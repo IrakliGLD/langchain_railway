@@ -13,3 +13,5 @@ statsmodels==0.14.4
 python-dotenv==1.0.1
 google-generativeai==0.8.2
 langchain-google-genai==2.1.12
+litellm==1.0.0
+langchain-supabase==0.1.0
