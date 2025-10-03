@@ -1,5 +1,5 @@
-# Dockerfile v1.0
-# Installs libpq for psycopg and sets up Python environment. Realistic: 90% success, 10% risk of build cache issues.
+# Dockerfile v1.1
+# Installs libpq for psycopg and sets up Python environment. Updated CMD to use shell for $PORT expansion. Realistic: 90% success, 10% risk of env variable issue.
 FROM python:3.12-slim
 
 # Install system dependencies including libpq
@@ -18,5 +18,5 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy application code
 COPY . .
 
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$PORT"]
+# Run the application with shell to expand $PORT
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
