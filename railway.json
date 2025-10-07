@@ -8,7 +8,7 @@
     "numReplicas": 1,
     "startCommand": "/bin/sh -c 'echo Starting with PORT=$PORT && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level debug > /tmp/app.log 2>&1'",
     "healthcheckPath": "/healthz",
-    "healthcheckInitialDelay": 300, // Increased to 300s (5min) to ensure startup
+    "healthcheckInitialDelay": 300, 
     "healthcheckTimeout": 30,
     "healthcheckRetries": 20,
     "healthcheckRetryDelay": 30,
