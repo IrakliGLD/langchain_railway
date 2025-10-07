@@ -1,4 +1,5 @@
 # main.py v17.47
+
 # Changes from v17.45: Removed forecasting (forecast_linear_ols, detect_forecast_intent, /forecast) to lighten startup—keeps NLQ, DB, RAG. Realistic: +90% startup success, 10% env risk, no cost impact.
 import os
 import re
