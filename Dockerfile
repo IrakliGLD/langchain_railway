@@ -1,4 +1,4 @@
-# Dockerfile v1.3
+# Dockerfile v1.4
 # Installs libpq for psycopg2-binary and sets up Python environment. Updated CMD to /bin/sh -c for $PORT expansion. Realistic: 95% success, 5% risk of env variable misconfiguration.
 FROM python:3.12-slim
 
@@ -18,5 +18,5 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy application code
 COPY . .
 
-# Run the application with /bin/sh to expand $PORT
+# Run the application with /bin/sh -c to expand $PORT
 CMD ["/bin/sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
