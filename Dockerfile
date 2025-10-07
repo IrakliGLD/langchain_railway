@@ -1,5 +1,5 @@
 # Dockerfile v1.2
-# Installs libpq for psycopg2-binary and sets up Python environment. Updated for psycopg2-binary dependency. Realistic: 90% success, 10% risk of env variable issue.
+# Installs libpq for psycopg2-binary and sets up Python environment. Shell CMD expands $PORT. Realistic: 90% success, 10% risk of env variable issue.
 FROM python:3.12-slim
 
 # Install system dependencies including libpq
