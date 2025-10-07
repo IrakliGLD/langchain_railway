@@ -1,13 +1,14 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
-    "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile"
+    "builder": "NIXPACKS"
   },
   "deploy": {
     "runtime": "V2",
     "numReplicas": 1,
-    "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
+    "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1",
+    "healthcheckPath": "/healthz",
+    "healthcheckInitialDelay": 30,
     "sleepApplication": false,
     "useLegacyStacker": false,
     "multiRegionConfig": {
