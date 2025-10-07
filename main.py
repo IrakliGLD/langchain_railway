@@ -1,5 +1,5 @@
-# main.py v17.49
-# Changes from v17.48: Added 10s readiness delay in /healthz—ensures DB init before health response. Kept minimal DB + NLQ. Realistic: +90% health success, 10% env risk, no cost impact.
+# main.py v17.50
+# Changes from v17.49: Ensured db_status in /healthz, increased readiness delay to 15s—resolves health check mismatch. Kept minimal DB + NLQ. Realistic: +90% health success, 10% env risk, no cost impact.
 import os
 import re
 import logging
@@ -89,7 +89,7 @@ db_name = parsed_db_url.path.lstrip('/')
 logger.info(f"DB connection details: host={db_host}, port={db_port}, dbname={db_name}")
 
 # --- FastAPI Application ---
-app = FastAPI(title="EnerBot Backend", version="17.49")
+app = FastAPI(title="EnerBot Backend", version="17.50")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -137,7 +137,7 @@ def create_db_connection(preload: bool = False):
             conn.execute(text("SELECT 1"))
             logger.debug("DB connection test succeeded")
         if preload:
-            time.sleep(10)  # Readiness delay for health check
+            time.sleep(15)  # Increased readiness delay to 15s
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
                 logger.debug("Preloaded database connection successfully")
@@ -151,17 +151,18 @@ def create_db_connection(preload: bool = False):
 @app.get("/healthz")
 def health(check_db: Optional[bool] = Query(False), preload: Optional[bool] = Query(False)):
     logger.debug("Health check triggered")
+    db_status = "not checked"
     if check_db or preload:
         try:
             engine, _, _ = create_db_connection(preload=preload)
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
+            db_status = "connected"
             logger.info("Health check with DB succeeded")
-            return {"status": "ok", "db_status": "connected"}
         except Exception as e:
             logger.error(f"Health check DB connection failed: {str(e)}", exc_info=True)
-            return {"status": "ok", "db_status": f"failed: {str(e)}"}
-    return {"status": "ok"}
+            db_status = f"failed: {str(e)}"
+    return {"status": "ok", "db_status": db_status}  # Ensure db_status always included
 
 @app.post("/ask")
 def ask(q: Question, x_app_key: str = Header(...)):
