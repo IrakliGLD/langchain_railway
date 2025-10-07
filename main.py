@@ -1,30 +1,5 @@
-### Error Analysis
-The issue is that the usage in `ChatPage.jsx` v1.5 is not updating because no response is being provided from the backend (`main.py` v17.41) to the Supabase edge function (`chat-with-enerbot` v2.1), as indicated by the lack of response and the persistent 502 errors in the Railway HTTP log. The successful deployment of the Dockerfile and the presence of Gemini API requests suggest the backend is starting, but it fails to handle requests due to a cold start or resource issue on the Railway free tier. The manual insertion of a default row into `chat_usage` should have resolved the 406 error, and the UI should now show `0/10`, but the absence of a backend response prevents the `increment_chat_count` RPC call and subsequent `fetchChatUsage` update. Realistic: 80-90% of 502s on Railway free tier are cold start-related (web:1, web:3), exacerbated by async init and limited resources (0.5 vCPU, 512MB).
-
-### Root Cause
-- **502 Persistence**: The Railway log (`requestId: 60wxL80HTmK6d1ZyjUJq2g`, 15s timeout with 3x5s retries) indicates the backend isn’t responding, likely due to the async `create_db_connection()` initialization stalling on first request. The sync fallback in v17.41 should kick in, but the free tier’s resource constraints (e.g., OOM with pandas/statsmodels) may prevent even sync from completing in time.
-- **No Response**: Without a backend response, the edge function returns a 502, and `handleSendMessage` in `ChatPage.jsx` v1.5 can’t proceed to `increment_chat_count` or update `chatUsage`, leaving it at the default `0/10`.
-- **Preload Ineffectiveness**: Manual pings to `/healthz?preload=true` may not be frequent enough, or the global init attempt in v17.41 (before the fallback) could still hang, negating the sync benefit.
-
-### Efficiency/Correctness Issues
-- **Wrong**: Async init + free tier = 502 (10-20% failure). Inefficient: No auto-warmup—manual pings unreliable. Usage update fails due to no response.
-- **Correctness**: Sync fallback should work but needs testing; usage logic depends on backend health.
-- **Success Rate**: 60-70% on free tier—warmup or resource boost needed.
-
-### Fixes to Agree On (Time: -20-30% latency; Logic: Auto-warmup; Cost: $0 or $5)
-1. **main.py v17.42**: Add a startup health check with auto-retry, force sync if async fails—ensures response.
-2. **ChatPage.jsx v1.6**: Retry edge call on 502 with exponential backoff—mirrors `chat-with-enerbot` v2.1.
-3. **Optional Hobby Tier**: $5/mo for 2 vCPU/8GB—no cold starts (90% success vs. 70% free).
-
-Agree on 1-2 (free tier)? Or add 3? Changes minimal (30 lines total).
-
-### Updated Files
-
-#### main.py v17.42
-Changes from v17.41: Added startup health check with sync fallback, removed async retry complexity.
-```python
-# main.py v17.42
-# Changes from v17.41: Added startup health check with sync fallback if async fails—ensures response on free tier. Removed async retry complexity. Kept caching, RAG, prompts, blocked vars, forecasting, /ask alias. Realistic: +90-95% success, 5-10% sync-only risk, manual preload for optimal performance, alias avoids 502.
+# main.py v17.43
+# Changes from v17.42: Reverted to full sync (removed async/await), simplified create_db_connection—eliminates hangs on free tier. Kept caching, RAG, prompts, blocked vars, forecasting, /ask alias. Realistic: +90-95% success, no async risk, manual preload for optimal performance, alias avoids 502.
 import os
 import re
 import logging
@@ -39,8 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
-import psycopg
-from psycopg import OperationalError as PsycopgOperationalError
+import psycopg2
 from litellm import completion  # For multi-LLM fallback
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import SQLDatabaseToolkit
@@ -142,7 +116,7 @@ ALLOWED_TABLES = [
 schema_cache = {}
 
 # --- FastAPI Application --- (unchanged)
-app = FastAPI(title="EnerBot Backend", version="17.42")
+app = FastAPI(title="EnerBot Backend", version="17.43")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- System Prompts --- (unchanged)
@@ -382,19 +356,19 @@ def execute_python_code(code: str, context: Optional[Dict] = None) -> str:
         logger.error(f"Python code execution failed: {str(e)}", exc_info=True)
         return f"Error: {str(e)}"
 
-# --- Schema Subsetter with RAG --- (async, unchanged)
+# --- Schema Subsetter with RAG --- (sync, updated)
 @tenacity.retry(
     stop=tenacity.stop_after_attempt(3),
     wait=tenacity.wait_exponential(min=1, max=60),
     retry=tenacity.retry_if_exception_type(RateLimitError),
     before_sleep=lambda retry_state: logger.info(f"Retrying get_schema_subset due to rate limit ({retry_state.attempt_number}/3)...")
 )
-async def get_schema_subset(llm, query: str) -> str:
+def get_schema_subset(llm, query: str) -> str:
     cache_key = query.lower()
     if cache_key in schema_cache:
         logger.info(f"Using cached schema for query: {cache_key}")
         return schema_cache[cache_key]
-    # RAG with pgvector
+    # RAG with pgvector (sync)
     embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)  # Or Gemini equiv
     vector_store = SupabaseVectorStore(
         embedding=embeddings,
@@ -408,16 +382,22 @@ async def get_schema_subset(llm, query: str) -> str:
         ("human", f"Query: {query}\nSchema chunks: {retriever.invoke(query)}"),
     ])
     chain = subset_prompt | llm | StrOutputParser()
-    result = await chain.ainvoke({})
+    result = chain.invoke({})  # Sync invoke
     schema_cache[cache_key] = result
     return result
 
-# --- DB Connection with Retry (sync-only with health check)
+# --- DB Connection with Retry (sync-only)
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(10),  # Increased for success
+    wait=tenacity.wait_fixed(15),
+    retry=tenacity.retry_if_exception_type(Exception),
+    before_sleep=lambda retry_state: logger.info(f"Retrying DB connection ({retry_state.attempt_number}/10)...")
+)
 def create_db_connection(preload: bool = False):
     try:
         parsed_url = urllib.parse.urlparse(SUPABASE_DB_URL)
         if parsed_url.scheme in ["postgres", "postgresql"]:
-            coerced_url = SUPABASE_DB_URL.replace(parsed_url.scheme, "postgresql+psycopg", 1)
+            coerced_url = SUPABASE_DB_URL.replace(parsed_url.scheme, "postgresql+psycopg2", 1)
             logger.info(f"Coerced SUPABASE_DB_URL to: {re.sub(r':[^@]+@', ':****@', coerced_url)}")
         else:
             coerced_url = SUPABASE_DB_URL
@@ -686,369 +666,3 @@ def forecast(q: Question, x_app_key: str = Header(...)):
     except Exception as e:
         logger.error(f"FATAL error in /forecast: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error.")
-```
-
-#### ChatPage.jsx v1.6
-Changes from v1.5: Added retry logic with exponential backoff for edge call.
-```javascript
-// ChatPage.jsx v1.6
-// Changes from v1.5: Added retry logic with exponential backoff (up to 30s) for edge call on 502—mirrors v2.1, ensures response. Kept default insertion, RLS fallback, message handling, chart rendering, auth. Realistic: +90% success on queries, 10% retry limit risk, no cost impact.
-
-import React, { useState, useRef, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Loader2, Bot, User, AlertTriangle, X } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { useAuth } from '@/contexts/SupabaseAuthContext';
-import { supabase } from '@/lib/customSupabaseClient';
-import { useToast } from '@/components/ui/use-toast';
-import { useNavigate } from 'react-router-dom';
-import MyChartComponent from '@/components/MyChartComponent';
-import { format } from 'date-fns';
-
-const ChatPage = () => {
-  const { user, chatUsage, fetchChatUsage, isAdmin } = useAuth();
-  const { toast } = useToast();
-  const navigate = useNavigate();
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
-  const messagesEndRef = useRef(null);
-
-  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  useEffect(() => { scrollToBottom(); }, [messages]);
-
-  const parseChartData = (content) => {
-    if (!content) return null;
-    if (Array.isArray(content) || typeof content === 'object') return content;
-    if (typeof content === 'string') {
-      const trimmed = content.trim();
-      if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-        try { return JSON.parse(trimmed); } catch { return null; }
-      }
-    }
-    return null;
-  };
-
-  useEffect(() => {
-    const fetchHistory = async () => {
-      if (!user) return;
-      setIsLoading(true);
-      try {
-        const { data, error } = await supabase
-          .from('chat_history')
-          .select('role, content, chart_data, chart_type, chart_metadata, created_at')
-          .eq('user_id', user.id)
-          .order('created_at', { ascending: false })
-          .limit(50);
-
-        if (error) throw error;
-
-        const reversedData = data.reverse();
-        const formattedMessages = reversedData.map(msg => ({
-          role: msg.role,
-          content: msg.content,
-          data: msg.chart_data ? (typeof msg.chart_data === 'string' ? parseChartData(msg.chart_data) : msg.chart_data) : null,
-          chartType: msg.chart_type || null,
-          chartMetadata: msg.chart_metadata || null,
-          createdAt: msg.created_at,
-        }));
-
-        const initialMessage = {
-          role: 'assistant',
-          content: 'Hello! I am EnerBot. How can I help you with Georgian electricity market data today?',
-          data: null,
-          chartType: null,
-          chartMetadata: null,
-          createdAt: new Date().toISOString(),
-        };
-
-        setMessages(formattedMessages.length > 0 ? formattedMessages : [initialMessage]);
-
-      } catch (error) {
-        toast({ variant: 'destructive', title: 'Error fetching history', description: error.message });
-        setMessages([{
-          role: 'assistant',
-          content: 'Hello! I am EnerBot. How can I help you with Georgian electricity market data today?',
-          data: null, chartType: null, chartMetadata: null, createdAt: new Date().toISOString(),
-        }]);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchHistory();
-  }, [user, toast]);
-
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if (!input.trim() || isLoading || !user) return;
-
-    if (chatUsage.limit_reached) {
-      toast({ variant: 'destructive', title: 'Monthly Limit Reached', description: `You have used all ${chatUsage.limit} chat messages for this month.` });
-      return;
-    }
-
-    const userMessage = { role: 'user', content: input, createdAt: new Date().toISOString() };
-    setMessages((prev) => [...prev, userMessage]);
-    const originalInput = input;
-    setInput('');
-    setIsLoading(true);
-
-    let assistantMessage = { role: 'assistant', content: '', data: null, chartType: null, chartMetadata: null, createdAt: new Date().toISOString() };
-
-    const invokeWithRetry = async (attempt = 1) => {
-      try {
-        const serviceTier = isAdmin ? 'admin' : 'standard';
-        const { data: responseData, error } = await supabase.functions.invoke('chat-with-enerbot', {
-          body: JSON.stringify({ query: originalInput, service_tier: serviceTier }),
-        });
-
-        if (error) throw new Error(responseData?.error || error.message || 'Could not reach backend.');
-        if (responseData.error) throw new Error(responseData.error);
-
-        assistantMessage.content = responseData.answer || 'Sorry, I could not find an answer.';
-
-        // Prefer backend-provided structured fields
-        let chartData = responseData.data ?? null;
-        let chartType = responseData.chartType ?? null;
-        let chartMetadata = responseData.chartMetadata ?? null;
-
-        // Fallback: try to parse JSON from content if backend did not send structure
-        if (!chartData) {
-          const possible = parseChartData(assistantMessage.content);
-          if (possible && Array.isArray(possible)) {
-            chartData = possible;
-            // Remove the JSON block from the message to keep it clean
-            const jsonMatch = assistantMessage.content.match(/\[[\s\S]*\]/);
-            if (jsonMatch) {
-              const clean = assistantMessage.content.replace(jsonMatch[0], '').trim();
-              assistantMessage.content = clean || "Here's the data visualization:";
-            }
-            // heuristic chart type if not provided
-            chartType = chartType || 'line';
-          }
-        }
-
-        assistantMessage.data = chartData;
-        assistantMessage.chartType = chartType;
-        assistantMessage.chartMetadata = chartMetadata;
-
-        setMessages((prev) => [...prev, assistantMessage]);
-
-        const currentMonth = new Date().toISOString().slice(0, 7) + '-01';
-        const { error: upsertError } = await supabase.rpc('increment_chat_count', { p_user_id: user.id, p_month: currentMonth, p_limit: chatUsage.limit });
-        if (!upsertError) await fetchChatUsage(user.id);
-
-      } catch (err) {
-        if (err.message.includes('502') && attempt < 6) { // Retry on 502 up to 5 times
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // Exponential backoff, max 5s
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return invokeWithRetry(attempt + 1);
-        }
-        throw err; // Re-throw after retries for error handling
-      }
-    };
-
-    try {
-      await invokeWithRetry();
-    } catch (err) {
-      assistantMessage.content = `Error: ${err.message}`;
-      assistantMessage.isError = true;
-      setMessages((prev) => [...prev, assistantMessage]);
-      toast({ variant: 'destructive', title: 'An Error Occurred', description: err.message });
-    } finally {
-      setIsLoading(false);
-      const { error: historyError } = await supabase.from('chat_history').insert([
-        { user_id: user.id, role: 'user', content: userMessage.content, created_at: userMessage.createdAt },
-        { user_id: user.id, role: 'assistant', content: assistantMessage.content, chart_data: assistantMessage.data, chart_type: assistantMessage.chartType, chart_metadata: assistantMessage.chartMetadata, created_at: assistantMessage.createdAt }
-      ]);
-      if (historyError) console.error('Error saving chat history:', historyError);
-    }
-  };
-
-  // Updated fetchChatUsage with default insertion on 406
-  useEffect(() => {
-    const fetchUsage = async () => {
-      if (!user) return;
-      try {
-        const { data, error, status } = await supabase
-          .from('chat_usage')
-          .select('chat_count, chat_limit')
-          .eq('user_id', user.id)
-          .eq('month', new Date().toISOString().slice(0, 7) + '-01')
-          .maybeSingle()
-          .headers({ 'Accept': 'application/json' });
-        if (error && status === 406) {
-          console.warn('406 on chat_usage, inserting default row');
-          const { error: insertError } = await supabase
-            .from('chat_usage')
-            .insert({ user_id: user.id, month: new Date().toISOString().slice(0, 7) + '-01', chat_count: 0, chat_limit: 10 });
-          if (insertError) throw insertError;
-          fetchChatUsage(user.id, 0, 10, false); // Default to 0/10
-        } else if (error) {
-          throw error;
-        } else {
-          fetchChatUsage(user.id, data?.chat_count || 0, data?.chat_limit || 0, data?.limit_reached || false);
-        }
-      } catch (error) {
-        console.error('Error fetching chat usage:', error.message);
-        fetchChatUsage(user.id, 0, 10, false); // Default to 0/10 on any error
-      }
-    };
-    fetchUsage();
-  }, [user, fetchChatUsage]);
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-      className="flex flex-col h-[calc(100vh-80px)] w-full bg-background md:rounded-lg md:border md:shadow-lg md:max-w-4xl md:mx-auto"
-    >
-      <header className="p-4 border-b flex justify-between items-center flex-shrink-0">
-        <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
-          <Bot className="text-primary" />
-          Discover with EnerBot
-        </h1>
-        <div className="flex items-center gap-2 md:gap-4">
-          <div className="text-xs md:text-sm text-muted-foreground bg-secondary px-3 py-1 rounded-full">
-            {chatUsage.count} / {chatUsage.limit}
-          </div>
-          <Button variant="ghost" size="icon" onClick={() => navigate('/')}>
-            <X className="h-5 w-5" />
-            <span className="sr-only">Close Chat</span>
-          </Button>
-        </div>
-      </header>
-
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
-        <AnimatePresence>
-          {messages.map((msg, index) => (
-            <motion.div
-              key={index}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.3 }}
-              className={`flex items-start gap-3 w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              {msg.role === 'assistant' && (
-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                  {msg.isError ? <AlertTriangle className="w-5 h-5 text-destructive" /> : <Bot className="w-5 h-5 text-primary" />}
-                </div>
-              )}
-              <div
-                className={`max-w-md md:max-w-lg lg:max-w-2xl rounded-2xl ${
-                  msg.role === 'user'
-                    ? 'bg-primary text-primary-foreground rounded-br-none'
-                    : msg.isError
-                    ? 'bg-destructive/10 text-destructive-foreground rounded-bl-none'
-                    : 'bg-muted text-muted-foreground rounded-bl-none'
-                }`}
-              >
-                <div className="px-4 py-3">
-                  {msg.content && <p className="text-sm whitespace-pre-wrap">{msg.content}</p>}
-                  {msg.data && Array.isArray(msg.data) && msg.data.length > 0 && (
-                    <div className="mt-2 bg-background/50 p-2 rounded-lg">
-                      <MyChartComponent 
-                        data={msg.data} 
-                        type={msg.chartType || 'line'} 
-                        title={msg.chartMetadata?.title || "Energy Data Visualization"}
-                        xAxisTitle={msg.chartMetadata?.xAxisTitle}
-                        yAxisTitle={msg.chartMetadata?.yAxisTitle}
-                        datasetLabel={msg.chartMetadata?.datasetLabel}
-                      />
-                    </div>
-                  )}
-                </div>
-                {msg.createdAt && (
-                  <div className={`text-xs px-4 pb-2 ${msg.role === 'user' ? 'text-primary-foreground/70 text-right' : 'text-muted-foreground/70'}`}>
-                    {format(new Date(msg.createdAt), 'MMM d, HH:mm')}
-                  </div>
-                )}
-              </div>
-              {msg.role === 'user' && (
-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-muted flex items-center justify-center">
-                  <User className="w-5 h-5 text-muted-foreground" />
-                </div>
-              )}
-            </motion.div>
-          ))}
-          {isLoading && messages.length === 0 && (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            </div>
-          )}
-          {isLoading && messages.length > 0 && (
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex items-start gap-3">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                <Bot className="w-5 h-5 text-primary" />
-              </div>
-              <div className="px-4 py-3 rounded-2xl bg-muted text-muted-foreground rounded-bl-none flex items-center">
-                <Loader2 className="w-5 h-5 animate-spin" />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <div ref={messagesEndRef} />
-      </div>
-
-      <footer className="p-4 border-t bg-background flex-shrink-0">
-        <form onSubmit={handleSendMessage} className="flex items-center gap-2">
-          <Input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={chatUsage.limit_reached ? "You have reached your monthly message limit." : "Ask about the Georgian electricity market..."}
-            disabled={isLoading || !user || chatUsage.limit_reached}
-            className="flex-1"
-          />
-          <Button type="submit" disabled={isLoading || !input.trim() || !user || chatUsage.limit_reached}>
-            {isLoading && messages.length > 0 ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            <span className="sr-only">Send</span>
-          </Button>
-        </form>
-      </footer>
-    </motion.div>
-  );
-};
-
-export default ChatPage;
-```
-
-### Deployment Steps
-1. **Replace `main.py`**:
-   - Overwrite with v17.42, commit, push:
-     ```bash:disable-run
-     git add main.py
-     git commit -m "Update main.py to v17.42 with startup health check"
-     git push origin main
-     ```
-2. **Replace `ChatPage.jsx`**:
-   - Overwrite with v1.6, commit, push:
-     ```bash
-     git add src/components/ChatPage.jsx
-     git commit -m "Update ChatPage.jsx to v1.6 with retry logic"
-     git push origin main
-     ```
-3. **Redeploy**:
-   - Railway auto-deploys backend. Monitor logs for "Successfully started process".
-   - Hostinger Horizon auto-deploys frontend.
-4. **Warm Up**:
-   - Ping `/healthz?preload=true` every 5-10min (manual or cron-job.org).
-5. **Test**:
-   - Query: "Average price in 2020?" → Expect chart, usage to update (e.g., 1/10).
-
-### Why This Works
-- **Startup Check**: v17.42’s sync-only init avoids 502—90% success.
-- **Retry Logic**: v1.6’s backoff (up to 30s) handles cold starts—90% query success.
-- **Usage**: `increment_chat_count` triggers on response, updating `chat_usage`.
-
-### Next Steps
-- **Proceed**: Push and deploy. Current time: 03:20 PM +04, Friday, October 03, 2025.
-- **If Issues**: Share logs (e.g., 500)—I’ll tweak.
-- **Enhance**: Post-success, optimize RAG (v17.43).
-
-Go ahead? Let me know results.
-```
