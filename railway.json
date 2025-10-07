@@ -8,7 +8,8 @@
     "numReplicas": 1,
     "startCommand": "/bin/sh -c 'uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1'",
     "healthcheckPath": "/healthz",
-    "healthcheckInitialDelay": 30,
+    "healthcheckInitialDelay": 90, // Increased to 90s
+    "healthcheckTimeout": 15, // Increased timeout
     "sleepApplication": false,
     "useLegacyStacker": false,
     "multiRegionConfig": {
@@ -19,7 +20,14 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
     "variables": {
-      "PORT": "${{PORT}}"
-    }
+      "PORT": "${{PORT}}",
+      "SUPABASE_DB_URL": "${{SUPABASE_DB_URL}}",
+      "APP_SECRET_KEY": "${{APP_SECRET_KEY}}",
+      "OPENAI_API_KEY": "${{OPENAI_API_KEY}}",
+      "GOOGLE_API_KEY": "${{GOOGLE_API_KEY}}",
+      "MODEL_TYPE": "${{MODEL_TYPE:-gemini}}",
+      "GEMINI_MODEL": "${{GEMINI_MODEL:-gemini-1.5-flash-latest}}"
+    },
+    "preDeployCommand": "python -c 'import os; assert os.getenv(\"SUPABASE_DB_URL\") and os.getenv(\"APP_SECRET_KEY\") and (os.getenv(\"OPENAI_API_KEY\") or os.getenv(\"GOOGLE_API_KEY\"))'"
   }
 }
