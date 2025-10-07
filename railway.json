@@ -6,10 +6,12 @@
   "deploy": {
     "runtime": "V2",
     "numReplicas": 1,
-    "startCommand": "/bin/sh -c 'uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1'",
+    "startCommand": "/bin/sh -c 'uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level debug > /tmp/app.log 2>&1'",
     "healthcheckPath": "/healthz",
-    "healthcheckInitialDelay": 90, 
-    "healthcheckTimeout": 15,
+    "healthcheckInitialDelay": 10, 
+    "healthcheckTimeout": 30,
+    "healthcheckRetries": 10,
+    "healthcheckRetryDelay": 10,
     "sleepApplication": false,
     "useLegacyStacker": false,
     "multiRegionConfig": {
@@ -18,7 +20,7 @@
       }
     },
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10,
+    "restartPolicyMaxRetries": 5,
     "variables": {
       "PORT": "${{PORT}}",
       "SUPABASE_DB_URL": "${{SUPABASE_DB_URL}}",
