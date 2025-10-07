@@ -1,4 +1,5 @@
 # main.py v17.52
+
 # Final version: Explicit param parsing for check_db, ensured db_status, added logging—resolves health check mismatch. Kept minimal DB + NLQ, async for consistency. Realistic: +95% health/query success, 5% env risk, no cost impact.
 import os
 import re
