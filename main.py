@@ -1,5 +1,5 @@
-# main.py v17.45
-# Changes from v17.44: Enhanced DB debug (connection retries), env logging—aids health failure diagnosis. Kept sync, caching, RAG, prompts, forecasting, /ask alias. Realistic: +90% debug success, 10% env risk, no cost impact.
+# main.py v17.47
+# Changes from v17.45: Removed forecasting (forecast_linear_ols, detect_forecast_intent, /forecast) to lighten startup—keeps NLQ, DB, RAG. Realistic: +90% startup success, 10% env risk, no cost impact.
 import os
 import re
 import logging
@@ -26,12 +26,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AgentAction
 from dotenv import load_dotenv
-from decimal import Decimal
-import numpy as np
-import pandas as pd
-import statsmodels.api as sm
-from statsmodels.tsa.seasonal import STL
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import json
 from langchain.cache import SQLiteCache  # For caching
 from langchain_supabase import SupabaseVectorStore  # For RAG
@@ -128,7 +122,7 @@ ALLOWED_TABLES = [
 schema_cache = {}
 
 # --- FastAPI Application --- (unchanged)
-app = FastAPI(title="EnerBot Backend", version="17.45")
+app = FastAPI(title="EnerBot Backend", version="17.47")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- System Prompts --- (unchanged)
@@ -253,87 +247,6 @@ def coerce_dataframe(rows: List[tuple], columns: List[str]) -> pd.DataFrame:
             df[col] = df[col].apply(convert_decimal_to_float)
     return df
 
-# --- Forecasting Helpers --- (unchanged)
-def _ensure_monthly_index(df: pd.DataFrame, date_col: str, value_col: str) -> pd.DataFrame:
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.set_index(date_col).asfreq("ME")
-    df[value_col] = df[value_col].interpolate(method="linear")
-    return df.reset_index()
-
-def forecast_linear_ols(df: pd.DataFrame, date_col: str, value_col: str, target_date: datetime) -> Optional[Dict]:
-    try:
-        if len(df) < 12:
-            raise ValueError("Insufficient data points for forecasting (need at least 12).")
-        df = _ensure_monthly_index(df, date_col, value_col)
-        df["t"] = (df[date_col] - df[date_col].min()) / np.timedelta64(1, "M")
-        X = sm.add_constant(df["t"])
-        y = df[value_col]
-        # Try seasonal STL first
-        try:
-            stl = STL(y, period=12, robust=True)
-            res = stl.fit()
-            y = res.trend
-        except Exception as e:
-            logger.warning(f"STL decomposition failed, falling back to raw OLS: {e}")
-        model = sm.OLS(y, X).fit()
-        future_t = (pd.to_datetime(target_date) - df[date_col].min()) / np.timedelta64(1, "M")
-        X_future = sm.add_constant(pd.DataFrame({"t": [future_t]}))
-        pred = model.get_prediction(X_future)
-        pred_summary = pred.summary_frame(alpha=0.10) # 90% CI
-        return {
-            "target_month": target_date.strftime("%Y-%m"),
-            "point": float(pred_summary["mean"].iloc[0]),
-            "90% CI": [float(pred_summary["mean_ci_lower"].iloc[0]), float(pred_summary["mean_ci_upper"].iloc[0])],
-            "slope_per_month": float(model.params["t"]) if "t" in model.params else None,
-            "R²": float(model.rsquared),
-            "n_obs": int(model.nobs),
-        }
-    except Exception as e:
-        logger.error(f"Forecast failed: {e}", exc_info=True)
-        return None
-
-def detect_forecast_intent(query: str) -> (bool, Optional[datetime], Optional[str]):
-    """
-    Detects whether the user is asking for a forecast/prediction.
-    Returns: (do_forecast, target_date, blocked_reason)
-    """
-    q = query.lower()
-    # Blocked variables with professional reasons
-    blocked_vars = {
-        "p_dereg_gel": "Forecasting the price for deregulated power plants (p_dereg_gel) is not possible, as it is influenced by political decisions rather than market forces such as supply and demand. Please try forecasting balancing electricity prices or demand.",
-        "p_gcap_gel": "Forecasting the guaranteed capacity charge (p_gcap_gel) is not possible, as it is regulated by GNERC based on tariff methodology and not influenced by market forces. Please try forecasting balancing electricity prices or demand.",
-        "tariff_gel": "Forecasting electricity generation tariffs (tariff_gel) is not possible, as they are approved by GNERC based on tariff methodology and not influenced by market forces. Please try forecasting balancing electricity prices or demand.",
-        "hydro": "Forecasting electricity generation by hydro is not possible, as it is highly dependent on unpredictable weather conditions and lacks data on planned projects. Please try forecasting balancing electricity prices or demand.",
-        "wind": "Forecasting electricity generation by wind is not possible, as it is highly dependent on unpredictable weather conditions and lacks data on planned projects. Please try forecasting balancing electricity prices or demand.",
-        "thermal": "Forecasting electricity generation by thermal is not feasible, as it depends on the gap between renewable generation and demand. Renewable generation cannot be forecasted due to unpredictable weather conditions and lack of data on planned projects. Please try forecasting balancing electricity prices or demand.",
-        "import": "Forecasting electricity imports is not feasible, as they depend on the gap between renewable generation and demand. Renewable generation cannot be forecasted due to unpredictable weather conditions and lack of data on planned projects. Please try forecasting balancing electricity prices or demand.",
-        "export": "Forecasting electricity exports is not possible, as they depend on the availability of renewable generation, which cannot be forecasted due to unpredictable weather conditions and lack of data on planned projects. Please try forecasting balancing electricity prices or demand."
-    }
-    # Fuzzy matching for blocked variables
-    for var, reason in blocked_vars.items():
-        if var == "tariff_gel":
-            if re.search(r'\btariff\b|\benguri\b|\bhpp\b|\bhydropower\b', q, re.IGNORECASE):
-                logger.info(f"Blocked forecast attempt for tariff_gel: {q}")
-                return False, None, reason
-        elif re.search(rf'\b{var}\b', q, re.IGNORECASE):
-            logger.info(f"Blocked forecast attempt for {var}: {q}")
-            return False, None, reason
-    # Fallback for generic tariff-related queries
-    if re.search(r'\btariff\b', q, re.IGNORECASE):
-        logger.info(f"Blocked forecast attempt for generic tariff: {q}")
-        return False, None, blocked_vars["tariff_gel"]
-    # Allowed forecasts
-    if "forecast" in q or "predict" in q or "estimate" in q:
-        for yr in range(2025, 2040):
-            if str(yr) in q:
-                try:
-                    return True, datetime(yr, 12, 1), None
-                except:
-                    pass
-        return True, datetime(2030, 12, 1), None
-    return False, None, None
-
 # --- Code Execution Tool --- (sandboxed, unchanged)
 @tool
 @tenacity.retry(
@@ -343,10 +256,10 @@ def detect_forecast_intent(query: str) -> (bool, Optional[datetime], Optional[st
     before_sleep=lambda retry_state: logger.info(f"Retrying execute_python_code due to rate limit ({retry_state.attempt_number}/3)...")
 )
 def execute_python_code(code: str, context: Optional[Dict] = None) -> str:
-    """Execute Python code for data analysis (e.g., correlations, summaries, forecasts). Input: code string, context with SQL results. Output: result as string.
-    Use pandas (pd), numpy (np), statsmodels (sm). No installs. Return df.to_json() for dataframes."""
+    """Execute Python code for data analysis (e.g., correlations, summaries). Input: code string, context with SQL results. Output: result as string.
+    Use pandas (pd), numpy (np). No installs. Return df.to_json() for dataframes."""
     try:
-        allowed_globals = {"pd": pd, "np": np, "sm": sm, "STL": STL, "ExponentialSmoothing": ExponentialSmoothing}
+        allowed_globals = {"pd": pd, "np": np}
         if not context or "sql_result" not in context:
             raise ValueError("SQL result context required; simulated data not allowed.")
         rows, columns = context["sql_result"]
@@ -418,8 +331,8 @@ def create_db_connection(preload: bool = False):
         engine = create_engine(
             coerced_url,
             poolclass=QueuePool,
-            pool_size=10,
-            max_overflow=5,
+            pool_size=5,  # Reduced for lighter load
+            max_overflow=2,
             pool_timeout=120,
             pool_pre_ping=True,
             pool_recycle=300,
@@ -513,98 +426,3 @@ def nlq(q: Question, x_app_key: str = Header(...)):
     except Exception as e:
         logger.error(f"FATAL error in /nlq: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error.")
-
-@app.post("/forecast", response_model=APIResponse)
-@tenacity.retry(
-    stop=tenacity.stop_after_attempt(5),
-    wait=tenacity.wait_exponential(min=1, max=60),
-    retry=tenacity.retry_if_exception_type(RateLimitError),
-    before_sleep=lambda retry_state: logger.info(f"Retrying /forecast due to rate limit ({retry_state.attempt_number}/5)...")
-)
-def forecast(q: Question, x_app_key: str = Header(...)):
-    start_time = time.time()
-    if x_app_key != APP_SECRET_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        logger.debug(f"Processing /forecast with query: {q.query}")
-        engine, db, _ = create_db_connection()
-        response = completion(model=GEMINI_MODEL if MODEL_TYPE == "gemini" else "gpt-4o-mini", messages=[{"role": "user", "content": q.query}], api_key=GOOGLE_API_KEY if MODEL_TYPE == "gemini" else OPENAI_API_KEY)
-        llm = response.choices[0].message.content
-        schema_subset = get_schema_subset(llm, q.query)  # Sync call
-        tools = [execute_python_code] + SQLDatabaseToolkit(db=db, llm=llm).get_tools()
-        partial_prompt = AGENT_PROMPT.partial(schema=schema_subset, joins=DB_JOINS)
-        agent = create_openai_tools_agent(llm=llm, tools=tools, prompt=partial_prompt)
-        memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, max_iterations=8, handle_parsing_errors=True, memory=memory)
-        result = agent_executor.invoke({"input": q.query})  # Sync invoke
-        raw_output = result.get("output", "Unable to process.")
-        # Parse charts (unchanged)
-        chart_data = None
-        chart_type = None
-        chart_metadata = {}
-        try:
-            json_match = re.search(r'\{.*"type":.*\}', raw_output, re.DOTALL)
-            if json_match:
-                chart_struct = json.loads(json_match.group(0))
-                chart_data = chart_struct.get("data")
-                chart_type = chart_struct.get("type")
-                chart_metadata = {k: v for k, v in chart_struct.items() if k not in ["data", "type"]}
-                raw_output = raw_output.replace(json_match.group(0), "").strip()
-        except:
-            pass
-        # Forecast-specific (unchanged, sync-only)
-        do_forecast, target_dt, blocked_reason = detect_forecast_intent(q.query)
-        if blocked_reason:
-            logger.info(f"Blocked forecast: {blocked_reason}")
-            return APIResponse(answer=blocked_reason, chart_data=None, chart_type=None, chart_metadata=None, execution_time=round(time.time() - start_time, 2))
-        if do_forecast and db:
-            sql_query = extract_sql_from_steps(result.get("intermediate_steps", []))
-            if sql_query:
-                try:
-                    with engine.connect() as conn:
-                        result = conn.execute(text(clean_and_validate_sql(sql_query)))
-                        rows = result.fetchall()
-                        columns = result.keys()
-                        df = coerce_dataframe(rows, columns)
-                        context = {"sql_result": (rows, columns)}
-                    if not df.empty and "date" in df.columns:
-                        if "p_bal_gel" in df.columns and "xrate" in df.columns:
-                            # Balancing electricity price forecast
-                            last_date = df["date"].max()
-                            steps = int((pd.to_datetime(target_dt) - last_date) / np.timedelta64(1, "M")) + 1
-                            n_rows = len(df)
-                            df["p_bal_usd"] = df["p_bal_gel"] / df["xrate"]
-                            model_gel = ExponentialSmoothing(df["p_bal_gel"], trend="add", seasonal="add", seasonal_periods=12)
-                            fit_gel = model_gel.fit()
-                            model_usd = ExponentialSmoothing(df["p_bal_usd"], trend="add", seasonal="add", seasonal_periods=12)
-                            fit_usd = model_usd.fit()
-                            forecast_gel = fit_gel.forecast(steps=steps)
-                            forecast_usd = fit_usd.forecast(steps=steps)
-                            yearly_avg_gel = forecast_gel.mean()
-                            yearly_avg_usd = forecast_usd.mean()
-                            summer_mask = forecast_gel.index.month.isin([5, 6, 7, 8])
-                            winter_mask = ~summer_mask
-                            summer_avg_gel = forecast_gel[summer_mask].mean() if summer_mask.any() else None
-                            winter_avg_gel = forecast_gel[winter_mask].mean() if winter_mask.any() else None
-                            summer_avg_usd = forecast_usd[summer_mask].mean() if summer_mask.any() else None
-                            winter_avg_usd = forecast_usd[winter_mask].mean() if winter_mask.any() else None
-                            raw_output = (
-                                f"Forecast for {target_dt.strftime('%Y-%m')}:\n"
-                                f"Yearly average: {yearly_avg_gel:.2f} GEL/MWh, {yearly_avg_usd:.2f} USD/MWh\n"
-                                f"Summer (May-Aug) average: {summer_avg_gel:.2f} GEL/MWh, {summer_avg_usd:.2f} USD/MWh\n"
-                                f"Winter (Sep-Apr) average: {winter_avg_gel:.2f} GEL/MWh, {winter_avg_usd:.2f} USD/MWh"
-                            )
-                            chart_data = {
-                                "type": "line",
-                                "data": [
-                                    {"date": str(date), "p_bal_gel": gel, "p_bal_usd": usd}
-                                    for date, gel, usd in zip(
-                                        pd.date_range(start=last_date, periods=steps, freq="ME"),
-                                        forecast_gel,
-                                        forecast_usd
-                                    )
-                                ]
-                            }
-                            chart_type = "line"
-                            chart_metadata = {"title": f"Balancing Electricity Price Forecast to {target_dt.strftime('%Y-%m')}"}
-                        elif "quantity_tech" in df.columns and "entity" in df.columns:
