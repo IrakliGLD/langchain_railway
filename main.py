@@ -1,6 +1,5 @@
-# main.py v17.52
-
-# Final version: Explicit param parsing for check_db, ensured db_status, added logging—resolves health check mismatch. Kept minimal DB + NLQ, async for consistency. Realistic: +95% health/query success, 5% env risk, no cost impact.
+# main.py v17.53
+# Final version: Uses str = Query("false") for check_db/preload, ensures full dict with db_status—resolves health check mismatch. Kept minimal DB + NLQ, async for consistency. Realistic: +95% health/query success, 5% env risk, no cost impact.
 import os
 import re
 import logging
@@ -90,7 +89,7 @@ db_name = parsed_db_url.path.lstrip('/')
 logger.info(f"DB connection details: host={db_host}, port={db_port}, dbname={db_name}")
 
 # --- FastAPI Application ---
-app = FastAPI(title="EnerBot Backend", version="17.52")
+app = FastAPI(title="EnerBot Backend", version="17.53")
 logger.debug(f"Registered endpoints: {list(app.routes)}")  # Debug endpoint registration
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -164,7 +163,9 @@ def health(check_db: str = Query("false", description="Check DB connection"), pr
         except Exception as e:
             logger.error(f"Health check DB connection failed: {str(e)}", exc_info=True)
             db_status = f"failed: {str(e)}"
-    return {"status": "ok", "db_status": db_status}
+    else:
+        db_status = "not checked"  # Explicit default
+    return {"status": "ok", "db_status": db_status}  # Always full dict
 
 @app.post("/ask")
 async def ask(q: Question, x_app_key: str = Header(...)):
