@@ -8,8 +8,8 @@
     "numReplicas": 1,
     "startCommand": "/bin/sh -c 'uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1'",
     "healthcheckPath": "/healthz",
-    "healthcheckInitialDelay": 90, // Increased to 90s
-    "healthcheckTimeout": 15, // Increased timeout
+    "healthcheckInitialDelay": 90, 
+    "healthcheckTimeout": 15,
     "sleepApplication": false,
     "useLegacyStacker": false,
     "multiRegionConfig": {
