@@ -31,7 +31,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 if not SUPABASE_DB_URL or not APP_SECRET_KEY:
     logger.error("Missing SUPABASE_DB_URL or APP_SECRET_KEY")
@@ -173,49 +173,45 @@ def health(check_db: str = Query("false"), preload: str = Query("false")):
 
 # --- NLQ endpoint ---
 @app.post("/nlq", response_model=APIResponse)
-@tenacity.retry(
-    stop=tenacity.stop_after_attempt(5),
-    wait=tenacity.wait_exponential(min=1, max=60),
-    retry=tenacity.retry_if_exception_type(RateLimitError),
-    before_sleep=lambda rs: logger.info(f"Retrying /nlq due to rate limit ({rs.attempt_number}/5)...")
-)
 async def nlq(q: Question, x_app_key: str = Header(...)):
-    """
-    Natural Language Query endpoint.
-    Prefers Gemini; falls back to OpenAI if Gemini fails.
-    """
-    start_time = time.time()
-
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-    logger.debug(f"/nlq query: {q.query}")
-
+    start = time.time()
+    model_name = None
+    api_key = None
+    # Try Gemini first
     try:
-        # --- Attempt with Gemini first ---
+        model_name = GEMINI_MODEL
+        api_key = GOOGLE_API_KEY
+        logger.info(f"Attempting Gemini: model={model_name}, api_key set={bool(api_key)}")
         response = completion(
-            model=GEMINI_MODEL,
+            model=model_name,
             messages=[{"role": "user", "content": q.query}],
-            api_key=GOOGLE_API_KEY
+            api_key=api_key
         )
         answer = response.choices[0].message.content
         source = "gemini"
-    except Exception as gemini_error:
-        logger.warning(f"Gemini failed, falling back to OpenAI: {gemini_error}")
+    except Exception as e_gemini:
+        logger.error(f"Gemini call failed: {e_gemini}", exc_info=True)
+        # fallback to OpenAI
         try:
+            model_name = "gpt-4o-mini"
+            api_key = OPENAI_API_KEY
+            logger.info(f"Falling back to OpenAI: model={model_name}, api_key set={bool(api_key)}")
             response = completion(
-                model="gpt-4o-mini",
+                model=model_name,
                 messages=[{"role": "user", "content": q.query}],
-                api_key=OPENAI_API_KEY
+                api_key=api_key
             )
             answer = response.choices[0].message.content
             source = "openai"
-        except Exception as openai_error:
-            logger.error(f"Both Gemini and OpenAI failed: {openai_error}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Both Gemini and OpenAI failed.")
+        except Exception as e_openai:
+            logger.error(f"OpenAI fallback failed: {e_openai}", exc_info=True)
+            # Expose Gemini error or OpenAI error
+            raise HTTPException(status_code=500, detail=f"Gemini error: {str(e_gemini)}; OpenAI error: {str(e_openai)}")
+    exec_time = round(time.time() - start, 2)
+    return APIResponse(answer=answer, execution_time=exec_time)
 
-    exec_time = round(time.time() - start_time, 2)
-    return APIResponse(answer=f"[{source}] {answer}", execution_time=exec_time)
 
 
 # --- ASK endpoint (wrapper for /nlq) ---
@@ -228,4 +224,4 @@ async def ask(q: Question, x_app_key: str = Header(...)):
         raise e
     except Exception as e:
         logger.error(f"/ask endpoint error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error.")
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
