@@ -1,5 +1,5 @@
 {
-  "$schema": "https://railway.app/railway.schema.json",
+  "schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS"
   },
@@ -22,7 +22,7 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
     "variables": {
-      "PORT": "8000",  // Explicit PORT setting
+      "PORT": "8000",
       "SUPABASE_DB_URL": "${{SUPABASE_DB_URL}}",
       "APP_SECRET_KEY": "${{APP_SECRET_KEY}}",
       "OPENAI_API_KEY": "${{OPENAI_API_KEY}}",
