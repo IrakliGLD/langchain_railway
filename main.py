@@ -511,18 +511,7 @@ def get_llm():
 
 # --- API Endpoints ---
 @app.get("/healthz")
-def health(check_db: Optional[bool] = Query(False), preload: Optional[bool] = Query(False)):
-    logger.debug("Health check triggered")
-    if check_db or preload:
-        try:
-            engine, db, _ = create_db_connection(preload=preload)
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            logger.info("Health check with DB succeeded")
-            return {"status": "ok", "db_status": "connected"}
-        except Exception as e:
-            logger.error(f"Health check DB connection failed: {str(e)}", exc_info=True)
-            return {"status": "ok", "db_status": f"failed: {str(e)}"}
+async def healthcheck():
     return {"status": "ok"}
 
 @app.post("/ask")
