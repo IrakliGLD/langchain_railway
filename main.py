@@ -43,11 +43,13 @@ class ChatRequest(BaseModel):
 def get_model():
     try:
         if MODEL_TYPE == "gemini":
-            print(f"🟢 Using Gemini model: {GEMINI_MODEL}")
-            model = init_chat_model(GEMINI_MODEL, model_type="gemini")
+            print(f"🟢 Using Gemini model (langchain-google-genai): {GEMINI_MODEL}")
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            model = ChatGoogleGenerativeAI(model=GEMINI_MODEL)
         else:
             print(f"🟢 Using OpenAI model: {OPENAI_MODEL}")
-            model = init_chat_model(OPENAI_MODEL, model_type="openai")
+            from langchain_openai import ChatOpenAI
+            model = ChatOpenAI(model=OPENAI_MODEL)
         return model
     except Exception as e:
         print(f"❌ Error initializing model: {e}")
