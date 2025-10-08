@@ -1,17 +1,16 @@
 {
-  "schema": "https://railway.app/railway.schema.json",
+  "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS"
   },
   "deploy": {
     "runtime": "V2",
     "numReplicas": 1,
-    "startCommand": "/bin/sh -c 'echo Starting with PORT=$PORT && uvicorn main:app --host :: --port $PORT --workers 1 --log-level debug > /tmp/app.log 2>&1'",
+    "startCommand": "/bin/sh -c 'echo Starting EnerBot on PORT=$PORT && sleep 15 && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level debug > /tmp/app.log 2>&1'",
     "healthcheckPath": "/healthz",
-    "healthcheckInitialDelay": 300,
-    "healthcheckTimeout": 30,
-    "healthcheckRetries": 20,
-    "healthcheckRetryDelay": 30,
+    "healthcheckTimeout": 400,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10,
     "sleepApplication": false,
     "useLegacyStacker": false,
     "multiRegionConfig": {
@@ -19,10 +18,8 @@
         "numReplicas": 1
       }
     },
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10,
     "variables": {
-      "PORT": "8000",
+      "PORT": "${{PORT}}",
       "SUPABASE_DB_URL": "${{SUPABASE_DB_URL}}",
       "APP_SECRET_KEY": "${{APP_SECRET_KEY}}",
       "OPENAI_API_KEY": "${{OPENAI_API_KEY}}",
