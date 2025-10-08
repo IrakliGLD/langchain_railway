@@ -180,29 +180,48 @@ def health(check_db: str = Query("false"), preload: str = Query("false")):
     before_sleep=lambda rs: logger.info(f"Retrying /nlq due to rate limit ({rs.attempt_number}/5)...")
 )
 async def nlq(q: Question, x_app_key: str = Header(...)):
+    """
+    Natural Language Query endpoint.
+    Prefers Gemini; falls back to OpenAI if Gemini fails.
+    """
     start_time = time.time()
+
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.debug(f"/nlq query: {q.query}")
+
     try:
-        logger.debug(f"/nlq query: {q.query}")
-        engine, _, _ = create_db_connection()
+        # --- Attempt with Gemini first ---
         response = completion(
-            model=GEMINI_MODEL if MODEL_TYPE == "gemini" else "gpt-4o-mini",
+            model=GEMINI_MODEL,
             messages=[{"role": "user", "content": q.query}],
-            api_key=GOOGLE_API_KEY if MODEL_TYPE == "gemini" else OPENAI_API_KEY
+            api_key=GOOGLE_API_KEY
         )
         answer = response.choices[0].message.content
-        exec_time = round(time.time() - start_time, 2)
-        return APIResponse(answer=answer, execution_time=exec_time)
-    except Exception as e:
-        logger.error(f"FATAL /nlq error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error.")
+        source = "gemini"
+    except Exception as gemini_error:
+        logger.warning(f"Gemini failed, falling back to OpenAI: {gemini_error}")
+        try:
+            response = completion(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": q.query}],
+                api_key=OPENAI_API_KEY
+            )
+            answer = response.choices[0].message.content
+            source = "openai"
+        except Exception as openai_error:
+            logger.error(f"Both Gemini and OpenAI failed: {openai_error}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Both Gemini and OpenAI failed.")
+
+    exec_time = round(time.time() - start_time, 2)
+    return APIResponse(answer=f"[{source}] {answer}", execution_time=exec_time)
 
 
 # --- ASK endpoint (wrapper for /nlq) ---
 @app.post("/ask", response_model=APIResponse)
 async def ask(q: Question, x_app_key: str = Header(...)):
-    """Simple wrapper that proxies /ask → /nlq"""
+    """Wrapper for /nlq."""
     try:
         return await nlq(q, x_app_key)
     except HTTPException as e:
