@@ -1,43 +1,67 @@
-# main.py — Railway DB Connectivity Test
 import os
-import urllib.parse
+import socket
+import time
+import traceback
 from fastapi import FastAPI
 from sqlalchemy import create_engine, text
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.exc import SQLAlchemyError
+from urllib.parse import urlparse
 
 app = FastAPI()
 
 @app.get("/healthz")
-async def healthz():
-    """Basic healthcheck"""
+def healthz():
     return {"status": "ok"}
 
 @app.get("/testdb")
-async def testdb():
-    """Try to connect to Supabase and run SELECT 1"""
+def test_db():
+    """Diagnose Supabase / Railway DB connection."""
+    db_url = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
+
+    if not db_url:
+        return {"error": "No SUPABASE_DB_URL or DATABASE_URL found in environment variables"}
+
+    result = {"raw_url": db_url, "steps": []}
     try:
-        SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
-        if not SUPABASE_DB_URL:
-            return {"error": "SUPABASE_DB_URL not found in env"}
+        parsed = urlparse(db_url)
+        host, port, user = parsed.hostname, parsed.port, parsed.username
+        result["parsed"] = {"host": host, "port": port, "user": user}
 
-        parsed_url = urllib.parse.urlparse(SUPABASE_DB_URL)
-        if parsed_url.scheme in ["postgres", "postgresql"]:
-            coerced_url = SUPABASE_DB_URL.replace(parsed_url.scheme, "postgresql+psycopg2", 1)
-        else:
-            coerced_url = SUPABASE_DB_URL
+        # Step 1. DNS resolution
+        try:
+            ip = socket.gethostbyname(host)
+            result["steps"].append(f"✅ DNS resolution success: {host} -> {ip}")
+        except Exception as e:
+            result["steps"].append(f"❌ DNS resolution failed: {repr(e)}")
+            return result
 
+        # Step 2. Connection attempt with retries
         engine = create_engine(
-            coerced_url,
-            poolclass=QueuePool,
-            pool_size=2,
-            max_overflow=1,
-            pool_timeout=10,
+            db_url,
             pool_pre_ping=True,
-            connect_args={"connect_timeout": 5},
+            connect_args={"connect_timeout": 5, "sslmode": "require"},
         )
 
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-            return {"result": "✅ Database connection successful!"}
+        connected = False
+        for attempt in range(5):
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT NOW()"))
+                connected = True
+                result["steps"].append(f"✅ Connection success on attempt {attempt + 1}")
+                break
+            except SQLAlchemyError as e:
+                err_msg = str(e.__cause__) if e.__cause__ else str(e)
+                result["steps"].append(f"Attempt {attempt + 1} failed: {err_msg}")
+                time.sleep(2)
+
+        if not connected:
+            result["steps"].append("❌ Could not connect after 5 attempts")
+
+        return result
+
     except Exception as e:
-        return {"error": f"❌ DB connection failed: {str(e)}"}
+        tb = traceback.format_exc()
+        result["error"] = str(e)
+        result["traceback"] = tb
+        return result
