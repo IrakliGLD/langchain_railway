@@ -1,75 +1,114 @@
 import os
-import time
-import logging
-from fastapi import FastAPI, HTTPException, Header
+import json
+import traceback
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from litellm import completion
+import requests
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# -----------------------------
+# MODEL INITIALIZATION
+# -----------------------------
+from langchain.chat_models import init_chat_model
 
-# --- FastAPI app ---
+# --- Try Gemini first (default) ---
+MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# Initialize FastAPI
 app = FastAPI()
 
-# --- Models ---
-class Question(BaseModel):
+# Allow all origins (for frontend use)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# -----------------------------
+# Define request schema
+# -----------------------------
+class ChatRequest(BaseModel):
     query: str
+    service_tier: str = "user"
 
-class APIResponse(BaseModel):
-    answer: str
-    execution_time: float
 
-# --- Environment variables ---
-APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# -----------------------------
+# Initialize model
+# -----------------------------
+def get_model():
+    try:
+        if MODEL_TYPE == "gemini":
+            print(f"🟢 Using Gemini model: {GEMINI_MODEL}")
+            model = init_chat_model(GEMINI_MODEL, model_type="gemini")
+        else:
+            print(f"🟢 Using OpenAI model: {OPENAI_MODEL}")
+            model = init_chat_model(OPENAI_MODEL, model_type="openai")
+        return model
+    except Exception as e:
+        print(f"❌ Error initializing model: {e}")
+        raise
 
-# --- Routes ---
+
+# -----------------------------
+# ROUTES
+# -----------------------------
 @app.get("/healthz")
-def healthz():
+async def healthz():
+    """Health check route for Railway"""
     return {"status": "ok"}
 
-@app.post("/ask", response_model=APIResponse)
-async def ask(q: Question, x_app_key: str = Header(...)):
-    if x_app_key != APP_SECRET_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    start = time.time()
-    answer = ""
-    source = ""
-
+@app.post("/ask")
+async def ask(request: Request):
+    """Handle incoming queries from Supabase Edge Function"""
     try:
-        # --- Gemini first ---
-        if MODEL_TYPE == "gemini" and GOOGLE_API_KEY:
-            model = GEMINI_MODEL
-            logger.info(f"Trying Gemini model: {model}")
-            response = completion(
-                model=model,
-                messages=[{"role": "user", "content": q.query}],
-                api_key=GOOGLE_API_KEY,
-            )
-            answer = response.choices[0].message.content
-            source = "gemini"
-        elif OPENAI_API_KEY:
-            # --- Fallback to OpenAI ---
-            logger.info("Gemini not available. Falling back to OpenAI (gpt-4o-mini)")
-            response = completion(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": q.query}],
-                api_key=OPENAI_API_KEY,
-            )
-            answer = response.choices[0].message.content
-            source = "openai"
+        data = await request.json()
+        print("📩 Incoming data:", data)
+
+        query = data.get("query", "").strip()
+        service_tier = data.get("service_tier", "user")
+
+        if not query:
+            return {"error": "Missing 'query' in request body"}
+
+        model = get_model()
+
+        # Construct the system message depending on the user tier
+        system_prompt = (
+            "You are EnerBot, an assistant specialized in the Georgian electricity and gas market."
+            if service_tier == "admin"
+            else "You are EnerBot, an informative chatbot about the Georgian energy sector."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query},
+        ]
+
+        response = model.invoke(messages)
+
+        # Ensure compatibility with LangChain’s response structure
+        if hasattr(response, "content"):
+            result_text = response.content
+        elif isinstance(response, dict) and "content" in response:
+            result_text = response["content"]
         else:
-            raise HTTPException(status_code=500, detail="No valid API key configured")
+            result_text = str(response)
+
+        print("✅ Model output:", result_text[:300])
+        return {"answer": result_text}
 
     except Exception as e:
-        logger.exception(f"Error in /ask: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        print("❌ Internal server error:", str(e))
+        traceback.print_exc()
+        return {"error": f"Internal server error: {str(e)}"}
 
-    exec_time = round(time.time() - start, 2)
-    logger.info(f"Response from {source} in {exec_time}s")
-    return APIResponse(answer=answer, execution_time=exec_time)
+
+@app.get("/")
+async def home():
+    return {"message": "EnerBot backend is running successfully 🚀"}
