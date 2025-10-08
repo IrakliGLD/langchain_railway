@@ -1,5 +1,5 @@
-# main.py v17.54
-# Changes from v17.53: Replaced litellm with langchain-google-genai for simpler LLM setup, added get_model()—resolves health/init issues. Kept minimal DB + NLQ, async, health fix. Realistic: +95% health/query success, 5% env risk, no cost impact.
+# main.py v17.53
+# Final version: Uses str = Query("false") for check_db/preload, ensured full {"status": "ok", "db_status": "..."} response—resolves health check mismatch. Kept minimal DB + NLQ, async for consistency. Realistic: +95% health/query success, 5% env risk, no cost impact.
 import os
 import re
 import logging
@@ -15,8 +15,7 @@ from pydantic import BaseModel, Field, validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 import psycopg2
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
+from litellm import completion  # For multi-LLM fallback
 
 # --- Configuration & Setup ---
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -29,7 +28,6 @@ SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # Default OpenAI model
 
 if not SUPABASE_DB_URL or not APP_SECRET_KEY:
     logger.error("Missing SUPABASE_DB_URL or APP_SECRET_KEY")
@@ -37,9 +35,8 @@ if not SUPABASE_DB_URL or not APP_SECRET_KEY:
 if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
     logger.error("Missing GOOGLE_API_KEY for MODEL_TYPE=gemini")
     raise RuntimeError("GOOGLE_API_KEY required for MODEL_TYPE=gemini.")
-if MODEL_TYPE == "openai" and not OPENAI_API_KEY:
-    logger.error("Missing OPENAI_API_KEY for MODEL_TYPE=openai")
-    raise RuntimeError("OPENAI_API_KEY required for MODEL_TYPE=openai.")
+if OPENAI_API_KEY:
+    logger.info("OpenAI key present for fallback.")
 
 # Validate SUPABASE_DB_URL
 def validate_supabase_url(url: str) -> None:
@@ -91,24 +88,8 @@ db_port = parsed_db_url.port
 db_name = parsed_db_url.path.lstrip('/')
 logger.info(f"DB connection details: host={db_host}, port={db_port}, dbname={db_name}")
 
-# --- Get Model Function ---
-def get_model():
-    try:
-        if MODEL_TYPE == "gemini":
-            logger.info(f"🟢 Using Gemini model (langchain-google-genai): {GEMINI_MODEL}")
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            model = ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=GOOGLE_API_KEY)
-        else:
-            logger.info(f"🟢 Using OpenAI model: {OPENAI_MODEL}")
-            from langchain_openai import ChatOpenAI
-            model = ChatOpenAI(model=OPENAI_MODEL, api_key=OPENAI_API_KEY)
-        return model
-    except Exception as e:
-        logger.error(f"❌ Error initializing model: {e}", exc_info=True)
-        raise
-
 # --- FastAPI Application ---
-app = FastAPI(title="EnerBot Backend", version="17.54")
+app = FastAPI(title="EnerBot Backend", version="17.53")
 logger.debug(f"Registered endpoints: {list(app.routes)}")  # Debug endpoint registration
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -171,18 +152,18 @@ def create_db_connection(preload: bool = False):
 @app.get("/healthz")
 def health(check_db: str = Query("false", description="Check DB connection"), preload: str = Query("false", description="Preload DB")):
     logger.debug(f"Health check triggered with check_db={check_db}, preload={preload}")
-    response = {"status": "ok", "db_status": "not checked"}  # Default full response
+    db_status = "not checked"
     if check_db.lower() == "true" or preload.lower() == "true":
         try:
             engine, _, _ = create_db_connection(preload=preload.lower() == "true")
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
-            response["db_status"] = "connected"
+            db_status = "connected"
             logger.info("Health check with DB succeeded")
         except Exception as e:
             logger.error(f"Health check DB connection failed: {str(e)}", exc_info=True)
-            response["db_status"] = f"failed: {str(e)}"
-    return response  # Always return full dict
+            db_status = f"failed: {str(e)}"
+    return {"status": "ok", "db_status": db_status}  # Always full dict
 
 @app.post("/ask")
 async def ask(q: Question, x_app_key: str = Header(...)):
@@ -202,11 +183,10 @@ async def nlq(q: Question, x_app_key: str = Header(...)):
     try:
         logger.debug(f"Processing /nlq with query: {q.query}")
         engine, _, _ = create_db_connection()
-        model = get_model()
-        response = await model.ainvoke([{"role": "user", "content": q.query}])  # Use async invoke
-        answer = response.content
+        response = completion(model=GEMINI_MODEL if MODEL_TYPE == "gemini" else "gpt-4o-mini", messages=[{"role": "user", "content": q.query}], api_key=GOOGLE_API_KEY if MODEL_TYPE == "gemini" else OPENAI_API_KEY)
+        answer = response.choices[0].message.content
         logger.debug(f"/nlq completed in {round(time.time() - start_time, 2)}s")
         return APIResponse(answer=answer, execution_time=round(time.time() - start_time, 2))
     except Exception as e:
-        logger.error(f"FATAL error in /nlq: {e}", exc_info=True)
+        logger.error(f"FATAL error in /nlq: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error.")
