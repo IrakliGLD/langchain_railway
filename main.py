@@ -328,9 +328,24 @@ def ask_post(
         log.exception("SQL generation failed")
         raise HTTPException(status_code=500, detail=f"Failed to generate SQL: {e}")
 
-    # 2) Sanitize SQL
+    # 2) Sanitize SQL (updated validation)
     try:
         safe_sql = sanitize_sql(raw_sql)
+
+        # --- Enhanced safety validation ---
+        # Block destructive SQL operations
+        if re.search(r"(insert|update|delete|drop|alter|create|truncate|grant|revoke)", safe_sql, re.IGNORECASE):
+            log.warning("❌ Rejected unsafe SQL keyword")
+            raise HTTPException(status_code=400, detail="Unsafe SQL operation detected")
+
+        # Allow arithmetic with xrate (e.g., p_bal_gel / xrate), but block unrelated joins
+        if re.search(r"\bjoin\b", safe_sql, re.IGNORECASE) and "price" not in safe_sql:
+            log.warning(f"❌ Rejected SQL with unexpected join: {safe_sql}")
+            raise HTTPException(status_code=400, detail="Unexpected join not allowed")
+
+        # Log approval of safe query
+        log.info(f"✅ Safe SQL passed validation: {safe_sql}")
+
     except Exception as e:
         log.warning(f"Rejected SQL: {raw_sql}")
         raise HTTPException(status_code=400, detail=f"Unsafe SQL: {e}")
@@ -361,12 +376,10 @@ def ask_post(
     chart_type = None
     chart_meta = None
     if rows and len(cols) >= 2:
-        # try to form (label,value) or (date,value)
         df = pd.DataFrame(rows, columns=cols)
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         if num_cols:
             val_col = num_cols[0]
-            # pick a likely label axis
             label_col = None
             for c in df.columns:
                 if c == val_col:
@@ -375,7 +388,6 @@ def ask_post(
                     label_col = c
                     break
             if label_col:
-                # small sample for client plotting
                 sample = df[[label_col, val_col]].head(50)
                 if "date" in label_col.lower() or "year" in label_col.lower():
                     chart_type = "line"
@@ -393,6 +405,7 @@ def ask_post(
         chart_metadata=chart_meta,
         execution_time=round(time.time() - t0, 2),
     )
+
 
 # -----------------------------
 # Local dev runner (Railway ignores this)
