@@ -4,27 +4,6 @@
     "buildCommand": "pip install -r requirements.txt"
   },
   "deploy": {
-    "startCommand": "python main.py",
-    "healthcheckPath": "/healthz",
-    "healthcheckInitialDelay": 300,
-    "healthcheckTimeout": 60,
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10,
-    "sleepApplication": false,
-    "useLegacyStacker": false,
-    "multiRegionConfig": {
-      "europe-west4-drams3a": {
-        "numReplicas": 1
-      }
-    },
-    "variables": {
-      "PORT": "3000",
-      "SUPABASE_DB_URL": "${{SUPABASE_DB_URL}}",
-      "APP_SECRET_KEY": "${{APP_SECRET_KEY}}",
-      "OPENAI_API_KEY": "${{OPENAI_API_KEY}}",
-      "GOOGLE_API_KEY": "${{GOOGLE_API_KEY}}",
-      "MODEL_TYPE": "${{MODEL_TYPE:-gemini}}",
-      "GEMINI_MODEL": "${{GEMINI_MODEL:-gemini-2.5-flash}}"
-    }
+    "startCommand": "python -m uvicorn main:app --host 0.0.0.0 --port $PORT"
   }
 }
