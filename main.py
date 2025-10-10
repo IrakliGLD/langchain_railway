@@ -107,9 +107,8 @@ app.add_middleware(
 )
 
 
-
 # -----------------------------
-# Column Validation Helpers 🆕
+# Column & Table Helpers 🆕
 # -----------------------------
 def closest_match(col: str) -> str:
     matches = get_close_matches(col, COLUMN_LABELS.keys(), n=1, cutoff=0.6)
@@ -266,7 +265,6 @@ def sanitize_sql(sql: str) -> str:
                 status_code=400,
                 detail=f"Unknown or disallowed table: '{t}' (after normalization: '{normalized}')"
             )
-
 
     # --- Enforce SELECT-only
     if not re.match(r"^\s*select\b", sql, re.IGNORECASE):
