@@ -116,19 +116,23 @@ def closest_match(col: str) -> str:
 
 def _extract_tables(sql: str) -> List[str]:
     """
-    Extract table names safely (FROM/JOIN only) and normalize plural forms.
-    Only affects table references, not column names or aliases.
+    Extract and normalize table names (handles plural forms safely).
     """
     tokens = re.findall(r"\b(?:from|join)\s+([a-zA-Z0-9_\.]+)", sql, flags=re.IGNORECASE)
     tables = []
     for name in tokens:
         tbl = name.split(".")[-1].lower().strip()
-        # normalize plural only if the singular form is explicitly whitelisted
+
+        # Normalize plural automatically if the singular form exists
         if tbl.endswith("s") and tbl[:-1] in ALLOWED_TABLES:
-            log.debug(f"Normalizing plural table name '{tbl}' -> '{tbl[:-1]}'")
+            log.info(f"Auto-normalized plural table '{tbl}' → '{tbl[:-1]}'")
             tbl = tbl[:-1]
-        tables.append(tbl)
+
+        # Only add unique, allowed table names
+        if tbl not in tables:
+            tables.append(tbl)
     return tables
+
 
 
 def validate_columns_exist(sql: str):
