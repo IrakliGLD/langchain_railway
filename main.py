@@ -247,13 +247,26 @@ def sanitize_sql(sql: str) -> str:
     # --- Extract and normalize tables
     tables = _extract_tables(sql)
     for t in tables:
-        if t not in ALLOWED_TABLES:
-            # Try plural → singular correction automatically
-            if t.endswith("s") and t[:-1] in ALLOWED_TABLES:
-                log.info(f"Auto-normalized plural table '{t}' → '{t[:-1]}'")
-                sql = re.sub(rf"\b{t}\b", t[:-1], sql, flags=re.IGNORECASE)
-            else:
-                raise HTTPException(status_code=400, detail=f"Unknown table: {t}")
+        normalized = t
+
+        # Try plural → singular correction automatically
+        if t.endswith("s") and t[:-1] in ALLOWED_TABLES:
+            log.info(f"Auto-normalized plural table '{t}' → '{t[:-1]}'")
+            normalized = t[:-1]
+            # Replace both with and without aliases safely
+            sql = re.sub(rf"\b{t}\b", normalized, sql, flags=re.IGNORECASE)
+
+        # Handle alias forms like "FROM prices p"
+        if re.search(rf"\b{t}\s+[a-z]\b", sql, re.IGNORECASE) and normalized in ALLOWED_TABLES:
+            log.debug(f"Alias detected for table '{normalized}'")
+
+        # Final safety check after normalization
+        if normalized not in ALLOWED_TABLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown or disallowed table: '{t}' (after normalization: '{normalized}')"
+            )
+
 
     # --- Enforce SELECT-only
     if not re.match(r"^\s*select\b", sql, re.IGNORECASE):
