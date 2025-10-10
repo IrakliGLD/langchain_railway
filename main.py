@@ -115,9 +115,32 @@ def closest_match(col: str) -> str:
     matches = get_close_matches(col, COLUMN_LABELS.keys(), n=1, cutoff=0.6)
     return matches[0] if matches else None
 
+def _extract_tables(sql: str) -> List[str]:
+    """
+    Extract table names safely (FROM/JOIN only) and normalize plural forms.
+    Only affects table references, not column names or aliases.
+    """
+    tokens = re.findall(r"\b(?:from|join)\s+([a-zA-Z0-9_\.]+)", sql, flags=re.IGNORECASE)
+    tables = []
+    for name in tokens:
+        tbl = name.split(".")[-1].lower().strip()
+        # normalize plural only if the singular form is explicitly whitelisted
+        if tbl.endswith("s") and tbl[:-1] in ALLOWED_TABLES:
+            log.debug(f"Normalizing plural table name '{tbl}' -> '{tbl[:-1]}'")
+            tbl = tbl[:-1]
+        tables.append(tbl)
+    return tables
+
 
 def validate_columns_exist(sql: str):
-    """Validate all referenced columns exist in schema."""
+    """Validate that all referenced tables and columns exist in the schema."""
+    # --- Table validation (before columns)
+    tables = _extract_tables(sql)
+    for t in tables:
+        if t not in ALLOWED_TABLES:
+            raise HTTPException(status_code=400, detail=f"Unknown or disallowed table: {t}")
+
+    # --- Column validation
     all_cols = {c.lower() for c in COLUMN_LABELS.keys()}
     tokens = re.findall(r"\b[a-z_]+\b", sql.lower())
 
@@ -138,6 +161,7 @@ def validate_columns_exist(sql: str):
                 status_code=400,
                 detail=f"Unknown column `{tok}`{hint}"
             )
+
 
 # -----------------------------
 # Models
