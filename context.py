@@ -1,7 +1,6 @@
-# === context.py v1.8 ===
-# Added rule: Any USD or USD/MWh variable must be derived as (GEL value / xrate)
-# Example: p_bal_usd = p_bal_gel / xrate, tariff_usd = tariff_gel / xrate, etc.
-# All prior content preserved from v1.7.
+# === context.py v1.9 ===
+# Added: Monthly granularity, temporal coverage clarifications, and note that energy_balance_long is yearly.
+# Preserved USD/xrate conversion logic from v1.8.
 
 import os
 import re
@@ -116,7 +115,8 @@ VALUE_LABELS = {
 DB_SCHEMA_DICT = {
     "tables": {
         "dates": {"columns": ["date"], "desc": "Calendar (Months)"},
-        "energy_balance_long": {"columns": ["year", "sector", "energy_source", "volume_tj"], "desc": "Energy Balance (by Sector)"},
+        # energy_balance_long contains yearly data (dimension = year)
+        "energy_balance_long": {"columns": ["year", "sector", "energy_source", "volume_tj"], "desc": "Energy Balance (by Sector, yearly data)"},
         "entities": {"columns": ["entity", "entity_normalized", "type", "ownership", "source"], "desc": "Power Sector Entities"},
         "monthly_cpi": {"columns": ["date", "cpi_type", "cpi"], "desc": "Consumer Price Index (CPI)"},
         "price": {"columns": ["date", "p_dereg_gel", "p_bal_gel", "p_gcap_gel", "xrate"], "desc": "Electricity Market Prices"},
@@ -126,20 +126,22 @@ DB_SCHEMA_DICT = {
     },
     "rules": {
         "unit_conversion": "1 TJ = 277.778 MWh; tech_quantity/trade in thousand MWh (multiply by 1000 for MWh).",
-        "usd_rule": "USD and USD/MWh variables are derived as (corresponding GEL value / xrate). Example: p_bal_usd = p_bal_gel / xrate, tariff_usd = tariff_gel / xrate.",
-        "granularity": "Monthly data (first day of month).",
-        "timeframe": "2015 to present.",
-        "forecast_restriction": "Only for prices, CPI, demand; no generation/imports/exports."
-    }
+        "usd_rule": "USD and USD/MWh variables are derived as (corresponding GEL value / xrate). Example: p_bal_usd = p_bal_gel / xrate, tariff_usd = tariff_gel / xrate. Always use same month’s xrate from price table, joined by date.",
+        "granularity": "Monthly data (first day of month, YYYY-MM-01 format). Do not treat as daily; each record represents one month. energy_balance_long contains yearly data (dimension = year).",
+        "temporal_scope": "Data available from 2015 up to latest month recorded; analyses must use full time range, not only earliest entries.",
+        "forecast_restriction": "Only for prices, CPI, demand; no generation/imports/exports.",
+    },
 }
 
 # --- Prose Schema Doc (for LLM context) ---
 DB_SCHEMA_DOC = """
 ### Global Rules & Conversions ###
 - **General Rule:** Provide summaries and insights only. Do NOT return raw data, full tables, or row-level dumps. If asked for a dump, refuse and suggest an aggregated view instead.
+
 - **Unit Conversion:** 
   - 1 TJ = 277.778 MWh
   - The `tech_quantity` and `trade` tables store quantities in **thousand MWh**; multiply by 1000 for MWh.
+
 - **USD Conversion Rule:**
   - Any variable ending with `_usd` or described in USD/MWh does **not exist directly** in the database.
   - These must be derived as:
@@ -152,11 +154,23 @@ DB_SCHEMA_DOC = """
     The exchange rate column (`xrate`) is located **inside the `price` table**.
     When performing conversions, always use `price.xrate` joined by the same `date`.
 
-- **Data Granularity:** All tables with a `date` column contain **monthly** data (first day of month).
-- **Timeframe:** Data generally spans from 2015 to present.
-- **Forecasting Restriction:** Forecasts can be made for prices, CPI, and demand. 
-  For generation (hydro, thermal, wind, solar) and imports/exports: 
-  only historical trends can be shown. Future projections depend on new capacity/projects not available in this data.
+- **Monthly Granularity:**
+  - All tables with a `date` column contain **monthly** data stored as the **first day of the month (YYYY-MM-01)**.
+  - Treat each record as one full month, not a daily entry.
+  - Example: a record with date '2024-05-01' represents data for **May 2024**.
+
+- **Yearly Data:**
+  - The `energy_balance_long` table uses a **year** dimension (not monthly).
+  - Its data is aggregated annually by sector and energy source.
+
+- **Temporal Coverage:**
+  - Data spans from **2015 to the most recent available month**.
+  - Analyses (e.g., trends, comparisons) must use the **full available range**, not just early data like 2015.
+
+- **Forecasting Restriction:**
+  - Forecasts can be made for prices, CPI, and demand.
+  - For generation (hydro, thermal, wind, solar) and imports/exports: only historical trends can be shown.
+  - Future projections depend on new capacity/projects not included in this dataset.
 """
 
 # --- DB_JOINS v1.4 ---
@@ -185,26 +199,26 @@ def scrub_schema_mentions(text: str) -> str:
 
     # 1) Columns -> labels
     for col, label in COLUMN_LABELS.items():
-        text = re.sub(rf"\b{re.escape(col)}\b", label, text, flags=re.IGNORECASE)
+        text = re.sub(rf"\\b{re.escape(col)}\\b", label, text, flags=re.IGNORECASE)
 
     # 2) Tables -> labels
     for tbl, label in TABLE_LABELS.items():
-        text = re.sub(rf"\b{re.escape(tbl)}\b", label, text, flags=re.IGNORECASE)
+        text = re.sub(rf"\\b{re.escape(tbl)}\\b", label, text, flags=re.IGNORECASE)
 
     # 3) Encoded values -> natural labels
     for val, label in VALUE_LABELS.items():
-        text = re.sub(rf"\b{re.escape(val)}\b", label, text, flags=re.IGNORECASE)
+        text = re.sub(rf"\\b{re.escape(val)}\\b", label, text, flags=re.IGNORECASE)
 
     # 4) Hide schema/SQL jargon
     schema_terms = ["schema", "table", "column", "sql", "join", "primary key", "foreign key", "view", "constraint"]
     for term in schema_terms:
-        text = re.sub(rf"\b{re.escape(term)}\b", "data", text, flags=re.IGNORECASE)
+        text = re.sub(rf"\\b{re.escape(term)}\\b", "data", text, flags=re.IGNORECASE)
 
     # 5) Strip markdown fences
     text = text.replace("```", "").strip()
 
     # 6) LLM fallback if terms still present
-    if any(re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE) for term in schema_terms):
+    if any(re.search(rf"\\b{re.escape(term)}\\b", text, re.IGNORECASE) for term in schema_terms):
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
         fallback_prompt = ChatPromptTemplate.from_messages([
             ("system", "Remove any technical jargon like schema, table, sql, join from text. Keep meaning intact."),
