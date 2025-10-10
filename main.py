@@ -321,36 +321,70 @@ def ask_post(
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # 1) Ask LLM for SQL
+    # 1️⃣ Generate SQL via LLM
     try:
         raw_sql = llm_generate_sql(q.query)
     except Exception as e:
         log.exception("SQL generation failed")
         raise HTTPException(status_code=500, detail=f"Failed to generate SQL: {e}")
 
-    # 2) Sanitize SQL (updated validation)
+    # 2️⃣ Sanitize and validate SQL (robust + systematic hybrid)
     try:
         safe_sql = sanitize_sql(raw_sql)
 
-        # --- Enhanced safety validation ---
-        # Block destructive SQL operations
+        # --- Destructive commands ---
         if re.search(r"(insert|update|delete|drop|alter|create|truncate|grant|revoke)", safe_sql, re.IGNORECASE):
-            log.warning("❌ Rejected unsafe SQL keyword")
+            log.warning("❌ Rejected unsafe SQL keyword (DDL/DML operation)")
             raise HTTPException(status_code=400, detail="Unsafe SQL operation detected")
 
-        # Allow arithmetic with xrate (e.g., p_bal_gel / xrate), but block unrelated joins
-        if re.search(r"\bjoin\b", safe_sql, re.IGNORECASE) and "price" not in safe_sql:
-            log.warning(f"❌ Rejected SQL with unexpected join: {safe_sql}")
-            raise HTTPException(status_code=400, detail="Unexpected join not allowed")
+        # --- Allow arithmetic & analytical functions ---
+        ALLOWED_ARITHMETIC = ["/", "+", "-", "*"]
+        ALLOWED_FUNCTIONS = [
+            "extract", "avg", "sum", "min", "max", "count",
+            "round", "coalesce", "abs", "year", "month"
+        ]
+        if any(op in safe_sql for op in ALLOWED_ARITHMETIC):
+            log.info("✅ Arithmetic operation detected and allowed")
+        if any(fn in safe_sql.lower() for fn in ALLOWED_FUNCTIONS):
+            log.info("✅ Analytical or date function detected and allowed")
 
-        # Log approval of safe query
+        # --- Allow joins if schema-related ---
+        if re.search(r"\bjoin\b", safe_sql, re.IGNORECASE):
+            ALLOWED_JOIN_KEYS = ["date", "year", "entity", "xrate", "price", "tariff_gen", "trade", "monthly_cpi"]
+            if not any(key in safe_sql.lower() for key in ALLOWED_JOIN_KEYS):
+                log.warning(f"❌ Rejected unexpected join: {safe_sql}")
+                raise HTTPException(status_code=400, detail="Join not allowed between unrelated tables")
+            else:
+                log.info("✅ Join involves approved relational key or table")
+
+        # --- Structure checks ---
+        if not re.search(r"\bselect\b", safe_sql, re.IGNORECASE):
+            raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+        if re.search(r"select\s+\*\s+from", safe_sql, re.IGNORECASE):
+            log.warning("❌ SELECT * blocked")
+            raise HTTPException(status_code=400, detail="Full table dumps are not allowed")
+
+        # --- xrate / USD derivation ---
+        if re.search(r"/\s*xrate", safe_sql, re.IGNORECASE):
+            log.info("✅ USD derivation via xrate approved")
+
+        # --- Grouping, Extract, Aggregates ---
+        if re.search(r"group\s+by", safe_sql, re.IGNORECASE):
+            log.info("✅ GROUP BY detected and allowed")
+        if re.search(r"extract\s*\(\s*(year|month)", safe_sql, re.IGNORECASE):
+            log.info("✅ Date component extraction approved")
+
+        # --- System schema protection ---
+        if re.search(r"(pg_|information_schema|sys|sqlite_master)", safe_sql, re.IGNORECASE):
+            raise HTTPException(status_code=400, detail="System schema access not allowed")
+
         log.info(f"✅ Safe SQL passed validation: {safe_sql}")
 
     except Exception as e:
         log.warning(f"Rejected SQL: {raw_sql}")
         raise HTTPException(status_code=400, detail=f"Unsafe SQL: {e}")
 
-    # 3) Execute SQL
+    # 3️⃣ Execute SQL safely
     try:
         with ENGINE.connect() as conn:
             res = conn.execute(text(safe_sql))
@@ -360,7 +394,7 @@ def ask_post(
         log.exception("SQL execution failed")
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-    # 4) Summarize results
+    # 4️⃣ Summarize & clean
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
     try:
@@ -371,10 +405,8 @@ def ask_post(
 
     summary = scrub_schema_mentions(summary)
 
-    # (Optional) simple chart suggestion (very lightweight heuristic)
-    chart_data = None
-    chart_type = None
-    chart_meta = None
+    # 5️⃣ Optional chart inference
+    chart_data = chart_type = chart_meta = None
     if rows and len(cols) >= 2:
         df = pd.DataFrame(rows, columns=cols)
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -405,7 +437,6 @@ def ask_post(
         chart_metadata=chart_meta,
         execution_time=round(time.time() - t0, 2),
     )
-
 
 # -----------------------------
 # Local dev runner (Railway ignores this)
