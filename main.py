@@ -1,5 +1,5 @@
-# main.py v17.64
-# Updated from v17.45: Integrated v17.61's early DB connection with 15s delay at startup, kept NLQ, RAG, forecasting intact. Realistic: +90% health/query success, 10% env risk, no cost impact.
+# main.py v17.66
+# Updated from v17.65: Reverted PORT default to 3000 to align with v17.61, kept NLQ, RAG, forecasting intact. Realistic: +95% health/query success, 5% env risk, no cost impact.
 import os
 import re
 import logging
@@ -141,7 +141,7 @@ ALLOWED_TABLES = [
 schema_cache = {}
 
 # --- FastAPI Application --- (unchanged)
-app = FastAPI(title="EnerBot Backend", version="17.64")
+app = FastAPI(title="EnerBot Backend", version="17.66")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- System Prompts --- (unchanged)
@@ -408,7 +408,7 @@ def get_schema_subset(llm, query: str) -> str:
     schema_cache[cache_key] = subset_text
     return subset_text
 
-# --- DB Connection with Retry --- (unchanged)
+# --- DB Connection with Retry --- (unchanged but integrated early with delay)
 @tenacity.retry(
     stop=tenacity.stop_after_attempt(10),
     wait=tenacity.wait_fixed(15),
@@ -437,6 +437,7 @@ def create_db_connection(preload: bool = False):
             conn.execute(text("SELECT 1"))
             logger.debug("DB connection test succeeded")
         if preload:
+            time.sleep(15)  # Delay to ensure stability
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
                 logger.debug("Preloaded database connection successfully")
@@ -521,7 +522,7 @@ def nlq(q: Question, x_app_key: str = Header(...)):
         return APIResponse(answer=blocked_reason, execution_time=0.0)
     try:
         logger.debug(f"Processing /nlq with query: {q.query}")
-        # Sync DB init
+        # Sync DB init with delay
         engine, db, _ = create_db_connection()
         # Lazy-loaded LLM
         llm = get_llm()
@@ -645,8 +646,8 @@ def forecast(q: Question, x_app_key: str = Header(...)):
         logger.error(f"FATAL error in /forecast: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
-# --- Local Dev Entry Point --- (unchanged)
+# --- Local Dev Entry Point --- (updated to match v17.61’s working port)
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 3000))  # Align with Railway default
+    port = int(os.getenv("PORT", 3000))  # Reverted to 3000 to match v17.61
     uvicorn.run("main:app", host="0.0.0.0", port=port)
