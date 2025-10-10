@@ -350,12 +350,26 @@ def ask_post(
 
         # --- Allow joins if schema-related ---
         if re.search(r"\bjoin\b", safe_sql, re.IGNORECASE):
-            ALLOWED_JOIN_KEYS = ["date", "year", "entity", "xrate", "price", "tariff_gen", "trade", "monthly_cpi"]
+            ALLOWED_JOIN_KEYS = [
+                "date", "year", "entity",
+                "xrate", "price", "tariff_gen",
+                "trade", "monthly_cpi", "tech_quantity",
+                "energy_balance_long", "entities"
+            ]
             if not any(key in safe_sql.lower() for key in ALLOWED_JOIN_KEYS):
                 log.warning(f"❌ Rejected unexpected join: {safe_sql}")
                 raise HTTPException(status_code=400, detail="Join not allowed between unrelated tables")
             else:
                 log.info("✅ Join involves approved relational key or table")
+
+        # --- Allow safe arithmetic/date logic even without GROUP BY or JOIN ---
+        if (
+            re.search(r"extract\s*\(", safe_sql, re.IGNORECASE)
+            or re.search(r"/\s*xrate", safe_sql, re.IGNORECASE)
+            or re.search(r"\border\s+by\b", safe_sql, re.IGNORECASE)
+        ):
+            log.info("✅ Query uses arithmetic/date/order logic safely without aggregation — approved")
+
 
         # --- Structure checks ---
         if not re.search(r"\bselect\b", safe_sql, re.IGNORECASE):
