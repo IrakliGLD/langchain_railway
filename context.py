@@ -142,12 +142,16 @@ DB_SCHEMA_DOC = """
   - The `tech_quantity` and `trade` tables store quantities in **thousand MWh**; multiply by 1000 for MWh.
 - **USD Conversion Rule:**
   - Any variable ending with `_usd` or described in USD/MWh does **not exist directly** in the database.
-  - These must be derived as:  
-    - `p_dereg_usd = p_dereg_gel / xrate`  
-    - `p_bal_usd = p_bal_gel / xrate`  
-    - `p_gcap_usd = p_gcap_gel / xrate`  
+  - These must be derived as:
+    - `p_dereg_usd = p_dereg_gel / xrate`
+    - `p_bal_usd = p_bal_gel / xrate`
+    - `p_gcap_usd = p_gcap_gel / xrate`
     - `tariff_usd = tariff_gel / xrate`
-  - Always use the latest `xrate` available for conversion.
+  - Always use the **same month’s `xrate`** for conversion — join on the `date` column between the target table and the `price` table.
+  - ⚠️ *Note:* There is **no separate `xrates` table.**
+    The exchange rate column (`xrate`) is located **inside the `price` table**.
+    When performing conversions, always use `price.xrate` joined by the same `date`.
+
 - **Data Granularity:** All tables with a `date` column contain **monthly** data (first day of month).
 - **Timeframe:** Data generally spans from 2015 to present.
 - **Forecasting Restriction:** Forecasts can be made for prices, CPI, and demand. 
