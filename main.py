@@ -162,13 +162,55 @@ class APIResponse(BaseModel):
 # -----------------------------
 # LLM helpers
 # -----------------------------
-def make_gemini() -> ChatGoogleGenerativeAI:
-    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0)
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-def make_openai() -> ChatOpenAI:
-    return ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
+def llm_generate_sql(user_query: str) -> str:
+    """
+    Ask LLM for a single SELECT query (no markdown), limited to allowed tables/columns per schema doc.
+    """
+    system = (
+        "You write a SINGLE PostgreSQL SELECT query to answer the user's question. "
+        "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
+        "Use only the documented tables and columns. Prefer monthly aggregation. "
+        "If unsure, produce a minimal safe SELECT that still helps answer."
+    )
+    prompt = f"""
+User question:
+{user_query}
 
-# ... llm_generate_sql and llm_summarize unchanged ...
+Schema (for your reference only):
+{DB_SCHEMA_DOC}
+
+Output rules:
+- Return ONLY raw SQL (no ``` fences, no prose)
+- SELECT queries only
+- Use at most the necessary tables
+- If large, add LIMIT 500
+"""
+
+    # Prefer Gemini; fallback to OpenAI
+    try:
+        if MODEL_TYPE == "gemini":
+            llm = ChatGoogleGenerativeAI(
+                model=GEMINI_MODEL,
+                google_api_key=GOOGLE_API_KEY,
+                temperature=0
+            )
+        else:
+            llm = ChatOpenAI(
+                model=OPENAI_MODEL,
+                temperature=0,
+                openai_api_key=OPENAI_API_KEY
+            )
+        sql = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+    except Exception as e:
+        log.warning(f"Gemini failed, fallback to OpenAI: {e}")
+        llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
+        sql = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+
+    return sql
+
 
 # -----------------------------
 # Endpoints
