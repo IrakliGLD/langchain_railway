@@ -235,6 +235,37 @@ Output rules:
 
     return sql
 
+# -----------------------------
+# SQL Sanitizer (with plural table normalization)
+# -----------------------------
+def sanitize_sql(sql: str) -> str:
+    """Clean and normalize SQL before execution."""
+    sql = sql.strip().rstrip(";").strip()
+    sql = re.sub(r"```(?:sql)?", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"--.*?$", "", sql, flags=re.MULTILINE)
+
+    # --- Extract and normalize tables
+    tables = _extract_tables(sql)
+    for t in tables:
+        if t not in ALLOWED_TABLES:
+            # Try plural → singular correction automatically
+            if t.endswith("s") and t[:-1] in ALLOWED_TABLES:
+                log.info(f"Auto-normalized plural table '{t}' → '{t[:-1]}'")
+                sql = re.sub(rf"\b{t}\b", t[:-1], sql, flags=re.IGNORECASE)
+            else:
+                raise HTTPException(status_code=400, detail=f"Unknown table: {t}")
+
+    # --- Enforce SELECT-only
+    if not re.match(r"^\s*select\b", sql, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="Only SELECT statements allowed")
+
+    # --- Basic disallow list
+    forbidden = ["insert", "update", "delete", "drop", "create", "alter", "grant", "revoke"]
+    if any(re.search(rf"\b{f}\b", sql, re.IGNORECASE) for f in forbidden):
+        raise HTTPException(status_code=400, detail="Forbidden SQL operation detected")
+
+    return sql
+
 
 # -----------------------------
 # Endpoints
