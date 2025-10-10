@@ -648,5 +648,5 @@ def forecast(q: Question, x_app_key: str = Header(...)):
 # --- Local Dev Entry Point --- (unchanged)
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))  # Align with Railway default
+    port = int(os.getenv("PORT", 3000))  # Align with Railway default
     uvicorn.run("main:app", host="0.0.0.0", port=port)
