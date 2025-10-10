@@ -16,3 +16,4 @@ langchain-google-genai
 litellm
 supabase
 langchain-openai
+psycopg
