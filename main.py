@@ -92,6 +92,22 @@ with ENGINE.connect() as conn:
     conn.execute(text("SELECT 1"))
 log.info("✅ Database connectivity verified")
 
+
+# -----------------------------
+# App
+# -----------------------------
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.3")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
 # -----------------------------
 # Column Validation Helpers 🆕
 # -----------------------------
