@@ -18,7 +18,7 @@
       }
     },
     "variables": {
-      "PORT": "8000",
+      "PORT": "${{PORT}}",
       "SUPABASE_DB_URL": "${{SUPABASE_DB_URL}}",
       "APP_SECRET_KEY": "${{APP_SECRET_KEY}}",
       "OPENAI_API_KEY": "${{OPENAI_API_KEY}}",
