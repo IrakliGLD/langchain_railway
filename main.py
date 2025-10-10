@@ -362,6 +362,19 @@ def ask_post(
             else:
                 log.info("✅ Join involves approved relational key or table")
 
+        # --- Allow safe arithmetic, date, and analytical logic ---
+        SAFE_PATTERNS = [
+            r"extract\s*\(", r"/\s*xrate", r"\border\s+by\b", r"\bgroup\s+by\b",
+            r"\b(avg|sum|min|max|count|stddev|variance|corr|covar|median)\s*\(",
+            r"\b(abs|round|floor|ceil|power|sqrt|ln|log|exp)\s*\(",
+            r"\b(case\s+when|coalesce|nullif|greatest|least)\b",
+            r"\b(row_number|rank|dense_rank|lag|lead|ntile|over\s*\()\b",
+            r"[\+\-\*/]\s*[a-zA-Z0-9_]+"
+        ]
+        if any(re.search(p, safe_sql, re.IGNORECASE) for p in SAFE_PATTERNS):
+            log.info("✅ Query uses arithmetic/date/aggregate/order logic safely — approved")
+
+
         # --- Allow safe arithmetic/date logic even without GROUP BY or JOIN ---
         if (
             re.search(r"extract\s*\(", safe_sql, re.IGNORECASE)
