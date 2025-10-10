@@ -1,5 +1,7 @@
-# === context.py v1.7 ===
-# No changes from v1.7: Already fixed os import issue. Error was from main.py DB connection, not context.py. Hybrid scrub, schema dict, prose doc, labels unchanged. Realistic note: No DB calls here, so error is purely from main.py import chain.
+# === context.py v1.8 ===
+# Added rule: Any USD or USD/MWh variable must be derived as (GEL value / xrate)
+# Example: p_bal_usd = p_bal_gel / xrate, tariff_usd = tariff_gel / xrate, etc.
+# All prior content preserved from v1.7.
 
 import os
 import re
@@ -117,13 +119,14 @@ DB_SCHEMA_DICT = {
         "energy_balance_long": {"columns": ["year", "sector", "energy_source", "volume_tj"], "desc": "Energy Balance (by Sector)"},
         "entities": {"columns": ["entity", "entity_normalized", "type", "ownership", "source"], "desc": "Power Sector Entities"},
         "monthly_cpi": {"columns": ["date", "cpi_type", "cpi"], "desc": "Consumer Price Index (CPI)"},
-        "price": {"columns": ["date", "p_dereg_gel", "p_bal_gel", "p_gcap_gel", "xrate", "p_dereg_usd", "p_bal_usd", "p_gcap_usd"], "desc": "Electricity Market Prices"},
-        "tariff_gen": {"columns": ["date", "entity", "tariff_gel", "tariff_usd"], "desc": "Regulated Tariffs"},
+        "price": {"columns": ["date", "p_dereg_gel", "p_bal_gel", "p_gcap_gel", "xrate"], "desc": "Electricity Market Prices"},
+        "tariff_gen": {"columns": ["date", "entity", "tariff_gel"], "desc": "Regulated Tariffs"},
         "tech_quantity": {"columns": ["date", "type_tech", "quantity_tech"], "desc": "Generation & Demand Quantities"},
         "trade": {"columns": ["date", "entity", "segment", "quantity"], "desc": "Electricity Trade"},
     },
     "rules": {
         "unit_conversion": "1 TJ = 277.778 MWh; tech_quantity/trade in thousand MWh (multiply by 1000 for MWh).",
+        "usd_rule": "USD and USD/MWh variables are derived as (corresponding GEL value / xrate). Example: p_bal_usd = p_bal_gel / xrate, tariff_usd = tariff_gel / xrate.",
         "granularity": "Monthly data (first day of month).",
         "timeframe": "2015 to present.",
         "forecast_restriction": "Only for prices, CPI, demand; no generation/imports/exports."
@@ -134,47 +137,22 @@ DB_SCHEMA_DICT = {
 DB_SCHEMA_DOC = """
 ### Global Rules & Conversions ###
 - **General Rule:** Provide summaries and insights only. Do NOT return raw data, full tables, or row-level dumps. If asked for a dump, refuse and suggest an aggregated view instead.
-- **Unit Conversion:** To compare data between tables, use:
+- **Unit Conversion:** 
   - 1 TJ = 277.778 MWh
   - The `tech_quantity` and `trade` tables store quantities in **thousand MWh**; multiply by 1000 for MWh.
+- **USD Conversion Rule:**
+  - Any variable ending with `_usd` or described in USD/MWh does **not exist directly** in the database.
+  - These must be derived as:  
+    - `p_dereg_usd = p_dereg_gel / xrate`  
+    - `p_bal_usd = p_bal_gel / xrate`  
+    - `p_gcap_usd = p_gcap_gel / xrate`  
+    - `tariff_usd = tariff_gel / xrate`
+  - Always use the latest `xrate` available for conversion.
 - **Data Granularity:** All tables with a `date` column contain **monthly** data (first day of month).
 - **Timeframe:** Data generally spans from 2015 to present.
 - **Forecasting Restriction:** Forecasts can be made for prices, CPI, and demand. 
   For generation (hydro, thermal, wind, solar) and imports/exports: 
   only historical trends can be shown. Future projections depend on new capacity/projects not available in this data.
-
----
-### Table: public.dates ###
-- Columns: date
-- Description: Calendar data with monthly timestamps.
-
-### Table: public.energy_balance_long ###
-- Columns: year, sector, energy_source, volume_tj
-- Description: Annual energy consumption by sector and source, in terajoules (TJ).
-
-### Table: public.entities ###
-- Columns: entity, entity_normalized, type, ownership, source
-- Description: Details on power sector entities (e.g., power plants, importers).
-
-### Table: public.monthly_cpi ###
-- Columns: date, cpi_type, cpi
-- Description: Monthly Consumer Price Index (CPI) data, base year 2015=100.
-
-### Table: public.price ###
-- Columns: date, p_dereg_gel, p_bal_gel, p_gcap_gel, xrate, p_dereg_usd, p_bal_usd, p_gcap_usd
-- Description: Monthly electricity market prices in GEL and USD per MWh.
-
-### Table: public.tariff_gen ###
-- Columns: date, entity, tariff_gel, tariff_usd
-- Description: Monthly regulated tariffs for entities, in GEL and USD per MWh.
-
-### Table: public.tech_quantity ###
-- Columns: date, type_tech, quantity_tech
-- Description: Monthly generation and demand quantities by technology type, in thousand MWh.
-
-### Table: public.trade ###
-- Columns: date, entity, segment, quantity
-- Description: Monthly electricity trade volumes by market segment, in thousand MWh.
 """
 
 # --- DB_JOINS v1.4 ---
@@ -214,10 +192,7 @@ def scrub_schema_mentions(text: str) -> str:
         text = re.sub(rf"\b{re.escape(val)}\b", label, text, flags=re.IGNORECASE)
 
     # 4) Hide schema/SQL jargon
-    schema_terms = [
-        "schema", "table", "column", "sql", "join",
-        "primary key", "foreign key", "view", "constraint"
-    ]
+    schema_terms = ["schema", "table", "column", "sql", "join", "primary key", "foreign key", "view", "constraint"]
     for term in schema_terms:
         text = re.sub(rf"\b{re.escape(term)}\b", "data", text, flags=re.IGNORECASE)
 
