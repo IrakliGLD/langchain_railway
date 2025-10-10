@@ -15,3 +15,4 @@ google-generativeai
 langchain-google-genai
 litellm
 supabase
+langchain-openai
