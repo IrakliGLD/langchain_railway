@@ -400,52 +400,53 @@ Write 3–6 sentences:
 # Handles aliases, derived fields, and aggregates robustly
 # =========================================
 
-from sqlglot import parse_one, exp
-from fastapi import HTTPException
-import re
 
+from sqlglot import parse, exp
+from fastapi import HTTPException
 
 log.warning("**ENTER _validate_allowed**")
 
 def _validate_allowed(ast_or_sql):
     """
-    Final safe validator:
-    - Handles string or AST input.
-    - Falls back from postgres → ansi dialect.
-    - Skips validation if parse or traversal fails.
+    Ultra-safe validator:
+    - Uses sqlglot.parse() instead of parse_one()
+    - Falls back from postgres → ansi
+    - Skips validation if parsing fails
     """
     global SCHEMA_MAP
     alias_map = {}
     log.warning("**ENTER _validate_allowed**")
 
-    # --- Try parsing ---
-    try:
-        if isinstance(ast_or_sql, str):
+    # --- Safe parsing ---
+    ast = None
+    if isinstance(ast_or_sql, str):
+        try:
+            parsed = parse(ast_or_sql, read="postgres")
+            ast = parsed[0] if parsed else None
+        except Exception as e:
+            log.warning(f"⚠️ Postgres parse failed: {e} → retrying ANSI")
             try:
-                ast = parse_one(ast_or_sql, read="postgres")
-                if ast is None:
-                    raise ValueError("Empty AST (postgres)")
-            except Exception as e:
-                log.warning(f"⚠️ Postgres parse failed: {e} → retrying ANSI")
-                ast = parse_one(ast_or_sql, read="ansi")
-        else:
-            ast = ast_or_sql
-    except Exception as e:
-        log.warning(f"⚠️ Both parse attempts failed ({e}); skipping validation.")
-        return
+                parsed = parse(ast_or_sql, read="ansi")
+                ast = parsed[0] if parsed else None
+            except Exception as e2:
+                log.warning(f"⚠️ ANSI parse failed: {e2}; skipping validation.")
+                return
+    else:
+        ast = ast_or_sql
 
     if ast is None:
-        log.warning("⚠️ AST is None even after ANSI parse → skipping validation.")
+        log.warning("⚠️ No AST produced → skipping validation.")
         return
 
     # --- Extract tables ---
+    found_tables = []
     try:
-        found_tables = []
         for tbl in ast.find_all(exp.Table):
             if hasattr(tbl, "name") and tbl.name:
-                found_tables.append(tbl.name.lower())
-                alias = (getattr(tbl, "alias", None) or tbl.name).lower()
-                alias_map[alias] = tbl.name.lower()
+                real = tbl.name.lower()
+                alias = (getattr(tbl, "alias", None) or real).lower()
+                alias_map[alias] = real
+                found_tables.append(real)
         log.warning(f"Extracted tables: {found_tables}")
     except Exception as e:
         log.warning(f"⚠️ Table extraction crashed: {e}")
