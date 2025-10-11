@@ -1,5 +1,5 @@
-# === context.py v2.0 ===
-# Updated for main.py v18.3: schema reinforcement, column alias hints, validation support.
+# === context.py v2.1 ===
+# Updated for main.py v18.5: materialized-view schema, OpenAI context alignment, demand/supply groups.
 
 import os
 import re
@@ -14,26 +14,26 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # --- Column label mapping ---
 COLUMN_LABELS = {
     # shared
-    "date": "Period (Year-Month)",
+    "date": "Period (Year-Month-Day)",
 
-    # energy_balance_long
+    # energy_balance_long_mv
     "year": "Year",
     "sector": "Sector",
     "energy_source": "Energy Source",
     "volume_tj": "Energy Consumption (TJ)",
 
-    # entities
+    # entities_mv
     "entity": "Entity Name",
     "entity_normalized": "Standardized Entity ID",
     "type": "Entity Type",
     "ownership": "Ownership",
     "source": "Source (Local vs Import-Dependent)",
 
-    # monthly_cpi
+    # monthly_cpi_mv
     "cpi_type": "CPI Category",
     "cpi": "CPI Value (2015=100)",
 
-    # price
+    # price_with_usd
     "p_dereg_gel": "Deregulated Price (GEL/MWh)",
     "p_bal_gel": "Balancing Price (GEL/MWh)",
     "p_gcap_gel": "Guaranteed Capacity Fee (GEL/MWh)",
@@ -42,55 +42,61 @@ COLUMN_LABELS = {
     "p_bal_usd": "Balancing Price (USD/MWh)",
     "p_gcap_usd": "Guaranteed Capacity Fee (USD/MWh)",
 
-    # tariff_gen
+    # tariff_with_usd
     "tariff_gel": "Regulated Tariff (GEL/MWh)",
     "tariff_usd": "Regulated Tariff (USD/MWh)",
 
-    # tech_quantity
+    # tech_quantity_view
     "type_tech": "Technology Type",
     "quantity_tech": "Quantity (thousand MWh)",
 
-    # trade
+    # trade_derived_entities
     "segment": "Market Segment",
     "quantity": "Trade Volume (thousand MWh)",
 }
 
 # --- Table label mapping ---
-TABLE_LABELS = {
-    "dates": "Calendar (Months)",
-    "energy_balance_long": "Energy Balance (by Sector)",
-    "entities": "Power Sector Entities",
-    "monthly_cpi": "Consumer Price Index (CPI)",
-    "price": "Electricity Market Prices",
-    "tariff_gen": "Regulated Tariffs",
-    "tech_quantity": "Generation & Demand Quantities",
-    "trade": "Electricity Trade",
+VIEW_LABELS = {
+    "energy_balance_long_mv": "Energy Balance (by Sector)",
+    "entities_mv": "Power Sector Entities",
+    "monthly_cpi_mv": "Consumer Price Index (CPI)",
+    "price_with_usd": "Electricity Market Prices (USD)",
+    "tariff_with_usd": "Regulated Tariffs (USD)",
+    "tech_quantity_view": "Generation & Demand Quantities",
+    "trade_derived_entities": "Electricity Trade",
+}
+
+# --- Demand/Supply classification for type_tech ---
+TECH_TYPE_GROUPS = {
+    "demand": {
+        "abkhazeti": "Abkhazeti",
+        "supply_distribution": "Supplier/Distributor",
+        "direct_customers": "Direct Consumers",
+        "self_cons": "Self-Consumption by PP",
+        "losses": "Losses",
+        "export": "Export",
+    },
+    "supply": {
+        "hydro": "Hydro Generation",
+        "thermal": "Thermal Generation",
+        "wind": "Wind Generation",
+        "import": "Import",
+    },
 }
 
 # --- Value label mapping ---
 VALUE_LABELS = {
-    "hydro": "Hydro Generation",
-    "thermal": "Thermal Generation",
-    "wind": "Wind Generation",
+    **TECH_TYPE_GROUPS["demand"],
+    **TECH_TYPE_GROUPS["supply"],
     "solar": "Solar Generation",
-    "import": "Imports",
-    "export": "Exports",
-    "losses": "Grid Losses",
-    "abkhazeti": "Abkhazia Consumption",
     "transit": "Transit Flows",
     "HPP": "Hydropower Plant",
     "TPP": "Thermal Power Plant",
-    "Solar": "Solar Plant",
-    "Wind": "Wind Plant",
-    "Import": "Import",
     "overall CPI": "Overall Consumer Price Index",
     "electricity_gas_and_other_fuels": "Electricity, Gas & Other Fuels CPI",
     "Coal": "Coal",
     "Oil products": "Oil Products",
     "Natural Gas": "Natural Gas",
-    "Hydro": "Hydropower",
-    "Wind": "Wind Power",
-    "Solar": "Solar Power",
     "Biofuel & Waste": "Biofuel & Waste",
     "Electricity": "Electricity",
     "Heat": "Heat",
@@ -99,90 +105,93 @@ VALUE_LABELS = {
     "bilateral_exchange": "Bilateral Contracts & Exchange",
     "renewable_ppa": "Renewable PPA",
     "thermal_ppa": "Thermal PPA",
+    "deregulated_hydro": "Deregulated HPP",
+    "regulated_hpp": "Regulated HPP",
+    "regulated_new_tpp": "Regulated new TPP",
+    "regulated_old_tpp": "Regulated old TPP",
 }
 
 # --- Structured Schema Dict ---
 DB_SCHEMA_DICT = {
-    "tables": {
-        "dates": {"columns": ["date"], "desc": "Calendar (Months)"},
-        "energy_balance_long": {
+    "views": {
+        "energy_balance_long_mv": {
             "columns": ["year", "sector", "energy_source", "volume_tj"],
             "desc": "Energy Balance (by Sector, yearly data)",
         },
-        "entities": {"columns": ["entity", "entity_normalized", "type", "ownership", "source"], "desc": "Power Sector Entities"},
-        "monthly_cpi": {"columns": ["date", "cpi_type", "cpi"], "desc": "Consumer Price Index (CPI)"},
-        "price": {"columns": ["date", "p_dereg_gel", "p_bal_gel", "p_gcap_gel", "xrate"], "desc": "Electricity Market Prices"},
-        "tariff_gen": {"columns": ["date", "entity", "tariff_gel"], "desc": "Regulated Tariffs"},
-        "tech_quantity": {"columns": ["date", "type_tech", "quantity_tech"], "desc": "Generation & Demand Quantities"},
-        "trade": {"columns": ["date", "entity", "segment", "quantity"], "desc": "Electricity Trade"},
+        "entities_mv": {
+            "columns": ["entity", "entity_normalized", "type", "ownership", "source"],
+            "desc": "Power Sector Entities",
+        },
+        "monthly_cpi_mv": {
+            "columns": ["date", "cpi_type", "cpi"],
+            "desc": "Consumer Price Index (CPI)",
+        },
+        "price_with_usd": {
+            "columns": ["date", "p_dereg_gel", "p_bal_gel", "p_gcap_gel", "xrate", "p_dereg_usd", "p_bal_usd", "p_gcap_usd"],
+            "desc": "Electricity Market Prices (GEL and USD)",
+        },
+        "tariff_with_usd": {
+            "columns": ["date", "entity", "tariff_gel", "tariff_usd"],
+            "desc": "Regulated Tariffs (GEL and USD)",
+        },
+        "tech_quantity_view": {
+            "columns": ["date", "type_tech", "quantity_tech"],
+            "desc": "Generation & Demand Quantities by Technology Type",
+        },
+        "trade_derived_entities": {
+            "columns": ["date", "entity", "segment", "quantity"],
+            "desc": "Electricity Trade Volumes (Derived)",
+        },
     },
     "rules": {
-        "unit_conversion": "1 TJ = 277.778 MWh; tech_quantity/trade in thousand MWh (multiply by 1000 for MWh).",
-        "usd_rule": "USD values = corresponding GEL value / xrate (from price table, joined by date).",
-        "granularity": "Monthly data; energy_balance_long is yearly.",
-        "temporal_scope": "2015–present; use full time range.",
+        "unit_conversion": "1 TJ = 277.778 MWh; tech_quantity/trade data in thousand MWh (×1000 for MWh).",
+        "usd_rule": "USD values = GEL / xrate (from price_with_usd joined by date).",
+        "granularity": "Monthly data for all except yearly energy_balance_long_mv.",
+        "temporal_scope": "2015–present; use full range.",
     },
 }
 
-# --- Reinforced Schema Text for LLM Context (Option 3) ---
+# --- Reinforced Schema Text for LLM Context ---
 DB_SCHEMA_DOC = """
-### Key Database Rules and Conventions
+### Key Database Rules and Conventions (Materialized Views)
 
-**Allowed Columns Only:**
-Use only these exact column names when forming SQL:
-- date, year, sector, energy_source, volume_tj
-- entity, entity_normalized, type, ownership, source
-- cpi_type, cpi
-- p_dereg_gel, p_bal_gel, p_gcap_gel, xrate
-- tariff_gel
-- type_tech, quantity_tech
-- segment, quantity
+**Available Views:**
+- energy_balance_long_mv(year, sector, energy_source, volume_tj)
+- entities_mv(entity, entity_normalized, type, ownership, source)
+- monthly_cpi_mv(date, cpi_type, cpi)
+- price_with_usd(date, p_dereg_gel, p_bal_gel, p_gcap_gel, xrate, p_dereg_usd, p_bal_usd, p_gcap_usd)
+- tariff_with_usd(date, entity, tariff_gel, tariff_usd)
+- tech_quantity_view(date, type_tech, quantity_tech)
+- trade_derived_entities(date, entity, segment, quantity)
 
-Do NOT invent variants like 'quantity_mwh', 'p_bal', or 'tariff_usd' — use correct names and apply /xrate for USD conversion.
+**Type_tech classification:**
+- Demand: abkhazeti, supply_distribution, direct_customers, self_cons, losses, export
+- Supply: hydro, thermal, wind, import
 
-**Unit Conversions:**
+**Units & Conversions:**
 - 1 TJ = 277.778 MWh
-- Quantities in `tech_quantity` and `trade` are thousand MWh → multiply by 1000 for MWh.
-
-**USD Conversions:**
-- No *_usd columns exist physically.
-- Compute manually:
-  - p_dereg_usd = p_dereg_gel / xrate
-  - p_bal_usd = p_bal_gel / xrate
-  - tariff_usd = tariff_gel / xrate
+- Quantities in thousand MWh (multiply ×1000 for MWh)
+- *_usd fields = *_gel / xrate
 
 **Granularity:**
-- Monthly for all tables with `date`.
-- Yearly for `energy_balance_long` (use column `year`).
+- Monthly for all except energy_balance_long_mv (yearly)
 
 **Joins:**
-- Always join on `date` or `entity` only when tables share those fields.
-- No cross joins or system tables.
+- Use date or entity as join keys only.
+- Avoid system tables or undefined joins.
 
-**Time Coverage:**
-2015–latest month.
-
-**Important Aliases and Clarifications:**
-If user asks for:
-- “energy in MWh” → use `quantity_tech`
-- “tariff in USD” → `tariff_gel / xrate`
-- “balancing vs deregulated prices” → `p_bal_gel` and `p_dereg_gel`
-- “generation type” → `type_tech`
-- “trade volume” → `quantity`
-
-Keep queries safe, aggregated, and small (add LIMIT 500 if needed).
+**Time Coverage:** 2015–latest month
 """
 
 # --- Join Map ---
 DB_JOINS = {
-    "dates": {"join_on": "date", "related_to": ["price", "monthly_cpi", "tech_quantity", "trade", "tariff_gen"]},
-    "energy_balance_long": {"join_on": "year", "related_to": ["tech_quantity", "price", "monthly_cpi", "trade"]},
-    "price": {"join_on": "date", "related_to": ["trade", "tech_quantity", "monthly_cpi", "energy_balance_long"]},
-    "trade": {"join_on": ["date", "entity"], "related_to": ["price", "entities", "tariff_gen", "tech_quantity", "energy_balance_long"]},
-    "tech_quantity": {"join_on": "date", "related_to": ["price", "energy_balance_long", "trade", "monthly_cpi"]},
-    "tariff_gen": {"join_on": ["date", "entity"], "related_to": ["entities", "trade", "price", "tech_quantity"]},
-    "entities": {"join_on": "entity", "related_to": ["tariff_gen", "trade"]},
-    "monthly_cpi": {"join_on": "date", "related_to": ["price", "tech_quantity", "energy_balance_long"]},
+    "energy_balance_long_mv": {"join_on": "year", "related_to": ["tech_quantity_view", "price_with_usd", "monthly_cpi_mv"]},
+    "price_with_usd": {"join_on": "date", "related_to": ["tariff_with_usd", "tech_quantity_view", "trade_derived_entities", "monthly_cpi_mv"]},
+    "tariff_with_usd": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "trade_derived_entities"]},
+    "tech_quantity_view": {"join_on": "date", "related_to": ["price_with_usd", "trade_derived_entities", "monthly_cpi_mv"]},
+    "trade_derived_entities": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "tariff_with_usd"]},
+    "monthly_cpi_mv": {"join_on": "date", "related_to": ["price_with_usd", "tech_quantity_view", "energy_balance_long_mv"]},
+    "entities_mv": {"join_on": "entity", "related_to": ["tariff_with_usd", "trade_derived_entities"]},
 }
 
 # --- Output scrubber ---
@@ -190,19 +199,19 @@ def scrub_schema_mentions(text: str) -> str:
     if not text:
         return text
     for col, label in COLUMN_LABELS.items():
-        text = re.sub(rf"\\b{re.escape(col)}\\b", label, text, flags=re.IGNORECASE)
-    for tbl, label in TABLE_LABELS.items():
-        text = re.sub(rf"\\b{re.escape(tbl)}\\b", label, text, flags=re.IGNORECASE)
+        text = re.sub(rf"\b{re.escape(col)}\b", label, text, flags=re.IGNORECASE)
+    for tbl, label in VIEW_LABELS.items():
+        text = re.sub(rf"\b{re.escape(tbl)}\b", label, text, flags=re.IGNORECASE)
     for val, label in VALUE_LABELS.items():
-        text = re.sub(rf"\\b{re.escape(val)}\\b", label, text, flags=re.IGNORECASE)
+        text = re.sub(rf"\b{re.escape(val)}\b", label, text, flags=re.IGNORECASE)
     schema_terms = ["schema", "table", "column", "sql", "join", "primary key", "foreign key", "view", "constraint"]
     for term in schema_terms:
-        text = re.sub(rf"\\b{re.escape(term)}\\b", "data", text, flags=re.IGNORECASE)
+        text = re.sub(rf"\b{re.escape(term)}\b", "data", text, flags=re.IGNORECASE)
     text = text.replace("```", "").strip()
-    if any(re.search(rf"\\b{re.escape(term)}\\b", text, re.IGNORECASE) for term in schema_terms):
+    if any(re.search(rf"\b{term}\b", text, re.IGNORECASE) for term in schema_terms):
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
         fallback_prompt = ChatPromptTemplate.from_messages([
-            ("system", "Remove any technical jargon (schema, table, sql, join) from text while keeping meaning."),
+            ("system", "Remove technical jargon (schema, SQL, join, etc.) while keeping meaning clear."),
             ("human", text),
         ])
         chain = fallback_prompt | llm | StrOutputParser()
