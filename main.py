@@ -468,8 +468,19 @@ def plan_validate_repair(sql: str) -> str:
     """
     def transform(_sql: str) -> str:
         ast = parse_one(_sql, read="postgres")
+
+        # --- Extract and log all detected table/view names for debugging ---
+        alias_map = {}
+        for tbl in ast.find_all(exp.Table):
+            real = tbl.name.lower()
+            alias = (tbl.alias or real).lower()
+            alias_map[alias] = real
+        log.warning(f"Extracted tables: {list(alias_map.values())}")
+
+        # --- Perform normal validation ---
         _validate_allowed(ast)
         return ast.sql(dialect="postgres")
+
 
     try:
         return transform(sql)
