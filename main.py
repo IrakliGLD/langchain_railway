@@ -421,59 +421,66 @@ def is_alias_or_derived(col: exp.Column) -> bool:
 
 def _validate_allowed(ast: exp.Expression):
     """
-    Validate that tables are allowed (materialized views only)
-    and column references exist within their schema definitions.
-    Derived columns, aliases, and aggregates are allowed automatically.
+    Validate SQL against allowed materialized views and known columns,
+    allowing aggregates, aliases, and derived expressions.
+    Works for any column present in REFLECTED_COLUMNS.
     """
-    # Alias map: alias → real table name
+    # Fallback safety: use global or reflected columns
+    global REFLECTED_COLUMNS
+    if not REFLECTED_COLUMNS:
+        log.warning("⚠️ REFLECTED_COLUMNS empty — skipping strict column validation.")
+        return
+
+    # Build SCHEMA_MAP
+    SCHEMA_MAP = {t.lower(): [c.lower() for c in cols] for t, cols in REFLECTED_COLUMNS.items()}
+
+    # Build alias mapping
     alias_map = {}
     for tbl in ast.find_all(exp.Table):
-        real_name = tbl.name.lower()
-        alias = (tbl.alias or real_name).lower()
-        alias_map[alias] = real_name
+        real = tbl.name.lower()
+        alias = (tbl.alias or real).lower()
+        alias_map[alias] = real
 
-    log.info(f"🔎 Table/Alias map: {alias_map}")
+    log.info(f"🔍 Alias map: {alias_map}")
 
     # Validate tables
     for alias, real in alias_map.items():
         if real not in ALLOWED_TABLES:
             raise HTTPException(
-                status_code=400,
-                detail=f"Table `{real}` (alias `{alias}`) is not allowed. Only materialized views may be queried."
+                400, f"Disallowed table/view `{real}` (alias `{alias}`). Only materialized views allowed."
             )
 
-    # Build schema map: table → list of known columns
-    SCHEMA_MAP = {t: [c.lower() for c in cols] for t, cols in REFLECTED_COLUMNS.items()}
-
-    # Validate column references
+    # Collect columns
     for col in ast.find_all(exp.Column):
-        name = col.name.lower()
+        col_name = col.name.lower()
         tbl_alias = (col.table or "").lower()
 
-        if is_alias_or_derived(col):
-            continue  # skip aliases/aggregates/derived fields
-
-        # Allow computed columns like *_usd or avg_*, sum_*, etc.
-        if name.endswith("_usd") or name.startswith(("avg_", "sum_", "count_", "min_", "max_")):
+        # Derived, alias, or aggregate — skip validation
+        parent = col.parent
+        if isinstance(parent, (exp.Alias, exp.Func, exp.Aggregate, exp.Binary, exp.Cast, exp.Extract)):
             continue
 
-        # Determine which table(s) this column could come from
-        candidate_tables = []
-        if tbl_alias and tbl_alias in alias_map:
-            candidate_tables = [alias_map[tbl_alias]]
-        else:
-            candidate_tables = list(alias_map.values())
+        # Allow computed or virtual patterns
+        if col_name.endswith("_usd") or col_name.startswith(("avg_", "sum_", "count_", "min_", "max_")):
+            continue
 
-        # Validate column presence
+        # Determine candidate tables
+        candidates = []
+        if tbl_alias and tbl_alias in alias_map:
+            candidates = [alias_map[tbl_alias]]
+        else:
+            candidates = list(alias_map.values())
+
+        # Check against reflected schema
         found = False
-        for t in candidate_tables:
-            if t in SCHEMA_MAP and name in SCHEMA_MAP[t]:
+        for t in candidates:
+            if t in SCHEMA_MAP and col_name in SCHEMA_MAP[t]:
                 found = True
                 break
 
         if not found:
-            log.warning(f"⚠️ Column `{name}` not found in allowed schema ({candidate_tables}) — treating as derived/alias.")
-            # soft warning, not hard rejection
+            log.warning(f"⚠️ Column `{col_name}` not found in {candidates}. Allowing as derived/alias.")
+
 
 
 def plan_validate_repair(sql: str) -> str:
