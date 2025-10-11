@@ -399,46 +399,53 @@ Write 3–6 sentences:
 def simple_table_whitelist_check(sql: str):
     """
     CRITICAL Pre-parsing safety check.
-    Uses a more robust regex to extract table names and ensure they are in ALLOWED_TABLES.
+    Uses a highly permissive regex to extract table names for robustness against LLM formatting.
     """
-    # *** IMPROVED REGEX ***
-    # This pattern looks for FROM or JOIN, followed by any amount of whitespace (including newlines),
-    # then captures the table name (allowing letters, numbers, and underscores).
-    # The [^;,\s\)\(]+ part is a bit safer as it matches anything until a common SQL delimiter.
+    
+    # 🌟 NEW, HIGHLY PERMISSIVE REGEX 🌟
     # Pattern explanation:
     # 1. (?:FROM|JOIN) : Non-capturing group for the keywords.
-    # 2. \s+           : One or more whitespace characters (including newlines).
-    # 3. ([a-zA-Z0-9_.]+) : CAPTURE the table name, explicitly allowing periods (for schema.table)
-    pattern = r"(?:FROM|JOIN)\s+([a-zA-Z0-9_.]+)"
+    # 2. [\s\n]+        : Explicitly match one or more whitespace OR newline characters.
+    # 3. ([a-zA-Z0-9_.]+) : CAPTURE the table name (allowing letters, numbers, underscores, and periods for schema.table).
+    # We remove the trailing \b to allow for immediate aliases (e.g., 'table_a t1')
+    pattern = r"(?:FROM|JOIN)[\s\n]+([a-zA-Z0-9_.]+)"
     
     # Use re.IGNORECASE for case-insensitivity.
+    # NOTE: We DO NOT use re.DOTALL here as it can sometimes mess with multi-line parsing.
+    # We rely on the explicit [\s\n]+.
     tables = re.findall(pattern, sql, re.IGNORECASE)
 
-    # Filter out common SQL keywords or parentheses that get accidentally captured.
-    tables = [t.lower().split()[0] for t in tables if t.lower() not in ('(', 'select', 'where') and t]
-
-    # Clean up the list to ensure we only get the canonical name if there's an alias.
-    # e.g., 'price_with_usd p' -> 'price_with_usd'
+    # --- Post-Processing Cleanup ---
+    # The regex is now aggressive, so the cleanup logic is critical.
     cleaned_tables = set()
-    for t in tables:
-        # Take the part before a space (alias) or a comma (multiple FROM tables)
-        t_name = t.split()[0].split(',')[0].strip('.')
-        if not t_name: continue # Skip if empty after stripping
+    for t_raw in tables:
+        # 1. Clean up the raw captured string (strip whitespace/periods)
+        t_name = t_raw.strip().strip('.')
+        
+        # 2. Stop if it captured a non-table name like 'SELECT', 'WHERE', or just '('
+        if not t_name or t_name.lower() in ('select', 'where', 'group', 'order'):
+            continue
+            
+        # 3. If the table name includes a period (schema.table), only check the full name
+        # If the table name is followed by a space (an alias), take only the table part
+        t_name = t_name.split()[0].split(',')[0].lower()
 
         # Apply synonym mapping and perform the strict whitelist check
-        t_canonical = TABLE_SYNONYMS.get(t_name, t_name) # Use .get for safer lookup
+        t_canonical = TABLE_SYNONYMS.get(t_name, t_name) # Safely get canonical name
 
         if t_canonical in ALLOWED_TABLES:
             cleaned_tables.add(t_canonical)
         else:
+            # Re-raise the exception with the specific name that failed the check
             raise HTTPException(
                 status_code=400,
                 detail=f"❌ Unauthorized table or view: `{t_name}`. Allowed: {sorted(ALLOWED_TABLES)}"
             )
 
     if not cleaned_tables and "from" in sql.lower():
-         # Last resort warning if a FROM clause exists but no table was captured (e.g., complex subquery)
-        log.warning("⚠️ Table extraction failed despite 'FROM' keyword. Allowing flow to plan_validate_repair (risky).")
+        # This fallback is a safety valve if the regex completely failed on a valid looking query
+        log.warning("⚠️ Table extraction failed despite 'FROM' keyword. Allowing flow to plan_validate_repair (RISKY).")
+        # In a real security environment, you might want to remove this `return` and let it crash.
         return
     
     log.info(f"✅ Pre-validation passed. Tables: {list(cleaned_tables)}")
