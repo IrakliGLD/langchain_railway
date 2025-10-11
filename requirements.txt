@@ -17,3 +17,4 @@ litellm
 supabase
 langchain-openai
 psycopg
+sqlglot
