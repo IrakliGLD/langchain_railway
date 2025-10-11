@@ -396,60 +396,76 @@ Write 3–6 sentences:
 # SQL sanitize + Pre-Parse Validator
 # -----------------------------
 
+from sqlglot import parse_one, exp, ParseError
+from fastapi import HTTPException # Assuming your existing HTTPException import
+import logging
+
+log = logging.getLogger(__name__)
+
+# --- Assuming these variables are still defined globally in your environment ---
+# ALLOWED_TABLES = {'price_with_usd', 'other_allowed_table', ...}
+# TABLE_SYNONYMS = {'p_with_usd': 'price_with_usd', ...} 
+# ----------------------------------------------------------------------------
+
 def simple_table_whitelist_check(sql: str):
     """
-    CRITICAL Pre-parsing safety check.
-    Uses a highly robust regex that minimizes dependency on specific formatting 
-    to extract table names from complex, multi-line SQL.
+    CRITICAL Pre-parsing safety check using a robust SQL parser.
+    Extracts all table references from the AST for whitelisting.
     """
-    
-    # 🌟 NEW, EXTREME ROBUSTNESS REGEX 🌟
-    # Pattern: Look for FROM or JOIN, followed by any characters/whitespace/newlines (non-greedy, *?),
-    # then capture the table name. We use \S+ to capture non-whitespace characters until the next space.
-    # This is often needed when the LLM output is not perfectly structured.
-    # We use re.DOTALL to ensure '.' matches newlines as well.
-    
-    # We will prioritize capturing the next word-like sequence after the FROM/JOIN.
-    # This specifically targets cases where the table name is immediately followed by an alias (e.g. 'table_name t')
-    pattern = r"(?:FROM|JOIN)[\s\n]+(\S+)"
-    
-    # Use re.IGNORECASE and re.DOTALL (re.S) for maximum multi-line and case resilience.
-    tables = re.findall(pattern, sql, re.IGNORECASE | re.DOTALL)
-
-    # --- Post-Processing Cleanup ---
     cleaned_tables = set()
-    for t_raw in tables:
-        # 1. Strip any surrounding junk and convert to lowercase
-        t_name = t_raw.strip().strip('.').lower()
-        
-        # 2. Critical: If the regex captured a name and an alias (e.g., 'table_name as t1' or 'table_name t1'), 
-        # split on the first space to get only the table name.
-        t_name = t_name.split()[0]
-        
-        # 3. Handle sub-queries or aliases: Split on comma (for multi-table FROM) or period (for schema.table).
-        t_name = t_name.split(',')[0].strip('.')
-
-        # 4. Filter out any remaining SQL keywords that might have been accidentally captured
-        if not t_name or t_name in ('select', 'where', 'group', 'order', 'limit', 'offset'):
-            continue
-            
-        # Apply synonym mapping and perform the strict whitelist check
-        t_canonical = TABLE_SYNONYMS.get(t_name, t_name)
-
-        if t_canonical in ALLOWED_TABLES:
-            cleaned_tables.add(t_canonical)
-        else:
-            # Re-raise the exception with the specific name that failed the check
-            raise HTTPException(
-                status_code=400,
-                detail=f"❌ Unauthorized table or view: `{t_name}`. Allowed: {sorted(ALLOWED_TABLES)}"
-            )
-
-    if not cleaned_tables and "from" in sql.lower():
-        # Fallback logging if 'FROM' exists but no table was extracted (e.g., a very complex subquery)
-        log.warning("⚠️ Table extraction failed despite 'FROM' keyword. Allowing flow to plan_validate_repair (RISKY).")
-        return
     
+    try:
+        # 1. Parse the SQL into an Abstract Syntax Tree (AST)
+        # Using the standard 'sql' dialect by default
+        parsed_expression = parse_one(sql, read='bigquery') # Use the dialect that matches your SQL functions (EXTRACT)
+
+        # 2. Traverse the AST to find all table expressions
+        for table_exp in parsed_expression.find_all(exp.Table):
+            
+            # Extract the canonical table name (e.g., 'schema.table' or just 'table')
+            t_raw = table_exp.name.lower()
+            
+            # The .name property handles quotes, aliases, and schema correctly.
+            # However, since the LLM output is likely unquoted simple names, 
+            # we perform a simple cleanup on the string to be safe.
+            t_name = t_raw.split('.')[0] # Take only the table name if a schema.table format exists
+            
+            # Apply synonym mapping and perform the strict whitelist check
+            t_canonical = TABLE_SYNONYMS.get(t_name, t_name)
+
+            if t_canonical in ALLOWED_TABLES:
+                cleaned_tables.add(t_canonical)
+            else:
+                # Re-raise the exception with the specific name that failed the check
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"❌ Unauthorized table or view: `{t_name}`. Allowed: {sorted(ALLOWED_TABLES)}"
+                )
+
+    except ParseError as e:
+        # If the SQL is too broken to parse (e.g., truly invalid SQL), reject it.
+        # For security, any unparseable query should be rejected.
+        log.error(f"SQL PARSE ERROR: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"❌ SQL Validation Error (Parse Failed): The query could not be reliably parsed for security review. Details: {e}"
+        )
+    except Exception as e:
+        log.error(f"Unexpected error during SQL parsing: {e}")
+        # Reject on any other unexpected error
+        raise HTTPException(
+            status_code=400,
+            detail=f"❌ SQL Validation Error (Unexpected): An unexpected error occurred during security review."
+        )
+
+
+    if not cleaned_tables:
+        # This handles valid queries that might not have a FROM clause (e.g., SELECT 1)
+        # or where the FROM clause is in a subquery/CTE that the parser handles,
+        # but the logic above didn't capture (unlikely with find_all(exp.Table)).
+        log.warning("⚠️ No tables were extracted. Allowing flow for statements without a FROM (e.g. SELECT 1).")
+        return
+        
     log.info(f"✅ Pre-validation passed. Tables: {list(cleaned_tables)}")
     return
 
