@@ -404,13 +404,15 @@ from sqlglot import parse_one, exp
 from fastapi import HTTPException
 import re
 
+
+
+
 def _validate_allowed(ast: exp.Expression):
     """
     Validate that only materialized views are accessed.
     Skip validation for scalar/derived/aggregate columns.
     """
-    # Use the reflected SCHEMA_MAP instead of undefined REFLECTED_COLUMNS
-    global SCHEMA_MAP
+    global SCHEMA_MAP  # use the actual reflected schema, not undefined REFLECTED_COLUMNS
     alias_map = {}
 
     # Build alias map
@@ -419,9 +421,8 @@ def _validate_allowed(ast: exp.Expression):
         alias = (tbl.alias or real).lower()
         alias_map[alias] = real
 
-    # Log extracted table/view names
+    # Log extracted tables
     log.warning(f"Extracted tables: {list(alias_map.values())}")
-
 
     # --- Validate tables ---
     for alias, real in alias_map.items():
@@ -435,12 +436,11 @@ def _validate_allowed(ast: exp.Expression):
         name = col.name.lower()
         tbl_alias = (col.table or "").lower()
 
-        # Skip function/alias/aggregate derived columns
+        # Skip derived / aggregate columns
         parent = col.parent
         if isinstance(parent, (exp.Alias, exp.Func, exp.Aggregate, exp.Binary, exp.Cast, exp.Extract)):
             continue
 
-        # Allow computed or derived variants
         if name.endswith("_usd") or name.startswith(("avg_", "sum_", "count_", "min_", "max_")):
             continue
 
@@ -457,13 +457,14 @@ def _validate_allowed(ast: exp.Expression):
                 found = True
                 break
 
-        # Permissive for scalar SELECTS (fixes your case)
+        # Allow single-view implicit columns
         if not found and len(ast.find_all(exp.Table)) == 1:
             log.info(f"ℹ️ Allowing `{name}` as implicit column (single-view mode).")
             continue
 
         if not found:
             raise HTTPException(400, f"Column `{name}` not found in {candidates}.")
+
 
 
 def plan_validate_repair(sql: str) -> str:
