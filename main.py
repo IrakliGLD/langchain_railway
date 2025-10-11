@@ -402,66 +402,45 @@ Write 3–6 sentences:
 # 🧠 Universal Reflection-Based Validator
 # Handles aliases, derived fields, and aggregates robustly
 # =========================================
+
 from sqlglot import parse_one, exp
 from fastapi import HTTPException
-
-def is_alias_or_derived(col: exp.Column) -> bool:
-    """
-    Returns True if the column is part of an alias, aggregate, or expression.
-    Prevents false rejections of derived / aliased columns.
-    """
-    parent = col.parent
-    if not parent:
-        return False
-    # skip aliases, functions, aggregates, or expressions
-    if isinstance(parent, (exp.Alias, exp.Func, exp.Aggregate, exp.Binary, exp.Cast, exp.Extract)):
-        return True
-    return False
-
+import re
 
 def _validate_allowed(ast: exp.Expression):
     """
-    Validate SQL against allowed materialized views and known columns,
-    allowing aggregates, aliases, and derived expressions.
-    Works for any column present in REFLECTED_COLUMNS.
+    Validate that only materialized views are accessed.
+    Skip validation for scalar/derived/aggregate columns.
     """
-    # Fallback safety: use global or reflected columns
     global REFLECTED_COLUMNS
-    if not REFLECTED_COLUMNS:
-        log.warning("⚠️ REFLECTED_COLUMNS empty — skipping strict column validation.")
-        return
-
-    # Build SCHEMA_MAP
     SCHEMA_MAP = {t.lower(): [c.lower() for c in cols] for t, cols in REFLECTED_COLUMNS.items()}
-
-    # Build alias mapping
     alias_map = {}
+
+    # Build alias map
     for tbl in ast.find_all(exp.Table):
         real = tbl.name.lower()
         alias = (tbl.alias or real).lower()
         alias_map[alias] = real
 
-    log.info(f"🔍 Alias map: {alias_map}")
-
-    # Validate tables
+    # --- Validate tables ---
     for alias, real in alias_map.items():
         if real not in ALLOWED_TABLES:
             raise HTTPException(
-                400, f"Disallowed table/view `{real}` (alias `{alias}`). Only materialized views allowed."
+                400, f"❌ Disallowed table/view `{real}` (alias `{alias}`). Only materialized views allowed."
             )
 
-    # Collect columns
+    # --- Validate columns ---
     for col in ast.find_all(exp.Column):
-        col_name = col.name.lower()
+        name = col.name.lower()
         tbl_alias = (col.table or "").lower()
 
-        # Derived, alias, or aggregate — skip validation
+        # Skip function/alias/aggregate derived columns
         parent = col.parent
         if isinstance(parent, (exp.Alias, exp.Func, exp.Aggregate, exp.Binary, exp.Cast, exp.Extract)):
             continue
 
-        # Allow computed or virtual patterns
-        if col_name.endswith("_usd") or col_name.startswith(("avg_", "sum_", "count_", "min_", "max_")):
+        # Allow computed or derived variants
+        if name.endswith("_usd") or name.startswith(("avg_", "sum_", "count_", "min_", "max_")):
             continue
 
         # Determine candidate tables
@@ -471,24 +450,24 @@ def _validate_allowed(ast: exp.Expression):
         else:
             candidates = list(alias_map.values())
 
-        # Check against reflected schema
         found = False
         for t in candidates:
-            if t in SCHEMA_MAP and col_name in SCHEMA_MAP[t]:
+            if t in SCHEMA_MAP and name in SCHEMA_MAP[t]:
                 found = True
                 break
 
-        if not found:
-            log.warning(f"⚠️ Column `{col_name}` not found in {candidates}. Allowing as derived/alias.")
+        # Permissive for scalar SELECTS (fixes your case)
+        if not found and len(ast.find_all(exp.Table)) == 1:
+            log.info(f"ℹ️ Allowing `{name}` as implicit column (single-view mode).")
+            continue
 
+        if not found:
+            raise HTTPException(400, f"Column `{name}` not found in {candidates}.")
 
 
 def plan_validate_repair(sql: str) -> str:
     """
-    Validate SQL using sqlglot AST.
-    - Automatically repairs plural → singular table names
-    - Normalizes schema references
-    - Allows derived columns and aliases
+    2-phase validation & repair with alias-awareness and fallback correction.
     """
     def transform(_sql: str) -> str:
         ast = parse_one(_sql, read="postgres")
@@ -497,11 +476,12 @@ def plan_validate_repair(sql: str) -> str:
 
     try:
         return transform(sql)
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning(f"First pass validation failed: {e}. Attempting auto-repair...")
+        log.warning(f"⚠️ First-pass validation failed: {e}. Trying to auto-correct table/view names...")
 
-        repaired = sql
-        repaired = re.sub(r"\bprices\b", "price_with_usd", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\bprices\b", "price_with_usd", sql, flags=re.IGNORECASE)
         repaired = re.sub(r"\btariffs\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
         repaired = re.sub(r"\btech_quantity\b", "tech_quantity_view", repaired, flags=re.IGNORECASE)
         repaired = re.sub(r"\btrade\b", "trade_derived_entities", repaired, flags=re.IGNORECASE)
@@ -512,9 +492,8 @@ def plan_validate_repair(sql: str) -> str:
         try:
             return transform(repaired)
         except Exception as e2:
-            log.exception("❌ Second pass validation failed:")
+            log.exception("❌ Second-pass validation failed:")
             raise HTTPException(status_code=400, detail=f"Validation failed: {e2}")
-
 
 
 @app.get("/ask")
