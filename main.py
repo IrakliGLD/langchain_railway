@@ -405,7 +405,7 @@ from fastapi import HTTPException
 import re
 
 
-
+log.warning("**ENTER _validate_allowed**")
 
 def _validate_allowed(ast: exp.Expression):
     """
@@ -539,6 +539,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     # 2) Sanitize, validate, repair
     try:
         sanitized = sanitize_sql(raw_sql)
+        log.warning(f"Before validate/repair, sql = {sanitized}")
         safe_sql = plan_validate_repair(sanitized)
         if " from " in safe_sql.lower() and re.search(r"\blimit\s+\d+\b", safe_sql, flags=re.IGNORECASE) is None:
             safe_sql = f"{safe_sql}\nLIMIT 500"
