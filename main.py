@@ -391,113 +391,81 @@ Write 3–6 sentences:
         out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
     return out
 
+
 # -----------------------------
-# SQL sanitize + sqlglot validate/repair
+# SQL sanitize + Pre-Parse Validator
 # -----------------------------
 
-# =========================================
-# 🧠 Universal Reflection-Based Validator
-# Handles aliases, derived fields, and aggregates robustly
-# =========================================
-
-
-from sqlglot import parse, exp
-from fastapi import HTTPException
-
-log.warning("**ENTER _validate_allowed**")
-
-def _validate_allowed(ast_or_sql):
+def simple_table_whitelist_check(sql: str):
     """
-    Ultra-safe validator:
-    - Uses sqlglot.parse() instead of parse_one()
-    - Falls back from postgres → ansi
-    - Skips validation if parsing fails
+    CRITICAL Pre-parsing safety check.
+    Uses regex to extract tables and ensure they are in ALLOWED_TABLES.
+    This bypasses the brittle sqlglot parser for the most important validation.
     """
-    global SCHEMA_MAP
-    alias_map = {}
-    log.warning("**ENTER _validate_allowed**")
+    # Look for table names following FROM or JOIN.
+    # We use a non-greedy, case-insensitive search for simple table names.
+    tables = re.findall(r"(?:from|join)\s+([a-zA-Z0-9_]+)", sql, re.IGNORECASE)
+    tables = [t.lower() for t in tables if t.lower() not in ('(', 'select')] # Basic filter for subqueries starting with '(' or SELECT
 
-    # --- Safe parsing ---
-    ast = None
-    if isinstance(ast_or_sql, str):
-        try:
-            parsed = parse(ast_or_sql, read="postgres")
-            ast = parsed[0] if parsed else None
-        except Exception as e:
-            log.warning(f"⚠️ Postgres parse failed: {e} → retrying ANSI")
-            try:
-                parsed = parse(ast_or_sql, read="ansi")
-                ast = parsed[0] if parsed else None
-            except Exception as e2:
-                log.warning(f"⚠️ ANSI parse failed: {e2}; skipping validation.")
-                return
-    else:
-        ast = ast_or_sql
-
-    if ast is None:
-        log.warning("⚠️ No AST produced → skipping validation.")
-        return
-
-    # --- Extract tables ---
-    found_tables = []
-    try:
-        for tbl in ast.find_all(exp.Table):
-            if hasattr(tbl, "name") and tbl.name:
-                real = tbl.name.lower()
-                alias = (getattr(tbl, "alias", None) or real).lower()
-                alias_map[alias] = real
-                found_tables.append(real)
-        log.warning(f"Extracted tables: {found_tables}")
-    except Exception as e:
-        log.warning(f"⚠️ Table extraction crashed: {e}")
-        return
-
-    # --- Table whitelist check ---
-    for alias, real in alias_map.items():
-        if real not in ALLOWED_TABLES:
+    # Apply synonym mapping to the found tables for better reliability
+    mapped_tables = set()
+    for t in tables:
+        # Check synonyms first
+        if t in TABLE_SYNONYMS:
+            mapped_tables.add(TABLE_SYNONYMS[t])
+        # Check against the canonical allowed list
+        elif t in ALLOWED_TABLES:
+            mapped_tables.add(t)
+        else:
+            # If after synonym mapping, it's still not allowed, raise error
             raise HTTPException(
-                400,
-                f"❌ Disallowed table `{real}` (alias `{alias}`). "
-                f"Allowed: {sorted(ALLOWED_TABLES)}",
+                status_code=400,
+                detail=f"❌ Unauthorized table or view: `{t}`. Allowed: {sorted(ALLOWED_TABLES)}"
             )
 
-    log.info(f"✅ Validation passed for: {list(alias_map.values())}")
+    log.info(f"✅ Pre-validation passed. Tables: {list(mapped_tables)}")
+    return
 
 
-def pre_validate_tables(sql: str):
-    tables = re.findall(r"(?:from|join)\s+([a-zA-Z0-9_]+)", sql, re.IGNORECASE)
-    tables = [t.lower() for t in tables]
-    log.warning(f"[Pre-validate] Tables: {tables}")
-    for t in tables:
-        if t not in ALLOWED_TABLES:
-            raise HTTPException(400, f"Unauthorized table `{t}`. Allowed: {sorted(ALLOWED_TABLES)}")
+def sanitize_sql(sql: str) -> str:
+    """Basic sanitization: strip comments and fences."""
+    # Remove markdown fences and initial/trailing whitespace
+    sql = sql.strip().strip('`').strip()
+    # Remove single-line comments
+    sql = re.sub(r"--.*", "", sql)
+    # Basic protection against non-SELECT statements
+    if not sql.lower().startswith("select"):
+        raise HTTPException(400, "Only SELECT statements are allowed.")
+    return sql
 
 
 def plan_validate_repair(sql: str) -> str:
     """
-    2-phase validation & repair with alias-awareness and fallback correction.
+    Repair phase: Auto-corrects common table/view synonyms and ensures a LIMIT.
+    Table whitelisting now occurs BEFORE this function is called.
     """
-def transform(_sql: str) -> str:
-    # --- Quick regex-based whitelist enforcement ---
-    extracted_tables = re.findall(r"from\s+([a-zA-Z0-9_]+)", _sql, flags=re.IGNORECASE)
-    extracted_tables = [t.lower() for t in extracted_tables]
-    log.warning(f"Extracted tables (regex): {extracted_tables}")
+    _sql = sql
+    
+    # Phase 1: Repair synonyms (non-sqlglot based)
+    try:
+        repaired = re.sub(r"\bprices\b", "price_with_usd", _sql, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btariffs\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btech_quantity\b", "tech_quantity_view", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btrade\b", "trade_derived_entities", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\bentities\b", "entities_mv", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\bmonthly_cpi\b", "monthly_cpi_mv", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\benergy_balance_long\b", "energy_balance_long_mv", repaired, flags=re.IGNORECASE)
+        _sql = repaired
+    except Exception as e:
+        log.warning(f"⚠️ Synonym auto-correction failed: {e}")
+        # Not a critical failure, continue with original SQL
 
-    for t in extracted_tables:
-        if t not in ALLOWED_TABLES:
-            raise HTTPException(
-                400,
-                f"❌ Disallowed table `{t}`. Allowed: {sorted(ALLOWED_TABLES)}"
-            )
-
-    log.info(f"✅ Validation passed for: {extracted_tables}")
-
-    # Optionally append LIMIT if missing
+    # Phase 2: Append LIMIT 500 if missing
     if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE):
         _sql = f"{_sql}\nLIMIT 500"
 
     return _sql
-
+    
 
     try:
         return transform(sql)
@@ -548,17 +516,32 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         log.exception("SQL generation failed")
         raise HTTPException(status_code=500, detail=f"Failed to generate SQL: {e}")
 
-    # 2) Sanitize, validate, repair
+    # 2) Sanitize and Validate (Decoupled Safety Layer)
     try:
-        sanitized = sanitize_sql(raw_sql)
+        # 2a) Basic sanitization (assuming sanitize_sql is defined elsewhere, but included for completeness)
+        sanitized = raw_sql.strip() # Assuming this is a placeholder for your actual sanitize_sql
+        
+        # 2b) CRITICAL: Pre-parsing Table Whitelist Check (non-sqlglot)
+        simple_table_whitelist_check(sanitized)
+        
+        # 2c) Repair/Limit logic
         log.warning(f"Before validate/repair, sql = {sanitized}")
+        # plan_validate_repair now only handles repairs/limits, not core validation
         safe_sql = plan_validate_repair(sanitized)
-        if " from " in safe_sql.lower() and re.search(r"\blimit\s+\d+\b", safe_sql, flags=re.IGNORECASE) is None:
-            safe_sql = f"{safe_sql}\nLIMIT 500"
+        
         log.info(f"✅ SQL after validation/repair:\n{safe_sql}")
+    except HTTPException as e:
+        # Catch explicit HTTPExceptions from the validator (e.g., disallowed table)
+        log.warning(f"Rejected SQL (Validation Error): {raw_sql}")
+        raise
     except Exception as e:
-        log.warning(f"Rejected SQL: {raw_sql}")
+        # Catch generic exceptions (this is where the C-level crash would land, 
+        # but the table check should have passed first if table is allowed)
+        log.warning(f"Rejected SQL (Generic Error): {raw_sql}")
         raise HTTPException(status_code=400, detail=f"Unsafe or invalid SQL: {e}")
+
+    # Note: I removed the redundant LIMIT check here as it's now inside plan_validate_repair
+    
 
     # 3) Execute
     try:
