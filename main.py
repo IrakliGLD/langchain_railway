@@ -116,25 +116,38 @@ with ENGINE.connect() as conn:
     log.info("✅ Database connectivity verified")
 
     try:
+        # Reflect only materialized views (exclude base tables)
         result = conn.execute(
             text("""
-                SELECT schemaname, matviewname AS name, 'materialized_view' AS type
-                FROM pg_matviews
-                WHERE schemaname = 'public'
-                UNION ALL
-                SELECT schemaname, tablename AS name, 'table' AS type
-                FROM pg_tables
-                WHERE schemaname = 'public';
+                SELECT m.matviewname AS view_name, a.attname AS column_name
+                FROM pg_matviews m
+                JOIN pg_attribute a ON m.matviewname::regclass = a.attrelid
+                WHERE a.attnum > 0 AND NOT a.attisdropped
+                AND m.schemaname = 'public';
             """)
         )
-        db_objects = result.fetchall()
-        materialized_views = [r.name for r in db_objects if r.type == "materialized_view"]
-        for mv in materialized_views:
-            ALLOWED_TABLES.add(mv)
-        log.info(f"🧩 Found materialized views: {materialized_views}")
-        log.info(f"📜 Final ALLOWED_TABLES: {sorted(list(ALLOWED_TABLES))}")
+        rows = result.fetchall()
+
+        # Build schema map for column-level validation
+        SCHEMA_MAP = {}
+        for v, c in rows:
+            SCHEMA_MAP.setdefault(v.lower(), set()).add(c.lower())
+
+        # Materialized views only
+        ALLOWED_TABLES = set(SCHEMA_MAP.keys())
+
+        log.info(f"🧩 Found materialized views: {sorted(ALLOWED_TABLES)}")
+        log.info(f"📜 Final ALLOWED_TABLES (views only): {sorted(ALLOWED_TABLES)}")
+
+        # Optional: show schema details for each view
+        for view, cols in SCHEMA_MAP.items():
+            log.info(f"📘 {view}: {sorted(cols)}")
+
     except Exception as e:
         log.warning(f"⚠️ Could not reflect materialized views: {e}")
+        SCHEMA_MAP = {}
+        ALLOWED_TABLES = set()
+
 
 # -----------------------------
 # App
@@ -386,26 +399,34 @@ Write 3–6 sentences:
 # -----------------------------
 
 def _validate_allowed(ast: exp.Expression):
-    """Validate allowed tables and columns, but allow materialized views and *_usd columns."""
-    allowed_tables = set(ALLOWED_TABLES)
-    known_cols = {c.lower() for c in COLUMN_LABELS.keys()} | {
-        "p_bal_usd", "p_dereg_usd", "p_gcap_usd", "tariff_usd",
-        "entity", "date", "year", "month"
-    }
+    """
+    Validate that SQL queries use only reflected materialized views
+    and reference only valid columns from SCHEMA_MAP.
+    """
+    # ✅ Extract table names from SQL AST
+    tables = {tbl.name.lower() for tbl in ast.find_all(exp.Table) if tbl.name}
 
-    for t in {t.name.lower() for t in ast.find_all(exp.Table)}:
-        if t not in allowed_tables:
-            raise HTTPException(status_code=400, detail=f"Unknown or disallowed table: {t}")
+    # 🚫 Reject any non-view tables
+    for t in tables:
+        if t not in ALLOWED_TABLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Table `{t}` is not allowed. Only materialized views are accessible."
+            )
 
-    for c in {c.name.lower() for c in ast.find_all(exp.Column) if c.name}:
-        if c.endswith("_usd") and c not in known_cols:
-            log.info(f"🪶 Allowing view column `{c}` (materialized view field)")
-            continue
-        if c not in known_cols:
-            log.warning(f"⚠️ Unknown column `{c}` — soft warning (not blocking)")
+    # ✅ Validate columns
+    for col in {c.name.lower() for c in ast.find_all(exp.Column) if c.name}:
+        found = any(col in SCHEMA_MAP[t] for t in tables if t in SCHEMA_MAP)
+        if not found:
+            # Soft warning — don’t block execution, but log for transparency
+            log.warning(f"⚠️ Column `{col}` not found in schema for views {tables}. Allowing for flexibility.")
+
 
 def plan_validate_repair(sql: str) -> str:
-    """Validate SQL with soft repair fallback for *_usd and synonyms."""
+    """
+    Validate and soft-repair SQL queries.
+    Uses reflection-based validation from SCHEMA_MAP.
+    """
     def transform(_sql: str) -> str:
         ast = parse_one(_sql, read="postgres")
         try:
@@ -417,17 +438,21 @@ def plan_validate_repair(sql: str) -> str:
     try:
         return transform(sql)
     except Exception as e:
-        log.warning(f"First pass validation failed: {e}. Retrying repair...")
-        repaired = re.sub(r"\bprices\b", "price", sql, flags=re.IGNORECASE)
-        repaired = re.sub(r"\btariffs\b", "tariff_gen", repaired, flags=re.IGNORECASE)
-        if re.search(r"\b(p_.*_usd|tariff_usd)\b", repaired, re.IGNORECASE):
-            repaired = re.sub(r"\bprice\b", "price_with_usd", repaired, flags=re.IGNORECASE)
-            repaired = re.sub(r"\btariff_gen\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
+        log.warning(f"First-pass validation failed: {e}. Retrying with soft repairs...")
+
+        # 🔧 Soft synonym repair (common fallback patterns)
+        repaired = re.sub(r"\bprices\b", "price_with_usd", sql, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btariffs\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\bprice\b", "price_with_usd", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btariff_gen\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
+
+        # Retry once more after auto-repair
         try:
             return transform(repaired)
         except Exception as e2:
-            log.exception("❌ Second pass validation failed:")
-            raise HTTPException(status_code=400, detail=f"Validation failed: {e2}")
+            log.exception("❌ Second-pass validation failed:")
+            raise HTTPException(status_code=400, detail=f"Validation failed after repair: {e2}")
+
 
 
 @app.get("/ask")
