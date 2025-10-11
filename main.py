@@ -505,6 +505,11 @@ def plan_validate_repair(sql: str) -> str:
 
     # Phase 2: Append LIMIT 500 if missing
     if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE):
+        
+        # CRITICAL FIX: Remove the trailing semicolon if it exists
+        _sql = _sql.rstrip().rstrip(';') 
+        
+        # Append LIMIT 500 without a preceding semicolon
         _sql = f"{_sql}\nLIMIT 500"
 
     return _sql
