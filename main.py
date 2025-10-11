@@ -409,8 +409,8 @@ def _validate_allowed(ast: exp.Expression):
     Validate that only materialized views are accessed.
     Skip validation for scalar/derived/aggregate columns.
     """
-    global REFLECTED_COLUMNS
-    SCHEMA_MAP = {t.lower(): [c.lower() for c in cols] for t, cols in REFLECTED_COLUMNS.items()}
+    # Use the reflected SCHEMA_MAP instead of undefined REFLECTED_COLUMNS
+    global SCHEMA_MAP
     alias_map = {}
 
     # Build alias map
@@ -418,6 +418,10 @@ def _validate_allowed(ast: exp.Expression):
         real = tbl.name.lower()
         alias = (tbl.alias or real).lower()
         alias_map[alias] = real
+
+    # Log extracted table/view names
+    log.warning(f"Extracted tables: {list(alias_map.values())}")
+
 
     # --- Validate tables ---
     for alias, real in alias_map.items():
