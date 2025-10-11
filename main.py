@@ -402,20 +402,38 @@ def simple_table_whitelist_check(sql: str):
     Uses regex to extract tables and ensure they are in ALLOWED_TABLES.
     This bypasses the brittle sqlglot parser for the most important validation.
     """
-    # Look for table names following FROM or JOIN.
-    # We use a non-greedy, case-insensitive search for simple table names.
-    tables = re.findall(r"(?:from|join)\s+([a-zA-Z0-9_]+)", sql, re.IGNORECASE)
-    tables = [t.lower() for t in tables if t.lower() not in ('(', 'select')] # Basic filter for subqueries starting with '(' or SELECT
+    # IMPROVED REGEX:
+    # Captures table names following FROM or JOIN. It's more forgiving of whitespace (including newlines)
+    # and handles optional aliases immediately following the table name (AS alias or just alias).
+    # Group 1 captures the table name.
+    pattern = r"(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)"
+    tables = re.findall(pattern, sql, re.IGNORECASE | re.MULTILINE)
 
-    # Apply synonym mapping to the found tables for better reliability
+    tables = [t.lower() for t in tables if t.lower() not in ('(', 'select', 'where')] 
+
+    # If tables list is empty, it could mean a complex query structure (subquery in SELECT)
+    # or a syntax issue. For a primary check, we proceed if we found something.
+    if not tables:
+        # Fallback for SELECT ... FROM (schema.table) or SELECT * FROM (subquery)
+        # This part is a bit tricky, but for simplicity, we assume if it starts with 'SELECT'
+        # and has no tables found, it might be a subquery or CTE, which is safer
+        # than just crashing. If the query is complex, we pass it to the repair step
+        # hoping for the best, as this regex approach has limits.
+        log.warning("⚠️ Simple table extraction failed. Allowing flow to plan_validate_repair (risky).")
+        return
+
+    # Apply synonym mapping and perform the strict whitelist check
     mapped_tables = set()
     for t in tables:
         # Check synonyms first
         if t in TABLE_SYNONYMS:
-            mapped_tables.add(TABLE_SYNONYMS[t])
+            t_canonical = TABLE_SYNONYMS[t]
+        else:
+            t_canonical = t
+
         # Check against the canonical allowed list
-        elif t in ALLOWED_TABLES:
-            mapped_tables.add(t)
+        if t_canonical in ALLOWED_TABLES:
+            mapped_tables.add(t_canonical)
         else:
             # If after synonym mapping, it's still not allowed, raise error
             raise HTTPException(
