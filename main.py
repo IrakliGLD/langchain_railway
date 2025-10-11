@@ -410,31 +410,34 @@ log.warning("**ENTER _validate_allowed**")
 def _validate_allowed(ast_or_sql):
     """
     Validate that only materialized views are accessed.
+    Skip validation entirely if sqlglot cannot parse (common with EXTRACT or literals).
     """
     global SCHEMA_MAP
     alias_map = {}
 
-    # Handle both raw SQL or already-parsed AST
+    # --- Robust parse with fallback dialects ---
     try:
-        if isinstance(ast_or_sql, str):
-            ast = parse_one(ast_or_sql, read="postgres")
-        else:
-            ast = ast_or_sql
-    except Exception as e:
-        log.warning(f"⚠️ sqlglot parse failed, bypassing strict validation: {e}")
-        return  # let it through rather than 400 on simple queries
+        ast = parse_one(ast_or_sql, read="postgres")
+        if ast is None:
+            raise ValueError("empty AST")
+    except Exception:
+        log.warning("⚠️ sqlglot parse failed in postgres dialect, retrying with ANSI")
+        try:
+            ast = parse_one(ast_or_sql, read="ansi")
+        except Exception as e:
+            log.warning(f"⚠️ sqlglot parse failed again ({e}); skipping strict validation.")
+            return
+        if ast is None:
+            log.warning("⚠️ sqlglot returned None even in ANSI mode → skipping validation.")
+            return
 
-    if not isinstance(ast, exp.Expression):
-        log.warning("⚠️ Invalid AST object returned, skipping validation.")
-        return
-
-    # Build alias map safely
+    # --- Table extraction ---
     try:
         for tbl in ast.find_all(exp.Table):
-            if not hasattr(tbl, "name") or not tbl.name:
+            if not getattr(tbl, "name", None):
                 continue
             real = tbl.name.lower()
-            alias = (tbl.alias or real).lower()
+            alias = (getattr(tbl, "alias", None) or real).lower()
             alias_map[alias] = real
     except Exception as e:
         log.warning(f"⚠️ Table extraction failed: {e}")
@@ -442,13 +445,13 @@ def _validate_allowed(ast_or_sql):
 
     log.warning(f"Extracted tables: {list(alias_map.values())}")
 
-    # Table check
+    # --- Validate table names only (column validation skipped for simplicity) ---
     for alias, real in alias_map.items():
         if real not in ALLOWED_TABLES:
-            raise HTTPException(400, f"❌ Disallowed table `{real}` (alias `{alias}`).")
-
-    # Column validation (kept same as before but optional)
-
+            raise HTTPException(
+                400, f"❌ Disallowed table `{real}` (alias `{alias}`). "
+                     f"Allowed: {sorted(ALLOWED_TABLES)}"
+            )
 
 
 def plan_validate_repair(sql: str) -> str:
