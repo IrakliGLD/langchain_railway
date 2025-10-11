@@ -464,6 +464,15 @@ def _validate_allowed(ast_or_sql):
     log.info(f"✅ Validation passed for: {list(alias_map.values())}")
 
 
+def pre_validate_tables(sql: str):
+    tables = re.findall(r"(?:from|join)\s+([a-zA-Z0-9_]+)", sql, re.IGNORECASE)
+    tables = [t.lower() for t in tables]
+    log.warning(f"[Pre-validate] Tables: {tables}")
+    for t in tables:
+        if t not in ALLOWED_TABLES:
+            raise HTTPException(400, f"Unauthorized table `{t}`. Allowed: {sorted(ALLOWED_TABLES)}")
+
+
 def plan_validate_repair(sql: str) -> str:
     """
     2-phase validation & repair with alias-awareness and fallback correction.
