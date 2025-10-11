@@ -320,7 +320,7 @@ Output: one raw SELECT statement.
 # -----------------------------
 # Data helpers (modified quick_stats)
 # -----------------------------
-def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 8) -> str:
+def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 200) -> str:
     if not rows:
         return "No rows returned."
     df = pd.DataFrame(rows[:max_rows], columns=cols)
