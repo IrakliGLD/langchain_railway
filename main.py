@@ -409,49 +409,58 @@ log.warning("**ENTER _validate_allowed**")
 
 def _validate_allowed(ast_or_sql):
     """
-    Validate that only materialized views are accessed.
-    Skip validation entirely if sqlglot cannot parse (common with EXTRACT or literals).
+    Final safe validator:
+    - Handles string or AST input.
+    - Falls back from postgres → ansi dialect.
+    - Skips validation if parse or traversal fails.
     """
     global SCHEMA_MAP
     alias_map = {}
+    log.warning("**ENTER _validate_allowed**")
 
-    # --- Robust parse with fallback dialects ---
+    # --- Try parsing ---
     try:
-        ast = parse_one(ast_or_sql, read="postgres")
-        if ast is None:
-            raise ValueError("empty AST")
-    except Exception:
-        log.warning("⚠️ sqlglot parse failed in postgres dialect, retrying with ANSI")
-        try:
-            ast = parse_one(ast_or_sql, read="ansi")
-        except Exception as e:
-            log.warning(f"⚠️ sqlglot parse failed again ({e}); skipping strict validation.")
-            return
-        if ast is None:
-            log.warning("⚠️ sqlglot returned None even in ANSI mode → skipping validation.")
-            return
-
-    # --- Table extraction ---
-    try:
-        for tbl in ast.find_all(exp.Table):
-            if not getattr(tbl, "name", None):
-                continue
-            real = tbl.name.lower()
-            alias = (getattr(tbl, "alias", None) or real).lower()
-            alias_map[alias] = real
+        if isinstance(ast_or_sql, str):
+            try:
+                ast = parse_one(ast_or_sql, read="postgres")
+                if ast is None:
+                    raise ValueError("Empty AST (postgres)")
+            except Exception as e:
+                log.warning(f"⚠️ Postgres parse failed: {e} → retrying ANSI")
+                ast = parse_one(ast_or_sql, read="ansi")
+        else:
+            ast = ast_or_sql
     except Exception as e:
-        log.warning(f"⚠️ Table extraction failed: {e}")
+        log.warning(f"⚠️ Both parse attempts failed ({e}); skipping validation.")
         return
 
-    log.warning(f"Extracted tables: {list(alias_map.values())}")
+    if ast is None:
+        log.warning("⚠️ AST is None even after ANSI parse → skipping validation.")
+        return
 
-    # --- Validate table names only (column validation skipped for simplicity) ---
+    # --- Extract tables ---
+    try:
+        found_tables = []
+        for tbl in ast.find_all(exp.Table):
+            if hasattr(tbl, "name") and tbl.name:
+                found_tables.append(tbl.name.lower())
+                alias = (getattr(tbl, "alias", None) or tbl.name).lower()
+                alias_map[alias] = tbl.name.lower()
+        log.warning(f"Extracted tables: {found_tables}")
+    except Exception as e:
+        log.warning(f"⚠️ Table extraction crashed: {e}")
+        return
+
+    # --- Table whitelist check ---
     for alias, real in alias_map.items():
         if real not in ALLOWED_TABLES:
             raise HTTPException(
-                400, f"❌ Disallowed table `{real}` (alias `{alias}`). "
-                     f"Allowed: {sorted(ALLOWED_TABLES)}"
+                400,
+                f"❌ Disallowed table `{real}` (alias `{alias}`). "
+                f"Allowed: {sorted(ALLOWED_TABLES)}",
             )
+
+    log.info(f"✅ Validation passed for: {list(alias_map.values())}")
 
 
 def plan_validate_repair(sql: str) -> str:
