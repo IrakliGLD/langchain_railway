@@ -398,60 +398,115 @@ Write 3–6 sentences:
 # SQL sanitize + sqlglot validate/repair
 # -----------------------------
 
+# =========================================
+# 🧠 Universal Reflection-Based Validator
+# Handles aliases, derived fields, and aggregates robustly
+# =========================================
+from sqlglot import parse_one, exp
+from fastapi import HTTPException
+
+def is_alias_or_derived(col: exp.Column) -> bool:
+    """
+    Returns True if the column is part of an alias, aggregate, or expression.
+    Prevents false rejections of derived / aliased columns.
+    """
+    parent = col.parent
+    if not parent:
+        return False
+    # skip aliases, functions, aggregates, or expressions
+    if isinstance(parent, (exp.Alias, exp.Func, exp.Aggregate, exp.Binary, exp.Cast, exp.Extract)):
+        return True
+    return False
+
+
 def _validate_allowed(ast: exp.Expression):
     """
-    Validate that SQL queries use only reflected materialized views
-    and reference only valid columns from SCHEMA_MAP.
+    Validate that tables are allowed (materialized views only)
+    and column references exist within their schema definitions.
+    Derived columns, aliases, and aggregates are allowed automatically.
     """
-    # ✅ Extract table names from SQL AST
-    tables = {tbl.name.lower() for tbl in ast.find_all(exp.Table) if tbl.name}
+    # Alias map: alias → real table name
+    alias_map = {}
+    for tbl in ast.find_all(exp.Table):
+        real_name = tbl.name.lower()
+        alias = (tbl.alias or real_name).lower()
+        alias_map[alias] = real_name
 
-    # 🚫 Reject any non-view tables
-    for t in tables:
-        if t not in ALLOWED_TABLES:
+    log.info(f"🔎 Table/Alias map: {alias_map}")
+
+    # Validate tables
+    for alias, real in alias_map.items():
+        if real not in ALLOWED_TABLES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Table `{t}` is not allowed. Only materialized views are accessible."
+                detail=f"Table `{real}` (alias `{alias}`) is not allowed. Only materialized views may be queried."
             )
 
-    # ✅ Validate columns
-    for col in {c.name.lower() for c in ast.find_all(exp.Column) if c.name}:
-        found = any(col in SCHEMA_MAP[t] for t in tables if t in SCHEMA_MAP)
+    # Build schema map: table → list of known columns
+    SCHEMA_MAP = {t: [c.lower() for c in cols] for t, cols in REFLECTED_COLUMNS.items()}
+
+    # Validate column references
+    for col in ast.find_all(exp.Column):
+        name = col.name.lower()
+        tbl_alias = (col.table or "").lower()
+
+        if is_alias_or_derived(col):
+            continue  # skip aliases/aggregates/derived fields
+
+        # Allow computed columns like *_usd or avg_*, sum_*, etc.
+        if name.endswith("_usd") or name.startswith(("avg_", "sum_", "count_", "min_", "max_")):
+            continue
+
+        # Determine which table(s) this column could come from
+        candidate_tables = []
+        if tbl_alias and tbl_alias in alias_map:
+            candidate_tables = [alias_map[tbl_alias]]
+        else:
+            candidate_tables = list(alias_map.values())
+
+        # Validate column presence
+        found = False
+        for t in candidate_tables:
+            if t in SCHEMA_MAP and name in SCHEMA_MAP[t]:
+                found = True
+                break
+
         if not found:
-            # Soft warning — don’t block execution, but log for transparency
-            log.warning(f"⚠️ Column `{col}` not found in schema for views {tables}. Allowing for flexibility.")
+            log.warning(f"⚠️ Column `{name}` not found in allowed schema ({candidate_tables}) — treating as derived/alias.")
+            # soft warning, not hard rejection
 
 
 def plan_validate_repair(sql: str) -> str:
     """
-    Validate and soft-repair SQL queries.
-    Uses reflection-based validation from SCHEMA_MAP.
+    Validate SQL using sqlglot AST.
+    - Automatically repairs plural → singular table names
+    - Normalizes schema references
+    - Allows derived columns and aliases
     """
     def transform(_sql: str) -> str:
         ast = parse_one(_sql, read="postgres")
-        try:
-            _validate_allowed(ast)
-        except HTTPException as e:
-            log.warning(f"⚠️ Validation warning ignored: {e.detail}")
+        _validate_allowed(ast)
         return ast.sql(dialect="postgres")
 
     try:
         return transform(sql)
     except Exception as e:
-        log.warning(f"First-pass validation failed: {e}. Retrying with soft repairs...")
+        log.warning(f"First pass validation failed: {e}. Attempting auto-repair...")
 
-        # 🔧 Soft synonym repair (common fallback patterns)
-        repaired = re.sub(r"\bprices\b", "price_with_usd", sql, flags=re.IGNORECASE)
+        repaired = sql
+        repaired = re.sub(r"\bprices\b", "price_with_usd", repaired, flags=re.IGNORECASE)
         repaired = re.sub(r"\btariffs\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
-        repaired = re.sub(r"\bprice\b", "price_with_usd", repaired, flags=re.IGNORECASE)
-        repaired = re.sub(r"\btariff_gen\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btech_quantity\b", "tech_quantity_view", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btrade\b", "trade_derived_entities", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\bentities\b", "entities_mv", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\bmonthly_cpi\b", "monthly_cpi_mv", repaired, flags=re.IGNORECASE)
+        repaired = re.sub(r"\benergy_balance_long\b", "energy_balance_long_mv", repaired, flags=re.IGNORECASE)
 
-        # Retry once more after auto-repair
         try:
             return transform(repaired)
         except Exception as e2:
-            log.exception("❌ Second-pass validation failed:")
-            raise HTTPException(status_code=400, detail=f"Validation failed after repair: {e2}")
+            log.exception("❌ Second pass validation failed:")
+            raise HTTPException(status_code=400, detail=f"Validation failed: {e2}")
 
 
 
