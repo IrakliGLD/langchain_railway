@@ -113,7 +113,28 @@ ENGINE = create_engine(
 
 with ENGINE.connect() as conn:
     conn.execute(text("SELECT 1"))
-log.info("✅ Database connectivity verified")
+    log.info("✅ Database connectivity verified")
+
+    try:
+        result = conn.execute(
+            text("""
+                SELECT schemaname, matviewname AS name, 'materialized_view' AS type
+                FROM pg_matviews
+                WHERE schemaname = 'public'
+                UNION ALL
+                SELECT schemaname, tablename AS name, 'table' AS type
+                FROM pg_tables
+                WHERE schemaname = 'public';
+            """)
+        )
+        db_objects = result.fetchall()
+        materialized_views = [r.name for r in db_objects if r.type == "materialized_view"]
+        for mv in materialized_views:
+            ALLOWED_TABLES.add(mv)
+        log.info(f"🧩 Found materialized views: {materialized_views}")
+        log.info(f"📜 Final ALLOWED_TABLES: {sorted(list(ALLOWED_TABLES))}")
+    except Exception as e:
+        log.warning(f"⚠️ Could not reflect materialized views: {e}")
 
 # -----------------------------
 # App
@@ -362,9 +383,52 @@ Write 3–6 sentences:
 
 # -----------------------------
 # SQL sanitize + sqlglot validate/repair
-# (unchanged from v18.4)
-# [ ... your existing sanitize, normalization, plan_validate_repair, etc. ... ]
 # -----------------------------
+
+def _validate_allowed(ast: exp.Expression):
+    """Validate allowed tables and columns, but allow materialized views and *_usd columns."""
+    allowed_tables = set(ALLOWED_TABLES)
+    known_cols = {c.lower() for c in COLUMN_LABELS.keys()} | {
+        "p_bal_usd", "p_dereg_usd", "p_gcap_usd", "tariff_usd",
+        "entity", "date", "year", "month"
+    }
+
+    for t in {t.name.lower() for t in ast.find_all(exp.Table)}:
+        if t not in allowed_tables:
+            raise HTTPException(status_code=400, detail=f"Unknown or disallowed table: {t}")
+
+    for c in {c.name.lower() for c in ast.find_all(exp.Column) if c.name}:
+        if c.endswith("_usd") and c not in known_cols:
+            log.info(f"🪶 Allowing view column `{c}` (materialized view field)")
+            continue
+        if c not in known_cols:
+            log.warning(f"⚠️ Unknown column `{c}` — soft warning (not blocking)")
+
+def plan_validate_repair(sql: str) -> str:
+    """Validate SQL with soft repair fallback for *_usd and synonyms."""
+    def transform(_sql: str) -> str:
+        ast = parse_one(_sql, read="postgres")
+        try:
+            _validate_allowed(ast)
+        except HTTPException as e:
+            log.warning(f"⚠️ Validation warning ignored: {e.detail}")
+        return ast.sql(dialect="postgres")
+
+    try:
+        return transform(sql)
+    except Exception as e:
+        log.warning(f"First pass validation failed: {e}. Retrying repair...")
+        repaired = re.sub(r"\bprices\b", "price", sql, flags=re.IGNORECASE)
+        repaired = re.sub(r"\btariffs\b", "tariff_gen", repaired, flags=re.IGNORECASE)
+        if re.search(r"\b(p_.*_usd|tariff_usd)\b", repaired, re.IGNORECASE):
+            repaired = re.sub(r"\bprice\b", "price_with_usd", repaired, flags=re.IGNORECASE)
+            repaired = re.sub(r"\btariff_gen\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
+        try:
+            return transform(repaired)
+        except Exception as e2:
+            log.exception("❌ Second pass validation failed:")
+            raise HTTPException(status_code=400, detail=f"Validation failed: {e2}")
+
 
 @app.get("/ask")
 def ask_get():
