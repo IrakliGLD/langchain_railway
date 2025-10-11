@@ -59,17 +59,14 @@ if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
 
 # Allow the base tables + USD materialized views
 ALLOWED_TABLES = {
-    "dates",
-    "energy_balance_long",
-    "entities",
-    "monthly_cpi",
-    "price",
-    "tariff_gen",
-    "tech_quantity",
-    "trade",
-    # USD materialized views
+    "dates_mv",
+    "energy_balance_long_mv",
+    "entities_mv",
+    "monthly_cpi_mv",
     "price_with_usd",
     "tariff_with_usd",
+    "tech_quantity_view",
+    "trade_derived_entities",
 }
 
 # Table synonym map (plural & common aliases → canonical)
