@@ -415,20 +415,26 @@ def simple_table_whitelist_check(sql: str):
     cleaned_tables = set()
     
     try:
-        # 1. Parse the SQL into an Abstract Syntax Tree (AST)
-        # Using the standard 'sql' dialect by default
-        parsed_expression = parse_one(sql, read='bigquery') # Use the dialect that matches your SQL functions (EXTRACT)
+        parsed_expression = parse_one(sql, read='bigquery') 
+
+        # --- FIX: 1. Extract CTE names ---
+        cte_names = set()
+        with_clause = parsed_expression.find(exp.With)
+        if with_clause:
+            for cte in with_clause.expressions:
+                cte_names.add(cte.alias.lower()) 
+        # ---------------------------------
 
         # 2. Traverse the AST to find all table expressions
         for table_exp in parsed_expression.find_all(exp.Table):
             
-            # Extract the canonical table name (e.g., 'schema.table' or just 'table')
             t_raw = table_exp.name.lower()
+            t_name = t_raw.split('.')[0]
             
-            # The .name property handles quotes, aliases, and schema correctly.
-            # However, since the LLM output is likely unquoted simple names, 
-            # we perform a simple cleanup on the string to be safe.
-            t_name = t_raw.split('.')[0] # Take only the table name if a schema.table format exists
+            # --- FIX: 2. Skip CTE names from whitelisting ---
+            if t_name in cte_names:
+                continue 
+            # ---------------------------------------------
             
             # Apply synonym mapping and perform the strict whitelist check
             t_canonical = TABLE_SYNONYMS.get(t_name, t_name)
