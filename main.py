@@ -468,20 +468,26 @@ def plan_validate_repair(sql: str) -> str:
     """
     2-phase validation & repair with alias-awareness and fallback correction.
     """
-    def transform(_sql: str) -> str:
-        ast = parse_one(_sql, read="postgres")
+def transform(_sql: str) -> str:
+    # --- Quick regex-based whitelist enforcement ---
+    extracted_tables = re.findall(r"from\s+([a-zA-Z0-9_]+)", _sql, flags=re.IGNORECASE)
+    extracted_tables = [t.lower() for t in extracted_tables]
+    log.warning(f"Extracted tables (regex): {extracted_tables}")
 
-        # --- Extract and log all detected table/view names for debugging ---
-        alias_map = {}
-        for tbl in ast.find_all(exp.Table):
-            real = tbl.name.lower()
-            alias = (tbl.alias or real).lower()
-            alias_map[alias] = real
-        log.warning(f"Extracted tables: {list(alias_map.values())}")
+    for t in extracted_tables:
+        if t not in ALLOWED_TABLES:
+            raise HTTPException(
+                400,
+                f"❌ Disallowed table `{t}`. Allowed: {sorted(ALLOWED_TABLES)}"
+            )
 
-        # --- Perform normal validation ---
-        _validate_allowed(ast)
-        return ast.sql(dialect="postgres")
+    log.info(f"✅ Validation passed for: {extracted_tables}")
+
+    # Optionally append LIMIT if missing
+    if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE):
+        _sql = f"{_sql}\nLIMIT 500"
+
+    return _sql
 
 
     try:
