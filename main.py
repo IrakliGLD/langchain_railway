@@ -399,49 +399,49 @@ Write 3–6 sentences:
 def simple_table_whitelist_check(sql: str):
     """
     CRITICAL Pre-parsing safety check.
-    Uses regex to extract tables and ensure they are in ALLOWED_TABLES.
-    This bypasses the brittle sqlglot parser for the most important validation.
+    Uses a more robust regex to extract table names and ensure they are in ALLOWED_TABLES.
     """
-    # IMPROVED REGEX:
-    # Captures table names following FROM or JOIN. It's more forgiving of whitespace (including newlines)
-    # and handles optional aliases immediately following the table name (AS alias or just alias).
-    # Group 1 captures the table name.
-    pattern = r"(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)"
-    tables = re.findall(pattern, sql, re.IGNORECASE | re.MULTILINE)
+    # *** IMPROVED REGEX ***
+    # This pattern looks for FROM or JOIN, followed by any amount of whitespace (including newlines),
+    # then captures the table name (allowing letters, numbers, and underscores).
+    # The [^;,\s\)\(]+ part is a bit safer as it matches anything until a common SQL delimiter.
+    # Pattern explanation:
+    # 1. (?:FROM|JOIN) : Non-capturing group for the keywords.
+    # 2. \s+           : One or more whitespace characters (including newlines).
+    # 3. ([a-zA-Z0-9_.]+) : CAPTURE the table name, explicitly allowing periods (for schema.table)
+    pattern = r"(?:FROM|JOIN)\s+([a-zA-Z0-9_.]+)"
+    
+    # Use re.IGNORECASE for case-insensitivity.
+    tables = re.findall(pattern, sql, re.IGNORECASE)
 
-    tables = [t.lower() for t in tables if t.lower() not in ('(', 'select', 'where')] 
+    # Filter out common SQL keywords or parentheses that get accidentally captured.
+    tables = [t.lower().split()[0] for t in tables if t.lower() not in ('(', 'select', 'where') and t]
 
-    # If tables list is empty, it could mean a complex query structure (subquery in SELECT)
-    # or a syntax issue. For a primary check, we proceed if we found something.
-    if not tables:
-        # Fallback for SELECT ... FROM (schema.table) or SELECT * FROM (subquery)
-        # This part is a bit tricky, but for simplicity, we assume if it starts with 'SELECT'
-        # and has no tables found, it might be a subquery or CTE, which is safer
-        # than just crashing. If the query is complex, we pass it to the repair step
-        # hoping for the best, as this regex approach has limits.
-        log.warning("⚠️ Simple table extraction failed. Allowing flow to plan_validate_repair (risky).")
-        return
-
-    # Apply synonym mapping and perform the strict whitelist check
-    mapped_tables = set()
+    # Clean up the list to ensure we only get the canonical name if there's an alias.
+    # e.g., 'price_with_usd p' -> 'price_with_usd'
+    cleaned_tables = set()
     for t in tables:
-        # Check synonyms first
-        if t in TABLE_SYNONYMS:
-            t_canonical = TABLE_SYNONYMS[t]
-        else:
-            t_canonical = t
+        # Take the part before a space (alias) or a comma (multiple FROM tables)
+        t_name = t.split()[0].split(',')[0].strip('.')
+        if not t_name: continue # Skip if empty after stripping
 
-        # Check against the canonical allowed list
+        # Apply synonym mapping and perform the strict whitelist check
+        t_canonical = TABLE_SYNONYMS.get(t_name, t_name) # Use .get for safer lookup
+
         if t_canonical in ALLOWED_TABLES:
-            mapped_tables.add(t_canonical)
+            cleaned_tables.add(t_canonical)
         else:
-            # If after synonym mapping, it's still not allowed, raise error
             raise HTTPException(
                 status_code=400,
-                detail=f"❌ Unauthorized table or view: `{t}`. Allowed: {sorted(ALLOWED_TABLES)}"
+                detail=f"❌ Unauthorized table or view: `{t_name}`. Allowed: {sorted(ALLOWED_TABLES)}"
             )
 
-    log.info(f"✅ Pre-validation passed. Tables: {list(mapped_tables)}")
+    if not cleaned_tables and "from" in sql.lower():
+         # Last resort warning if a FROM clause exists but no table was captured (e.g., complex subquery)
+        log.warning("⚠️ Table extraction failed despite 'FROM' keyword. Allowing flow to plan_validate_repair (risky).")
+        return
+    
+    log.info(f"✅ Pre-validation passed. Tables: {list(cleaned_tables)}")
     return
 
 
