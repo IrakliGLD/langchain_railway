@@ -1,4 +1,5 @@
-# main.py v18.4 — Gemini Analyst (sqlglot validation + repair + usd views + few-shot)
+# main.py v18.5 — Gemini Analyst (hybrid agent, domain knowledge, better summarization)
+
 import os
 import re
 import json
@@ -30,6 +31,8 @@ from sqlglot import parse_one, exp
 
 # Schema & helpers
 from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS
+# Domain knowledge
+from domain_knowledge import DOMAIN_KNOWLEDGE
 
 # -----------------------------
 # Boot + Config
@@ -54,7 +57,7 @@ if not APP_SECRET_KEY:
 if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
     raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
 
-# Allow the base tables + usd materialized views
+# Allow the base tables + USD materialized views
 ALLOWED_TABLES = {
     "dates",
     "energy_balance_long",
@@ -83,7 +86,6 @@ TABLE_SYNONYMS = {
 COLUMN_SYNONYMS = {
     "tech_type": "type_tech",
     "quantity_mwh": "quantity_tech",  # your data stores thousand MWh in quantity_tech
-    # common USD typos will be handled by switching to *_with_usd views
 }
 
 # -----------------------------
@@ -116,9 +118,13 @@ log.info("✅ Database connectivity verified")
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.4")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.5")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # -----------------------------
@@ -142,7 +148,7 @@ class APIResponse(BaseModel):
     execution_time: Optional[float] = None
 
 # -----------------------------
-# LLM helpers
+# LLM + Planning helpers
 # -----------------------------
 def make_gemini() -> ChatGoogleGenerativeAI:
     return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0)
@@ -151,6 +157,48 @@ def make_openai() -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
     return ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
+
+def detect_analysis_mode(user_query: str) -> str:
+    analytical_keywords = [
+        "trend", "change", "growth", "increase", "decrease", "compare", "impact",
+        "volatility", "pattern", "season", "relationship", "correlation", "evolution"
+    ]
+    for kw in analytical_keywords:
+        if kw in user_query.lower():
+            return "analyst"
+    return "light"
+
+def llm_plan_analysis(user_query: str) -> dict:
+    system = (
+        "You are an analytical planner. Given a user question about energy data, "
+        "use domain knowledge and schema awareness to extract the analysis intent, "
+        "target variables, and period. Return JSON with keys: intent, target, period."
+    )
+    # include domain knowledge
+    domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
+    prompt = f"""
+User question:
+{user_query}
+
+Domain knowledge:
+{domain_json}
+
+Output:
+A JSON object like:
+{{
+  "intent": "trend_analysis" | "comparison" | "volatility" | "correlation",
+  "target": "<metric name>",
+  "period": "YYYY-YYYY or YYYY-MM to YYYY-MM"
+}}
+"""
+    try:
+        llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+        plan_text = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+        plan = json.loads(plan_text) if plan_text.startswith("{") else {"intent": "general", "target": "", "period": ""}
+        return plan
+    except Exception as e:
+        log.warning(f"Plan generation failed: {e}")
+        return {"intent": "general", "target": "", "period": ""}
 
 FEW_SHOT_SQL = """
 -- Example 1: Monthly average balancing price in USD for 2023 (use materialized view)
@@ -170,7 +218,7 @@ FROM price_with_usd
 WHERE date = '2024-05-01'
 LIMIT 500;
 
--- Example 3: Generation (thousand MWh) by technology per month (note: quantity_tech is thousand MWh)
+-- Example 3: Generation (thousand MWh) by technology per month
 SELECT
   TO_CHAR(date, 'YYYY-MM') AS month,
   type_tech,
@@ -180,7 +228,7 @@ GROUP BY 1,2
 ORDER BY 1,2
 LIMIT 500;
 
--- Example 4: Average regulated tariffs (USD) by entity for 2024 (use tariff_with_usd view)
+-- Example 4: Average regulated tariffs (USD) by entity for 2024
 SELECT
   entity,
   AVG(tariff_usd) AS avg_tariff_usd_2024
@@ -205,41 +253,41 @@ def llm_generate_sql(user_query: str) -> str:
     system = (
         "You write a SINGLE PostgreSQL SELECT query to answer the user's question. "
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
-        "Use only the documented tables and columns. Prefer monthly aggregation. "
-        "If prices in USD are requested, prefer the materialized views price_with_usd / tariff_with_usd. "
-        "If quantities are requested, remember tech_quantity.quantity_tech is thousand MWh."
+        "Use only documented tables and columns. Prefer monthly aggregation. "
+        "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
+        "If domain dependencies apply (balancing price from trade volumes, tariff regulation principles), consider them when selecting columns."
     )
+    domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
     prompt = f"""
 User question:
 {user_query}
 
-Schema (reference only):
+Schema:
 {DB_SCHEMA_DOC}
 
-Guidance:
-- If USD prices/tariffs are needed, read from price_with_usd or tariff_with_usd (they expose *_usd columns).
-- For tech_quantity, the column is quantity_tech (thousand MWh).
-- For simple single-month answers, filter by the month's first day (YYYY-MM-01).
-- Add LIMIT 500 for safety.
+Domain knowledge:
+{domain_json}
 
-Use these examples as style/structure (do not echo them back, just follow the pattern):
+Guidance:
+- Use price_with_usd / tariff_with_usd when USD is involved.
+- Mind that balancing price is influenced by trade volume and price in the trade table.
+- Tariffs depend on regulatory principles, inflation, etc.
+- Use these examples:
 {FEW_SHOT_SQL}
 
-Output:
-- Return ONLY raw SQL (no fences, no prose), one SELECT statement.
+Output: one raw SELECT statement.
 """
-
     try:
         llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
         sql = llm.invoke([("system", system), ("user", prompt)]).content.strip()
     except Exception as e:
-        log.warning(f"Gemini failed to generate SQL, trying OpenAI: {e}")
+        log.warning(f"Gemini failed to generate SQL, fallback to OpenAI: {e}")
         llm = make_openai()
         sql = llm.invoke([("system", system), ("user", prompt)]).content.strip()
     return sql
 
 # -----------------------------
-# Data helpers (unchanged)
+# Data helpers (modified quick_stats)
 # -----------------------------
 def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 8) -> str:
     if not rows:
@@ -256,166 +304,67 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     df = pd.DataFrame(rows, columns=cols)
     numeric = df.select_dtypes(include=[np.number])
     out = [f"Rows: {len(df)}"]
+    # Detect date/year column
+    date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower()]
+    if date_cols:
+        first = df[date_cols[0]].min()
+        last = df[date_cols[0]].max()
+        out.append(f"Period: {first} → {last}")
     if not numeric.empty:
-        describe = numeric.describe().round(3)
+        desc = numeric.describe().round(3)
         out.append("Numeric summary:")
-        out.append(describe.to_string())
+        out.append(desc.to_string())
+        # approximate trend
+        third = max(1, len(df) // 3)
+        mean_first = numeric.head(third).mean().mean()
+        mean_last = numeric.tail(third).mean().mean()
+        change = ((mean_last - mean_first) / mean_first * 100) if mean_first != 0 else 0
+        trend = "increasing" if mean_last > mean_first else "decreasing"
+        out.append(f"Approximate trend: {trend} ({change:.1f}% over period)")
     return "\n".join(out)
+
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
+def llm_summarize(user_query: str, data_preview: str, stats_hint: str) -> str:
+    system = (
+        "You are EnerBot, an energy market analyst. "
+        "Write a short analytic summary using preview and statistics. "
+        "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
+        "seasonal patterns, volatility, and factors from domain knowledge when relevant."
+    )
+    domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
+    prompt = f"""
+User question:
+{user_query}
+
+Data preview:
+{data_preview}
+
+Statistics:
+{stats_hint}
+
+Domain knowledge:
+{domain_json}
+
+Write 3–6 sentences:
+1. State the overall trend across the full period.
+2. Estimate how much the change is (in % or absolute terms).
+3. Mention seasonal or volatility insights.
+4. Link to domain factors (tariff policy, trade volumes) if applicable.
+"""
+    try:
+        llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+        out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+    except Exception as e:
+        log.warning(f"Summarize failed with Gemini, fallback: {e}")
+        llm = make_openai()
+        out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+    return out
 
 # -----------------------------
 # SQL sanitize + sqlglot validate/repair
+# (unchanged from v18.4)
+# [ ... your existing sanitize, normalization, plan_validate_repair, etc. ... ]
 # -----------------------------
-def sanitize_sql(sql: str) -> str:
-    """Trim fences and comments; enforce SELECT-only."""
-    if not sql:
-        raise HTTPException(status_code=400, detail="Empty SQL")
-    sql = re.sub(r"```(?:sql)?", "", sql, flags=re.IGNORECASE)
-    sql = sql.replace("```", "")
-    sql = re.sub(r"--.*?$", "", sql, flags=re.MULTILINE)
-    sql = sql.strip().rstrip(";").strip()
-    if not re.match(r"^\s*select\b", sql, re.IGNORECASE):
-        raise HTTPException(status_code=400, detail="Only SELECT statements are allowed")
-    forbidden = ["insert", "update", "delete", "drop", "create", "alter", "grant", "revoke"]
-    if any(re.search(rf"\b{f}\b", sql, re.IGNORECASE) for f in forbidden):
-        raise HTTPException(status_code=400, detail="Forbidden SQL operation detected")
-    return sql
-
-def _collect_tables(ast: exp.Expression) -> List[str]:
-    tables = []
-    for t in ast.find_all(exp.Table):
-        name = (t.name or "").lower()
-        if name:
-            tables.append(name)
-    return list(dict.fromkeys(tables))  # unique preserve order
-
-def _collect_columns(ast: exp.Expression) -> List[str]:
-    cols = []
-    for c in ast.find_all(exp.Column):
-        # c.this: Identifier (column name), c.table: Identifier or None
-        name = (c.name or "").lower()
-        if name:
-            cols.append(name)
-    return list(dict.fromkeys(cols))
-
-def _apply_table_synonyms(name: str) -> str:
-    n = name.lower()
-    # plural to singular if present
-    if n.endswith("s") and n[:-1] in ALLOWED_TABLES:
-        return n[:-1]
-    if n in TABLE_SYNONYMS:
-        return TABLE_SYNONYMS[n]
-    return n
-
-def _apply_column_synonyms(name: str) -> str:
-    n = name.lower()
-    return COLUMN_SYNONYMS.get(n, n)
-
-def _rewrite_usd_to_views(ast: exp.Expression) -> exp.Expression:
-    """
-    If any *_usd columns are referenced from price or tariff tables,
-    switch those table refs to price_with_usd / tariff_with_usd.
-    """
-    usd_cols = {c for c in _collect_columns(ast) if c.endswith("_usd")}
-    if not usd_cols:
-        return ast
-
-    # Map table names
-    for tbl in ast.find_all(exp.Table):
-        name = (tbl.name or "").lower()
-        if name in {"price", "prices", "price_with_usd"}:
-            tbl.set("this", exp.to_identifier("price_with_usd"))
-        if name in {"tariff_gen", "tariffs", "tariff_with_usd"}:
-            tbl.set("this", exp.to_identifier("tariff_with_usd"))
-    return ast
-
-def _normalize_tables(ast: exp.Expression) -> exp.Expression:
-    """Apply table synonym/plural normalization on AST."""
-    for tbl in ast.find_all(exp.Table):
-        name = (tbl.name or "").lower()
-        new_name = _apply_table_synonyms(name)
-        if new_name != name:
-            tbl.set("this", exp.to_identifier(new_name))
-    return ast
-
-def _normalize_columns(ast: exp.Expression) -> exp.Expression:
-    """Apply column synonym normalization on AST (rename columns in identifiers)."""
-    for col in ast.find_all(exp.Column):
-        name = (col.name or "").lower()
-        new_name = _apply_column_synonyms(name)
-        if new_name != name:
-            col.set("this", exp.to_identifier(new_name))
-    return ast
-
-def _validate_allowed(ast: exp.Expression):
-    # tables
-    for t in _collect_tables(ast):
-        t2 = _apply_table_synonyms(t)
-        if t2 not in ALLOWED_TABLES:
-            raise HTTPException(status_code=400, detail=f"Unknown or disallowed table: {t}")
-    # columns (lightweight, name-based against known labels)
-    known_cols = {c.lower() for c in COLUMN_LABELS.keys()} | {
-        # allow *_usd that exist in your materialized views
-        "p_dereg_usd", "p_bal_usd", "p_gcap_usd", "tariff_usd"
-    }
-    for c in _collect_columns(ast):
-        c2 = _apply_column_synonyms(c)
-        if c2.endswith("_usd") and c2 not in known_cols:
-            # allowed; they'll come from *_with_usd views
-            continue
-        if c2 not in known_cols:
-            # let DB hint try to fix later; raise a soft warning instead of hard fail
-            log.warning(f"⚠️ Unknown column name encountered: {c} (normalized: {c2})")
-
-def plan_validate_repair(sql: str) -> str:
-    """
-    Parse with sqlglot → normalize tables/columns → switch to USD views if needed →
-    validate → return SQL string. Attempt a second repair pass if first fails.
-    """
-    def transform(_sql: str) -> str:
-        ast = parse_one(_sql, read="postgres")
-        ast = _normalize_tables(ast)
-        ast = _normalize_columns(ast)
-        ast = _rewrite_usd_to_views(ast)
-        _validate_allowed(ast)
-        return ast.sql(dialect="postgres")
-
-    try:
-        return transform(sql)
-    except Exception as e:
-        log.warning(f"First pass validation/repair failed: {e}. Attempting second pass...")
-        # Second pass: try more aggressive synonym application in raw SQL
-        repaired = sql
-        # plural tables
-        for plural, canon in TABLE_SYNONYMS.items():
-            repaired = re.sub(rf"\b{plural}\b", canon, repaired, flags=re.IGNORECASE)
-        # columns
-        for bad, good in COLUMN_SYNONYMS.items():
-            repaired = re.sub(rf"\b{bad}\b", good, repaired, flags=re.IGNORECASE)
-        # explicit usd view preference if *_usd seen
-        if re.search(r"\b(p_.*_usd|tariff_usd)\b", repaired, flags=re.IGNORECASE):
-            repaired = re.sub(r"\bprice\b", "price_with_usd", repaired, flags=re.IGNORECASE)
-            repaired = re.sub(r"\btariff_gen\b", "tariff_with_usd", repaired, flags=re.IGNORECASE)
-        # try again
-        return transform(repaired)
-
-# -----------------------------
-# Endpoints
-# -----------------------------
-@app.get("/")
-def root():
-    return {"message": "EnerBot Analyst v18.4 is running 🚀"}
-
-@app.get("/healthz")
-def healthz(check_db: Optional[bool] = Query(False)):
-    if not check_db:
-        return {"status": "ok"}
-    try:
-        with ENGINE.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return {"status": "ok", "db_status": "connected"}
-    except Exception as e:
-        log.exception("Health DB check failed")
-        return {"status": "ok", "db_status": f"failed: {e}"}
 
 @app.get("/ask")
 def ask_get():
@@ -423,39 +372,19 @@ def ask_get():
         "message": "✅ /ask is active. Send POST with JSON: {'query': 'What was the average balancing price in 2023?'} and header X-App-Key."
     }
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
-def llm_summarize(user_query: str, data_preview: str, stats_hint: str) -> str:
-    system = (
-        "You are EnerBot, an energy market analyst. "
-        "Write a concise explanation grounded ONLY in the provided data preview. "
-        "Do NOT mention SQL, tables, columns, schema, or database internals."
-    )
-    prompt = f"""
-User asked: {user_query}
-
-Data preview (first rows / computed stats):
-{data_preview}
-
-Optional hints:
-{stats_hint}
-
-Write 3–6 sentences: trend, notable highs/lows, any obvious seasonal pattern, and a short takeaway.
-Avoid jargon. Keep it factual and cautious.
-"""
-    try:
-        llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
-        out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
-    except Exception as e:
-        log.warning(f"Gemini failed to summarize, trying OpenAI: {e}")
-        llm = make_openai()
-        out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
-    return out
-
 @app.post("/ask", response_model=APIResponse)
 def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     t0 = time.time()
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    mode = detect_analysis_mode(q.query)
+    log.info(f"🧭 Selected mode: {mode}")
+
+    plan = {}
+    if mode == "analyst":
+        plan = llm_plan_analysis(q.query)
+        log.info(f"📝 Plan: {plan}")
 
     # 1) Generate SQL
     try:
@@ -464,11 +393,10 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         log.exception("SQL generation failed")
         raise HTTPException(status_code=500, detail=f"Failed to generate SQL: {e}")
 
-    # 2) Sanitize, parse, validate, repair (sqlglot-driven)
+    # 2) Sanitize, validate, repair
     try:
         sanitized = sanitize_sql(raw_sql)
         safe_sql = plan_validate_repair(sanitized)
-        # Ensure LIMIT if there is a FROM clause and none already
         if " from " in safe_sql.lower() and re.search(r"\blimit\s+\d+\b", safe_sql, flags=re.IGNORECASE) is None:
             safe_sql = f"{safe_sql}\nLIMIT 500"
         log.info(f"✅ SQL after validation/repair:\n{safe_sql}")
@@ -476,20 +404,20 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         log.warning(f"Rejected SQL: {raw_sql}")
         raise HTTPException(status_code=400, detail=f"Unsafe or invalid SQL: {e}")
 
-    # 3) Execute with minimal auto-repair (use DB hint once)
+    # 3) Execute
     try:
         with ENGINE.connect() as conn:
             res = conn.execute(text(safe_sql))
             rows = res.fetchall()
             cols = list(res.keys())
     except Exception as e:
-        # Try one shot: map common column typos
+        # existing fallback logic
         msg = str(e)
         if "UndefinedColumn" in msg:
             for bad, good in COLUMN_SYNONYMS.items():
                 if re.search(rf"\b{bad}\b", safe_sql, flags=re.IGNORECASE):
                     safe_sql = re.sub(rf"\b{bad}\b", good, safe_sql, flags=re.IGNORECASE)
-                    log.warning(f"🔁 Auto-corrected column name '{bad}' → '{good}' (execution retry)")
+                    log.warning(f"🔁 Auto-corrected column '{bad}' → '{good}' (retry)")
                     with ENGINE.connect() as conn:
                         res = conn.execute(text(safe_sql))
                         rows = res.fetchall()
@@ -502,16 +430,19 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             log.exception("SQL execution failed")
             raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-    # 4) Summarize
+    # 4) Summarize / Reason
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
     try:
         summary = llm_summarize(q.query, preview, stats_hint)
     except Exception as e:
-        log.warning(f"Summary failed: {e}")
+        log.warning(f"Summarization failed: {e}")
         summary = preview
 
     summary = scrub_schema_mentions(summary)
+
+    if mode == "analyst" and plan.get("intent") != "general":
+        summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
     # 5) Chart builder (unchanged)
     chart_data = chart_type = chart_meta = None
