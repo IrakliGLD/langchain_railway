@@ -418,16 +418,16 @@ Data preview:
 
 Statistics:
 {stats_hint}
-# NOTE: The 'Trend (Yearly Avg)' in Statistics is the most reliable long-term trend estimate.
 
 Domain knowledge:
 {domain_json}
+# NOTE: If a comparison between GEL and USD is present, use the 'CurrencyInfluence' knowledge to explain the divergence based on the exchange rate and USD-denominated costs (gas, imports).
 
-Write 3–6 sentences:
-1. State the overall **long-term trend** using the 'Trend (Yearly Avg)' from the Statistics.
-2. Estimate the magnitude of change (in % or absolute terms).
-3. **Analyze and mention seasonal patterns (e.g., peak/trough months)** or volatility insights.
-4. Link to domain factors (tariff policy, trade volumes) if applicable.
+Write 4–7 sentences:
+1. State the overall long-term trend (using Yearly Avg).
+2. If dual-currency, explain the **divergence** by citing the **GEL/USD exchange rate trend** (depreciation/appreciation).
+3. Mention the specific USD-denominated cost factors (e.g., thermal gas, imports) that are affected.
+4. Analyze and mention seasonal patterns or volatility.
 """
 
     
@@ -706,7 +706,32 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             for _, r in df.iterrows():
                 item = {c: str(r[c]) if c == time_key else float(r[c]) for c in [time_key, gel_key, usd_key]}
                 chart_data.append(item)
-        
+
+            # Simple check for long-term x-rate movement
+            df['x_rate'] = df[gel_key] / df[usd_key]
+            first_x_rate = df['x_rate'].iloc[0]
+            last_x_rate = df['x_rate'].iloc[-1]
+            x_rate_change = ((last_x_rate - first_x_rate) / first_x_rate * 100) if first_x_rate != 0 else 0
+            
+            x_rate_trend = "depreciation of GEL" if last_x_rate > first_x_rate else "appreciation of GEL"
+
+            chart_meta = {
+                "xAxisTitle": time_key, 
+                "yAxisTitle": f"{gel_key.upper()} / {usd_key.upper()}", 
+                "title": f"Comparison: {gel_key.upper()} vs {usd_key.upper()}",
+                # --- NEW KEYS FOR LLM HINTING ---
+                "XRateAnalysis": {
+                    "first_x_rate": round(first_x_rate, 4),
+                    "last_x_rate": round(last_x_rate, 4),
+                    "overall_change_percent": round(x_rate_change, 1),
+                    "trend_label": x_rate_trend
+                }
+                # --- END NEW KEYS ---
+            }
+            log.info(f"💵 Detected X-Rate Trend: {x_rate_trend} ({x_rate_change:.1f}%)")
+            # --- END NEW METADATA ---
+
+            
             chart_meta = {
                 "xAxisTitle": time_key, 
                 "yAxisTitle": f"{gel_key.upper()} / {usd_key.upper()}", 
