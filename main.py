@@ -637,38 +637,80 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     if mode == "analyst" and plan.get("intent") != "general":
         summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-    # 5) Chart builder (unchanged)
-    chart_data = chart_type = chart_meta = None
-    if rows and len(cols) >= 2:
-        df = pd.DataFrame(rows, columns=cols)
-        num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if num_cols:
-            val_col = num_cols[0]
-            label_col = None
-            for c in df.columns:
-                if c == val_col:
-                    continue
-                if df[c].dtype == "O" or "date" in c.lower() or "year" in c.lower():
-                    label_col = c
-                    break
-            if label_col:
-                sample = df[[label_col, val_col]].head(50)
-                if "date" in label_col.lower() or "year" in label_col.lower():
-                    chart_type = "line"
-                    chart_data = [{"date": str(r[label_col]), "value": float(r[val_col])} for _, r in sample.iterrows()]
-                    chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Trend"}
+# 5) Chart builder (UPDATED LOGIC)
+chart_data = chart_type = chart_meta = None
+if rows and cols:
+    df = pd.DataFrame(rows, columns=cols)
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # --- Dual-Axis Check (GEL/USD) ---
+    gel_key = next((c for c in cols if "gel" in c.lower()), None)
+    usd_key = next((c for c in cols if "usd" in c.lower()), None)
+    time_key = next((c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None)
+
+    if gel_key and usd_key and time_key:
+        log.info("📊 Detected dual-currency time series (GEL/USD).")
+        chart_type = "line"  # Forces the line chart, the frontend component will handle dual axes
+        
+        # Create the chart_data list, preserving all relevant keys
+        chart_data = []
+        for _, r in df.iterrows():
+            item = {c: str(r[c]) if c == time_key else float(r[c]) for c in [time_key, gel_key, usd_key]}
+            chart_data.append(item)
+        
+        chart_meta = {
+            "xAxisTitle": time_key, 
+            "yAxisTitle": f"{gel_key.upper()} / {usd_key.upper()}", 
+            "title": f"Comparison: {gel_key.upper()} vs {usd_key.upper()}"
+        }
+
+    # --- Single-Series Fallback (Time, Bar, Pie/Doughnut) ---
+    elif num_cols:
+        val_col = num_cols[0]
+        label_col = None
+        
+        # Find the best non-numeric column for the label/x-axis
+        for c in df.columns:
+            if c != val_col and ("date" in c.lower() or "year" in c.lower() or "month" in c.lower() or "label" in c.lower() or "category" in c.lower() or "sector" in c.lower() or "entity" in c.lower()):
+                label_col = c
+                break
+                
+        if label_col:
+            # Check for multi-categorical breakdown (potential stacked bar)
+            if "sector" in cols and "energy_source" in cols:
+                log.info("📊 Detected categorical breakdown (Stacked Bar potential).")
+                chart_type = "stackedbar"
+                # Pass the raw data for the frontend to pivot
+                chart_data = df.to_dict('records') 
+                chart_meta = {"xAxisTitle": "Sector", "yAxisTitle": val_col, "title": "Breakdown by Source & Sector"}
+
+            elif "date" in label_col.lower() or "year" in label_col.lower() or "month" in label_col.lower():
+                log.info("📊 Detected single time series (Line/Bar).")
+                chart_type = "line"
+                chart_data = [{"date": str(r[label_col]), "value": float(r[val_col])} for _, r in df.head(500).iterrows()]
+                chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Trend"}
+            
+            else:
+                log.info("📊 Detected simple category data (Bar/Pie).")
+                # Determine if a Pie chart is more appropriate (e.g., small number of unique labels)
+                if df[label_col].nunique() < 12 and len(df) <= 12:
+                     # This forces pie chart for small, aggregate queries
+                    chart_type = "pie" 
+                    
                 else:
                     chart_type = "bar"
-                    chart_data = [{"label": str(r[label_col]), "value": float(r[val_col])} for _, r in sample.iterrows()]
-                    chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Comparison"}
+                    
+                chart_data = [{"label": str(r[label_col]), "value": float(r[val_col])} for _, r in df.head(500).iterrows()]
+                chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Comparison"}
 
-    return APIResponse(
-        answer=summary,
-        chart_data=chart_data,
-        chart_type=chart_type,
-        chart_metadata=chart_meta,
-        execution_time=round(time.time() - t0, 2),
-    )
+# 6) Return
+return APIResponse(
+    answer=summary,
+    chart_data=chart_data,
+    chart_type=chart_type,
+    chart_metadata=chart_meta,
+    execution_time=round(time.time() - t0, 2),
+)
 
 # -----------------------------
 # Local dev runner
