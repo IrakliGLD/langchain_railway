@@ -28,7 +28,7 @@ DOMAIN_KNOWLEDGE = {
             "Trade volumes determine the weights used in calculating the balancing electricity price."
         ]
     }
-}
+},
 
 
     "CurrencyInfluence": {
