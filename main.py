@@ -329,29 +329,75 @@ def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 200) -> 
             df[c] = df[c].astype(float).round(3)
     return df.to_string(index=False)
 
+
 def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     if not rows:
         return "0 rows."
     df = pd.DataFrame(rows, columns=cols)
     numeric = df.select_dtypes(include=[np.number])
     out = [f"Rows: {len(df)}"]
-    # Detect date/year column
-    date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower()]
-    if date_cols:
-        first = df[date_cols[0]].min()
-        last = df[date_cols[0]].max()
-        out.append(f"Period: {first} → {last}")
+    
+    # 1. Detect date/year column
+    date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()]
+    if not date_cols or numeric.empty:
+        # Fallback to simple stats if no date or numeric data
+        # ... (original logic for non-time series can stay here) ...
+        return "\n".join(out)
+
+    time_col = date_cols[0]
+
+    # --- NEW TREND CALCULATION: Compare First Full Year vs Last Full Year ---
+    try:
+        # Ensure the time column is datetime, then extract year/month
+        if pd.api.types.is_datetime64_any_dtype(df[time_col]):
+             df['__year'] = df[time_col].dt.year
+        else:
+             # Attempt to coerce strings/objects to datetime
+             df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+             df['__year'] = df[time_col].dt.year
+
+        valid_years = df['__year'].dropna().unique()
+        if len(valid_years) >= 2:
+            first_full_year = int(valid_years.min())
+            last_full_year = int(valid_years.max())
+
+            # Ensure we are comparing two different years
+            if first_full_year != last_full_year:
+                
+                # Filter data for the first and last full years
+                df_first = df[df['__year'] == first_full_year]
+                df_last = df[df['__year'] == last_full_year]
+                
+                # Get the mean of all numeric columns for these years
+                mean_first_year = df_first[numeric.columns].mean().mean()
+                mean_last_year = df_last[numeric.columns].mean().mean()
+                
+                change = ((mean_last_year - mean_first_year) / mean_first_year * 100) if mean_first_year != 0 else 0
+                trend = "increasing" if mean_last_year > mean_first_year else "decreasing"
+                
+                out.append(f"Trend (Yearly Avg, {first_full_year}→{last_full_year}): {trend} ({change:.1f}%)")
+                
+            else:
+                 out.append("Trend: Less than one full year of data for comparison.")
+
+        else:
+            out.append("Trend: Insufficient data for yearly comparison.")
+
+    except Exception as e:
+        log.warning(f"⚠️ Yearly trend calculation failed: {e}")
+        # Fallback to original logic or just skip trend calculation
+
+    # ... (Keep the date range display) ...
+    first = df[time_col].min()
+    last = df[time_col].max()
+    out.append(f"Period: {first} → {last}")
+    
+    # ... (Keep the numeric summary) ...
     if not numeric.empty:
         desc = numeric.describe().round(3)
         out.append("Numeric summary:")
         out.append(desc.to_string())
-        # approximate trend
-        third = max(1, len(df) // 3)
-        mean_first = numeric.head(third).mean().mean()
-        mean_last = numeric.tail(third).mean().mean()
-        change = ((mean_last - mean_first) / mean_first * 100) if mean_first != 0 else 0
-        trend = "increasing" if mean_last > mean_first else "decreasing"
-        out.append(f"Approximate trend: {trend} ({change:.1f}% over period)")
+
     return "\n".join(out)
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
@@ -372,16 +418,19 @@ Data preview:
 
 Statistics:
 {stats_hint}
+# NOTE: The 'Trend (Yearly Avg)' in Statistics is the most reliable long-term trend estimate.
 
 Domain knowledge:
 {domain_json}
 
 Write 3–6 sentences:
-1. State the overall trend across the full period.
-2. Estimate how much the change is (in % or absolute terms).
-3. Mention seasonal or volatility insights.
+1. State the overall **long-term trend** using the 'Trend (Yearly Avg)' from the Statistics.
+2. Estimate the magnitude of change (in % or absolute terms).
+3. **Analyze and mention seasonal patterns (e.g., peak/trough months)** or volatility insights.
 4. Link to domain factors (tariff policy, trade volumes) if applicable.
 """
+
+    
     try:
         llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
         out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
