@@ -277,6 +277,18 @@ FROM monthly_cpi
 WHERE cpi_type = 'electricity_gas_and_other_fuels'
 ORDER BY date
 LIMIT 500;
+
+-- Example 6: Monthly data for Balancing Price (GEL) and Shares of key sources (Hydro, Import) for correlation analysis
+SELECT
+  TO_CHAR(t1.date, 'YYYY-MM') AS month,
+  t1.p_bal_gel AS balancing_price_gel,
+  t2.share_import,
+  t2.share_deregulated_hydro,
+  t2.share_regulated_hpp
+FROM price_with_usd t1
+JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
+ORDER BY 1
+LIMIT 500;
 """
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
@@ -675,6 +687,37 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     # 4) Summarize / Reason
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
+    
+    # --- NEW: Correlation Analysis ---
+    correlation_results = {}
+    if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
+        log.info("🔍 Calculating correlation matrix for LLM analysis.")
+        
+        # Identify the target variables (prices)
+        target_cols = [c for c in df.columns if 'price' in c.lower() or 'bal' in c.lower()]
+        
+        # Identify the explanatory variables (shares/sources)
+        explanatory_cols = [c for c in df.columns if 'share' in c.lower() or 'import' in c.lower() or 'hydro' in c.lower() or 'tpp' in c.lower()]
+        
+        # Calculate correlation matrix for relevant columns
+        if target_cols and explanatory_cols:
+            # Drop non-numeric/time columns before corr()
+            corr_df = df[target_cols + explanatory_cols].apply(pd.to_numeric, errors='coerce').dropna()
+            
+            # Calculate correlation against all targets
+            for target in target_cols:
+                if target in corr_df.columns:
+                    # Get correlation of the target column with all other columns
+                    corr_series = corr_df.corr()[target].sort_values(ascending=False).round(3)
+                    # Filter for only the explanatory variables and exclude self-correlation
+                    correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+        
+        if correlation_results:
+            stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
+            stats_hint += json.dumps(correlation_results, indent=2)
+            log.info(f"Generated correlations: {correlation_results}")
+    # --- END Correlation Analysis ---
+    
     try:
         summary = llm_summarize(q.query, preview, stats_hint)
     except Exception as e:
