@@ -29,3 +29,15 @@ DOMAIN_KNOWLEDGE = {
         ]
     }
 }
+
+
+    "CurrencyInfluence": {
+        "GEL_USD_Effect": "Energy price analysis must consider the GEL/USD exchange rate. A change in the rate directly causes divergence between GEL-denominated and USD-denominated prices for the same product.",
+        "USD_Denominated_Costs": [
+            "Natural Gas for Thermal Generation (TGC) is primarily priced in USD. As GEL depreciates, the cost of thermal generation increases in GEL terms, pushing up wholesale and balancing prices.",
+            "Electricity Imports are priced in USD. When GEL depreciates, import prices rise in GEL terms.",
+            "Regulated tariffs (for distribution/supply) are often adjusted based on exchange rate changes to cover USD-denominated costs."
+        ],
+        "SeasonalityHint": "Price trends should be compared on a yearly average basis to neutralize the strong seasonal swings (high Hydro Generation in summer = low prices; high Thermal Generation in winter = high prices)."
+    }
+}
