@@ -27,9 +27,7 @@ DOMAIN_KNOWLEDGE = {
             "Includes transactions across exchange and balancing electricity segments.",
             "Trade volumes determine the weights used in calculating the balancing electricity price."
         ]
-    }
-},
-
+    },
 
     "CurrencyInfluence": {
         "GEL_USD_Effect": "Energy price analysis must consider the GEL/USD exchange rate. A change in the rate directly causes divergence between GEL-denominated and USD-denominated prices for the same product.",
