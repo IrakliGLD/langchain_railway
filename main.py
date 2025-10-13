@@ -216,7 +216,7 @@ FROM price_with_usd
 WHERE EXTRACT(YEAR FROM date) = 2023
 GROUP BY 1,2
 ORDER BY 1,2
-LIMIT 500;
+LIMIT 750;
 
 -- Example 2: Single month balancing price (USD) for May 2024
 SELECT p_bal_usd
@@ -707,58 +707,96 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     if mode == "analyst" and plan.get("intent") != "general":
         summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-    # 5) Chart builder (ENFORCED: unified one-axis for same dimensions + labeled series)
+    # 5) Chart builder (FINAL v3 — unified axis, dimension-aware, label-safe)
     chart_data = chart_type = chart_meta = None
     if rows and cols:
-        num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        df = df.copy()
+
+        # --- Force numeric conversion ---
+        for c in cols:
+            try:
+                df[c] = pd.to_numeric(df[c], errors="ignore")
+            except Exception:
+                pass
+
+        # --- Detect numeric columns ---
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         time_key = next(
-            (c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None
+            (c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])),
+            None,
         )
 
-        # --- Infer physical/currency dimension from column names ---
+        # --- Infer physical/economic/index dimension ---
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
             if any(x in col_l for x in ["quantity", "generation", "mw", "tj", "volume"]):
-                return "energy_qty"
+                return "energy_qty"        # thousand MWh or TJ
             if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
-                return "price_tariff"
+                return "price_tariff"      # GEL/USD per MWh
+            if any(x in col_l for x in ["cpi", "index", "inflation"]):
+                return "index"             # CPI-type
             return "other"
 
-        dims = {infer_dimension(c) for c in num_cols}
-        log.info(f"📐 Detected dimensions: {dims}")
+        dim_map = {c: infer_dimension(c) for c in num_cols}
+        dims = set(dim_map.values())
+        log.info(f"📐 Detected dimensions: {dim_map} → {dims}")
 
-        # --- Build label map from context.py ---
-        label_map = {c: COLUMN_LABELS.get(c, c.upper()) for c in num_cols}
+        # --- Load human-readable labels from context.py ---
+        try:
+            from context import COLUMN_LABELS
+        except ImportError:
+            COLUMN_LABELS = {}
 
-        # --- Prepare labeled DataFrame for chart_data ---
-        df_labeled = df.copy()
-        df_labeled.rename(columns=label_map, inplace=True)
+        label_map = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in num_cols}
         chart_labels = [label_map[c] for c in num_cols]
+        df_labeled = df.rename(columns=label_map)
 
-        # --- Determine axis rule ---
-        if dims == {"price_tariff"} or dims == {"energy_qty"} or len(dims) == 1:
-            # ✅ All indicators share the same dimension → one y-axis
-            log.info("📊 Single-dimension dataset → enforcing one-axis chart.")
+        # --- Determine chart logic ---
+        if len(dims) == 1:
+            # ✅ All indicators share one physical dimension
+            log.info("📊 Uniform dimension → single-axis chart.")
             chart_type = "line"
+            chart_data = df_labeled.to_dict("records")
+            main_dim = next(iter(dims))
+            y_label = (
+                "Price/Tariff (GEL or USD per MWh)" if main_dim == "price_tariff"
+                else "Energy Quantity (TJ / thousand MWh)" if main_dim == "energy_qty"
+                else "Index Value (2015 = 100)" if main_dim == "index"
+                else "Value"
+            )
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisTitle": y_label,
+                "title": "Indicator Comparison (same dimension)",
+                "axisMode": "single",
+                "labels": chart_labels,
+            }
+
+        elif "index" in dims and len(dims) > 1:
+            # ✅ CPI or other index + anything else → dual-axis (index always right)
+            log.info("📊 Mixed index + other dimension → dual-axis chart.")
+            chart_type = "dualaxis"
             chart_data = df_labeled.to_dict("records")
             chart_meta = {
                 "xAxisTitle": time_key or "time",
-                "yAxisTitle": (
-                    "Price/Tariff (GEL or USD per MWh)" if "price_tariff" in dims else "Quantity (MW/TJ)"
+                "yAxisLeft": (
+                    "Price/Tariff (GEL or USD per MWh)" if "price_tariff" in dims
+                    else "Energy Quantity (TJ / thousand MWh)"
                 ),
-                "title": "Indicator Comparison (same dimension)",
-                "axisMode": "single",
-                "labels": chart_labels,  # human-readable series names
+                "yAxisRight": "Index (2015 = 100)",
+                "title": "Index vs Other Indicator",
+                "axisMode": "dual",
+                "labels": chart_labels,
             }
 
         elif "price_tariff" in dims and "energy_qty" in dims:
-            # ⚙️ Different physical dimension → dual y-axis
+            # ✅ Monetary + Physical → dual-axis
             log.info("📊 Mixed price/tariff and quantity → dual y-axis chart.")
             chart_type = "dualaxis"
             chart_data = df_labeled.to_dict("records")
             chart_meta = {
                 "xAxisTitle": time_key or "time",
-                "yAxisLeft": "Quantity (MW/TJ)",
+                "yAxisLeft": "Quantity (TJ / thousand MWh)",
                 "yAxisRight": "Price/Tariff (GEL or USD per MWh)",
                 "title": "Quantity vs Price/Tariff",
                 "axisMode": "dual",
@@ -766,8 +804,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             }
 
         else:
-            # ⚙️ Fallback (unclassified columns)
-            log.info("📊 Fallback generic one-axis chart.")
+            # ✅ Generic fallback
+            log.info("📊 Fallback single-axis chart.")
             chart_type = "line"
             chart_data = df_labeled.to_dict("records")
             chart_meta = {
@@ -777,6 +815,10 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 "axisMode": "single",
                 "labels": chart_labels,
             }
+
+        log.info(
+            f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')} | labels={chart_labels}"
+        )
 
 
     # 6) Final response
