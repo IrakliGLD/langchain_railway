@@ -707,11 +707,13 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     if mode == "analyst" and plan.get("intent") != "general":
         summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-    # 5) Chart builder (REVISED: unified axis rule)
+    # 5) Chart builder (ENFORCED: unified one-axis for same dimensions + labeled series)
     chart_data = chart_type = chart_meta = None
     if rows and cols:
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        time_key = next((c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None)
+        time_key = next(
+            (c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None
+        )
 
         # --- Infer physical/currency dimension from column names ---
         def infer_dimension(col: str) -> str:
@@ -725,51 +727,57 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         dims = {infer_dimension(c) for c in num_cols}
         log.info(f"📐 Detected dimensions: {dims}")
 
-        # --- Determine axis rule ---
-        if len(dims) == 1 or dims == {"price_tariff"} or dims == {"energy_qty"}:
-            # Single dimension or all prices/tariffs (even if mixed currencies) → single y-axis
-            log.info("📊 Uniform indicator dimension → single y-axis chart.")
-            val_cols = [c for c in num_cols if c != time_key]
+        # --- Build label map from context.py ---
+        label_map = {c: COLUMN_LABELS.get(c, c.upper()) for c in num_cols}
 
-            if len(val_cols) == 1:
-                chart_type = "line"
-                chart_data = [{"date": str(r[time_key]), "value": float(r[val_cols[0]])} for _, r in df.iterrows()]
-                chart_meta = {
-                    "xAxisTitle": time_key or "time",
-                    "yAxisTitle": val_cols[0],
-                    "title": f"{val_cols[0]} Trend"
-                }
-            elif len(val_cols) > 1:
-                chart_type = "line"
-                chart_data = df.to_dict("records")
-                chart_meta = {
-                    "xAxisTitle": time_key or "time",
-                    "yAxisTitle": "Same Dimension (Price/Tariff or Quantity)",
-                    "title": "Comparison (same dimension)"
-                }
+        # --- Prepare labeled DataFrame for chart_data ---
+        df_labeled = df.copy()
+        df_labeled.rename(columns=label_map, inplace=True)
+        chart_labels = [label_map[c] for c in num_cols]
+
+        # --- Determine axis rule ---
+        if dims == {"price_tariff"} or dims == {"energy_qty"} or len(dims) == 1:
+            # ✅ All indicators share the same dimension → one y-axis
+            log.info("📊 Single-dimension dataset → enforcing one-axis chart.")
+            chart_type = "line"
+            chart_data = df_labeled.to_dict("records")
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisTitle": (
+                    "Price/Tariff (GEL or USD per MWh)" if "price_tariff" in dims else "Quantity (MW/TJ)"
+                ),
+                "title": "Indicator Comparison (same dimension)",
+                "axisMode": "single",
+                "labels": chart_labels,  # human-readable series names
+            }
 
         elif "price_tariff" in dims and "energy_qty" in dims:
-            # Mixed dimensions → dual y-axis (price vs quantity)
+            # ⚙️ Different physical dimension → dual y-axis
             log.info("📊 Mixed price/tariff and quantity → dual y-axis chart.")
             chart_type = "dualaxis"
-            chart_data = df.to_dict("records")
+            chart_data = df_labeled.to_dict("records")
             chart_meta = {
                 "xAxisTitle": time_key or "time",
                 "yAxisLeft": "Quantity (MW/TJ)",
                 "yAxisRight": "Price/Tariff (GEL or USD per MWh)",
-                "title": "Quantity vs Price/Tariff"
+                "title": "Quantity vs Price/Tariff",
+                "axisMode": "dual",
+                "labels": chart_labels,
             }
 
         else:
-            # Fallback for any other unexpected mix
-            log.info("📊 Fallback generic single-axis chart.")
+            # ⚙️ Fallback (unclassified columns)
+            log.info("📊 Fallback generic one-axis chart.")
             chart_type = "line"
-            chart_data = df.to_dict("records")
+            chart_data = df_labeled.to_dict("records")
             chart_meta = {
                 "xAxisTitle": time_key or "time",
                 "yAxisTitle": "Value",
-                "title": "Indicator Comparison"
+                "title": "Indicator Comparison",
+                "axisMode": "single",
+                "labels": chart_labels,
             }
+
 
     # 6) Final response
     exec_time = time.time() - t0
