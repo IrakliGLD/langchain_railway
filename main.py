@@ -1,4 +1,4 @@
-# main.py v18.9 — Gemini Analyst (DB Pool Reduced)
+# main.py v18.7 — Gemini Analyst (combined plan & SQL for speed)
 
 import os
 import re
@@ -31,6 +31,7 @@ from langchain_openai import ChatOpenAI
 from sqlglot import parse_one, exp
 
 # Schema & helpers
+# NOTE: Ensure these imports are available in your environment
 from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS
 # Domain knowledge
 from domain_knowledge import DOMAIN_KNOWLEDGE
@@ -66,11 +67,7 @@ ALLOWED_TABLES = {
     "monthly_cpi_mv",
     "price_with_usd",
     "tariff_with_usd",
-    "tech_quantity_pivot", 
     "tech_quantity_view",
-    "trade_by_ownership",  
-    "trade_by_source",     
-    "trade_by_type",       
     "trade_derived_entities",
 }
 
@@ -82,9 +79,6 @@ TABLE_SYNONYMS = {
     "tariff_usd": "tariff_with_usd",
     "price_with_usd": "price_with_usd",
     "tariff_with_usd": "tariff_with_usd",
-    "tech_quantity": "tech_quantity_view",
-    "tech_pivot": "tech_quantity_pivot",
-    "trade": "trade_derived_entities",
 }
 
 # Column synonym map (common misnamings → canonical)
@@ -108,8 +102,8 @@ DB_URL = coerce_to_psycopg_url(SUPABASE_DB_URL)
 ENGINE = create_engine(
     DB_URL,
     poolclass=QueuePool,
-    pool_size=3, # *** FIX 1: Reduced from 5 to 3 for lower memory overhead ***
-    max_overflow=1, # *** FIX 1: Reduced from 2 to 1 for lower memory overhead ***
+    pool_size=5,
+    max_overflow=2,
     pool_timeout=30,
     pool_pre_ping=True,
     pool_recycle=300,
@@ -157,7 +151,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.9") # Updated version
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.7") # Version bump
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -270,16 +264,6 @@ FROM price_with_usd t1
 JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
 ORDER BY 1
 LIMIT 500;
-
--- Example 7: Monthly average balancing price comparison in GEL and USD
-SELECT
-    TO_CHAR(date, 'YYYY-MM') AS month,
-    AVG(p_bal_gel) AS avg_balancing_gel,
-    AVG(p_bal_usd) AS avg_balancing_usd
-FROM price_with_usd
-GROUP BY 1
-ORDER BY 1
-LIMIT 500;
 """
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
@@ -335,15 +319,14 @@ SELECT ...
         llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
         combined_output = llm.invoke([("system", system), ("user", prompt)]).content.strip()
     except Exception as e:
-        log.warning(f"Combined generation failed with primary model: {e}")
+        log.warning(f"Combined generation failed: {e}")
         # Fallback to OpenAI if Gemini fails
         try:
             llm = make_openai()
             combined_output = llm.invoke([("system", system), ("user", prompt)]).content.strip()
         except Exception as e_f:
-             log.error(f"FATAL: Combined generation failed with fallback model: {e_f}")
-             # *** FIX 2: Raise a simpler exception to avoid proxy errors (e.g., 502) ***
-             raise RuntimeError(f"Both primary and fallback LLM models failed to respond. Details: {e_f}")
+             log.warning(f"Combined generation failed with fallback: {e_f}")
+             raise e_f # Re-raise final exception
              
     return combined_output
 
@@ -375,9 +358,9 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     if len(df) <= 1 or numeric.empty:
         out.append("Trend: Single-value result (not a trend series).")
         if not numeric.empty:
-              desc = numeric.describe().round(3)
-              out.append("Numeric summary:")
-              out.append(desc.to_string())
+             desc = numeric.describe().round(3)
+             out.append("Numeric summary:")
+             out.append(desc.to_string())
         return "\n".join(out)
 
     time_col = date_cols[0]
@@ -484,6 +467,11 @@ Write 4–7 sentences:
 from sqlglot import parse_one, exp, ParseError
 
 log = logging.getLogger("enerbot")
+
+# --- Assuming these variables are still defined globally in your environment ---
+# ALLOWED_TABLES = {'price_with_usd', 'other_allowed_table', ...}
+# TABLE_SYNONYMS = {'p_with_usd': 'price_with_usd', ...} 
+# ----------------------------------------------------------------------------
 
 def simple_table_whitelist_check(sql: str):
     """
@@ -640,9 +628,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             plan = {"intent": "general", "target": "", "period": ""}
 
     except Exception as e:
-        # This catches the RuntimeError from llm_generate_plan_and_sql (or other hard failure)
         log.exception("Combined Plan/SQL generation failed")
-        # Ensure a clean 500 is returned if LLM communication failed
         raise HTTPException(status_code=500, detail=f"Failed to generate Plan/SQL: {e}")
 
     log.info(f"📝 Plan: {plan}")
@@ -763,7 +749,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         
         time_key = next((c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None)
 
-        # --- Dual-Axis Restriction Logic (Price/Tariff AND Quantity/Volume) ---
+        # --- Dual-Axis Restriction Logic ---
         # Dual-axis is ONLY allowed if charting Price/Tariff AND Quantity/Volume together,
         # AND if the result is a time series (more than one row).
         if is_mixed_price_and_qty and time_key and len(df) > 1:
@@ -800,73 +786,92 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             val_col = num_cols[0]
             label_col = None
             
-            # **FIXED LOGIC**: If price indicators (including dual currency) are present, but no quantity,
-            # always use a single-axis line chart (as requested).
-            if len(price_indicators) > 0 and len(quantity_indicators) == 0 and time_key and len(df) > 1:
-                log.info("📊 Detected Price/Tariff series (including dual-currency). Enforcing SINGLE-axis line chart.")
+            # If dual-currency price is returned (e.g. p_bal_gel and p_bal_usd), plot both on a single line chart
+            if len(price_indicators) > 1 and len(quantity_indicators) == 0 and time_key and len(df) > 1:
+                log.info("📊 Detected dual-currency price series (GEL/USD only). Single-axis line chart.")
                 chart_type = "line"
                 chart_data = []
                 for _, r in df.iterrows():
                     item = {time_key: str(r[time_key])}
                     for c in price_indicators:
-                        item[c] = float(r[c])
+                         item[c] = float(r[c])
                     chart_data.append(item)
                 
                 chart_meta = {
                     "xAxisTitle": time_key,
-                    "yAxisTitle": "Price/Tariff", # Single Y-axis title for all price indicators
-                    "title": "Price/Tariff Trend",
-                    "seriesKeys": price_indicators, # All price indicators on this single axis
+                    "yAxisTitle": "Price/Tariff",
+                    "title": "Price/Tariff Trend (GEL vs USD)",
+                    "seriesKeys": price_indicators,
                 }
             
-            # Default single-series logic (Bar/Pie/Stacked Bar charts)
+            # Default single-series logic
             else:
-                # Find the best non-numeric column for the label/x-axis
+                 # Find the best non-numeric column for the label/x-axis
                 for c in df.columns:
                     if c != val_col and ("date" in c.lower() or "year" in c.lower() or "month" in c.lower() or "label" in c.lower() or "category" in c.lower() or "sector" in c.lower() or "entity" in c.lower()):
                         label_col = c
                         break
-                        
+                    
                 if label_col:
                     if "sector" in cols and "energy_source" in cols:
                         log.info("📊 Detected categorical breakdown (Stacked Bar potential).")
-                        chart_type = "stacked_bar"
-                        # Placeholder for stacked bar logic (requires more columns to be generic)
-                        chart_data = None
-                        chart_meta = None
-                    elif time_key:
-                        log.info("📊 Detected single numeric time series. Defaulting to Line Chart.")
+                        chart_type = "stackedbar"
+                        # Pass the raw data for the frontend to pivot
+                        chart_data = df.to_dict('records') 
+                        chart_meta = {"xAxisTitle": "Sector", "yAxisTitle": val_col, "title": "Breakdown by Source & Sector"}
+
+                    elif "date" in label_col.lower() or "year" in label_col.lower() or "month" in label_col.lower():
+                        log.info("📊 Detected single time series (Line/Bar).")
                         chart_type = "line"
-                        chart_data = df.to_dict('records')
-                        chart_meta = {
-                            "xAxisTitle": time_key,
-                            "yAxisTitle": val_col,
-                            "title": f"Trend for {COLUMN_LABELS.get(val_col, val_col)}",
-                            "seriesKeys": [val_col],
-                        }
+                        chart_data = [{"date": str(r[label_col]), "value": float(r[val_col])} for _, r in df.head(500).iterrows()]
+                        chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Trend"}
+                    
                     else:
-                        log.info("📊 Detected single numeric and label. Defaulting to Bar Chart.")
-                        chart_type = "bar"
-                        chart_data = df.to_dict('records')
-                        chart_meta = {
-                            "xAxisTitle": label_col,
-                            "yAxisTitle": val_col,
-                            "title": f"Breakdown of {COLUMN_LABELS.get(val_col, val_col)} by {COLUMN_LABELS.get(label_col, label_col)}",
-                            "labelKey": label_col,
-                            "valueKey": val_col,
-                        }
-                else:
-                    log.info("⚠️ Could not find a suitable label column for charting.")
-
-
-    # 6) Final response
-    elapsed = time.time() - t0
-    log.info(f"Final Execution Time: {elapsed:.2f}s")
+                        log.info("📊 Detected simple category data (Bar/Pie).")
+                        # Determine if a Pie chart is more appropriate (e.g., small number of unique labels)
+                        if df[label_col].nunique() < 12 and len(df) <= 12:
+                            # This forces pie chart
+                            chart_type = "pie" 
+                        else:
+                            chart_type = "bar" # Default to bar for >12 categories or rows
+                            
+                        # Re-map columns for generic charting
+                        chart_data = [{
+                            "label": str(r[label_col]), 
+                            "value": float(r[val_col])
+                        } for _, r in df.head(500).iterrows()]
+                        
+                        if not chart_meta:
+                             chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Breakdown"}
+        
     
-    return APIResponse(
+    # 6) Final response
+    exec_time = time.time() - t0
+    log.info(f"Finished request in {exec_time:.2f}s")
+
+    response = APIResponse(
         answer=summary,
         chart_data=chart_data,
         chart_type=chart_type,
         chart_metadata=chart_meta,
-        execution_time=elapsed,
+        execution_time=exec_time,
     )
+    
+    # Note: Returning the response object here for the FastAPI endpoint
+    return response
+
+
+# -----------------------------
+# Server Startup
+# -----------------------------
+if __name__ == "__main__":
+    try:
+        import uvicorn
+        port = int(os.getenv("PORT", 8000)) 
+        
+        log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{port}")
+        uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+    except ImportError:
+        log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
+    except Exception as e:
+        log.error(f"FATAL: Uvicorn server failed to start: {e}")
