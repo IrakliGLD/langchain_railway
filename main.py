@@ -162,11 +162,15 @@ app.add_middleware(
 # -----------------------------
 # Models
 # -----------------------------
+from pydantic import BaseModel, Field, field_validator # Import field_validator
+
 class Question(BaseModel):
     query: str = Field(..., max_length=2000)
     user_id: Optional[str] = None
 
-    @validator("query")
+    # V2 style - resolves warning
+    @field_validator("query") 
+    @classmethod
     def _not_empty(cls, v):
         if not v or not v.strip():
             raise ValueError("Query cannot be empty")
