@@ -39,7 +39,7 @@ from domain_knowledge import DOMAIN_KNOWLEDGE
 # Boot + Config
 # -----------------------------
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("enerbot")
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -83,7 +83,7 @@ TABLE_SYNONYMS = {
 # Column synonym map (common misnamings → canonical)
 COLUMN_SYNONYMS = {
     "tech_type": "type_tech",
-    "quantity_mwh": "quantity_tech",  # your data stores thousand MWh in quantity_tech
+    "quantity_mwh": "quantity_tech",  # your data stores thousand MWh in quantity_tech
 }
 
 # -----------------------------
@@ -461,7 +461,7 @@ log = logging.getLogger("enerbot")
 
 # --- Assuming these variables are still defined globally in your environment ---
 # ALLOWED_TABLES = {'price_with_usd', 'other_allowed_table', ...}
-# TABLE_SYNONYMS = {'p_with_usd': 'price_with_usd', ...} 
+# TABLE_SYNONYMS = {'p_with_usd': 'price_with_usd', ...} 
 # ----------------------------------------------------------------------------
 
 def simple_table_whitelist_check(sql: str):
@@ -472,14 +472,14 @@ def simple_table_whitelist_check(sql: str):
     cleaned_tables = set()
     
     try:
-        parsed_expression = parse_one(sql, read='bigquery') 
+        parsed_expression = parse_one(sql, read='bigquery') 
 
         # --- FIX: 1. Extract CTE names ---
         cte_names = set()
         with_clause = parsed_expression.find(exp.With)
         if with_clause:
             for cte in with_clause.expressions:
-                cte_names.add(cte.alias.lower()) 
+                cte_names.add(cte.alias.lower()) 
         # ---------------------------------
 
         # 2. Traverse the AST to find all table expressions
@@ -490,7 +490,7 @@ def simple_table_whitelist_check(sql: str):
             
             # --- FIX: 2. Skip CTE names from whitelisting ---
             if t_name in cte_names:
-                continue 
+                continue 
             # ---------------------------------------------
             
             # Apply synonym mapping and perform the strict whitelist check
@@ -570,16 +570,13 @@ def plan_validate_repair(sql: str) -> str:
     if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE):
         
         # CRITICAL FIX: Remove the trailing semicolon if it exists
-        _sql = _sql.rstrip().rstrip(';') 
+        _sql = _sql.rstrip().rstrip(';') 
         
         # Append LIMIT 500 without a preceding semicolon
         _sql = f"{_sql}\nLIMIT 500"
 
     return _sql
     
-    
-    # NOTE: The rest of the original plan_validate_repair function was redundant/unreachable
-    # and has been trimmed for the final version to prevent errors.
 
 @app.get("/ask")
 def ask_get():
@@ -738,7 +735,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         if gel_key and usd_key and time_key:
             log.info("📊 Detected dual-currency time series (GEL/USD).")
-            chart_type = "line"  # Forces the line chart, the frontend component will handle dual axes
+            chart_type = "line"  # Forces the line chart, the frontend component will handle dual axes
             
             # Create the chart_data list, preserving all relevant keys
             chart_data = []
@@ -755,8 +752,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             x_rate_trend = "depreciation of GEL" if last_x_rate > first_x_rate else "appreciation of GEL"
 
             chart_meta = {
-                "xAxisTitle": time_key, 
-                "yAxisTitle": f"{gel_key.upper()} / {usd_key.upper()}", 
+                "xAxisTitle": time_key, 
+                "yAxisTitle": f"{gel_key.upper()} / {usd_key.upper()}", 
                 "title": f"Comparison: {gel_key.upper()} vs {usd_key.upper()}",
                 # --- NEW KEYS FOR LLM HINTING ---
                 "XRateAnalysis": {
@@ -769,7 +766,6 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             }
             log.info(f"💵 Detected X-Rate Trend: {x_rate_trend} ({x_rate_change:.1f}%)")
             
-            # NOTE: Removed the redundant chart_meta re-assignment here
 
         # --- Single-Series Fallback (Time, Bar, Pie/Doughnut) ---
         elif num_cols:
@@ -788,7 +784,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                     log.info("📊 Detected categorical breakdown (Stacked Bar potential).")
                     chart_type = "stackedbar"
                     # Pass the raw data for the frontend to pivot
-                    chart_data = df.to_dict('records') 
+                    chart_data = df.to_dict('records') 
                     chart_meta = {"xAxisTitle": "Sector", "yAxisTitle": val_col, "title": "Breakdown by Source & Sector"}
 
                 elif "date" in label_col.lower() or "year" in label_col.lower() or "month" in label_col.lower():
@@ -802,7 +798,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                     # Determine if a Pie chart is more appropriate (e.g., small number of unique labels)
                     if df[label_col].nunique() < 12 and len(df) <= 12:
                         # This forces pie chart
-                        chart_type = "pie" 
+                        chart_type = "pie" 
                     else:
                         chart_type = "bar" # Default to bar for >12 categories or rows
                         
