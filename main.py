@@ -621,12 +621,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
     log.info(f"📝 Plan: {plan}")
 
-    # ------------------- NEW PERIOD AGGREGATION COMMENT BLOCK -------------------
-    # The user may ask: "generation for May–Aug period" or "average price 2023Q1".
-    # -> Before execution, we detect if plan['period'] or the query text includes
-    #    a date range (e.g. May–Aug, Jan–Mar, Q1, 2024-05 to 2024-08).
-    # -> If found, we inject an outer aggregation (SUM for quantities / AVG for prices).
-    # ---------------------------------------------------------------------------
+    # --- Period aggregation detection (optional user-defined range) ---
     period_pattern = re.search(
         r"(?P<start>(?:19|20)\d{2}[-/]?\d{0,2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
         r"[\s–\-to]+"
@@ -640,14 +635,12 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         simple_table_whitelist_check(sanitized)
         safe_sql = plan_validate_repair(sanitized)
 
-        # --- Optional aggregation wrapping ---
         if period_pattern:
             log.info("🧮 Detected user-defined period range → applying aggregation logic.")
             if any(x in q.query.lower() for x in ["generation", "quantity", "volume", "demand", "supply"]):
                 agg_func = "SUM"
             else:
                 agg_func = "AVG"
-            # Wrap the original query into subselect for period aggregation
             safe_sql_final = f"SELECT {agg_func}(x.*) FROM ({safe_sql}) AS x"
         else:
             safe_sql_final = safe_sql
@@ -655,7 +648,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         log.warning(f"SQL validation failed: {e}")
         raise HTTPException(status_code=400, detail=f"Unsafe or invalid SQL: {e}")
 
-    # 3) Execute
+    # 3) Execute SQL
     df = pd.DataFrame()
     rows = []
     cols = []
@@ -666,7 +659,6 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             cols = list(res.keys())
             df = pd.DataFrame(rows, columns=cols)
     except Exception as e:
-        # ... unchanged error handling block ...
         msg = str(e)
         if "UndefinedColumn" in msg:
             for bad, good in COLUMN_SYNONYMS.items():
@@ -686,13 +678,26 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             log.exception("SQL execution failed")
             raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-    # 4) Summarize / Reason (unchanged)
+    # 4) Summarize and analyze
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
     correlation_results = {}
-    # ... correlation block unchanged ...
 
-    # --- Summary generation (unchanged) ---
+    if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
+        log.info("🔍 Calculating correlation matrix for LLM analysis.")
+        target_cols = [c for c in df.columns if 'price' in c.lower() or 'bal' in c.lower()]
+        explanatory_cols = [c for c in df.columns if 'share' in c.lower() or 'import' in c.lower() or 'hydro' in c.lower() or 'tpp' in c.lower()]
+        if target_cols and explanatory_cols:
+            corr_df = df[target_cols + explanatory_cols].apply(pd.to_numeric, errors='coerce').dropna()
+            for target in target_cols:
+                if target in corr_df.columns:
+                    corr_series = corr_df.corr()[target].sort_values(ascending=False).round(3)
+                    correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+        if correlation_results:
+            stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
+            stats_hint += json.dumps(correlation_results, indent=2)
+            log.info(f"Generated correlations: {correlation_results}")
+
     try:
         summary = llm_summarize(q.query, preview, stats_hint)
     except Exception as e:
@@ -702,60 +707,74 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     if mode == "analyst" and plan.get("intent") != "general":
         summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-    # ------------------- UPDATED CHART LOGIC COMMENTS -------------------
-    # Rule: dual y-axis charts ONLY if price/tariff indicators (GEL/MWh or USD/MWh)
-    #       AND quantity indicators (MW, TJ, MWh, etc.) appear together.
-    # Otherwise → always single-axis chart.
-    # ---------------------------------------------------------------
+    # 5) Chart builder (REVISED: unified axis rule)
     chart_data = chart_type = chart_meta = None
     if rows and cols:
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         time_key = next((c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None)
 
-        # Detect indicator types
-        has_price = any("price" in c.lower() or "tariff" in c.lower() for c in cols)
-        has_quantity = any("quantity" in c.lower() or "generation" in c.lower() or "mw" in c.lower() or "tj" in c.lower() for c in cols)
+        # --- Infer physical/currency dimension from column names ---
+        def infer_dimension(col: str) -> str:
+            col_l = col.lower()
+            if any(x in col_l for x in ["quantity", "generation", "mw", "tj", "volume"]):
+                return "energy_qty"
+            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
+                return "price_tariff"
+            return "other"
 
-        # --- NEW: Dual-axis condition ---
-        if has_price and has_quantity and time_key:
-            log.info("📊 Valid dual-axis condition met (price/tariff + quantity).")
+        dims = {infer_dimension(c) for c in num_cols}
+        log.info(f"📐 Detected dimensions: {dims}")
+
+        # --- Determine axis rule ---
+        if len(dims) == 1 or dims == {"price_tariff"} or dims == {"energy_qty"}:
+            # Single dimension or all prices/tariffs (even if mixed currencies) → single y-axis
+            log.info("📊 Uniform indicator dimension → single y-axis chart.")
+            val_cols = [c for c in num_cols if c != time_key]
+
+            if len(val_cols) == 1:
+                chart_type = "line"
+                chart_data = [{"date": str(r[time_key]), "value": float(r[val_cols[0]])} for _, r in df.iterrows()]
+                chart_meta = {
+                    "xAxisTitle": time_key or "time",
+                    "yAxisTitle": val_cols[0],
+                    "title": f"{val_cols[0]} Trend"
+                }
+            elif len(val_cols) > 1:
+                chart_type = "line"
+                chart_data = df.to_dict("records")
+                chart_meta = {
+                    "xAxisTitle": time_key or "time",
+                    "yAxisTitle": "Same Dimension (Price/Tariff or Quantity)",
+                    "title": "Comparison (same dimension)"
+                }
+
+        elif "price_tariff" in dims and "energy_qty" in dims:
+            # Mixed dimensions → dual y-axis (price vs quantity)
+            log.info("📊 Mixed price/tariff and quantity → dual y-axis chart.")
             chart_type = "dualaxis"
             chart_data = df.to_dict("records")
             chart_meta = {
-                "xAxisTitle": time_key,
+                "xAxisTitle": time_key or "time",
                 "yAxisLeft": "Quantity (MW/TJ)",
                 "yAxisRight": "Price/Tariff (GEL or USD per MWh)",
                 "title": "Quantity vs Price/Tariff"
             }
 
-        # --- Existing single-axis logic preserved below ---
-        elif has_price and not has_quantity:
-            log.info("📊 Price/Tariff only → single y-axis.")
-            val_cols = [c for c in num_cols if "price" in c.lower() or "tariff" in c.lower()]
-            if val_cols and time_key:
-                chart_type = "line"
-                chart_data = [{"date": str(r[time_key]), "value": float(r[val_cols[0]])} for _, r in df.iterrows()]
-                chart_meta = {"xAxisTitle": time_key, "yAxisTitle": val_cols[0], "title": "Price/Tariff Trend"}
-
-        elif has_quantity and not has_price:
-            log.info("📊 Quantity-only data → single y-axis.")
-            val_cols = [c for c in num_cols if "quantity" in c.lower() or "generation" in c.lower()]
-            if val_cols and time_key:
-                chart_type = "line"
-                chart_data = [{"date": str(r[time_key]), "value": float(r[val_cols[0]])} for _, r in df.iterrows()]
-                chart_meta = {"xAxisTitle": time_key, "yAxisTitle": val_cols[0], "title": "Quantity Trend"}
-
         else:
-            # fallback to your prior general logic
-            log.info("📊 Using fallback generic chart logic.")
-            # (keep all prior single-series / pie / bar fallback code as-is)
-            # ...
-            # existing block unchanged below
-            # ------------------------------------------------------------
+            # Fallback for any other unexpected mix
+            log.info("📊 Fallback generic single-axis chart.")
+            chart_type = "line"
+            chart_data = df.to_dict("records")
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisTitle": "Value",
+                "title": "Indicator Comparison"
+            }
 
-    # ... unchanged response packaging section ...
+    # 6) Final response
     exec_time = time.time() - t0
     log.info(f"Finished request in {exec_time:.2f}s")
+
     response = APIResponse(
         answer=summary,
         chart_data=chart_data,
@@ -764,6 +783,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         execution_time=exec_time,
     )
     return response
+
 
 # ... [server startup block identical] ...
 
