@@ -11,7 +11,8 @@ from difflib import get_close_matches
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+# Corrected Pydantic imports for V2 compatibility
+from pydantic import BaseModel, Field, field_validator 
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
@@ -162,14 +163,11 @@ app.add_middleware(
 # -----------------------------
 # Models
 # -----------------------------
-from pydantic import BaseModel, Field, field_validator # Import field_validator
-
 class Question(BaseModel):
     query: str = Field(..., max_length=2000)
     user_id: Optional[str] = None
 
-    # V2 style - resolves warning
-    @field_validator("query") 
+    @field_validator("query")  # Pydantic V2 syntax
     @classmethod
     def _not_empty(cls, v):
         if not v or not v.strip():
@@ -211,9 +209,9 @@ def detect_analysis_mode(user_query: str) -> str:
 FEW_SHOT_SQL = """
 -- Example 1: Monthly average balancing price in USD for 2023 (use materialized view)
 SELECT
-  EXTRACT(YEAR FROM date) AS year,
-  EXTRACT(MONTH FROM date) AS month,
-  AVG(p_bal_usd) AS avg_balancing_usd
+  EXTRACT(YEAR FROM date) AS year,
+  EXTRACT(MONTH FROM date) AS month,
+  AVG(p_bal_usd) AS avg_balancing_usd
 FROM price_with_usd
 WHERE EXTRACT(YEAR FROM date) = 2023
 GROUP BY 1,2
@@ -228,9 +226,9 @@ LIMIT 500;
 
 -- Example 3: Generation (thousand MWh) by technology per month
 SELECT
-  TO_CHAR(date, 'YYYY-MM') AS month,
-  type_tech,
-  SUM(quantity_tech) AS qty_thousand_mwh
+  TO_CHAR(date, 'YYYY-MM') AS month,
+  type_tech,
+  SUM(quantity_tech) AS qty_thousand_mwh
 FROM tech_quantity_view
 GROUP BY 1,2
 ORDER BY 1,2
@@ -238,8 +236,8 @@ LIMIT 500;
 
 -- Example 4: Average regulated tariffs (USD) by entity for 2024
 SELECT
-  entity,
-  AVG(tariff_usd) AS avg_tariff_usd_2024
+  entity,
+  AVG(tariff_usd) AS avg_tariff_usd_2024
 FROM tariff_with_usd
 WHERE EXTRACT(YEAR FROM date) = 2024
 GROUP BY entity
@@ -248,8 +246,8 @@ LIMIT 500;
 
 -- Example 5: CPI monthly values for electricity fuels category
 SELECT
-  TO_CHAR(date, 'YYYY-MM') AS month,
-  cpi
+  TO_CHAR(date, 'YYYY-MM') AS month,
+  cpi
 FROM monthly_cpi_mv
 WHERE cpi_type = 'electricity_gas_and_other_fuels'
 ORDER BY date
@@ -257,11 +255,11 @@ LIMIT 500;
 
 -- Example 6: Monthly data for Balancing Price (GEL) and Shares of key sources (Hydro, Import) for correlation analysis
 SELECT
-  TO_CHAR(t1.date, 'YYYY-MM') AS month,
-  t1.p_bal_gel AS balancing_price_gel,
-  t2.share_import,
-  t2.share_deregulated_hydro,
-  t2.share_regulated_hpp
+  TO_CHAR(t1.date, 'YYYY-MM') AS month,
+  t1.p_bal_gel AS balancing_price_gel,
+  t2.share_import,
+  t2.share_deregulated_hydro,
+  t2.share_regulated_hpp
 FROM price_with_usd t1
 JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
 ORDER BY 1
@@ -458,8 +456,6 @@ Write 4–7 sentences:
 # -----------------------------
 
 from sqlglot import parse_one, exp, ParseError
-# from fastapi import HTTPException # Assuming your existing HTTPException import
-# import logging
 
 log = logging.getLogger("enerbot")
 
@@ -820,10 +816,31 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     exec_time = time.time() - t0
     log.info(f"Finished request in {exec_time:.2f}s")
 
-    return APIResponse(
+    response = APIResponse(
         answer=summary,
         chart_data=chart_data,
         chart_type=chart_type,
         chart_metadata=chart_meta,
         execution_time=exec_time,
     )
+    
+    # Note: Returning the response object here for the FastAPI endpoint
+    return response
+
+
+# -----------------------------
+# Server Startup (CRITICAL FIX)
+# -----------------------------
+# This block runs the application when the script is executed directly (e.g., by a Docker ENTRYPOINT)
+if __name__ == "__main__":
+    try:
+        import uvicorn
+        port = int(os.getenv("PORT", 8000)) 
+        
+        # CRITICAL: host '0.0.0.0' is required for container accessibility
+        log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{port}")
+        uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+    except ImportError:
+        log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
+    except Exception as e:
+        log.error(f"FATAL: Uvicorn server failed to start: {e}")
