@@ -1,4 +1,4 @@
-# main.py v18.7 — Gemini Analyst (combined plan & SQL for speed)
+# main.py v18.8 — Gemini Analyst (combined plan & SQL for speed)
 
 import os
 import re
@@ -67,7 +67,11 @@ ALLOWED_TABLES = {
     "monthly_cpi_mv",
     "price_with_usd",
     "tariff_with_usd",
+    "tech_quantity_pivot", # Added from reflection in previous step
     "tech_quantity_view",
+    "trade_by_ownership",  # Added from reflection in previous step
+    "trade_by_source",     # Added from reflection in previous step
+    "trade_by_type",       # Added from reflection in previous step
     "trade_derived_entities",
 }
 
@@ -79,6 +83,9 @@ TABLE_SYNONYMS = {
     "tariff_usd": "tariff_with_usd",
     "price_with_usd": "price_with_usd",
     "tariff_with_usd": "tariff_with_usd",
+    "tech_quantity": "tech_quantity_view",
+    "tech_pivot": "tech_quantity_pivot",
+    "trade": "trade_derived_entities",
 }
 
 # Column synonym map (common misnamings → canonical)
@@ -151,7 +158,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.8") # Version bump for changes
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.8") 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -329,14 +336,15 @@ SELECT ...
         llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
         combined_output = llm.invoke([("system", system), ("user", prompt)]).content.strip()
     except Exception as e:
-        log.warning(f"Combined generation failed: {e}")
+        log.warning(f"Combined generation failed with primary model: {e}")
         # Fallback to OpenAI if Gemini fails
         try:
             llm = make_openai()
             combined_output = llm.invoke([("system", system), ("user", prompt)]).content.strip()
         except Exception as e_f:
-             log.warning(f"Combined generation failed with fallback: {e_f}")
-             raise e_f # Re-raise final exception
+             log.error(f"FATAL: Combined generation failed with fallback model: {e_f}")
+             # *** CRITICAL FIX: Raise a simpler exception to avoid proxy errors (e.g., 502) ***
+             raise RuntimeError(f"Both primary and fallback LLM models failed to respond: {e_f}")
              
     return combined_output
 
@@ -638,7 +646,9 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             plan = {"intent": "general", "target": "", "period": ""}
 
     except Exception as e:
+        # This catches the RuntimeError from llm_generate_plan_and_sql (or other hard failure)
         log.exception("Combined Plan/SQL generation failed")
+        # Ensure a clean 500 is returned if LLM communication failed
         raise HTTPException(status_code=500, detail=f"Failed to generate Plan/SQL: {e}")
 
     log.info(f"📝 Plan: {plan}")
