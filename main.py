@@ -1,4 +1,4 @@
-# main.py v18.6 — Gemini Analyst (combined plan & SQL for speed)
+# main.py v18.7 — Gemini Analyst (combined plan & SQL for speed)
 
 import os
 import re
@@ -151,7 +151,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.6") # Version bump
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.7") # Version bump
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -275,8 +275,12 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str) -> str:
         "1. **Plan:** Extract the analysis intent, target variables, and period for the user's question. "
         "2. **Generate SQL:** Write a single, correct PostgreSQL SELECT query to fulfill the plan. "
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
-        "Use only documented tables and columns. Prefer monthly aggregation. "
+        "Use only documented tables and columns. "
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
+        
+        # --- NEW GUIDANCE FOR PERIOD AGGREGATION ---
+        "**CRITICAL RULE: For queries asking for a total/sum/average over a specific period (e.g., 'May to August', 'H1 2024'), you MUST aggregate the indicator (e.g., SUM for quantity, AVG for price) and return a SINGLE ROW with the calculated value. Do NOT use monthly grouping if the user asks for a total period.**"
+        # ------------------------------------------
     )
     domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
     
@@ -349,9 +353,14 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     
     # 1. Detect date/year column
     date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()]
-    if not date_cols or numeric.empty:
-        # Fallback to simple stats if no date or numeric data
-        # ... (original logic for non-time series can stay here) ...
+    
+    # Skip full trend calculation if only one row (single aggregated period)
+    if len(df) <= 1 or numeric.empty:
+        out.append("Trend: Single-value result (not a trend series).")
+        if not numeric.empty:
+             desc = numeric.describe().round(3)
+             out.append("Numeric summary:")
+             out.append(desc.to_string())
         return "\n".join(out)
 
     time_col = date_cols[0]
@@ -434,7 +443,7 @@ Domain knowledge:
 # NOTE: If a comparison between GEL and USD is present, use the 'CurrencyInfluence' knowledge to explain the divergence based on the exchange rate and USD-denominated costs (gas, imports).
 
 Write 4–7 sentences:
-1. State the overall long-term trend (using Yearly Avg).
+1. State the overall long-term trend (using Yearly Avg). If this is a single, aggregated value, simply state the result.
 2. If dual-currency, explain the **divergence** by citing the **GEL/USD exchange rate trend** (depreciation/appreciation).
 3. Mention the specific USD-denominated cost factors (e.g., thermal gas, imports) that are affected.
 4. Analyze and mention seasonal patterns or volatility.
@@ -567,7 +576,10 @@ def plan_validate_repair(sql: str) -> str:
         # Not a critical failure, continue with original SQL
 
     # Phase 2: Append LIMIT 500 if missing
-    if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE):
+    # Do NOT append limit if the query appears to be an aggregate (no GROUP BY, one row expected)
+    is_single_row_aggregate = not re.search(r"\bGROUP BY\b", _sql, flags=re.IGNORECASE) and not re.search(r"\bORDER BY\b", _sql, flags=re.IGNORECASE)
+    
+    if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE) and not is_single_row_aggregate:
         
         # CRITICAL FIX: Remove the trailing semicolon if it exists
         _sql = _sql.rstrip().rstrip(';') 
@@ -728,89 +740,110 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # df already created in step 3
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         
-        # --- Dual-Axis Check (GEL/USD) ---
-        gel_key = next((c for c in cols if "gel" in c.lower()), None)
-        usd_key = next((c for c in cols if "usd" in c.lower()), None)
+        # --- Charting Indicators Classification ---
+        # Note: 'gel', 'usd', 'mwh', 'tj' are used for classification.
+        price_indicators = [c for c in num_cols if 'gel' in c.lower() or 'usd' in c.lower() or 'tariff' in c.lower() or 'price' in c.lower()]
+        quantity_indicators = [c for c in num_cols if 'qty' in c.lower() or 'mwh' in c.lower() or 'tj' in c.lower() or 'quantity' in c.lower() or 'volume' in c.lower()]
+        
+        is_mixed_price_and_qty = len(price_indicators) > 0 and len(quantity_indicators) > 0
+        
         time_key = next((c for c in cols if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()), None)
 
-        if gel_key and usd_key and time_key:
-            log.info("📊 Detected dual-currency time series (GEL/USD).")
-            chart_type = "line"  # Forces the line chart, the frontend component will handle dual axes
+        # --- Dual-Axis Restriction Logic ---
+        # Dual-axis is ONLY allowed if charting Price/Tariff AND Quantity/Volume together,
+        # AND if the result is a time series (more than one row).
+        if is_mixed_price_and_qty and time_key and len(df) > 1:
+            log.info("📊 Detected MIXED (Price/Tariff AND Quantity/Volume) time series. Enabling dual-axis.")
+            chart_type = "dual_line"  # Use a new chart type identifier for the frontend
             
-            # Create the chart_data list, preserving all relevant keys
+            # Prepare data for dual-axis (all relevant numeric columns)
+            y1_cols = price_indicators
+            y2_cols = quantity_indicators
+            
+            # Combine all Y columns needed for the chart
+            chart_y_cols = y1_cols + y2_cols
+            
             chart_data = []
             for _, r in df.iterrows():
-                item = {c: str(r[c]) if c == time_key else float(r[c]) for c in [time_key, gel_key, usd_key]}
+                item = {time_key: str(r[time_key])}
+                for c in chart_y_cols:
+                    item[c] = float(r[c])
                 chart_data.append(item)
 
-            # Simple check for long-term x-rate movement
-            df['x_rate'] = df[gel_key] / df[usd_key]
-            first_x_rate = df['x_rate'].iloc[0]
-            last_x_rate = df['x_rate'].iloc[-1]
-            x_rate_change = ((last_x_rate - first_x_rate) / first_x_rate * 100) if first_x_rate != 0 else 0
-            
-            x_rate_trend = "depreciation of GEL" if last_x_rate > first_x_rate else "appreciation of GEL"
-
+            # Metadata for frontend to determine axes
             chart_meta = {
                 "xAxisTitle": time_key, 
-                "yAxisTitle": f"{gel_key.upper()} / {usd_key.upper()}", 
-                "title": f"Comparison: {gel_key.upper()} vs {usd_key.upper()}",
-                # --- NEW KEYS FOR LLM HINTING ---
-                "XRateAnalysis": {
-                    "first_x_rate": round(first_x_rate, 4),
-                    "last_x_rate": round(last_x_rate, 4),
-                    "overall_change_percent": round(x_rate_change, 1),
-                    "trend_label": x_rate_trend
-                }
-                # --- END NEW KEYS ---
+                "y1AxisKeys": y1_cols,
+                "y2AxisKeys": y2_cols,
+                "y1Title": "Price/Tariff (GEL/USD per MWh)",
+                "y2Title": "Quantity/Volume (MWh/TJ)",
+                "title": "Combined Price/Tariff and Quantity Trend",
             }
-            log.info(f"💵 Detected X-Rate Trend: {x_rate_trend} ({x_rate_change:.1f}%)")
+            log.info("📈 Chart is set to Dual Line.")
             
-
         # --- Single-Series Fallback (Time, Bar, Pie/Doughnut) ---
         elif num_cols:
             val_col = num_cols[0]
             label_col = None
             
-            # Find the best non-numeric column for the label/x-axis
-            for c in df.columns:
-                if c != val_col and ("date" in c.lower() or "year" in c.lower() or "month" in c.lower() or "label" in c.lower() or "category" in c.lower() or "sector" in c.lower() or "entity" in c.lower()):
-                    label_col = c
-                    break
+            # If dual-currency price is returned (e.g. p_bal_gel and p_bal_usd), plot both on a single line chart
+            if len(price_indicators) > 1 and len(quantity_indicators) == 0 and time_key and len(df) > 1:
+                log.info("📊 Detected dual-currency price series (GEL/USD only). Single-axis line chart.")
+                chart_type = "line"
+                chart_data = []
+                for _, r in df.iterrows():
+                    item = {time_key: str(r[time_key])}
+                    for c in price_indicators:
+                         item[c] = float(r[c])
+                    chart_data.append(item)
                 
-            if label_col:
-                # Check for multi-categorical breakdown (potential stacked bar)
-                if "sector" in cols and "energy_source" in cols:
-                    log.info("📊 Detected categorical breakdown (Stacked Bar potential).")
-                    chart_type = "stackedbar"
-                    # Pass the raw data for the frontend to pivot
-                    chart_data = df.to_dict('records') 
-                    chart_meta = {"xAxisTitle": "Sector", "yAxisTitle": val_col, "title": "Breakdown by Source & Sector"}
-
-                elif "date" in label_col.lower() or "year" in label_col.lower() or "month" in label_col.lower():
-                    log.info("📊 Detected single time series (Line/Bar).")
-                    chart_type = "line"
-                    chart_data = [{"date": str(r[label_col]), "value": float(r[val_col])} for _, r in df.head(500).iterrows()]
-                    chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Trend"}
-                
-                else:
-                    log.info("📊 Detected simple category data (Bar/Pie).")
-                    # Determine if a Pie chart is more appropriate (e.g., small number of unique labels)
-                    if df[label_col].nunique() < 12 and len(df) <= 12:
-                        # This forces pie chart
-                        chart_type = "pie" 
-                    else:
-                        chart_type = "bar" # Default to bar for >12 categories or rows
-                        
-                    # Re-map columns for generic charting
-                    chart_data = [{
-                        "label": str(r[label_col]), 
-                        "value": float(r[val_col])
-                    } for _, r in df.head(500).iterrows()]
+                chart_meta = {
+                    "xAxisTitle": time_key,
+                    "yAxisTitle": "Price/Tariff",
+                    "title": "Price/Tariff Trend (GEL vs USD)",
+                    "seriesKeys": price_indicators,
+                }
+            
+            # Default single-series logic
+            else:
+                 # Find the best non-numeric column for the label/x-axis
+                for c in df.columns:
+                    if c != val_col and ("date" in c.lower() or "year" in c.lower() or "month" in c.lower() or "label" in c.lower() or "category" in c.lower() or "sector" in c.lower() or "entity" in c.lower()):
+                        label_col = c
+                        break
                     
-                    if not chart_meta:
-                         chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Breakdown"}
+                if label_col:
+                    if "sector" in cols and "energy_source" in cols:
+                        log.info("📊 Detected categorical breakdown (Stacked Bar potential).")
+                        chart_type = "stackedbar"
+                        # Pass the raw data for the frontend to pivot
+                        chart_data = df.to_dict('records') 
+                        chart_meta = {"xAxisTitle": "Sector", "yAxisTitle": val_col, "title": "Breakdown by Source & Sector"}
 
+                    elif "date" in label_col.lower() or "year" in label_col.lower() or "month" in label_col.lower():
+                        log.info("📊 Detected single time series (Line/Bar).")
+                        chart_type = "line"
+                        chart_data = [{"date": str(r[label_col]), "value": float(r[val_col])} for _, r in df.head(500).iterrows()]
+                        chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Trend"}
+                    
+                    else:
+                        log.info("📊 Detected simple category data (Bar/Pie).")
+                        # Determine if a Pie chart is more appropriate (e.g., small number of unique labels)
+                        if df[label_col].nunique() < 12 and len(df) <= 12:
+                            # This forces pie chart
+                            chart_type = "pie" 
+                        else:
+                            chart_type = "bar" # Default to bar for >12 categories or rows
+                            
+                        # Re-map columns for generic charting
+                        chart_data = [{
+                            "label": str(r[label_col]), 
+                            "value": float(r[val_col])
+                        } for _, r in df.head(500).iterrows()]
+                        
+                        if not chart_meta:
+                             chart_meta = {"xAxisTitle": label_col, "yAxisTitle": val_col, "title": "Breakdown"}
+        
     
     # 6) Final response
     exec_time = time.time() - t0
@@ -829,15 +862,13 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
 
 # -----------------------------
-# Server Startup (CRITICAL FIX)
+# Server Startup
 # -----------------------------
-# This block runs the application when the script is executed directly (e.g., by a Docker ENTRYPOINT)
 if __name__ == "__main__":
     try:
         import uvicorn
         port = int(os.getenv("PORT", 8000)) 
         
-        # CRITICAL: host '0.0.0.0' is required for container accessibility
         log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{port}")
         uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
     except ImportError:
