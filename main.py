@@ -707,118 +707,142 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     if mode == "analyst" and plan.get("intent") != "general":
         summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-    # 5) Chart builder (FINAL v3 — unified axis, dimension-aware, label-safe)
+    # 5) Chart builder (FINAL: labels from context + unit-only axis + robust numeric coercion)
     chart_data = chart_type = chart_meta = None
     if rows and cols:
         df = df.copy()
 
-        # --- Force numeric conversion ---
+        # --- Coerce numeric for all non-time columns so JSON values are numbers, not strings ---
+        time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])), None)
         for c in cols:
-            try:
-                df[c] = pd.to_numeric(df[c], errors="ignore")
-            except Exception:
-                pass
+            if c != time_key:
+                try:
+                    # coerce to numeric where possible; non-numerics become NaN and remain fine
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                except Exception:
+                    pass
 
-        # --- Detect numeric columns ---
-        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        time_key = next(
-            (c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])),
-            None,
-        )
+        # --- Numeric columns after coercion ---
+        num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
 
-        # --- Infer physical/economic/index dimension ---
+        # --- Dimension inference (price_tariff | energy_qty | index) ---
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
-            if any(x in col_l for x in ["quantity", "generation", "mw", "tj", "volume"]):
-                return "energy_qty"        # thousand MWh or TJ
-            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
-                return "price_tariff"      # GEL/USD per MWh
             if any(x in col_l for x in ["cpi", "index", "inflation"]):
-                return "index"             # CPI-type
+                return "index"
+            if any(x in col_l for x in ["quantity", "generation", "volume_tj", "volume", "mw", "tj"]):
+                return "energy_qty"
+            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
+                return "price_tariff"
             return "other"
 
         dim_map = {c: infer_dimension(c) for c in num_cols}
         dims = set(dim_map.values())
         log.info(f"📐 Detected dimensions: {dim_map} → {dims}")
 
-        # --- Load human-readable labels from context.py ---
+        # --- UNIT inference for axis title (unit only) ---
+        def unit_for_price(cols_: list[str]) -> str:
+            has_gel = any("_gel" in c.lower() for c in cols_)
+            has_usd = any("_usd" in c.lower() for c in cols_)
+            # Mixed currencies share the same physical unit; per your rule, keep unit only:
+            if has_gel and has_usd:
+                return "per MWh"
+            if has_gel:
+                return "GEL/MWh"
+            if has_usd:
+                return "USD/MWh"
+            # fallback for generic price columns
+            return "per MWh"
+
+        def unit_for_qty(cols_: list[str]) -> str:
+            has_tj = any("tj" in c.lower() for c in cols_) or any("volume_tj" in c.lower() for c in cols_)
+            # your data uses thousand MWh in quantity_tech/trade volume
+            has_thousand_mwh = any("quantity" in c.lower() or "quantity_tech" in c.lower() for c in cols_)
+            if has_tj and not has_thousand_mwh:
+                return "TJ"
+            if has_thousand_mwh and not has_tj:
+                return "thousand MWh"
+            # mixed TJ & thousand MWh → still a single axis by your rule; show generic quantity unit
+            return "Energy Quantity"
+
+        def unit_for_index(_: list[str]) -> str:
+            return "Index (2015=100)"
+
+        # --- Labels from context.py for EVERY series (not only numeric) ---
         try:
             from context import COLUMN_LABELS
         except ImportError:
             COLUMN_LABELS = {}
 
-        label_map = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in num_cols}
-        chart_labels = [label_map[c] for c in num_cols]
-        df_labeled = df.rename(columns=label_map)
+        # Build a label map for ALL columns except the time axis
+        label_map_all = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in cols if c != time_key}
 
-        # --- Determine chart logic ---
-        if len(dims) == 1:
-            # ✅ All indicators share one physical dimension
-            log.info("📊 Uniform dimension → single-axis chart.")
-            chart_type = "line"
-            chart_data = df_labeled.to_dict("records")
-            main_dim = next(iter(dims))
-            y_label = (
-                "Price/Tariff (GEL or USD per MWh)" if main_dim == "price_tariff"
-                else "Energy Quantity (TJ / thousand MWh)" if main_dim == "energy_qty"
-                else "Index Value (2015 = 100)" if main_dim == "index"
-                else "Value"
-            )
-            chart_meta = {
-                "xAxisTitle": time_key or "time",
-                "yAxisTitle": y_label,
-                "title": "Indicator Comparison (same dimension)",
-                "axisMode": "single",
-                "labels": chart_labels,
-            }
+        # Apply renaming for output (legend/tooltip keys)
+        df_labeled = df.rename(columns=label_map_all)
 
-        elif "index" in dims and len(dims) > 1:
-            # ✅ CPI or other index + anything else → dual-axis (index always right)
+        # Recompute the labeled series list in the same order as num_cols
+        chart_labels = [label_map_all.get(c, c) for c in num_cols]
+
+        # --- Determine axis mode & titles ---
+        if "index" in dims and len(dims) > 1:
+            # CPI mixed with any other → dual axes (index is always right)
             log.info("📊 Mixed index + other dimension → dual-axis chart.")
             chart_type = "dualaxis"
             chart_data = df_labeled.to_dict("records")
+            # Left axis unit: prefer price or quantity depending on what is present
+            if "price_tariff" in dims:
+                left_unit = unit_for_price(num_cols)
+            else:
+                left_unit = unit_for_qty(num_cols)
             chart_meta = {
                 "xAxisTitle": time_key or "time",
-                "yAxisLeft": (
-                    "Price/Tariff (GEL or USD per MWh)" if "price_tariff" in dims
-                    else "Energy Quantity (TJ / thousand MWh)"
-                ),
-                "yAxisRight": "Index (2015 = 100)",
+                "yAxisLeft": left_unit,                 # unit only
+                "yAxisRight": unit_for_index(num_cols), # unit only
                 "title": "Index vs Other Indicator",
                 "axisMode": "dual",
                 "labels": chart_labels,
             }
 
         elif "price_tariff" in dims and "energy_qty" in dims:
-            # ✅ Monetary + Physical → dual-axis
-            log.info("📊 Mixed price/tariff and quantity → dual y-axis chart.")
+            # Price/Tariff + Quantity → dual axes
+            log.info("📊 Mixed price/tariff and quantity → dual-axis chart.")
             chart_type = "dualaxis"
             chart_data = df_labeled.to_dict("records")
             chart_meta = {
                 "xAxisTitle": time_key or "time",
-                "yAxisLeft": "Quantity (TJ / thousand MWh)",
-                "yAxisRight": "Price/Tariff (GEL or USD per MWh)",
+                "yAxisLeft": unit_for_qty(num_cols),     # unit only (TJ / thousand MWh)
+                "yAxisRight": unit_for_price(num_cols),  # unit only (GEL/MWh, USD/MWh, or per MWh)
                 "title": "Quantity vs Price/Tariff",
                 "axisMode": "dual",
                 "labels": chart_labels,
             }
 
         else:
-            # ✅ Generic fallback
-            log.info("📊 Fallback single-axis chart.")
+            # Uniform dimension → single axis
+            log.info("📊 Uniform dimension → single-axis chart.")
             chart_type = "line"
             chart_data = df_labeled.to_dict("records")
+
+            # Decide unit by the only dimension present
+            if dims == {"price_tariff"}:
+                y_unit = unit_for_price(num_cols)
+            elif dims == {"energy_qty"}:
+                y_unit = unit_for_qty(num_cols)
+            elif dims == {"index"}:
+                y_unit = unit_for_index(num_cols)
+            else:
+                y_unit = "Value"
+
             chart_meta = {
                 "xAxisTitle": time_key or "time",
-                "yAxisTitle": "Value",
-                "title": "Indicator Comparison",
+                "yAxisTitle": y_unit,              # unit only
+                "title": "Indicator Comparison (same dimension)",
                 "axisMode": "single",
                 "labels": chart_labels,
             }
 
-        log.info(
-            f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')} | labels={chart_labels}"
-        )
+        log.info(f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')} | labels={chart_labels}")
+
 
 
     # 6) Final response
