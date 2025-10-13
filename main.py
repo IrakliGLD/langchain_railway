@@ -1,4 +1,4 @@
-# main.py v18.8 — Gemini Analyst (combined plan & SQL for speed)
+# main.py v18.9 — Gemini Analyst (DB Pool Reduced)
 
 import os
 import re
@@ -31,7 +31,6 @@ from langchain_openai import ChatOpenAI
 from sqlglot import parse_one, exp
 
 # Schema & helpers
-# NOTE: Ensure these imports are available in your environment
 from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS
 # Domain knowledge
 from domain_knowledge import DOMAIN_KNOWLEDGE
@@ -67,11 +66,11 @@ ALLOWED_TABLES = {
     "monthly_cpi_mv",
     "price_with_usd",
     "tariff_with_usd",
-    "tech_quantity_pivot", # Added from reflection in previous step
+    "tech_quantity_pivot", 
     "tech_quantity_view",
-    "trade_by_ownership",  # Added from reflection in previous step
-    "trade_by_source",     # Added from reflection in previous step
-    "trade_by_type",       # Added from reflection in previous step
+    "trade_by_ownership",  
+    "trade_by_source",     
+    "trade_by_type",       
     "trade_derived_entities",
 }
 
@@ -109,8 +108,8 @@ DB_URL = coerce_to_psycopg_url(SUPABASE_DB_URL)
 ENGINE = create_engine(
     DB_URL,
     poolclass=QueuePool,
-    pool_size=5,
-    max_overflow=2,
+    pool_size=3, # *** FIX 1: Reduced from 5 to 3 for lower memory overhead ***
+    max_overflow=1, # *** FIX 1: Reduced from 2 to 1 for lower memory overhead ***
     pool_timeout=30,
     pool_pre_ping=True,
     pool_recycle=300,
@@ -158,7 +157,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.8") 
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.9") # Updated version
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -343,8 +342,8 @@ SELECT ...
             combined_output = llm.invoke([("system", system), ("user", prompt)]).content.strip()
         except Exception as e_f:
              log.error(f"FATAL: Combined generation failed with fallback model: {e_f}")
-             # *** CRITICAL FIX: Raise a simpler exception to avoid proxy errors (e.g., 502) ***
-             raise RuntimeError(f"Both primary and fallback LLM models failed to respond: {e_f}")
+             # *** FIX 2: Raise a simpler exception to avoid proxy errors (e.g., 502) ***
+             raise RuntimeError(f"Both primary and fallback LLM models failed to respond. Details: {e_f}")
              
     return combined_output
 
@@ -485,11 +484,6 @@ Write 4–7 sentences:
 from sqlglot import parse_one, exp, ParseError
 
 log = logging.getLogger("enerbot")
-
-# --- Assuming these variables are still defined globally in your environment ---
-# ALLOWED_TABLES = {'price_with_usd', 'other_allowed_table', ...}
-# TABLE_SYNONYMS = {'p_with_usd': 'price_with_usd', ...} 
-# ----------------------------------------------------------------------------
 
 def simple_table_whitelist_check(sql: str):
     """
