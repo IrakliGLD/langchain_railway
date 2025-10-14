@@ -768,6 +768,56 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # --- Numeric columns after coercion ---
         num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
 
+
+        
+        # --- 🧠 Generic chart-type detection based on data structure ---
+        cols_lower = [c.lower() for c in df.columns]
+        time_cols = [c for c in df.columns if re.search(r"(year|month|date)", c.lower())]
+        category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category)", c.lower())]
+        value_cols = [c for c in df.columns if re.search(r"(quantity|volume|value|amount|price|tariff|cpi|index|mwh|tj|usd|gel)", c.lower())]
+
+        chart_type = "line"  # default fallback
+
+        # CASE 1: Time + Single Value
+        if len(time_cols) >= 1 and len(category_cols) == 0 and len(value_cols) == 1:
+            chart_type = "line"
+
+        # CASE 2: Time + Category + Value
+        elif len(time_cols) >= 1 and len(category_cols) >= 1 and len(value_cols) >= 1:
+            chart_type = "stackedbar"
+
+        # CASE 3: Category + Value (single-year comparison)
+        elif len(time_cols) == 0 and len(category_cols) == 1 and len(value_cols) >= 1:
+            chart_type = "bar"
+
+        # CASE 4: Category + Subcategory + Value
+        elif len(time_cols) == 0 and len(category_cols) > 1 and len(value_cols) >= 1:
+            chart_type = "stackedbar"
+
+        # CASE 5: Few Categories + Value (distribution)
+        elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) == 1:
+            unique_cats = df[category_cols[0]].nunique()
+            if unique_cats <= 8:
+                chart_type = "pie"
+            else:
+                chart_type = "bar"
+
+        # CASE 6: Time + Multiple Numeric Values
+        elif len(time_cols) >= 1 and len(value_cols) > 1:
+            chart_type = "line"
+
+        # CASE 7: Category + Multiple Numeric Values (no time)
+        elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) > 1:
+            chart_type = "bar"
+
+        # Fallback
+        else:
+            chart_type = "line"
+
+        log.info(f"🧠 Chart type auto-detected → {chart_type} | Time={len(time_cols)} | Categories={len(category_cols)} | Values={len(value_cols)}")
+
+
+        
         # --- Dimension inference (price_tariff | energy_qty | index) ---
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
