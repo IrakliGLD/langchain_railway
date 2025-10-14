@@ -759,6 +759,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         for c in df.columns:
             if c not in ordered_cols:
                 ordered_cols.append(c)
+        ordered_cols = [c for c in ordered_cols if c in df.columns]
         df = df[ordered_cols]
 
 
