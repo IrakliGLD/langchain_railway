@@ -658,6 +658,41 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             rows = res.fetchall()
             cols = list(res.keys())
             df = pd.DataFrame(rows, columns=cols)
+
+            try:
+                from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
+            except ImportError:
+                SUPPLY_TECH_TYPES = ["hydro", "thermal", "wind", "solar", "import", "self-cons"]
+                DEMAND_TECH_TYPES = ["supply-distribution", "direct customers", "abkhazeti", "losses", "export"]
+                TRANSIT_TECH_TYPES = ["transit"]
+
+            if "type_tech" in df.columns:
+                supply_df = df[df["type_tech"].isin(SUPPLY_TECH_TYPES)]
+                demand_df = df[df["type_tech"].isin(DEMAND_TECH_TYPES)]
+                transit_df = df[df["type_tech"].isin(TRANSIT_TECH_TYPES)]
+
+                user_query_lower = q.query.lower()
+
+                if any(w in user_query_lower for w in ["demand", "consumption", "loss", "export"]):
+                    if not demand_df.empty:
+                        df = demand_df.copy()
+                        log.info(f"⚙️ Showing DEMAND side only: {DEMAND_TECH_TYPES}")
+                    else:
+                        log.info("⚠️ No DEMAND-side data found, using full dataset.")
+                elif "transit" in user_query_lower:
+                    if not transit_df.empty:
+                        df = transit_df.copy()
+                        log.info("⚙️ Showing TRANSIT data only.")
+                    else:
+                        log.info("⚠️ No TRANSIT data found, using full dataset.")
+                else:
+                    if not supply_df.empty:
+                        df = supply_df.copy()
+                        log.info(f"⚙️ Showing SUPPLY side only: {SUPPLY_TECH_TYPES}")
+                    else:
+                        log.info("⚠️ No SUPPLY-side data found, using full dataset.")
+
+    
     except Exception as e:
         msg = str(e)
         if "UndefinedColumn" in msg:
