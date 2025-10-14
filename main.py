@@ -713,15 +713,57 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         df = df.copy()
 
         # --- Coerce numeric for all non-time columns so JSON values are numbers, not strings ---
+        # --- Detect time column ---
         time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])), None)
+
+        # --- Detect and preserve categorical columns ---
+        categorical_hints = [
+            "type", "tech", "entity", "sector", "source", "segment",
+            "region", "category", "ownership", "market", "trade", "fuel"
+        ]
         for c in cols:
             if c != time_key:
-                try:
-                    # coerce to numeric where possible; non-numerics become NaN and remain fine
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-                except Exception:
-                    pass
+                if any(h in c.lower() for h in categorical_hints):
+                    df[c] = df[c].astype(str).replace("nan", None)
+                else:
+                    try:
+                        df[c] = pd.to_numeric(df[c], errors="coerce")
+                    except Exception:
+                        pass
 
+        # --- Auto-detect all categorical columns (non-numeric, non-time) ---
+        categorical_cols = [
+            c for c in df.columns
+            if c != time_key and not pd.api.types.is_numeric_dtype(df[c])
+        ]
+
+        # --- Apply human-readable labels from context ---
+        try:
+            from context import COLUMN_LABELS
+        except ImportError:
+            COLUMN_LABELS = {}
+
+        label_map_all = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in cols if c != time_key}
+
+        # --- Automatically rename categorical columns to readable names ---
+        for c in categorical_cols:
+            new_name = label_map_all.get(c, c.replace("_", " ").title())
+            if new_name != c:
+                df.rename(columns={c: new_name}, inplace=True)
+
+        # --- Optional: reorder columns: [time, categories..., values...] ---
+        ordered_cols = []
+        if time_key:
+            ordered_cols.append(time_key)
+        ordered_cols += categorical_cols
+        for c in df.columns:
+            if c not in ordered_cols:
+                ordered_cols.append(c)
+        df = df[ordered_cols]
+
+
+
+        
         # --- Numeric columns after coercion ---
         num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
 
