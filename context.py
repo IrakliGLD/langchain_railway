@@ -217,3 +217,8 @@ def scrub_schema_mentions(text: str) -> str:
         chain = fallback_prompt | llm | StrOutputParser()
         text = chain.invoke({})
     return text
+
+# --- Supply/Demand/Transit explicit lists for backend filtering ---
+SUPPLY_TECH_TYPES = list(TECH_TYPE_GROUPS["supply"].keys()) + ["solar", "self_cons"]
+DEMAND_TECH_TYPES = list(TECH_TYPE_GROUPS["demand"].keys())
+TRANSIT_TECH_TYPES = ["transit"]
