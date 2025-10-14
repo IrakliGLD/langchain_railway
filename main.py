@@ -946,10 +946,13 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             }
 
         else:
-            # Uniform dimension → single axis
-            log.info("📊 Uniform dimension → single-axis chart.")
-            chart_type = "line"
+            log.info("📊 Uniform dimension → single-axis chart (respecting earlier chart type).")
+
+            # Respect the earlier classification (stackedbar, bar, etc.)
+            if chart_type not in ["stackedbar", "bar", "pie", "dualaxis"]:
+                chart_type = "line"
             chart_data = df_labeled.to_dict("records")
+
 
             # Decide unit by the only dimension present
             if dims == {"price_tariff"}:
