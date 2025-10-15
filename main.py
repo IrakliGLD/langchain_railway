@@ -832,8 +832,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 # Fallback
                 return np.nan
 
-                else:
-                    return np.nan
+
+        
 
             # --- Step 1: Deduplicate columns (avoid DataFrame-in-column issue) ---
             subset = subset.loc[:, ~subset.columns.duplicated()]
