@@ -195,12 +195,14 @@ def make_openai() -> ChatOpenAI:
 def detect_analysis_mode(user_query: str) -> str:
     analytical_keywords = [
         "trend", "change", "growth", "increase", "decrease", "compare", "impact",
-        "volatility", "pattern", "season", "relationship", "correlation", "evolution"
+        "volatility", "pattern", "season", "relationship", "correlation", "evolution",
+        "driver", "cause", "effect", "factor", "reason", "influence", "depend", "why", "behind"
     ]
     for kw in analytical_keywords:
         if kw in user_query.lower():
             return "analyst"
     return "light"
+
 
 # ------------------------------------------------------------------
 # REMOVED: llm_plan_analysis - Combined into llm_generate_plan_and_sql
@@ -778,26 +780,30 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         plan["intent"] = "correlation"
 
 
-    if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
+
+    # --- Correlation analysis (runs whenever intent = correlation, regardless of mode) ---
+    if plan.get("intent") == "correlation" and not df.empty:
         log.info("🔍 Calculating correlation matrix for LLM analysis.")
 
-
-    if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
-        log.info("🔍 Calculating correlation matrix for LLM analysis.")
-
-        
         target_cols = [c for c in df.columns if 'price' in c.lower() or 'bal' in c.lower()]
-        explanatory_cols = [c for c in df.columns if 'share' in c.lower() or 'import' in c.lower() or 'hydro' in c.lower() or 'tpp' in c.lower()]
+        explanatory_cols = [c for c in df.columns if any(k in c.lower() for k in [
+            'share', 'import', 'hydro', 'tpp', 'tariff', 'xrate', 'thermal', 'renewable', 'fuel', 'volume'
+        ])]
+
         if target_cols and explanatory_cols:
             corr_df = df[target_cols + explanatory_cols].apply(pd.to_numeric, errors='coerce').dropna()
             for target in target_cols:
                 if target in corr_df.columns:
                     corr_series = corr_df.corr()[target].sort_values(ascending=False).round(3)
                     correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+
         if correlation_results:
             stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
             stats_hint += json.dumps(correlation_results, indent=2)
             log.info(f"Generated correlations: {correlation_results}")
+        else:
+            log.info("⚠️ No numeric overlap found for correlation calculation.")
+
 
     try:
         summary = llm_summarize(q.query, preview, stats_hint)
