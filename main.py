@@ -1,6 +1,5 @@
 # main.py v18.6 — Gemini Analyst (combined plan & SQL for speed)
 
-
 import os
 import re
 import json
@@ -267,6 +266,21 @@ FROM price_with_usd t1
 JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
 ORDER BY 1
 LIMIT 3750;
+
+-- Example 7: Tariffs for specific thermal power plants like Gardabani TPP LLC and grouped old TPPs for correlation
+SELECT
+  p.date,
+  p.p_bal_gel,
+  p.xrate,
+  MAX(CASE WHEN t.entity LIKE 'Gardabani TPP%' THEN t.tariff_gel END) AS gardabani_tpp_tariff_gel,
+  AVG(CASE WHEN e.type = 'thermal' AND t.entity NOT LIKE 'Gardabani TPP%' THEN t.tariff_gel END) AS grouped_old_tpp_tariff_gel
+FROM price_with_usd p
+LEFT JOIN tariff_with_usd t ON p.date = t.date
+LEFT JOIN entities_mv e ON t.entity = e.entity
+WHERE e.type = 'thermal'
+GROUP BY p.date, p.p_bal_gel, p.xrate
+ORDER BY p.date
+LIMIT 3750;
 """
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
@@ -280,6 +294,7 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str) -> str:
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
         "Use only documented tables and columns. Prefer monthly aggregation. "
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
+        "For tariffs, join with entities_mv and use entity LIKE patterns or type = 'thermal' for grouping, as entity names may include 'LLC' or numbers like 'Gardabani TPP 2 LLC'."
     )
     domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
     
