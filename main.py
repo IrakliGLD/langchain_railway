@@ -795,10 +795,19 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             for target in target_cols:
                 if target in corr_df.columns:
                     corr_matrix = corr_df.corr(numeric_only=True)
-                    if target in corr_matrix.index:
-                        # Explicitly convert to Series if it isn't, and then sort.
-                        corr_series = corr_matrix.loc[target].sort_values(ascending=False).round(3) 
-                        correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+                    # --- (#4) Safety check: ensure target column exists
+                    if target not in corr_matrix.index:
+                        log.warning(f"⚠️ Target {target} not in corr_matrix.index {list(corr_matrix.index)}")
+                        continue  # skip to next target safely
+
+                    # --- (#3) Debug log: confirm returned object type
+                    val = corr_matrix.loc[target, :]
+                    log.info(f"Type of corr_series_base for target={target}: {type(val)}; index sample={list(val.index)[:5]}")
+
+                    # --- Actual correlation sorting and extraction
+                    corr_series = val.sort_values(ascending=False).round(3)
+                    correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+
                     else:
                         log.warning(f"⚠️ Target column '{target}' not found in correlation matrix index.")
 
