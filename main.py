@@ -808,9 +808,6 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                     corr_series = val.sort_values(ascending=False).round(3)
                     correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
 
-                    else:
-                        log.warning(f"⚠️ Target column '{target}' not found in correlation matrix index.")
-
 
 
 
