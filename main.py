@@ -750,19 +750,33 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     stats_hint = quick_stats(rows, cols)
     correlation_results = {}
 
-    # --- Normalize plan intent: auto-detect driver/causal/correlation analysis ---
-    user_q_lower = q.query.lower()
-    intent_raw = (plan.get("intent") or "").lower()
+    # --- Semantic correlation intent detection (v18.6 semantic mode) ---
+    user_text = q.query.lower().strip()
+    intent_text = str(plan.get("intent", "")).lower()
+    combined_text = f"{intent_text} {user_text}"
 
-    # Any word implying cause/effect/influence should trigger correlation analysis
+    # --- Broader semantic triggers for cause/effect intent ---
     driver_keywords = [
-        "driver", "cause", "effect", "factor", "reason", "impact",
-        "influence", "explain", "relationship", "determinant",
-        "depend", "correl", "why", "behind", "affect", "cause of"
+        "driver", "cause", "effect", "factor", "reason", "impact", "influence",
+        "relationship", "correlation", "depend", "why", "behind", "due to",
+        "explain", "determinant", "driven by", "lead to", "affect", "because",
+        "based on", "results in", "responsible for"
     ]
 
-    if any(k in intent_raw for k in driver_keywords) or any(k in user_q_lower for k in driver_keywords):
+    # Semantic pattern detection (cause-effect phrases)
+    causal_patterns = [
+        r"what.*cause", r"what.*affect", r"why.*change", r"why.*increase",
+        r"factors?.*behind", r"factors?.*influenc", r"reason.*for",
+        r"cause.*of", r"impact.*on", r"driv.*price", r"lead.*to"
+    ]
+
+    text_hit = any(k in combined_text for k in driver_keywords)
+    pattern_hit = any(re.search(p, combined_text) for p in causal_patterns)
+
+    if text_hit or pattern_hit:
+        log.info("🧮 Semantic intent → correlation (detected cause/effect phrasing).")
         plan["intent"] = "correlation"
+
 
     if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
         log.info("🔍 Calculating correlation matrix for LLM analysis.")
