@@ -792,8 +792,32 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         if target_cols and explanatory_cols:
             
+            # --- 🩹 Flatten + clean numeric data before correlation ---
+            def flatten_nested(df_in: pd.DataFrame) -> pd.DataFrame:
+                for c in df_in.columns:
+                    if df_in[c].apply(lambda x: isinstance(x, (pd.DataFrame, list, dict))).any():
+                        try:
+                            df_in[c] = df_in[c].apply(
+                                lambda x: x.iloc[0, 0] if isinstance(x, pd.DataFrame) and not x.empty else (
+                                    x[0] if isinstance(x, list) and len(x) > 0 else np.nan
+                                )
+                            )
+                            log.info(f"🩹 Flattened nested structure in column '{c}'")
+                        except Exception as e:
+                            log.warning(f"⚠️ Could not flatten column '{c}': {e}")
+                return df_in
+
             subset = df[target_cols + explanatory_cols].copy()
             log.info(f"🧩 Subset columns before coercion: {list(subset.columns)} | shape={subset.shape}")
+
+            # 1️⃣ Flatten nested DataFrames/lists
+            subset = flatten_nested(subset)
+
+            # 2️⃣ Clean textual numeric artifacts (%, commas)
+            subset = subset.replace(r'%', '', regex=True)
+            subset = subset.replace(',', '.', regex=True)
+
+            # 3️⃣ Coerce each column safely
             for c in list(subset.columns):
                 col_data = subset.get(c)
                 if isinstance(col_data, (pd.Series, list, tuple, np.ndarray)):
@@ -801,24 +825,21 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 else:
                     log.warning(f"⚠️ Skipping non-Series column '{c}' during numeric coercion (type={type(col_data)})")
 
-
-            # Drop columns that are completely NaN, but keep partially valid ones
+            # 4️⃣ Drop fully empty columns / rows
             subset = subset.dropna(axis=1, how="all")
-
-            # Drop rows only if *all* numeric values are NaN
             subset = subset.dropna(axis=0, how="all")
 
-            subset = subset.replace(r'%', '', regex=True)
-            subset = subset.replace(',', '.', regex=True)
-            subset = subset.apply(pd.to_numeric, errors='coerce')
+            # 5️⃣ Diagnostics
+            log.info(f"✅ After flattening: {subset.shape}, dtypes={subset.dtypes.to_dict()}")
 
-
-            # Require at least two numeric columns for correlation
-            if subset.select_dtypes(include=[np.number]).shape[1] >= 2:
-                corr_df = subset
+            # 6️⃣ Ensure sufficient numeric data
+            numeric_cols = subset.select_dtypes(include=[np.number])
+            if numeric_cols.shape[1] >= 2:
+                corr_df = numeric_cols
             else:
                 log.warning("⚠️ Insufficient numeric data for correlation after coercion.")
                 corr_df = pd.DataFrame()
+
 
 
             
