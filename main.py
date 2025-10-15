@@ -813,6 +813,20 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             # 1️⃣ Flatten nested DataFrames/lists
             subset = flatten_nested(subset)
 
+            # 🧮 --- Inject missing share calculations if not present ---
+            share_like_cols = [c for c in df.columns if "quantity" in c.lower() and "share" not in c.lower()]
+            if "date" in df.columns and share_like_cols:
+                try:
+                    # total quantity per date for normalization
+                    df_total = df.groupby("date")[share_like_cols].sum().sum(axis=1)
+                    for col in share_like_cols:
+                        share_col = f"share_{col}".replace("quantity_", "")
+                        subset[share_col] = df.set_index("date")[col] / df_total
+                        log.info(f"🧮 Calculated {share_col} as normalized share of {col}")
+                except Exception as e:
+                    log.warning(f"⚠️ Failed to compute dynamic shares: {e}")
+
+            
             # 2️⃣ Clean textual numeric artifacts (%, commas)
             subset = subset.replace(r'%', '', regex=True)
             subset = subset.replace(',', '.', regex=True)
