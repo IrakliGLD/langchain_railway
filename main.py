@@ -218,13 +218,13 @@ FROM price_with_usd
 WHERE EXTRACT(YEAR FROM date) = 2023
 GROUP BY 1,2
 ORDER BY 1,2
-LIMIT 750;
+LIMIT 3750;
 
 -- Example 2: Single month balancing price (USD) for May 2024
 SELECT p_bal_usd
 FROM price_with_usd
 WHERE date = '2024-05-01'
-LIMIT 500;
+LIMIT 3750;
 
 -- Example 3: Generation (thousand MWh) by technology per month
 SELECT
@@ -234,7 +234,7 @@ SELECT
 FROM tech_quantity_view
 GROUP BY 1,2
 ORDER BY 1,2
-LIMIT 500;
+LIMIT 3750;
 
 -- Example 4: Average regulated tariffs (USD) by entity for 2024
 SELECT
@@ -244,7 +244,7 @@ FROM tariff_with_usd
 WHERE EXTRACT(YEAR FROM date) = 2024
 GROUP BY entity
 ORDER BY entity
-LIMIT 500;
+LIMIT 3750;
 
 -- Example 5: CPI monthly values for electricity fuels category
 SELECT
@@ -253,7 +253,7 @@ SELECT
 FROM monthly_cpi_mv
 WHERE cpi_type = 'electricity_gas_and_other_fuels'
 ORDER BY date
-LIMIT 500;
+LIMIT 3750;
 
 -- Example 6: Monthly data for Balancing Price (GEL) and Shares of key sources (Hydro, Import) for correlation analysis
 SELECT
@@ -265,7 +265,7 @@ SELECT
 FROM price_with_usd t1
 JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
 ORDER BY 1
-LIMIT 500;
+LIMIT 3750;
 """
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
@@ -568,14 +568,14 @@ def plan_validate_repair(sql: str) -> str:
         log.warning(f"⚠️ Synonym auto-correction failed: {e}")
         # Not a critical failure, continue with original SQL
 
-    # Phase 2: Append LIMIT 500 if missing
+    # Phase 2: Append LIMIT 3750 if missing
     if " from " in _sql.lower() and not re.search(r"\blimit\s+\d+\b", _sql, flags=re.IGNORECASE):
         
         # CRITICAL FIX: Remove the trailing semicolon if it exists
         _sql = _sql.rstrip().rstrip(';') 
         
-        # Append LIMIT 500 without a preceding semicolon
-        _sql = f"{_sql}\nLIMIT 500"
+        # Append LIMIT 3750 without a preceding semicolon
+        _sql = f"{_sql}\nLIMIT 3750"
 
     return _sql
     
