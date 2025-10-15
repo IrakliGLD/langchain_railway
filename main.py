@@ -750,8 +750,28 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     stats_hint = quick_stats(rows, cols)
     correlation_results = {}
 
+    # --- Normalize plan intent: auto-detect driver/causal/correlation analysis ---
+    user_q_lower = q.query.lower()
+    intent_raw = (plan.get("intent") or "").lower()
+
+    # Any word implying cause/effect/influence should trigger correlation analysis
+    driver_keywords = [
+        "driver", "cause", "effect", "factor", "reason", "impact",
+        "influence", "explain", "relationship", "determinant",
+        "depend", "correl", "why", "behind", "affect", "cause of"
+    ]
+
+    if any(k in intent_raw for k in driver_keywords) or any(k in user_q_lower for k in driver_keywords):
+        plan["intent"] = "correlation"
+
     if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
         log.info("🔍 Calculating correlation matrix for LLM analysis.")
+
+
+    if mode == "analyst" and plan.get("intent") == "correlation" and not df.empty:
+        log.info("🔍 Calculating correlation matrix for LLM analysis.")
+
+        
         target_cols = [c for c in df.columns if 'price' in c.lower() or 'bal' in c.lower()]
         explanatory_cols = [c for c in df.columns if 'share' in c.lower() or 'import' in c.lower() or 'hydro' in c.lower() or 'tpp' in c.lower()]
         if target_cols and explanatory_cols:
