@@ -793,8 +793,14 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         if target_cols and explanatory_cols:
             
             subset = df[target_cols + explanatory_cols].copy()
-            for c in subset.columns:
-                subset[c] = pd.to_numeric(subset[c], errors="coerce")
+            log.info(f"🧩 Subset columns before coercion: {list(subset.columns)} | shape={subset.shape}")
+            for c in list(subset.columns):
+                col_data = subset.get(c)
+                if isinstance(col_data, (pd.Series, list, tuple, np.ndarray)):
+                    subset[c] = pd.to_numeric(col_data, errors="coerce")
+                else:
+                    log.warning(f"⚠️ Skipping non-Series column '{c}' during numeric coercion (type={type(col_data)})")
+
 
             # Drop columns that are completely NaN, but keep partially valid ones
             subset = subset.dropna(axis=1, how="all")
