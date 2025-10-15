@@ -794,8 +794,14 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             corr_df = df[target_cols + explanatory_cols].apply(pd.to_numeric, errors='coerce').dropna()
             for target in target_cols:
                 if target in corr_df.columns:
-                    corr_series = corr_df.corr()[target].sort_values(ascending=False).round(3)
-                    correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+                    corr_matrix = corr_df.corr(numeric_only=True)
+                    if target in corr_matrix.columns:
+                        corr_series = corr_matrix.loc[:, target].sort_values(ascending=False).round(3)
+                        correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+                    else:
+                        log.warning(f"⚠️ Target column '{target}' not found in correlation matrix.")
+
+
 
         if correlation_results:
             stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
