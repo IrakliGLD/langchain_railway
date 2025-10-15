@@ -807,48 +807,61 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                             log.warning(f"⚠️ Could not flatten column '{c}': {e}")
                 return df_in
 
-            # --- Final robust flatten + numeric coercion for correlation ---
+            # --- flatten + numeric coercion for correlation ---
             subset = df[target_cols + explanatory_cols].copy()
             log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
 
-            def collapse_to_scalar(x):
-                # If x is a DataFrame
-                if isinstance(x, pd.DataFrame):
+            def collapse_to_scalar(val):
+                """Safely reduce any nested object (DataFrame, list, Series) to a scalar numeric value."""
+                if isinstance(val, pd.DataFrame):
+                    # Flatten all numeric values and take their mean
                     try:
-                        # flatten to a Series and take mean
-                        return pd.to_numeric(x.stack(), errors="coerce").mean()
+                        flat = pd.to_numeric(val.stack(), errors="coerce")
+                        return flat.mean() if not flat.empty else np.nan
                     except Exception:
                         return np.nan
-                # If x is a Series, list, np.ndarray, tuple
-                if isinstance(x, (pd.Series, list, tuple, np.ndarray)):
+                elif isinstance(val, (list, tuple, np.ndarray, pd.Series)):
+                    # Convert to Series and take mean if numeric
                     try:
-                        series_x = pd.Series(x)
-                        return pd.to_numeric(series_x, errors="coerce").mean()
+                        s = pd.Series(val)
+                        s = pd.to_numeric(s, errors="coerce")
+                        return s.mean() if s.notna().any() else np.nan
                     except Exception:
                         return np.nan
-                # otherwise return as is
-                return x
+                elif isinstance(val, (float, int, np.floating, np.integer)):
+                    return val
+                else:
+                    # Try parsing single string numeric value
+                    try:
+                        return float(str(val).replace(",", ".").replace("%", ""))
+                    except Exception:
+                        return np.nan
 
-            # Apply collapse only on problematic columns; but safe to apply on all
+            # Apply collapse to each column; ensure result is scalar per cell
             for c in subset.columns:
-                subset[c] = subset[c].apply(collapse_to_scalar)
+                try:
+                    subset[c] = subset[c].map(collapse_to_scalar)
+                except Exception as e:
+                    log.warning(f"⚠️ Collapse failed for column {c}: {e}")
 
-            # Now clean textual artifacts
+            # Clean up
             subset = subset.replace(r'%', '', regex=True)
             subset = subset.replace(',', '.', regex=True)
 
-            # Coerce to numeric
+            # Coerce to numeric globally (now all cells should be simple scalars)
             for c in subset.columns:
                 subset[c] = pd.to_numeric(subset[c], errors="coerce")
 
-            # Drop all-NaN columns/rows
-            subset = subset.dropna(axis=1, how="all")
-            subset = subset.dropna(axis=0, how="all")
+            # Drop completely empty columns/rows
+            subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
 
-            log.info(f"✅ After collapse + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
+            # Diagnostic
+            log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
 
+            # Select only numeric columns for correlation
             corr_df = subset.select_dtypes(include=[np.number])
-
+            if corr_df.shape[1] < 2:
+                log.warning("⚠️ Not enough numeric columns for correlation.")
 
 
 
