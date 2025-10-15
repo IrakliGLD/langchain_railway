@@ -812,21 +812,26 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
 
             def collapse_to_scalar(val):
-                """Safely reduce any nested object (DataFrame, list, Series) to a scalar numeric value."""
+                """Reduce any nested or string value to a numeric scalar if possible."""
+                # Try direct numeric coercion first
+                try:
+                    return float(str(val).replace(",", ".").replace("%", "").strip())
+                except Exception:
+                    pass
+
+                # DataFrame
                 if isinstance(val, pd.DataFrame):
                     flat = pd.to_numeric(val.stack(), errors="coerce")
                     return flat.mean() if not flat.empty else np.nan
-                elif isinstance(val, (list, tuple, np.ndarray, pd.Series)):
+
+                # List / array / Series
+                if isinstance(val, (list, tuple, np.ndarray, pd.Series)):
                     s = pd.to_numeric(pd.Series(val), errors="coerce")
                     return s.mean() if s.notna().any() else np.nan
-                elif isinstance(val, (float, int, np.floating, np.integer)):
-                    return val
-                elif isinstance(val, str):
-                    # Remove % and commas, then parse
-                    try:
-                        return float(val.replace(",", ".").replace("%", ""))
-                    except Exception:
-                        return np.nan
+
+                # Fallback
+                return np.nan
+
                 else:
                     return np.nan
 
@@ -852,7 +857,9 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                     log.warning(f"⚠️ Could not coerce column {c} to numeric: {e}")
 
             # --- Step 4: Drop empty columns/rows ---
-            subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
+            #subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
+            log.info(f"🔍 Sample values before dropna:\n{subset.head(5)}")
+            log.info(f"🔍 Non-null counts:\n{subset.notna().sum()}")
 
             # --- Step 5: Diagnostics ---
             log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
