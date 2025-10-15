@@ -1,5 +1,6 @@
 # main.py v18.6 — Gemini Analyst (combined plan & SQL for speed)
 
+
 import os
 import re
 import json
@@ -257,26 +258,14 @@ LIMIT 3750;
 
 -- Example 6: Monthly data for Balancing Price (GEL) and Shares of key sources (Hydro, Import) for correlation analysis
 SELECT
-  p.date,
-  p.p_bal_gel AS balancing_price_gel,
-  SUM(CASE WHEN tde.entity = 'import' THEN tde.quantity END) / SUM(tde.quantity) AS share_import,
-  SUM(CASE WHEN tde.entity = 'deregulated_hydro' THEN tde.quantity END) / SUM(tde.quantity) AS share_deregulated_hydro,
-  SUM(CASE WHEN tde.entity = 'renewable_ppa' THEN tde.quantity END) / SUM(tde.quantity) AS share_renewable_ppa
-FROM price_with_usd p
-LEFT JOIN trade_derived_entities tde ON p.date = tde.date
-GROUP BY p.date, p.p_bal_gel
-ORDER BY p.date
-LIMIT 3750;
-
--- Example 7: Tariffs for specific thermal power plants like Gardabani TPP LLC and grouped old TPPs for correlation
-SELECT
-  p.date,
-  p.p_bal_gel,
-  p.xrate,
-  (SELECT MAX(t.tariff_gel) FROM tariff_with_usd t WHERE t.date = p.date AND t.entity LIKE 'Gardabani%') AS gardabani_tpp_tariff_gel,
-  (SELECT AVG(t.tariff_gel) FROM tariff_with_usd t JOIN entities_mv e ON t.entity = e.entity WHERE t.date = p.date AND e.type = 'thermal' AND t.entity NOT LIKE 'Gardabani%') AS grouped_old_tpp_tariff_gel
-FROM price_with_usd p
-ORDER BY p.date
+  TO_CHAR(t1.date, 'YYYY-MM') AS month,
+  t1.p_bal_gel AS balancing_price_gel,
+  t2.share_import,
+  t2.share_deregulated_hydro,
+  t2.share_regulated_hpp
+FROM price_with_usd t1
+JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
+ORDER BY 1
 LIMIT 3750;
 """
 
@@ -291,9 +280,6 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str) -> str:
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
         "Use only documented tables and columns. Prefer monthly aggregation. "
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
-        "For tariffs, join with entities_mv and use entity LIKE patterns or type = 'thermal' for grouping, as entity names may include 'LLC' or numbers like 'Gardabani TPP 2 LLC'. "
-        "Calculate shares from trade_derived_entities as quantity / total_quantity per date using CASE and WITH totals. "
-        "Use subqueries for tariff aggregations to avoid filtering the main dataset."
     )
     domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
     
@@ -718,28 +704,16 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
             pivot_sql = """
-WITH totals AS (
-  SELECT date, SUM(quantity) AS total_qty
-  FROM trade_derived_entities
-  GROUP BY date
-)
-SELECT
-  tde.date,
-  SUM(CASE WHEN tde.entity = 'import' THEN tde.quantity END) AS qty_import_bal,
-  SUM(CASE WHEN tde.entity = 'deregulated_hydro' THEN tde.quantity END) AS qty_deregulated_hydro,
-  SUM(CASE WHEN tde.entity = 'renewable_ppa' THEN tde.quantity END) AS qty_renewable_ppa_bal,
-  SUM(CASE WHEN tde.entity = 'regulated_hpp' THEN tde.quantity END) AS qty_regulated_hpp,
-  SUM(CASE WHEN tde.entity = 'thermal_ppa' THEN tde.quantity END) AS qty_thermal_ppa,
-  SUM(CASE WHEN tde.entity = 'total_hpp' THEN tde.quantity END) AS qty_total_hpp,
-  SUM(CASE WHEN tde.entity = 'import' THEN tde.quantity / totals.total_qty END) AS share_import_bal,
-  SUM(CASE WHEN tde.entity = 'deregulated_hydro' THEN tde.quantity / totals.total_qty END) AS share_deregulated_hydro,
-  SUM(CASE WHEN tde.entity = 'renewable_ppa' THEN tde.quantity / totals.total_qty END) AS share_renewable_ppa_bal,
-  SUM(CASE WHEN tde.entity = 'regulated_hpp' THEN tde.quantity / totals.total_qty END) AS share_regulated_hpp,
-  SUM(CASE WHEN tde.entity = 'thermal_ppa' THEN tde.quantity / totals.total_qty END) AS share_thermal_ppa,
-  SUM(CASE WHEN tde.entity = 'total_hpp' THEN tde.quantity / totals.total_qty END) AS share_total_hpp
-FROM trade_derived_entities tde
-JOIN totals ON tde.date = totals.date
-GROUP BY tde.date
+            SELECT
+                date,
+                SUM(CASE WHEN entity = 'import' THEN share ELSE 0 END) AS share_import,
+                SUM(CASE WHEN entity = 'deregulated_hydro' THEN share ELSE 0 END) AS share_deregulated_hydro,
+                SUM(CASE WHEN entity = 'regulated_hpp' THEN share ELSE 0 END) AS share_regulated_hpp,
+                SUM(CASE WHEN entity = 'renewable_ppa' THEN share ELSE 0 END) AS share_renewable_ppa,
+                SUM(CASE WHEN entity = 'thermal_ppa' THEN share ELSE 0 END) AS share_thermal_ppa,
+                SUM(CASE WHEN entity = 'total_hpp' THEN share ELSE 0 END) AS share_total_hpp
+            FROM trade_derived_entities
+            GROUP BY date
             """
             # Replace direct reference with pivoted subquery
             safe_sql_final = re.sub(
