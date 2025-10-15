@@ -809,55 +809,46 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
             # --- Final robust flatten + numeric coercion for correlation ---
             subset = df[target_cols + explanatory_cols].copy()
-            log.info(f"🧩 Subset columns before coercion: {list(subset.columns)} | shape={subset.shape}")
+            log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
 
-            def smart_flatten_column(series: pd.Series, name: str) -> pd.Series:
-                """Flatten nested structures within a column."""
-                sample_types = series.dropna().map(type).unique().tolist()
-                if all(t in [float, int, np.float64, np.int64] for t in sample_types):
-                    return pd.to_numeric(series, errors="coerce")  # Already numeric
+            def collapse_to_scalar(x):
+                # If x is a DataFrame
+                if isinstance(x, pd.DataFrame):
+                    try:
+                        # flatten to a Series and take mean
+                        return pd.to_numeric(x.stack(), errors="coerce").mean()
+                    except Exception:
+                        return np.nan
+                # If x is a Series, list, np.ndarray, tuple
+                if isinstance(x, (pd.Series, list, tuple, np.ndarray)):
+                    try:
+                        series_x = pd.Series(x)
+                        return pd.to_numeric(series_x, errors="coerce").mean()
+                    except Exception:
+                        return np.nan
+                # otherwise return as is
+                return x
 
-                flattened = []
-                for val in series:
-                    if isinstance(val, pd.DataFrame):
-                        try:
-                            # If numeric, take mean of all values
-                            if not val.empty:
-                                flattened.append(pd.to_numeric(val.stack(), errors="coerce").mean())
-                            else:
-                                flattened.append(np.nan)
-                        except Exception:
-                            flattened.append(np.nan)
-                    elif isinstance(val, (list, tuple, np.ndarray, pd.Series)):
-                        try:
-                            # Take mean if all numeric, else first item
-                            arr = pd.to_numeric(pd.Series(val), errors="coerce")
-                            flattened.append(arr.mean() if arr.notna().any() else np.nan)
-                        except Exception:
-                            flattened.append(np.nan)
-                    else:
-                        flattened.append(val)
-                flattened = pd.to_numeric(flattened, errors="coerce")
-                log.info(f"🧮 Flattened nested column '{name}' | non-null count={flattened.notna().sum()}")
-                return flattened
-
-            # Apply only to columns that need flattening
+            # Apply collapse only on problematic columns; but safe to apply on all
             for c in subset.columns:
-                if subset[c].apply(lambda x: isinstance(x, (pd.DataFrame, list, dict, pd.Series, np.ndarray))).any():
-                    subset[c] = smart_flatten_column(subset[c], c)
-                else:
-                    subset[c] = pd.to_numeric(subset[c], errors="coerce")
+                subset[c] = subset[c].apply(collapse_to_scalar)
 
-            # Drop completely empty columns/rows
-            subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
+            # Now clean textual artifacts
+            subset = subset.replace(r'%', '', regex=True)
+            subset = subset.replace(',', '.', regex=True)
 
-            # Show diagnostics
-            log.info(f"✅ After flatten & coercion: shape={subset.shape} | dtypes={subset.dtypes.to_dict()}")
+            # Coerce to numeric
+            for c in subset.columns:
+                subset[c] = pd.to_numeric(subset[c], errors="coerce")
 
-            # Keep only numeric columns for correlation
+            # Drop all-NaN columns/rows
+            subset = subset.dropna(axis=1, how="all")
+            subset = subset.dropna(axis=0, how="all")
+
+            log.info(f"✅ After collapse + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
+
             corr_df = subset.select_dtypes(include=[np.number])
-            if corr_df.shape[1] < 2:
-                log.warning("⚠️ Insufficient numeric columns after flatten; correlation may be incomplete.")
+
 
 
 
