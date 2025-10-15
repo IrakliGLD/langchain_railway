@@ -791,7 +791,31 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         ])]
 
         if target_cols and explanatory_cols:
-            corr_df = df[target_cols + explanatory_cols].apply(pd.to_numeric, errors='coerce').dropna()
+            
+            subset = df[target_cols + explanatory_cols].copy()
+            for c in subset.columns:
+                subset[c] = pd.to_numeric(subset[c], errors="coerce")
+
+            # Drop columns that are completely NaN, but keep partially valid ones
+            subset = subset.dropna(axis=1, how="all")
+
+            # Drop rows only if *all* numeric values are NaN
+            subset = subset.dropna(axis=0, how="all")
+
+            subset = subset.replace(r'%', '', regex=True)
+            subset = subset.replace(',', '.', regex=True)
+            subset = subset.apply(pd.to_numeric, errors='coerce')
+
+
+            # Require at least two numeric columns for correlation
+            if subset.select_dtypes(include=[np.number]).shape[1] >= 2:
+                corr_df = subset
+            else:
+                log.warning("⚠️ Insufficient numeric data for correlation after coercion.")
+                corr_df = pd.DataFrame()
+
+
+            
             for target in target_cols:
                 if target in corr_df.columns:
                     corr_matrix = corr_df.corr(numeric_only=True)
