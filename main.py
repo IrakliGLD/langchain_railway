@@ -814,54 +814,54 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             def collapse_to_scalar(val):
                 """Safely reduce any nested object (DataFrame, list, Series) to a scalar numeric value."""
                 if isinstance(val, pd.DataFrame):
-                    # Flatten all numeric values and take their mean
-                    try:
-                        flat = pd.to_numeric(val.stack(), errors="coerce")
-                        return flat.mean() if not flat.empty else np.nan
-                    except Exception:
-                        return np.nan
+                    flat = pd.to_numeric(val.stack(), errors="coerce")
+                    return flat.mean() if not flat.empty else np.nan
                 elif isinstance(val, (list, tuple, np.ndarray, pd.Series)):
-                    # Convert to Series and take mean if numeric
-                    try:
-                        s = pd.Series(val)
-                        s = pd.to_numeric(s, errors="coerce")
-                        return s.mean() if s.notna().any() else np.nan
-                    except Exception:
-                        return np.nan
+                    s = pd.to_numeric(pd.Series(val), errors="coerce")
+                    return s.mean() if s.notna().any() else np.nan
                 elif isinstance(val, (float, int, np.floating, np.integer)):
                     return val
-                else:
-                    # Try parsing single string numeric value
+                elif isinstance(val, str):
+                    # Remove % and commas, then parse
                     try:
-                        return float(str(val).replace(",", ".").replace("%", ""))
+                        return float(val.replace(",", ".").replace("%", ""))
                     except Exception:
                         return np.nan
+                else:
+                    return np.nan
 
-            # Apply collapse to each column; ensure result is scalar per cell
+            # --- Step 1: Deduplicate columns (avoid DataFrame-in-column issue) ---
+            subset = subset.loc[:, ~subset.columns.duplicated()]
+            log.info(f"🧮 After deduplication: cols={list(subset.columns)} shape={subset.shape}")
+
+            # --- Step 2: Flatten each column properly ---
+            for c in subset.columns:
+                col = subset[c]
+                # if column is DataFrame (e.g., multi-level or duplicate source)
+                if isinstance(col, pd.DataFrame):
+                    # collapse each cell
+                    subset[c] = col.applymap(collapse_to_scalar).stack().groupby(level=0).mean()
+                else:
+                    subset[c] = col.map(collapse_to_scalar)
+
+            # --- Step 3: Coerce everything to numeric safely ---
             for c in subset.columns:
                 try:
-                    subset[c] = subset[c].map(collapse_to_scalar)
+                    subset[c] = pd.to_numeric(subset[c], errors="coerce")
                 except Exception as e:
-                    log.warning(f"⚠️ Collapse failed for column {c}: {e}")
+                    log.warning(f"⚠️ Could not coerce column {c} to numeric: {e}")
 
-            # Clean up
-            subset = subset.replace(r'%', '', regex=True)
-            subset = subset.replace(',', '.', regex=True)
-
-            # Coerce to numeric globally (now all cells should be simple scalars)
-            for c in subset.columns:
-                subset[c] = pd.to_numeric(subset[c], errors="coerce")
-
-            # Drop completely empty columns/rows
+            # --- Step 4: Drop empty columns/rows ---
             subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
 
-            # Diagnostic
+            # --- Step 5: Diagnostics ---
             log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
 
-            # Select only numeric columns for correlation
+            # --- Step 6: Select numeric for correlation ---
             corr_df = subset.select_dtypes(include=[np.number])
             if corr_df.shape[1] < 2:
                 log.warning("⚠️ Not enough numeric columns for correlation.")
+
 
 
 
