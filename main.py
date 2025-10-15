@@ -841,20 +841,13 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
             # --- Step 2: Flatten each column properly ---
             for c in subset.columns:
-                col = subset[c]
-                # if column is DataFrame (e.g., multi-level or duplicate source)
-                if isinstance(col, pd.DataFrame):
-                    # collapse each cell
-                    subset[c] = col.applymap(collapse_to_scalar).stack().groupby(level=0).mean()
-                else:
-                    subset[c] = col.map(collapse_to_scalar)
+                if isinstance(subset[c], pd.DataFrame):
+                    subset[c] = subset[c].applymap(collapse_to_scalar).stack().groupby(level=0).mean()
+                elif not pd.api.types.is_numeric_dtype(subset[c]):
+                    subset[c] = subset[c].map(collapse_to_scalar)
 
             # --- Step 3: Coerce everything to numeric safely ---
-            for c in subset.columns:
-                try:
-                    subset[c] = pd.to_numeric(subset[c], errors="coerce")
-                except Exception as e:
-                    log.warning(f"⚠️ Could not coerce column {c} to numeric: {e}")
+            subset = subset.apply(pd.to_numeric, errors="coerce")
 
             # --- Step 4: Drop empty columns/rows ---
             #subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
@@ -868,7 +861,6 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             corr_df = subset.select_dtypes(include=[np.number])
             if corr_df.shape[1] < 2:
                 log.warning("⚠️ Not enough numeric columns for correlation.")
-
 
 
 
