@@ -693,9 +693,40 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                         log.info("⚠️ No SUPPLY-side data found, using full dataset.")
 
     
+ 
     except Exception as e:
         msg = str(e)
-        if "UndefinedColumn" in msg:
+
+        # --- 🩹 Auto-pivot fix for hallucinated trade_derived_entities columns ---
+        if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
+            log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
+            pivot_sql = """
+            SELECT
+                date,
+                SUM(CASE WHEN entity = 'import' THEN share ELSE 0 END) AS share_import,
+                SUM(CASE WHEN entity = 'deregulated_hydro' THEN share ELSE 0 END) AS share_deregulated_hydro,
+                SUM(CASE WHEN entity = 'regulated_hpp' THEN share ELSE 0 END) AS share_regulated_hpp,
+                SUM(CASE WHEN entity = 'renewable_ppa' THEN share ELSE 0 END) AS share_renewable_ppa,
+                SUM(CASE WHEN entity = 'thermal_ppa' THEN share ELSE 0 END) AS share_thermal_ppa,
+                SUM(CASE WHEN entity = 'total_hpp' THEN share ELSE 0 END) AS share_total_hpp
+            FROM trade_derived_entities
+            GROUP BY date
+            """
+            # Replace direct reference with pivoted subquery
+            safe_sql_final = re.sub(
+                r"\btrade_derived_entities\b",
+                f"({pivot_sql}) AS tde",
+                safe_sql_final,
+                flags=re.IGNORECASE
+            )
+            with ENGINE.connect() as conn:
+                res = conn.execute(text(safe_sql_final))
+                rows = res.fetchall()
+                cols = list(res.keys())
+                df = pd.DataFrame(rows, columns=cols)
+
+        elif "UndefinedColumn" in msg:
+            # Fallback synonym auto-fix (existing behavior)
             for bad, good in COLUMN_SYNONYMS.items():
                 if re.search(rf"\b{bad}\b", safe_sql_final, flags=re.IGNORECASE):
                     safe_sql_final = re.sub(rf"\b{bad}\b", good, safe_sql_final, flags=re.IGNORECASE)
@@ -709,6 +740,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             else:
                 log.exception("SQL execution failed (UndefinedColumn)")
                 raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
         else:
             log.exception("SQL execution failed")
             raise HTTPException(status_code=500, detail=f"Query failed: {e}")
