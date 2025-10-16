@@ -9,6 +9,7 @@ import logging
 import urllib.parse
 from typing import Optional, Dict, Any, List, Tuple
 from difflib import get_close_matches
+from sqlglot.errors import ParseError
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
