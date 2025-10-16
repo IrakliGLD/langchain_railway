@@ -544,9 +544,44 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                 
                 change = ((mean_last_year - mean_first_year) / mean_first_year * 100) if mean_first_year != 0 else 0
                 trend = "increasing" if mean_last_year > mean_first_year else "decreasing"
-                
                 out.append(f"Trend (Yearly Avg, {first_full_year}→{last_full_year}): {trend} ({change:.1f}%)")
-                
+
+                # --- NEW: Seasonal split (Summer vs Winter) with CAGR ---
+                try:
+                    df['month'] = df[time_col].dt.month
+                    summer_mask = df['month'].isin([4, 5, 6, 7])
+                    winter_mask = ~summer_mask
+
+                    def seasonal_cagr(df_season, col):
+                        df_y = df_season.groupby('__year')[col].mean().dropna()
+                        if len(df_y) >= 2:
+                            first, last = df_y.iloc[0], df_y.iloc[-1]
+                            n = len(df_y) - 1
+                            return ((last / first) ** (1 / n) - 1) * 100 if first > 0 else np.nan
+                        return np.nan
+
+                    for col in numeric.columns:
+                        if col.lower().startswith('p_bal') or 'price' in col.lower():
+                            summer_avg_first = df.loc[(df['__year'] == first_full_year) & summer_mask, col].mean()
+                            summer_avg_last = df.loc[(df['__year'] == last_full_year) & summer_mask, col].mean()
+                            winter_avg_first = df.loc[(df['__year'] == first_full_year) & winter_mask, col].mean()
+                            winter_avg_last = df.loc[(df['__year'] == last_full_year) & winter_mask, col].mean()
+
+                            cagr_summer = seasonal_cagr(df.loc[summer_mask], col)
+                            cagr_winter = seasonal_cagr(df.loc[winter_mask], col)
+
+                            out.append(
+                                f"Seasonal Trend ({col}): Summer {first_full_year}→{last_full_year}: "
+                                f"{(summer_avg_last - summer_avg_first):.1f} Δ, CAGR {cagr_summer:.2f}%; "
+                                f"Winter {first_full_year}→{last_full_year}: "
+                                f"{(winter_avg_last - winter_avg_first):.1f} Δ, CAGR {cagr_winter:.2f}%."
+                            )
+                except Exception as e:
+                    log.warning(f'⚠️ Seasonal trend calculation failed: {e}')
+
+
+
+            
             else:
                 out.append("Trend: Less than one full year of data for comparison.")
 
