@@ -808,6 +808,38 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                             log.warning(f"⚠️ Could not flatten column '{c}': {e}")
                 return df_in
 
+            
+            # --- 🧩 Enrich correlation dataset with relevant tariffs (Hydro + Thermal) ---
+            if "p_bal_gel" in df.columns:
+                log.info("♻️ Adding Engurhesi (Hydro) and Thermal GEL tariffs for correlation...")
+
+                tariff_pivot_sql = """
+                SELECT
+                    date,
+                    -- Engurhesi hydro tariff
+                    AVG(CASE WHEN entity ILIKE '%engurhesi%' THEN tariff_gel END) AS engurhesi_tariff_gel,
+                    -- Thermal generation tariffs (aggregate group)
+                    AVG(CASE WHEN entity ILIKE ANY(ARRAY[
+                        '%gardabani%', '%mtskheta%', '%tbilisi%', '%rustavi%', '%khrami%', '%vartsikhe%'
+                    ]) THEN tariff_gel END) AS thermal_tariff_gel
+                FROM tariff_with_usd
+                GROUP BY date
+                ORDER BY date;
+                """
+
+                tariff_df = pd.read_sql(text(tariff_pivot_sql), ENGINE)
+
+                if "date" in df.columns and "date" in tariff_df.columns:
+                    before_cols = set(df.columns)
+                    df = df.merge(tariff_df, on="date", how="left")
+                    added_cols = list(set(df.columns) - before_cols)
+                    log.info(f"✅ Added tariff columns for correlation: {added_cols}")
+                else:
+                    log.warning("⚠️ Could not merge tariff data: missing date column in main DF.")
+
+
+
+            
             # --- flatten + numeric coercion for correlation ---
             subset = df[target_cols + explanatory_cols].copy()
             log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
