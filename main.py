@@ -230,6 +230,25 @@ def compute_weighted_balancing_price(conn) -> pd.DataFrame:
     return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
 
 
+def compute_seasonal_average(df: pd.DataFrame, date_col: str, value_col: str, agg_func: str = "avg") -> pd.DataFrame:
+    """
+    Compute seasonal (Summer vs Winter) average or sum for a given value column.
+    Assumes df contains a date column in datetime or string format.
+    """
+    if date_col not in df.columns or value_col not in df.columns:
+        return df
+
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df["season"] = df[date_col].dt.month.apply(lambda m: "Summer" if m in [4,5,6,7] else "Winter")
+
+    if agg_func.lower() in ("avg", "mean"):
+        grouped = df.groupby("season")[value_col].mean().reset_index(name=f"avg_{value_col}")
+    elif agg_func.lower() == "sum":
+        grouped = df.groupby("season")[value_col].sum().reset_index(name=f"sum_{value_col}")
+    else:
+        raise ValueError("agg_func must be 'avg' or 'sum'")
+    return grouped
 
 
 
@@ -439,7 +458,8 @@ Guidance:
 - NEVER use tariff_usd in correlations; use tariff_gel only.
 - Tariffs follow cost-plus methodology; thermal tariffs depend on gas price (USD) → correlated with xrate.
 - When USD values appear, *_usd = *_gel / xrate.
-- Aggregation default = monthly.
+- Aggregation default = monthly. for energy_balance_long_mv= yearly.
+- Season is a derived dimension (not a column): use CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'Summer' ELSE 'Winter' END AS season to group data seasonally when user mentions 'season', 'summer', or 'winter'.
 - Use these examples:
 {FEW_SHOT_SQL}
 
@@ -584,6 +604,15 @@ When tariffs are discussed:
 
 When inflation or CPI is mentioned, relate the CPI category 'electricity_gas_and_other_fuels'
 to tariff_gel or p_bal_gel for affordability comparisons.
+
+Always perform seasonal comparison between Summer and Winter when analyzing prices, tariffs, or generation data:
+- Summer = April, May, June, July
+- Winter = August, September, October, November, December, January, February, March
+For every balancing price, tariff, or quantity analysis, compute averages (for prices) or totals (for quantities) separately for these two seasons.
+Explain the structural difference clearly:
+- Summer → high hydro generation, low balancing prices.
+- Winter → thermal and import dominance, higher balancing prices.
+This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it.
 
 
 Write 3–5 sentences:
