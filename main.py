@@ -1,4 +1,5 @@
-# main.py v18.13 — Fix 403 error (log x-app-secret), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
+
+# main.py v18.14 — Fix 403 (enhanced logging), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
 import re
@@ -11,6 +12,7 @@ from difflib import get_close_matches
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
+# Corrected Pydantic imports for V2 compatibility
 from pydantic import BaseModel, Field, field_validator, ValidationError
 
 from sqlalchemy import create_engine, text
@@ -148,7 +150,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.13")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.14")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -166,14 +168,14 @@ async def health_check():
 # Models
 # -----------------------------
 class Question(BaseModel):
-    query: str = Field(..., max_length=5000)
+    query: str = Field(..., max_length=2000)
     user_id: Optional[str] = None
 
     @field_validator("query")
     @classmethod
     def _not_empty(cls, v):
         if not v or not v.strip():
-            raise ValueError("Query cannot be empty or whitespace")
+            raise ValueError("Query cannot be empty")
         return v.strip()
 
 # -----------------------------
@@ -386,16 +388,20 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     numeric = df.select_dtypes(include=[np.number])
     out = [f"Rows: {len(df)}"]
     
+    # 1. Detect date/year column
     date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()]
     if not date_cols or numeric.empty:
         return "\n".join(out)
 
     time_col = date_cols[0]
 
+    # --- NEW TREND CALCULATION: Compare First Full Year vs Last Full Year ---
     try:
+        # Ensure the time column is datetime, then extract year/month
         if pd.api.types.is_datetime64_any_dtype(df[time_col]):
             df['__year'] = df[time_col].dt.year
         else:
+            # Attempt to coerce strings/objects to datetime
             df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
             df['__year'] = df[time_col].dt.year
 
@@ -404,10 +410,14 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
             first_full_year = int(valid_years.min())
             last_full_year = int(valid_years.max())
 
+            # Ensure we are comparing two different years
             if first_full_year != last_full_year:
+                
+                # Filter data for the first and last full years
                 df_first = df[df['__year'] == first_full_year]
                 df_last = df[df['__year'] == last_full_year]
                 
+                # Get the mean of all numeric columns for these years
                 mean_first_year = df_first[numeric.columns].mean().mean()
                 mean_last_year = df_last[numeric.columns].mean().mean()
                 
@@ -424,11 +434,14 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 
     except Exception as e:
         log.warning(f"⚠️ Yearly trend calculation failed: {e}")
+        # Fallback to original logic or just skip trend calculation
 
+    # ... (Keep the date range display) ...
     first = df[time_col].min()
     last = df[time_col].max()
     out.append(f"Period: {first} → {last}")
     
+    # ... (Keep the numeric summary) ...
     if not numeric.empty:
         desc = numeric.describe().round(3)
         out.append("Numeric summary:")
@@ -478,20 +491,36 @@ Write 4–7 sentences:
 # SQL sanitize + Pre-Parse Validator
 # -----------------------------
 def simple_table_whitelist_check(sql: str):
+    """
+    CRITICAL Pre-parsing safety check using a robust SQL parser.
+    Extracts all table references from the AST for whitelisting.
+    """
     cleaned_tables = set()
+    
     try:
         parsed_expression = parse_one(sql, read='bigquery') 
+
+        # --- FIX: 1. Extract CTE names ---
         cte_names = set()
         with_clause = parsed_expression.find(exp.With)
         if with_clause:
             for cte in with_clause.expressions:
                 cte_names.add(cte.alias.lower()) 
+        # ---------------------------------
+
+        # 2. Traverse the AST to find all table expressions
         for table_exp in parsed_expression.find_all(exp.Table):
+            
             t_raw = table_exp.name.lower()
             t_name = t_raw.split('.')[0]
+            
+            # --- FIX: 2. Skip CTE names from whitelisting ---
             if t_name in cte_names:
                 continue 
+            # ---------------------------------
             cleaned_tables.add(t_name)
+
+        # 3. Map synonyms to canonical table names
         final_tables = set()
         for t in cleaned_tables:
             canonical = TABLE_SYNONYMS.get(t, t)
@@ -503,6 +532,8 @@ def simple_table_whitelist_check(sql: str):
                     final_tables.add(TABLE_SYNONYMS.get(close[0], close[0]))
                 else:
                     raise ValueError(f"Table '{t}' not allowed or unknown. Closest match: {close[0] if close else 'none'}")
+
+        # 4. Validate columns (if schema map is available)
         if SCHEMA_MAP:
             for table in final_tables:
                 if table not in SCHEMA_MAP:
@@ -515,8 +546,10 @@ def simple_table_whitelist_check(sql: str):
                         if not close:
                             raise ValueError(f"Column '{col_name}' not allowed in table '{table}'")
                         log.warning(f"Column '{col_name}' mapped to closest match '{close[0]}' in {table}")
+
         log.info(f"✅ Pre-validation passed. Tables: {sorted(final_tables)}")
         return True
+
     except ParseError as e:
         log.error(f"SQL parse error: {e}")
         raise ValueError(f"Invalid SQL syntax: {e}")
@@ -531,36 +564,21 @@ def simple_table_whitelist_check(sql: str):
 # Main Endpoint
 # -----------------------------
 @app.post("/ask")
-async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=None), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
-    if APP_SECRET_KEY is None:
-        log.error(f"Missing x-app-secret header | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
-        raise HTTPException(status_code=403, detail="Missing x-app-secret header")
-    if APP_SECRET_KEY != APP_SECRET_KEY:
-        # Mask first 4 chars of x-app-secret for security, log partial value for debugging
-        masked_secret = f"****{APP_SECRET_KEY[4:]}" if len(APP_SECRET_KEY) > 4 else "****"
-        log.error(f"Invalid x-app-secret header (provided: {masked_secret}) | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
+async def ask_question(q: Question, x_app_secret: str = Header(...), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
+    if x_app_secret != APP_SECRET_KEY:
+        masked_secret = f"****{x_app_secret[4:]}" if len(x_app_secret) > 4 else "****"
+        log.error(f"Invalid x-app-secret header (provided: {masked_secret}) | Client IP: {client_ip} | Payload: {json.dumps(q.dict(), default=str)}")
         raise HTTPException(status_code=403, detail="Invalid app secret")
     
     t0 = time.time()
-    try:
-        # Validate payload explicitly
-        try:
-            question = Question(**q)
-        except ValidationError as e:
-            log.error(f"Payload validation failed: {e.errors()} | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
-            raise HTTPException(status_code=422, detail=f"Invalid request payload: {e.errors()}")
-    except Exception as e:
-        log.error(f"Unexpected payload error: {str(e)} | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
-        raise HTTPException(status_code=422, detail=f"Unexpected payload error: {str(e)}")
-
-    log.info(f"🧭 Selected mode: {detect_analysis_mode(question.query)}")
-    mode = detect_analysis_mode(question.query)
+    log.info(f"🧭 Selected mode: {detect_analysis_mode(q.query)}")
+    mode = detect_analysis_mode(q.query)
     correlation_results = {}
     plan = {"intent": "general", "target": "unknown", "period": "full_data_range"}
     
     # 1) Generate plan and SQL
     try:
-        combined_output = llm_generate_plan_and_sql(question.query, mode)
+        combined_output = llm_generate_plan_and_sql(q.query, mode)
         plan_str, sql = combined_output.split("---SQL---", 1)
         plan = json.loads(plan_str.strip())
         sql = sql.strip()
@@ -607,6 +625,7 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
             ]
         ]
         if target_cols and explanatory_cols:
+            # --- Flatten + clean numeric data before correlation ---
             def flatten_nested(df_in: pd.DataFrame) -> pd.DataFrame:
                 for c in df_in.columns:
                     if df_in[c].apply(lambda x: isinstance(x, (pd.DataFrame, list, dict))).any():
@@ -620,31 +639,52 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                         except Exception as e:
                             log.warning(f"⚠️ Could not flatten column '{c}': {e}")
                 return df_in
+
+            # --- flatten + numeric coercion for correlation ---
             subset = df[target_cols + explanatory_cols].copy()
             log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
+
             def collapse_to_scalar(val):
+                """Reduce any nested or string value to a numeric scalar if possible."""
+                # Try direct numeric coercion first
                 try:
                     return float(str(val).replace(",", ".").replace("%", "").strip())
                 except Exception:
                     pass
+
+                # DataFrame
                 if isinstance(val, pd.DataFrame):
                     flat = pd.to_numeric(val.stack(), errors="coerce")
                     return flat.mean() if not flat.empty else np.nan
+
+                # List / array / Series
                 if isinstance(val, (list, tuple, np.ndarray, pd.Series)):
                     s = pd.to_numeric(pd.Series(val), errors="coerce")
                     return s.mean() if s.notna().any() else np.nan
+
+                # Fallback
                 return np.nan
+
+            # --- Step 1: Deduplicate columns ---
             subset = subset.loc[:, ~subset.columns.duplicated()]
             log.info(f"🧮 After deduplication: cols={list(subset.columns)} shape={subset.shape}")
+
+            # --- Step 2: Flatten each column properly ---
             for c in subset.columns:
                 if isinstance(subset[c], pd.DataFrame):
                     subset[c] = subset[c].applymap(collapse_to_scalar).stack().groupby(level=0).mean()
                 elif not pd.api.types.is_numeric_dtype(subset[c]):
                     subset[c] = subset[c].map(collapse_to_scalar)
+
+            # --- Step 3: Coerce everything to numeric safely ---
             subset = subset.apply(pd.to_numeric, errors="coerce")
+
+            # --- Step 4: Diagnostics ---
             log.info(f"🔍 Sample values before dropna:\n{subset.head(5)}")
             log.info(f"🔍 Non-null counts:\n{subset.notna().sum()}")
             log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
+
+            # --- Step 5: Select numeric for correlation ---
             corr_df = subset.select_dtypes(include=[np.number])
             if corr_df.shape[1] < 2:
                 log.warning("⚠️ Not enough numeric columns for correlation.")
@@ -660,12 +700,13 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                             val = val.iloc[:, 0]
                         corr_series = val.sort_values(ascending=False).round(3)
                         correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
-        if correlation_results:
-            stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
-            stats_hint += json.dumps(correlation_results, indent=2)
-            log.info(f"Generated correlations: {correlation_results}")
-        else:
-            log.info("⚠️ No numeric overlap found for correlation calculation.")
+
+    if correlation_results:
+        stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
+        stats_hint += json.dumps(correlation_results, indent=2)
+        log.info(f"Generated correlations: {correlation_results}")
+    else:
+        log.info("⚠️ No numeric overlap found for correlation calculation.")
 
     try:
         summary = llm_summarize(q.query, preview, stats_hint)
@@ -676,11 +717,16 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
     if mode == "analyst" and plan.get("intent") != "general":
         summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-    # 5) Chart builder
+    # 5) Chart builder (FINAL: labels from context + unit-only axis + robust numeric coercion)
     chart_data = chart_type = chart_meta = None
     if rows and cols:
         df = df.copy()
+
+        # --- Coerce numeric for all non-time columns so JSON values are numbers, not strings ---
+        # --- Detect time column ---
         time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])), None)
+
+        # --- Detect and preserve categorical columns ---
         categorical_hints = [
             "type", "tech", "entity", "sector", "source", "segment",
             "region", "category", "ownership", "market", "trade", "fuel"
@@ -694,19 +740,28 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                         df[c] = pd.to_numeric(df[c], errors="coerce")
                     except Exception:
                         pass
+
+        # --- Auto-detect all categorical columns (non-numeric, non-time) ---
         categorical_cols = [
             c for c in df.columns
             if c != time_key and not pd.api.types.is_numeric_dtype(df[c])
         ]
+
+        # --- Apply human-readable labels from context ---
         try:
             from context import COLUMN_LABELS
         except ImportError:
             COLUMN_LABELS = {}
+
         label_map_all = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in cols if c != time_key}
+
+        # --- Automatically rename categorical columns to readable names ---
         for c in categorical_cols:
             new_name = label_map_all.get(c, c.replace("_", " ").title())
             if new_name != c:
                 df.rename(columns={c: new_name}, inplace=True)
+
+        # --- Optional: reorder columns: [time, categories..., values...] ---
         ordered_cols = []
         if time_key:
             ordered_cols.append(time_key)
@@ -716,31 +771,57 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                 ordered_cols.append(c)
         ordered_cols = [c for c in ordered_cols if c in df.columns]
         df = df[ordered_cols]
+
+        # --- Numeric columns after coercion ---
         num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
+
+        # --- Generic chart-type detection based on data structure ---
         cols_lower = [c.lower() for c in df.columns]
         time_cols = [c for c in df.columns if re.search(r"(year|month|date)", c.lower())]
         category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category)", c.lower())]
         value_cols = [c for c in df.columns if re.search(r"(quantity|volume|value|amount|price|tariff|cpi|index|mwh|tj|usd|gel)", c.lower())]
-        chart_type = "line"
+
+        chart_type = "line"  # default fallback
+
+        # CASE 1: Time + Single Value
         if len(time_cols) >= 1 and len(category_cols) == 0 and len(value_cols) == 1:
             chart_type = "line"
+
+        # CASE 2: Time + Category + Value
         elif len(time_cols) >= 1 and len(category_cols) >= 1 and len(value_cols) >= 1:
             chart_type = "stackedbar"
+
+        # CASE 3: Category + Value (single-year comparison)
         elif len(time_cols) == 0 and len(category_cols) == 1 and len(value_cols) >= 1:
             chart_type = "bar"
+
+        # CASE 4: Category + Subcategory + Value
         elif len(time_cols) == 0 and len(category_cols) > 1 and len(value_cols) >= 1:
             chart_type = "stackedbar"
+
+        # CASE 5: Few Categories + Value (distribution)
         elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) == 1:
             unique_cats = df[category_cols[0]].nunique()
             if unique_cats <= 8:
                 chart_type = "pie"
             else:
                 chart_type = "bar"
+
+        # CASE 6: Time + Multiple Numeric Values
         elif len(time_cols) >= 1 and len(value_cols) > 1:
             chart_type = "line"
+
+        # CASE 7: Category + Multiple Numeric Values (no time)
         elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) > 1:
             chart_type = "bar"
+
+        # Fallback
+        else:
+            chart_type = "line"
+
         log.info(f"🧠 Chart type auto-detected → {chart_type} | Time={len(time_cols)} | Categories={len(category_cols)} | Values={len(value_cols)}")
+
+        # --- Dimension inference (price_tariff | energy_qty | index) ---
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
             if any(x in col_l for x in ["cpi", "index", "inflation"]):
@@ -750,9 +831,12 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
             if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
                 return "price_tariff"
             return "other"
+
         dim_map = {c: infer_dimension(c) for c in num_cols}
         dims = set(dim_map.values())
         log.info(f"📐 Detected dimensions: {dim_map} → {dims}")
+
+        # --- UNIT inference for axis title (unit only) ---
         def unit_for_price(cols_: list[str]) -> str:
             has_gel = any("_gel" in c.lower() for c in cols_)
             has_usd = any("_usd" in c.lower() for c in cols_)
@@ -763,6 +847,7 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
             if has_usd:
                 return "USD/MWh"
             return "per MWh"
+
         def unit_for_qty(cols_: list[str]) -> str:
             has_tj = any("tj" in c.lower() for c in cols_) or any("volume_tj" in c.lower() for c in cols_)
             has_thousand_mwh = any("quantity" in c.lower() or "quantity_tech" in c.lower() for c in cols_)
@@ -771,11 +856,25 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
             if has_thousand_mwh and not has_tj:
                 return "thousand MWh"
             return "Energy Quantity"
+
         def unit_for_index(_: list[str]) -> str:
             return "Index (2015=100)"
+
+        # --- Labels from context.py for EVERY series (not only numeric) ---
+        try:
+            from context import COLUMN_LABELS
+        except ImportError:
+            COLUMN_LABELS = {}
+
         label_map_all = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in cols if c != time_key}
+
+        # Apply renaming for output (legend/tooltip keys)
         df_labeled = df.rename(columns=label_map_all)
+
+        # Recompute the labeled series list in the same order as num_cols
         chart_labels = [label_map_all.get(c, c) for c in num_cols]
+
+        # --- Determine axis mode & titles ---
         if "index" in dims and len(dims) > 1:
             log.info("📊 Mixed index + other dimension → dual-axis chart.")
             chart_type = "dualaxis"
@@ -792,6 +891,7 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                 "axisMode": "dual",
                 "labels": chart_labels,
             }
+
         elif "price_tariff" in dims and "energy_qty" in dims:
             log.info("📊 Mixed price/tariff and quantity → dual-axis chart.")
             chart_type = "dualaxis"
@@ -804,11 +904,13 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                 "axisMode": "dual",
                 "labels": chart_labels,
             }
+
         else:
             log.info("📊 Uniform dimension → single-axis chart (respecting earlier chart type).")
             if chart_type not in ["stackedbar", "bar", "pie", "dualaxis"]:
                 chart_type = "line"
             chart_data = df_labeled.to_dict("records")
+
             if dims == {"price_tariff"}:
                 y_unit = unit_for_price(num_cols)
             elif dims == {"energy_qty"}:
@@ -817,6 +919,7 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                 y_unit = unit_for_index(num_cols)
             else:
                 y_unit = "Value"
+
             chart_meta = {
                 "xAxisTitle": time_key or "time",
                 "yAxisTitle": y_unit,
@@ -824,11 +927,13 @@ async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=N
                 "axisMode": "single",
                 "labels": chart_labels,
             }
+
         log.info(f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')} | labels={chart_labels}")
 
     # 6) Final response
     exec_time = time.time() - t0
     log.info(f"Finished request in {exec_time:.2f}s")
+
     response = APIResponse(
         answer=summary,
         chart_data=chart_data,
