@@ -153,19 +153,22 @@ DOMAIN_KNOWLEDGE = {
 
 
     "SeasonalTrends": {
-        "Definition": "Balancing electricity prices exhibit structurally different behaviors across seasons due to shifts in generation composition.",
-        "Rule": "Always compute and compare seasonal averages and CAGRs for April–July (Summer) and August–March (Winter) periods. These comparisons must always accompany the total yearly trend.",
-        "DataBasis": "Seasonal composition can be directly observed from the trade_derived_entities view, where the shares of deregulated_hydro and regulated_hpp reflect the availability of low-cost hydro generation in the balancing market.",
+        "Definition": "Balancing electricity prices, generation, and demand exhibit structurally different behaviors across seasons due to shifts in supply composition and consumption patterns.",
+        "Rule": "Always compute and compare seasonal averages and CAGRs for April–July (Summer) and August–March (Winter) periods. These comparisons must always accompany the total yearly trend for balancing prices, generation, and demand. Seasonal analysis is not required for tariffs.",
+        "DataBasis": "Seasonal composition and its evolution can be directly observed from the trade_derived_entities view, where the shares of deregulated_hydro and regulated_hpp reflect the availability of low-cost hydro generation in the balancing market, while import and thermal categories represent higher-cost sources.",
         "Interpretation": [
-            "Summer prices tend to rise faster in recent years because the shares of cheap hydro sources (deregulated_hydro and regulated_hpp) in balancing electricity have declined. Increasing portions of hydro generation are sold under bilateral contracts instead of on the balancing market.",
-            "Winter prices also show an upward trend, though typically smaller, mainly due to higher natural gas costs for thermal generation and increased import reliance during low-hydro periods."
+            "Summer prices tend to rise faster in recent years because the shares of cheap hydro sources (deregulated_hydro and regulated_hpp) in balancing electricity have declined. An increasing portion of hydro generation is sold through bilateral contracts instead of the balancing market.",
+            "Winter prices also show an upward trend, though typically smaller, driven by higher gas costs for thermal generation and greater reliance on imports during low-hydro periods.",
+            "Seasonal demand patterns amplify these effects: electricity consumption peaks in winter due to heating and again in summer due to cooling, affecting balancing volumes and price volatility."
         ],
         "AnalyticalUse": [
-            "Combine seasonal trend analysis with hydro share data from trade_derived_entities to explain structural shifts.",
-            "When comparing Summer and Winter price trends, always mention the relative shares of deregulated_hydro and regulated_hpp as underlying drivers."
+            "Combine seasonal trend analysis with hydro, thermal, and import share data from trade_derived_entities to explain structural shifts.",
+            "When comparing Summer and Winter trends, always reference deregulated_hydro and regulated_hpp shares as key indicators of cheap hydro availability.",
+            "When analyzing demand or generation, compare total quantities (SUM) by season, while for prices use averages (AVG)."
         ],
-        "Insight": "Include both total yearly trend and separate seasonal trends (Summer vs Winter) in every balancing price trend analysis, interpreting the results through the evolution of hydro and import shares."
-    },
+        "Insight": "Include both total yearly and separate seasonal trends (Summer vs Winter) in every balancing price, generation, or demand trend analysis, interpreting results through the evolution of hydro, thermal, and import shares and corresponding seasonal demand differences."
+    }
+
 
     
     "InflationLinks": {
