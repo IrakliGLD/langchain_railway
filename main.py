@@ -878,13 +878,25 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         if period_pattern:
             log.info("🧮 Detected user-defined period range → applying aggregation logic.")
-            if any(x in q.query.lower() for x in ["generation", "quantity", "volume", "demand", "supply"]):
-                agg_func = "SUM"
+
+            # detect whether query already includes GROUP BY or aggregation
+            lower_sql = safe_sql.lower()
+            has_agg = any(x in lower_sql for x in ["avg(", "sum(", "count(", "group by"])
+
+            if has_agg:
+                log.info("🧮 Query already aggregated → skipping outer AVG/SUM wrapper.")
+                safe_sql_final = safe_sql
             else:
-                agg_func = "AVG"
-            safe_sql_final = f"SELECT {agg_func}(x.*) FROM ({safe_sql}) AS x"
+                if any(x in q.query.lower() for x in ["generation", "quantity", "volume", "demand", "supply"]):
+                    agg_func = "SUM"
+                else:
+                    agg_func = "AVG"
+                safe_sql_final = f"SELECT {agg_func}(x.value) AS aggregated_value FROM ({safe_sql}) AS x"
         else:
             safe_sql_final = safe_sql
+
+
+    
     except Exception as e:
         log.warning(f"SQL validation failed: {e}")
         raise HTTPException(status_code=400, detail=f"Unsafe or invalid SQL: {e}")
