@@ -55,19 +55,6 @@ DOMAIN_KNOWLEDGE = {
         ]
     },
 
-    "thermal": [
-        'ltd "gardabni thermal power plant"',
-        'ltd "mtkvari energy"',
-        'ltd "iec" (tbilresi)',
-        'ltd "g power" (capital turbines)',
-        'ltd "khrami_1"',
-        'ltd "khrami_2"'
-    ],
-    "notes": [
-        "Engurhesi is the dominant hydro plant, often used as a reference for hydro correlation with balancing prices.",
-        "Thermal entities include Tbilisi (IEC), Gardabani, G-POWER, and Mtkvari plants whose tariffs are driven by gas costs.",
-        "Energo-Pro hydro plants (Rioni, Lajanuri, Shaori, Gumati, Dzevruli) have similar cost structures and are grouped as 'other_hydro'."
-    ],
 
     "price_with_usd": {
         "description": "Electricity market prices (including balancing electricity) converted to USD.",
