@@ -1,4 +1,4 @@
-```python
+
 # main.py v18.16 — Fix 422 (header logging, service_tier), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
@@ -859,4 +859,3 @@ if __name__ == "__main__":
         log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
     except Exception as e:
         log.error(f"FATAL: Uvicorn server failed to start: {e}")
-```
