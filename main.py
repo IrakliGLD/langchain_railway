@@ -1,4 +1,4 @@
-# main.py v18.10 — Fix SyntaxError, NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
+# main.py v18.11 — Fix 422 error, NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
 import re
@@ -11,7 +11,7 @@ from difflib import get_close_matches
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator 
+from pydantic import BaseModel, Field, field_validator, ValidationError
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
@@ -148,7 +148,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.10")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.11")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -166,22 +166,15 @@ async def health_check():
 # Models
 # -----------------------------
 class Question(BaseModel):
-    query: str = Field(..., max_length=2000)
+    query: str = Field(..., max_length=5000)  # Increased from 2000 to handle complex queries
     user_id: Optional[str] = None
 
     @field_validator("query")
     @classmethod
     def _not_empty(cls, v):
         if not v or not v.strip():
-            raise ValueError("Query cannot be empty")
+            raise ValueError("Query cannot be empty or whitespace")
         return v.strip()
-
-class APIResponse(BaseModel):
-    answer: str
-    chart_data: Optional[List[Dict[str, Any]]] = None
-    chart_type: Optional[str] = None
-    chart_metadata: Optional[Dict[str, Any]] = None
-    execution_time: Optional[float] = None
 
 # -----------------------------
 # LLM + Planning helpers
@@ -538,19 +531,30 @@ def simple_table_whitelist_check(sql: str):
 # Main Endpoint
 # -----------------------------
 @app.post("/ask")
-async def ask_question(q: Question, x_app_secret: str = Header(...)):
+async def ask_question(q: dict, x_app_secret: str = Header(...)):
     if x_app_secret != APP_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid app secret")
     
     t0 = time.time()
-    log.info(f"🧭 Selected mode: {detect_analysis_mode(q.query)}")
-    mode = detect_analysis_mode(q.query)
+    try:
+        # Validate payload explicitly
+        try:
+            question = Question(**q)
+        except ValidationError as e:
+            log.error(f"Payload validation failed: {e.errors()} | Payload: {json.dumps(q, default=str)}")
+            raise HTTPException(status_code=422, detail=f"Invalid request payload: {e.errors()}")
+    except Exception as e:
+        log.error(f"Unexpected payload error: {str(e)} | Payload: {json.dumps(q, default=str)}")
+        raise HTTPException(status_code=422, detail=f"Unexpected payload error: {str(e)}")
+
+    log.info(f"🧭 Selected mode: {detect_analysis_mode(question.query)}")
+    mode = detect_analysis_mode(question.query)
     correlation_results = {}
     plan = {"intent": "general", "target": "unknown", "period": "full_data_range"}
     
     # 1) Generate plan and SQL
     try:
-        combined_output = llm_generate_plan_and_sql(q.query, mode)
+        combined_output = llm_generate_plan_and_sql(question.query, mode)
         plan_str, sql = combined_output.split("---SQL---", 1)
         plan = json.loads(plan_str.strip())
         sql = sql.strip()
@@ -658,7 +662,7 @@ async def ask_question(q: Question, x_app_secret: str = Header(...)):
             log.info("⚠️ No numeric overlap found for correlation calculation.")
 
     try:
-        summary = llm_summarize(q.query, preview, stats_hint)
+        summary = llm_summarize(question.query, preview, stats_hint)
     except Exception as e:
         log.warning(f"Summarization failed: {e}")
         summary = preview
