@@ -554,10 +554,10 @@ def simple_table_whitelist_check(sql: str):
 # Main Endpoint
 # -----------------------------
 @app.post("/ask")
-async def ask_question(q: Question, x-app-secret: str = Header(...), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
-    if x-app-secret != APP_SECRET_KEY:
-        masked_secret = f"****{x-app-secret[4:]}" if len(x-app-secret) > 4 else "****"
-        log.error(f"Invalid x-app-secret header (provided: {masked_secret}) | Client IP: {client_ip} | Payload: {json.dumps(q.dict(), default=str)}")
+async def ask_question(q: Question, x_app_key: str = Header(...), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
+    if x_app_key != APP_SECRET_KEY:
+        masked_secret = f"****{x_app_key[4:]}" if len(x_app_key) > 4 else "****"
+        log.error(f"Invalid x_app_key header (provided: {masked_secret}) | Client IP: {client_ip} | Payload: {json.dumps(q.dict(), default=str)}")
         raise HTTPException(status_code=403, detail="Invalid app secret")
     
     t0 = time.time()
