@@ -1,3 +1,4 @@
+```python
 # main.py v18.13 — Fix 403 error (log x-app-secret), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
@@ -531,13 +532,13 @@ def simple_table_whitelist_check(sql: str):
 # Main Endpoint
 # -----------------------------
 @app.post("/ask")
-async def ask_question(q: dict, x_app_secret: Optional[str] = Header(default=None), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
-    if x_app_secret is None:
+async def ask_question(q: dict, APP_SECRET_KEY: Optional[str] = Header(default=None), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
+    if APP_SECRET_KEY is None:
         log.error(f"Missing x-app-secret header | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
         raise HTTPException(status_code=403, detail="Missing x-app-secret header")
-    if x_app_secret != APP_SECRET_KEY:
+    if APP_SECRET_KEY != APP_SECRET_KEY:
         # Mask first 4 chars of x-app-secret for security, log partial value for debugging
-        masked_secret = f"****{x_app_secret[4:]}" if len(x_app_secret) > 4 else "****"
+        masked_secret = f"****{APP_SECRET_KEY[4:]}" if len(APP_SECRET_KEY) > 4 else "****"
         log.error(f"Invalid x-app-secret header (provided: {masked_secret}) | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
         raise HTTPException(status_code=403, detail="Invalid app secret")
     
@@ -851,3 +852,4 @@ if __name__ == "__main__":
         log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
     except Exception as e:
         log.error(f"FATAL: Uvicorn server failed to start: {e}")
+```
