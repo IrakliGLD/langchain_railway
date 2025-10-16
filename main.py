@@ -1145,6 +1145,41 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # --- Numeric columns after coercion ---
         num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
 
+        # --- 🧭 Decide whether to generate chart at all (context-aware) ---
+        generate_chart = True
+        intent = str(plan.get("intent", "")).lower()
+        mode = str(mode).lower()
+        query_text = q.query.lower()
+
+        # Disable chart for purely explanatory or conceptual questions
+        if any(word in query_text for word in ["why", "how", "reason", "explain", "because", "cause"]):
+            generate_chart = False
+        elif any(word in query_text for word in ["define", "what is", "describe", "meaning of"]):
+            generate_chart = False
+        elif not any(re.search(r"(price|tariff|quantity|volume|value|cpi|index|usd|gel)", c.lower()) for c in cols):
+            generate_chart = False
+        elif intent in ["trend_analysis", "correlation_analysis", "driver_analysis", "identify_drivers"] or mode == "analyst":
+            generate_chart = True
+        else:
+            num_cols_test = [c for c in cols if any(k in c.lower() for k in ["price", "tariff", "quantity", "volume", "value", "usd", "gel"])]
+            generate_chart = len(num_cols_test) >= 1
+
+        if not generate_chart:
+            log.info("🧭 Skipping chart generation (explanatory or non-numeric query).")
+            chart_data = chart_type = chart_meta = None
+            # Jump to Final response (bypass chart drawing)
+            exec_time = time.time() - t0
+            log.info(f"Finished request in {exec_time:.2f}s")
+            return APIResponse(
+                answer=summary,
+                chart_data=None,
+                chart_type=None,
+                chart_metadata=None,
+                execution_time=exec_time,
+            )
+        else:
+            log.info("🎨 Proceeding with chart generation.")
+
 
         
         # --- 🧠 Generic chart-type detection based on data structure ---
