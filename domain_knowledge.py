@@ -50,6 +50,8 @@ DOMAIN_KNOWLEDGE = {
         "notes": [
             "Engurhesi is Georgia's main large hydro plant; used as a reference for hydro-tariff correlation.",
             "Thermal tariffs depend strongly on natural gas prices.",
+            "'ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', and 'ltd "g power" (capital turbines)' are regulalted old TPP."
+            "'ltd "gardabni thermal power plant"' is regulalted new TPP."
             "Energo-Pro hydro plants (Rioni, Lajanuri, Shaori, Gumati, Dzevruli) have similar cost structures and can be averaged together.",
             "Entity labels are provided for clearer chart legends and report outputs."
         ]
