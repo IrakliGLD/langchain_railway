@@ -167,7 +167,7 @@ DOMAIN_KNOWLEDGE = {
             "When analyzing demand or generation, compare total quantities (SUM) by season, while for prices use averages (AVG)."
         ],
         "Insight": "Include both total yearly and separate seasonal trends (Summer vs Winter) in every balancing price, generation, or demand trend analysis, interpreting results through the evolution of hydro, thermal, and import shares and corresponding seasonal demand differences."
-    }
+    },
 
 
     
