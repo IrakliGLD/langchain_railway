@@ -1155,7 +1155,12 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         
         # --- Numeric columns after coercion ---
-        num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
+        num_cols = [
+            c for c in df.columns
+            if c != time_key
+            and pd.api.types.is_numeric_dtype(df[c])
+            and not re.search(r"\b(month|year)\b", c.lower())
+        ]
 
         # --- 🧭 Decide whether to generate chart at all (context-aware) ---
         generate_chart = True
