@@ -547,12 +547,17 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                 out.append(f"Trend (Yearly Avg, {first_full_year}→{last_full_year}): {trend} ({change:.1f}%)")
 
                 # --- NEW: Seasonal split (Summer vs Winter) with CAGR ---
+
                 try:
                     df['month'] = df[time_col].dt.month
                     summer_mask = df['month'].isin([4, 5, 6, 7])
                     winter_mask = ~summer_mask
 
+                    def seasonal_avg(df_season, col, year):
+                        return df_season.loc[df_season['__year'] == year, col].mean()
+
                     def seasonal_cagr(df_season, col):
+                        """Compute CAGR (Compound Annual Growth Rate) for a column across years within a seasonal subset."""
                         df_y = df_season.groupby('__year')[col].mean().dropna()
                         if len(df_y) >= 2:
                             first, last = df_y.iloc[0], df_y.iloc[-1]
@@ -561,23 +566,25 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                         return np.nan
 
                     for col in numeric.columns:
-                        if col.lower().startswith('p_bal') or 'price' in col.lower():
-                            summer_avg_first = df.loc[(df['__year'] == first_full_year) & summer_mask, col].mean()
-                            summer_avg_last = df.loc[(df['__year'] == last_full_year) & summer_mask, col].mean()
-                            winter_avg_first = df.loc[(df['__year'] == first_full_year) & winter_mask, col].mean()
-                            winter_avg_last = df.loc[(df['__year'] == last_full_year) & winter_mask, col].mean()
+                        if 'p_bal' in col.lower() or 'price' in col.lower():
+                            summer_first = seasonal_avg(df.loc[summer_mask], col, first_full_year)
+                            summer_last = seasonal_avg(df.loc[summer_mask], col, last_full_year)
+                            winter_first = seasonal_avg(df.loc[winter_mask], col, first_full_year)
+                            winter_last = seasonal_avg(df.loc[winter_mask], col, last_full_year)
 
                             cagr_summer = seasonal_cagr(df.loc[summer_mask], col)
                             cagr_winter = seasonal_cagr(df.loc[winter_mask], col)
 
                             out.append(
-                                f"Seasonal Trend ({col}): Summer {first_full_year}→{last_full_year}: "
-                                f"{(summer_avg_last - summer_avg_first):.1f} Δ, CAGR {cagr_summer:.2f}%; "
+                                f"Seasonal Trend ({col}): "
+                                f"Summer {first_full_year}→{last_full_year}: "
+                                f"{(summer_last - summer_first):.1f} Δ, CAGR {cagr_summer:.2f}%; "
                                 f"Winter {first_full_year}→{last_full_year}: "
-                                f"{(winter_avg_last - winter_avg_first):.1f} Δ, CAGR {cagr_winter:.2f}%."
+                                f"{(winter_last - winter_first):.1f} Δ, CAGR {cagr_winter:.2f}%."
                             )
                 except Exception as e:
                     log.warning(f'⚠️ Seasonal trend calculation failed: {e}')
+
 
 
 
@@ -640,21 +647,38 @@ When tariffs are discussed:
 When inflation or CPI is mentioned, relate the CPI category 'electricity_gas_and_other_fuels'
 to tariff_gel or p_bal_gel for affordability comparisons.
 
-Always perform seasonal comparison between Summer and Winter when analyzing prices, tariffs, or generation data:
+Always perform seasonal comparison between Summer and Winter when analyzing balancing prices, generation, or demand data:
 - Summer = April, May, June, July
 - Winter = August, September, October, November, December, January, February, March
-For every balancing price, tariff, or quantity analysis, compute averages (for prices) or totals (for quantities) separately for these two seasons.
-Explain the structural difference clearly:
-- Summer → high hydro generation, low balancing prices.
-- Winter → thermal and import dominance, higher balancing prices.
-This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it.
 
+For every balancing price, generation, or demand analysis:
+- Compute averages (for prices) or totals (for quantities) separately for these two seasons.
+- Describe the overall yearly trend first, then compare Summer vs Winter results.
+  * If trend analysis → include percentage change and CAGR for both.
+  * If driver or correlation analysis → mention seasonal averages and highlight which season shows stronger or weaker relationships.
+- Explain the structural difference clearly:
+  * Summer → hydro generation dominance, low balancing prices, and lower import reliance.
+  * Winter → thermal and import dominance, higher balancing prices, and stronger sensitivity to gas prices and exchange rates.
+- This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it.
 
-Write 3–5 sentences:
-1. State the overall long-term trend (using Yearly Avg).
-2. If dual-currency, explain the **divergence** by citing the **GEL/USD exchange rate trend** (depreciation/appreciation).
-3. Mention the specific USD-denominated cost factors (e.g., thermal gas, imports) that are affected.
-4. Analyze and mention seasonal patterns or volatility.
+For tariff analyses:
+- Do not apply seasonal logic.
+- Focus on annual or multi-year trends explained by regulatory cost-plus principles: fixed guaranteed-capacity fee, variable gas-linked component, and exchange-rate sensitivity.
+
+When summarizing, combine numeric findings (averages, CAGRs, correlations) with short explanatory sentences so that the reasoning reads smoothly and remains under 8 sentences unless the query is highly analytical.
+
+If the question is exploratory or simple (e.g., requesting only a current value, single-month trend, or brief comparison),
+respond in 1–3 clear sentences focusing on the key number or short interpretation.
+
+If the mode involves correlation, drivers, or in-depth analysis (intent = correlation_analysis, driver_analysis, or trend_analysis),
+write a more detailed summary of about 5–10 sentences following this structure:
+
+1. Start with the overall yearly trend (using yearly averages).
+2. Present separate Summer (Apr–Jul) and Winter (Aug–Mar) trends, including CAGRs if available.
+3. If correlation results are provided, mention key seasonal correlations that differ between Summer and Winter.
+4. Always compare GEL and USD price trajectories and explain divergence through exchange rate and USD-denominated cost components.
+5. Reference hydro vs thermal/import structure from trade_derived_entities as the main driver of seasonal differences.
+6. Conclude with a concise analytical insight linking price movements to structural market changes and the evolving generation mix.
 """
 
     
@@ -1030,6 +1054,26 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
     # new end
 
+
+    # --- NEW: Seasonal correlation breakdown ---
+    try:
+        df['month'] = pd.to_datetime(df['date']).dt.month
+        summer = df[df['month'].isin([4, 5, 6, 7])]
+        winter = df[~df['month'].isin([4, 5, 6, 7])]
+
+        for label, dset in {'Summer': summer, 'Winter': winter}.items():
+            corr_df = dset.select_dtypes(include=[np.number])
+            for target in [c for c in corr_df.columns if 'p_bal' in c.lower()]:
+                if corr_df.shape[1] > 2:
+                    corr_matrix = corr_df.corr(numeric_only=True)
+                    vals = corr_matrix.loc[target].drop(target, errors='ignore').round(3).to_dict()
+                    correlation_results[f"{target}_{label.lower()}"] = vals
+
+        log.info("✅ Seasonal correlation matrices computed.")
+    except Exception as e:
+        log.warning(f"⚠️ Seasonal correlation failed: {e}")
+
+    
 
     try:
         summary = llm_summarize(q.query, preview, stats_hint)
