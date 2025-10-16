@@ -1,4 +1,4 @@
-# main.py v18.12 — Fix 422 error (missing x-app-secret), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
+# main.py v18.13 — Fix 403 error (log x-app-secret), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
 import re
@@ -148,7 +148,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.12")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.13")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -536,7 +536,9 @@ async def ask_question(q: dict, x_app_secret: Optional[str] = Header(default=Non
         log.error(f"Missing x-app-secret header | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
         raise HTTPException(status_code=403, detail="Missing x-app-secret header")
     if x_app_secret != APP_SECRET_KEY:
-        log.error(f"Invalid x-app-secret header | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
+        # Mask first 4 chars of x-app-secret for security, log partial value for debugging
+        masked_secret = f"****{x_app_secret[4:]}" if len(x_app_secret) > 4 else "****"
+        log.error(f"Invalid x-app-secret header (provided: {masked_secret}) | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
         raise HTTPException(status_code=403, detail="Invalid app secret")
     
     t0 = time.time()
@@ -666,7 +668,7 @@ async def ask_question(q: dict, x_app_secret: Optional[str] = Header(default=Non
             log.info("⚠️ No numeric overlap found for correlation calculation.")
 
     try:
-        summary = llm_summarize(question.query, preview, stats_hint)
+        summary = llm_summarize(q.query, preview, stats_hint)
     except Exception as e:
         log.warning(f"Summarization failed: {e}")
         summary = preview
