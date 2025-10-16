@@ -1,4 +1,4 @@
-# main.py v18.6 — Gemini Analyst (combined plan & SQL for speed)
+# main.py v18.7 — Gemini Analyst (combined plan & SQL for speed)
 
 
 import os
@@ -149,6 +149,90 @@ with ENGINE.connect() as conn:
         ALLOWED_TABLES = set()
 
 
+# --- v18.8: Balancing correlation & weighted price helpers ---
+
+def build_balancing_correlation_df(conn) -> pd.DataFrame:
+    """
+    Returns a monthly panel with:
+      targets: p_bal_gel, p_bal_usd
+      drivers: xrate, share_import, share_deregulated_hydro, share_regulated_hpp,
+               share_renewable_ppa, enguri_tariff_gel, gardabani_tpp_tariff_gel,
+               grouped_old_tpp_tariff_gel
+    """
+    sql = """
+    WITH shares AS (
+      SELECT
+        t.date,
+        SUM(t.quantity) AS total_qty,
+        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
+        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa
+      FROM trade_derived_entities t
+      GROUP BY t.date
+    ),
+    tariffs AS (
+      SELECT
+        d.date,
+        (SELECT t1.tariff_gel FROM tariff_with_usd t1 WHERE t1.date = d.date AND t1.entity = 'ltd "engurhesi"1' LIMIT 1) AS enguri_tariff_gel,
+        (SELECT t2.tariff_gel FROM tariff_with_usd t2 WHERE t2.date = d.date AND t2.entity = 'ltd "gardabni thermal power plant"' LIMIT 1) AS gardabani_tpp_tariff_gel,
+        (SELECT AVG(t3.tariff_gel) FROM tariff_with_usd t3 WHERE t3.date = d.date AND t3.entity IN ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)')) AS grouped_old_tpp_tariff_gel
+      FROM price_with_usd d
+    )
+    SELECT
+      p.date,
+      p.p_bal_gel,
+      p.p_bal_usd,
+      p.xrate,
+      (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
+      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+      (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp,
+      (s.qty_ren_ppa / NULLIF(s.total_qty,0)) AS share_renewable_ppa,
+      tr.enguri_tariff_gel,
+      tr.gardabani_tpp_tariff_gel,
+      tr.grouped_old_tpp_tariff_gel
+    FROM price_with_usd p
+    LEFT JOIN shares s ON s.date = p.date
+    LEFT JOIN tariffs tr ON tr.date = p.date
+    ORDER BY p.date
+    LIMIT 3750;
+    """
+    res = conn.execute(text(sql))
+    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+
+
+def compute_weighted_balancing_price(conn) -> pd.DataFrame:
+    """
+    Compute monthly weighted-average balancing price (GEL & USD)
+    based on balancing-market sales volumes.
+    """
+    sql = """
+    WITH t AS (
+      SELECT date, entity, SUM(quantity) AS qty
+      FROM trade_derived_entities
+      WHERE entity IN ('deregulated_hydro','import','regulated_hpp',
+                       'regulated_new_tpp','regulated_old_tpp',
+                       'renewable_ppa','thermal_ppa')
+      GROUP BY date, entity
+    ),
+    w AS (SELECT date, SUM(qty) AS total_qty FROM t GROUP BY date)
+    SELECT
+      p.date,
+      p.p_bal_gel,
+      p.p_bal_usd,
+      (p.p_bal_gel * w.total_qty) / NULLIF(SUM(w.total_qty) OVER (),0) AS weighted_gel,
+      (p.p_bal_usd * w.total_qty) / NULLIF(SUM(w.total_qty) OVER (),0) AS weighted_usd
+    FROM price_with_usd p
+    JOIN w ON w.date = p.date
+    ORDER BY p.date;
+    """
+    res = conn.execute(text(sql))
+    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+
+
+
+
+
 # -----------------------------
 # App
 # -----------------------------
@@ -210,18 +294,17 @@ def detect_analysis_mode(user_query: str) -> str:
 # ------------------------------------------------------------------
 
 FEW_SHOT_SQL = """
--- Example 1: Monthly average balancing price in USD for 2023 (use materialized view)
+-- Example 1: Monthly average balancing price (USD)
 SELECT
   EXTRACT(YEAR FROM date) AS year,
   EXTRACT(MONTH FROM date) AS month,
   AVG(p_bal_usd) AS avg_balancing_usd
 FROM price_with_usd
-WHERE EXTRACT(YEAR FROM date) = 2023
 GROUP BY 1,2
 ORDER BY 1,2
 LIMIT 3750;
 
--- Example 2: Single month balancing price (USD) for May 2024
+-- Example 2: Single-month balancing price (USD)
 SELECT p_bal_usd
 FROM price_with_usd
 WHERE date = '2024-05-01'
@@ -237,17 +320,7 @@ GROUP BY 1,2
 ORDER BY 1,2
 LIMIT 3750;
 
--- Example 4: Average regulated tariffs (USD) by entity for 2024
-SELECT
-  entity,
-  AVG(tariff_usd) AS avg_tariff_usd_2024
-FROM tariff_with_usd
-WHERE EXTRACT(YEAR FROM date) = 2024
-GROUP BY entity
-ORDER BY entity
-LIMIT 3750;
-
--- Example 5: CPI monthly values for electricity fuels category
+-- Example 4: CPI monthly values for electricity fuels
 SELECT
   TO_CHAR(date, 'YYYY-MM') AS month,
   cpi
@@ -256,18 +329,71 @@ WHERE cpi_type = 'electricity_gas_and_other_fuels'
 ORDER BY date
 LIMIT 3750;
 
--- Example 6: Monthly data for Balancing Price (GEL) and Shares of key sources (Hydro, Import) for correlation analysis
+-- Example 5: Balancing price GEL vs shares (no raw quantities)
+WITH shares AS (
+  SELECT
+    t.date,
+    SUM(t.quantity) AS total_qty,
+    SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
+    SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+    SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
+  FROM trade_derived_entities t
+  GROUP BY t.date
+)
 SELECT
-  TO_CHAR(t1.date, 'YYYY-MM') AS month,
-  t1.p_bal_gel AS balancing_price_gel,
-  t2.share_import,
-  t2.share_deregulated_hydro,
-  t2.share_regulated_hpp
-FROM price_with_usd t1
-JOIN trade_derived_entities t2 ON t1.date = t2.date -- Assuming trade_derived_entities contains monthly share data
-ORDER BY 1
+  TO_CHAR(p.date, 'YYYY-MM') AS month,
+  p.p_bal_gel,
+  (s.qty_import / NULLIF(s.total_qty,0))      AS share_import,
+  (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+  (s.qty_reg_hpp / NULLIF(s.total_qty,0))     AS share_regulated_hpp
+FROM price_with_usd p
+LEFT JOIN shares s ON s.date = p.date
+ORDER BY p.date
+LIMIT 3750;
+
+-- Example 6: Balancing price (GEL, USD) + tariffs (Enguri, Gardabani, old TPPs) + xrate
+WITH tariffs AS (
+  SELECT
+    d.date,
+    (SELECT t1.tariff_gel FROM tariff_with_usd t1 WHERE t1.date = d.date AND t1.entity = 'ltd "engurhesi"1' LIMIT 1) AS enguri_tariff_gel,
+    (SELECT t2.tariff_gel FROM tariff_with_usd t2 WHERE t2.date = d.date AND t2.entity = 'ltd "gardabni thermal power plant"' LIMIT 1) AS gardabani_tpp_tariff_gel,
+    (SELECT AVG(t3.tariff_gel) FROM tariff_with_usd t3 WHERE t3.date = d.date AND t3.entity IN ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)')) AS grouped_old_tpp_tariff_gel
+  FROM price_with_usd d
+)
+SELECT
+  p.date,
+  p.p_bal_gel,
+  p.p_bal_usd,
+  p.xrate,
+  tr.enguri_tariff_gel,
+  tr.gardabani_tpp_tariff_gel,
+  tr.grouped_old_tpp_tariff_gel
+FROM price_with_usd p
+LEFT JOIN tariffs tr ON tr.date = p.date
+ORDER BY p.date
+LIMIT 3750;
+
+-- Example 7: Summer vs Winter averages
+WITH seasons AS (
+  SELECT date,
+         CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season
+  FROM price_with_usd
+)
+SELECT
+  s.season,
+  AVG(p.p_bal_gel) AS avg_bal_price_gel,
+  AVG(tr.enguri_tariff_gel) AS avg_enguri_tariff_gel
+FROM seasons s
+JOIN price_with_usd p ON p.date = s.date
+JOIN (
+  SELECT date, tariff_gel AS enguri_tariff_gel
+  FROM tariff_with_usd WHERE entity = 'ltd "engurhesi"1'
+) tr ON tr.date = s.date
+GROUP BY s.season
+ORDER BY s.season
 LIMIT 3750;
 """
+
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
 def llm_generate_plan_and_sql(user_query: str, analysis_mode: str) -> str:
@@ -300,9 +426,20 @@ Domain knowledge:
 {domain_json}
 
 Guidance:
-- Use price_with_usd / tariff_with_usd when USD is involved.
-- Mind that balancing price is influenced by trade volume and price in the trade table.
-- Tariffs depend on regulatory principles, inflation, etc.
+- Use ONLY documented materialized views.
+- For balancing-price analyses, differentiate Summer (Apr–Jul) vs Winter (Aug–Mar).
+- Weighted-average balancing price = weighted by total balancing-market quantities (entities: deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa).
+- Correlation policy:
+  * Targets: p_bal_gel, p_bal_usd
+  * Drivers: xrate; shares from trade_derived_entities (computed via share CTE, no raw quantities);
+              tariffs in GEL only from tariff_with_usd for:
+              Enguri ('ltd "engurhesi"1'),
+              Gardabani TPP ('ltd "gardabni thermal power plant"'),
+              Old TPP group ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)').
+- NEVER use tariff_usd in correlations; use tariff_gel only.
+- Tariffs follow cost-plus methodology; thermal tariffs depend on gas price (USD) → correlated with xrate.
+- When USD values appear, *_usd = *_gel / xrate.
+- Aggregation default = monthly.
 - Use these examples:
 {FEW_SHOT_SQL}
 
@@ -434,9 +571,22 @@ Statistics:
 
 Domain knowledge:
 {domain_json}
-# NOTE: If a comparison between GEL and USD is present, use the 'CurrencyInfluence' knowledge to explain the divergence based on the exchange rate and USD-denominated costs (gas, imports).
 
-Write 4–7 sentences:
+For balancing price assessments (trends, averages, or correlations), always compare
+Summer (April–July) vs Winter (August–March) conditions:
+- Summer → high hydro share, low prices.
+- Winter → thermal/import dominant, higher prices.
+
+When tariffs are discussed:
+- Tariffs follow GNERC-approved cost-plus methodology.
+- Thermal tariffs include a Guaranteed Capacity Fee (fixed) plus a variable per-MWh cost based on gas price and efficiency.
+- Gas is priced in USD, so thermal tariffs correlate with the GEL/USD exchange rate (xrate).
+
+When inflation or CPI is mentioned, relate the CPI category 'electricity_gas_and_other_fuels'
+to tariff_gel or p_bal_gel for affordability comparisons.
+
+
+Write 3–5 sentences:
 1. State the overall long-term trend (using Yearly Avg).
 2. If dual-currency, explain the **divergence** by citing the **GEL/USD exchange rate trend** (depreciation/appreciation).
 3. Mention the specific USD-denominated cost factors (e.g., thermal gas, imports) that are affected.
@@ -782,118 +932,39 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
 
 
-    # --- Correlation analysis (runs whenever intent = correlation, regardless of mode) ---
-    if plan.get("intent") == "correlation" and not df.empty:
-        log.info("🔍 Calculating correlation matrix for LLM analysis.")
+    # new statt
+    # --- v18.8 Strict balancing-price correlation (semantic detection preserved) ---
+    if plan.get("intent") == "correlation":
+        log.info("🔍 v18.8: Building balancing-price correlation frame.")
+        correlation_results = {}
+        with ENGINE.connect() as conn:
+            corr_df = build_balancing_correlation_df(conn)
 
-        target_cols = [c for c in df.columns if 'price' in c.lower() or 'bal' in c.lower()]
-        explanatory_cols = [c for c in df.columns if any(k in c.lower() for k in [
-            'share', 'import', 'hydro', 'tpp', 'tariff', 'xrate', 'thermal', 'renewable', 'fuel', 'volume'
-        ])]
+        allowed_targets = ["p_bal_gel", "p_bal_usd"]
+        allowed_drivers = [
+            "xrate", "share_import", "share_deregulated_hydro",
+            "share_regulated_hpp", "share_renewable_ppa",
+            "enguri_tariff_gel", "gardabani_tpp_tariff_gel",
+            "grouped_old_tpp_tariff_gel"
+        ]
 
-        if target_cols and explanatory_cols:
-            
-            # --- 🩹 Flatten + clean numeric data before correlation ---
-            def flatten_nested(df_in: pd.DataFrame) -> pd.DataFrame:
-                for c in df_in.columns:
-                    if df_in[c].apply(lambda x: isinstance(x, (pd.DataFrame, list, dict))).any():
-                        try:
-                            df_in[c] = df_in[c].apply(
-                                lambda x: x.iloc[0, 0] if isinstance(x, pd.DataFrame) and not x.empty else (
-                                    x[0] if isinstance(x, list) and len(x) > 0 else np.nan
-                                )
-                            )
-                            log.info(f"🩹 Flattened nested structure in column '{c}'")
-                        except Exception as e:
-                            log.warning(f"⚠️ Could not flatten column '{c}': {e}")
-                return df_in
+        corr_df = corr_df[[c for c in corr_df.columns if c in (["date"] + allowed_targets + allowed_drivers)]]
+        numeric_df = corr_df.drop(columns=["date"], errors="ignore").apply(pd.to_numeric, errors="coerce")
 
-            # --- flatten + numeric coercion for correlation ---
-            subset = df[target_cols + explanatory_cols].copy()
-            log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
-
-            def collapse_to_scalar(val):
-                """Reduce any nested or string value to a numeric scalar if possible."""
-                # Try direct numeric coercion first
-                try:
-                    return float(str(val).replace(",", ".").replace("%", "").strip())
-                except Exception:
-                    pass
-
-                # DataFrame
-                if isinstance(val, pd.DataFrame):
-                    flat = pd.to_numeric(val.stack(), errors="coerce")
-                    return flat.mean() if not flat.empty else np.nan
-
-                # List / array / Series
-                if isinstance(val, (list, tuple, np.ndarray, pd.Series)):
-                    s = pd.to_numeric(pd.Series(val), errors="coerce")
-                    return s.mean() if s.notna().any() else np.nan
-
-                # Fallback
-                return np.nan
-
-
-        
-
-            # --- Step 1: Deduplicate columns (avoid DataFrame-in-column issue) ---
-            subset = subset.loc[:, ~subset.columns.duplicated()]
-            log.info(f"🧮 After deduplication: cols={list(subset.columns)} shape={subset.shape}")
-
-            # --- Step 2: Flatten each column properly ---
-            for c in subset.columns:
-                if isinstance(subset[c], pd.DataFrame):
-                    subset[c] = subset[c].applymap(collapse_to_scalar).stack().groupby(level=0).mean()
-                elif not pd.api.types.is_numeric_dtype(subset[c]):
-                    subset[c] = subset[c].map(collapse_to_scalar)
-
-            # --- Step 3: Coerce everything to numeric safely ---
-            subset = subset.apply(pd.to_numeric, errors="coerce")
-
-            # --- Step 4: Drop empty columns/rows ---
-            #subset = subset.dropna(axis=1, how="all").dropna(axis=0, how="all")
-            log.info(f"🔍 Sample values before dropna:\n{subset.head(5)}")
-            log.info(f"🔍 Non-null counts:\n{subset.notna().sum()}")
-
-            # --- Step 5: Diagnostics ---
-            log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
-
-            # --- Step 6: Select numeric for correlation ---
-            corr_df = subset.select_dtypes(include=[np.number])
-            if corr_df.shape[1] < 2:
-                log.warning("⚠️ Not enough numeric columns for correlation.")
-
-
-
-
-            
-            for target in target_cols:
-                if target in corr_df.columns:
-                    corr_matrix = corr_df.corr(numeric_only=True)
-                    if target not in corr_matrix.index:
-                        log.warning(f"⚠️ Target '{target}' not in corr_matrix.index {list(corr_matrix.index)}")
-                        continue
-
-                    val = corr_matrix.loc[target, :]
-
-                    # Debug:
-                    log.info(f"Type of corr_series_base for target={target}: {type(val)}; index sample={list(val.index)[:5]}")
-
-                    # If it's a DataFrame, convert to Series
-                    if isinstance(val, pd.DataFrame):
-                        # For DataFrame, pick one column (or aggregate) — e.g. first column
-                        val = val.iloc[:, 0]
-
-                    corr_series = val.sort_values(ascending=False).round(3)
-                    correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
-
+        for target in allowed_targets:
+            if target not in numeric_df.columns:
+                continue
+            series = numeric_df.corr(numeric_only=True)[target].drop(labels=[target], errors="ignore")
+            if series.notna().any():
+                correlation_results[target] = series.sort_values(ascending=False).round(3).to_dict()
 
         if correlation_results:
-            stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
-            stats_hint += json.dumps(correlation_results, indent=2)
-            log.info(f"Generated correlations: {correlation_results}")
+            stats_hint = stats_hint + "\n\n--- CORRELATION MATRIX (vs Balancing Price) ---\n" + json.dumps(correlation_results, indent=2)
+            log.info(f"v18.8 correlations: {correlation_results}")
         else:
-            log.info("⚠️ No numeric overlap found for correlation calculation.")
+            log.info("⚠️ v18.8: No valid correlations under strict policy.")
+
+    # new end
 
 
     try:
