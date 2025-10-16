@@ -1,5 +1,4 @@
-
-# main.py v18.9 — NaN fix for correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
+# main.py v18.10 — Fix SyntaxError, NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
 import re
@@ -149,7 +148,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.9")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.10")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -394,14 +393,12 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     numeric = df.select_dtypes(include=[np.number])
     out = [f"Rows: {len(df)}"]
     
-    # Detect date/year column
     date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()]
     if not date_cols or numeric.empty:
         return "\n".join(out)
 
     time_col = date_cols[0]
 
-    # --- NEW TREND CALCULATION: Compare First Full Year vs Last Full Year ---
     try:
         if pd.api.types.is_datetime64_any_dtype(df[time_col]):
             df['__year'] = df[time_col].dt.year
@@ -537,108 +534,299 @@ def simple_table_whitelist_check(sql: str):
         log.error(f"Unexpected SQL validation error: {e}")
         raise ValueError(f"SQL validation failed: {e}")
 
-# ... [Rest of the code for SQL execution and chart building unchanged] ...
-
-# Updated correlation section
-if plan.get("intent") == "correlation" and not df.empty:
-    log.info("🔍 Calculating correlation matrix for LLM analysis.")
-    target_cols = [c for c in df.columns if c in ['p_bal_gel', 'p_bal_usd']]
-    explanatory_cols = [
-        c for c in df.columns 
-        if c in [
-            'xrate',
-            'enguri_tariff_gel',
-            'gardabani_tpp_tariff_gel',
-            'grouped_old_tpp_tariff_gel',
-            'share_deregulated_hydro',
-            'share_import',
-            'share_renewable_ppa'
+# -----------------------------
+# Main Endpoint
+# -----------------------------
+@app.post("/ask")
+async def ask_question(q: Question, x_app_secret: str = Header(...)):
+    if x_app_secret != APP_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid app secret")
+    
+    t0 = time.time()
+    log.info(f"🧭 Selected mode: {detect_analysis_mode(q.query)}")
+    mode = detect_analysis_mode(q.query)
+    correlation_results = {}
+    plan = {"intent": "general", "target": "unknown", "period": "full_data_range"}
+    
+    # 1) Generate plan and SQL
+    try:
+        combined_output = llm_generate_plan_and_sql(q.query, mode)
+        plan_str, sql = combined_output.split("---SQL---", 1)
+        plan = json.loads(plan_str.strip())
+        sql = sql.strip()
+    except Exception as e:
+        log.error(f"Plan/SQL generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query planning failed: {str(e)}")
+    
+    # 2) Validate SQL
+    try:
+        simple_table_whitelist_check(sql)
+    except Exception as e:
+        log.error(f"SQL validation failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    
+    # 3) Execute SQL
+    rows = cols = None
+    try:
+        with ENGINE.connect() as conn:
+            result = conn.execute(text(sql))
+            cols = list(result.keys())
+            rows = result.fetchall()
+    except Exception as e:
+        log.error(f"SQL execution failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
+    
+    # 4) Stats + Correlation
+    preview = rows_to_preview(rows, cols)
+    stats_hint = quick_stats(rows, cols)
+    
+    if plan.get("intent") == "correlation" and rows:
+        log.info("🔍 Calculating correlation matrix for LLM analysis.")
+        df = pd.DataFrame(rows, columns=cols)
+        target_cols = [c for c in df.columns if c in ['p_bal_gel', 'p_bal_usd']]
+        explanatory_cols = [
+            c for c in df.columns 
+            if c in [
+                'xrate',
+                'enguri_tariff_gel',
+                'gardabani_tpp_tariff_gel',
+                'grouped_old_tpp_tariff_gel',
+                'share_deregulated_hydro',
+                'share_import',
+                'share_renewable_ppa'
+            ]
         ]
-    ]
-    if target_cols and explanatory_cols:
-        def flatten_nested(df_in: pd.DataFrame) -> pd.DataFrame:
-            for c in df_in.columns:
-                if df_in[c].apply(lambda x: isinstance(x, (pd.DataFrame, list, dict))).any():
-                    try:
-                        df_in[c] = df_in[c].apply(
-                            lambda x: x.iloc[0, 0] if isinstance(x, pd.DataFrame) and not x.empty else (
-                                x[0] if isinstance(x, list) and len(x) > 0 else np.nan
+        if target_cols and explanatory_cols:
+            def flatten_nested(df_in: pd.DataFrame) -> pd.DataFrame:
+                for c in df_in.columns:
+                    if df_in[c].apply(lambda x: isinstance(x, (pd.DataFrame, list, dict))).any():
+                        try:
+                            df_in[c] = df_in[c].apply(
+                                lambda x: x.iloc[0, 0] if isinstance(x, pd.DataFrame) and not x.empty else (
+                                    x[0] if isinstance(x, list) and len(x) > 0 else np.nan
+                                )
                             )
-                        )
-                        log.info(f"🩹 Flattened nested structure in column '{c}'")
-                    except Exception as e:
-                        log.warning(f"⚠️ Could not flatten column '{c}': {e}")
-            return df_in
-        subset = df[target_cols + explanatory_cols].copy()
-        log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
-        def collapse_to_scalar(val):
-            try:
-                return float(str(val).replace(",", ".").replace("%", "").strip())
-            except Exception:
-                pass
-            if isinstance(val, pd.DataFrame):
-                flat = pd.to_numeric(val.stack(), errors="coerce")
-                return flat.mean() if not flat.empty else np.nan
-            if isinstance(val, (list, tuple, np.ndarray, pd.Series)):
-                s = pd.to_numeric(pd.Series(val), errors="coerce")
-                return s.mean() if s.notna().any() else np.nan
-            return np.nan
-        subset = subset.loc[:, ~subset.columns.duplicated()]
-        log.info(f"🧮 After deduplication: cols={list(subset.columns)} shape={subset.shape}")
-        for c in subset.columns:
-            if isinstance(subset[c], pd.DataFrame):
-                subset[c] = subset[c].applymap(collapse_to_scalar).stack().groupby(level=0).mean()
-            elif not pd.api.types.is_numeric_dtype(subset[c]):
-                subset[c] = subset[c].map(collapse_to_scalar)
-        subset = subset.apply(pd.to_numeric, errors="coerce")
-        log.info(f"🔍 Sample values before dropna:\n{subset.head(5)}")
-        log.info(f"🔍 Non-null counts:\n{subset.notna().sum()}")
-        log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
-        corr_df = subset.select_dtypes(include=[np.number])
-        if corr_df.shape[1] < 2:
-            log.warning("⚠️ Not enough numeric columns for correlation.")
+                            log.info(f"🩹 Flattened nested structure in column '{c}'")
+                        except Exception as e:
+                            log.warning(f"⚠️ Could not flatten column '{c}': {e}")
+                return df_in
+            subset = df[target_cols + explanatory_cols].copy()
+            log.info(f"🧩 Subset before flatten: cols={list(subset.columns)} shape={subset.shape}")
+            def collapse_to_scalar(val):
+                try:
+                    return float(str(val).replace(",", ".").replace("%", "").strip())
+                except Exception:
+                    pass
+                if isinstance(val, pd.DataFrame):
+                    flat = pd.to_numeric(val.stack(), errors="coerce")
+                    return flat.mean() if not flat.empty else np.nan
+                if isinstance(val, (list, tuple, np.ndarray, pd.Series)):
+                    s = pd.to_numeric(pd.Series(val), errors="coerce")
+                    return s.mean() if s.notna().any() else np.nan
+                return np.nan
+            subset = subset.loc[:, ~subset.columns.duplicated()]
+            log.info(f"🧮 After deduplication: cols={list(subset.columns)} shape={subset.shape}")
+            for c in subset.columns:
+                if isinstance(subset[c], pd.DataFrame):
+                    subset[c] = subset[c].applymap(collapse_to_scalar).stack().groupby(level=0).mean()
+                elif not pd.api.types.is_numeric_dtype(subset[c]):
+                    subset[c] = subset[c].map(collapse_to_scalar)
+            subset = subset.apply(pd.to_numeric, errors="coerce")
+            log.info(f"🔍 Sample values before dropna:\n{subset.head(5)}")
+            log.info(f"🔍 Non-null counts:\n{subset.notna().sum()}")
+            log.info(f"✅ After flatten + coercion: shape={subset.shape}, dtypes={subset.dtypes.to_dict()}")
+            corr_df = subset.select_dtypes(include=[np.number])
+            if corr_df.shape[1] < 2:
+                log.warning("⚠️ Not enough numeric columns for correlation.")
+            else:
+                for target in target_cols:
+                    if target in corr_df.columns:
+                        corr_matrix = corr_df.corr(numeric_only=True)
+                        if target not in corr_matrix.index:
+                            log.warning(f"⚠️ Target '{target}' not in corr_matrix.index {list(corr_matrix.index)}")
+                            continue
+                        val = corr_matrix.loc[target, :]
+                        if isinstance(val, pd.DataFrame):
+                            val = val.iloc[:, 0]
+                        corr_series = val.sort_values(ascending=False).round(3)
+                        correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
+        if correlation_results:
+            stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
+            stats_hint += json.dumps(correlation_results, indent=2)
+            log.info(f"Generated correlations: {correlation_results}")
         else:
-            for target in target_cols:
-                if target in corr_df.columns:
-                    corr_matrix = corr_df.corr(numeric_only=True)
-                    if target not in corr_matrix.index:
-                        log.warning(f"⚠️ Target '{target}' not in corr_matrix.index {list(corr_matrix.index)}")
-                        continue
-                    val = corr_matrix.loc[target, :]
-                    if isinstance(val, pd.DataFrame):
-                        val = val.iloc[:, 0]
-                    corr_series = val.sort_values(ascending=False).round(3)
-                    correlation_results[target] = corr_series.drop(index=target, errors='ignore').to_dict()
-    if correlation_results:
-        stats_hint += "\n\n--- CORRELATION MATRIX (vs Price) ---\n"
-        stats_hint += json.dumps(correlation_results, indent=2)
-        log.info(f"Generated correlations: {correlation_results}")
-    else:
-        log.info("⚠️ No numeric overlap found for correlation calculation.")
+            log.info("⚠️ No numeric overlap found for correlation calculation.")
 
-try:
-    summary = llm_summarize(q.query, preview, stats_hint)
-except Exception as e:
-    log.warning(f"Summarization failed: {e}")
-    summary = preview
-summary = scrub_schema_mentions(summary)
-if mode == "analyst" and plan.get("intent") != "general":
-    summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
+    try:
+        summary = llm_summarize(q.query, preview, stats_hint)
+    except Exception as e:
+        log.warning(f"Summarization failed: {e}")
+        summary = preview
+    summary = scrub_schema_mentions(summary)
+    if mode == "analyst" and plan.get("intent") != "general":
+        summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
-# ... [Chart builder unchanged] ...
+    # 5) Chart builder
+    chart_data = chart_type = chart_meta = None
+    if rows and cols:
+        df = df.copy()
+        time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])), None)
+        categorical_hints = [
+            "type", "tech", "entity", "sector", "source", "segment",
+            "region", "category", "ownership", "market", "trade", "fuel"
+        ]
+        for c in cols:
+            if c != time_key:
+                if any(h in c.lower() for h in categorical_hints):
+                    df[c] = df[c].astype(str).replace("nan", None)
+                else:
+                    try:
+                        df[c] = pd.to_numeric(df[c], errors="coerce")
+                    except Exception:
+                        pass
+        categorical_cols = [
+            c for c in df.columns
+            if c != time_key and not pd.api.types.is_numeric_dtype(df[c])
+        ]
+        try:
+            from context import COLUMN_LABELS
+        except ImportError:
+            COLUMN_LABELS = {}
+        label_map_all = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in cols if c != time_key}
+        for c in categorical_cols:
+            new_name = label_map_all.get(c, c.replace("_", " ").title())
+            if new_name != c:
+                df.rename(columns={c: new_name}, inplace=True)
+        ordered_cols = []
+        if time_key:
+            ordered_cols.append(time_key)
+        ordered_cols += categorical_cols
+        for c in df.columns:
+            if c not in ordered_cols:
+                ordered_cols.append(c)
+        ordered_cols = [c for c in ordered_cols if c in df.columns]
+        df = df[ordered_cols]
+        num_cols = [c for c in df.columns if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
+        cols_lower = [c.lower() for c in df.columns]
+        time_cols = [c for c in df.columns if re.search(r"(year|month|date)", c.lower())]
+        category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category)", c.lower())]
+        value_cols = [c for c in df.columns if re.search(r"(quantity|volume|value|amount|price|tariff|cpi|index|mwh|tj|usd|gel)", c.lower())]
+        chart_type = "line"
+        if len(time_cols) >= 1 and len(category_cols) == 0 and len(value_cols) == 1:
+            chart_type = "line"
+        elif len(time_cols) >= 1 and len(category_cols) >= 1 and len(value_cols) >= 1:
+            chart_type = "stackedbar"
+        elif len(time_cols) == 0 and len(category_cols) == 1 and len(value_cols) >= 1:
+            chart_type = "bar"
+        elif len(time_cols) == 0 and len(category_cols) > 1 and len(value_cols) >= 1:
+            chart_type = "stackedbar"
+        elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) == 1:
+            unique_cats = df[category_cols[0]].nunique()
+            if unique_cats <= 8:
+                chart_type = "pie"
+            else:
+                chart_type = "bar"
+        elif len(time_cols) >= 1 and len(value_cols) > 1:
+            chart_type = "line"
+        elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) > 1:
+            chart_type = "bar"
+        log.info(f"🧠 Chart type auto-detected → {chart_type} | Time={len(time_cols)} | Categories={len(category_cols)} | Values={len(value_cols)}")
+        def infer_dimension(col: str) -> str:
+            col_l = col.lower()
+            if any(x in col_l for x in ["cpi", "index", "inflation"]):
+                return "index"
+            if any(x in col_l for x in ["quantity", "generation", "volume_tj", "volume", "mw", "tj"]):
+                return "energy_qty"
+            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
+                return "price_tariff"
+            return "other"
+        dim_map = {c: infer_dimension(c) for c in num_cols}
+        dims = set(dim_map.values())
+        log.info(f"📐 Detected dimensions: {dim_map} → {dims}")
+        def unit_for_price(cols_: list[str]) -> str:
+            has_gel = any("_gel" in c.lower() for c in cols_)
+            has_usd = any("_usd" in c.lower() for c in cols_)
+            if has_gel and has_usd:
+                return "per MWh"
+            if has_gel:
+                return "GEL/MWh"
+            if has_usd:
+                return "USD/MWh"
+            return "per MWh"
+        def unit_for_qty(cols_: list[str]) -> str:
+            has_tj = any("tj" in c.lower() for c in cols_) or any("volume_tj" in c.lower() for c in cols_)
+            has_thousand_mwh = any("quantity" in c.lower() or "quantity_tech" in c.lower() for c in cols_)
+            if has_tj and not has_thousand_mwh:
+                return "TJ"
+            if has_thousand_mwh and not has_tj:
+                return "thousand MWh"
+            return "Energy Quantity"
+        def unit_for_index(_: list[str]) -> str:
+            return "Index (2015=100)"
+        label_map_all = {c: COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in cols if c != time_key}
+        df_labeled = df.rename(columns=label_map_all)
+        chart_labels = [label_map_all.get(c, c) for c in num_cols]
+        if "index" in dims and len(dims) > 1:
+            log.info("📊 Mixed index + other dimension → dual-axis chart.")
+            chart_type = "dualaxis"
+            chart_data = df_labeled.to_dict("records")
+            if "price_tariff" in dims:
+                left_unit = unit_for_price(num_cols)
+            else:
+                left_unit = unit_for_qty(num_cols)
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisLeft": left_unit,
+                "yAxisRight": unit_for_index(num_cols),
+                "title": "Index vs Other Indicator",
+                "axisMode": "dual",
+                "labels": chart_labels,
+            }
+        elif "price_tariff" in dims and "energy_qty" in dims:
+            log.info("📊 Mixed price/tariff and quantity → dual-axis chart.")
+            chart_type = "dualaxis"
+            chart_data = df_labeled.to_dict("records")
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisLeft": unit_for_qty(num_cols),
+                "yAxisRight": unit_for_price(num_cols),
+                "title": "Quantity vs Price/Tariff",
+                "axisMode": "dual",
+                "labels": chart_labels,
+            }
+        else:
+            log.info("📊 Uniform dimension → single-axis chart (respecting earlier chart type).")
+            if chart_type not in ["stackedbar", "bar", "pie", "dualaxis"]:
+                chart_type = "line"
+            chart_data = df_labeled.to_dict("records")
+            if dims == {"price_tariff"}:
+                y_unit = unit_for_price(num_cols)
+            elif dims == {"energy_qty"}:
+                y_unit = unit_for_qty(num_cols)
+            elif dims == {"index"}:
+                y_unit = unit_for_index(num_cols)
+            else:
+                y_unit = "Value"
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisTitle": y_unit,
+                "title": "Indicator Comparison (same dimension)",
+                "axisMode": "single",
+                "labels": chart_labels,
+            }
+        log.info(f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')} | labels={chart_labels}")
 
-# 6) Final response
-exec_time = time.time() - t0
-log.info(f"Finished request in {exec_time:.2f}s")
-
-response = APIResponse(
-    answer=summary,
-    chart_data=chart_data,
-    chart_type=chart_type,
-    chart_metadata=chart_meta,
-    execution_time=exec_time,
-)
-return response
+    # 6) Final response
+    exec_time = time.time() - t0
+    log.info(f"Finished request in {exec_time:.2f}s")
+    response = APIResponse(
+        answer=summary,
+        chart_data=chart_data,
+        chart_type=chart_type,
+        chart_metadata=chart_meta,
+        execution_time=exec_time,
+    )
+    return response
 
 # -----------------------------
 # Server Startup
