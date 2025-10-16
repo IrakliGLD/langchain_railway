@@ -176,6 +176,11 @@ DB_SCHEMA_DOC = """
 **Granularity:**
 - Monthly for all except energy_balance_long_mv (yearly)
 
+**Derived Dimensions:**
+- Season is not a column in the database but can be computed analytically as:
+  CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'Summer' ELSE 'Winter' END AS season
+- Use this derived field for seasonal aggregation of prices (AVG) or quantities (SUM).
+
 **Joins:**
 - Use date or entity as join keys only.
 - Avoid system tables or undefined joins.
