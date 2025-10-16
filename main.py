@@ -1,5 +1,5 @@
-
-# main.py v18.15 — Fix 422 (handle service_tier, enhance logging), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
+```python
+# main.py v18.16 — Fix 422 (header logging, service_tier), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
 import re
@@ -150,7 +150,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.15")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.16")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -859,3 +859,4 @@ if __name__ == "__main__":
         log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
     except Exception as e:
         log.error(f"FATAL: Uvicorn server failed to start: {e}")
+```
