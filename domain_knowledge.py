@@ -151,6 +151,23 @@ DOMAIN_KNOWLEDGE = {
         "UsageHint": "Compare tariff_gel with p_bal_gel to assess regulatory lag."
     },
 
+
+    "SeasonalTrends": {
+        "Definition": "Balancing electricity prices exhibit structurally different behaviors across seasons due to shifts in generation composition.",
+        "Rule": "Always compute and compare seasonal averages and CAGRs for April–July (Summer) and August–March (Winter) periods. These comparisons must always accompany the total yearly trend.",
+        "DataBasis": "Seasonal composition can be directly observed from the trade_derived_entities view, where the shares of deregulated_hydro and regulated_hpp reflect the availability of low-cost hydro generation in the balancing market.",
+        "Interpretation": [
+            "Summer prices tend to rise faster in recent years because the shares of cheap hydro sources (deregulated_hydro and regulated_hpp) in balancing electricity have declined. Increasing portions of hydro generation are sold under bilateral contracts instead of on the balancing market.",
+            "Winter prices also show an upward trend, though typically smaller, mainly due to higher natural gas costs for thermal generation and increased import reliance during low-hydro periods."
+        ],
+        "AnalyticalUse": [
+            "Combine seasonal trend analysis with hydro share data from trade_derived_entities to explain structural shifts.",
+            "When comparing Summer and Winter price trends, always mention the relative shares of deregulated_hydro and regulated_hpp as underlying drivers."
+        ],
+        "Insight": "Include both total yearly trend and separate seasonal trends (Summer vs Winter) in every balancing price trend analysis, interpreting the results through the evolution of hydro and import shares."
+    },
+
+    
     "InflationLinks": {
         "Relation": "Electricity tariffs partially track CPI for 'electricity, gas and other fuels'.",
         "UseCase": "Compare CPI vs tariff_gel or p_bal_gel.",
