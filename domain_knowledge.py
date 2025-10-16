@@ -1,12 +1,73 @@
 DOMAIN_KNOWLEDGE = {
-    "tariff_gen": {
-        "description": "Regulated generation tariffs approved by the Georgian energy regulator (GNERC).",
-        "dependencies": [
-            "Tariffs are set using a cost-plus methodology defined by the regulator.",
-            "They reflect approved investment costs, operational expenses, and the allowed return on assets.",
-            "Tariffs of thermal generation units depend heavily on the USD exchange rate, because natural gas fuel costs are denominated in USD."
+    "tariff_entities": {
+        "description": "Specific generator entities present in the tariff_with_usd view, used for tariff-based correlation and chart labeling.",
+        "hydro": {
+            "engurhesi": {
+                "entities": ['ltd "engurhesi"1'],
+                "labels": {"ltd \"engurhesi\"1": "Engurhesi HPP (Hydro)"}
+            },
+            "other_hydro": {
+                "entities": [
+                    'jsc "energo-pro georgia genration" (dzevrulhesi)',
+                    'jsc "energo-pro georgia genration" (gumathesi)',
+                    'jsc "energo-pro georgia genration" (shaorhesi)',
+                    'jsc "energo-pro georgia genration" (rionhesi)',
+                    'jsc "energo-pro georgia genration" (lajanurhesi)',
+                    'jsc "georgian water & power" (zhinvalhesi)',
+                    'ltd "vardnili hpp cascade"',
+                    'ltd "vartsikhe-2005"'
+                ],
+                "labels": {
+                    'jsc "energo-pro georgia genration" (dzevrulhesi)': "Dzevruli HPP (Energo-Pro)",
+                    'jsc "energo-pro georgia genration" (gumathesi)': "Gumati HPP (Energo-Pro)",
+                    'jsc "energo-pro georgia genration" (shaorhesi)': "Shaori HPP (Energo-Pro)",
+                    'jsc "energo-pro georgia genration" (rionhesi)': "Rioni HPP (Energo-Pro)",
+                    'jsc "energo-pro georgia genration" (lajanurhesi)': "Lajanuri HPP (Energo-Pro)",
+                    'jsc "georgian water & power" (zhinvalhesi)': "Zhinvali HPP (GWP)",
+                    'ltd "vardnili hpp cascade"': "Vardnili HPP Cascade",
+                    'ltd "vartsikhe-2005"': "Vartsikhe HPP"
+                }
+            }
+        },
+        "thermal": {
+            "entities": [
+                'ltd "gardabni thermal power plant"',
+                'ltd "mtkvari energy"',
+                'ltd "iec" (tbilresi)',
+                'ltd "g power" (capital turbines)',
+                'ltd "khrami_1"',
+                'ltd "khrami_2"'
+            ],
+            "labels": {
+                'ltd "gardabni thermal power plant"': "Gardabani TPP",
+                'ltd "mtkvari energy"': "Mtkvari Energy",
+                'ltd "iec" (tbilresi)': "Tbilisi TPP (IEC)",
+                'ltd "g power" (capital turbines)': "G-POWER (Capital Turbines)",
+                'ltd "khrami_1"': "Khrami I HPP",
+                'ltd "khrami_2"': "Khrami II HPP"
+            }
+        },
+        "notes": [
+            "Engurhesi is Georgia's main large hydro plant; used as a reference for hydro-tariff correlation.",
+            "Thermal entities include Gardabani, Mtkvari, Tbilisi (IEC), and G-POWER, whose tariffs depend strongly on natural gas prices.",
+            "Energo-Pro hydro plants (Rioni, Lajanuri, Shaori, Gumati, Dzevruli) have similar cost structures and can be averaged together.",
+            "Entity labels are provided for clearer chart legends and report outputs."
         ]
     },
+
+    "thermal": [
+        'ltd "gardabni thermal power plant"',
+        'ltd "mtkvari energy"',
+        'ltd "iec" (tbilresi)',
+        'ltd "g power" (capital turbines)',
+        'ltd "khrami_1"',
+        'ltd "khrami_2"'
+    ],
+    "notes": [
+        "Engurhesi is the dominant hydro plant, often used as a reference for hydro correlation with balancing prices.",
+        "Thermal entities include Tbilisi (IEC), Gardabani, G-POWER, and Mtkvari plants whose tariffs are driven by gas costs.",
+        "Energo-Pro hydro plants (Rioni, Lajanuri, Shaori, Gumati, Dzevruli) have similar cost structures and are grouped as 'other_hydro'."
+    ],
 
     "price_with_usd": {
         "description": "Electricity market prices (including balancing electricity) converted to USD.",
@@ -38,21 +99,16 @@ DOMAIN_KNOWLEDGE = {
         ],
         "SeasonalityHint": "Price trends should be compared on a yearly average basis to neutralize the strong seasonal swings (high Hydro Generation in summer = low prices; high Thermal Generation in winter = high prices)."
     },
-    
-    # NEW STRUCTURE FOR CORRELATION DRIVERS
+
     "PriceDrivers": {
         "TargetColumns": ["p_bal_gel", "p_bal_usd"],
         "DriverColumns": {
-            # Prices / Tariffs
             "p_dereg_gel": "Deregulated HPP Price (from price_with_usd)",
             "p_gardabani_tpp_tariff": "Regulated New TPP Tariff (from tariff_with_usd)",
             "p_grouped_old_tpp_tariffs": "Regulated Old TPP Group Tariffs (from tariff_with_usd)",
-
-            # Shares / Volumes (entity-based structure)
-            # These entities exist as rows in trade_derived_entities
             "entity = 'deregulated_hydro'": "Deregulated HPP Share (from trade_derived_entities)",
             "entity = 'import'": "Import Share (from trade_derived_entities)",
-            "entity = 'renewable_ppa'": "Renewable PPA Share (from trade_derived_entities)",
-        },
+            "entity = 'renewable_ppa'": "Renewable PPA Share (from trade_derived_entities)"
+        }
     }
 }
