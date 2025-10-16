@@ -1,4 +1,4 @@
-# main.py v18.11 — Fix 422 error, NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
+# main.py v18.12 — Fix 422 error (missing x-app-secret), NaN correlations (all thermal tariffs), time reduction, summer/winter balancing price, 502 mitigation
 
 import os
 import re
@@ -148,7 +148,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.11")
+app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.12")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -166,7 +166,7 @@ async def health_check():
 # Models
 # -----------------------------
 class Question(BaseModel):
-    query: str = Field(..., max_length=5000)  # Increased from 2000 to handle complex queries
+    query: str = Field(..., max_length=5000)
     user_id: Optional[str] = None
 
     @field_validator("query")
@@ -531,8 +531,12 @@ def simple_table_whitelist_check(sql: str):
 # Main Endpoint
 # -----------------------------
 @app.post("/ask")
-async def ask_question(q: dict, x_app_secret: str = Header(...)):
+async def ask_question(q: dict, x_app_secret: Optional[str] = Header(default=None), client_ip: str = Header(default=None, alias="X-Forwarded-For")):
+    if x_app_secret is None:
+        log.error(f"Missing x-app-secret header | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
+        raise HTTPException(status_code=403, detail="Missing x-app-secret header")
     if x_app_secret != APP_SECRET_KEY:
+        log.error(f"Invalid x-app-secret header | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
         raise HTTPException(status_code=403, detail="Invalid app secret")
     
     t0 = time.time()
@@ -541,10 +545,10 @@ async def ask_question(q: dict, x_app_secret: str = Header(...)):
         try:
             question = Question(**q)
         except ValidationError as e:
-            log.error(f"Payload validation failed: {e.errors()} | Payload: {json.dumps(q, default=str)}")
+            log.error(f"Payload validation failed: {e.errors()} | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
             raise HTTPException(status_code=422, detail=f"Invalid request payload: {e.errors()}")
     except Exception as e:
-        log.error(f"Unexpected payload error: {str(e)} | Payload: {json.dumps(q, default=str)}")
+        log.error(f"Unexpected payload error: {str(e)} | Client IP: {client_ip} | Payload: {json.dumps(q, default=str)}")
         raise HTTPException(status_code=422, detail=f"Unexpected payload error: {str(e)}")
 
     log.info(f"🧭 Selected mode: {detect_analysis_mode(question.query)}")
@@ -559,14 +563,14 @@ async def ask_question(q: dict, x_app_secret: str = Header(...)):
         plan = json.loads(plan_str.strip())
         sql = sql.strip()
     except Exception as e:
-        log.error(f"Plan/SQL generation failed: {e}")
+        log.error(f"Plan/SQL generation failed: {e} | Client IP: {client_ip}")
         raise HTTPException(status_code=500, detail=f"Query planning failed: {str(e)}")
     
     # 2) Validate SQL
     try:
         simple_table_whitelist_check(sql)
     except Exception as e:
-        log.error(f"SQL validation failed: {e}")
+        log.error(f"SQL validation failed: {e} | Client IP: {client_ip}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
     
     # 3) Execute SQL
@@ -577,7 +581,7 @@ async def ask_question(q: dict, x_app_secret: str = Header(...)):
             cols = list(result.keys())
             rows = result.fetchall()
     except Exception as e:
-        log.error(f"SQL execution failed: {e}")
+        log.error(f"SQL execution failed: {e} | Client IP: {client_ip}")
         raise HTTPException(status_code=500, detail=f"Query execution failed: {str(e)}")
     
     # 4) Stats + Correlation
