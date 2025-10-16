@@ -1,4 +1,4 @@
-```python
+
 # main.py v18.9 — NaN fix for correlations (all thermal tariffs), time reduction, summer/winter balancing price
 
 import os
