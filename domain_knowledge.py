@@ -4,7 +4,7 @@ DOMAIN_KNOWLEDGE = {
         "hydro": {
             "engurhesi": {
                 "entities": ['ltd "engurhesi"1'],
-                "labels": {"ltd \"engurhesi\"1": "Engurhesi HPP (Hydro)"}
+                "labels": {"ltd \"engurhesi\"1": "Enguri HPP"}
             },
             "other_hydro": {
                 "entities": [
@@ -15,17 +15,21 @@ DOMAIN_KNOWLEDGE = {
                     'jsc "energo-pro georgia genration" (lajanurhesi)',
                     'jsc "georgian water & power" (zhinvalhesi)',
                     'ltd "vardnili hpp cascade"',
-                    'ltd "vartsikhe-2005"'
+                    'ltd "vartsikhe-2005"',
+                    'ltd "khrami_1"',
+                    'ltd "khrami_2"'
                 ],
                 "labels": {
-                    'jsc "energo-pro georgia genration" (dzevrulhesi)': "Dzevruli HPP (Energo-Pro)",
-                    'jsc "energo-pro georgia genration" (gumathesi)': "Gumati HPP (Energo-Pro)",
-                    'jsc "energo-pro georgia genration" (shaorhesi)': "Shaori HPP (Energo-Pro)",
-                    'jsc "energo-pro georgia genration" (rionhesi)': "Rioni HPP (Energo-Pro)",
-                    'jsc "energo-pro georgia genration" (lajanurhesi)': "Lajanuri HPP (Energo-Pro)",
-                    'jsc "georgian water & power" (zhinvalhesi)': "Zhinvali HPP (GWP)",
+                    'jsc "energo-pro georgia genration" (dzevrulhesi)': "Dzevruli HPP",
+                    'jsc "energo-pro georgia genration" (gumathesi)': "Gumati HPP",
+                    'jsc "energo-pro georgia genration" (shaorhesi)': "Shaori HPP",
+                    'jsc "energo-pro georgia genration" (rionhesi)': "Rioni HPP",
+                    'jsc "energo-pro georgia genration" (lajanurhesi)': "Lajanuri HPP",
+                    'jsc "georgian water & power" (zhinvalhesi)': "Zhinvali HPP",
                     'ltd "vardnili hpp cascade"': "Vardnili HPP Cascade",
-                    'ltd "vartsikhe-2005"': "Vartsikhe HPP"
+                    'ltd "vartsikhe-2005"': "Vartsikhe HPP",
+                    'ltd "khrami_1"': "Khrami I HPP",
+                    'ltd "khrami_2"': "Khrami II HPP"
                 }
             }
         },
@@ -35,21 +39,17 @@ DOMAIN_KNOWLEDGE = {
                 'ltd "mtkvari energy"',
                 'ltd "iec" (tbilresi)',
                 'ltd "g power" (capital turbines)',
-                'ltd "khrami_1"',
-                'ltd "khrami_2"'
             ],
             "labels": {
                 'ltd "gardabni thermal power plant"': "Gardabani TPP",
                 'ltd "mtkvari energy"': "Mtkvari Energy",
-                'ltd "iec" (tbilresi)': "Tbilisi TPP (IEC)",
-                'ltd "g power" (capital turbines)': "G-POWER (Capital Turbines)",
-                'ltd "khrami_1"': "Khrami I HPP",
-                'ltd "khrami_2"': "Khrami II HPP"
+                'ltd "iec" (tbilresi)': "Tbilisi TPP",
+                'ltd "g power" (capital turbines)': "G-POWER"
             }
         },
         "notes": [
             "Engurhesi is Georgia's main large hydro plant; used as a reference for hydro-tariff correlation.",
-            "Thermal entities include Gardabani, Mtkvari, Tbilisi (IEC), and G-POWER, whose tariffs depend strongly on natural gas prices.",
+            "Thermal tariffs depend strongly on natural gas prices.",
             "Energo-Pro hydro plants (Rioni, Lajanuri, Shaori, Gumati, Dzevruli) have similar cost structures and can be averaged together.",
             "Entity labels are provided for clearer chart legends and report outputs."
         ]
