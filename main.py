@@ -441,7 +441,7 @@ User question:
 Schema:
 {DB_SCHEMA_DOC}
 
-Domain knowledge:
+Background information (for reference only):
 {domain_json}
 
 Guidance:
@@ -471,6 +471,9 @@ Example Output:
 ---SQL---
 SELECT ...
 """
+    prompt = prompt.replace("Based on domain knowledge", "Based on the information I have")
+    prompt = prompt.replace("domain knowledge", "background information")
+    
     try:
         llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
         combined_output = llm.invoke([("system", system), ("user", prompt)]).content.strip()
@@ -497,7 +500,10 @@ def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 200) -> 
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].astype(float).round(3)
-    return df.to_string(index=False)
+    preview = df.to_string(index=False)
+    preview = preview.replace("None", "N/A").replace("nan", "N/A")
+    return preview
+
 
 
 def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
@@ -636,7 +642,8 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
         desc = numeric.describe().round(3)
         out.append("Numeric summary:")
         out.append(desc.to_string())
-
+    
+    out = [line.replace("None", "N/A").replace("nan", "N/A") for line in out]
     return "\n".join(out)
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
@@ -708,6 +715,12 @@ write a more detailed summary of about 5–10 sentences following this structure
 6. Reference hydro vs thermal/import structure from trade_derived_entities as the main driver of seasonal differences.
 7. Conclude with a concise analytical insight linking price movements to structural market changes and the evolving generation mix.
 """
+
+    # --- Handle missing or irrelevant data gracefully ---
+    if ("N/A" in data_preview or "No rows returned" in data_preview or
+        "0 rows" in stats_hint or "Rows: 0" in stats_hint):
+        log.info("🟡 No relevant data available for summarization → returning fallback.")
+        return "I do not have relevant information to answer this question based on the available data."
 
     
     try:
