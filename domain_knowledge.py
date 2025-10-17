@@ -220,14 +220,26 @@ DOMAIN_KNOWLEDGE = {
     "DataEvidenceIntegration": {
         "Purpose": "Links conceptual rules in domain_knowledge with quantifiable evidence stored in Supabase materialized views.",
         "Guidance": [
-            "Every analytical or causal statement should, when possible, be justified by trends or values from the corresponding views.",
+            "Every analytical or causal statement should, when possible, be justified by trends or values from the corresponding materialized views.",
             "For tariff-related insights (e.g., Enguri/Vardnili increases, gas-cost effects), verify and illustrate with data from tariff_with_usd.",
             "For balancing price behavior (summer vs winter, correlation with generation mix), use price_with_usd and trade_derived_entities.",
             "For demand or sectoral structure, reference energy_balance_long_mv.",
             "For import dependence or renewable share dynamics, use trade_derived_entities, focusing on share_import, share_deregulated_hydro, and share_renewable_ppa.",
-            "If the user asks for an interpretation (not a raw figure), combine quantitative evidence (e.g., average, CAGR, percentage change) with the relevant explanatory rule from domain_knowledge.",
-            "If the user explicitly asks only for a numeric answer, provide the number directly without narrative justification."
+            "If the user asks for an interpretation (not a raw figure), combine quantitative evidence (e.g., average, CAGR, or percentage change) with the relevant explanatory rule from domain_knowledge.",
+            "If the user explicitly asks only for a numeric answer, provide the number directly without narrative justification.",
+            "When comparing across currencies, units, or dimensions, ensure the interpretation explicitly reflects the measurement unit (e.g., GEL/MWh, USD/MWh, or share ratio)."
         ],
-        "LLMHint": "When generating an answer, use domain_knowledge for reasoning but cite patterns or magnitudes using actual results from the database views. Prioritize causal storytelling supported by numeric evidence rather than listing values."
+        "LLMHint": (
+            "When generating an answer, use domain_knowledge for reasoning but cite patterns or magnitudes using actual computed results from the database views. "
+            "Prioritize causal storytelling supported by numeric evidence rather than listing values. "
+            "Balance narrative and precision: integrate data-driven observations with conceptual insights (e.g., rising prices explained by declining hydro share)."
+        ),
+        "ChartSelectionHint": (
+            "When generating or explaining results, prioritize clarity over completeness. "
+            "Select up to four key indicators that best answer the user's question — for example, price levels (in GEL/USD), main driver shares, and relevant exchange rate or tariff variables. "
+            "Avoid including every numeric column in one chart unless the user explicitly asks for a full multi-series view. "
+            "Prefer showing representative variables with clear contrast (e.g., GEL vs USD, hydro vs thermal, import share vs price) "
+            "so the chart remains interpretable and visually balanced. "
+            "When multiple variables differ by unit or scale, group them logically and use dual axes (left for price/tariff, right for share or index)."
+        )
     }
-}
