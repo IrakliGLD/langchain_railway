@@ -539,7 +539,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                     log.info(f"🧩 Excluding incomplete years from trend calculation: {incomplete_years}")
                     df = df[~df['__year'].isin(incomplete_years)]
             except Exception as e:
-            l    og.warning(f"⚠️ Failed to filter incomplete years: {e}")
+                log.warning(f"⚠️ Failed to filter incomplete years: {e}")
 
 
         
