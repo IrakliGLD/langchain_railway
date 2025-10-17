@@ -677,8 +677,9 @@ write a more detailed summary of about 5–10 sentences following this structure
 2. Present separate Summer (Apr–Jul) and Winter (Aug–Mar) trends, including CAGRs if available.
 3. If correlation results are provided, mention key seasonal correlations that differ between Summer and Winter.
 4. Always compare GEL and USD price trajectories and explain divergence through exchange rate and USD-denominated cost components.
-5. Reference hydro vs thermal/import structure from trade_derived_entities as the main driver of seasonal differences.
-6. Conclude with a concise analytical insight linking price movements to structural market changes and the evolving generation mix.
+5. When referring to electricity prices or tariffs, always include the correct physical unit (GEL/MWh or USD/MWh) rather than currency only.
+6. Reference hydro vs thermal/import structure from trade_derived_entities as the main driver of seasonal differences.
+7. Conclude with a concise analytical insight linking price movements to structural market changes and the evolving generation mix.
 """
 
     
@@ -1093,8 +1094,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         log.warning(f"Summarization failed: {e}")
         summary = preview
     summary = scrub_schema_mentions(summary)
-    if mode == "analyst" and plan.get("intent") != "general":
-        summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
+    #if mode == "analyst" and plan.get("intent") != "general":
+        #summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
 
     # 5) Chart builder (FINAL: labels from context + unit-only axis + robust numeric coercion)
     chart_data = chart_type = chart_meta = None
