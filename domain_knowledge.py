@@ -270,6 +270,89 @@ DOMAIN_KNOWLEDGE = {
     },
 
 
+    "MarketParticipantsAndDataSources": {
+        "description": "Key institutions in Georgia’s electricity sector, their primary functions, and mapping between system data views and source organizations.",
+        "participants": {
+            "GNERC (Georgian National Energy and Water Supply Regulatory Commission)": {
+                "role": "Independent energy regulator, tariff authority, energy market monitoring and licensing body.",
+                "functions": [
+                    "In electricity sector pproves electricity generation, transmission, and distribution tariffs, including tariff methodologies.",
+                    "Issues, modifies, and revokes licenses for generation, transmission, distribution, martket operator. Authorized electricity activities not subject to license, like suppy, trade, small generation.",
+                    "Approves and enforces the Grid Code, network connection rules, and accounting standards for market participants.",
+                    "Oversees cost audits, tariff reviews, guaranteed capacity payments, and consumer protection measures."
+                ],
+                "notes": [
+                    "GNERC is the primary source for the 'tariff_with_usd', 'price_with_usd' views.",
+                    "It also collects and validates generation technology reports used in 'tech_quantity_view' and similar datasets."
+                ]
+            },
+            "ESCO (Electricity System Commercial Operator)": {
+                "role": "Electricity System Commercial Operator. Responsible for buying and selling balancing electricity.",
+                "functions": [
+                    "Administers the balancing and guaranteed capacity settlement processes.",
+                    "Registers wholesale market participants, manages direct contracts.",
+                    "Handles import/export settlements and acts as counterparty for CfD (Contract for Difference) and guaranteed capacity contracts."
+                ],
+                "notes": [
+                    "ESCO provides data for 'trade_derived_entities', and other balancing-related views.",
+                    "Although named a 'balancing market', the current ESCO mechanism operates as a monthly imbalance settlement system rather than an hourly balancing product market."
+                ]
+            },
+            "GSE (Georgian State Electrosystem)": {
+                "role": "Transmission System Operator (TSO), system dispatcher, and transmission network owner.",
+                "functions": [
+                    "Owns and operates Georgia’s transmission infrastructure.",
+                    "Performs real-time system dispatch, grid stability control.",
+                    "Manages cross-border interconnections with neighboring systems (Turkey, Azerbaijan, Armenia, Russia).",
+                    "Plans transmission development and publishes the Ten-Year Network Development Plan (TYNDP)."
+                ],
+                "notes": [
+                    "GSE is responsible for the operation and reliability of the national grid but does not generate electricity.",
+                    "GSE is licensed operator of a balanicng market, however, real balancing market and hourly imbalance responsibility was set to launch on july 2027."
+                ]
+            },
+            "GENEX (Georgian Energy Exchange)": {
+                "role": "Electricity Exchange Operator for electricity day-ahead and intraday markets.",
+                "functions": [
+                    "Operates day-ahead, intraday.",
+                    "Publishes market prices, traded volumes, and clearing results.",
+                    "Handles financial settlement of trades executed on the exchange."
+                ],
+                "notes": [
+                    "GENEX was established jointly by GSE and ESCO in 2019. Current shareholders are GSE, ESCO, GGTC and GOGC to implement the competitive wholesale electricity market framework.",
+                ]
+            },
+            "GEOSTAT (National Statistics Office of Georgia)": {
+                "role": "Official statistical agency providing macroeconomic and energy data.",
+                "functions": [
+                    "Publishes national energy balances, sectoral demand indicators, and inflation indices.",
+                    "Maintains the CPI (Consumer Price Index) series, including the 'electricity, gas, and other fuels' category used in energy affordability analysis.",
+                    "Provides long-term energy balance datasets in cooperation with GSE and GNERC."
+                ],
+                "notes": [
+                    "GEOSTAT is the data source for 'monthly_cpi_mv' and 'energy_balance_long_mv'.",
+                    "EnerBot should treat GEOSTAT datasets as official statistical references for national-level demand and macroeconomic trends."
+                ]
+            }
+        },
+        "data_source_mapping": {
+            "price_with_usd, tariff_with_usd": "GNERC – Georgian National Energy and Water Supply Regulatory Commission",
+            "monthly_cpi_mv": "GEOSTAT – National Statistics Office of Georgia",
+            "energy_balance_long_mv": "GEOSTAT – National Statistics Office of Georgia",
+            "tech_quantity_view (or tech_quantity_pivot)": "GNERC – generation reports from licensed producers",
+            "trade_derived_entities, other operational views": "ESCO / GENEX – balancing and market settlement data"
+        },
+        "analytical_notes": [
+            "When EnerBot references tariff data, it must cite GNERC as the source of tariff methodologies and approved rates.",
+            "For macro energy balances and CPI statistics, GEOSTAT is the authoritative source.",
+            "For generation by technology (hydro, thermal, wind, solar), EnerBot should attribute data to GNERC, based on licensee reporting.",
+            "All balancing and market operation statistics are based on ESCO and GENEX datasets unless otherwise noted.",
+            "When explaining discrepancies or missing data, EnerBot should note possible timing lags between GNERC, ESCO, and GEOSTAT publications."
+        ]
+    },
+
+
+    
     "SeasonalityPatterns": {
         "SummerMonths": [4, 5, 6, 7],
         "WinterMonths": [1, 2, 3, 8, 9, 10, 11, 12],
