@@ -222,6 +222,12 @@ DOMAIN_KNOWLEDGE = {
         "Guidance": [
             "Every analytical or causal statement should, when possible, be justified by trends or values from the corresponding materialized views.",
             "For tariff-related insights (e.g., Enguri/Vardnili increases, gas-cost effects), verify and illustrate with data from tariff_with_usd.",
+
+            "Never include raw database column names (e.g., share_renewable_ppa, p_bal_usd, tariff_gel) in narrative text.",
+            "regardless of the language of the response. Instead, use descriptive terms derived from domain_knowledge.",
+            "or natural language equivalents (e.g., the share of renewable PPAs, the average balancing price in USD). If a suitable label is not found, infer a clear and human-readable name based on context before generating the answer.",
+
+            
             "For balancing price behavior (summer vs winter, correlation with generation mix), use price_with_usd and trade_derived_entities.",
             "For demand or sectoral structure, reference energy_balance_long_mv.",
             "For import dependence or renewable share dynamics, use trade_derived_entities, focusing on share_import, share_deregulated_hydro, and share_renewable_ppa.",
