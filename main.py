@@ -526,20 +526,21 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
             df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
             df['__year'] = df[time_col].dt.year
 
-            # --- Detect and exclude incomplete final year ---
-            # If multiple months per year exist, ensure only full years are used for trend comparisons
-            try:
-                df['_year_month'] = df[time_col].dt.to_period('M')
-                year_month_counts = df['_year_month'].dt.year.value_counts().sort_index()
-                # Determine average number of months per year (approx full coverage baseline)
-                avg_months = year_month_counts.mean()
-                # Mark as incomplete if less than 10 months (i.e. not a full year of data)
-                incomplete_years = year_month_counts[year_month_counts < 10].index.tolist()
-                if incomplete_years:
-                    log.info(f"🧩 Excluding incomplete years from trend calculation: {incomplete_years}")
-                    df = df[~df['__year'].isin(incomplete_years)]
-            except Exception as e:
-                log.warning(f"⚠️ Failed to filter incomplete years: {e}")
+        # --- Detect and exclude incomplete final year ---
+        # Applies to all time columns, even if already datetime
+        try:
+            df['_year_month'] = df[time_col].dt.to_period('M')
+            year_month_counts = df['_year_month'].dt.year.value_counts().sort_index()
+            # Determine average number of months per year (approx full coverage baseline)
+            avg_months = year_month_counts.mean()
+            # Mark as incomplete if less than 10 months (not a full year of data)
+            incomplete_years = year_month_counts[year_month_counts < 10].index.tolist()
+            if incomplete_years:
+                log.info(f"🧩 Excluding incomplete years from trend calculation: {incomplete_years}")
+                df = df[~df['__year'].isin(incomplete_years)]
+        except Exception as e:
+            log.warning(f"⚠️ Failed to filter incomplete years: {e}")
+
 
 
         
