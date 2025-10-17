@@ -173,6 +173,72 @@ DOMAIN_KNOWLEDGE = {
         ]
     },
 
+
+    "TransmissionNetworkDevelopment": {
+        "description": "Long-term transmission system priorities and constraints identified in the 2024–2034 Ten-Year Network Development Plan (TYNDP) prepared by Georgian State Electrosystem (GSE). All data, capacity values, and investment figures used by the model must explicitly refer to this document as the source: 'GSE Ten-Year Network Development Plan 2024–2034 (TYNDP)'.",
+        "main_objectives": [
+            "Ensure security of supply and system reliability through meeting N-1, G-1, and N-G-1 criteria.",
+            "Address west–east transmission imbalance caused by concentration of hydro generation in western Georgia and main consumption in the east (Tbilisi–Rustavi).",
+            "Eliminate critical bottlenecks along the Enguri–Zestaponi–Imereti 500/220 kV corridor and strengthen internal transfer capacity.",
+            "Modernize substations and increase transformer capacities to maintain reliability under growing urban demand (especially Tbilisi and Batumi)."
+        ],
+        "renewable_integration": [
+            "Up to 750 MW of new wind and 500 MW of new solar capacity can be integrated by 2028 under existing balancing and regulating resources.",
+            "Integration of renewables is contingent on new flexible capacity (CCGT) and reservoir HPPs to provide balancing and system inertia.",
+            "The west–east imbalance intensifies during high-hydro summer periods, reinforcing the need for transmission upgrades and storage solutions."
+        ],
+        "investment_program": [
+            "16 priority projects were identified, totaling approximately 1,400 km of new or rehabilitated lines and 5,000 MVA of transformer capacity.",
+            "68% of these projects are expected to be commissioned during 2024–2026, 17% in 2027–2028, and the remainder by 2034.",
+            "Total expected investment is around 1 billion EUR, primarily aimed at improving reliability, enabling integration of 3.5–4 GW of new hydro capacity, and expanding cross-border transit potential."
+        ],
+        "cross_border_projects": [
+            "Georgia–Romania Black Sea Submarine Cable (HVDC) — will connect Georgia to the Continental European grid via Romania, enabling direct electricity trade with EU markets.",
+            "Georgia–Russia–Azerbaijan Power System Connection — aims to enable synchronous or coordinated operation and controlled power flows within the regional IPS/UPS network.",
+            "Additional interconnections with Turkey and Armenia are planned to strengthen regional exchange and improve system flexibility."
+        ],
+        "digital_and_control_infrastructure": [
+            "Development of SCADA, WAMS, and ACS systems integrated with IT and cybersecurity frameworks is part of the ten-year plan to enhance real-time system observability and control.",
+            "Advanced automation and information platforms are required to manage a more decentralized, variable, and renewable-heavy power system."
+        ],
+        "analytical_notes": [
+            "The leitmotif of Georgian transmission development over 2024–2034 is 'security of supply' — maintaining system stability amid rapid generation diversification and demand growth.",
+            "Transmission bottlenecks directly affect the marginal cost of balancing electricity; congestion between western hydro generation and eastern demand zones can elevate balancing prices even in high-hydro months.",
+            "EnerBot should treat the transmission plan as a structural constraint in price and dispatch analysis: west–east congestion and delayed network reinforcements can explain short-term price spreads or curtailment patterns despite sufficient installed capacity.",
+            "Whenever EnerBot references line capacities, regional transfer limits, or project commissioning dates, it must cite: 'Source: GSE Ten-Year Network Development Plan 2024–2034 (TYNDP)'."
+        ]
+    },
+
+    "GenerationAdequacyAndForecast": {
+        "description": "Long-term forecast of generation capacity, demand, and adequacy from the Georgian TSO’s 2024–2034 Ten-Year Network Development Plan (TYNDP). All quantitative figures (installed capacities, demand forecasts, or adequacy margins) must be attributed to this document as the official source.",
+        "current_state": [
+            "As of 2023, total installed capacity in Georgia was about 4,621 MW, of which 73% was hydropower (51% regulating, 22% seasonal), 23% thermal, and 0.5% wind.",
+            "The generation–demand pattern is highly seasonal: in summer, hydro generation exceeds demand allowing exports; in winter, hydro output declines and thermal generation covers up to 28% of total supply."
+        ],
+        "forecast_to_2034": [
+            "Total installed capacity is expected to reach around 10,336 MW by 2034, more than doubling the current level.",
+            "Of this, 4,314 MW will be regulating HPPs, 2,908 MW seasonal HPPs, 1,291 MW wind, 232 MW solar, 110 MW gas turbines, and 1,480 MW combined-cycle and existing Gardabani TPP units.",
+            "Hydropower will remain dominant, with about 70% of total capacity, while wind and solar will together provide roughly 15%.",
+            "This capacity mix aims to reduce import dependence in winter and fossil-fuel exposure, but will increase seasonal and spatial variability of generation."
+        ],
+        "demand_and_balance_scenarios": [
+            "Three demand growth scenarios are modeled — L1 (1% annual), L2 (3% base case), and L3 (5%) — paired with generation build-out cases G1, G2, and G3 representing different commissioning delays.",
+            "Base-case assumption (L2G3) foresees 3% annual consumption growth and on-time integration of all planned generation projects.",
+            "The plan anticipates that under all scenarios, Georgia will maintain energy adequacy through 2034, but seasonal surpluses in summer and shortages in winter will persist."
+        ],
+        "generation_adequacy_analysis": [
+            "Adequacy simulations using the PLEXOS model confirm sufficient capacity under all scenarios, but highlight the importance of adding regulating HPPs and CCGTs for flexibility.",
+            "Wind and solar additions contribute to overall adequacy, yet their variability requires reserve margins and flexible hydropower for balancing.",
+            "Scenario G2 (with reservoir hydro development) provides higher flexibility and resilience compared to G1 (mostly run-of-river renewables)."
+        ],
+        "analytical_notes": [
+            "EnerBot should interpret forecasts and adequacy results as system-level constraints influencing price and balancing behavior.",
+            "Summer export surpluses will continue to dominate the balance, potentially lowering domestic balancing prices during high-hydro years, while winter scarcity will sustain higher balancing and import prices.",
+            "When explaining trends, EnerBot must explicitly state that figures and forecasts originate from the GSE TYNDP 2024–2034, and link seasonal price patterns to the projected evolution of regulating versus seasonal hydro and the limited contribution of solar and wind during winter peaks."
+        ]
+    },
+
+
     "SeasonalityPatterns": {
         "SummerMonths": [4, 5, 6, 7],
         "WinterMonths": [1, 2, 3, 8, 9, 10, 11, 12],
