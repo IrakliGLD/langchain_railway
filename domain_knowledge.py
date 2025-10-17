@@ -105,24 +105,55 @@ DOMAIN_KNOWLEDGE = {
             "Georgia conducted several capacity auctions to support development of new hydro, solar, and wind power plants.",
             "All winning projects are renewable (hydro, solar, or wind), forming the first batch of CfD-based investments in the country.",
             "Under transitional market provisions, CfD projects are not allowed to sell electricity on the competitive exchange; instead, they are centrally dispatched by the system operator (GSE).",
-            "Payments are structured as a Contract for Difference (CfD): the generator receives or pays the difference between the 'reference market price' and the agreed 'strike (CfD) price', applied to the actual generated quantity.",
-            "This structure ensures partial price certainty for investors, while maintaining market-based balancing signals."
+            "The CfD ensures a fixed payment for generated electricity based on the agreed 'strike price' multiplied by the actual generated and accepted energy.",
+            "The 'reference market price' is used only for accounting and settlement between the offtaker and the market operator — it does not affect the generator’s final income.",
+            "As a result, CfD owners are fully insulated from market price risk: they always receive the contracted CfD (strike) price for their accepted generation, regardless of the contemporaneous market price level."
         ],
         "market_implications": [
-            "CfD plants face **quantity risk** because their remuneration depends on actual dispatched energy — if the system operator curtails their generation for system stability, the lost production is not compensated.",
-            "Under a self-dispatch or exchange-participation model, these producers could optimize generation and minimize curtailment, but the CfD design transfers that flexibility to the central dispatcher.",
-            "As more CfD plants enter operation, the central dispatch role of GSE will become more complex, and overall balancing costs could change depending on the variability of CfD plants' output.",
-            "Because CfD plants are centrally dispatched, their energy volumes bypass the exchange, which may reduce short-term market liquidity and price discovery.",
-            "The effect of CfD generation on the **market price level** is uncertain: while additional renewable capacity increases total supply, most CfD projects are hydro and solar producing mainly in summer months. If the contracted CfD price is higher than the contemporaneous market reference price, CfD injections may effectively raise the summer price signal rather than reduce it."
+            "CfD plants face **quantity risk**, not price risk, because their remuneration depends solely on the amount of energy actually dispatched. If the system operator curtails their generation for system stability, the lost production is not compensated.",
+            "Under a self-dispatch or exchange-participation model, producers could optimize generation to maximize revenue, but the CfD design transfers operational control to the central dispatcher.",
+            "As more CfD plants enter operation, the central dispatch role of GSE becomes more complex, and overall balancing or curtailment volumes could increase depending on the variability of CfD output.",
+            "Because CfD plants are centrally dispatched and remunerated outside the exchange, their energy bypasses market trading, which can reduce liquidity and price formation transparency.",
+            "The effect of CfD generation on the **market price level** is uncertain: while additional renewable capacity increases total supply, most CfD projects are hydro and solar producing mainly in summer months. When the contracted CfD price is higher than contemporaneous market prices, their inclusion in system dispatch may indirectly raise the seasonal average price signal even though the generator itself remains price-neutral."
         ],
         "analytical_notes": [
-            "CfD capacity additions will significantly expand Georgia’s renewable base over the next few years, but their influence on market prices depends on seasonal patterns and the relative level of CfD strike prices.",
-            "When analyzing average or balancing prices, note that CfD generation volumes are excluded from exchange transactions and remunerated separately, which can distort apparent price and volume correlations.",
-            "EnerBot should treat CfD projects as a distinct category within generation — centrally dispatched, renewable, and subject to curtailment risk — with an indirect but material influence on the system’s supply-demand balance and market price formation, particularly during summer."
+            "EnerBot must treat CfD generators as **price-neutral** participants: their revenues are fixed at the strike price and are not influenced by short-term market price changes.",
+            "Their main exposure is **quantity risk** — if GSE curtails output for system reasons, their remuneration falls proportionally.",
+            "When analyzing average or balancing prices, EnerBot should note that CfD generation volumes are excluded from exchange transactions and remunerated separately, which can distort apparent price–volume relationships.",
+            "EnerBot should describe CfD projects as a distinct category within generation — centrally dispatched, renewable, fully price-insulated, and subject to curtailment risk — with indirect but material influence on system balance and market price formation.",
+            "All CfD-related quantities, price levels, and contract assumptions originate from the official GSE auction documentation and the Georgian electricity market transitional rules."
         ]
     },
 
-    
+
+    "BalancingMarketStructure": {
+        "description": "Explanation of the current Georgian balancing mechanism and how it differs from the European-style balancing market design. This context is essential for EnerBot when interpreting balancing electricity prices or queries mentioning 'balancing market' or 'imbalance settlement'.",
+        "current_design": [
+            "Despite being formally called a 'balancing market', Georgia’s current system functions as an imbalance settlement mechanism rather than a real-time balancing market in the European sense.",
+            "Balancing responsibility is not defined on an hourly basis — there is no concept of Balance Responsible Parties (BRPs) with continuous imbalance settlement.",
+            "The current balancing period is one month, and the imbalance is calculated as the difference between the total electricity consumed or generated and the electricity sold or purchased during that same month."
+        ],
+        "price_determination": [
+            "The balancing electricity price is calculated as a weighted average price of electricity sold as balancing energy during the month.",
+            "This price formation principle is described in the 'price_with_usd' domain: it aggregates transactions across generation entities based on their quantities and individual tariffs or market values.",
+            "Therefore, the current 'balancing price' represents a settlement value for deviations over a month, not an hourly marginal price determined by balancing actions or frequency restoration products."
+        ],
+        "comparison_with_eu_practice": [
+            "In the European electricity market model, the balancing market includes trading of balancing products such as FCR (Frequency Containment Reserve), aFRR (Automatic Frequency Restoration Reserve), and mFRR (Manual Frequency Restoration Reserve).",
+            "Those products are activated on a sub-hourly basis to maintain system frequency and resolve imbalances in real time, with separate procurement and activation prices.",
+            "Georgia’s system does not yet have such hourly or product-based balancing. Instead, it performs monthly imbalance settlement after-the-fact, without separate reserve products or imbalance responsibility allocation."
+        ],
+        "future_direction": [
+            "Full transition toward an EU-style balancing market is expected in future market reforms, with the introduction of BRPs, hourly metering, and separate balancing product procurement.",
+            "Until that transition, EnerBot must interpret any reference to the 'balancing market' as meaning 'monthly imbalance settlement' rather than a real-time balancing product market."
+        ],
+        "analytical_notes": [
+            "When EnerBot analyzes 'balancing price' trends, it must not treat them as real-time marginal prices — instead, they represent average monthly imbalance settlement values.",
+            "Statements about balancing volumes or revenues refer to quantities of electricity settled as imbalances, not energy traded in real-time balancing product markets.",
+            "In this context, EnerBot should link balancing price variations mainly to factors such as exchange rate movements, hydro/thermal generation composition, and tariff structures, as defined in the 'PriceDrivers' and 'CurrencyInfluence' domains."
+        ]
+    },
+
 
     "BalancingPriceFormation": {
         "Definition": "The balancing price is the weighted-average price of electricity sold on the balancing market.",
