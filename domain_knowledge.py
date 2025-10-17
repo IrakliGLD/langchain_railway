@@ -71,7 +71,7 @@ DOMAIN_KNOWLEDGE = {
     "trade": {
         "description": "Monthly trading data from market participants.",
         "dependencies": [
-            "Includes transactions across exchange and balancing segments.",
+            "Includes transactions across exchange and balancing segments. the Exchange was introduce in July 2024.",
             "Trade volumes determine the weights used in calculating the balancing electricity price."
         ]
     },
@@ -123,25 +123,19 @@ DOMAIN_KNOWLEDGE = {
                 "FXExposure": "Gas price in USD → tariff_gel correlates with xrate."
             }
         },
-
         "TariffContext": {
             "Definition": "Contextual regulatory and market factors explaining changes in electricity tariffs and their relationship to balancing prices.",
             "Rules": [
-                "From May 2025, tariffs for Enguri HPP and Vardnili HPP Cascade increased due to a legislative amendment requiring these plants to cover the cost of electricity supplied to the occupied territory of Abkhazia by selling electricity to the rest of Georgia. Their tariff rose because they must recover total generation costs while being paid only for part of the produced electricity.",
+                "From May 2025, tariffs for Enguri HPP and Vardnili HPP Cascade increased due to a legislative amendment requiring these plants to cover the cost of electricity supplied to the occupied territory of Abkhazia by selling electricity to the rest of Georgia.",
                 "From January 2024, regulated tariffs for all thermal power plants increased substantially because the procurement price of natural gas rose sharply after being fixed at a low level for several years.",
-                "The average price of renewable PPAs is typically higher than the summer balancing market price. Balancing electricity—being the residual after bilateral or exchange trades—is often cheaper during summer due to a higher share of deregulated or regulated hydro generation.",
-                "When the share of renewable PPA electricity increases and the shares of deregulated or regulated hydro decrease, the summer balancing price tends to converge toward the average PPA price.",
-                "Balancing electricity represents the residual volume between total generation and electricity already sold under bilateral contracts or on exchanges."
+                "Renewable PPAs generally have higher fixed tariffs than average summer balancing prices; as renewable share grows and cheap hydro share declines, summer balancing prices converge toward average PPA prices.",
+                "Balancing electricity is the residual of total generation minus volumes sold under bilateral contracts or on exchanges."
             ],
             "Interpretation": [
-                "Tariff increases in 2024–2025 are largely cost-driven, tied to gas import prices, legislative changes, and compensation for unreimbursed generation.",
-                "Seasonal and structural price differences should be interpreted through these regulatory cost adjustments and generation-mix dynamics."
+                "Tariff increases in 2024–2025 are primarily cost-driven, reflecting gas price rises, currency depreciation, and compensation mechanisms for unreimbursed energy.",
+                "Seasonal price differences must be read in context of regulatory cost adjustments and evolving generation mix."
             ]
         },
-
-
-
-        
         "AnalyticalImplications": [
             "Thermal tariffs rise with GEL depreciation and gas price increases.",
             "Hydro tariffs are stable across seasons.",
@@ -170,26 +164,23 @@ DOMAIN_KNOWLEDGE = {
         "UsageHint": "Compare tariff_gel with p_bal_gel to assess regulatory lag."
     },
 
-
     "SeasonalTrends": {
         "Definition": "Balancing electricity prices, generation, and demand exhibit structurally different behaviors across seasons due to shifts in supply composition and consumption patterns.",
         "Rule": "Always compute and compare seasonal averages and CAGRs for April–July (Summer) and August–March (Winter) periods. These comparisons must always accompany the total yearly trend for balancing prices, generation, and demand. Seasonal analysis is not required for tariffs.",
-        "DataBasis": "Seasonal composition and its evolution can be directly observed from the trade_derived_entities view, where the shares of deregulated_hydro and regulated_hpp reflect the availability of low-cost hydro generation in the balancing market, while import and thermal categories represent higher-cost sources.",
+        "DataBasis": "Seasonal composition can be directly observed from the trade_derived_entities view, where deregulated_hydro and regulated_hpp shares indicate hydro availability while imports and thermal plants represent higher-cost sources.",
         "Interpretation": [
-            "Summer prices tend to rise faster in recent years because the shares of cheap hydro sources (deregulated_hydro and regulated_hpp) in balancing electricity have declined. An increasing portion of hydro generation is sold through bilateral contracts instead of the balancing market.",
-            "Winter prices also show an upward trend, though typically smaller, driven by higher gas costs for thermal generation and greater reliance on imports during low-hydro periods.",
-            "Seasonal demand patterns amplify these effects: electricity consumption peaks in winter due to heating and again in summer due to cooling, affecting balancing volumes and price volatility."
+            "Summer prices rise faster in recent years because cheap hydro shares have declined — more hydro output is sold under bilateral contracts instead of the balancing market.",
+            "Winter prices increase more moderately, driven by higher gas costs and import reliance.",
+            "Demand peaks in winter (heating) and summer (cooling), amplifying seasonal volatility."
         ],
         "AnalyticalUse": [
             "Combine seasonal trend analysis with hydro, thermal, and import share data from trade_derived_entities to explain structural shifts.",
-            "When comparing Summer and Winter trends, always reference deregulated_hydro and regulated_hpp shares as key indicators of cheap hydro availability.",
-            "When analyzing demand or generation, compare total quantities (SUM) by season, while for prices use averages (AVG)."
+            "Reference deregulated_hydro and regulated_hpp shares as indicators of cheap hydro availability.",
+            "Use SUM for quantities and AVG for prices when comparing seasons."
         ],
-        "Insight": "Include both total yearly and separate seasonal trends (Summer vs Winter) in every balancing price, generation, or demand trend analysis, interpreting results through the evolution of hydro, thermal, and import shares and corresponding seasonal demand differences."
+        "Insight": "Include both yearly and seasonal (Summer vs Winter) trends in balancing price, generation, or demand analyses."
     },
 
-
-    
     "InflationLinks": {
         "Relation": "Electricity tariffs partially track CPI for 'electricity, gas and other fuels'.",
         "UseCase": "Compare CPI vs tariff_gel or p_bal_gel.",
@@ -217,29 +208,90 @@ DOMAIN_KNOWLEDGE = {
     "TradeSegments": {
         "SegmentTypes": ["balancing", "exchange", "bilateral"],
         "DerivedShares": "Compute shares per segment and entity using quantity / SUM(quantity) by date.",
-        "AnalyticalUse": "Identify whether balancing segment grows during low hydro periods."
+        "AnalyticalUse": "Identify whether balancing segment grows during low-hydro periods."
     },
 
     "DerivedDimensions": {
         "season": {
             "definition": "A derived analytical grouping dividing the year into two structural periods.",
-            "rules": {
-                "Summer": [4,5,6,7],
-                "Winter": [1,2,3,8,9,10,11,12]
-            },
+            "rules": {"Summer": [4,5,6,7], "Winter": [1,2,3,8,9,10,11,12]},
             "use_cases": [
                 "When analyzing prices, tariffs, or generation volumes, compute seasonal averages or totals.",
                 "For prices: take AVG() by season to compare hydro vs thermal.",
                 "For quantities: take SUM() by season to measure total energy generated or consumed."
-            ],
-            "sql_hint": """
-            SELECT
-              CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'Summer' ELSE 'Winter' END AS season,
-              AVG(p_bal_gel) AS avg_balancing_price_gel
-            FROM price_with_usd
-            GROUP BY season;
-            """,
-            "comment": "Season is not a database column but a derived field computed from EXTRACT(MONTH FROM date)."
+            ]
         }
+    },
+
+    # === NEW EXPERT DOMAINS (from GNERC 2024 reports) ===
+
+    "BalancingMarketLogic": {
+        "Definition": "The balancing market reflects short-term deviations between forecasted and actual generation or consumption.",
+        "Rules": [
+            "When hydro inflows are strong, surplus deregulated HPP output reduces balancing price and volume.",
+            "Low-hydro months push balancing to thermal and imports, raising volatility and cost.",
+            "Balancing prices reflect the residual mix, not just cost; cheap hydro depresses prices, gas/import raise them.",
+            "Rising renewable PPA share lifts summer prices as it displaces cheap hydro from balancing volumes."
+        ],
+        "AnalyticalUse": [
+            "Relate price volatility to hydrological cycles and hydro vs renewable composition.",
+            "Balancing acts as residual market: low contract coverage → higher balancing exposure."
+        ]
+    },
+
+    "TariffTransmissionMechanism": {
+        "Definition": "Describes how regulatory tariff changes propagate through generation costs and market prices.",
+        "KeyMechanisms": [
+            "Thermal plant tariffs include fixed (capacity) and variable (gas-linked) components — gas price hikes pass through immediately.",
+            "Enguri and Vardnili now recover full cost via higher tariff per sold MWh due to Abkhazia supply adjustment (2025).",
+            "Renewable PPAs are USD-indexed and form a price floor for summer market prices.",
+            "Thermal tariff increases (Mtkvari, Tbilisi, G-Power) transmit almost directly to winter balancing prices."
+        ],
+        "AnalyticalUse": [
+            "Separate input-cost (gas/xrate) effects from structural tariff reforms.",
+            "Note compounded impact when multiple tariff changes occur together."
+        ]
+    },
+
+    "ImportDependence": {
+        "Definition": "Explains the strategic role of imports in price formation and adequacy.",
+        "Rules": [
+            "Georgia imports in winter, exports in summer; import exposure sets upper bound on domestic prices.",
+            "Imports are USD-denominated and follow Turkish/Azeri prices, transmitting regional volatility.",
+            "Higher import share + weaker GEL → higher balancing prices.",
+            "Hydro shortfall or Enguri/Vardnili outages trigger import reliance and winter spikes."
+        ],
+        "AnalyticalUse": [
+            "When correlating, use share_import × xrate to capture import-cost pass-through.",
+            "Highlight that import sensitivity rises when hydro share <60%."
+        ]
+    },
+
+    "RenewableIntegration": {
+        "Definition": "Captures how renewable PPAs affect market structure and balancing behavior.",
+        "Rules": [
+            "Renewable PPAs are fixed-price, USD-indexed, reducing residual balancing liquidity.",
+            "Rising renewable share reduces hydro flexibility and increases balancing volatility.",
+            "In summer, renewable PPAs can lift balancing price toward their own tariff level.",
+            "In winter, thermal dominance limits renewable impact."
+        ],
+        "AnalyticalUse": [
+            "Track convergence between summer balancing and average PPA price.",
+            "Treat renewable share growth as structural, not seasonal, driver."
+        ]
     }
+},
+
+"DataEvidenceIntegration": {
+    "Purpose": "Links conceptual rules in domain_knowledge with quantifiable evidence stored in Supabase materialized views.",
+    "Guidance": [
+        "Every analytical or causal statement should, when possible, be justified by trends or values from the corresponding views.",
+        "For tariff-related insights (e.g., Enguri/Vardnili increases, gas-cost effects), verify and illustrate with data from tariff_with_usd.",
+        "For balancing price behavior (summer vs winter, correlation with generation mix), use price_with_usd and trade_derived_entities.",
+        "For demand or sectoral structure, reference energy_balance_long_mv.",
+        "For import dependence or renewable share dynamics, use trade_derived_entities, focusing on share_import, share_deregulated_hydro, and share_renewable_ppa.",
+        "If the user asks for an interpretation (not a raw figure), combine quantitative evidence (e.g., average, CAGR, percentage change) with the relevant explanatory rule from domain_knowledge.",
+        "If the user explicitly asks only for a numeric answer, provide the number directly without narrative justification."
+    ],
+    "LLMHint": "When generating an answer, use domain_knowledge for reasoning but cite patterns or magnitudes using the actual computed results from the database views. Prioritize causal storytelling supported by numeric evidence rather than listing values."
 }
