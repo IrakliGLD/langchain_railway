@@ -3,48 +3,48 @@ DOMAIN_KNOWLEDGE = {
         "description": "Specific generator entities present in the tariff_with_usd view, used for tariff-based correlation and chart labeling.",
         "hydro": {
             "engurhesi": {
-                "entities": ['ltd "engurhesi"1'],
+                "entities": ['ltd \"engurhesi\"1'],
                 "labels": {"ltd \"engurhesi\"1": "Enguri HPP"}
             },
             "other_hydro": {
                 "entities": [
-                    'jsc "energo-pro georgia genration" (dzevrulhesi)',
-                    'jsc "energo-pro georgia genration" (gumathesi)',
-                    'jsc "energo-pro georgia genration" (shaorhesi)',
-                    'jsc "energo-pro georgia genration" (rionhesi)',
-                    'jsc "energo-pro georgia genration" (lajanurhesi)',
-                    'jsc "georgian water & power" (zhinvalhesi)',
-                    'ltd "vardnili hpp cascade"',
-                    'ltd "vartsikhe-2005"',
-                    'ltd "khrami_1"',
-                    'ltd "khrami_2"'
+                    'jsc \"energo-pro georgia genration\" (dzevrulhesi)',
+                    'jsc \"energo-pro georgia genration\" (gumathesi)',
+                    'jsc \"energo-pro georgia genration\" (shaorhesi)',
+                    'jsc \"energo-pro georgia genration\" (rionhesi)',
+                    'jsc \"energo-pro georgia genration\" (lajanurhesi)',
+                    'jsc \"georgian water & power\" (zhinvalhesi)',
+                    'ltd \"vardnili hpp cascade\"',
+                    'ltd \"vartsikhe-2005\"',
+                    'ltd \"khrami_1\"',
+                    'ltd \"khrami_2\"'
                 ],
                 "labels": {
-                    'jsc "energo-pro georgia genration" (dzevrulhesi)': "Dzevruli HPP",
-                    'jsc "energo-pro georgia genration" (gumathesi)': "Gumati HPP",
-                    'jsc "energo-pro georgia genration" (shaorhesi)': "Shaori HPP",
-                    'jsc "energo-pro georgia genration" (rionhesi)': "Rioni HPP",
-                    'jsc "energo-pro georgia genration" (lajanurhesi)': "Lajanuri HPP",
-                    'jsc "georgian water & power" (zhinvalhesi)': "Zhinvali HPP",
-                    'ltd "vardnili hpp cascade"': "Vardnili HPP Cascade",
-                    'ltd "vartsikhe-2005"': "Vartsikhe HPP",
-                    'ltd "khrami_1"': "Khrami I HPP",
-                    'ltd "khrami_2"': "Khrami II HPP"
+                    'jsc \"energo-pro georgia genration\" (dzevrulhesi)': "Dzevruli HPP",
+                    'jsc \"energo-pro georgia genration\" (gumathesi)': "Gumati HPP",
+                    'jsc \"energo-pro georgia genration\" (shaorhesi)': "Shaori HPP",
+                    'jsc \"energo-pro georgia genration\" (rionhesi)': "Rioni HPP",
+                    'jsc \"energo-pro georgia genration\" (lajanurhesi)': "Lajanuri HPP",
+                    'jsc \"georgian water & power\" (zhinvalhesi)': "Zhinvali HPP",
+                    'ltd \"vardnili hpp cascade\"': "Vardnili HPP Cascade",
+                    'ltd \"vartsikhe-2005\"': "Vartsikhe HPP",
+                    'ltd \"khrami_1\"': "Khrami I HPP",
+                    'ltd \"khrami_2\"': "Khrami II HPP"
                 }
             }
         },
         "thermal": {
             "entities": [
-                'ltd "gardabni thermal power plant"',
-                'ltd "mtkvari energy"',
-                'ltd "iec" (tbilresi)',
-                'ltd "g power" (capital turbines)',
+                'ltd \"gardabni thermal power plant\"',
+                'ltd \"mtkvari energy\"',
+                'ltd \"iec\" (tbilresi)',
+                'ltd \"g power\" (capital turbines)'
             ],
             "labels": {
-                'ltd "gardabni thermal power plant"': "Gardabani TPP",
-                'ltd "mtkvari energy"': "Mtkvari Energy",
-                'ltd "iec" (tbilresi)': "Tbilisi TPP",
-                'ltd "g power" (capital turbines)': "G-POWER"
+                'ltd \"gardabni thermal power plant\"': "Gardabani TPP",
+                'ltd \"mtkvari energy\"': "Mtkvari Energy",
+                'ltd \"iec\" (tbilresi)': "Tbilisi TPP",
+                'ltd \"g power\" (capital turbines)': "G-POWER"
             }
         },
         "notes": [
@@ -71,7 +71,7 @@ DOMAIN_KNOWLEDGE = {
     "trade": {
         "description": "Monthly trading data from market participants.",
         "dependencies": [
-            "Includes transactions across exchange and balancing segments. the Exchange was introduce in July 2024.",
+            "Includes transactions across exchange and balancing segments. The Exchange was introduced in July 2024.",
             "Trade volumes determine the weights used in calculating the balancing electricity price."
         ]
     },
@@ -148,8 +148,8 @@ DOMAIN_KNOWLEDGE = {
     },
 
     "SeasonalityPatterns": {
-        "SummerMonths": [4,5,6,7],
-        "WinterMonths": [1,2,3,8,9,10,11,12],
+        "SummerMonths": [4, 5, 6, 7],
+        "WinterMonths": [1, 2, 3, 8, 9, 10, 11, 12],
         "Description": "Summer: hydro-dominant, low prices. Winter: thermal/import-dominant, high prices.",
         "AnalyticalUse": [
             "Compare prices and generation composition between seasons.",
@@ -166,64 +166,16 @@ DOMAIN_KNOWLEDGE = {
 
     "SeasonalTrends": {
         "Definition": "Balancing electricity prices, generation, and demand exhibit structurally different behaviors across seasons due to shifts in supply composition and consumption patterns.",
-        "Rule": "Always compute and compare seasonal averages and CAGRs for April–July (Summer) and August–March (Winter) periods. These comparisons must always accompany the total yearly trend for balancing prices, generation, and demand. Seasonal analysis is not required for tariffs.",
-        "DataBasis": "Seasonal composition can be directly observed from the trade_derived_entities view, where deregulated_hydro and regulated_hpp shares indicate hydro availability while imports and thermal plants represent higher-cost sources.",
+        "Rule": "Always compute and compare seasonal averages and CAGRs for April–July (Summer) and August–March (Winter).",
         "Interpretation": [
-            "Summer prices rise faster in recent years because cheap hydro shares have declined — more hydro output is sold under bilateral contracts instead of the balancing market.",
-            "Winter prices increase more moderately, driven by higher gas costs and import reliance.",
-            "Demand peaks in winter (heating) and summer (cooling), amplifying seasonal volatility."
+            "Summer prices rise faster as cheap hydro shares decline and more output moves to contracts.",
+            "Winter prices increase moderately due to higher gas costs and import reliance."
         ],
         "AnalyticalUse": [
-            "Combine seasonal trend analysis with hydro, thermal, and import share data from trade_derived_entities to explain structural shifts.",
-            "Reference deregulated_hydro and regulated_hpp shares as indicators of cheap hydro availability.",
-            "Use SUM for quantities and AVG for prices when comparing seasons."
-        ],
-        "Insight": "Include both yearly and seasonal (Summer vs Winter) trends in balancing price, generation, or demand analyses."
+            "Combine seasonal trend analysis with hydro, thermal, and import shares.",
+            "Use SUM for quantities, AVG for prices when comparing seasons."
+        ]
     },
-
-    "InflationLinks": {
-        "Relation": "Electricity tariffs partially track CPI for 'electricity, gas and other fuels'.",
-        "UseCase": "Compare CPI vs tariff_gel or p_bal_gel.",
-        "Insight": "Divergence indicates lagged cost pass-through."
-    },
-
-    "EnergySectorTrends": {
-        "Variables": ["sector", "energy_source", "volume_tj"],
-        "Questions": [
-            "Which sector’s energy use grew fastest?",
-            "Did households or industry drive demand growth?"
-        ],
-        "Rules": "Use energy_balance_long_mv grouped by sector and energy_source; compute shares."
-    },
-
-    "OwnershipPatterns": {
-        "OwnershipTypes": ["State", "Private", "Mixed"],
-        "EntityExamples": {
-            "State": ["Engurhesi", "GSE", "GWP"],
-            "Private": ["Energo-Pro Georgia Generation", "Gardabani TPP"]
-        },
-        "AnalyticalUse": "Group tariffs or generation by ownership type to assess performance."
-    },
-
-    "TradeSegments": {
-        "SegmentTypes": ["balancing", "exchange", "bilateral"],
-        "DerivedShares": "Compute shares per segment and entity using quantity / SUM(quantity) by date.",
-        "AnalyticalUse": "Identify whether balancing segment grows during low-hydro periods."
-    },
-
-    "DerivedDimensions": {
-        "season": {
-            "definition": "A derived analytical grouping dividing the year into two structural periods.",
-            "rules": {"Summer": [4,5,6,7], "Winter": [1,2,3,8,9,10,11,12]},
-            "use_cases": [
-                "When analyzing prices, tariffs, or generation volumes, compute seasonal averages or totals.",
-                "For prices: take AVG() by season to compare hydro vs thermal.",
-                "For quantities: take SUM() by season to measure total energy generated or consumed."
-            ]
-        }
-    },
-
-    # === NEW EXPERT DOMAINS (from GNERC 2024 reports) ===
 
     "BalancingMarketLogic": {
         "Definition": "The balancing market reflects short-term deviations between forecasted and actual generation or consumption.",
@@ -232,10 +184,6 @@ DOMAIN_KNOWLEDGE = {
             "Low-hydro months push balancing to thermal and imports, raising volatility and cost.",
             "Balancing prices reflect the residual mix, not just cost; cheap hydro depresses prices, gas/import raise them.",
             "Rising renewable PPA share lifts summer prices as it displaces cheap hydro from balancing volumes."
-        ],
-        "AnalyticalUse": [
-            "Relate price volatility to hydrological cycles and hydro vs renewable composition.",
-            "Balancing acts as residual market: low contract coverage → higher balancing exposure."
         ]
     },
 
@@ -246,10 +194,6 @@ DOMAIN_KNOWLEDGE = {
             "Enguri and Vardnili now recover full cost via higher tariff per sold MWh due to Abkhazia supply adjustment (2025).",
             "Renewable PPAs are USD-indexed and form a price floor for summer market prices.",
             "Thermal tariff increases (Mtkvari, Tbilisi, G-Power) transmit almost directly to winter balancing prices."
-        ],
-        "AnalyticalUse": [
-            "Separate input-cost (gas/xrate) effects from structural tariff reforms.",
-            "Note compounded impact when multiple tariff changes occur together."
         ]
     },
 
@@ -260,10 +204,6 @@ DOMAIN_KNOWLEDGE = {
             "Imports are USD-denominated and follow Turkish/Azeri prices, transmitting regional volatility.",
             "Higher import share + weaker GEL → higher balancing prices.",
             "Hydro shortfall or Enguri/Vardnili outages trigger import reliance and winter spikes."
-        ],
-        "AnalyticalUse": [
-            "When correlating, use share_import × xrate to capture import-cost pass-through.",
-            "Highlight that import sensitivity rises when hydro share <60%."
         ]
     },
 
@@ -274,24 +214,20 @@ DOMAIN_KNOWLEDGE = {
             "Rising renewable share reduces hydro flexibility and increases balancing volatility.",
             "In summer, renewable PPAs can lift balancing price toward their own tariff level.",
             "In winter, thermal dominance limits renewable impact."
-        ],
-        "AnalyticalUse": [
-            "Track convergence between summer balancing and average PPA price.",
-            "Treat renewable share growth as structural, not seasonal, driver."
         ]
-    }
-},
+    },
 
-"DataEvidenceIntegration": {
-    "Purpose": "Links conceptual rules in domain_knowledge with quantifiable evidence stored in Supabase materialized views.",
-    "Guidance": [
-        "Every analytical or causal statement should, when possible, be justified by trends or values from the corresponding views.",
-        "For tariff-related insights (e.g., Enguri/Vardnili increases, gas-cost effects), verify and illustrate with data from tariff_with_usd.",
-        "For balancing price behavior (summer vs winter, correlation with generation mix), use price_with_usd and trade_derived_entities.",
-        "For demand or sectoral structure, reference energy_balance_long_mv.",
-        "For import dependence or renewable share dynamics, use trade_derived_entities, focusing on share_import, share_deregulated_hydro, and share_renewable_ppa.",
-        "If the user asks for an interpretation (not a raw figure), combine quantitative evidence (e.g., average, CAGR, percentage change) with the relevant explanatory rule from domain_knowledge.",
-        "If the user explicitly asks only for a numeric answer, provide the number directly without narrative justification."
-    ],
-    "LLMHint": "When generating an answer, use domain_knowledge for reasoning but cite patterns or magnitudes using the actual computed results from the database views. Prioritize causal storytelling supported by numeric evidence rather than listing values."
+    "DataEvidenceIntegration": {
+        "Purpose": "Links conceptual rules in domain_knowledge with quantifiable evidence stored in Supabase materialized views.",
+        "Guidance": [
+            "Every analytical or causal statement should, when possible, be justified by trends or values from the corresponding views.",
+            "For tariff-related insights (e.g., Enguri/Vardnili increases, gas-cost effects), verify and illustrate with data from tariff_with_usd.",
+            "For balancing price behavior (summer vs winter, correlation with generation mix), use price_with_usd and trade_derived_entities.",
+            "For demand or sectoral structure, reference energy_balance_long_mv.",
+            "For import dependence or renewable share dynamics, use trade_derived_entities, focusing on share_import, share_deregulated_hydro, and share_renewable_ppa.",
+            "If the user asks for an interpretation (not a raw figure), combine quantitative evidence (e.g., average, CAGR, percentage change) with the relevant explanatory rule from domain_knowledge.",
+            "If the user explicitly asks only for a numeric answer, provide the number directly without narrative justification."
+        ],
+        "LLMHint": "When generating an answer, use domain_knowledge for reasoning but cite patterns or magnitudes using actual results from the database views. Prioritize causal storytelling supported by numeric evidence rather than listing values."
+    }
 }
