@@ -98,6 +98,32 @@ DOMAIN_KNOWLEDGE = {
         }
     },
 
+
+    "CfD_Contracts": {
+        "description": "Contracts for Difference (CfD) introduced for new renewable power plant projects developed under Georgia's capacity auction scheme.",
+        "key_facts": [
+            "Georgia conducted several capacity auctions to support development of new hydro, solar, and wind power plants.",
+            "All winning projects are renewable (hydro, solar, or wind), forming the first batch of CfD-based investments in the country.",
+            "Under transitional market provisions, CfD projects are not allowed to sell electricity on the competitive exchange; instead, they are centrally dispatched by the system operator (GSE).",
+            "Payments are structured as a Contract for Difference (CfD): the generator receives or pays the difference between the 'reference market price' and the agreed 'strike (CfD) price', applied to the actual generated quantity.",
+            "This structure ensures partial price certainty for investors, while maintaining market-based balancing signals."
+        ],
+        "market_implications": [
+            "CfD plants face **quantity risk** because their remuneration depends on actual dispatched energy — if the system operator curtails their generation for system stability, the lost production is not compensated.",
+            "Under a self-dispatch or exchange-participation model, these producers could optimize generation and minimize curtailment, but the CfD design transfers that flexibility to the central dispatcher.",
+            "As more CfD plants enter operation, the central dispatch role of GSE will become more complex, and overall balancing costs could change depending on the variability of CfD plants' output.",
+            "Because CfD plants are centrally dispatched, their energy volumes bypass the exchange, which may reduce short-term market liquidity and price discovery.",
+            "The effect of CfD generation on the **market price level** is uncertain: while additional renewable capacity increases total supply, most CfD projects are hydro and solar producing mainly in summer months. If the contracted CfD price is higher than the contemporaneous market reference price, CfD injections may effectively raise the summer price signal rather than reduce it."
+        ],
+        "analytical_notes": [
+            "CfD capacity additions will significantly expand Georgia’s renewable base over the next few years, but their influence on market prices depends on seasonal patterns and the relative level of CfD strike prices.",
+            "When analyzing average or balancing prices, note that CfD generation volumes are excluded from exchange transactions and remunerated separately, which can distort apparent price and volume correlations.",
+            "EnerBot should treat CfD projects as a distinct category within generation — centrally dispatched, renewable, and subject to curtailment risk — with an indirect but material influence on the system’s supply-demand balance and market price formation, particularly during summer."
+        ]
+    },
+
+    
+
     "BalancingPriceFormation": {
         "Definition": "The balancing price is the weighted-average price of electricity sold on the balancing market.",
         "WeightingEntities": [
