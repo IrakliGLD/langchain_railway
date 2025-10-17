@@ -1086,6 +1086,206 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     except Exception as e:
         log.warning(f"⚠️ Seasonal correlation failed: {e}")
 
+    # --- v18.8b: Forecasting (CAGR) + "Why?" reasoning (full combined block) ---
+
+    def _detect_forecast_mode(text: str) -> bool:
+        keys = ["forecast", "predict", "projection", "project", "future", "next year", "estimate", "estimation", "outlook"]
+        t = text.lower()
+        return any(k in t for k in keys)
+
+    def _detect_why_mode(text: str) -> bool:
+        keys = ["why", "reason", "cause", "factor", "explain", "due to", "behind", "what caused", "what influenced"]
+        t = text.lower()
+        return any(k in t for k in keys)
+
+    def _month_from_text(s: str) -> int | None:
+        months = {
+            "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+            "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12
+        }
+        for k,v in months.items():
+            if k in s:
+                return v
+        return None
+
+    def _choose_target_for_forecast(df_in: pd.DataFrame) -> tuple[str, str]:
+        """Return (time_col, value_col) for forecasting."""
+        cols = [c.lower() for c in df_in.columns]
+        time_candidates = [c for c in df_in.columns if any(k in c.lower() for k in ["date", "year", "month"])]
+        time_col = time_candidates[0] if time_candidates else None
+        for c in df_in.columns:
+            if c.lower() in ["p_bal_usd", "p_bal_gel"]:
+                return time_col, c
+        for c in df_in.columns:
+            if any(k in c.lower() for k in ["price", "tariff", "p_bal"]):
+                return time_col, c
+        for c in df_in.columns:
+            if any(k in c.lower() for k in ["quantity_tech", "quantity", "volume_tj", "generation", "demand"]):
+                return time_col, c
+        for c in df_in.columns:
+            if pd.api.types.is_numeric_dtype(df_in[c]):
+                return time_col, c
+        return time_col, None
+
+    def _detect_data_type(value_col: str) -> str:
+        """Classify column into 'price', 'quantity', or 'other'."""
+        c = value_col.lower()
+        if any(k in c for k in ["p_bal", "price", "tariff"]):
+            return "price"
+        if any(k in c for k in ["quantity", "volume_tj", "demand", "generation"]):
+            return "quantity"
+        return "other"
+
+    def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> tuple[pd.DataFrame, str]:
+        """
+        Generate forecast:
+        - For quantity/demand/generation: yearly totals → CAGR → extend years.
+        - For balancing electricity price: yearly + seasonal (summer/winter) forecasts.
+        """
+        df = df_in.copy()
+        time_col, value_col = _choose_target_for_forecast(df)
+        if not time_col or not value_col:
+            return df_in, "Forecast skipped: no clear time/value columns."
+
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        df = df.dropna(subset=[time_col, value_col])
+        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+        df = df.dropna(subset=[value_col])
+        if df.empty:
+            return df_in, "Forecast skipped: no numeric data."
+
+        data_type = _detect_data_type(value_col)
+        note_parts = []
+
+        if data_type == "quantity":
+            df["year"] = df[time_col].dt.year
+            df_y = df.groupby("year")[value_col].sum().reset_index()
+            if len(df_y) < 2:
+                return df_in, "Forecast skipped: insufficient yearly data."
+            first, last = df_y.iloc[0], df_y.iloc[-1]
+            span = last["year"] - first["year"]
+            if span <= 0 or first[value_col] <= 0:
+                return df_in, "Invalid data for CAGR."
+            cagr = (last[value_col] / first[value_col]) ** (1 / span) - 1
+            note_parts.append(f"Yearly CAGR={cagr*100:.2f}% ({int(first['year'])}→{int(last['year'])}).")
+            yrs_in_q = re.findall(r"(20\d{2})", user_query)
+            target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [last["year"] + i for i in range(1, 4)]
+            f_rows = []
+            for y in target_years:
+                val = last[value_col] * ((1 + cagr) ** (y - last["year"]))
+                f_rows.append({time_col: pd.to_datetime(f"{y}-01-01"), value_col: val, "is_forecast": True})
+            if "is_forecast" not in df.columns:
+                df["is_forecast"] = False
+            df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
+            note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
+            return df_f, " ".join(note_parts)
+
+        elif data_type == "price":
+            df["year"] = df[time_col].dt.year
+            df["month"] = df[time_col].dt.month
+            df["season"] = np.where(df["month"].isin([4,5,6,7]), "summer", "winter")
+
+            df_y = df.groupby("year")[value_col].mean().reset_index()
+            first, last = df_y.iloc[0], df_y.iloc[-1]
+            span = last["year"] - first["year"]
+            cagr_y = (last[value_col]/first[value_col])**(1/span)-1 if span>0 else 0
+
+            df_s = df.groupby(["year","season"])[value_col].mean().reset_index()
+            summer = df_s[df_s["season"]=="summer"]
+            winter = df_s[df_s["season"]=="winter"]
+            cagr_s = (summer[value_col].iloc[-1]/summer[value_col].iloc[0])**(1/(summer["year"].iloc[-1]-summer["year"].iloc[0]))-1 if len(summer)>=2 else np.nan
+            cagr_w = (winter[value_col].iloc[-1]/winter[value_col].iloc[0])**(1/(winter["year"].iloc[-1]-winter["year"].iloc[0]))-1 if len(winter)>=2 else np.nan
+
+            note_parts.append(f"Yearly CAGR={cagr_y*100:.2f}%, Summer={cagr_s*100 if not np.isnan(cagr_s) else 0:.2f}%, Winter={cagr_w*100 if not np.isnan(cagr_w) else 0:.2f}%.")
+
+            yrs_in_q = re.findall(r"(20\d{2})", user_query)
+            target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [last["year"] + i for i in range(1, 4)]
+
+            f_rows = []
+            for y in target_years:
+                val_y = last[value_col] * ((1 + cagr_y) ** (y - last["year"]))
+                val_s = last[value_col] * ((1 + cagr_s) ** (y - last["year"])) if not np.isnan(cagr_s) else val_y
+                val_w = last[value_col] * ((1 + cagr_w) ** (y - last["year"])) if not np.isnan(cagr_w) else val_y
+                f_rows.append({time_col: pd.to_datetime(f"{y}-04-01"), "season": "summer", value_col: val_s, "is_forecast": True})
+                f_rows.append({time_col: pd.to_datetime(f"{y}-12-01"), "season": "winter", value_col: val_w, "is_forecast": True})
+
+            if "is_forecast" not in df.columns:
+                df["is_forecast"] = False
+            df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
+            note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
+            return df_f, " ".join(note_parts)
+
+        else:
+            return df_in, "Forecast skipped: unrecognized data type."
+
+    # 1️⃣ FORECAST MODE -------------------------------------------------
+    if _detect_forecast_mode(q.query) and not df.empty:
+        try:
+            df, _forecast_note = _generate_cagr_forecast(df, q.query)
+            stats_hint += f"\n\n--- FORECAST NOTE ---\n{_forecast_note}"
+            log.info(_forecast_note)
+        except Exception as _e:
+            log.warning(f"Forecast generation failed: {_e}")
+
+    # 2️⃣ WHY MODE ------------------------------------------------------
+    if _detect_why_mode(q.query) and not df.empty:
+        try:
+            ctx = {"notes": [], "signals": {}}
+            t_series_col = next((c for c in df.columns if any(k in c.lower() for k in ["date","year","month"])), None)
+            if t_series_col:
+                df[t_series_col] = pd.to_datetime(df[t_series_col], errors="coerce")
+                df = df.dropna(subset=[t_series_col]).sort_values(t_series_col)
+
+                years = [int(y) for y in re.findall(r"(20\d{2})", q.query)]
+                mon = _month_from_text(q.query.lower())
+                target_period = pd.Timestamp(years[0], mon or 1, 1) if years else df[t_series_col].iloc[-1]
+
+                cur_row = df.loc[df[t_series_col] == target_period]
+                if cur_row.empty:
+                    cur_row = df[df[t_series_col] <= target_period].tail(1)
+                prev_row = df[df[t_series_col] < cur_row[t_series_col].iloc[0]].tail(1)
+
+                def _get_val(row, cols):
+                    for c in cols:
+                        if c in row:
+                            try: return float(row[c])
+                            except: continue
+                    return None
+
+                cur_gel = _get_val(cur_row, ["p_bal_gel"])
+                prev_gel = _get_val(prev_row, ["p_bal_gel"])
+                cur_usd = _get_val(cur_row, ["p_bal_usd"])
+                prev_usd = _get_val(prev_row, ["p_bal_usd"])
+                cur_xrate = _get_val(cur_row, ["xrate"])
+                prev_xrate = _get_val(prev_row, ["xrate"])
+
+                share_cols = [c for c in df.columns if c.startswith("share_")]
+                cur_shares = {c: float(cur_row[c]) for c in share_cols if c in cur_row and pd.notna(cur_row[c]).all()}
+                prev_shares = {c: float(prev_row[c]) for c in share_cols if c in prev_row and pd.notna(prev_row[c]).all()}
+                deltas = {k: round(cur_shares.get(k,0)-prev_shares.get(k,0),4) for k in cur_shares}
+
+                ctx["signals"] = {
+                    "period": str(cur_row[t_series_col].iloc[0]) if not cur_row.empty else None,
+                    "p_bal_gel": {"cur": cur_gel, "prev": prev_gel},
+                    "p_bal_usd": {"cur": cur_usd, "prev": prev_usd},
+                    "xrate": {"cur": cur_xrate, "prev": prev_xrate},
+                    "share_deltas": deltas
+                }
+
+            dk = DOMAIN_KNOWLEDGE
+            ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")
+            ctx["notes"].extend(dk.get("price_with_usd", {}).get("dependencies", []))
+            ctx["notes"].append(dk.get("CurrencyInfluence", {}).get("GEL_USD_Effect", ""))
+            ctx["notes"].extend(dk.get("CurrencyInfluence", {}).get("USD_Denominated_Costs", []))
+            ctx["notes"].append("If GEL depreciates, GEL-denominated balancing price rises due to USD-linked gas/import costs.")
+            ctx["notes"].append("Composition shift toward thermal or import increases price; more hydro or renewable lowers it.")
+            stats_hint += "\n\n--- CAUSAL CONTEXT ---\n" + json.dumps(ctx, default=str, indent=2)
+            log.info("Why-context attached to stats_hint.")
+        except Exception as _e:
+            log.warning(f"'Why' reasoning context build failed: {_e}")
+
+    
+
     
 
     try:
