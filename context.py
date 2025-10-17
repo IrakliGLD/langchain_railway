@@ -55,6 +55,24 @@ COLUMN_LABELS = {
     "quantity": "Trade Volume (thousand MWh)",
 }
 
+# ----------------------------------------------------------
+# DERIVED_LABELS — for LLM-generated / computed columns
+# (These do not exist physically in Supabase views)
+# ----------------------------------------------------------
+DERIVED_LABELS = {
+    "share_import": "Share of Imports in Balancing Electricity",
+    "share_deregulated_hydro": "Share of Deregulated Hydro",
+    "share_regulated_hpp": "Share of Regulated HPPs",
+    "share_renewable_ppa": "Share of Renewable PPAs",
+    "enguri_tariff_gel": "Enguri HPP Tariff (GEL/MWh)",
+    "gardabani_tpp_tariff_gel": "Gardabani TPP Tariff (GEL/MWh)",
+    "grouped_old_tpp_tariff_gel": "Old Thermal Power Plants Tariff (GEL/MWh)",
+    "weighted_gel": "Weighted-Average Balancing Price (GEL/MWh)",
+    "weighted_usd": "Weighted-Average Balancing Price (USD/MWh)",
+    "season": "Season (Summer/Winter)",
+    "period_group": "Period Group (e.g., 2015–2020 vs 2021–2025)",
+}
+
 # --- Table label mapping ---
 VIEW_LABELS = {
     "energy_balance_long_mv": "Energy Balance (by Sector)",
