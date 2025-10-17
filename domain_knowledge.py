@@ -106,11 +106,12 @@ DOMAIN_KNOWLEDGE = {
             "All winning projects are renewable (hydro, solar, or wind), forming the first batch of CfD-based investments in the country.",
             "Under transitional market provisions, CfD projects are not allowed to sell electricity on the competitive exchange; instead, they are centrally dispatched by the system operator (GSE).",
             "The CfD ensures a fixed payment for generated electricity based on the agreed 'strike price' multiplied by the actual generated and accepted energy.",
+            "If there were the self-dispatching regime and CfD owners get remunerated based on the sold electricity, the quantity risk would be minimized. So, Georgian Electricity Target Model, which envisages self-dispatching reduces the qauntity risk, but bringing the imbalance risk, whixh can be efficiently hedged.",
             "The 'reference market price' is used only for accounting and settlement between the offtaker and the market operator — it does not affect the generator’s final income.",
             "As a result, CfD owners are fully insulated from market price risk: they always receive the contracted CfD (strike) price for their accepted generation, regardless of the contemporaneous market price level."
         ],
         "market_implications": [
-            "CfD plants face **quantity risk**, not price risk, because their remuneration depends solely on the amount of energy actually dispatched. If the system operator curtails their generation for system stability, the lost production is not compensated.",
+            "CfD plants face quantity risk, not price risk, because their remuneration depends solely on the amount of energy actually dispatched. If the system operator curtails their generation for system stability, the lost production is not compensated.",
             "Under a self-dispatch or exchange-participation model, producers could optimize generation to maximize revenue, but the CfD design transfers operational control to the central dispatcher.",
             "As more CfD plants enter operation, the central dispatch role of GSE becomes more complex, and overall balancing or curtailment volumes could increase depending on the variability of CfD output.",
             "Because CfD plants are centrally dispatched and remunerated outside the exchange, their energy bypasses market trading, which can reduce liquidity and price formation transparency.",
