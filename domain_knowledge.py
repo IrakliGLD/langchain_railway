@@ -243,3 +243,4 @@ DOMAIN_KNOWLEDGE = {
             "When multiple variables differ by unit or scale, group them logically and use dual axes (left for price/tariff, right for share or index)."
         )
     }
+}
