@@ -123,6 +123,25 @@ DOMAIN_KNOWLEDGE = {
                 "FXExposure": "Gas price in USD → tariff_gel correlates with xrate."
             }
         },
+
+        "TariffContext": {
+            "Definition": "Contextual regulatory and market factors explaining changes in electricity tariffs and their relationship to balancing prices.",
+            "Rules": [
+                "From May 2025, tariffs for Enguri HPP and Vardnili HPP Cascade increased due to a legislative amendment requiring these plants to cover the cost of electricity supplied to the occupied territory of Abkhazia by selling electricity to the rest of Georgia. Their tariff rose because they must recover total generation costs while being paid only for part of the produced electricity.",
+                "From January 2024, regulated tariffs for all thermal power plants increased substantially because the procurement price of natural gas rose sharply after being fixed at a low level for several years.",
+                "The average price of renewable PPAs is typically higher than the summer balancing market price. Balancing electricity—being the residual after bilateral or exchange trades—is often cheaper during summer due to a higher share of deregulated or regulated hydro generation.",
+                "When the share of renewable PPA electricity increases and the shares of deregulated or regulated hydro decrease, the summer balancing price tends to converge toward the average PPA price.",
+                "Balancing electricity represents the residual volume between total generation and electricity already sold under bilateral contracts or on exchanges."
+            ],
+            "Interpretation": [
+                "Tariff increases in 2024–2025 are largely cost-driven, tied to gas import prices, legislative changes, and compensation for unreimbursed generation.",
+                "Seasonal and structural price differences should be interpreted through these regulatory cost adjustments and generation-mix dynamics."
+            ]
+        },
+
+
+
+        
         "AnalyticalImplications": [
             "Thermal tariffs rise with GEL depreciation and gas price increases.",
             "Hydro tariffs are stable across seasons.",
