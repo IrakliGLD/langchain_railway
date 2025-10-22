@@ -61,7 +61,7 @@ if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
     raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
 
 # Allow the base tables + USD materialized views
-ALLOWED_TABLES = {
+STATIC_ALLOWED_TABLES = {
     "dates_mv",
     "energy_balance_long_mv",
     "entities_mv",
@@ -71,6 +71,8 @@ ALLOWED_TABLES = {
     "tech_quantity_view",
     "trade_derived_entities",
 }
+
+ALLOWED_TABLES = set(STATIC_ALLOWED_TABLES)
 
 # Table synonym map (plural & common aliases → canonical)
 TABLE_SYNONYMS = {
@@ -146,7 +148,9 @@ with ENGINE.connect() as conn:
     except Exception as e:
         log.warning(f"⚠️ Could not reflect materialized views: {e}")
         SCHEMA_MAP = {}
-        ALLOWED_TABLES = set()
+        # Fall back to the static allow-list so transient reflection issues
+        # don't incorrectly block legitimate queries.
+        ALLOWED_TABLES = set(STATIC_ALLOWED_TABLES)
 
 
 # --- v18.8: Balancing correlation & weighted price helpers ---
