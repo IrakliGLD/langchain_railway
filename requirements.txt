@@ -2,9 +2,9 @@ sqlalchemy
 psycopg2-binary
 fastapi
 uvicorn
-langchain
-langchain-community
-langchain-core
+langchain==0.1.20
+langchain-community==0.1.19
+langchain-core==0.1.52
 pydantic
 tenacity
 pandas
@@ -12,7 +12,7 @@ numpy
 statsmodels
 python-dotenv
 google-generativeai
-langchain-google-genai
+langchain-google-genai==0.1.4
 litellm
 supabase
 langchain-openai
