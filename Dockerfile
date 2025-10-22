@@ -1,6 +1,7 @@
-# Dockerfile v1.4
-# Installs libpq for psycopg2-binary and sets up Python environment. Updated CMD to /bin/sh -c for $PORT expansion. Realistic: 95% success, 5% risk of env variable misconfiguration.
-FROM python:3.12-slim
+# Dockerfile v1.5
+# Python 3.11 for compatibility with langsmith/pydantic v1
+# Python 3.12 has breaking changes in typing.ForwardRef._evaluate() that cause pydantic v1 to fail
+FROM python:3.11-slim
 
 # Install system dependencies including libpq
 RUN apt-get update && apt-get install -y \
@@ -18,5 +19,5 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy application code
 COPY . .
 
-# Run the application with /bin/sh -c to expand $PORT
-CMD ["/bin/sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
+# Run the application via Python entrypoint (handles PORT from environment)
+CMD ["python", "main.py"]
