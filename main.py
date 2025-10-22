@@ -505,9 +505,18 @@ def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 200) -> 
 
 
 def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
+    """Generate quick statistics for query results.
+
+    Args:
+        rows: List of tuples containing query results
+        cols: List of column names
+
+    Returns:
+        String summary of statistics and trends
+    """
     if not rows:
         return "0 rows."
-    df = pd.DataFrame(rows, columns=cols)
+    df = pd.DataFrame(rows, columns=cols).copy()  # Protect original data
     numeric = df.select_dtypes(include=[np.number])
     out = [f"Rows: {len(df)}"]
     
@@ -534,11 +543,10 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
         # Applies to all time columns, even if already datetime
         try:
             df['_year_month'] = df[time_col].dt.to_period('M')
-            year_month_counts = df['_year_month'].dt.year.value_counts().sort_index()
-            # Determine average number of months per year (approx full coverage baseline)
-            avg_months = year_month_counts.mean()
+            # Count how many records (months) exist for each year
+            months_per_year = df.groupby(df['_year_month'].dt.year).size().sort_index()
             # Mark as incomplete if less than 10 months (not a full year of data)
-            incomplete_years = year_month_counts[year_month_counts < 10].index.tolist()
+            incomplete_years = months_per_year[months_per_year < 10].index.tolist()
             if incomplete_years:
                 log.info(f"🧩 Excluding incomplete years from trend calculation: {incomplete_years}")
                 df = df[~df['__year'].isin(incomplete_years)]
@@ -559,10 +567,11 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                 # Filter data for the first and last full years
                 df_first = df[df['__year'] == first_full_year]
                 df_last = df[df['__year'] == last_full_year]
-                
-                # Get the mean of all numeric columns for these years
-                mean_first_year = df_first[numeric.columns].mean().mean()
-                mean_last_year = df_last[numeric.columns].mean().mean()
+
+                # Get the mean of all numeric values for these years
+                # Using .values.mean() to get single average across all values
+                mean_first_year = df_first[numeric.columns].values.mean()
+                mean_last_year = df_last[numeric.columns].values.mean()
                 
                 change = ((mean_last_year - mean_first_year) / mean_first_year * 100) if mean_first_year != 0 else 0
                 trend = "increasing" if mean_last_year > mean_first_year else "decreasing"
@@ -743,7 +752,8 @@ def simple_table_whitelist_check(sql: str):
         with_clause = parsed_expression.find(exp.With)
         if with_clause:
             for cte in with_clause.expressions:
-                cte_names.add(cte.alias.lower()) 
+                if cte.alias:  # Check alias exists before accessing
+                    cte_names.add(cte.alias.lower())
         # ---------------------------------
 
         # 2. Traverse the AST to find all table expressions
@@ -938,9 +948,11 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             try:
                 from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
             except ImportError:
+                # Fallback values matching database schema
                 SUPPLY_TECH_TYPES = ["hydro", "thermal", "wind", "solar", "import", "self-cons"]
-                DEMAND_TECH_TYPES = ["supply-distribution", "direct customers", "abkhazeti", "losses", "export"]
+                DEMAND_TECH_TYPES = ["abkhazeti", "supply-distribution", "direct customers", "losses", "export"]
                 TRANSIT_TECH_TYPES = ["transit"]
+                log.warning("Using fallback tech type classifications")
 
             if "type_tech" in df.columns:
                 supply_df = df[df["type_tech"].isin(SUPPLY_TECH_TYPES)]
@@ -1210,15 +1222,45 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             df_y = df.groupby("year")[value_col].mean().reset_index()
             first, last = df_y.iloc[0], df_y.iloc[-1]
             span = last["year"] - first["year"]
-            cagr_y = (last[value_col]/first[value_col])**(1/span)-1 if span>0 else 0
+
+            # Calculate yearly CAGR with validation
+            if span > 0 and first[value_col] > 0 and last[value_col] > 0:
+                cagr_y = (last[value_col]/first[value_col])**(1/span)-1
+            else:
+                cagr_y = 0
+                if span > 0:
+                    log.warning(f"Invalid CAGR calculation: first={first[value_col]}, last={last[value_col]}")
 
             df_s = df.groupby(["year","season"])[value_col].mean().reset_index()
             summer = df_s[df_s["season"]=="summer"]
             winter = df_s[df_s["season"]=="winter"]
-            cagr_s = (summer[value_col].iloc[-1]/summer[value_col].iloc[0])**(1/(summer["year"].iloc[-1]-summer["year"].iloc[0]))-1 if len(summer)>=2 else np.nan
-            cagr_w = (winter[value_col].iloc[-1]/winter[value_col].iloc[0])**(1/(winter["year"].iloc[-1]-winter["year"].iloc[0]))-1 if len(winter)>=2 else np.nan
 
-            note_parts.append(f"Yearly CAGR={cagr_y*100:.2f}%, Summer={cagr_s*100 if not np.isnan(cagr_s) else 0:.2f}%, Winter={cagr_w*100 if not np.isnan(cagr_w) else 0:.2f}%.")
+            # Calculate seasonal CAGR with validation
+            if len(summer) >= 2:
+                s_first, s_last = summer[value_col].iloc[0], summer[value_col].iloc[-1]
+                s_year_span = summer["year"].iloc[-1] - summer["year"].iloc[0]
+                if s_year_span > 0 and s_first > 0 and s_last > 0:
+                    cagr_s = (s_last / s_first)**(1/s_year_span) - 1
+                else:
+                    cagr_s = np.nan
+            else:
+                cagr_s = np.nan
+
+            if len(winter) >= 2:
+                w_first, w_last = winter[value_col].iloc[0], winter[value_col].iloc[-1]
+                w_year_span = winter["year"].iloc[-1] - winter["year"].iloc[0]
+                if w_year_span > 0 and w_first > 0 and w_last > 0:
+                    cagr_w = (w_last / w_first)**(1/w_year_span) - 1
+                else:
+                    cagr_w = np.nan
+            else:
+                cagr_w = np.nan
+
+            # Format CAGR values for display
+            def format_cagr(cagr_val):
+                return f"{cagr_val*100:.2f}" if not np.isnan(cagr_val) else "N/A"
+
+            note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_w)}%.")
 
             yrs_in_q = re.findall(r"(20\d{2})", user_query)
             target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [last["year"] + i for i in range(1, 4)]
@@ -1265,34 +1307,69 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 cur_row = df.loc[df[t_series_col] == target_period]
                 if cur_row.empty:
                     cur_row = df[df[t_series_col] <= target_period].tail(1)
-                prev_row = df[df[t_series_col] < cur_row[t_series_col].iloc[0]].tail(1)
 
-                def _get_val(row, cols):
-                    for c in cols:
-                        if c in row:
-                            try: return float(row[c])
-                            except: continue
-                    return None
+                # Check if we have valid current row data
+                if cur_row.empty:
+                    log.warning("No data found for target period in 'why' analysis")
+                    # Skip 'why' analysis if no data available
+                else:
+                    prev_row = df[df[t_series_col] < cur_row[t_series_col].iloc[0]].tail(1)
 
-                cur_gel = _get_val(cur_row, ["p_bal_gel"])
-                prev_gel = _get_val(prev_row, ["p_bal_gel"])
-                cur_usd = _get_val(cur_row, ["p_bal_usd"])
-                prev_usd = _get_val(prev_row, ["p_bal_usd"])
-                cur_xrate = _get_val(cur_row, ["xrate"])
-                prev_xrate = _get_val(prev_row, ["xrate"])
+                    def _get_val(row, cols):
+                        """Extract first available numeric value from row columns."""
+                        if row.empty:
+                            return None
+                        for c in cols:
+                            if c in row.columns:
+                                val = row[c].iloc[0] if len(row) > 0 else None
+                                if val is not None and pd.notna(val):
+                                    try:
+                                        return float(val)
+                                    except (ValueError, TypeError) as e:
+                                        log.debug(f"Could not convert {c} to float: {e}")
+                                        continue
+                        return None
 
-                share_cols = [c for c in df.columns if c.startswith("share_")]
-                cur_shares = {c: float(cur_row[c]) for c in share_cols if c in cur_row and pd.notna(cur_row[c]).all()}
-                prev_shares = {c: float(prev_row[c]) for c in share_cols if c in prev_row and pd.notna(prev_row[c]).all()}
-                deltas = {k: round(cur_shares.get(k,0)-prev_shares.get(k,0),4) for k in cur_shares}
+                    cur_gel = _get_val(cur_row, ["p_bal_gel"])
+                    prev_gel = _get_val(prev_row, ["p_bal_gel"]) if not prev_row.empty else None
+                    cur_usd = _get_val(cur_row, ["p_bal_usd"])
+                    prev_usd = _get_val(prev_row, ["p_bal_usd"]) if not prev_row.empty else None
+                    cur_xrate = _get_val(cur_row, ["xrate"])
+                    prev_xrate = _get_val(prev_row, ["xrate"]) if not prev_row.empty else None
 
-                ctx["signals"] = {
-                    "period": str(cur_row[t_series_col].iloc[0]) if not cur_row.empty else None,
-                    "p_bal_gel": {"cur": cur_gel, "prev": prev_gel},
-                    "p_bal_usd": {"cur": cur_usd, "prev": prev_usd},
-                    "xrate": {"cur": cur_xrate, "prev": prev_xrate},
-                    "share_deltas": deltas
-                }
+                    # Extract share columns safely
+                    share_cols = [c for c in df.columns if c.startswith("share_")]
+                    cur_shares = {}
+                    prev_shares = {}
+
+                    for c in share_cols:
+                        if c in cur_row.columns and not cur_row[c].empty:
+                            val = cur_row[c].iloc[0]
+                            if pd.notna(val):
+                                try:
+                                    cur_shares[c] = float(val)
+                                except (ValueError, TypeError):
+                                    pass
+
+                    if not prev_row.empty:
+                        for c in share_cols:
+                            if c in prev_row.columns and not prev_row[c].empty:
+                                val = prev_row[c].iloc[0]
+                                if pd.notna(val):
+                                    try:
+                                        prev_shares[c] = float(val)
+                                    except (ValueError, TypeError):
+                                        pass
+
+                    deltas = {k: round(cur_shares.get(k,0)-prev_shares.get(k,0),4) for k in cur_shares}
+
+                    ctx["signals"] = {
+                        "period": str(cur_row[t_series_col].iloc[0]) if not cur_row.empty else None,
+                        "p_bal_gel": {"cur": cur_gel, "prev": prev_gel},
+                        "p_bal_usd": {"cur": cur_usd, "prev": prev_usd},
+                        "xrate": {"cur": cur_xrate, "prev": prev_xrate},
+                        "share_deltas": deltas
+                    }
 
             dk = DOMAIN_KNOWLEDGE
             ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")

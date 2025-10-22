@@ -85,12 +85,12 @@ VIEW_LABELS = {
 }
 
 # --- Demand/Supply classification for type_tech ---
+# Note: Keys match actual database values (with dashes/spaces as stored in DB)
 TECH_TYPE_GROUPS = {
     "demand": {
         "abkhazeti": "Abkhazeti",
-        "supply_distribution": "Supplier/Distributor",
-        "direct_customers": "Direct Consumers",
-        "self_cons": "Self-Consumption by PP",
+        "supply-distribution": "Supplier/Distributor",
+        "direct customers": "Direct Consumers",
         "losses": "Losses",
         "export": "Export",
     },
@@ -242,6 +242,6 @@ def scrub_schema_mentions(text: str) -> str:
     return text
 
 # --- Supply/Demand/Transit explicit lists for backend filtering ---
-SUPPLY_TECH_TYPES = list(TECH_TYPE_GROUPS["supply"].keys()) + ["solar", "self_cons"]
+SUPPLY_TECH_TYPES = list(TECH_TYPE_GROUPS["supply"].keys()) + ["solar", "self-cons"]
 DEMAND_TECH_TYPES = list(TECH_TYPE_GROUPS["demand"].keys())
 TRANSIT_TECH_TYPES = ["transit"]
