@@ -293,9 +293,24 @@ class APIResponse(BaseModel):
 # LLM + Planning helpers
 # -----------------------------
 def make_gemini() -> ChatGoogleGenerativeAI:
-    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0)
+    """Create Gemini LLM instance with proper configuration.
+
+    Note: convert_system_message_to_human=True is required because Gemini
+    doesn't natively support SystemMessages in the LangChain interface.
+    """
+    return ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0,
+        convert_system_message_to_human=True
+    )
 
 def make_openai() -> ChatOpenAI:
+    """Create OpenAI LLM instance for fallback when Gemini fails.
+
+    Raises:
+        RuntimeError: If OPENAI_API_KEY is not configured
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
     return ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
