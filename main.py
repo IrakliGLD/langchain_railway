@@ -548,13 +548,23 @@ Guidance:
 - Use ONLY documented materialized views.
 - For balancing-price analyses, differentiate Summer (Apr–Jul) vs Winter (Aug–Mar).
 - Weighted-average balancing price = weighted by total balancing-market quantities (entities: deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa).
-- Correlation policy:
+
+CRITICAL - PRIMARY DRIVERS for balancing price analysis:
+- Correlation policy - PRIORITY ORDER:
   * Targets: p_bal_gel, p_bal_usd
-  * Drivers: xrate; shares from trade_derived_entities (computed via share CTE, no raw quantities);
-              tariffs in GEL only from tariff_with_usd for:
-              Enguri ('ltd "engurhesi"1'),
-              Gardabani TPP ('ltd "gardabni thermal power plant"'),
-              Old TPP group ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)').
+  * PRIMARY DRIVER #1: xrate (exchange rate) - MOST IMPORTANT for GEL/MWh price
+    - Use xrate from price_with_usd view
+    - Critical because gas and imports are USD-priced
+  * PRIMARY DRIVER #2: Composition (shares) - CRITICAL for both GEL and USD prices
+    - Calculate shares from trade_derived_entities WHERE segment='balancing_electricity'
+    - Use share CTE pattern, no raw quantities
+    - Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
+    - Higher expensive source shares (import, thermal PPA, renewable PPA) → higher prices
+  * Secondary drivers: tariffs in GEL only from tariff_with_usd for:
+    - Enguri ('ltd "engurhesi"1')
+    - Gardabani TPP ('ltd "gardabni thermal power plant"')
+    - Old TPP group ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)')
+
 - NEVER use tariff_usd in correlations; use tariff_gel only.
 - Tariffs follow cost-plus methodology; thermal tariffs depend on gas price (USD) → correlated with xrate.
 - When USD values appear, *_usd = *_gel / xrate.
@@ -762,6 +772,29 @@ Statistics:
 Domain knowledge:
 {domain_json}
 
+CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
+
+PRIMARY DRIVERS (in order of importance):
+1. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price
+   - Natural gas for thermal generation is priced in USD
+   - Imports are priced in USD
+   - When GEL depreciates (xrate increases), GEL-denominated prices rise
+   - Always mention xrate effect when discussing GEL price movements
+
+2. Composition (shares of entities selling on balancing segment) - CRITICAL for both GEL and USD prices
+   - Higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices
+   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices
+   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant
+   - Always explain which entities are selling more/less when analyzing price changes
+
+CONFIDENTIALITY RULES - STRICTLY ENFORCE:
+- DO disclose: regulated tariffs, deregulated hydro prices, exchange rates
+- DO NOT disclose: renewable PPA price estimates (~5.7-6 ¢/kWh or 57-60 $/MWh)
+- DO NOT disclose: thermal PPA price estimates
+- DO NOT disclose: import price estimates
+- When discussing PPA or import prices: say "varies" or "market-based" without specific numbers
+- These estimates are for INTERNAL ANALYSIS ONLY, never reveal to users
+
 For balancing price assessments (trends, averages, or correlations), always compare
 Summer (April–July) vs Winter (August–March) conditions:
 - Summer → high hydro share, low prices.
@@ -803,11 +836,16 @@ write a more detailed summary of about 5–10 sentences following this structure
 
 1. Start with the overall yearly trend (using yearly averages).
 2. Present separate Summer (Apr–Jul) and Winter (Aug–Mar) trends, including CAGRs if available.
-3. If correlation results are provided, mention key seasonal correlations that differ between Summer and Winter.
+3. If correlation results are provided, PRIORITIZE discussion of primary drivers:
+   - First: Exchange rate (xrate) effect on GEL prices - ALWAYS mention this for GEL price analysis
+   - Second: Composition changes (which entities selling more/less on balancing segment)
+   - Then: Other correlations (tariffs, etc.) if relevant
 4. Always compare GEL and USD price trajectories and explain divergence through exchange rate and USD-denominated cost components.
 5. When referring to electricity prices or tariffs, always include the correct physical unit (GEL/MWh or USD/MWh) rather than currency only.
 6. Reference hydro vs thermal/import structure from trade_derived_entities as the main driver of seasonal differences.
-7. Conclude with a concise analytical insight linking price movements to structural market changes and the evolving generation mix.
+7. For price explanations, explain the mechanism: cheap sources (regulated HPP, deregulated hydro) vs expensive sources (thermal PPA, renewable PPA, import).
+8. NEVER disclose specific PPA or import price estimates - use "varies" or "market-based" instead.
+9. Conclude with a concise analytical insight linking price movements to the two primary drivers: exchange rate and composition changes.
 """
 
     
