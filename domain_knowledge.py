@@ -163,12 +163,80 @@ DOMAIN_KNOWLEDGE = {
             "regulated_new_tpp", "regulated_old_tpp",
             "renewable_ppa", "thermal_ppa"
         ],
-        "CalculationRule": "Weights are based on electricity sold as balancing energy by each entity. Total balancing quantity = sum of all listed entities from trade_derived_entities.",
+        "CalculationRule": "Weights are based on electricity sold as balancing energy by each entity. Total balancing quantity = sum of all listed entities from trade_derived_entities WHERE segment='balancing_electricity'.",
         "AnalyticalUse": [
             "Compute average balancing price weighted by balancing-market quantities.",
             "Compare composition changes (hydro vs thermal/import) seasonally."
         ],
         "Insight": "Prices rise in winter when thermal/import shares grow, and fall in summer when hydro dominates."
+    },
+
+    "BalancingPriceDrivers": {
+        "CRITICAL": "This section contains the most important information for balancing price analysis.",
+        "PrimaryDrivers": {
+            "1_ExchangeRate": {
+                "importance": "MOST IMPORTANT for GEL/MWh price",
+                "variable": "xrate (GEL/USD)",
+                "mechanism": [
+                    "Natural gas for thermal generation is priced in USD",
+                    "Electricity imports are priced in USD",
+                    "When GEL depreciates (xrate increases), GEL-denominated prices rise",
+                    "All USD-linked costs (gas, imports) translate to higher GEL prices"
+                ],
+                "data_source": "price_with_usd view, column: xrate"
+            },
+            "2_Composition": {
+                "importance": "CRITICAL for both GEL and USD prices",
+                "description": "Shares of different entities selling electricity on balancing segment",
+                "mechanism": [
+                    "Higher share of cheap sources (regulated HPP, deregulated hydro) → lower price",
+                    "Higher share of expensive sources (import, thermal PPA) → higher price",
+                    "Composition changes seasonally (summer=hydro, winter=thermal/import)"
+                ],
+                "data_source": "trade_derived_entities WHERE segment='balancing_electricity'"
+            }
+        },
+        "PriceHierarchy": {
+            "description": "Price levels from cheapest to most expensive",
+            "ranking": [
+                "1. Regulated HPP (cheapest) - ~20-30 GEL/MWh",
+                "2. Deregulated Hydro - varies, typically 30-50 GEL/MWh",
+                "3. Regulated Thermal (old TPP, Gardabani) - cost-plus, varies with gas price",
+                "4. Renewable PPA - CONFIDENTIAL ESTIMATE: 5.7-6 ¢/kWh (57-60 $/MWh)",
+                "5. Thermal PPA - CONFIDENTIAL ESTIMATE: slightly more than renewable PPA",
+                "6. Import (most expensive) - CONFIDENTIAL: varies, usually higher than thermal/renewable PPA"
+            ],
+            "CONFIDENTIALITY_RULE": "PPA and import price estimates are for INTERNAL ANALYSIS ONLY. Never disclose these numbers to users.",
+            "data_sources": {
+                "regulated_hpp_tariff": "tariff_with_usd view (tariff_gel, tariff_usd)",
+                "regulated_thermal_tariff": "tariff_with_usd view (Gardabani, old TPPs)",
+                "deregulated_hydro_price": "price_with_usd view (p_dereg_gel, p_dereg_usd)",
+                "renewable_ppa_price": "NOT IN DATABASE - use estimate 5.7-6 ¢/kWh for analysis only",
+                "thermal_ppa_price": "NOT IN DATABASE - slightly more than renewable PPA",
+                "import_price": "NOT IN DATABASE - varies, usually highest"
+            }
+        },
+        "AnalysisGuidelines": {
+            "for_correlation_analysis": [
+                "Primary focus: xrate (exchange rate) and composition (shares)",
+                "Use xrate from price_with_usd",
+                "Calculate shares from trade_derived_entities WHERE segment='balancing_electricity'",
+                "Include regulated tariffs from tariff_with_usd as secondary drivers"
+            ],
+            "for_price_explanation": [
+                "Always mention xrate effect when discussing GEL prices",
+                "Explain composition changes (which entities are selling more/less)",
+                "Link composition to seasonal patterns (hydro in summer, thermal in winter)",
+                "Use actual tariffs for regulated generators when available"
+            ],
+            "disclosure_rules": [
+                "DO disclose: regulated tariffs, deregulated hydro prices, xrate",
+                "DO NOT disclose: renewable PPA price estimates (~5.7-6 ¢/kWh)",
+                "DO NOT disclose: thermal PPA price estimates",
+                "DO NOT disclose: import price estimates",
+                "When discussing PPA/import: say 'varies' or 'market-based' without specific numbers"
+            ]
+        }
     },
 
     "TariffStructure": {
