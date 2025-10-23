@@ -162,6 +162,9 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
       drivers: xrate, share_import, share_deregulated_hydro, share_regulated_hpp,
                share_renewable_ppa, enguri_tariff_gel, gardabani_tpp_tariff_gel,
                grouped_old_tpp_tariff_gel
+
+    CRITICAL FIX: Shares are calculated using ONLY balancing_electricity segment
+    to properly reflect the composition that affects balancing electricity price.
     """
     sql = """
     WITH shares AS (
@@ -173,6 +176,7 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa
       FROM trade_derived_entities t
+      WHERE t.segment = 'balancing_electricity'
       GROUP BY t.date
     ),
     tariffs AS (
@@ -327,6 +331,80 @@ def detect_analysis_mode(user_query: str) -> str:
     return "light"
 
 
+def should_generate_chart(user_query: str, row_count: int) -> bool:
+    """
+    Determine if a chart would be helpful for answering the query.
+
+    Returns False if:
+    - Query asks for specific values/numbers only
+    - Result has very few rows (< 3)
+    - Query is asking "what", "which", "list" type questions
+
+    Returns True if:
+    - Query asks about trends, comparisons, distributions
+    - Result has time series or categorical data suitable for visualization
+    """
+    query_lower = user_query.lower()
+
+    # Don't generate chart for simple fact queries
+    no_chart_indicators = [
+        "what is the", "what was the", "how much", "how many",
+        "give me the value", "tell me the", "რა არის", "რამდენი",
+        "скол ько", "какой"
+    ]
+
+    for indicator in no_chart_indicators:
+        if indicator in query_lower and row_count <= 3:
+            return False
+
+    # Always generate chart for trend/comparison/distribution queries
+    chart_friendly_keywords = [
+        "trend", "over time", "compare", "comparison", "distribution",
+        "evolution", "динамика", "сравнение", "ტენდენცია", "შედარება",
+        "chart", "graph", "plot", "visualize", "show me"
+    ]
+
+    for keyword in chart_friendly_keywords:
+        if keyword in query_lower:
+            return True
+
+    # Generate chart if we have enough data points
+    if row_count >= 5:
+        return True
+
+    # Default: generate chart unless very few rows
+    return row_count >= 3
+
+
+def detect_language(text: str) -> str:
+    """
+    Detect the language of the input text.
+
+    Returns:
+        Language code: 'ka' for Georgian, 'ru' for Russian, 'en' for English
+    """
+    # Georgian unicode range check
+    if any('\u10a0' <= char <= '\u10ff' for char in text):
+        return "ka"
+
+    # Russian/Cyrillic unicode range check
+    if any('\u0400' <= char <= '\u04ff' for char in text):
+        return "ru"
+
+    # Default to English
+    return "en"
+
+
+def get_language_instruction(lang_code: str) -> str:
+    """Get instruction for LLM to respond in the detected language."""
+    language_instructions = {
+        "ka": "IMPORTANT: Respond in Georgian language (ქართული ენა). Use Georgian characters and natural Georgian phrasing.",
+        "ru": "IMPORTANT: Respond in Russian language (русский язык). Use Cyrillic characters and natural Russian phrasing.",
+        "en": "Respond in English."
+    }
+    return language_instructions.get(lang_code, language_instructions["en"])
+
+
 # ------------------------------------------------------------------
 # REMOVED: llm_plan_analysis - Combined into llm_generate_plan_and_sql
 # ------------------------------------------------------------------
@@ -368,6 +446,7 @@ ORDER BY date
 LIMIT 3750;
 
 -- Example 5: Balancing price GEL vs shares (no raw quantities)
+-- IMPORTANT: Use segment='balancing_electricity' to get correct shares for price analysis
 WITH shares AS (
   SELECT
     t.date,
@@ -376,6 +455,7 @@ WITH shares AS (
     SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
+  WHERE t.segment = 'balancing_electricity'
   GROUP BY t.date
 )
 SELECT
@@ -434,9 +514,9 @@ LIMIT 3750;
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
-def llm_generate_plan_and_sql(user_query: str, analysis_mode: str) -> str:
-    # New combined function
-    
+def llm_generate_plan_and_sql(user_query: str, analysis_mode: str, lang_instruction: str = "Respond in English.") -> str:
+    # New combined function with language support
+
     system = (
         "You are an analytical PostgreSQL generator. Your task is to perform two steps: "
         "1. **Plan:** Extract the analysis intent, target variables, and period for the user's question. "
@@ -444,6 +524,7 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str) -> str:
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
         "Use only documented tables and columns. Prefer monthly aggregation. "
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
+        f"{lang_instruction}"
     )
     domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
     
@@ -659,12 +740,13 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     return "\n".join(out)
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
-def llm_summarize(user_query: str, data_preview: str, stats_hint: str) -> str:
+def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.") -> str:
     system = (
         "You are EnerBot, an energy market analyst. "
         "Write a short analytic summary using preview and statistics. "
         "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
-        "seasonal patterns, volatility, and factors from domain knowledge when relevant."
+        "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
+        f"{lang_instruction}"
     )
     domain_json = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
     prompt = f"""
@@ -888,11 +970,16 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     mode = detect_analysis_mode(q.query)
     log.info(f"🧭 Selected mode: {mode}")
 
+    # Detect query language for multilingual response
+    lang_code = detect_language(q.query)
+    lang_instruction = get_language_instruction(lang_code)
+    log.info(f"🌍 Detected language: {lang_code}")
+
     plan = {}
 
     # 1) Generate PLAN and SQL in ONE LLM call
     try:
-        combined_output = llm_generate_plan_and_sql(q.query, mode)
+        combined_output = llm_generate_plan_and_sql(q.query, mode, lang_instruction)
         if "---SQL---" in combined_output:
             plan_text, raw_sql = combined_output.split("---SQL---", 1)
             raw_sql = raw_sql.strip()
@@ -1003,17 +1090,26 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # --- 🩹 Auto-pivot fix for hallucinated trade_derived_entities columns ---
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
+            log.info("CRITICAL: Using segment='balancing_electricity' for share calculation")
             pivot_sql = """
+            WITH totals AS (
+                SELECT date, SUM(quantity) AS total_qty
+                FROM trade_derived_entities
+                WHERE segment = 'balancing_electricity'
+                GROUP BY date
+            )
             SELECT
-                date,
-                SUM(CASE WHEN entity = 'import' THEN share ELSE 0 END) AS share_import,
-                SUM(CASE WHEN entity = 'deregulated_hydro' THEN share ELSE 0 END) AS share_deregulated_hydro,
-                SUM(CASE WHEN entity = 'regulated_hpp' THEN share ELSE 0 END) AS share_regulated_hpp,
-                SUM(CASE WHEN entity = 'renewable_ppa' THEN share ELSE 0 END) AS share_renewable_ppa,
-                SUM(CASE WHEN entity = 'thermal_ppa' THEN share ELSE 0 END) AS share_thermal_ppa,
-                SUM(CASE WHEN entity = 'total_hpp' THEN share ELSE 0 END) AS share_total_hpp
-            FROM trade_derived_entities
-            GROUP BY date
+                t.date,
+                SUM(CASE WHEN t.entity = 'import' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_import,
+                SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
+                SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
+                SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
+                SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
+                SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_total_hpp
+            FROM trade_derived_entities t
+            LEFT JOIN totals total ON t.date = total.date
+            WHERE t.segment = 'balancing_electricity'
+            GROUP BY t.date, total.total_qty
             """
             # Replace direct reference with pivoted subquery
             safe_sql_final = re.sub(
@@ -1403,7 +1499,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     
 
     try:
-        summary = llm_summarize(q.query, preview, stats_hint)
+        summary = llm_summarize(q.query, preview, stats_hint, lang_instruction)
     except Exception as e:
         log.warning(f"Summarization failed: {e}")
         summary = preview
@@ -1478,26 +1574,29 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         ]
 
         # --- 🧭 Decide whether to generate chart at all (context-aware) ---
-        generate_chart = True
+        # Use improved chart necessity detection
+        generate_chart = should_generate_chart(q.query, len(df))
+
+        # Additional refinements based on query type and intent
         intent = str(plan.get("intent", "")).lower()
-        mode = str(mode).lower()
         query_text = q.query.lower()
 
-        # Disable chart for purely explanatory or conceptual questions
-        if any(word in query_text for word in ["why", "how", "reason", "explain", "because", "cause"]):
+        # Override: Disable chart for purely explanatory questions
+        if any(word in query_text for word in ["why", "how", "reason", "explain", "because", "cause", "რატომ", "როგორ", "почему"]):
+            if len(df) < 5:  # Only skip if result is small
+                generate_chart = False
+
+        # Override: Disable chart for definition queries
+        if any(word in query_text for word in ["define", "meaning of", "განმარტება"]):
             generate_chart = False
-        elif any(word in query_text for word in ["define", "what is", "describe", "meaning of"]):
-            generate_chart = False
-        elif not any(re.search(r"(price|tariff|quantity|volume|value|cpi|index|usd|gel)", c.lower()) for c in cols):
-            generate_chart = False
-        elif intent in ["trend_analysis", "correlation_analysis", "driver_analysis", "identify_drivers"] or mode == "analyst":
-            generate_chart = True
-        else:
-            num_cols_test = [c for c in cols if any(k in c.lower() for k in ["price", "tariff", "quantity", "volume", "value", "usd", "gel"])]
-            generate_chart = len(num_cols_test) >= 1
+
+        # Override: Always generate chart for analyst mode with suitable data
+        if intent in ["trend_analysis", "correlation_analysis", "driver_analysis", "identify_drivers"]:
+            if len(df) >= 3:
+                generate_chart = True
 
         if not generate_chart:
-            log.info("🧭 Skipping chart generation (explanatory or non-numeric query).")
+            log.info(f"🧭 Skipping chart generation (query type or data not suitable for visualization, rows={len(df)}).")
             chart_data = chart_type = chart_meta = None
             # Jump to Final response (bypass chart drawing)
             exec_time = time.time() - t0
