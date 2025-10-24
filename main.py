@@ -395,8 +395,6 @@ def get_gemini() -> ChatGoogleGenerativeAI:
 
     Note: convert_system_message_to_human=True is required because Gemini
     doesn't natively support SystemMessages in the LangChain interface.
-
-    Optimized with timeout and token limits for faster responses.
     """
     global _gemini_llm
     if _gemini_llm is None:
@@ -404,11 +402,9 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             model=GEMINI_MODEL,
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
-            convert_system_message_to_human=True,
-            max_output_tokens=500,  # Limit response size for faster generation
-            request_timeout=15,  # 15-second timeout to fail fast
+            convert_system_message_to_human=True
         )
-        log.info("✅ Gemini LLM instance cached with timeout=15s, max_tokens=500")
+        log.info("✅ Gemini LLM instance cached")
     return _gemini_llm
 
 def get_openai() -> ChatOpenAI:
@@ -421,14 +417,8 @@ def get_openai() -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
     if _openai_llm is None:
-        _openai_llm = ChatOpenAI(
-            model=OPENAI_MODEL,
-            temperature=0,
-            openai_api_key=OPENAI_API_KEY,
-            max_tokens=500,  # Limit response size
-            request_timeout=15,  # 15-second timeout
-        )
-        log.info("✅ OpenAI LLM instance cached with timeout=15s, max_tokens=500")
+        _openai_llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
+        log.info("✅ OpenAI LLM instance cached")
     return _openai_llm
 
 # Backward compatibility aliases
@@ -924,42 +914,15 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.") -> str:
     system = (
         "You are EnerBot, an energy market analyst. "
-        "Write a concise summary using the data preview and statistics. "
-        "Focus on key numbers and trends. "
+        "Write a short analytic summary using preview and statistics. "
+        "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
+        "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
         f"{lang_instruction}"
     )
+    # Use selective domain knowledge to reduce tokens (30-40% savings)
+    domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
 
-    # Performance optimization: Use cached domain knowledge for simple queries
-    # Only use selective (slower) domain knowledge for complex analytical queries
-    is_analytical = detect_analysis_mode(user_query) == "analyst"
-    use_cached = not is_analytical  # Cache for simple queries
-
-    if use_cached:
-        log.info("⚡ Using cached domain knowledge for faster response")
-        domain_json = _DOMAIN_KNOWLEDGE_JSON  # Use pre-cached
-    else:
-        log.info("🔍 Using selective domain knowledge for analytical query")
-        domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
-
-    # Conditional prompt sizing: shorter for simple queries, full for analytical
-    if not is_analytical:
-        # Simple/short prompt for basic queries (50% smaller)
-        prompt = f"""
-User question:
-{user_query}
-
-Data:
-{data_preview}
-
-Statistics:
-{stats_hint}
-
-Provide a concise 2-3 sentence summary focusing on the key numbers and trends shown in the data.
-Include units (GEL/MWh or USD/MWh) when mentioning prices.
-"""
-    else:
-        # Full analytical prompt with all guidelines
-        prompt = f"""
+    prompt = f"""
 User question:
 {user_query}
 
@@ -1887,12 +1850,13 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             log.info("🎨 Proceeding with chart generation.")
 
 
-        
+
         # --- 🧠 Generic chart-type detection based on data structure ---
+        # Support Georgian column names in addition to English
         cols_lower = [c.lower() for c in df.columns]
-        time_cols = [c for c in df.columns if re.search(r"(year|month|date)", c.lower())]
-        category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category)", c.lower())]
-        value_cols = [c for c in df.columns if re.search(r"(quantity|volume|value|amount|price|tariff|cpi|index|mwh|tj|usd|gel)", c.lower())]
+        time_cols = [c for c in df.columns if re.search(r"(year|month|date|წელი|თვე|თარიღი)", c.lower())]
+        category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category|ტიპი|სექტორი)", c.lower())]
+        value_cols = [c for c in df.columns if re.search(r"(quantity|volume|value|amount|price|tariff|cpi|index|mwh|tj|usd|gel|რაოდენობა|მოცულობა|ფასი|ტარიფი|საშუალო|სულ)", c.lower())]
 
         chart_type = "line"  # default fallback
 
@@ -1935,15 +1899,17 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         log.info(f"🧠 Chart type auto-detected → {chart_type} | Time={len(time_cols)} | Categories={len(category_cols)} | Values={len(value_cols)}")
 
 
-        
+
+
         # --- Dimension inference (price_tariff | energy_qty | index) ---
+        # Support Georgian column names
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
-            if any(x in col_l for x in ["cpi", "index", "inflation"]):
+            if any(x in col_l for x in ["cpi", "index", "inflation", "ინდექსი"]):
                 return "index"
-            if any(x in col_l for x in ["quantity", "generation", "volume_tj", "volume", "mw", "tj"]):
+            if any(x in col_l for x in ["quantity", "generation", "volume_tj", "volume", "mw", "tj", "რაოდენობა", "მოცულობა", "გენერაცია"]):
                 return "energy_qty"
-            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap"]):
+            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap", "ფასი", "ტარიფი", "საშუალო"]):
                 return "price_tariff"
             return "other"
 
