@@ -395,6 +395,8 @@ def get_gemini() -> ChatGoogleGenerativeAI:
 
     Note: convert_system_message_to_human=True is required because Gemini
     doesn't natively support SystemMessages in the LangChain interface.
+
+    Optimized with timeout and token limits for faster responses.
     """
     global _gemini_llm
     if _gemini_llm is None:
@@ -402,9 +404,11 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             model=GEMINI_MODEL,
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
-            convert_system_message_to_human=True
+            convert_system_message_to_human=True,
+            max_output_tokens=500,  # Limit response size for faster generation
+            request_timeout=15,  # 15-second timeout to fail fast
         )
-        log.info("✅ Gemini LLM instance cached")
+        log.info("✅ Gemini LLM instance cached with timeout=15s, max_tokens=500")
     return _gemini_llm
 
 def get_openai() -> ChatOpenAI:
@@ -417,8 +421,14 @@ def get_openai() -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
     if _openai_llm is None:
-        _openai_llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
-        log.info("✅ OpenAI LLM instance cached")
+        _openai_llm = ChatOpenAI(
+            model=OPENAI_MODEL,
+            temperature=0,
+            openai_api_key=OPENAI_API_KEY,
+            max_tokens=500,  # Limit response size
+            request_timeout=15,  # 15-second timeout
+        )
+        log.info("✅ OpenAI LLM instance cached with timeout=15s, max_tokens=500")
     return _openai_llm
 
 # Backward compatibility aliases
@@ -914,15 +924,42 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.") -> str:
     system = (
         "You are EnerBot, an energy market analyst. "
-        "Write a short analytic summary using preview and statistics. "
-        "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
-        "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
+        "Write a concise summary using the data preview and statistics. "
+        "Focus on key numbers and trends. "
         f"{lang_instruction}"
     )
-    # Use selective domain knowledge to reduce tokens (30-40% savings)
-    domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
 
-    prompt = f"""
+    # Performance optimization: Use cached domain knowledge for simple queries
+    # Only use selective (slower) domain knowledge for complex analytical queries
+    is_analytical = detect_analysis_mode(user_query) == "analyst"
+    use_cached = not is_analytical  # Cache for simple queries
+
+    if use_cached:
+        log.info("⚡ Using cached domain knowledge for faster response")
+        domain_json = _DOMAIN_KNOWLEDGE_JSON  # Use pre-cached
+    else:
+        log.info("🔍 Using selective domain knowledge for analytical query")
+        domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
+
+    # Conditional prompt sizing: shorter for simple queries, full for analytical
+    if not is_analytical:
+        # Simple/short prompt for basic queries (50% smaller)
+        prompt = f"""
+User question:
+{user_query}
+
+Data:
+{data_preview}
+
+Statistics:
+{stats_hint}
+
+Provide a concise 2-3 sentence summary focusing on the key numbers and trends shown in the data.
+Include units (GEL/MWh or USD/MWh) when mentioning prices.
+"""
+    else:
+        # Full analytical prompt with all guidelines
+        prompt = f"""
 User question:
 {user_query}
 
