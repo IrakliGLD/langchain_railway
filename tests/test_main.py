@@ -51,10 +51,12 @@ sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore
 
 
 from main import (
+    BALANCING_SHARE_PIVOT_SQL,
     quick_stats,
     rows_to_preview,
     build_trade_share_cte,
     generate_share_summary,
+    fetch_balancing_share_panel,
 )  # noqa: E402
 
 
@@ -164,6 +166,71 @@ class TestTradeSharePivot:
         rewritten = build_trade_share_cte(original)
         assert "share_all_ppa" in rewritten
         assert "share_all_renewables" in rewritten
+
+
+class TestBalancingSharePanel:
+    """Ensure the deterministic balancing share panel helper returns expected structure."""
+
+    def test_fetch_balancing_share_panel_structure(self):
+        rows = [
+            (
+                pd.Timestamp("2024-06-01"),
+                "balancing_electricity",
+                0.1,
+                0.2,
+                0.3,
+                0.4,
+                0.05,
+                0.15,
+                0.25,
+                0.6,
+                0.7,
+                0.65,
+            )
+        ]
+        cols = [
+            "date",
+            "segment",
+            "share_import",
+            "share_deregulated_hydro",
+            "share_regulated_hpp",
+            "share_regulated_new_tpp",
+            "share_regulated_old_tpp",
+            "share_renewable_ppa",
+            "share_thermal_ppa",
+            "share_all_ppa",
+            "share_all_renewables",
+            "share_total_hpp",
+        ]
+
+        class FakeResult:
+            def __init__(self, data, headers):
+                self._data = data
+                self._headers = headers
+
+            def fetchall(self):
+                return self._data
+
+            def keys(self):
+                return self._headers
+
+        class FakeConn:
+            def __init__(self, data, headers):
+                self._data = data
+                self._headers = headers
+                self.last_sql = None
+
+            def execute(self, clause):
+                self.last_sql = str(clause).strip()
+                return FakeResult(self._data, self._headers)
+
+        conn = FakeConn(rows, cols)
+        df = fetch_balancing_share_panel(conn)
+
+        assert not df.empty
+        assert list(df.columns) == cols
+        assert conn.last_sql == BALANCING_SHARE_PIVOT_SQL
+        assert pytest.approx(df.iloc[0]["share_renewable_ppa"], rel=1e-6) == 0.15
 
 
 class TestShareSummaryOverride:

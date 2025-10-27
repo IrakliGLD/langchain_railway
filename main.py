@@ -158,35 +158,36 @@ SYNONYM_PATTERNS = [
 LIMIT_PATTERN = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
 
 
+BALANCING_SHARE_PIVOT_SQL = dedent(
+    """
+    SELECT
+        t.date,
+        'balancing_electricity'::text AS segment,
+        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
+        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
+        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
+        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_new_tpp,
+        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_old_tpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
+        SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_ppa,
+        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_renewables,
+        SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
+    FROM trade_derived_entities t
+    JOIN (
+        SELECT date, SUM(quantity) AS total_qty
+        FROM trade_derived_entities
+        WHERE segment = 'balancing_electricity'
+        GROUP BY date
+    ) total ON t.date = total.date
+    WHERE t.segment = 'balancing_electricity'
+    GROUP BY t.date, total.total_qty
+    """
+).strip()
+
+
 def build_trade_share_cte(original_sql: str) -> str:
     """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
-
-    pivot_query = dedent(
-        """
-        SELECT
-            t.date,
-            'balancing_electricity'::text AS segment,
-            SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
-            SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
-            SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
-            SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_new_tpp,
-            SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_old_tpp,
-            SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
-            SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
-            SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_ppa,
-            SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_renewables,
-            SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
-        FROM trade_derived_entities t
-        JOIN (
-            SELECT date, SUM(quantity) AS total_qty
-            FROM trade_derived_entities
-            WHERE segment = 'balancing_electricity'
-            GROUP BY date
-        ) total ON t.date = total.date
-        WHERE t.segment = 'balancing_electricity'
-        GROUP BY t.date, total.total_qty
-        """
-    ).strip()
 
     table_pattern = re.compile(r"\btrade_derived_entities\b", re.IGNORECASE)
     pivot_alias_sql = table_pattern.sub("tde", original_sql)
@@ -194,12 +195,21 @@ def build_trade_share_cte(original_sql: str) -> str:
     with_pattern = re.compile(r"^\s*WITH\b", re.IGNORECASE)
     if with_pattern.match(pivot_alias_sql):
         return with_pattern.sub(
-            f"WITH tde AS ({pivot_query}), ",
+            f"WITH tde AS ({BALANCING_SHARE_PIVOT_SQL}), ",
             pivot_alias_sql,
             count=1,
         )
 
-    return f"WITH tde AS ({pivot_query})\n{pivot_alias_sql}"
+    return f"WITH tde AS ({BALANCING_SHARE_PIVOT_SQL})\n{pivot_alias_sql}"
+
+
+def fetch_balancing_share_panel(conn) -> pd.DataFrame:
+    """Return a DataFrame with monthly balancing share ratios for each entity group."""
+
+    res = conn.execute(text(BALANCING_SHARE_PIVOT_SQL))
+    rows = res.fetchall()
+    cols = list(res.keys())
+    return pd.DataFrame(rows, columns=cols)
 
 
 MONTH_NAME_TO_NUMBER = {
@@ -1607,10 +1617,22 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
     # 4) Summarize and analyze
+    share_intent = str(plan.get("intent", "")).lower()
+    if df.empty and (share_intent in {"calculate_share", "share"} or "share" in q.query.lower()):
+        try:
+            log.warning("🔄 Share query returned 0 rows — recomputing with deterministic balancing share pivot.")
+            with ENGINE.connect() as conn:
+                fallback_df = fetch_balancing_share_panel(conn)
+            if not fallback_df.empty:
+                df = fallback_df
+                cols = list(fallback_df.columns)
+                rows = [tuple(r) for r in fallback_df.itertuples(index=False, name=None)]
+        except Exception as fallback_err:
+            log.warning(f"Share pivot fallback failed: {fallback_err}")
+
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
     share_summary_override = None
-    share_intent = str(plan.get("intent", "")).lower()
     if share_intent in {"calculate_share", "share"} or "share" in q.query.lower():
         try:
             share_summary_override = generate_share_summary(df, plan, q.query)
