@@ -158,8 +158,11 @@ SYNONYM_PATTERNS = [
 LIMIT_PATTERN = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
 
 
+BALANCING_SEGMENT_NORMALIZER = "lower(regexp_replace(segment, '[^a-zA-Z0-9]+', '_', 'g'))"
+
+
 BALANCING_SHARE_PIVOT_SQL = dedent(
-    """
+    f"""
     SELECT
         t.date,
         'balancing_electricity'::text AS segment,
@@ -177,10 +180,10 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     JOIN (
         SELECT date, SUM(quantity) AS total_qty
         FROM trade_derived_entities
-        WHERE segment = 'balancing_electricity'
+        WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
         GROUP BY date
     ) total ON t.date = total.date
-    WHERE t.segment = 'balancing_electricity'
+    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
     GROUP BY t.date, total.total_qty
     ORDER BY t.date
     """
@@ -232,6 +235,9 @@ def ensure_share_dataframe(
 
     fallback_df = fetch_balancing_share_panel(conn)
     if fallback_df.empty:
+        log.warning(
+            "Deterministic balancing share pivot returned 0 rows; check segment naming in trade_derived_entities."
+        )
         return df, False
 
     return fallback_df, True

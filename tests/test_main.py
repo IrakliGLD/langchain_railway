@@ -51,6 +51,7 @@ sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore
 
 
 from main import (
+    BALANCING_SEGMENT_NORMALIZER,
     BALANCING_SHARE_PIVOT_SQL,
     quick_stats,
     rows_to_preview,
@@ -233,6 +234,7 @@ class TestBalancingSharePanel:
         assert list(df.columns) == cols
         assert conn.last_sql == BALANCING_SHARE_PIVOT_SQL
         assert pytest.approx(df.iloc[0]["share_renewable_ppa"], rel=1e-6) == 0.15
+        assert BALANCING_SEGMENT_NORMALIZER in BALANCING_SHARE_PIVOT_SQL
 
 
 class TestEnsureShareDataFrame:
