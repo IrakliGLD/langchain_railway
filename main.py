@@ -182,6 +182,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     ) total ON t.date = total.date
     WHERE t.segment = 'balancing_electricity'
     GROUP BY t.date, total.total_qty
+    ORDER BY t.date
     """
 ).strip()
 
@@ -209,7 +210,31 @@ def fetch_balancing_share_panel(conn) -> pd.DataFrame:
     res = conn.execute(text(BALANCING_SHARE_PIVOT_SQL))
     rows = res.fetchall()
     cols = list(res.keys())
-    return pd.DataFrame(rows, columns=cols)
+    df = pd.DataFrame(rows, columns=[str(c) for c in cols])
+    return df
+
+
+def ensure_share_dataframe(
+    df: Optional[pd.DataFrame], conn
+) -> tuple[pd.DataFrame, bool]:
+    """Ensure we have a dataframe containing share_* columns for summarisation.
+
+    Returns the dataframe to use plus a flag indicating whether the deterministic
+    pivot fallback was executed.
+    """
+
+    if df is None:
+        df = pd.DataFrame()
+
+    has_share_cols = any(isinstance(c, str) and c.startswith("share_") for c in df.columns)
+    if not df.empty and has_share_cols:
+        return df, False
+
+    fallback_df = fetch_balancing_share_panel(conn)
+    if fallback_df.empty:
+        return df, False
+
+    return fallback_df, True
 
 
 BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
@@ -1693,24 +1718,29 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
     # 4) Summarize and analyze
     share_intent = str(plan.get("intent", "")).lower()
-    if df.empty and (share_intent in {"calculate_share", "share"} or "share" in q.query.lower()):
+    share_query_detected = share_intent in {"calculate_share", "share"} or "share" in q.query.lower()
+    share_df_for_summary = df
+    if share_query_detected:
         try:
-            log.warning("🔄 Share query returned 0 rows — recomputing with deterministic balancing share pivot.")
             with ENGINE.connect() as conn:
-                fallback_df = fetch_balancing_share_panel(conn)
-            if not fallback_df.empty:
-                df = fallback_df
-                cols = list(fallback_df.columns)
-                rows = [tuple(r) for r in fallback_df.itertuples(index=False, name=None)]
+                resolved_df, used_fallback = ensure_share_dataframe(df, conn)
+            if used_fallback:
+                log.warning("🔄 Share query lacked usable rows — using deterministic balancing share pivot.")
+                df = resolved_df
+                share_df_for_summary = resolved_df
+                cols = list(resolved_df.columns)
+                rows = [tuple(r) for r in resolved_df.itertuples(index=False, name=None)]
+            else:
+                share_df_for_summary = resolved_df
         except Exception as fallback_err:
-            log.warning(f"Share pivot fallback failed: {fallback_err}")
+            log.warning(f"Share pivot resolution failed: {fallback_err}")
 
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
     share_summary_override = None
-    if share_intent in {"calculate_share", "share"} or "share" in q.query.lower():
+    if share_query_detected:
         try:
-            share_summary_override = generate_share_summary(df, plan, q.query)
+            share_summary_override = generate_share_summary(share_df_for_summary, plan, q.query)
             if share_summary_override:
                 log.info("✅ Generated deterministic share summary override.")
         except Exception as share_err:
@@ -2016,31 +2046,88 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                     cur_xrate = _get_val(cur_row, ["xrate"])
                     prev_xrate = _get_val(prev_row, ["xrate"]) if not prev_row.empty else None
 
-                    # Extract share columns safely
+                    # Extract share columns safely; fall back to deterministic panel if missing
                     share_cols = [c for c in df.columns if c.startswith("share_")]
-                    cur_shares = {}
-                    prev_shares = {}
+                    cur_shares: dict[str, float] = {}
+                    prev_shares: dict[str, float] = {}
 
-                    for c in share_cols:
-                        if c in cur_row.columns and not cur_row[c].empty:
-                            val = cur_row[c].iloc[0]
-                            if pd.notna(val):
-                                try:
-                                    cur_shares[c] = float(val)
-                                except (ValueError, TypeError):
-                                    pass
+                    target_ts = None
+                    if not cur_row.empty and t_series_col in cur_row.columns:
+                        target_ts = pd.to_datetime(cur_row[t_series_col].iloc[0], errors="coerce")
 
-                    if not prev_row.empty:
-                        for c in share_cols:
-                            if c in prev_row.columns and not prev_row[c].empty:
-                                val = prev_row[c].iloc[0]
+                    def _populate_from_frame(frame: pd.DataFrame, dest: dict[str, float]) -> None:
+                        if frame is None or frame.empty:
+                            return
+                        for col in share_cols:
+                            if col in frame.columns and not frame[col].empty:
+                                val = frame[col].iloc[0]
                                 if pd.notna(val):
                                     try:
-                                        prev_shares[c] = float(val)
+                                        dest[col] = float(val)
                                     except (ValueError, TypeError):
-                                        pass
+                                        continue
 
-                    deltas = {k: round(cur_shares.get(k,0)-prev_shares.get(k,0),4) for k in cur_shares}
+                    if share_cols:
+                        _populate_from_frame(cur_row, cur_shares)
+                        if not prev_row.empty:
+                            _populate_from_frame(prev_row, prev_shares)
+                    else:
+                        share_panel = pd.DataFrame()
+                        try:
+                            with ENGINE.connect() as conn:
+                                share_panel = fetch_balancing_share_panel(conn)
+                        except Exception as share_err:
+                            log.warning(f"Share panel lookup failed: {share_err}")
+                        else:
+                            if not share_panel.empty:
+                                share_panel = share_panel.copy()
+                                if "segment" in share_panel.columns:
+                                    share_panel = share_panel[share_panel["segment"] == "balancing_electricity"]
+                                share_panel["date"] = pd.to_datetime(share_panel["date"], errors="coerce")
+                                share_panel = share_panel.dropna(subset=["date"]).sort_values("date")
+                                share_cols = [c for c in share_panel.columns if c.startswith("share_")]
+
+                                def _match_share_row(ts: Optional[pd.Timestamp]) -> pd.DataFrame:
+                                    if ts is None or pd.isna(ts):
+                                        return pd.DataFrame()
+                                    ts = pd.to_datetime(ts)
+                                    exact = share_panel[share_panel["date"] == ts]
+                                    if not exact.empty:
+                                        return exact.tail(1)
+                                    monthly = share_panel[share_panel["date"].dt.to_period("M") == ts.to_period("M")]
+                                    if not monthly.empty:
+                                        return monthly.tail(1)
+                                    earlier = share_panel[share_panel["date"] <= ts]
+                                    if not earlier.empty:
+                                        return earlier.tail(1)
+                                    return pd.DataFrame()
+
+                                share_cur = _match_share_row(target_ts)
+                                if share_cur.empty and not share_panel.empty:
+                                    share_cur = share_panel.tail(1)
+                                if not share_cur.empty:
+                                    for col in share_cols:
+                                        val = share_cur[col].iloc[0]
+                                        if pd.notna(val):
+                                            try:
+                                                cur_shares[col] = float(val)
+                                            except (ValueError, TypeError):
+                                                continue
+
+                                    prev_cutoff = share_cur["date"].iloc[0]
+                                    share_prev = share_panel[share_panel["date"] < prev_cutoff].tail(1)
+                                    if share_prev.empty and target_ts is not None:
+                                        share_prev = share_panel[share_panel["date"] < target_ts].tail(1)
+                                    if not share_prev.empty:
+                                        for col in share_cols:
+                                            val = share_prev[col].iloc[0]
+                                            if pd.notna(val):
+                                                try:
+                                                    prev_shares[col] = float(val)
+                                                except (ValueError, TypeError):
+                                                    continue
+
+                    deltas = {k: round(cur_shares.get(k, 0) - prev_shares.get(k, 0), 4) for k in cur_shares}
 
                     ctx["signals"] = {
                         "period": str(cur_row[t_series_col].iloc[0]) if not cur_row.empty else None,
@@ -2049,6 +2136,28 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                         "xrate": {"cur": cur_xrate, "prev": prev_xrate},
                         "share_deltas": deltas,
                     }
+
+                    if cur_shares:
+                        ctx["signals"]["share_snapshot"] = {
+                            k: round(v, 4) for k, v in cur_shares.items()
+                        }
+                    if prev_shares:
+                        ctx["signals"]["share_prev_snapshot"] = {
+                            k: round(v, 4) for k, v in prev_shares.items()
+                        }
+
+                    if cur_shares:
+                        sorted_mix = sorted(cur_shares.items(), key=lambda kv: kv[1], reverse=True)
+                        mix_parts = []
+                        for key, value in sorted_mix[:5]:
+                            label = BALANCING_SHARE_METADATA.get(key, {}).get(
+                                "label", key.replace("_", " ")
+                            )
+                            mix_parts.append(f"{label} {value * 100:.1f}%")
+                        if mix_parts:
+                            ctx["notes"].append(
+                                "Current balancing mix composition: " + ", ".join(mix_parts) + "."
+                            )
 
                     share_notes = build_share_shift_notes(cur_shares, prev_shares)
                     for note in share_notes:

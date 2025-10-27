@@ -58,6 +58,7 @@ from main import (
     generate_share_summary,
     fetch_balancing_share_panel,
     build_share_shift_notes,
+    ensure_share_dataframe,
 )  # noqa: E402
 
 
@@ -232,6 +233,66 @@ class TestBalancingSharePanel:
         assert list(df.columns) == cols
         assert conn.last_sql == BALANCING_SHARE_PIVOT_SQL
         assert pytest.approx(df.iloc[0]["share_renewable_ppa"], rel=1e-6) == 0.15
+
+
+class TestEnsureShareDataFrame:
+    """Exercise the share dataframe resolver for both fast-path and fallback."""
+
+    def test_returns_existing_dataframe_without_query(self):
+        df = pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-06-01")],
+                "share_import": [0.41],
+            }
+        )
+
+        class NoOpConn:
+            def execute(self, *_args, **_kwargs):
+                raise AssertionError("Fallback should not execute when share columns exist")
+
+        resolved, used_fallback = ensure_share_dataframe(df, NoOpConn())
+        assert resolved is df
+        assert used_fallback is False
+
+    def test_fetches_fallback_when_missing_shares(self):
+        rows = [
+            (
+                pd.Timestamp("2024-06-01"),
+                "balancing_electricity",
+                0.11,
+                0.22,
+            )
+        ]
+        cols = ["date", "segment", "share_import", "share_renewable_ppa"]
+
+        class FakeResult:
+            def __init__(self, data, headers):
+                self._data = data
+                self._headers = headers
+
+            def fetchall(self):
+                return self._data
+
+            def keys(self):
+                return self._headers
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, clause):
+                self.calls += 1
+                assert str(clause).strip() == BALANCING_SHARE_PIVOT_SQL
+                return FakeResult(rows, cols)
+
+        empty_df = pd.DataFrame()
+        conn = FakeConn()
+        resolved, used_fallback = ensure_share_dataframe(empty_df, conn)
+
+        assert used_fallback is True
+        assert conn.calls == 1
+        assert list(resolved.columns) == cols
+        assert pytest.approx(resolved.iloc[0]["share_renewable_ppa"], rel=1e-6) == 0.22
 
 
 class TestShareSummaryOverride:
