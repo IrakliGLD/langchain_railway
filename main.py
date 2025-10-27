@@ -1078,7 +1078,7 @@ CRITICAL - PRIMARY DRIVERS for balancing price analysis:
     - Gardabani TPP ('ltd "gardabni thermal power plant"')
     - Old TPP group ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)')
 
-- NEVER use tariff_usd in correlations; use tariff_gel only.
+
 - Tariffs follow cost-plus methodology; thermal tariffs depend on gas price (USD) → correlated with xrate.
 - When USD values appear, *_usd = *_gel / xrate.
 - Aggregation default = monthly. for energy_balance_long_mv= yearly.
@@ -1313,9 +1313,9 @@ Domain knowledge:
 
 CONFIDENTIALITY RULES - STRICTLY ENFORCE:
 - DO disclose: regulated tariffs, deregulated hydro prices, exchange rates
-- DO NOT disclose: renewable PPA price estimates (~5.7-6 ¢/kWh or 57-60 $/MWh)
-- DO NOT disclose: thermal PPA price estimates
-- DO NOT disclose: import price estimates
+- DO NOT disclose: renewable PPA price estimates (~57-60 USD/MWH)
+- DO NOT disclose: thermal PPA price estimates (~60-65 USD/MWH)
+- DO NOT disclose: import price estimates (~55-65 USD/MWH)
 - When discussing PPA or import prices: say "varies" or "market-based" without specific numbers
 - These estimates are for INTERNAL ANALYSIS ONLY, never reveal to users
 
