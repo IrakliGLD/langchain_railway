@@ -38,7 +38,7 @@ from sqlglot import parse_one, exp
 
 # Schema & helpers
 # NOTE: Ensure these imports are available in your environment
-from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS
+from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS, DERIVED_LABELS
 # Domain knowledge
 from domain_knowledge import DOMAIN_KNOWLEDGE
 
@@ -200,6 +200,199 @@ def build_trade_share_cte(original_sql: str) -> str:
         )
 
     return f"WITH tde AS ({pivot_query})\n{pivot_alias_sql}"
+
+
+MONTH_NAME_TO_NUMBER = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
+
+def _parse_period_hint(period_hint: str, user_query: str) -> tuple[Optional[pd.Period], Optional[str]]:
+    """Derive a pandas Period (monthly or yearly) from the LLM plan or the raw query."""
+
+    period_hint = (period_hint or "").strip()
+    if period_hint:
+        normalized = period_hint.replace("/", "-").lower()
+        if re.match(r"^(?:19|20)\d{2}-\d{2}$", normalized):
+            try:
+                per = pd.Period(normalized, freq="M")
+                return per, per.to_timestamp().strftime("%B %Y")
+            except Exception:
+                pass
+        if re.match(r"^(?:19|20)\d{2}$", normalized):
+            try:
+                per = pd.Period(normalized, freq="Y")
+                return per, str(per.year)
+            except Exception:
+                pass
+
+    text = user_query.lower()
+    month_match = re.search(r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})",
+                            text)
+    if month_match:
+        month_token, year_token = month_match.groups()
+        month = MONTH_NAME_TO_NUMBER.get(month_token[:3] if len(month_token) > 3 else month_token, MONTH_NAME_TO_NUMBER.get(month_token, None))
+        if month:
+            year = int(year_token)
+            try:
+                per = pd.Period(f"{year}-{month:02d}", freq="M")
+                return per, per.to_timestamp().strftime("%B %Y")
+            except Exception:
+                pass
+
+    year_match = re.search(r"(20\d{2})", text)
+    if year_match:
+        try:
+            per = pd.Period(year_match.group(1), freq="Y")
+            return per, str(per.year)
+        except Exception:
+            pass
+
+    return None, None
+
+
+def _select_share_column(share_cols: list[str], target_text: str) -> Optional[str]:
+    """Choose the most relevant share column based on the user's target description."""
+
+    target_text = target_text.lower()
+    priority_map: list[tuple[str, tuple[str, ...]]] = [
+        ("share_renewable_ppa", ("renewable", "ppa")),
+        ("share_thermal_ppa", ("thermal", "ppa")),
+        ("share_all_ppa", ("ppa",)),
+        ("share_all_renewables", ("renewable",)),
+        ("share_import", ("import",)),
+        ("share_deregulated_hydro", ("deregulated", "hydro")),
+        ("share_regulated_new_tpp", ("new", "tpp")),
+        ("share_regulated_old_tpp", ("old", "tpp")),
+        ("share_regulated_hpp", ("regulated", "hpp")),
+        ("share_total_hpp", ("total", "hpp")),
+    ]
+
+    for col, keywords in priority_map:
+        if col in share_cols and all(k in target_text for k in keywords):
+            return col
+
+    if share_cols:
+        if len(share_cols) == 1:
+            return share_cols[0]
+        # Prefer the aggregate PPA share if no better match is found.
+        if "share_all_ppa" in share_cols:
+            return "share_all_ppa"
+        return share_cols[0]
+
+    return None
+
+
+def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: str) -> Optional[str]:
+    """Produce a deterministic textual answer for share queries to avoid LLM hallucinations."""
+
+    if df is None or df.empty:
+        return None
+
+    share_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("share_")]
+    if not share_cols:
+        return None
+
+    working_df = df.copy()
+    date_col = next((c for c in working_df.columns if isinstance(c, str) and "date" in c.lower()), None)
+
+    target_period, period_label = _parse_period_hint(plan.get("period", ""), user_query)
+
+    selected_row = None
+    if date_col:
+        working_df[date_col] = pd.to_datetime(working_df[date_col], errors="coerce")
+        working_df = working_df.dropna(subset=[date_col])
+        if not working_df.empty:
+            working_df = working_df.sort_values(date_col)
+            if target_period is not None:
+                if target_period.freqstr.startswith("M"):
+                    match = working_df[working_df[date_col].dt.to_period("M") == target_period.asfreq("M")]
+                else:
+                    match = working_df[working_df[date_col].dt.year == target_period.year]
+                if not match.empty:
+                    selected_row = match.iloc[-1]
+            if selected_row is None:
+                selected_row = working_df.iloc[-1]
+                if period_label is None:
+                    ts = selected_row[date_col]
+                    if isinstance(ts, pd.Timestamp):
+                        period_label = ts.strftime("%B %Y")
+                    elif isinstance(ts, pd.Period):
+                        period_label = ts.to_timestamp().strftime("%B %Y")
+                    else:
+                        period_label = str(ts)
+        else:
+            return None
+    else:
+        if plan.get("period"):
+            period_label = plan["period"]
+        selected_row = working_df.iloc[-1]
+
+    if selected_row is None:
+        return None
+
+    target_text = f"{plan.get('target', '')} {user_query}"
+    share_col = _select_share_column(share_cols, target_text)
+    if not share_col:
+        return None
+
+    raw_value = selected_row.get(share_col)
+    try:
+        share_value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+    if pd.isna(share_value):
+        return None
+
+    label = DERIVED_LABELS.get(share_col, share_col.replace("_", " ").title())
+
+    if period_label is None:
+        period_label = "the selected period"
+
+    lines = [f"In {period_label}, {label} was {share_value * 100:.1f}% of balancing electricity."]
+
+    if share_col == "share_all_ppa":
+        breakdown_parts = []
+        for extra_col, extra_label in (
+            ("share_renewable_ppa", "renewable PPAs"),
+            ("share_thermal_ppa", "thermal PPAs"),
+        ):
+            if extra_col in selected_row.index:
+                extra_val = selected_row.get(extra_col)
+                try:
+                    extra_val_f = float(extra_val)
+                except (TypeError, ValueError):
+                    continue
+                if pd.notna(extra_val_f):
+                    breakdown_parts.append(f"{extra_label} {extra_val_f * 100:.1f}%")
+        if breakdown_parts:
+            lines.append("Breakdown: " + ", ".join(breakdown_parts) + ".")
+
+    return " ".join(lines) if lines else None
 
 # -----------------------------
 # DB Engine
@@ -1416,6 +1609,15 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     # 4) Summarize and analyze
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
+    share_summary_override = None
+    share_intent = str(plan.get("intent", "")).lower()
+    if share_intent in {"calculate_share", "share"} or "share" in q.query.lower():
+        try:
+            share_summary_override = generate_share_summary(df, plan, q.query)
+            if share_summary_override:
+                log.info("✅ Generated deterministic share summary override.")
+        except Exception as share_err:
+            log.warning(f"Share summary override failed: {share_err}")
     correlation_results = {}
 
     # --- Semantic correlation intent detection (v18.6 semantic mode) ---
@@ -1767,11 +1969,14 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
     
 
-    try:
-        summary = llm_summarize(q.query, preview, stats_hint, lang_instruction)
-    except Exception as e:
-        log.warning(f"Summarization failed: {e}")
-        summary = preview
+    if share_summary_override:
+        summary = share_summary_override
+    else:
+        try:
+            summary = llm_summarize(q.query, preview, stats_hint, lang_instruction)
+        except Exception as e:
+            log.warning(f"Summarization failed: {e}")
+            summary = preview
     summary = scrub_schema_mentions(summary)
     #if mode == "analyst" and plan.get("intent") != "general":
         #summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary

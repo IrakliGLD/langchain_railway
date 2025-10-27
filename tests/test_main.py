@@ -50,7 +50,12 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore[assignment]
 
 
-from main import quick_stats, rows_to_preview, build_trade_share_cte  # noqa: E402
+from main import (
+    quick_stats,
+    rows_to_preview,
+    build_trade_share_cte,
+    generate_share_summary,
+)  # noqa: E402
 
 
 class TestQuickStats:
@@ -159,6 +164,57 @@ class TestTradeSharePivot:
         rewritten = build_trade_share_cte(original)
         assert "share_all_ppa" in rewritten
         assert "share_all_renewables" in rewritten
+
+
+class TestShareSummaryOverride:
+    """Validate deterministic share summaries for direct share questions."""
+
+    def test_all_ppa_share_with_breakdown(self):
+        df = pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-06-01")],
+                "share_all_ppa": [0.32],
+                "share_renewable_ppa": [0.2],
+                "share_thermal_ppa": [0.12],
+            }
+        )
+        plan = {
+            "intent": "calculate_share",
+            "target": "share of PPA in balancing electricity",
+            "period": "2024-06",
+        }
+        summary = generate_share_summary(
+            df,
+            plan,
+            "What was the share of PPA in balancing electricity in June 2024?",
+        )
+        assert summary is not None
+        assert "June 2024" in summary
+        assert "32.0%" in summary
+        assert "renewable PPAs 20.0%" in summary
+        assert "thermal PPAs 12.0%" in summary
+
+    def test_specific_share_selection(self):
+        df = pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-06-01")],
+                "share_import": [0.41],
+                "share_all_ppa": [0.33],
+            }
+        )
+        plan = {
+            "intent": "calculate_share",
+            "target": "share of import in balancing electricity",
+            "period": "2024-06",
+        }
+        summary = generate_share_summary(
+            df,
+            plan,
+            "What share did import have in balancing electricity during June 2024?",
+        )
+        assert summary is not None
+        assert "41.0%" in summary
+        assert "Import" in summary or "Imports" in summary
 
 
 if __name__ == "__main__":
