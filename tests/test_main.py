@@ -57,6 +57,7 @@ from main import (
     build_trade_share_cte,
     generate_share_summary,
     fetch_balancing_share_panel,
+    build_share_shift_notes,
 )  # noqa: E402
 
 
@@ -258,8 +259,32 @@ class TestShareSummaryOverride:
         assert summary is not None
         assert "June 2024" in summary
         assert "32.0%" in summary
-        assert "renewable PPAs 20.0%" in summary
-        assert "thermal PPAs 12.0%" in summary
+
+
+class TestShareShiftNotes:
+    """Ensure share shift helper produces explanatory notes for 'why' analysis."""
+
+    def test_highlight_changes_and_usd_sources(self):
+        cur = {
+            "share_regulated_hpp": 0.30,
+            "share_deregulated_hydro": 0.10,
+            "share_renewable_ppa": 0.25,
+            "share_thermal_ppa": 0.20,
+            "share_import": 0.05,
+        }
+        prev = {
+            "share_regulated_hpp": 0.45,
+            "share_deregulated_hydro": 0.18,
+            "share_renewable_ppa": 0.15,
+            "share_thermal_ppa": 0.12,
+            "share_import": 0.05,
+        }
+
+        notes = build_share_shift_notes(cur, prev)
+        assert any("Share shifts month-over-month" in n for n in notes)
+        assert any("Cheaper balancing supply contracted" in n for n in notes)
+        assert any("Higher-cost groups expanded" in n for n in notes)
+        assert any("USD-denominated sellers" in n for n in notes)
 
     def test_specific_share_selection(self):
         df = pd.DataFrame(

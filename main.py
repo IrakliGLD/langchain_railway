@@ -212,6 +212,81 @@ def fetch_balancing_share_panel(conn) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
+    "share_regulated_hpp": {"label": "regulated HPP", "cost": "cheap", "usd_linked": False},
+    "share_deregulated_hydro": {"label": "deregulated hydro", "cost": "cheap", "usd_linked": False},
+    "share_total_hpp": {"label": "total HPP", "cost": "cheap", "usd_linked": False},
+    "share_import": {"label": "imports", "cost": "expensive", "usd_linked": True},
+    "share_regulated_new_tpp": {"label": "regulated new TPP", "cost": "expensive", "usd_linked": True},
+    "share_regulated_old_tpp": {"label": "regulated old TPP", "cost": "expensive", "usd_linked": True},
+    "share_renewable_ppa": {"label": "renewable PPAs", "cost": "expensive", "usd_linked": True},
+    "share_thermal_ppa": {"label": "thermal PPAs", "cost": "expensive", "usd_linked": True},
+    "share_all_ppa": {"label": "all PPAs", "cost": "expensive", "usd_linked": True},
+    "share_all_renewables": {"label": "all renewables", "cost": "mixed", "usd_linked": True},
+}
+
+
+def build_share_shift_notes(
+    cur_shares: dict[str, float],
+    prev_shares: dict[str, float],
+) -> list[str]:
+    """Generate textual notes describing month-over-month share changes."""
+
+    if not cur_shares:
+        return []
+
+    highlights: list[str] = []
+    cheap_losses: list[str] = []
+    expensive_gains: list[str] = []
+    usd_gains: list[str] = []
+
+    for key, meta in BALANCING_SHARE_METADATA.items():
+        if key not in cur_shares or key not in prev_shares:
+            continue
+        cur_val = cur_shares[key]
+        prev_val = prev_shares.get(key)
+        if prev_val is None:
+            continue
+        delta = cur_val - prev_val
+        if abs(delta) < 0.001:
+            continue
+
+        direction = "rose" if delta > 0 else "fell"
+        highlights.append(
+            f"{meta['label']} {direction} by {abs(delta) * 100:.1f} pp to {cur_val * 100:.1f}%"
+        )
+
+        if meta.get("cost") == "cheap" and delta < 0:
+            cheap_losses.append(f"{meta['label']} ↓{abs(delta) * 100:.1f} pp")
+        if meta.get("cost") == "expensive" and delta > 0:
+            expensive_gains.append(f"{meta['label']} ↑{delta * 100:.1f} pp")
+        if meta.get("usd_linked") and delta > 0:
+            usd_gains.append(meta["label"])
+
+    notes: list[str] = []
+    if highlights:
+        notes.append("Share shifts month-over-month: " + "; ".join(highlights) + ".")
+    if cheap_losses:
+        notes.append(
+            "Cheaper balancing supply contracted: " + ", ".join(cheap_losses) + "."
+        )
+    if expensive_gains:
+        notes.append(
+            "Higher-cost groups expanded their weight: "
+            + ", ".join(expensive_gains)
+            + "."
+        )
+    if usd_gains:
+        uniq_sources = sorted(set(usd_gains))
+        notes.append(
+            "USD-denominated sellers gained share ("
+            + ", ".join(uniq_sources)
+            + "), amplifying GEL price pressure."
+        )
+
+    return notes
+
+
 MONTH_NAME_TO_NUMBER = {
     "january": 1,
     "jan": 1,
@@ -1207,7 +1282,6 @@ Domain knowledge:
 
   2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
      - Natural gas for thermal generation is priced in USD
-     - PPA are priced in USD
      - Imports are priced in USD
      - When GEL depreciates (xrate increases), GEL-denominated prices rise
      - Always mention xrate effect when discussing GEL price movements once composition has been covered
@@ -1973,8 +2047,12 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                         "p_bal_gel": {"cur": cur_gel, "prev": prev_gel},
                         "p_bal_usd": {"cur": cur_usd, "prev": prev_usd},
                         "xrate": {"cur": cur_xrate, "prev": prev_xrate},
-                        "share_deltas": deltas
+                        "share_deltas": deltas,
                     }
+
+                    share_notes = build_share_shift_notes(cur_shares, prev_shares)
+                    for note in share_notes:
+                        ctx["notes"].append(note)
 
             dk = DOMAIN_KNOWLEDGE
             ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")
