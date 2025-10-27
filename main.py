@@ -8,6 +8,7 @@ import time
 import logging
 import urllib.parse
 import uuid
+from textwrap import dedent
 from contextvars import ContextVar
 from typing import Optional, Dict, Any, List, Tuple
 from difflib import get_close_matches
@@ -37,7 +38,7 @@ from sqlglot import parse_one, exp
 
 # Schema & helpers
 # NOTE: Ensure these imports are available in your environment
-from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS
+from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS, DERIVED_LABELS
 # Domain knowledge
 from domain_knowledge import DOMAIN_KNOWLEDGE
 
@@ -156,6 +157,353 @@ SYNONYM_PATTERNS = [
 # Pre-compiled regex for LIMIT detection
 LIMIT_PATTERN = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
 
+
+BALANCING_SHARE_PIVOT_SQL = dedent(
+    """
+    SELECT
+        t.date,
+        'balancing_electricity'::text AS segment,
+        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
+        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
+        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
+        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_new_tpp,
+        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_old_tpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
+        SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_ppa,
+        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_renewables,
+        SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
+    FROM trade_derived_entities t
+    JOIN (
+        SELECT date, SUM(quantity) AS total_qty
+        FROM trade_derived_entities
+        WHERE segment = 'balancing_electricity'
+        GROUP BY date
+    ) total ON t.date = total.date
+    WHERE t.segment = 'balancing_electricity'
+    GROUP BY t.date, total.total_qty
+    ORDER BY t.date
+    """
+).strip()
+
+
+def build_trade_share_cte(original_sql: str) -> str:
+    """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
+
+    table_pattern = re.compile(r"\btrade_derived_entities\b", re.IGNORECASE)
+    pivot_alias_sql = table_pattern.sub("tde", original_sql)
+
+    with_pattern = re.compile(r"^\s*WITH\b", re.IGNORECASE)
+    if with_pattern.match(pivot_alias_sql):
+        return with_pattern.sub(
+            f"WITH tde AS ({BALANCING_SHARE_PIVOT_SQL}), ",
+            pivot_alias_sql,
+            count=1,
+        )
+
+    return f"WITH tde AS ({BALANCING_SHARE_PIVOT_SQL})\n{pivot_alias_sql}"
+
+
+def fetch_balancing_share_panel(conn) -> pd.DataFrame:
+    """Return a DataFrame with monthly balancing share ratios for each entity group."""
+
+    res = conn.execute(text(BALANCING_SHARE_PIVOT_SQL))
+    rows = res.fetchall()
+    cols = list(res.keys())
+    df = pd.DataFrame(rows, columns=[str(c) for c in cols])
+    return df
+
+
+def ensure_share_dataframe(
+    df: Optional[pd.DataFrame], conn
+) -> tuple[pd.DataFrame, bool]:
+    """Ensure we have a dataframe containing share_* columns for summarisation.
+
+    Returns the dataframe to use plus a flag indicating whether the deterministic
+    pivot fallback was executed.
+    """
+
+    if df is None:
+        df = pd.DataFrame()
+
+    has_share_cols = any(isinstance(c, str) and c.startswith("share_") for c in df.columns)
+    if not df.empty and has_share_cols:
+        return df, False
+
+    fallback_df = fetch_balancing_share_panel(conn)
+    if fallback_df.empty:
+        return df, False
+
+    return fallback_df, True
+
+
+BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
+    "share_regulated_hpp": {"label": "regulated HPP", "cost": "cheap", "usd_linked": False},
+    "share_deregulated_hydro": {"label": "deregulated hydro", "cost": "cheap", "usd_linked": False},
+    "share_total_hpp": {"label": "total HPP", "cost": "cheap", "usd_linked": False},
+    "share_import": {"label": "imports", "cost": "expensive", "usd_linked": True},
+    "share_regulated_new_tpp": {"label": "regulated new TPP", "cost": "expensive", "usd_linked": True},
+    "share_regulated_old_tpp": {"label": "regulated old TPP", "cost": "expensive", "usd_linked": True},
+    "share_renewable_ppa": {"label": "renewable PPAs", "cost": "expensive", "usd_linked": True},
+    "share_thermal_ppa": {"label": "thermal PPAs", "cost": "expensive", "usd_linked": True},
+    "share_all_ppa": {"label": "all PPAs", "cost": "expensive", "usd_linked": True},
+    "share_all_renewables": {"label": "all renewables", "cost": "mixed", "usd_linked": True},
+}
+
+
+def build_share_shift_notes(
+    cur_shares: dict[str, float],
+    prev_shares: dict[str, float],
+) -> list[str]:
+    """Generate textual notes describing month-over-month share changes."""
+
+    if not cur_shares:
+        return []
+
+    highlights: list[str] = []
+    cheap_losses: list[str] = []
+    expensive_gains: list[str] = []
+    usd_gains: list[str] = []
+
+    for key, meta in BALANCING_SHARE_METADATA.items():
+        if key not in cur_shares or key not in prev_shares:
+            continue
+        cur_val = cur_shares[key]
+        prev_val = prev_shares.get(key)
+        if prev_val is None:
+            continue
+        delta = cur_val - prev_val
+        if abs(delta) < 0.001:
+            continue
+
+        direction = "rose" if delta > 0 else "fell"
+        highlights.append(
+            f"{meta['label']} {direction} by {abs(delta) * 100:.1f} pp to {cur_val * 100:.1f}%"
+        )
+
+        if meta.get("cost") == "cheap" and delta < 0:
+            cheap_losses.append(f"{meta['label']} ↓{abs(delta) * 100:.1f} pp")
+        if meta.get("cost") == "expensive" and delta > 0:
+            expensive_gains.append(f"{meta['label']} ↑{delta * 100:.1f} pp")
+        if meta.get("usd_linked") and delta > 0:
+            usd_gains.append(meta["label"])
+
+    notes: list[str] = []
+    if highlights:
+        notes.append("Share shifts month-over-month: " + "; ".join(highlights) + ".")
+    if cheap_losses:
+        notes.append(
+            "Cheaper balancing supply contracted: " + ", ".join(cheap_losses) + "."
+        )
+    if expensive_gains:
+        notes.append(
+            "Higher-cost groups expanded their weight: "
+            + ", ".join(expensive_gains)
+            + "."
+        )
+    if usd_gains:
+        uniq_sources = sorted(set(usd_gains))
+        notes.append(
+            "USD-denominated sellers gained share ("
+            + ", ".join(uniq_sources)
+            + "), amplifying GEL price pressure."
+        )
+
+    return notes
+
+
+MONTH_NAME_TO_NUMBER = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
+
+def _parse_period_hint(period_hint: str, user_query: str) -> tuple[Optional[pd.Period], Optional[str]]:
+    """Derive a pandas Period (monthly or yearly) from the LLM plan or the raw query."""
+
+    period_hint = (period_hint or "").strip()
+    if period_hint:
+        normalized = period_hint.replace("/", "-").lower()
+        if re.match(r"^(?:19|20)\d{2}-\d{2}$", normalized):
+            try:
+                per = pd.Period(normalized, freq="M")
+                return per, per.to_timestamp().strftime("%B %Y")
+            except Exception:
+                pass
+        if re.match(r"^(?:19|20)\d{2}$", normalized):
+            try:
+                per = pd.Period(normalized, freq="Y")
+                return per, str(per.year)
+            except Exception:
+                pass
+
+    text = user_query.lower()
+    month_match = re.search(r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})",
+                            text)
+    if month_match:
+        month_token, year_token = month_match.groups()
+        month = MONTH_NAME_TO_NUMBER.get(month_token[:3] if len(month_token) > 3 else month_token, MONTH_NAME_TO_NUMBER.get(month_token, None))
+        if month:
+            year = int(year_token)
+            try:
+                per = pd.Period(f"{year}-{month:02d}", freq="M")
+                return per, per.to_timestamp().strftime("%B %Y")
+            except Exception:
+                pass
+
+    year_match = re.search(r"(20\d{2})", text)
+    if year_match:
+        try:
+            per = pd.Period(year_match.group(1), freq="Y")
+            return per, str(per.year)
+        except Exception:
+            pass
+
+    return None, None
+
+
+def _select_share_column(share_cols: list[str], target_text: str) -> Optional[str]:
+    """Choose the most relevant share column based on the user's target description."""
+
+    target_text = target_text.lower()
+    priority_map: list[tuple[str, tuple[str, ...]]] = [
+        ("share_renewable_ppa", ("renewable", "ppa")),
+        ("share_thermal_ppa", ("thermal", "ppa")),
+        ("share_all_ppa", ("ppa",)),
+        ("share_all_renewables", ("renewable",)),
+        ("share_import", ("import",)),
+        ("share_deregulated_hydro", ("deregulated", "hydro")),
+        ("share_regulated_new_tpp", ("new", "tpp")),
+        ("share_regulated_old_tpp", ("old", "tpp")),
+        ("share_regulated_hpp", ("regulated", "hpp")),
+        ("share_total_hpp", ("total", "hpp")),
+    ]
+
+    for col, keywords in priority_map:
+        if col in share_cols and all(k in target_text for k in keywords):
+            return col
+
+    if share_cols:
+        if len(share_cols) == 1:
+            return share_cols[0]
+        # Prefer the aggregate PPA share if no better match is found.
+        if "share_all_ppa" in share_cols:
+            return "share_all_ppa"
+        return share_cols[0]
+
+    return None
+
+
+def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: str) -> Optional[str]:
+    """Produce a deterministic textual answer for share queries to avoid LLM hallucinations."""
+
+    if df is None or df.empty:
+        return None
+
+    share_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("share_")]
+    if not share_cols:
+        return None
+
+    working_df = df.copy()
+    date_col = next((c for c in working_df.columns if isinstance(c, str) and "date" in c.lower()), None)
+
+    target_period, period_label = _parse_period_hint(plan.get("period", ""), user_query)
+
+    selected_row = None
+    if date_col:
+        working_df[date_col] = pd.to_datetime(working_df[date_col], errors="coerce")
+        working_df = working_df.dropna(subset=[date_col])
+        if not working_df.empty:
+            working_df = working_df.sort_values(date_col)
+            if target_period is not None:
+                if target_period.freqstr.startswith("M"):
+                    match = working_df[working_df[date_col].dt.to_period("M") == target_period.asfreq("M")]
+                else:
+                    match = working_df[working_df[date_col].dt.year == target_period.year]
+                if not match.empty:
+                    selected_row = match.iloc[-1]
+            if selected_row is None:
+                selected_row = working_df.iloc[-1]
+                if period_label is None:
+                    ts = selected_row[date_col]
+                    if isinstance(ts, pd.Timestamp):
+                        period_label = ts.strftime("%B %Y")
+                    elif isinstance(ts, pd.Period):
+                        period_label = ts.to_timestamp().strftime("%B %Y")
+                    else:
+                        period_label = str(ts)
+        else:
+            return None
+    else:
+        if plan.get("period"):
+            period_label = plan["period"]
+        selected_row = working_df.iloc[-1]
+
+    if selected_row is None:
+        return None
+
+    target_text = f"{plan.get('target', '')} {user_query}"
+    share_col = _select_share_column(share_cols, target_text)
+    if not share_col:
+        return None
+
+    raw_value = selected_row.get(share_col)
+    try:
+        share_value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+    if pd.isna(share_value):
+        return None
+
+    label = DERIVED_LABELS.get(share_col, share_col.replace("_", " ").title())
+
+    if period_label is None:
+        period_label = "the selected period"
+
+    lines = [f"In {period_label}, {label} was {share_value * 100:.1f}% of balancing electricity."]
+
+    if share_col == "share_all_ppa":
+        breakdown_parts = []
+        for extra_col, extra_label in (
+            ("share_renewable_ppa", "renewable PPAs"),
+            ("share_thermal_ppa", "thermal PPAs"),
+        ):
+            if extra_col in selected_row.index:
+                extra_val = selected_row.get(extra_col)
+                try:
+                    extra_val_f = float(extra_val)
+                except (TypeError, ValueError):
+                    continue
+                if pd.notna(extra_val_f):
+                    breakdown_parts.append(f"{extra_label} {extra_val_f * 100:.1f}%")
+        if breakdown_parts:
+            lines.append("Breakdown: " + ", ".join(breakdown_parts) + ".")
+
+    return " ".join(lines) if lines else None
+
 # -----------------------------
 # DB Engine
 # -----------------------------
@@ -240,7 +588,10 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
         SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
-        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa
+        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
+        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
       WHERE t.segment = 'balancing_electricity'
       GROUP BY t.date
@@ -261,7 +612,12 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
       (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
       (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
       (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp,
+      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) AS share_regulated_new_tpp,
+      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
       (s.qty_ren_ppa / NULLIF(s.total_qty,0)) AS share_renewable_ppa,
+      (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
+      ((s.qty_ren_ppa + s.qty_thermal_ppa) / NULLIF(s.total_qty,0)) AS share_all_ppa,
+      ((s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa) / NULLIF(s.total_qty,0)) AS share_all_renewables,
       tr.enguri_tariff_gel,
       tr.gardabani_tpp_tariff_gel,
       tr.grouped_old_tpp_tariff_gel
@@ -935,20 +1291,25 @@ Statistics:
 Domain knowledge:
 {domain_json}
 
-CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
+  CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
-PRIMARY DRIVERS (in order of importance):
-1. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price
-   - Natural gas for thermal generation is priced in USD
-   - Imports are priced in USD
-   - When GEL depreciates (xrate increases), GEL-denominated prices rise
-   - Always mention xrate effect when discussing GEL price movements
+  FIRST STEP FOR EVERY BALANCING PRICE EXPLANATION:
+  - Inspect share_* columns (entity composition) before discussing anything else.
+  - Identify which entities increased or decreased their share because each entity sells at a different price level in the codebase.
+  - Explain how those share shifts mechanically push the weighted-average balancing price up or down.
 
-2. Composition (shares of entities selling on balancing segment) - CRITICAL for both GEL and USD prices
-   - Higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices
-   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices
-   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant
-   - Always explain which entities are selling more/less when analyzing price changes
+  PRIMARY DRIVERS (in order of importance):
+  1. Composition (shares of entities selling on balancing segment)
+     - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices.
+     - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices.
+     - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant.
+     - Always explain which entities are selling more/less when analyzing price changes.
+
+  2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
+     - Natural gas for thermal generation is priced in USD
+     - Imports are priced in USD
+     - When GEL depreciates (xrate increases), GEL-denominated prices rise
+     - Always mention xrate effect when discussing GEL price movements once composition has been covered
 
 CONFIDENTIALITY RULES - STRICTLY ENFORCE:
 - DO disclose: regulated tariffs, deregulated hydro prices, exchange rates
@@ -1316,33 +1677,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
             log.info("CRITICAL: Using segment='balancing_electricity' for share calculation")
-            pivot_sql = """
-            WITH totals AS (
-                SELECT date, SUM(quantity) AS total_qty
-                FROM trade_derived_entities
-                WHERE segment = 'balancing_electricity'
-                GROUP BY date
-            )
-            SELECT
-                t.date,
-                SUM(CASE WHEN t.entity = 'import' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_import,
-                SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
-                SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
-                SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
-                SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
-                SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_total_hpp
-            FROM trade_derived_entities t
-            LEFT JOIN totals total ON t.date = total.date
-            WHERE t.segment = 'balancing_electricity'
-            GROUP BY t.date, total.total_qty
-            """
-            # Replace direct reference with pivoted subquery
-            safe_sql_final = re.sub(
-                r"\btrade_derived_entities\b",
-                f"({pivot_sql}) AS tde",
-                safe_sql_final,
-                flags=re.IGNORECASE
-            )
+            safe_sql_final = build_trade_share_cte(safe_sql_final)
             with ENGINE.connect() as conn:
                 res = conn.execute(text(safe_sql_final))
                 rows = res.fetchall()
@@ -1382,8 +1717,34 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
     # 4) Summarize and analyze
+    share_intent = str(plan.get("intent", "")).lower()
+    share_query_detected = share_intent in {"calculate_share", "share"} or "share" in q.query.lower()
+    share_df_for_summary = df
+    if share_query_detected:
+        try:
+            with ENGINE.connect() as conn:
+                resolved_df, used_fallback = ensure_share_dataframe(df, conn)
+            if used_fallback:
+                log.warning("🔄 Share query lacked usable rows — using deterministic balancing share pivot.")
+                df = resolved_df
+                share_df_for_summary = resolved_df
+                cols = list(resolved_df.columns)
+                rows = [tuple(r) for r in resolved_df.itertuples(index=False, name=None)]
+            else:
+                share_df_for_summary = resolved_df
+        except Exception as fallback_err:
+            log.warning(f"Share pivot resolution failed: {fallback_err}")
+
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
+    share_summary_override = None
+    if share_query_detected:
+        try:
+            share_summary_override = generate_share_summary(share_df_for_summary, plan, q.query)
+            if share_summary_override:
+                log.info("✅ Generated deterministic share summary override.")
+        except Exception as share_err:
+            log.warning(f"Share summary override failed: {share_err}")
     correlation_results = {}
 
     # --- Semantic correlation intent detection (v18.6 semantic mode) ---
@@ -1685,39 +2046,122 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                     cur_xrate = _get_val(cur_row, ["xrate"])
                     prev_xrate = _get_val(prev_row, ["xrate"]) if not prev_row.empty else None
 
-                    # Extract share columns safely
+                    # Extract share columns safely; fall back to deterministic panel if missing
                     share_cols = [c for c in df.columns if c.startswith("share_")]
-                    cur_shares = {}
-                    prev_shares = {}
+                    cur_shares: dict[str, float] = {}
+                    prev_shares: dict[str, float] = {}
 
-                    for c in share_cols:
-                        if c in cur_row.columns and not cur_row[c].empty:
-                            val = cur_row[c].iloc[0]
-                            if pd.notna(val):
-                                try:
-                                    cur_shares[c] = float(val)
-                                except (ValueError, TypeError):
-                                    pass
+                    target_ts = None
+                    if not cur_row.empty and t_series_col in cur_row.columns:
+                        target_ts = pd.to_datetime(cur_row[t_series_col].iloc[0], errors="coerce")
 
-                    if not prev_row.empty:
-                        for c in share_cols:
-                            if c in prev_row.columns and not prev_row[c].empty:
-                                val = prev_row[c].iloc[0]
+                    def _populate_from_frame(frame: pd.DataFrame, dest: dict[str, float]) -> None:
+                        if frame is None or frame.empty:
+                            return
+                        for col in share_cols:
+                            if col in frame.columns and not frame[col].empty:
+                                val = frame[col].iloc[0]
                                 if pd.notna(val):
                                     try:
-                                        prev_shares[c] = float(val)
+                                        dest[col] = float(val)
                                     except (ValueError, TypeError):
-                                        pass
+                                        continue
 
-                    deltas = {k: round(cur_shares.get(k,0)-prev_shares.get(k,0),4) for k in cur_shares}
+                    if share_cols:
+                        _populate_from_frame(cur_row, cur_shares)
+                        if not prev_row.empty:
+                            _populate_from_frame(prev_row, prev_shares)
+                    else:
+                        share_panel = pd.DataFrame()
+                        try:
+                            with ENGINE.connect() as conn:
+                                share_panel = fetch_balancing_share_panel(conn)
+                        except Exception as share_err:
+                            log.warning(f"Share panel lookup failed: {share_err}")
+                        else:
+                            if not share_panel.empty:
+                                share_panel = share_panel.copy()
+                                if "segment" in share_panel.columns:
+                                    share_panel = share_panel[share_panel["segment"] == "balancing_electricity"]
+                                share_panel["date"] = pd.to_datetime(share_panel["date"], errors="coerce")
+                                share_panel = share_panel.dropna(subset=["date"]).sort_values("date")
+                                share_cols = [c for c in share_panel.columns if c.startswith("share_")]
+
+                                def _match_share_row(ts: Optional[pd.Timestamp]) -> pd.DataFrame:
+                                    if ts is None or pd.isna(ts):
+                                        return pd.DataFrame()
+                                    ts = pd.to_datetime(ts)
+                                    exact = share_panel[share_panel["date"] == ts]
+                                    if not exact.empty:
+                                        return exact.tail(1)
+                                    monthly = share_panel[share_panel["date"].dt.to_period("M") == ts.to_period("M")]
+                                    if not monthly.empty:
+                                        return monthly.tail(1)
+                                    earlier = share_panel[share_panel["date"] <= ts]
+                                    if not earlier.empty:
+                                        return earlier.tail(1)
+                                    return pd.DataFrame()
+
+                                share_cur = _match_share_row(target_ts)
+                                if share_cur.empty and not share_panel.empty:
+                                    share_cur = share_panel.tail(1)
+                                if not share_cur.empty:
+                                    for col in share_cols:
+                                        val = share_cur[col].iloc[0]
+                                        if pd.notna(val):
+                                            try:
+                                                cur_shares[col] = float(val)
+                                            except (ValueError, TypeError):
+                                                continue
+
+                                    prev_cutoff = share_cur["date"].iloc[0]
+                                    share_prev = share_panel[share_panel["date"] < prev_cutoff].tail(1)
+                                    if share_prev.empty and target_ts is not None:
+                                        share_prev = share_panel[share_panel["date"] < target_ts].tail(1)
+                                    if not share_prev.empty:
+                                        for col in share_cols:
+                                            val = share_prev[col].iloc[0]
+                                            if pd.notna(val):
+                                                try:
+                                                    prev_shares[col] = float(val)
+                                                except (ValueError, TypeError):
+                                                    continue
+
+                    deltas = {k: round(cur_shares.get(k, 0) - prev_shares.get(k, 0), 4) for k in cur_shares}
 
                     ctx["signals"] = {
                         "period": str(cur_row[t_series_col].iloc[0]) if not cur_row.empty else None,
                         "p_bal_gel": {"cur": cur_gel, "prev": prev_gel},
                         "p_bal_usd": {"cur": cur_usd, "prev": prev_usd},
                         "xrate": {"cur": cur_xrate, "prev": prev_xrate},
-                        "share_deltas": deltas
+                        "share_deltas": deltas,
                     }
+
+                    if cur_shares:
+                        ctx["signals"]["share_snapshot"] = {
+                            k: round(v, 4) for k, v in cur_shares.items()
+                        }
+                    if prev_shares:
+                        ctx["signals"]["share_prev_snapshot"] = {
+                            k: round(v, 4) for k, v in prev_shares.items()
+                        }
+
+                    if cur_shares:
+                        sorted_mix = sorted(cur_shares.items(), key=lambda kv: kv[1], reverse=True)
+                        mix_parts = []
+                        for key, value in sorted_mix[:5]:
+                            label = BALANCING_SHARE_METADATA.get(key, {}).get(
+                                "label", key.replace("_", " ")
+                            )
+                            mix_parts.append(f"{label} {value * 100:.1f}%")
+                        if mix_parts:
+                            ctx["notes"].append(
+                                "Current balancing mix composition: " + ", ".join(mix_parts) + "."
+                            )
+
+                    share_notes = build_share_shift_notes(cur_shares, prev_shares)
+                    for note in share_notes:
+                        ctx["notes"].append(note)
 
             dk = DOMAIN_KNOWLEDGE
             ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")
@@ -1735,11 +2179,14 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
     
 
-    try:
-        summary = llm_summarize(q.query, preview, stats_hint, lang_instruction)
-    except Exception as e:
-        log.warning(f"Summarization failed: {e}")
-        summary = preview
+    if share_summary_override:
+        summary = share_summary_override
+    else:
+        try:
+            summary = llm_summarize(q.query, preview, stats_hint, lang_instruction)
+        except Exception as e:
+            log.warning(f"Summarization failed: {e}")
+            summary = preview
     summary = scrub_schema_mentions(summary)
     #if mode == "analyst" and plan.get("intent") != "general":
         #summary = f"**Analysis type: {plan.get('intent')}**\n\n" + summary
