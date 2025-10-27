@@ -3,10 +3,54 @@ Basic tests for main.py functionality.
 
 To run tests: pytest tests/
 """
+import os
+from typing import Any
+
 import pytest
 import pandas as pd
 import numpy as np
-from main import quick_stats, rows_to_preview
+import sqlalchemy
+
+
+class DummyResult:
+    """Minimal result object mimicking SQLAlchemy behaviour used at import time."""
+
+    def fetchall(self):
+        return []
+
+    def keys(self):
+        return []
+
+
+class DummyConnection:
+    """Context manager returning predictable results for execute calls."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, *args: Any, **kwargs: Any):
+        return DummyResult()
+
+
+class DummyEngine:
+    """Engine stub that avoids real database access during tests."""
+
+    def connect(self):
+        return DummyConnection()
+
+
+# Provide required environment variables and stub the engine *before* importing main.
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("APP_SECRET_KEY", "test-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore[assignment]
+
+
+from main import quick_stats, rows_to_preview, build_trade_share_cte  # noqa: E402
 
 
 class TestQuickStats:
@@ -81,6 +125,40 @@ class TestSQLValidation:
         """Test that CTEs without aliases don't crash."""
         # Placeholder - would test simple_table_whitelist_check
         pass
+
+
+class TestTradeSharePivot:
+    """Tests for the auto-pivot SQL helper used when share columns are hallucinated."""
+
+    def test_basic_wrapping(self):
+        original = (
+            "SELECT date, share_renewable_ppa FROM trade_derived_entities "
+            "WHERE segment = 'balancing_electricity'"
+        )
+        rewritten = build_trade_share_cte(original)
+        assert rewritten.strip().startswith("WITH tde AS"), rewritten
+        assert "FROM tde" in rewritten
+        assert "WHERE segment = 'balancing_electricity'" in rewritten
+
+    def test_preserves_existing_cte(self):
+        original = (
+            "WITH latest AS (SELECT * FROM trade_derived_entities) "
+            "SELECT * FROM latest"
+        )
+        rewritten = build_trade_share_cte(original)
+        assert rewritten.strip().startswith("WITH tde AS"), rewritten
+        assert "latest AS" in rewritten
+
+    def test_alias_survives_replacement(self):
+        original = "SELECT t.date FROM trade_derived_entities t"
+        rewritten = build_trade_share_cte(original)
+        assert "FROM tde t" in rewritten
+
+    def test_includes_aggregated_shares(self):
+        original = "SELECT * FROM trade_derived_entities"
+        rewritten = build_trade_share_cte(original)
+        assert "share_all_ppa" in rewritten
+        assert "share_all_renewables" in rewritten
 
 
 if __name__ == "__main__":
