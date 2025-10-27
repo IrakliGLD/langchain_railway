@@ -8,6 +8,7 @@ import time
 import logging
 import urllib.parse
 import uuid
+from textwrap import dedent
 from contextvars import ContextVar
 from typing import Optional, Dict, Any, List, Tuple
 from difflib import get_close_matches
@@ -156,6 +157,50 @@ SYNONYM_PATTERNS = [
 # Pre-compiled regex for LIMIT detection
 LIMIT_PATTERN = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
 
+
+def build_trade_share_cte(original_sql: str) -> str:
+    """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
+
+    pivot_query = dedent(
+        """
+        SELECT
+            t.date,
+            'balancing_electricity'::text AS segment,
+            SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
+            SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
+            SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
+            SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_new_tpp,
+            SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_old_tpp,
+            SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
+            SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
+            SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_ppa,
+            SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_renewables,
+            SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
+        FROM trade_derived_entities t
+        JOIN (
+            SELECT date, SUM(quantity) AS total_qty
+            FROM trade_derived_entities
+            WHERE segment = 'balancing_electricity'
+            GROUP BY date
+        ) total ON t.date = total.date
+        WHERE t.segment = 'balancing_electricity'
+        GROUP BY t.date, total.total_qty
+        """
+    ).strip()
+
+    table_pattern = re.compile(r"\btrade_derived_entities\b", re.IGNORECASE)
+    pivot_alias_sql = table_pattern.sub("tde", original_sql)
+
+    with_pattern = re.compile(r"^\s*WITH\b", re.IGNORECASE)
+    if with_pattern.match(pivot_alias_sql):
+        return with_pattern.sub(
+            f"WITH tde AS ({pivot_query}), ",
+            pivot_alias_sql,
+            count=1,
+        )
+
+    return f"WITH tde AS ({pivot_query})\n{pivot_alias_sql}"
+
 # -----------------------------
 # DB Engine
 # -----------------------------
@@ -240,7 +285,10 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
         SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
-        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa
+        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
+        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
       WHERE t.segment = 'balancing_electricity'
       GROUP BY t.date
@@ -261,7 +309,12 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
       (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
       (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
       (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp,
+      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) AS share_regulated_new_tpp,
+      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
       (s.qty_ren_ppa / NULLIF(s.total_qty,0)) AS share_renewable_ppa,
+      (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
+      ((s.qty_ren_ppa + s.qty_thermal_ppa) / NULLIF(s.total_qty,0)) AS share_all_ppa,
+      ((s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa) / NULLIF(s.total_qty,0)) AS share_all_renewables,
       tr.enguri_tariff_gel,
       tr.gardabani_tpp_tariff_gel,
       tr.grouped_old_tpp_tariff_gel
@@ -935,20 +988,25 @@ Statistics:
 Domain knowledge:
 {domain_json}
 
-CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
+  CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
-PRIMARY DRIVERS (in order of importance):
-1. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price
-   - Natural gas for thermal generation is priced in USD
-   - Imports are priced in USD
-   - When GEL depreciates (xrate increases), GEL-denominated prices rise
-   - Always mention xrate effect when discussing GEL price movements
+  FIRST STEP FOR EVERY BALANCING PRICE EXPLANATION:
+  - Inspect share_* columns (entity composition) before discussing anything else.
+  - Identify which entities increased or decreased their share because each entity sells at a different price level in the codebase.
+  - Explain how those share shifts mechanically push the weighted-average balancing price up or down.
 
-2. Composition (shares of entities selling on balancing segment) - CRITICAL for both GEL and USD prices
-   - Higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices
-   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices
-   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant
-   - Always explain which entities are selling more/less when analyzing price changes
+  PRIMARY DRIVERS (in order of importance):
+  1. Composition (shares of entities selling on balancing segment)
+     - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices.
+     - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices.
+     - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant.
+     - Always explain which entities are selling more/less when analyzing price changes.
+
+  2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
+     - Natural gas for thermal generation is priced in USD
+     - Imports are priced in USD
+     - When GEL depreciates (xrate increases), GEL-denominated prices rise
+     - Always mention xrate effect when discussing GEL price movements once composition has been covered
 
 CONFIDENTIALITY RULES - STRICTLY ENFORCE:
 - DO disclose: regulated tariffs, deregulated hydro prices, exchange rates
@@ -1316,33 +1374,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
             log.info("CRITICAL: Using segment='balancing_electricity' for share calculation")
-            pivot_sql = """
-            WITH totals AS (
-                SELECT date, SUM(quantity) AS total_qty
-                FROM trade_derived_entities
-                WHERE segment = 'balancing_electricity'
-                GROUP BY date
-            )
-            SELECT
-                t.date,
-                SUM(CASE WHEN t.entity = 'import' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_import,
-                SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
-                SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
-                SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
-                SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
-                SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity END) / NULLIF(total.total_qty,0) AS share_total_hpp
-            FROM trade_derived_entities t
-            LEFT JOIN totals total ON t.date = total.date
-            WHERE t.segment = 'balancing_electricity'
-            GROUP BY t.date, total.total_qty
-            """
-            # Replace direct reference with pivoted subquery
-            safe_sql_final = re.sub(
-                r"\btrade_derived_entities\b",
-                f"({pivot_sql}) AS tde",
-                safe_sql_final,
-                flags=re.IGNORECASE
-            )
+            safe_sql_final = build_trade_share_cte(safe_sql_final)
             with ENGINE.connect() as conn:
                 res = conn.execute(text(safe_sql_final))
                 rows = res.fetchall()

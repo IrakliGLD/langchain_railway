@@ -223,12 +223,13 @@ DOMAIN_KNOWLEDGE = {
                 "Calculate shares from trade_derived_entities WHERE segment='balancing_electricity'",
                 "Include regulated tariffs from tariff_with_usd as secondary drivers"
             ],
-            "for_price_explanation": [
-                "Always mention xrate effect when discussing GEL prices",
-                "Explain composition changes (which entities are selling more/less)",
-                "Link composition to seasonal patterns (hydro in summer, thermal in winter)",
-                "Use actual tariffs for regulated generators when available"
-            ],
+                "for_price_explanation": [
+                    "Start by analysing share_* columns (share_import, share_all_renewables, share_all_ppa, etc.) because entity-specific price levels drive the weighted-average balancing price.",
+                    "Explain composition changes (which entities are selling more/less) before mentioning other drivers.",
+                    "Always mention xrate effect when discussing GEL prices once composition is covered.",
+                    "Link composition to seasonal patterns (hydro in summer, thermal/import in winter).",
+                    "Use actual tariffs for regulated generators when available"
+                ],
             "disclosure_rules": [
                 "DO disclose: regulated tariffs, deregulated hydro prices, xrate",
                 "DO NOT disclose: renewable PPA price estimates (~5.7-6 ¢/kWh)",
