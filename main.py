@@ -102,7 +102,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
 
-MODEL_TYPE = (os.getenv("MODEL_TYPE", "gemini") or "gemini").lower()
+MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -169,35 +169,25 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     SELECT
         t.date,
         'balancing'::text AS segment,
-        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
-        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
-        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
-        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_new_tpp,
-        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_old_tpp,
-        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_renewable_ppa,
-        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
-        SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_ppa,
-        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_renewables,
-        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
+        SUM(t.quantity) AS total_quantity_debug,
+        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_import,
+        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_deregulated_hydro,
+        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_hpp,
+        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_new_tpp,
+        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_old_tpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_renewable_ppa,
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_thermal_ppa,
+        SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_all_ppa,
+        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_all_renewables,
+        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_total_hpp
     FROM trade_derived_entities t
-    JOIN (
-        SELECT date, SUM(quantity) AS total_qty
-        FROM trade_derived_entities
-        WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
-          AND entity IN (
-            'import', 'deregulated_hydro', 'regulated_hpp',
-            'regulated_new_tpp', 'regulated_old_tpp',
-            'renewable_ppa', 'thermal_ppa'
-          )
-        GROUP BY date
-    ) total ON t.date = total.date
     WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
       AND t.entity IN (
         'import', 'deregulated_hydro', 'regulated_hpp',
         'regulated_new_tpp', 'regulated_old_tpp',
         'renewable_ppa', 'thermal_ppa'
       )
-    GROUP BY t.date, total.total_qty
+    GROUP BY t.date
     ORDER BY t.date
     """
 ).strip()
@@ -242,9 +232,7 @@ def build_trade_share_cte(original_sql: str) -> str:
 
     Uses a unique CTE name to avoid conflicts if original SQL already uses 'tde' as alias.
     """
-    import uuid
-
-    # Generate unique CTE name to avoid collisions
+    # Generate unique CTE name to avoid collisions (uuid already imported at top)
     cte_name = f"tde_{uuid.uuid4().hex[:6]}"
 
     table_pattern = re.compile(r"\btrade_derived_entities\b", re.IGNORECASE)
@@ -449,7 +437,8 @@ def _parse_period_hint(period_hint: str, user_query: str) -> tuple[Optional[pd.P
                             text)
     if month_match:
         month_token, year_token = month_match.groups()
-        month = MONTH_NAME_TO_NUMBER.get(month_token[:3] if len(month_token) > 3 else month_token, MONTH_NAME_TO_NUMBER.get(month_token, None))
+        # Dictionary already contains all variations (jan, january, sep, sept, september, etc.)
+        month = MONTH_NAME_TO_NUMBER.get(month_token)
         if month:
             year = int(year_token)
             try:
@@ -564,15 +553,27 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
         return None
 
     # 🔍 VALIDATION: Check if shares sum to ~1.0 (indicates correct denominator)
+    # Define base entities that constitute the whole (non-overlapping)
+    BASE_SHARE_COLS = [
+        "share_import",
+        "share_deregulated_hydro",
+        "share_regulated_hpp",
+        "share_regulated_new_tpp",
+        "share_regulated_old_tpp",
+        "share_renewable_ppa",
+        "share_thermal_ppa"
+    ]
+
+    # Only sum base entities to avoid double-counting aggregates like share_all_ppa
     total_shares = sum(
         float(selected_row.get(c, 0))
-        for c in share_cols
-        if not pd.isna(selected_row.get(c))
+        for c in BASE_SHARE_COLS
+        if c in selected_row and not pd.isna(selected_row.get(c))
     )
     if abs(total_shares - 1.0) > 0.05:
         log.warning(
-            f"⚠️ Share columns sum to {total_shares:.3f} instead of 1.0 — possible denominator bug. "
-            f"Shares: {[f'{c}={selected_row.get(c):.3f}' for c in share_cols[:5]]}"
+            f"⚠️ Base share columns sum to {total_shares:.3f} instead of 1.0 — possible denominator bug. "
+            f"Date: {selected_row.get(date_col) if date_col else 'N/A'}"
         )
         # Continue anyway, but warn that shares might be incorrect
 
@@ -697,11 +698,25 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
     ),
     tariffs AS (
       SELECT
-        d.date,
-        (SELECT t1.tariff_gel FROM tariff_with_usd t1 WHERE t1.date = d.date AND t1.entity = 'ltd "engurhesi"1' LIMIT 1) AS enguri_tariff_gel,
-        (SELECT t2.tariff_gel FROM tariff_with_usd t2 WHERE t2.date = d.date AND t2.entity = 'ltd "gardabni thermal power plant"' LIMIT 1) AS gardabani_tpp_tariff_gel,
-        (SELECT AVG(t3.tariff_gel) FROM tariff_with_usd t3 WHERE t3.date = d.date AND t3.entity IN ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)')) AS grouped_old_tpp_tariff_gel
-      FROM price_with_usd d
+        date,
+        MAX(CASE
+          WHEN entity = 'ltd "engurhesi"1'
+          THEN tariff_gel
+        END) AS enguri_tariff_gel,
+        MAX(CASE
+          WHEN entity = 'ltd "gardabni thermal power plant"'
+          THEN tariff_gel
+        END) AS gardabani_tpp_tariff_gel,
+        AVG(CASE
+          WHEN entity IN (
+            'ltd "mtkvari energy"',
+            'ltd "iec" (tbilresi)',
+            'ltd "g power" (capital turbines)'
+          )
+          THEN tariff_gel
+        END) AS grouped_old_tpp_tariff_gel
+      FROM tariff_with_usd
+      GROUP BY date
     )
     SELECT
       p.date,
@@ -733,10 +748,19 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
 
 def compute_weighted_balancing_price(conn) -> pd.DataFrame:
     """
-    Compute monthly weighted-average balancing price (GEL & USD)
-    based on balancing-market sales volumes.
+    Compute each month's contribution to the grand-total weighted-average balancing price.
 
-    CRITICAL: Uses ONLY balancing_electricity segment to calculate weights.
+    Returns monthly panel with:
+    - date: Month
+    - p_bal_gel, p_bal_usd: Monthly balancing price (actual weighted average)
+    - contribution_gel, contribution_usd: Month's contribution to all-time average
+
+    Formula: (monthly_price * monthly_quantity) / total_quantity_across_all_months
+
+    Note: The monthly weighted average price is p_bal_gel/p_bal_usd (already in price_with_usd).
+    This function calculates how much each month contributes to the grand average.
+
+    CRITICAL: Uses ONLY balancing segment to calculate weights.
     Uses case-insensitive segment matching to handle different database formats.
     """
     sql = """
@@ -754,8 +778,8 @@ def compute_weighted_balancing_price(conn) -> pd.DataFrame:
       p.date,
       p.p_bal_gel,
       p.p_bal_usd,
-      (p.p_bal_gel * w.total_qty) / NULLIF(SUM(w.total_qty) OVER (),0) AS weighted_gel,
-      (p.p_bal_usd * w.total_qty) / NULLIF(SUM(w.total_qty) OVER (),0) AS weighted_usd
+      (p.p_bal_gel * w.total_qty) / NULLIF(SUM(w.total_qty) OVER (),0) AS contribution_gel,
+      (p.p_bal_usd * w.total_qty) / NULLIF(SUM(w.total_qty) OVER (),0) AS contribution_usd
     FROM price_with_usd p
     JOIN w ON w.date = p.date
     ORDER BY p.date;
@@ -768,13 +792,19 @@ def compute_seasonal_average(df: pd.DataFrame, date_col: str, value_col: str, ag
     """
     Compute seasonal (Summer vs Winter) average or sum for a given value column.
     Assumes df contains a date column in datetime or string format.
+
+    Note: Summer is defined as months [4,5,6,7] (April-July).
+    This may be domain-specific for Georgian hydro patterns.
     """
     if date_col not in df.columns or value_col not in df.columns:
         return df
 
     df = df.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df["season"] = df[date_col].dt.month.apply(lambda m: "Summer" if m in [4,5,6,7] else "Winter")
+
+    # Vectorized operation (much faster than .apply())
+    summer_months = [4, 5, 6, 7]
+    df["season"] = np.where(df[date_col].dt.month.isin(summer_months), "Summer", "Winter")
 
     if agg_func.lower() in ("avg", "mean"):
         grouped = df.groupby("season")[value_col].mean().reset_index(name=f"avg_{value_col}")
