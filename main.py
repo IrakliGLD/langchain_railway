@@ -158,7 +158,7 @@ SYNONYM_PATTERNS = [
 LIMIT_PATTERN = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
 
 
-BALANCING_SEGMENT_NORMALIZER = "lower(regexp_replace(segment, '[^a-zA-Z0-9]+', '_', 'g'))"
+BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"
 
 
 BALANCING_SHARE_PIVOT_SQL = dedent(
@@ -585,6 +585,7 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
 
     CRITICAL FIX: Shares are calculated using ONLY balancing_electricity segment
     to properly reflect the composition that affects balancing electricity price.
+    Uses case-insensitive segment matching to handle different database formats.
     """
     sql = """
     WITH shares AS (
@@ -599,7 +600,7 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE t.segment = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
       GROUP BY t.date
     ),
     tariffs AS (
@@ -643,12 +644,13 @@ def compute_weighted_balancing_price(conn) -> pd.DataFrame:
     based on balancing-market sales volumes.
 
     CRITICAL: Uses ONLY balancing_electricity segment to calculate weights.
+    Uses case-insensitive segment matching to handle different database formats.
     """
     sql = """
     WITH t AS (
       SELECT date, entity, SUM(quantity) AS qty
       FROM trade_derived_entities
-      WHERE segment = 'balancing_electricity'
+      WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity'
         AND entity IN ('deregulated_hydro','import','regulated_hpp',
                        'regulated_new_tpp','regulated_old_tpp',
                        'renewable_ppa','thermal_ppa')
@@ -725,7 +727,7 @@ def compute_entity_price_contributions(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE t.segment = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
       GROUP BY t.date
     ),
     entity_prices AS (
@@ -855,7 +857,7 @@ def compute_share_changes(conn) -> pd.DataFrame:
         (SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_renewable_ppa,
         (SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_thermal_ppa
       FROM trade_derived_entities t
-      WHERE t.segment = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
       GROUP BY t.date
     )
     SELECT
@@ -1171,7 +1173,8 @@ ORDER BY date
 LIMIT 3750;
 
 -- Example 5: Balancing price GEL vs shares (no raw quantities)
--- IMPORTANT: Use segment='balancing_electricity' to get correct shares for price analysis
+-- IMPORTANT: Use ILIKE or lowercase comparison for segment to handle different casings
+-- Database may contain 'Balancing Electricity', 'balancing_electricity', or other variants
 WITH shares AS (
   SELECT
     t.date,
@@ -1180,7 +1183,7 @@ WITH shares AS (
     SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
-  WHERE t.segment = 'balancing_electricity'
+  WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
   GROUP BY t.date
 )
 SELECT
@@ -1282,7 +1285,9 @@ CRITICAL - PRIMARY DRIVERS for balancing price analysis:
     - Use xrate from price_with_usd view
     - Critical because gas and imports are USD-priced
   * PRIMARY DRIVER #2: Composition (shares) - CRITICAL for both GEL and USD prices
-    - Calculate shares from trade_derived_entities WHERE segment='balancing_electricity'
+    - Calculate shares from trade_derived_entities
+    - IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity' for segment filter
+    - Database may have 'Balancing Electricity', 'balancing_electricity', or other variants
     - Use share CTE pattern, no raw quantities
     - Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
     - Higher expensive source shares (import, thermal PPA, renewable PPA) → higher prices
