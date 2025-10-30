@@ -238,6 +238,26 @@ def ensure_share_dataframe(
         log.warning(
             "Deterministic balancing share pivot returned 0 rows; check segment naming in trade_derived_entities."
         )
+
+        # DIAGNOSTIC: Check what segment values actually exist
+        try:
+            diag_sql = """
+            SELECT DISTINCT segment,
+                   COUNT(*) as row_count,
+                   MIN(date) as earliest_date,
+                   MAX(date) as latest_date
+            FROM trade_derived_entities
+            GROUP BY segment
+            ORDER BY segment
+            """
+            diag_res = conn.execute(text(diag_sql))
+            diag_rows = diag_res.fetchall()
+            log.warning(f"🔍 DIAGNOSTIC: Found {len(diag_rows)} distinct segment values in trade_derived_entities:")
+            for row in diag_rows:
+                log.warning(f"   - '{row[0]}': {row[1]} rows (from {row[2]} to {row[3]})")
+        except Exception as e:
+            log.error(f"Diagnostic query failed: {e}")
+
         return df, False
 
     return fallback_df, True
@@ -1835,6 +1855,10 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     cols = []
     try:
         sql_start = time.time()
+
+        # DEBUG: Log the actual SQL being executed
+        log.info(f"🔍 Executing SQL:\n{safe_sql_final}")
+
         with ENGINE.connect() as conn:
             res = conn.execute(text(safe_sql_final))
             rows = res.fetchall()
