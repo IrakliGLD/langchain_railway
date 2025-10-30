@@ -168,7 +168,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     f"""
     SELECT
         t.date,
-        'balancing_electricity'::text AS segment,
+        'balancing'::text AS segment,
         SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
         SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
@@ -183,7 +183,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     JOIN (
         SELECT date, SUM(quantity) AS total_qty
         FROM trade_derived_entities
-        WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
+        WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
           AND entity IN (
             'import', 'deregulated_hydro', 'regulated_hpp',
             'regulated_new_tpp', 'regulated_old_tpp',
@@ -191,7 +191,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
           )
         GROUP BY date
     ) total ON t.date = total.date
-    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
+    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
       AND t.entity IN (
         'import', 'deregulated_hydro', 'regulated_hpp',
         'regulated_new_tpp', 'regulated_old_tpp',
@@ -686,7 +686,7 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     ),
     tariffs AS (
@@ -737,7 +737,7 @@ def compute_weighted_balancing_price(conn) -> pd.DataFrame:
     WITH t AS (
       SELECT date, entity, SUM(quantity) AS qty
       FROM trade_derived_entities
-      WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
         AND entity IN ('deregulated_hydro','import','regulated_hpp',
                        'regulated_new_tpp','regulated_old_tpp',
                        'renewable_ppa','thermal_ppa')
@@ -814,7 +814,7 @@ def compute_entity_price_contributions(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     ),
     entity_prices AS (
@@ -946,7 +946,7 @@ def compute_share_changes(conn) -> pd.DataFrame:
         (SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_renewable_ppa,
         (SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     )
     SELECT
@@ -1264,7 +1264,7 @@ LIMIT 3750;
 
 -- Example 5: Balancing price GEL vs shares (no raw quantities)
 -- IMPORTANT: Use ILIKE or lowercase comparison for segment to handle different casings
--- Database may contain 'Balancing Electricity', 'balancing_electricity', or other variants
+-- Database may contain 'Balancing Electricity', 'balancing', or other variants
 WITH shares AS (
   SELECT
     t.date,
@@ -1273,7 +1273,7 @@ WITH shares AS (
     SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
-  WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+  WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
   GROUP BY t.date
 )
 SELECT
@@ -1340,7 +1340,7 @@ WITH shares AS (
     SUM(CASE WHEN entity = 'thermal_ppa' THEN quantity ELSE 0 END) AS qty_thermal_ppa,
     SUM(CASE WHEN entity = 'import' THEN quantity ELSE 0 END) AS qty_import
   FROM trade_derived_entities
-  WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity'
+  WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
   GROUP BY date
 )
 SELECT
@@ -1400,8 +1400,8 @@ CRITICAL - PRIMARY DRIVERS for balancing price analysis:
     - Critical because gas and imports are USD-priced
   * PRIMARY DRIVER #2: Composition (shares) - CRITICAL for both GEL and USD prices
     - Calculate shares from trade_derived_entities
-    - IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity' for segment filter
-    - Database may have 'Balancing Electricity', 'balancing_electricity', or other variants
+    - IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing' for segment filter
+    - Database may have 'Balancing Electricity', 'balancing', or other variants
     - Use share CTE pattern, no raw quantities
     - Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
     - Higher expensive source shares (import, thermal PPA, renewable PPA) → higher prices
@@ -2030,7 +2030,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # --- 🩹 Auto-pivot fix for hallucinated trade_derived_entities columns ---
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
-            log.info("CRITICAL: Using segment='balancing_electricity' for share calculation")
+            log.info("CRITICAL: Using segment='balancing' for share calculation")
             safe_sql_final = build_trade_share_cte(safe_sql_final)
             with ENGINE.connect() as conn:
                 res = conn.execute(text(safe_sql_final))
