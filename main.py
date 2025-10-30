@@ -175,7 +175,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_thermal_ppa,
         SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_ppa,
         SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_all_renewables,
-        SUM(CASE WHEN t.entity = 'total_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
+        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp') THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_total_hpp
     FROM trade_derived_entities t
     JOIN (
         SELECT date, SUM(quantity) AS total_qty
@@ -641,12 +641,15 @@ def compute_weighted_balancing_price(conn) -> pd.DataFrame:
     """
     Compute monthly weighted-average balancing price (GEL & USD)
     based on balancing-market sales volumes.
+
+    CRITICAL: Uses ONLY balancing_electricity segment to calculate weights.
     """
     sql = """
     WITH t AS (
       SELECT date, entity, SUM(quantity) AS qty
       FROM trade_derived_entities
-      WHERE entity IN ('deregulated_hydro','import','regulated_hpp',
+      WHERE segment = 'balancing_electricity'
+        AND entity IN ('deregulated_hydro','import','regulated_hpp',
                        'regulated_new_tpp','regulated_old_tpp',
                        'renewable_ppa','thermal_ppa')
       GROUP BY date, entity
@@ -685,6 +688,210 @@ def compute_seasonal_average(df: pd.DataFrame, date_col: str, value_col: str, ag
     else:
         raise ValueError("agg_func must be 'avg' or 'sum'")
     return grouped
+
+
+def compute_entity_price_contributions(conn) -> pd.DataFrame:
+    """
+    Decompose balancing price into entity-level contributions.
+
+    Returns monthly panel showing:
+    - Balancing price (actual weighted average)
+    - Each entity's share in balancing electricity
+    - Entity-level reference prices (where available from tariff_with_usd and price_with_usd)
+    - Estimated contribution to balancing price: share × reference_price
+
+    CRITICAL NOTES:
+    - Regulated entities (regulated_hpp, regulated TPPs): use tariff_gel from tariff_with_usd
+    - Deregulated hydro: use p_dereg_gel from price_with_usd
+    - PPAs and imports: reference prices NOT available in database (confidential)
+    - Actual balancing transaction prices may differ from reference prices
+    - This provides directional insight, not exact decomposition
+
+    Use this to explain:
+    - Which entities drove price changes month-over-month
+    - How composition shifts affected weighted average price
+    - Relative contribution of cheap vs expensive sources
+    """
+    sql = """
+    WITH shares AS (
+      SELECT
+        t.date,
+        SUM(t.quantity) AS total_qty,
+        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
+        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
+        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
+        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
+        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
+      FROM trade_derived_entities t
+      WHERE t.segment = 'balancing_electricity'
+      GROUP BY t.date
+    ),
+    entity_prices AS (
+      SELECT
+        d.date,
+        -- Reference prices from available sources
+        p.p_dereg_gel AS price_deregulated_hydro,
+
+        -- Regulated HPP: use weighted average of main HPPs or Enguri as proxy
+        (SELECT AVG(t1.tariff_gel)
+         FROM tariff_with_usd t1
+         WHERE t1.date = d.date
+           AND (t1.entity LIKE '%engurhesi%'
+                OR t1.entity LIKE '%energo-pro%'
+                OR t1.entity LIKE '%vardnili%')
+        ) AS price_regulated_hpp,
+
+        -- Regulated new TPP: Gardabani
+        (SELECT t2.tariff_gel
+         FROM tariff_with_usd t2
+         WHERE t2.date = d.date
+           AND t2.entity = 'ltd "gardabni thermal power plant"'
+         LIMIT 1
+        ) AS price_regulated_new_tpp,
+
+        -- Regulated old TPPs: average of old thermal plants
+        (SELECT AVG(t3.tariff_gel)
+         FROM tariff_with_usd t3
+         WHERE t3.date = d.date
+           AND t3.entity IN ('ltd "mtkvari energy"',
+                            'ltd "iec" (tbilresi)',
+                            'ltd "g power" (capital turbines)')
+        ) AS price_regulated_old_tpp
+
+        -- Note: PPA and import prices are NOT available in database
+        -- These would need to be estimated or obtained from confidential data
+
+      FROM price_with_usd d
+      LEFT JOIN price_with_usd p ON p.date = d.date
+    )
+    SELECT
+      p.date,
+      p.p_bal_gel AS balancing_price_gel,
+      p.p_bal_usd AS balancing_price_usd,
+      p.xrate,
+
+      -- Shares
+      (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
+      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+      (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp,
+      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) AS share_regulated_new_tpp,
+      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
+      (s.qty_ren_ppa / NULLIF(s.total_qty,0)) AS share_renewable_ppa,
+      (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
+
+      -- Reference prices (where available)
+      ep.price_deregulated_hydro,
+      ep.price_regulated_hpp,
+      ep.price_regulated_new_tpp,
+      ep.price_regulated_old_tpp,
+
+      -- Estimated contributions to balancing price
+      -- (share × reference_price) = estimated contribution in GEL/MWh
+      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_hydro, 0)
+        AS contribution_deregulated_hydro,
+      (s.qty_reg_hpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_hpp, 0)
+        AS contribution_regulated_hpp,
+      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_new_tpp, 0)
+        AS contribution_regulated_new_tpp,
+      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_old_tpp, 0)
+        AS contribution_regulated_old_tpp,
+
+      -- Sum of known contributions
+      COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro, 0) +
+      COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp, 0) +
+      COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp, 0) +
+      COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp, 0)
+        AS total_known_contributions,
+
+      -- Residual (PPA + import contribution, not directly observable)
+      p.p_bal_gel - (
+        COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro, 0) +
+        COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp, 0) +
+        COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp, 0) +
+        COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp, 0)
+      ) AS residual_contribution_ppa_import,
+
+      -- Shares of PPA and import (for context on residual)
+      (s.qty_ren_ppa / NULLIF(s.total_qty,0)) +
+      (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) +
+      (s.qty_import / NULLIF(s.total_qty,0)) AS share_ppa_import_total
+
+    FROM price_with_usd p
+    LEFT JOIN shares s ON s.date = p.date
+    LEFT JOIN entity_prices ep ON ep.date = p.date
+    WHERE p.date >= '2015-01-01'
+    ORDER BY p.date
+    LIMIT 3750;
+    """
+    res = conn.execute(text(sql))
+    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+
+
+def compute_share_changes(conn) -> pd.DataFrame:
+    """
+    Calculate month-over-month changes in entity shares.
+
+    Returns panel showing:
+    - Current month shares
+    - Previous month shares
+    - Absolute change (percentage points)
+    - Relative change (percent)
+
+    Use this to identify which entities increased/decreased their balancing market participation
+    and explain resulting price movements.
+    """
+    sql = """
+    WITH shares AS (
+      SELECT
+        t.date,
+        SUM(t.quantity) AS total_qty,
+        (SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_import,
+        (SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_deregulated_hydro,
+        (SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_regulated_hpp,
+        (SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_regulated_new_tpp,
+        (SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_regulated_old_tpp,
+        (SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_renewable_ppa,
+        (SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_thermal_ppa
+      FROM trade_derived_entities t
+      WHERE t.segment = 'balancing_electricity'
+      GROUP BY t.date
+    )
+    SELECT
+      s.date,
+      p.p_bal_gel,
+      LAG(p.p_bal_gel) OVER (ORDER BY s.date) AS prev_p_bal_gel,
+      p.p_bal_gel - LAG(p.p_bal_gel) OVER (ORDER BY s.date) AS price_change_gel,
+
+      -- Current shares
+      s.share_import,
+      s.share_deregulated_hydro,
+      s.share_regulated_hpp,
+      s.share_renewable_ppa,
+      s.share_thermal_ppa,
+
+      -- Previous month shares
+      LAG(s.share_import) OVER (ORDER BY s.date) AS prev_share_import,
+      LAG(s.share_deregulated_hydro) OVER (ORDER BY s.date) AS prev_share_deregulated_hydro,
+      LAG(s.share_regulated_hpp) OVER (ORDER BY s.date) AS prev_share_regulated_hpp,
+      LAG(s.share_renewable_ppa) OVER (ORDER BY s.date) AS prev_share_renewable_ppa,
+      LAG(s.share_thermal_ppa) OVER (ORDER BY s.date) AS prev_share_thermal_ppa,
+
+      -- Changes in shares (percentage points)
+      s.share_import - LAG(s.share_import) OVER (ORDER BY s.date) AS change_share_import,
+      s.share_deregulated_hydro - LAG(s.share_deregulated_hydro) OVER (ORDER BY s.date) AS change_share_deregulated_hydro,
+      s.share_regulated_hpp - LAG(s.share_regulated_hpp) OVER (ORDER BY s.date) AS change_share_regulated_hpp,
+      s.share_renewable_ppa - LAG(s.share_renewable_ppa) OVER (ORDER BY s.date) AS change_share_renewable_ppa,
+      s.share_thermal_ppa - LAG(s.share_thermal_ppa) OVER (ORDER BY s.date) AS change_share_thermal_ppa
+
+    FROM shares s
+    LEFT JOIN price_with_usd p ON p.date = s.date
+    ORDER BY s.date
+    LIMIT 3750;
+    """
+    res = conn.execute(text(sql))
+    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
 
 
 

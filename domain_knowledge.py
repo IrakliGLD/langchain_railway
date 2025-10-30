@@ -193,7 +193,12 @@ DOMAIN_KNOWLEDGE = {
                     "Higher share of expensive sources (import, thermal PPA) → higher price",
                     "Composition changes seasonally (summer=hydro, winter=thermal/import)"
                 ],
-                "data_source": "trade_derived_entities WHERE segment='balancing_electricity'"
+                "data_source": "trade_derived_entities WHERE segment='balancing_electricity'",
+                "calculation_functions": [
+                    "BALANCING_SHARE_PIVOT_SQL: calculates entity shares from balancing_electricity segment only",
+                    "compute_entity_price_contributions: decomposes balancing price into entity-level contributions",
+                    "compute_share_changes: tracks month-over-month changes in entity shares"
+                ]
             }
         },
         "PriceHierarchy": {
@@ -460,6 +465,67 @@ DOMAIN_KNOWLEDGE = {
             "Low-hydro months push balancing to thermal and imports, raising volatility and cost.",
             "Balancing prices reflect the residual mix, not just cost; cheap hydro depresses prices, gas/import raise them.",
             "Rising renewable PPA share lifts summer prices as it displaces cheap hydro from balancing volumes."
+        ]
+    },
+
+    "BalancingPriceDecomposition": {
+        "Definition": "Methodology for decomposing the weighted-average balancing price into entity-level contributions to explain price dynamics.",
+        "Purpose": "Enable analysis of which entities drive balancing price changes by combining quantity shares with entity-specific prices.",
+        "AvailableFunctions": {
+            "compute_entity_price_contributions": {
+                "description": "Calculates monthly entity contributions to balancing price using available reference prices",
+                "output_columns": [
+                    "balancing_price_gel: actual weighted average balancing price",
+                    "share_[entity]: quantity share of each entity in balancing electricity",
+                    "price_[entity]: reference price for entity (from tariff_with_usd or price_with_usd)",
+                    "contribution_[entity]: estimated contribution = share × reference_price",
+                    "total_known_contributions: sum of all calculable contributions",
+                    "residual_contribution_ppa_import: unexplained portion (entities without price data)"
+                ],
+                "data_availability": {
+                    "available": [
+                        "Regulated HPP: average tariff from main hydro plants (Enguri, Vardnili, Energo-Pro)",
+                        "Deregulated hydro: p_dereg_gel from price_with_usd",
+                        "Regulated new TPP: Gardabani tariff_gel from tariff_with_usd",
+                        "Regulated old TPPs: average of Mtkvari, Tbilisi, G-Power tariffs"
+                    ],
+                    "unavailable": [
+                        "Renewable PPA: prices are confidential, not in database",
+                        "Thermal PPA: prices are confidential, not in database",
+                        "Import: prices vary by transaction, not in database"
+                    ]
+                },
+                "usage": "Use to identify which entities contributed most to price increases/decreases month-over-month"
+            },
+            "compute_share_changes": {
+                "description": "Calculates month-over-month changes in entity shares to track composition shifts",
+                "output_columns": [
+                    "share_[entity]: current month share",
+                    "prev_share_[entity]: previous month share",
+                    "change_share_[entity]: absolute change in percentage points",
+                    "price_change_gel: corresponding change in balancing price"
+                ],
+                "usage": "Use to correlate price changes with composition changes (e.g., if import share increased by 15pp and price rose by 20 GEL/MWh)"
+            }
+        },
+        "AnalyticalWorkflow": [
+            "1. Use compute_share_changes to identify which entity shares changed significantly month-over-month",
+            "2. Use compute_entity_price_contributions to estimate the price impact of those share changes",
+            "3. Consider xrate changes for GEL-denominated price analysis (affects thermal, import, PPA costs)",
+            "4. Link composition shifts to seasonal patterns (summer=hydro dominant, winter=thermal/import dominant)",
+            "5. For entities without price data (PPAs, imports), infer direction from residual_contribution_ppa_import"
+        ],
+        "Limitations": [
+            "Reference prices (tariffs) may differ from actual balancing transaction prices",
+            "PPA and import prices not available; residual contribution provides proxy only",
+            "Does not capture intra-month price volatility, only monthly averages",
+            "Assumes linear price-quantity relationships, which may not hold for marginal pricing"
+        ],
+        "InterpretationGuidelines": [
+            "A positive contribution increase indicates that entity contributed more to raising the price",
+            "Compare contribution changes to price changes to assess relative importance",
+            "Large residual_contribution_ppa_import suggests PPAs/imports drove price, but exact decomposition unknown",
+            "Always validate decomposition insights against seasonal patterns and tariff changes"
         ]
     },
 
