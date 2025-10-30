@@ -205,20 +205,21 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
 
 def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
     """
-    Detect if query is asking for balancing share but SQL doesn't include proper pivot.
+    Detect if query is asking for balancing share but SQL doesn't include share calculations.
 
     Returns True if:
     - User query mentions balancing-related concepts
     - User query mentions entity types
     - SQL uses trade_derived_entities directly (not through pivot)
-    - SQL either lacks share columns OR lacks proper entity filtering in denominator
+    - SQL lacks share columns (no manual share calculation attempted)
 
     This forces pivot injection for queries like:
     - "what was the share of renewable PPA in balancing electricity?"
     - "show me the composition of balancing market in june 2024"
 
-    CRITICAL: Even if SQL has share columns, inject pivot if it's missing the
-    entity filter in WHERE clause (which causes wrong denominator calculation).
+    Strategy: If SQL already has share calculations, let it run - the fixed
+    Example 5 few-shot should teach correct entity filtering. Only inject pivot
+    when LLM completely misses the share calculation.
     """
     query_lower = user_query.lower()
     sql_lower = sql.lower()
@@ -231,14 +232,9 @@ def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
     has_trade = "trade_derived_entities" in sql_lower
     has_share_col = any(f"share_{e}" in sql_lower for e in ["import", "renewable", "ppa", "hydro", "tpp", "hpp"])
 
-    # Check if SQL has proper entity filter for denominator
-    # Look for pattern: entity IN ('import', 'deregulated_hydro', ...)
-    has_entity_filter = "entity in (" in sql_lower or "t.entity in (" in sql_lower
-
-    # Inject pivot if:
-    # 1. Query is about balancing shares AND uses trade_derived_entities
-    # 2. AND either: no share columns exist OR entity filter is missing
-    return has_balancing and has_entity and has_trade and (not has_share_col or not has_entity_filter)
+    # Only inject pivot if query is about balancing shares but SQL doesn't have share columns
+    # If share columns exist, trust that Example 5 taught correct entity filtering
+    return has_balancing and has_entity and has_trade and not has_share_col
 
 
 def build_trade_share_cte(original_sql: str) -> str:
