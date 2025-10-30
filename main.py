@@ -205,16 +205,20 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
 
 def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
     """
-    Detect if query is asking for balancing share but SQL doesn't include pivot.
+    Detect if query is asking for balancing share but SQL doesn't include proper pivot.
 
     Returns True if:
     - User query mentions balancing-related concepts
     - User query mentions entity types
     - SQL uses trade_derived_entities directly (not through pivot)
+    - SQL either lacks share columns OR lacks proper entity filtering in denominator
 
     This forces pivot injection for queries like:
     - "what was the share of renewable PPA in balancing electricity?"
     - "show me the composition of balancing market in june 2024"
+
+    CRITICAL: Even if SQL has share columns, inject pivot if it's missing the
+    entity filter in WHERE clause (which causes wrong denominator calculation).
     """
     query_lower = user_query.lower()
     sql_lower = sql.lower()
@@ -227,8 +231,14 @@ def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
     has_trade = "trade_derived_entities" in sql_lower
     has_share_col = any(f"share_{e}" in sql_lower for e in ["import", "renewable", "ppa", "hydro", "tpp", "hpp"])
 
-    # Inject pivot if query is about balancing shares but SQL doesn't have share columns
-    return has_balancing and has_entity and has_trade and not has_share_col
+    # Check if SQL has proper entity filter for denominator
+    # Look for pattern: entity IN ('import', 'deregulated_hydro', ...)
+    has_entity_filter = "entity in (" in sql_lower or "t.entity in (" in sql_lower
+
+    # Inject pivot if:
+    # 1. Query is about balancing shares AND uses trade_derived_entities
+    # 2. AND either: no share columns exist OR entity filter is missing
+    return has_balancing and has_entity and has_trade and (not has_share_col or not has_entity_filter)
 
 
 def build_trade_share_cte(original_sql: str) -> str:
@@ -1265,6 +1275,7 @@ LIMIT 3750;
 -- Example 5: Balancing price GEL vs shares (no raw quantities)
 -- IMPORTANT: Use ILIKE or lowercase comparison for segment to handle different casings
 -- Database may contain 'Balancing Electricity', 'balancing', or other variants
+-- CRITICAL: Filter entities in denominator to only include relevant balancing entities
 WITH shares AS (
   SELECT
     t.date,
@@ -1274,6 +1285,9 @@ WITH shares AS (
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
   WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
+    AND t.entity IN ('import', 'deregulated_hydro', 'regulated_hpp',
+                     'regulated_new_tpp', 'regulated_old_tpp',
+                     'renewable_ppa', 'thermal_ppa')
   GROUP BY t.date
 )
 SELECT
