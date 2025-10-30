@@ -181,13 +181,51 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
         SELECT date, SUM(quantity) AS total_qty
         FROM trade_derived_entities
         WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
+          AND entity IN (
+            'import', 'deregulated_hydro', 'regulated_hpp',
+            'regulated_new_tpp', 'regulated_old_tpp',
+            'renewable_ppa', 'thermal_ppa'
+          )
         GROUP BY date
     ) total ON t.date = total.date
     WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
+      AND t.entity IN (
+        'import', 'deregulated_hydro', 'regulated_hpp',
+        'regulated_new_tpp', 'regulated_old_tpp',
+        'renewable_ppa', 'thermal_ppa'
+      )
     GROUP BY t.date, total.total_qty
     ORDER BY t.date
     """
 ).strip()
+
+
+def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
+    """
+    Detect if query is asking for balancing share but SQL doesn't include pivot.
+
+    Returns True if:
+    - User query mentions balancing-related concepts
+    - User query mentions entity types
+    - SQL uses trade_derived_entities directly (not through pivot)
+
+    This forces pivot injection for queries like:
+    - "what was the share of renewable PPA in balancing electricity?"
+    - "show me the composition of balancing market in june 2024"
+    """
+    query_lower = user_query.lower()
+    sql_lower = sql.lower()
+
+    balancing_keywords = ["balancing", "share", "composition", "mix", "weight", "proportion"]
+    entity_keywords = ["ppa", "renewable", "thermal", "import", "hydro", "tpp", "hpp", "entity", "entities"]
+
+    has_balancing = any(k in query_lower for k in balancing_keywords)
+    has_entity = any(k in query_lower for k in entity_keywords)
+    has_trade = "trade_derived_entities" in sql_lower
+    has_share_col = any(f"share_{e}" in sql_lower for e in ["import", "renewable", "ppa", "hydro", "tpp", "hpp"])
+
+    # Inject pivot if query is about balancing shares but SQL doesn't have share columns
+    return has_balancing and has_entity and has_trade and not has_share_col
 
 
 def build_trade_share_cte(original_sql: str) -> str:
@@ -503,6 +541,19 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
 
     if pd.isna(share_value):
         return None
+
+    # 🔍 VALIDATION: Check if shares sum to ~1.0 (indicates correct denominator)
+    total_shares = sum(
+        float(selected_row.get(c, 0))
+        for c in share_cols
+        if not pd.isna(selected_row.get(c))
+    )
+    if abs(total_shares - 1.0) > 0.05:
+        log.warning(
+            f"⚠️ Share columns sum to {total_shares:.3f} instead of 1.0 — possible denominator bug. "
+            f"Shares: {[f'{c}={selected_row.get(c):.3f}' for c in share_cols[:5]]}"
+        )
+        # Continue anyway, but warn that shares might be incorrect
 
     label = DERIVED_LABELS.get(share_col, share_col.replace("_", " ").title())
 
@@ -1258,6 +1309,30 @@ JOIN (
 GROUP BY s.season
 ORDER BY s.season
 LIMIT 3750;
+
+-- Example 8: Renewable PPA share in balancing electricity for specific month
+-- CRITICAL: Always use LOWER(REPLACE(segment, ' ', '_')) for segment filtering
+-- This example shows how to calculate share of a specific entity
+WITH shares AS (
+  SELECT
+    date,
+    SUM(quantity) AS total_qty,
+    SUM(CASE WHEN entity = 'renewable_ppa' THEN quantity ELSE 0 END) AS qty_renewable_ppa,
+    SUM(CASE WHEN entity = 'thermal_ppa' THEN quantity ELSE 0 END) AS qty_thermal_ppa,
+    SUM(CASE WHEN entity = 'import' THEN quantity ELSE 0 END) AS qty_import
+  FROM trade_derived_entities
+  WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity'
+  GROUP BY date
+)
+SELECT
+  date,
+  (qty_renewable_ppa / NULLIF(total_qty, 0)) AS share_renewable_ppa,
+  (qty_thermal_ppa / NULLIF(total_qty, 0)) AS share_thermal_ppa,
+  (qty_import / NULLIF(total_qty, 0)) AS share_import
+FROM shares
+WHERE date = '2024-06-01'
+ORDER BY date
+LIMIT 3750;
 """
 
 
@@ -1823,6 +1898,13 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         sanitized = raw_sql.strip()
         simple_table_whitelist_check(sanitized)
         safe_sql = plan_validate_repair(sanitized)
+
+        # 🎯 CRITICAL: Force pivot injection for balancing share queries
+        # LLM often generates SQL querying trade_derived_entities directly instead of using share columns
+        # This proactively converts entity rows into share_* columns
+        if should_inject_balancing_pivot(q.query, safe_sql):
+            log.info("🔄 Force-injecting balancing share pivot based on query intent")
+            safe_sql = build_trade_share_cte(safe_sql)
 
         if period_pattern:
             log.info("🧮 Detected user-defined period range → applying aggregation logic.")
