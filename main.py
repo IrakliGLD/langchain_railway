@@ -106,6 +106,9 @@ MODEL_TYPE = (os.getenv("MODEL_TYPE", "gemini") or "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+# Maximum rows to return from queries (prevents huge result sets)
+MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
+
 if not SUPABASE_DB_URL:
     raise RuntimeError("Missing SUPABASE_DB_URL")
 if not APP_SECRET_KEY:
@@ -154,8 +157,8 @@ SYNONYM_PATTERNS = [
     (re.compile(r"\benergy_balance_long\b", re.IGNORECASE), "energy_balance_long_mv"),
 ]
 
-# Pre-compiled regex for LIMIT detection
-LIMIT_PATTERN = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
+# Pre-compiled regex for LIMIT detection (allows optional whitespace)
+LIMIT_PATTERN = re.compile(r"\bLIMIT\s*\d+\b", re.IGNORECASE)
 
 
 BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"
@@ -165,7 +168,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     f"""
     SELECT
         t.date,
-        'balancing_electricity'::text AS segment,
+        'balancing'::text AS segment,
         SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_import,
         SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_deregulated_hydro,
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(total.total_qty,0) AS share_regulated_hpp,
@@ -180,7 +183,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     JOIN (
         SELECT date, SUM(quantity) AS total_qty
         FROM trade_derived_entities
-        WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
+        WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
           AND entity IN (
             'import', 'deregulated_hydro', 'regulated_hpp',
             'regulated_new_tpp', 'regulated_old_tpp',
@@ -188,7 +191,7 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
           )
         GROUP BY date
     ) total ON t.date = total.date
-    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing_electricity'
+    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
       AND t.entity IN (
         'import', 'deregulated_hydro', 'regulated_hpp',
         'regulated_new_tpp', 'regulated_old_tpp',
@@ -229,26 +232,38 @@ def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
 
 
 def build_trade_share_cte(original_sql: str) -> str:
-    """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
+    """Inject a balancing electricity share pivot as a CTE and alias original SQL to it.
+
+    Uses a unique CTE name to avoid conflicts if original SQL already uses 'tde' as alias.
+    """
+    import uuid
+
+    # Generate unique CTE name to avoid collisions
+    cte_name = f"tde_{uuid.uuid4().hex[:6]}"
 
     table_pattern = re.compile(r"\btrade_derived_entities\b", re.IGNORECASE)
-    pivot_alias_sql = table_pattern.sub("tde", original_sql)
+    pivot_alias_sql = table_pattern.sub(cte_name, original_sql)
 
     with_pattern = re.compile(r"^\s*WITH\b", re.IGNORECASE)
     if with_pattern.match(pivot_alias_sql):
         return with_pattern.sub(
-            f"WITH tde AS ({BALANCING_SHARE_PIVOT_SQL}), ",
+            f"WITH {cte_name} AS ({BALANCING_SHARE_PIVOT_SQL}), ",
             pivot_alias_sql,
             count=1,
         )
 
-    return f"WITH tde AS ({BALANCING_SHARE_PIVOT_SQL})\n{pivot_alias_sql}"
+    return f"WITH {cte_name} AS ({BALANCING_SHARE_PIVOT_SQL})\n{pivot_alias_sql}"
 
 
 def fetch_balancing_share_panel(conn) -> pd.DataFrame:
-    """Return a DataFrame with monthly balancing share ratios for each entity group."""
+    """Return a DataFrame with monthly balancing share ratios for each entity group.
 
-    res = conn.execute(text(BALANCING_SHARE_PIVOT_SQL))
+    LIMIT added to prevent huge result sets when used as fallback.
+    """
+    # Add LIMIT to prevent returning all months (could be 100+ rows)
+    limited_sql = f"{BALANCING_SHARE_PIVOT_SQL}\nLIMIT {MAX_ROWS}"
+
+    res = conn.execute(text(limited_sql))
     rows = res.fetchall()
     cols = list(res.keys())
     df = pd.DataFrame(rows, columns=[str(c) for c in cols])
@@ -671,7 +686,7 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     ),
     tariffs AS (
@@ -703,9 +718,10 @@ def build_balancing_correlation_df(conn) -> pd.DataFrame:
     LEFT JOIN shares s ON s.date = p.date
     LEFT JOIN tariffs tr ON tr.date = p.date
     ORDER BY p.date
-    LIMIT 3750;
     """
-    res = conn.execute(text(sql))
+    # Add LIMIT using configured MAX_ROWS (replaces hardcoded 3750)
+    sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
+    res = conn.execute(text(sql_with_limit))
     return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
 
 
@@ -721,7 +737,7 @@ def compute_weighted_balancing_price(conn) -> pd.DataFrame:
     WITH t AS (
       SELECT date, entity, SUM(quantity) AS qty
       FROM trade_derived_entities
-      WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
         AND entity IN ('deregulated_hydro','import','regulated_hpp',
                        'regulated_new_tpp','regulated_old_tpp',
                        'renewable_ppa','thermal_ppa')
@@ -798,7 +814,7 @@ def compute_entity_price_contributions(conn) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     ),
     entity_prices AS (
@@ -808,12 +824,13 @@ def compute_entity_price_contributions(conn) -> pd.DataFrame:
         p.p_dereg_gel AS price_deregulated_hydro,
 
         -- Regulated HPP: use weighted average of main HPPs or Enguri as proxy
+        -- Using ILIKE for case-insensitive matching (PostgreSQL extension)
         (SELECT AVG(t1.tariff_gel)
          FROM tariff_with_usd t1
          WHERE t1.date = d.date
-           AND (t1.entity LIKE '%engurhesi%'
-                OR t1.entity LIKE '%energo-pro%'
-                OR t1.entity LIKE '%vardnili%')
+           AND (t1.entity ILIKE '%engurhesi%'
+                OR t1.entity ILIKE '%energo-pro%'
+                OR t1.entity ILIKE '%vardnili%')
         ) AS price_regulated_hpp,
 
         -- Regulated new TPP: Gardabani
@@ -896,9 +913,10 @@ def compute_entity_price_contributions(conn) -> pd.DataFrame:
     LEFT JOIN entity_prices ep ON ep.date = p.date
     WHERE p.date >= '2015-01-01'
     ORDER BY p.date
-    LIMIT 3750;
     """
-    res = conn.execute(text(sql))
+    # Add LIMIT using configured MAX_ROWS (replaces hardcoded 3750)
+    sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
+    res = conn.execute(text(sql_with_limit))
     return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
 
 
@@ -928,7 +946,7 @@ def compute_share_changes(conn) -> pd.DataFrame:
         (SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_renewable_ppa,
         (SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity),0)) AS share_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     )
     SELECT
@@ -961,9 +979,10 @@ def compute_share_changes(conn) -> pd.DataFrame:
     FROM shares s
     LEFT JOIN price_with_usd p ON p.date = s.date
     ORDER BY s.date
-    LIMIT 3750;
     """
-    res = conn.execute(text(sql))
+    # Add LIMIT using configured MAX_ROWS (replaces hardcoded 3750)
+    sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
+    res = conn.execute(text(sql_with_limit))
     return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
 
 
@@ -1245,7 +1264,7 @@ LIMIT 3750;
 
 -- Example 5: Balancing price GEL vs shares (no raw quantities)
 -- IMPORTANT: Use ILIKE or lowercase comparison for segment to handle different casings
--- Database may contain 'Balancing Electricity', 'balancing_electricity', or other variants
+-- Database may contain 'Balancing Electricity', 'balancing', or other variants
 WITH shares AS (
   SELECT
     t.date,
@@ -1254,7 +1273,7 @@ WITH shares AS (
     SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
-  WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing_electricity'
+  WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
   GROUP BY t.date
 )
 SELECT
@@ -1321,7 +1340,7 @@ WITH shares AS (
     SUM(CASE WHEN entity = 'thermal_ppa' THEN quantity ELSE 0 END) AS qty_thermal_ppa,
     SUM(CASE WHEN entity = 'import' THEN quantity ELSE 0 END) AS qty_import
   FROM trade_derived_entities
-  WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity'
+  WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
   GROUP BY date
 )
 SELECT
@@ -1381,8 +1400,8 @@ CRITICAL - PRIMARY DRIVERS for balancing price analysis:
     - Critical because gas and imports are USD-priced
   * PRIMARY DRIVER #2: Composition (shares) - CRITICAL for both GEL and USD prices
     - Calculate shares from trade_derived_entities
-    - IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity' for segment filter
-    - Database may have 'Balancing Electricity', 'balancing_electricity', or other variants
+    - IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing' for segment filter
+    - Database may have 'Balancing Electricity', 'balancing', or other variants
     - Use share CTE pattern, no raw quantities
     - Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
     - Higher expensive source shares (import, thermal PPA, renewable PPA) → higher prices
@@ -1468,12 +1487,17 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     # --- NEW TREND CALCULATION: Compare First Full Year vs Last Full Year ---
     try:
         # Ensure the time column is datetime, then extract year/month
-        if pd.api.types.is_datetime64_any_dtype(df[time_col]):
-            df['__year'] = df[time_col].dt.year
-        else:
+        if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
             # Attempt to coerce strings/objects to datetime
             df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-            df['__year'] = df[time_col].dt.year
+
+        # Verify conversion worked before using .dt accessors
+        if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+            # Conversion failed, still object dtype - skip trend calculation
+            log.warning(f"⚠️ Column {time_col} could not be converted to datetime, skipping trend")
+            return "\n".join(out)
+
+        df['__year'] = df[time_col].dt.year
 
         # --- Detect and exclude incomplete final year ---
         # Applies to all time columns, even if already datetime
@@ -1726,7 +1750,7 @@ def simple_table_whitelist_check(sql: str):
         with_clause = parsed_expression.find(exp.With)
         if with_clause:
             for cte in with_clause.expressions:
-                if cte.alias:  # Check alias exists before accessing
+                if cte.alias is not None:  # Explicit None check for anonymous CTEs
                     cte_names.add(cte.alias.lower())
         # ---------------------------------
 
@@ -1808,14 +1832,14 @@ def plan_validate_repair(sql: str) -> str:
         log.warning(f"⚠️ Synonym auto-correction failed: {e}")
         # Not a critical failure, continue with original SQL
 
-    # Phase 2: Append LIMIT 3750 if missing (using pre-compiled pattern)
+    # Phase 2: Append LIMIT if missing (using pre-compiled pattern)
     if " from " in _sql.lower() and not LIMIT_PATTERN.search(_sql):
-        
+
         # CRITICAL FIX: Remove the trailing semicolon if it exists
-        _sql = _sql.rstrip().rstrip(';') 
-        
-        # Append LIMIT 3750 without a preceding semicolon
-        _sql = f"{_sql}\nLIMIT 3750"
+        _sql = _sql.rstrip().rstrip(';')
+
+        # Append LIMIT without a preceding semicolon
+        _sql = f"{_sql}\nLIMIT {MAX_ROWS}"
 
     return _sql
     
@@ -1868,11 +1892,18 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     # 1) Generate PLAN and SQL in ONE LLM call
     try:
         combined_output = llm_generate_plan_and_sql(q.query, mode, lang_instruction)
-        if "---SQL---" in combined_output:
-            plan_text, raw_sql = combined_output.split("---SQL---", 1)
-            raw_sql = raw_sql.strip()
-        else:
-            plan_text = combined_output
+
+        # Validate LLM output format
+        separator = "---SQL---"
+        if separator not in combined_output:
+            log.error(f"❌ LLM output missing separator. Output: {combined_output[:200]}")
+            raise ValueError("LLM output malformed: missing '---SQL---' separator")
+
+        plan_text, raw_sql = combined_output.split(separator, 1)
+        raw_sql = raw_sql.strip()
+        if not raw_sql:
+            log.error("❌ LLM returned empty SQL after separator")
+            raise ValueError("LLM output malformed: SQL part is empty")
             raw_sql = "SELECT 1"
         try:
             plan = json.loads(plan_text.strip())
@@ -1917,11 +1948,10 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 log.info("🧮 Query already aggregated → skipping outer AVG/SUM wrapper.")
                 safe_sql_final = safe_sql
             else:
-                if any(x in q.query.lower() for x in ["generation", "quantity", "volume", "demand", "supply"]):
-                    agg_func = "SUM"
-                else:
-                    agg_func = "AVG"
-                safe_sql_final = f"SELECT {agg_func}(x.value) AS aggregated_value FROM ({safe_sql}) AS x"
+                # DISABLED: Period aggregation wrapper has a bug - assumes column named 'value'
+                # TODO: Fix to detect actual column names from inner query
+                log.warning("⚠️ Period aggregation requested but wrapper is disabled (column name detection needed)")
+                safe_sql_final = safe_sql
         else:
             safe_sql_final = safe_sql
 
@@ -2000,7 +2030,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # --- 🩹 Auto-pivot fix for hallucinated trade_derived_entities columns ---
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
-            log.info("CRITICAL: Using segment='balancing_electricity' for share calculation")
+            log.info("CRITICAL: Using segment='balancing' for share calculation")
             safe_sql_final = build_trade_share_cte(safe_sql_final)
             with ENGINE.connect() as conn:
                 res = conn.execute(text(safe_sql_final))
