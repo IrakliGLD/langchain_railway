@@ -2592,12 +2592,15 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         # --- Coerce numeric for all non-time columns so JSON values are numbers, not strings ---
         # --- Detect time column ---
-        time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month"])), None)
+        # Support Georgian column names: თვე (month), წელი (year), თარიღი (date)
+        time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
 
         # --- Detect and preserve categorical columns ---
+        # Support Georgian column names: ტიპი (type), სექტორი (sector), etc.
         categorical_hints = [
             "type", "tech", "entity", "sector", "source", "segment",
-            "region", "category", "ownership", "market", "trade", "fuel"
+            "region", "category", "ownership", "market", "trade", "fuel",
+            "ტიპი", "სექტორი", "წყარო"
         ]
         for c in cols:
             if c != time_key:
