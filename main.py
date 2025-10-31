@@ -1406,6 +1406,8 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str, lang_instruct
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
         "Use only documented tables and columns. Prefer monthly aggregation. "
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
+        "CRITICAL: Always use ENGLISH column aliases in SQL output (e.g., AS month, AS balancing_price_gel), "
+        "never use Georgian/Russian names in column aliases, even if the user query is in Georgian/Russian. "
         f"{lang_instruction}"
     )
     # Use selective domain knowledge to reduce tokens (30-40% savings)
