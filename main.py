@@ -1083,6 +1083,42 @@ class APIResponse(BaseModel):
 # LLM + Planning helpers
 # -----------------------------
 
+# ------------------------------------------------------------------
+# STEP 1: Domain Knowledge Reasoning (NEW - ADD HERE)
+# ------------------------------------------------------------------
+def llm_analyze_with_domain_knowledge(user_query: str, lang_instruction: str) -> str:
+    """
+    First LLM call: Pure reasoning using domain knowledge.
+    Forces the model to think like an energy analyst BEFORE writing SQL.
+    """
+    system = (
+        "You are a senior energy market analyst for Georgia. "
+        "Interpret the user's question using ONLY the domain knowledge. "
+        "Do not write SQL. Do not mention tables. "
+        "Answer in 3 parts: "
+        "1. Intent: What is the user asking? (e.g., price trend, share, driver) "
+        "2. Key Concepts: List domain concepts involved "
+        "3. Reasoning: Explain using domain knowledge "
+        f"{lang_instruction}"
+    )
+    domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
+    prompt = f"""
+User question: {user_query}
+
+Domain Knowledge:
+{domain_json}
+
+Respond in structured text only.
+"""
+    try:
+        llm = make_gemini()
+        response = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+        log.info(f"Domain Reasoning:\n{response}")
+        return response
+    except Exception as e:
+        log.warning(f"Domain reasoning failed: {e}. Using fallback.")
+        return "Intent: general\nKey Concepts: balancing price\nReasoning: Use xrate and entity shares from trade_derived_entities."
+
 # Cached LLM instances (singleton pattern for performance)
 _gemini_llm = None
 _openai_llm = None
@@ -1216,17 +1252,104 @@ def get_language_instruction(lang_code: str) -> str:
 
 def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> str:
     """Return domain knowledge JSON, optionally filtered by query relevance.
-
     Args:
         user_query: The user's query text
         use_cache: If True, use full cached JSON. If False, select relevant sections only.
-
     Returns:
         JSON string of domain knowledge (full or filtered)
-
     This function can reduce token usage by 30-40% when use_cache=False by including
     only sections relevant to the query type.
     """
+    if use_cache:
+        return _DOMAIN_KNOWLEDGE_JSON
+
+    query_lower = user_query.lower()
+    relevant = {}
+
+    # ------------------------------------------------------------------
+    # Keyword triggers – each key must exist in DOMAIN_KNOWLEDGE
+    # ------------------------------------------------------------------
+    triggers = {
+        "BalancingPriceDrivers": [
+            "balancing", "price", "p_bal", "cost", "driver", "why", "increase", "decrease",
+            "xrate", "share", "composition", "hydro", "thermal", "import", "ppa"
+        ],
+        "BalancingPriceFormation": [
+            "weighted", "average", "weighting", "entity", "segment", "balancing_electricity"
+        ],
+        "BalancingMarketStructure": [
+            "balancing market", "imbalance", "settlement", "esco", "brp", "monthly"
+        ],
+        "BalancingPriceDecomposition": [
+            "decomposition", "contribution", "share_change", "entity contribution"
+        ],
+        "BalancingMarketLogic": [
+            "deviation", "forecast", "actual", "residual", "mix"
+        ],
+        "TariffStructure": [
+            "tariff", "regulated", "enguri", "vardnili", "gardabani", "tpp", "cost-plus",
+            "gnerc", "capacity fee"
+        ],
+        "TariffDependencies": [
+            "enguri", "gardabani", "old tpp", "mtkvar", "g-power"
+        ],
+        "tariff_entities": [
+            "engurhesi", "energo-pro", "dzevruli", "gumati", "shaori", "rioni",
+            "lajanuri", "zhinvali", "khrami", "mtkvari energy", "tbilisi tpp"
+        ],
+        "price_with_usd": [
+            "p_bal_gel", "p_bal_usd", "p_dereg_gel", "p_dereg_usd", "usd"
+        ],
+        "CurrencyInfluence": [
+            "gel", "usd", "exchange rate", "depreciation", "xrate"
+        ],
+        "SeasonalityPatterns": [
+            "summer", "winter", "april", "july", "august", "march", "season"
+        ],
+        "SeasonalTrends": [
+            "seasonal", "cagr", "trend", "hydro dominant", "thermal dominant"
+        ],
+        "CfD_Contracts": [
+            "cfd", "contract for difference", "strike price", "renewable ppa", "central dispatch"
+        ],
+        "RenewableIntegration": [
+            "renewable", "ppa", "solar", "wind", "integration"
+        ],
+        "ImportDependence": [
+            "import", "export", "dependence", "turkey", "azeri"
+        ],
+        "TransmissionNetworkDevelopment": [
+            "transmission", "tyndp", "gse", "west-east", "congestion", "substation"
+        ],
+        "GenerationAdequacyAndForecast": [
+            "adequacy", "forecast", "capacity", "plexos", "2034"
+        ],
+        "MarketParticipantsAndDataSources": [
+            "gnerc", "esco", "gse", "genex", "geostat", "participant"
+        ],
+        "DataEvidenceIntegration": [
+            "evidence", "view", "materialized", "chart", "cpi"
+        ]
+    }
+
+    for section, keywords in triggers.items():
+        if any(k in query_lower for k in keywords):
+            if section in DOMAIN_KNOWLEDGE:
+                relevant[section] = DOMAIN_KNOWLEDGE[section]
+
+    # ------------------------------------------------------------------
+    # FALLBACK: always include BalancingPriceDrivers (core for price questions)
+    # ------------------------------------------------------------------
+    if not relevant:
+        relevant = {
+            "note": "No specific domain knowledge matched the query.",
+            "BalancingPriceDrivers": DOMAIN_KNOWLEDGE.get("BalancingPriceDrivers", {})
+        }
+
+    return json.dumps(relevant, indent=2)
+
+
+    
     if use_cache:
         # Use full pre-cached JSON (fastest, but more tokens)
         return _DOMAIN_KNOWLEDGE_JSON
@@ -1395,9 +1518,14 @@ LIMIT 3750;
 """
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
-def llm_generate_plan_and_sql(user_query: str, analysis_mode: str, lang_instruction: str = "Respond in English.") -> str:
-    # New combined function with language support
+@retry(stop=stop_after_attempt(2), wait_exponential(min=1, max=8))
+def llm_generate_plan_and_sql(
+    user_query: str,
+    analysis_mode: str,
+    lang_instruction: str = "Respond in English.",
+    domain_reasoning: str = ""  # ← NEW: Pass domain reasoning
+) -> str:
+    
 
     system = (
         "You are an analytical PostgreSQL generator. Your task is to perform two steps: "
@@ -1420,6 +1548,9 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str, lang_instruct
     }
 
     prompt = f"""
+DOMAIN REASONING (USE THIS FIRST):
+{domain_reasoning}
+
 User question:
 {user_query}
 
@@ -1928,12 +2059,22 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     lang_code = detect_language(q.query)
     lang_instruction = get_language_instruction(lang_code)
     log.info(f"🌍 Detected language: {lang_code}")
+# ------------------------------------------------------------------
+    # STEP 2: Domain Reasoning First (NEW - ADD HERE)
+    # ------------------------------------------------------------------
+    domain_reasoning = llm_analyze_with_domain_knowledge(q.query, lang_instruction
 
+    
     plan = {}
 
     # 1) Generate PLAN and SQL in ONE LLM call
     try:
-        combined_output = llm_generate_plan_and_sql(q.query, mode, lang_instruction)
+        combined_output = llm_generate_plan_and_sql(
+            user_query=q.query,
+            analysis_mode=mode,
+            lang_instruction=lang_instruction,
+            domain_reasoning=domain_reasoning  # ← PASS IT HERE
+        )
 
         # Validate LLM output format
         separator = "---SQL---"
