@@ -2047,7 +2047,7 @@ def get_metrics():
 
 
 @app.post("/ask", response_model=APIResponse)
-async def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
+def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     t0 = time.time()
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -2059,57 +2059,45 @@ async def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key"))
     lang_code = detect_language(q.query)
     lang_instruction = get_language_instruction(lang_code)
     log.info(f"🌍 Detected language: {lang_code}")
+# ------------------------------------------------------------------
+    # STEP 2: Domain Reasoning First (NEW - ADD HERE)
+    # ------------------------------------------------------------------
+    domain_reasoning = llm_analyze_with_domain_knowledge(q.query, lang_instruction)
 
     
-    # ------------------------------------------------------------------
-    # STEP 2: PARALLEL DOMAIN REASONING + SQL PLANNING (FAST)
-    # ------------------------------------------------------------------
-    import asyncio  # ← Already added at top
-    
-    async def run_domain_reasoning():
-        return llm_analyze_with_domain_knowledge(q.query, lang_instruction)
-    
-    async def run_sql_planning_placeholder():
-        return llm_generate_plan_and_sql(
+    plan = {}
+
+    # 1) Generate PLAN and SQL in ONE LLM call
+    try:
+        combined_output = llm_generate_plan_and_sql(
             user_query=q.query,
             analysis_mode=mode,
             lang_instruction=lang_instruction,
-            domain_reasoning=""
+            domain_reasoning=domain_reasoning  # ← PASS IT HERE
         )
-    
-    # === RUN BOTH IN PARALLEL ===
-    domain_reasoning, placeholder_output = await asyncio.gather(
-        run_domain_reasoning(),
-        run_sql_planning_placeholder()
-    )
-    log.info("Parallel LLMs completed")
-    
-    # === FINAL CALL WITH DOMAIN KNOWLEDGE ===
-    combined_output = llm_generate_plan_and_sql(
-        user_query=q.query,
-        analysis_mode=mode,
-        lang_instruction=lang_instruction,
-        domain_reasoning=domain_reasoning
-    )
-    
-    # === VALIDATE OUTPUT ===
-    separator = "---SQL---"
-    if separator not in combined_output:
-        log.error(f"LLM output missing separator. Output: {combined_output[:200]}")
-        raise ValueError("LLM output malformed: missing '---SQL---' separator")
-    plan_text, raw_sql = combined_output.split(separator, 1)
-    raw_sql = raw_sql.strip()
-    if not raw_sql:
-        log.error("LLM returned empty SQL after separator")
-        raise ValueError("LLM output malformed: SQL part is empty")
-        raw_sql = "SELECT 1"
-    try:
-        plan = json.loads(plan_text.strip())
-    except json.JSONDecodeError:
-        log.warning("Plan JSON decoding failed, defaulting to general plan.")
-        plan = {"intent": "general", "target": "", "period": ""}
-    # ------------------------------------------------------------------
-    log.info(f"Plan: {plan}")
+
+        # Validate LLM output format
+        separator = "---SQL---"
+        if separator not in combined_output:
+            log.error(f"❌ LLM output missing separator. Output: {combined_output[:200]}")
+            raise ValueError("LLM output malformed: missing '---SQL---' separator")
+
+        plan_text, raw_sql = combined_output.split(separator, 1)
+        raw_sql = raw_sql.strip()
+        if not raw_sql:
+            log.error("❌ LLM returned empty SQL after separator")
+            raise ValueError("LLM output malformed: SQL part is empty")
+            raw_sql = "SELECT 1"
+        try:
+            plan = json.loads(plan_text.strip())
+        except json.JSONDecodeError:
+            log.warning("Plan JSON decoding failed, defaulting to general plan.")
+            plan = {"intent": "general", "target": "", "period": ""}
+    except Exception as e:
+        log.exception("Combined Plan/SQL generation failed")
+        raise HTTPException(status_code=500, detail=f"Failed to generate Plan/SQL: {e}")
+
+    log.info(f"📝 Plan: {plan}")
 
     # --- Period aggregation detection (optional user-defined range) ---
     period_pattern = re.search(
