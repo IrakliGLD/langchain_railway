@@ -47,7 +47,7 @@ from domain_knowledge import DOMAIN_KNOWLEDGE
 # -----------------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("enerbot")
+log = logging.getLogger("Enai")
 
 # Cache domain knowledge JSON serialization (done once at startup)
 _DOMAIN_KNOWLEDGE_JSON = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
@@ -1026,7 +1026,7 @@ def compute_share_changes(conn) -> pd.DataFrame:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="EnerBot Analyst (Gemini)", version="18.6") # Version bump
+app = FastAPI(title="Enai Analyst (Gemini)", version="18.6") # Version bump
 
 # Request ID middleware for observability and debugging
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -1779,7 +1779,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
 def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.") -> str:
     system = (
-        "You are EnerBot, an energy market analyst. "
+        "You are Enai, an energy market analyst. "
         "Write a short analytic summary using preview and statistics. "
         "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
         "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
@@ -1901,7 +1901,7 @@ write a more detailed summary of about 5–10 sentences following this structure
 
 from sqlglot import parse_one, exp, ParseError
 
-log = logging.getLogger("enerbot")
+log = logging.getLogger("Enai")
 
 # --- Assuming these variables are still defined globally in your environment ---
 # ALLOWED_TABLES = {'price_with_usd', 'other_allowed_table', ...}
