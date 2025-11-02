@@ -2066,7 +2066,7 @@ async def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key"))
     # ------------------------------------------------------------------
     import asyncio  # ← Already added at top
     
-    async816 def run_domain_reasoning():
+    async def run_domain_reasoning():
         return llm_analyze_with_domain_knowledge(q.query, lang_instruction)
     
     async def run_sql_planning_placeholder():
