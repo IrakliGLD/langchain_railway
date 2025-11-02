@@ -1518,7 +1518,7 @@ LIMIT 3750;
 """
 
 
-@retry(stop=stop_after_attempt(2), wait_exponential(min=1, max=8))
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8))
 def llm_generate_plan_and_sql(
     user_query: str,
     analysis_mode: str,
