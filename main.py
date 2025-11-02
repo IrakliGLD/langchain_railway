@@ -2062,7 +2062,7 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 # ------------------------------------------------------------------
     # STEP 2: Domain Reasoning First (NEW - ADD HERE)
     # ------------------------------------------------------------------
-    domain_reasoning = llm_analyze_with_domain_knowledge(q.query, lang_instruction
+    domain_reasoning = llm_analyze_with_domain_knowledge(q.query, lang_instruction)
 
     
     plan = {}
