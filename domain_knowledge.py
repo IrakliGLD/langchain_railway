@@ -190,7 +190,7 @@ DOMAIN_KNOWLEDGE = {
                 "description": "Shares of different entities selling electricity on balancing segment",
                 "mechanism": [
                     "Higher share of cheap sources (regulated HPP, deregulated hydro) → lower price",
-                    "Higher share of expensive sources (import, thermal PPA) → higher price",
+                    "Higher share of expensive sources (import, thermal PPA, renewable PPA is also higher than average summer prices) → higher price",
                     "Composition changes seasonally (summer=hydro, winter=thermal/import)"
                 ],
                 "data_source": "trade_derived_entities WHERE segment='balancing_electricity'",
