@@ -2888,15 +2888,25 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
 
 
-        # --- Dimension inference (price_tariff | energy_qty | index) ---
+        # --- Dimension inference (xrate | share | price_tariff | energy_qty | index) ---
         # Support Georgian column names
+        # IMPORTANT: Check in order of specificity (xrate before price, share before other)
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
+            # Exchange rate - check FIRST before price (has _gel/_usd but is not a price)
+            if any(x in col_l for x in ["xrate", "exchange", "rate", "კურსი"]):
+                return "xrate"
+            # Shares/proportions - check BEFORE other
+            if any(x in col_l for x in ["share_", "წილი_", "proportion", "percent", "პროცენტ"]):
+                return "share"
+            # Index
             if any(x in col_l for x in ["cpi", "index", "inflation", "ინდექსი"]):
                 return "index"
+            # Quantity
             if any(x in col_l for x in ["quantity", "generation", "volume_tj", "volume", "mw", "tj", "რაოდენობა", "მოცულობა", "გენერაცია"]):
                 return "energy_qty"
-            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap", "ფასი", "ტარიფი", "საშუალო"]):
+            # Price/Tariff - check AFTER xrate
+            if any(x in col_l for x in ["price", "tariff", "_gel", "_usd", "p_bal", "p_dereg", "p_gcap", "ფასი", "ტარიფი"]):
                 return "price_tariff"
             return "other"
 
@@ -2931,6 +2941,55 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         def unit_for_index(_: list[str]) -> str:
             return "Index (2015=100)"
+
+        def unit_for_xrate(_: list[str]) -> str:
+            return "GEL per USD"
+
+        def unit_for_share(_: list[str]) -> str:
+            return "Share (0-1)"
+
+        # --- LIMIT to max 2-3 series for readability ---
+        # If too many series, select most relevant based on query keywords
+        MAX_SERIES = 3
+        if len(num_cols) > MAX_SERIES:
+            log.info(f"⚠️ Too many series ({len(num_cols)}), limiting to {MAX_SERIES} most relevant")
+
+            query_lower = q.query.lower()
+
+            # Score each column by keyword relevance
+            def relevance_score(col: str) -> int:
+                score = 0
+                col_lower = col.lower()
+
+                # High priority keywords
+                if any(k in query_lower for k in ["price", "ფასი", "цена"]) and any(k in col_lower for k in ["price", "p_bal", "ფასი"]):
+                    score += 10
+                if any(k in query_lower for k in ["xrate", "exchange", "კურსი", "курс"]) and "xrate" in col_lower:
+                    score += 10
+                if any(k in query_lower for k in ["share", "წილი", "доля", "composition"]) and "share" in col_lower:
+                    score += 5
+                if any(k in query_lower for k in ["tariff", "ტარიფი", "тариф"]) and "tariff" in col_lower:
+                    score += 5
+
+                # Prefer primary metrics
+                if "p_bal" in col_lower:
+                    score += 3
+                if "xrate" in col_lower:
+                    score += 2
+
+                return score
+
+            # Sort by relevance and take top MAX_SERIES
+            scored_cols = [(col, relevance_score(col)) for col in num_cols]
+            scored_cols.sort(key=lambda x: x[1], reverse=True)
+            num_cols = [col for col, _ in scored_cols[:MAX_SERIES]]
+
+            log.info(f"📊 Selected series: {num_cols}")
+
+            # Recalculate dimensions for filtered columns
+            dim_map = {c: infer_dimension(c) for c in num_cols}
+            dims = set(dim_map.values())
+            log.info(f"📐 Filtered dimensions: {dim_map} → {dims}")
 
         # --- Labels from context.py for EVERY series (not only numeric) ---
         try:
@@ -2967,6 +3026,34 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 "labels": chart_labels,
             }
 
+        elif "price_tariff" in dims and "xrate" in dims:
+            # Price + Exchange Rate → dual axes (different units!)
+            log.info("📊 Mixed price and xrate → dual-axis chart.")
+            chart_type = "dualaxis"
+            chart_data = df_labeled.to_dict("records")
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisLeft": unit_for_price(num_cols),   # GEL/MWh or USD/MWh
+                "yAxisRight": unit_for_xrate(num_cols),  # GEL per USD
+                "title": "Price vs Exchange Rate",
+                "axisMode": "dual",
+                "labels": chart_labels,
+            }
+
+        elif "price_tariff" in dims and "share" in dims:
+            # Price + Share → dual axes (different scales: 0-200 vs 0-1)
+            log.info("📊 Mixed price and share → dual-axis chart.")
+            chart_type = "dualaxis"
+            chart_data = df_labeled.to_dict("records")
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisLeft": unit_for_price(num_cols),  # GEL/MWh or USD/MWh
+                "yAxisRight": unit_for_share(num_cols), # Share (0-1)
+                "title": "Price vs Composition Shares",
+                "axisMode": "dual",
+                "labels": chart_labels,
+            }
+
         elif "price_tariff" in dims and "energy_qty" in dims:
             # Price/Tariff + Quantity → dual axes
             log.info("📊 Mixed price/tariff and quantity → dual-axis chart.")
@@ -2977,6 +3064,20 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 "yAxisLeft": unit_for_qty(num_cols),     # unit only (TJ / thousand MWh)
                 "yAxisRight": unit_for_price(num_cols),  # unit only (GEL/MWh, USD/MWh, or per MWh)
                 "title": "Quantity vs Price/Tariff",
+                "axisMode": "dual",
+                "labels": chart_labels,
+            }
+
+        elif "xrate" in dims and "share" in dims:
+            # Exchange Rate + Share → dual axes
+            log.info("📊 Mixed xrate and share → dual-axis chart.")
+            chart_type = "dualaxis"
+            chart_data = df_labeled.to_dict("records")
+            chart_meta = {
+                "xAxisTitle": time_key or "time",
+                "yAxisLeft": unit_for_xrate(num_cols),  # GEL per USD
+                "yAxisRight": unit_for_share(num_cols), # Share (0-1)
+                "title": "Exchange Rate vs Composition",
                 "axisMode": "dual",
                 "labels": chart_labels,
             }
@@ -2997,6 +3098,10 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 y_unit = unit_for_qty(num_cols)
             elif dims == {"index"}:
                 y_unit = unit_for_index(num_cols)
+            elif dims == {"xrate"}:
+                y_unit = unit_for_xrate(num_cols)
+            elif dims == {"share"}:
+                y_unit = unit_for_share(num_cols)
             else:
                 y_unit = "Value"
 
