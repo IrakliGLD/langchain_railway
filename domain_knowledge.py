@@ -118,17 +118,17 @@ DOMAIN_KNOWLEDGE = {
             "The effect of CfD generation on the **market price level** is uncertain: while additional renewable capacity increases total supply, most CfD projects are hydro and solar producing mainly in summer months. When the contracted CfD price is higher than contemporaneous market prices, their inclusion in system dispatch may indirectly raise the seasonal average price signal even though the generator itself remains price-neutral."
         ],
         "analytical_notes": [
-            "EnerBot must treat CfD generators as **price-neutral** participants: their revenues are fixed at the strike price and are not influenced by short-term market price changes.",
+            "Enai must treat CfD generators as **price-neutral** participants: their revenues are fixed at the strike price and are not influenced by short-term market price changes.",
             "Their main exposure is **quantity risk** — if GSE curtails output for system reasons, their remuneration falls proportionally.",
-            "When analyzing average or balancing prices, EnerBot should note that CfD generation volumes are excluded from exchange transactions and remunerated separately, which can distort apparent price–volume relationships.",
-            "EnerBot should describe CfD projects as a distinct category within generation — centrally dispatched, renewable, fully price-insulated, and subject to curtailment risk — with indirect but material influence on system balance and market price formation.",
+            "When analyzing average or balancing prices, Enai should note that CfD generation volumes are excluded from exchange transactions and remunerated separately, which can distort apparent price–volume relationships.",
+            "Enai should describe CfD projects as a distinct category within generation — centrally dispatched, renewable, fully price-insulated, and subject to curtailment risk — with indirect but material influence on system balance and market price formation.",
             "All CfD-related quantities, price levels, and contract assumptions originate from the official GSE auction documentation and the Georgian electricity market transitional rules."
         ]
     },
 
 
     "BalancingMarketStructure": {
-        "description": "Explanation of the current Georgian balancing mechanism and how it differs from the European-style balancing market design. This context is essential for EnerBot when interpreting balancing electricity prices or queries mentioning 'balancing market' or 'imbalance settlement'.",
+        "description": "Explanation of the current Georgian balancing mechanism and how it differs from the European-style balancing market design. This context is essential for Enai when interpreting balancing electricity prices or queries mentioning 'balancing market' or 'imbalance settlement'.",
         "current_design": [
             "Despite being formally called a 'balancing market', Georgia’s current system functions as an imbalance settlement mechanism rather than a real-time balancing market in the European sense.",
             "Balancing responsibility is not defined on an hourly basis — there is no concept of Balance Responsible Parties (BRPs) with continuous imbalance settlement.",
@@ -146,12 +146,12 @@ DOMAIN_KNOWLEDGE = {
         ],
         "future_direction": [
             "Full transition toward an EU-style balancing market is expected in future market reforms, with the introduction of BRPs, hourly metering, and separate balancing product procurement.",
-            "Until that transition, EnerBot must interpret any reference to the 'balancing market' as meaning 'monthly imbalance settlement' rather than a real-time balancing product market."
+            "Until that transition, Enai must interpret any reference to the 'balancing market' as meaning 'monthly imbalance settlement' rather than a real-time balancing product market."
         ],
         "analytical_notes": [
-            "When EnerBot analyzes 'balancing price' trends, it must not treat them as real-time marginal prices — instead, they represent average monthly imbalance settlement values.",
+            "When Enai analyzes 'balancing price' trends, it must not treat them as real-time marginal prices — instead, they represent average monthly imbalance settlement values.",
             "Statements about balancing volumes or revenues refer to quantities of electricity settled as imbalances, not energy traded in real-time balancing product markets.",
-            "In this context, EnerBot should link balancing price variations mainly to factors such as exchange rate movements, hydro/thermal generation composition, and tariff structures, as defined in the 'PriceDrivers' and 'CurrencyInfluence' domains."
+            "In this context, Enai should link balancing price variations mainly to factors such as exchange rate movements, hydro/thermal generation composition, and tariff structures, as defined in the 'PriceDrivers' and 'CurrencyInfluence' domains."
         ]
     },
 
@@ -190,7 +190,7 @@ DOMAIN_KNOWLEDGE = {
                 "description": "Shares of different entities selling electricity on balancing segment",
                 "mechanism": [
                     "Higher share of cheap sources (regulated HPP, deregulated hydro) → lower price",
-                    "Higher share of expensive sources (import, thermal PPA) → higher price",
+                    "Higher share of expensive sources (import, thermal PPA, renewable PPA is also higher than average summer prices) → higher price",
                     "Composition changes seasonally (summer=hydro, winter=thermal/import)"
                 ],
                 "data_source": "trade_derived_entities WHERE segment='balancing_electricity'",
@@ -310,8 +310,8 @@ DOMAIN_KNOWLEDGE = {
         "analytical_notes": [
             "The leitmotif of Georgian transmission development over 2024–2034 is 'security of supply' — maintaining system stability amid rapid generation diversification and demand growth.",
             "Transmission bottlenecks directly affect the marginal cost of balancing electricity; congestion between western hydro generation and eastern demand zones can elevate balancing prices even in high-hydro months.",
-            "EnerBot should treat the transmission plan as a structural constraint in price and dispatch analysis: west–east congestion and delayed network reinforcements can explain short-term price spreads or curtailment patterns despite sufficient installed capacity.",
-            "Whenever EnerBot references line capacities, regional transfer limits, or project commissioning dates, it must cite: 'Source: GSE Ten-Year Network Development Plan 2024–2034 (TYNDP)'."
+            "Enai should treat the transmission plan as a structural constraint in price and dispatch analysis: west–east congestion and delayed network reinforcements can explain short-term price spreads or curtailment patterns despite sufficient installed capacity.",
+            "Whenever Enai references line capacities, regional transfer limits, or project commissioning dates, it must cite: 'Source: GSE Ten-Year Network Development Plan 2024–2034 (TYNDP)'."
         ]
     },
 
@@ -338,9 +338,9 @@ DOMAIN_KNOWLEDGE = {
             "Scenario G2 (with reservoir hydro development) provides higher flexibility and resilience compared to G1 (mostly run-of-river renewables)."
         ],
         "analytical_notes": [
-            "EnerBot should interpret forecasts and adequacy results as system-level constraints influencing price and balancing behavior.",
+            "Enai should interpret forecasts and adequacy results as system-level constraints influencing price and balancing behavior.",
             "Summer export surpluses will continue to dominate the balance, potentially lowering domestic balancing prices during high-hydro years, while winter scarcity will sustain higher balancing and import prices.",
-            "When explaining trends, EnerBot must explicitly state that figures and forecasts originate from the GSE TYNDP 2024–2034, and link seasonal price patterns to the projected evolution of regulating versus seasonal hydro and the limited contribution of solar and wind during winter peaks."
+            "When explaining trends, Enai must explicitly state that figures and forecasts originate from the GSE TYNDP 2024–2034, and link seasonal price patterns to the projected evolution of regulating versus seasonal hydro and the limited contribution of solar and wind during winter peaks."
         ]
     },
 
@@ -406,7 +406,7 @@ DOMAIN_KNOWLEDGE = {
                 ],
                 "notes": [
                     "GEOSTAT is the data source for 'monthly_cpi_mv' and 'energy_balance_long_mv'.",
-                    "EnerBot should treat GEOSTAT datasets as official statistical references for national-level demand and macroeconomic trends."
+                    "Enai should treat GEOSTAT datasets as official statistical references for national-level demand and macroeconomic trends."
                 ]
             }
         },
@@ -418,11 +418,11 @@ DOMAIN_KNOWLEDGE = {
             "trade_derived_entities, other operational views": "ESCO / GENEX – balancing and market settlement data"
         },
         "analytical_notes": [
-            "When EnerBot references tariff data, it must cite GNERC as the source of tariff methodologies and approved rates.",
+            "When Enai references tariff data, it must cite GNERC as the source of tariff methodologies and approved rates.",
             "For macro energy balances and CPI statistics, GEOSTAT is the authoritative source.",
-            "For generation by technology (hydro, thermal, wind, solar), EnerBot should attribute data to GNERC, based on licensee reporting.",
+            "For generation by technology (hydro, thermal, wind, solar), Enai should attribute data to GNERC, based on licensee reporting.",
             "All balancing and market operation statistics are based on ESCO and GENEX datasets unless otherwise noted.",
-            "When explaining discrepancies or missing data, EnerBot should note possible timing lags between GNERC, ESCO, and GEOSTAT publications."
+            "When explaining discrepancies or missing data, Enai should note possible timing lags between GNERC, ESCO, and GEOSTAT publications."
         ]
     },
 
