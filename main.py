@@ -1135,54 +1135,191 @@ def detect_analysis_mode(user_query: str) -> str:
     Optimized: Uses set for O(1) lookup, converts to lowercase once.
     """
     query_lower = user_query.lower()
+
+    # Simple fact queries → light mode (higher priority)
+    simple_patterns = [
+        "what is", "what was", "list", "show", "give me",
+        "რა არის", "რამდენი", "покажи", "что такое"
+    ]
+    if any(p in query_lower for p in simple_patterns):
+        return "light"
+
+    # Deep analysis keywords → analyst mode
+    analyst_keywords = [
+        "trend over time", "correlation", "driver", "impact on",
+        "relationship between", "explain the dynamics", "analyze",
+        "what drives", "what causes", "why does"
+    ]
+    if any(k in query_lower for k in analyst_keywords):
+        return "analyst"
+
+    # Fallback to old logic for other analytical keywords
     if any(kw in query_lower for kw in ANALYTICAL_KEYWORDS):
         return "analyst"
+
     return "light"
+
+
+def classify_query_type(user_query: str) -> str:
+    """
+    Classify query into specific types for better chart/answer decisions.
+
+    Returns:
+        - "single_value": One specific value requested
+        - "list": Enumeration/listing of items
+        - "comparison": Comparing two or more things
+        - "trend": Time series analysis
+        - "table": Detailed data display
+        - "unknown": Cannot determine type
+    """
+    query_lower = user_query.lower()
+
+    # Single value indicators (highest priority)
+    if any(p in query_lower for p in [
+        "what is the", "what was the", "how much is", "how much was",
+        "რა არის", "რა იყო", "сколько"
+    ]) and any(p in query_lower for p in [
+        "in june", "in 2024", "for june", "for 2024", "latest", "last month",
+        "იუნის", "წელს", "в июне", "в 2024"
+    ]):
+        return "single_value"
+
+    # List indicators
+    if any(p in query_lower for p in [
+        "list all", "show all", "enumerate", "which entities",
+        "what are the", "name all", "give me all entities",
+        "ჩამოთვალე", "ყველა", "перечисли", "какие"
+    ]):
+        return "list"
+
+    # Comparison indicators
+    if any(p in query_lower for p in [
+        "compare", " vs ", " vs. ", "versus", "difference between",
+        "compared to", "შედარება", "შედარებით", "сравни", "по сравнению"
+    ]):
+        return "comparison"
+
+    # Trend indicators
+    if any(p in query_lower for p in [
+        "trend", "over time", "dynamics", "evolution", "change over",
+        "from 20", "between 20", "since 20",
+        "динамика", "ტენდენცია", "დინამიკა"
+    ]):
+        return "trend"
+
+    # Table indicators
+    if any(p in query_lower for p in [
+        "show me all", "give me all", "detailed", "breakdown", "show data",
+        "table", "tabular"
+    ]):
+        return "table"
+
+    return "unknown"
+
+
+def get_query_focus(user_query: str) -> str:
+    """
+    Determine the main focus of the query to filter domain knowledge appropriately.
+
+    Returns:
+        - "cpi": Consumer Price Index queries
+        - "tariff": Tariff-focused queries
+        - "generation": Electricity generation queries
+        - "balancing": Balancing market/price queries
+        - "trade": Import/export/trade queries
+        - "general": Cannot determine or multiple focuses
+    """
+    query_lower = user_query.lower()
+
+    # CPI focus (check first - very specific)
+    if any(k in query_lower for k in ["cpi", "inflation", "consumer price index", "ინფლაცია"]):
+        return "cpi"
+
+    # Tariff focus (check before balancing - tariff is more specific)
+    if any(k in query_lower for k in ["tariff", "ტარიფი", "тариф"]) and \
+       not any(k in query_lower for k in ["balancing", "საბალანსო", "баланс"]):
+        return "tariff"
+
+    # Generation focus
+    if any(k in query_lower for k in ["generation", "generated", "produce", "გენერაცია", "генерация", "производство"]) and \
+       not any(k in query_lower for k in ["price", "ფასი", "цена"]):
+        return "generation"
+
+    # Trade focus
+    if any(k in query_lower for k in ["import", "export", "trade", "იმპორტი", "ექსპორტი", "импорт", "экспорт"]) and \
+       not any(k in query_lower for k in ["price", "ფასი", "цена"]):
+        return "trade"
+
+    # Balancing focus (check last - most common)
+    if any(k in query_lower for k in ["balancing", "p_bal", "საბალანსო", "баланс", "balance market"]):
+        return "balancing"
+
+    return "general"
 
 
 def should_generate_chart(user_query: str, row_count: int) -> bool:
     """
     Determine if a chart would be helpful for answering the query.
 
-    Returns False if:
-    - Query asks for specific values/numbers only
-    - Result has very few rows (< 3)
-    - Query is asking "what", "which", "list" type questions
-
-    Returns True if:
-    - Query asks about trends, comparisons, distributions
-    - Result has time series or categorical data suitable for visualization
+    Uses query type classification for better decisions.
+    Returns False if user wants table/list/single value.
+    Returns True if user wants trend/comparison or explicitly requests visualization.
     """
     query_lower = user_query.lower()
+    query_type = classify_query_type(user_query)
+
+    # NEVER generate chart for these query types
+    if query_type in ["single_value", "list"]:
+        log.info(f"🚫 Skipping chart: query type = {query_type}")
+        return False
+
+    # ALWAYS generate chart for these types if enough data
+    if query_type in ["comparison", "trend"]:
+        if row_count >= 3:
+            log.info(f"✅ Generating chart: query type = {query_type}")
+            return True
+        return False
+
+    # Explicit chart request (highest priority)
+    if any(k in query_lower for k in [
+        "chart", "graph", "plot", "visualize", "show chart", "draw",
+        "დიაგრამა", "გრაფიკი", "график", "визуализ"
+    ]):
+        if row_count >= 2:
+            log.info("✅ Generating chart: explicit request")
+            return True
+        return False
+
+    # Explicit table request (suppress chart)
+    if any(k in query_lower for k in [
+        "table", "show table", "tabular", "give me table",
+        "ცხრილი", "таблица"
+    ]):
+        log.info("🚫 Skipping chart: explicit table request")
+        return False
 
     # Don't generate chart for simple fact queries
     no_chart_indicators = [
         "what is the", "what was the", "how much", "how many",
-        "give me the value", "tell me the", "რა არის", "რამდენი",
-        "скол ько", "какой"
+        "give me the value", "tell me the", "რა არის", "რამდენი"
     ]
-
     for indicator in no_chart_indicators:
         if indicator in query_lower and row_count <= 3:
+            log.info(f"🚫 Skipping chart: simple fact query with {row_count} rows")
             return False
 
-    # Always generate chart for trend/comparison/distribution queries
-    chart_friendly_keywords = [
-        "trend", "over time", "compare", "comparison", "distribution",
-        "evolution", "динамика", "сравнение", "ტენდენცია", "შედარება",
-        "chart", "graph", "plot", "visualize", "show me"
-    ]
-
-    for keyword in chart_friendly_keywords:
-        if keyword in query_lower:
+    # For unknown/table query types with significant time series data
+    # Use conservative threshold (10 instead of 5)
+    if query_type in ["unknown", "table"]:
+        if row_count >= 10:
+            log.info(f"✅ Generating chart: {row_count} rows (time series assumed)")
             return True
+        log.info(f"🚫 Skipping chart: only {row_count} rows for {query_type} type")
+        return False
 
-    # Generate chart if we have enough data points
-    if row_count >= 5:
-        return True
-
-    # Default: generate chart unless very few rows
-    return row_count >= 3
+    # Default: no chart for ambiguous cases
+    log.info(f"🚫 Skipping chart: default (type={query_type}, rows={row_count})")
+    return False
 
 
 def detect_language(text: str) -> str:
@@ -1215,7 +1352,7 @@ def get_language_instruction(lang_code: str) -> str:
 
 
 def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> str:
-    """Return domain knowledge JSON, optionally filtered by query relevance.
+    """Return domain knowledge JSON, filtered by query focus to reduce token usage.
 
     Args:
         user_query: The user's query text
@@ -1224,37 +1361,75 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
     Returns:
         JSON string of domain knowledge (full or filtered)
 
-    This function can reduce token usage by 30-40% when use_cache=False by including
-    only sections relevant to the query type.
+    This function can reduce token usage by 50-70% when use_cache=False by including
+    only sections relevant to the query focus area.
     """
     if use_cache:
         # Use full pre-cached JSON (fastest, but more tokens)
         return _DOMAIN_KNOWLEDGE_JSON
 
-    # Selective approach: include only relevant sections
+    # Selective approach: filter by query focus
     query_lower = user_query.lower()
+    query_focus = get_query_focus(user_query)
 
-    # Always include critical sections
-    relevant = {
-        "BalancingPriceDrivers": DOMAIN_KNOWLEDGE["BalancingPriceDrivers"],
-    }
+    relevant = {}
 
-    # Add conditionally based on query content
-    if any(word in query_lower for word in ["tariff", "regulated", "thermal", "hpp", "gardabani", "enguri"]):
-        relevant["TariffStructure"] = DOMAIN_KNOWLEDGE.get("TariffStructure", {})
+    # Include domain knowledge based on query focus
+    if query_focus == "balancing":
+        # Balancing price queries get full balancing context
+        relevant["BalancingPriceDrivers"] = DOMAIN_KNOWLEDGE.get("BalancingPriceDrivers", {})
+        relevant["BalancingPriceFormation"] = DOMAIN_KNOWLEDGE.get("BalancingPriceFormation", {})
+        relevant["CurrencyInfluence"] = DOMAIN_KNOWLEDGE.get("CurrencyInfluence", {})
+        # May also need tariffs for correlation
+        if any(word in query_lower for word in ["tariff", "correlation", "driver", "factor"]):
+            relevant["TariffStructure"] = DOMAIN_KNOWLEDGE.get("TariffStructure", {})
 
-    if any(word in query_lower for word in ["balance", "energy", "generation", "supply", "demand"]):
-        relevant["EnergyBalance"] = DOMAIN_KNOWLEDGE.get("EnergyBalance", {})
-
-    if any(word in query_lower for word in ["season", "summer", "winter", "monthly"]):
-        relevant["SeasonalPattern"] = DOMAIN_KNOWLEDGE.get("SeasonalPattern", {})
-
-    if any(word in query_lower for word in ["import", "export", "trade"]):
-        relevant["TradePattern"] = DOMAIN_KNOWLEDGE.get("TradePattern", {})
-
-    if any(word in query_lower for word in ["cpi", "inflation", "price index"]):
+    elif query_focus == "cpi":
+        # CPI queries get CPI context only
         relevant["CPI"] = DOMAIN_KNOWLEDGE.get("CPI", {})
+        # May mention prices peripherally
+        if any(word in query_lower for word in ["price", "electricity", "ფასი"]):
+            relevant["CurrencyInfluence"] = DOMAIN_KNOWLEDGE.get("CurrencyInfluence", {})
 
+    elif query_focus == "tariff":
+        # Tariff queries get tariff context
+        relevant["TariffStructure"] = DOMAIN_KNOWLEDGE.get("TariffStructure", {})
+        relevant["tariff_entities"] = DOMAIN_KNOWLEDGE.get("tariff_entities", {})
+        # May ask about tariff impact on prices
+        if any(word in query_lower for word in ["impact", "affect", "influence", "price"]):
+            relevant["CurrencyInfluence"] = DOMAIN_KNOWLEDGE.get("CurrencyInfluence", {})
+
+    elif query_focus == "generation":
+        # Generation queries get generation/trade context
+        relevant["trade"] = DOMAIN_KNOWLEDGE.get("trade", {})
+        if any(word in query_lower for word in ["seasonal", "summer", "winter"]):
+            relevant["SeasonalPattern"] = DOMAIN_KNOWLEDGE.get("SeasonalPattern", {})
+
+    elif query_focus == "trade":
+        # Trade/import/export queries
+        relevant["TradePattern"] = DOMAIN_KNOWLEDGE.get("TradePattern", {})
+        relevant["trade"] = DOMAIN_KNOWLEDGE.get("trade", {})
+
+    else:
+        # General queries or unclear focus - include minimal context
+        # Check for specific keywords to add relevant sections
+        if any(word in query_lower for word in ["balancing", "баланс", "საბალანსო"]):
+            relevant["BalancingPriceDrivers"] = DOMAIN_KNOWLEDGE.get("BalancingPriceDrivers", {})
+
+        if any(word in query_lower for word in ["tariff", "ტარიფი", "тариф"]):
+            relevant["TariffStructure"] = DOMAIN_KNOWLEDGE.get("TariffStructure", {})
+
+        if any(word in query_lower for word in ["season", "summer", "winter"]):
+            relevant["SeasonalPattern"] = DOMAIN_KNOWLEDGE.get("SeasonalPattern", {})
+
+        if any(word in query_lower for word in ["cpi", "inflation"]):
+            relevant["CPI"] = DOMAIN_KNOWLEDGE.get("CPI", {})
+
+    # If no relevant sections found, provide minimal context
+    if not relevant:
+        relevant["price_with_usd"] = DOMAIN_KNOWLEDGE.get("price_with_usd", {})
+
+    log.info(f"📚 Domain knowledge filtered: focus={query_focus}, sections={list(relevant.keys())}")
     return json.dumps(relevant, indent=2)
 
 
@@ -1392,6 +1567,50 @@ FROM shares
 WHERE date = '2024-06-01'
 ORDER BY date
 LIMIT 3750;
+
+-- Example 9: Simple entity list (NO price context needed)
+SELECT DISTINCT entity
+FROM trade_derived_entities
+ORDER BY entity
+LIMIT 3750;
+
+-- Example 10: Single tariff value query (NO balancing context needed)
+SELECT tariff_gel
+FROM tariff_with_usd
+WHERE entity = 'ltd "engurhesi"1'
+  AND date = '2024-06-01'
+LIMIT 1;
+
+-- Example 11: Generation by technology (NO price context needed)
+SELECT
+  type_tech,
+  SUM(quantity_tech) AS total_generation_thousand_mwh
+FROM tech_quantity_view
+WHERE EXTRACT(YEAR FROM date) = 2023
+GROUP BY type_tech
+ORDER BY total_generation_thousand_mwh DESC
+LIMIT 3750;
+
+-- Example 12: CPI trend (NO electricity price context needed)
+SELECT
+  TO_CHAR(date, 'YYYY-MM') AS month,
+  cpi AS electricity_fuels_cpi
+FROM monthly_cpi_mv
+WHERE cpi_type = 'electricity_gas_and_other_fuels'
+  AND date >= '2023-01-01'
+ORDER BY date
+LIMIT 3750;
+
+-- Example 13: Tariff comparison (NO balancing price context needed)
+SELECT
+  TO_CHAR(date, 'YYYY-MM') AS month,
+  entity,
+  tariff_gel
+FROM tariff_with_usd
+WHERE entity IN ('ltd "engurhesi"1', 'ltd "gardabni thermal power plant"')
+  AND date >= '2024-01-01'
+ORDER BY date, entity
+LIMIT 3750;
 """
 
 
@@ -1419,6 +1638,54 @@ def llm_generate_plan_and_sql(user_query: str, analysis_mode: str, lang_instruct
         "period": "YYYY-YYYY or YYYY-MM to YYYY-MM"
     }
 
+    # Build guidance dynamically based on query focus
+    query_focus = get_query_focus(user_query)
+    query_lower = user_query.lower()
+
+    guidance_sections = []
+
+    # Always include basic rules
+    guidance_sections.append("- Use ONLY documented materialized views.")
+    guidance_sections.append("- Aggregation default = monthly. For energy_balance_long_mv, use yearly.")
+    guidance_sections.append("- When USD values appear, *_usd = *_gel / xrate.")
+
+    # Conditionally include balancing-specific guidance
+    if query_focus == "balancing" or any(k in query_lower for k in ["balancing", "p_bal", "საბალანსო"]):
+        guidance_sections.append("""
+BALANCING PRICE ANALYSIS:
+- Weighted-average balancing price = weighted by total balancing-market quantities
+- Entities: deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa
+- PRIMARY DRIVER #1: xrate (exchange rate) - MOST IMPORTANT for GEL/MWh price
+  * Use xrate from price_with_usd view
+  * Critical because gas and imports are USD-priced
+- PRIMARY DRIVER #2: Composition (shares) - CRITICAL for both GEL and USD prices
+  * Calculate shares from trade_derived_entities
+  * IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing' for segment filter
+  * Use share CTE pattern, no raw quantities
+  * Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
+  * Higher expensive source shares (import, thermal PPA) → higher prices
+- For seasonal analysis: Summer (Apr–Jul) has lower prices due to hydro generation
+""")
+
+    # Conditionally include seasonal guidance
+    if any(k in query_lower for k in ["season", "summer", "winter", "სეზონ", "ზაფხულ", "ზამთარ"]):
+        guidance_sections.append("- Season is a derived dimension: use CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season")
+
+    # Conditionally include tariff guidance
+    if query_focus == "tariff" or any(k in query_lower for k in ["tariff", "ტარიფი", "тариф"]):
+        guidance_sections.append("""
+TARIFF ANALYSIS:
+- Key entities: Enguri ('ltd "engurhesi"1'), Gardabani TPP ('ltd "gardabni thermal power plant"')
+- Thermal tariffs depend on gas price (USD) → correlated with xrate
+- Use tariff_with_usd view for tariff queries
+""")
+
+    # Conditionally include CPI guidance
+    if query_focus == "cpi" or any(k in query_lower for k in ["cpi", "inflation", "ინფლაცია"]):
+        guidance_sections.append("- CPI data: use monthly_cpi_mv, filter by cpi_type = 'electricity_gas_and_other_fuels'")
+
+    guidance = "\n".join(guidance_sections)
+
     prompt = f"""
 User question:
 {user_query}
@@ -1430,34 +1697,9 @@ Domain knowledge:
 {domain_json}
 
 Guidance:
-- Use ONLY documented materialized views.
-- For balancing-price analyses, differentiate Summer (Apr–Jul) vs Winter (Aug–Mar).
-- Weighted-average balancing price = weighted by total balancing-market quantities (entities: deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa).
+{guidance}
 
-CRITICAL - PRIMARY DRIVERS for balancing price analysis:
-- Correlation policy - PRIORITY ORDER:
-  * Targets: p_bal_gel, p_bal_usd
-  * PRIMARY DRIVER #1: xrate (exchange rate) - MOST IMPORTANT for GEL/MWh price
-    - Use xrate from price_with_usd view
-    - Critical because gas and imports are USD-priced
-  * PRIMARY DRIVER #2: Composition (shares) - CRITICAL for both GEL and USD prices
-    - Calculate shares from trade_derived_entities
-    - IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing' for segment filter
-    - Database may have 'Balancing Electricity', 'balancing', or other variants
-    - Use share CTE pattern, no raw quantities
-    - Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
-    - Higher expensive source shares (import, thermal PPA, renewable PPA) → higher prices
-  * Secondary drivers: tariffs in GEL only from tariff_with_usd for:
-    - Enguri ('ltd "engurhesi"1')
-    - Gardabani TPP ('ltd "gardabni thermal power plant"')
-    - Old TPP group ('ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)')
-
-
-- Tariffs follow cost-plus methodology; thermal tariffs depend on gas price (USD) → correlated with xrate.
-- When USD values appear, *_usd = *_gel / xrate.
-- Aggregation default = monthly. for energy_balance_long_mv= yearly.
-- Season is a derived dimension (not a column): use CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'Summer' ELSE 'Winter' END AS season to group data seasonally when user mentions 'season', 'summer', or 'winter'.
-- Use these examples:
+Examples:
 {FEW_SHOT_SQL}
 
 Output Format:
@@ -1657,38 +1899,47 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
     # Use selective domain knowledge to reduce tokens (30-40% savings)
     domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
 
-    prompt = f"""
-User question:
-{user_query}
+    # Determine query focus to provide relevant guidance only
+    query_focus = get_query_focus(user_query)
+    query_lower = user_query.lower()
 
-Data preview:
-{data_preview}
+    # Build guidance dynamically based on query focus
+    guidance_sections = []
 
-Statistics:
-{stats_hint}
+    # Always include focus rules at the top
+    guidance_sections.append("""
+IMPORTANT RULES - STAY FOCUSED:
+1. Answer ONLY what the user asked - don't discuss unrelated topics
+2. If query is about CPI/inflation → discuss CPI only (not electricity prices unless comparing affordability)
+3. If query is about tariffs → discuss tariffs only (not balancing prices)
+4. If query is about generation/quantities → discuss generation only (not prices)
+5. If query is about entities/list → provide the list only (no price analysis)
+6. Only discuss balancing price if explicitly asked or if query contains balancing price keywords
+7. Keep answers concise (1-3 sentences) unless detailed analysis requested
+""")
 
-Domain knowledge:
-{domain_json}
+    # Conditionally include balancing-specific guidance
+    if query_focus == "balancing" or any(k in query_lower for k in ["balancing", "p_bal", "балансовая", "ბალანსის"]):
+        guidance_sections.append("""
+CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
-  CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
+FIRST STEP FOR EVERY BALANCING PRICE EXPLANATION:
+- Inspect share_* columns (entity composition) before discussing anything else.
+- Identify which entities increased or decreased their share because each entity sells at a different price level in the codebase.
+- Explain how those share shifts mechanically push the weighted-average balancing price up or down.
 
-  FIRST STEP FOR EVERY BALANCING PRICE EXPLANATION:
-  - Inspect share_* columns (entity composition) before discussing anything else.
-  - Identify which entities increased or decreased their share because each entity sells at a different price level in the codebase.
-  - Explain how those share shifts mechanically push the weighted-average balancing price up or down.
+PRIMARY DRIVERS (in order of importance):
+1. Composition (shares of entities selling on balancing segment)
+   - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices.
+   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices.
+   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant.
+   - Always explain which entities are selling more/less when analyzing price changes.
 
-  PRIMARY DRIVERS (in order of importance):
-  1. Composition (shares of entities selling on balancing segment)
-     - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices.
-     - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices.
-     - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant.
-     - Always explain which entities are selling more/less when analyzing price changes.
-
-  2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
-     - Natural gas for thermal generation is priced in USD
-     - Imports are priced in USD
-     - When GEL depreciates (xrate increases), GEL-denominated prices rise
-     - Always mention xrate effect when discussing GEL price movements once composition has been covered
+2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
+   - Natural gas for thermal generation is priced in USD
+   - Imports are priced in USD
+   - When GEL depreciates (xrate increases), GEL-denominated prices rise
+   - Always mention xrate effect when discussing GEL price movements once composition has been covered
 
 CONFIDENTIALITY RULES - STRICTLY ENFORCE:
 - DO disclose: regulated tariffs, deregulated hydro prices, exchange rates
@@ -1703,19 +1954,7 @@ Summer (April–July) vs Winter (August–March) conditions:
 - Summer → high hydro share, low prices.
 - Winter → thermal/import dominant, higher prices.
 
-When tariffs are discussed:
-- Tariffs follow GNERC-approved cost-plus methodology.
-- Thermal tariffs include a Guaranteed Capacity Fee (fixed) plus a variable per-MWh cost based on gas price and efficiency.
-- Gas is priced in USD, so thermal tariffs correlate with the GEL/USD exchange rate (xrate).
-
-When inflation or CPI is mentioned, relate the CPI category 'electricity_gas_and_other_fuels'
-to tariff_gel or p_bal_gel for affordability comparisons.
-
-Always perform seasonal comparison between Summer and Winter when analyzing balancing prices, generation, or demand data:
-- Summer = April, May, June, July
-- Winter = August, September, October, November, December, January, February, March
-
-For every balancing price, generation, or demand analysis:
+For every balancing price analysis:
 - Compute averages (for prices) or totals (for quantities) separately for these two seasons.
 - Describe the overall yearly trend first, then compare Summer vs Winter results.
   * If trend analysis → include percentage change and CAGR for both.
@@ -1724,31 +1963,86 @@ For every balancing price, generation, or demand analysis:
   * Summer → hydro generation dominance, low balancing prices, and lower import reliance.
   * Winter → thermal and import dominance, higher balancing prices, and stronger sensitivity to gas prices and exchange rates.
 - This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it.
+""")
 
-For tariff analyses:
-- Do not apply seasonal logic.
+    # Conditionally include tariff-specific guidance
+    if query_focus == "tariff" or any(k in query_lower for k in ["tariff", "тариф", "ტარიფ"]):
+        guidance_sections.append("""
+TARIFF ANALYSIS GUIDELINES:
+- Tariffs follow GNERC-approved cost-plus methodology.
+- Thermal tariffs include a Guaranteed Capacity Fee (fixed) plus a variable per-MWh cost based on gas price and efficiency.
+- Gas is priced in USD, so thermal tariffs correlate with the GEL/USD exchange rate (xrate).
+- Do not apply seasonal logic to tariff analyses.
 - Focus on annual or multi-year trends explained by regulatory cost-plus principles: fixed guaranteed-capacity fee, variable gas-linked component, and exchange-rate sensitivity.
+""")
 
-When summarizing, combine numeric findings (averages, CAGRs, correlations) with short explanatory sentences so that the reasoning reads smoothly and remains under 8 sentences unless the query is highly analytical.
+    # Conditionally include CPI-specific guidance
+    if query_focus == "cpi":
+        guidance_sections.append("""
+CPI ANALYSIS GUIDELINES:
+- Focus on CPI category 'electricity_gas_and_other_fuels' trends.
+- When comparing to electricity prices (tariff_gel or p_bal_gel), frame as affordability comparison.
+- Describe CPI trend direction, magnitude, and time periods clearly.
+- Only discuss electricity prices if user asks for affordability comparison.
+""")
 
-If the question is exploratory or simple (e.g., requesting only a current value, single-month trend, or brief comparison),
-respond in 1–3 clear sentences focusing on the key number or short interpretation.
+    # Conditionally include generation-specific guidance
+    if query_focus == "generation":
+        guidance_sections.append("""
+GENERATION ANALYSIS GUIDELINES:
+- Focus on quantities (thousand_mwh) by technology type or entity.
+- Describe generation trends, shares, and seasonal patterns.
+- Summer vs Winter comparison relevant for hydro vs thermal generation.
+- Only discuss prices if user explicitly asks about price-generation relationships.
+""")
 
-If the mode involves correlation, drivers, or in-depth analysis (intent = correlation_analysis, driver_analysis, or trend_analysis),
-write a more detailed summary of about 5–10 sentences following this structure:
+    # General formatting guidelines (always included)
+    guidance_sections.append("""
+FORMATTING AND LENGTH GUIDELINES:
+- When referring to electricity prices or tariffs, always include the correct physical unit (GEL/MWh or USD/MWh) rather than currency only.
+- If the question is exploratory or simple (e.g., requesting only a current value, single-month trend, or brief comparison),
+  respond in 1–3 clear sentences focusing on the key number or short interpretation.
+- If the mode involves correlation, drivers, or in-depth analysis (intent = correlation_analysis, driver_analysis, or trend_analysis),
+  write a more detailed summary of about 5–10 sentences following this structure:
+  1. Start with the overall yearly trend (using yearly averages).
+  2. Present seasonal or period-specific trends if relevant, including CAGRs if available.
+  3. If correlation results are provided, discuss primary drivers from domain knowledge.
+  4. For GEL vs USD comparisons, explain divergence through exchange rate.
+  5. Conclude with a concise analytical insight linking findings to domain knowledge drivers.
+- When summarizing, combine numeric findings (averages, CAGRs, correlations) with short explanatory sentences so that the reasoning reads smoothly.
+""")
 
-1. Start with the overall yearly trend (using yearly averages).
-2. Present separate Summer (Apr–Jul) and Winter (Aug–Mar) trends, including CAGRs if available.
-3. If correlation results are provided, PRIORITIZE discussion of primary drivers:
-   - First: Exchange rate (xrate) effect on GEL prices - ALWAYS mention this for GEL price analysis
-   - Second: Composition changes (which entities selling more/less on balancing segment)
-   - Then: Other correlations (tariffs, etc.) if relevant
-4. Always compare GEL and USD price trajectories and explain divergence through exchange rate and USD-denominated cost components.
-5. When referring to electricity prices or tariffs, always include the correct physical unit (GEL/MWh or USD/MWh) rather than currency only.
-6. Reference hydro vs thermal/import structure from trade_derived_entities as the main driver of seasonal differences.
-7. For price explanations, explain the mechanism: cheap sources (regulated HPP, deregulated hydro) vs expensive sources (thermal PPA, renewable PPA, import).
-8. NEVER disclose specific PPA or import price estimates - use "varies" or "market-based" instead.
-9. Conclude with a concise analytical insight linking price movements to the two primary drivers: exchange rate and composition changes.
+    # Assemble final prompt
+    guidance = "\n".join(guidance_sections)
+
+    # Log which guidance sections are included
+    guidance_types = []
+    if "STAY FOCUSED" in guidance:
+        guidance_types.append("focus_rules")
+    if "CRITICAL ANALYSIS GUIDELINES for balancing" in guidance:
+        guidance_types.append("balancing")
+    if "TARIFF ANALYSIS" in guidance:
+        guidance_types.append("tariff")
+    if "CPI ANALYSIS" in guidance:
+        guidance_types.append("cpi")
+    if "GENERATION ANALYSIS" in guidance:
+        guidance_types.append("generation")
+    log.info(f"💬 Answer guidance: focus={query_focus}, sections={guidance_types}")
+
+    prompt = f"""
+User question:
+{user_query}
+
+Data preview:
+{data_preview}
+
+Statistics:
+{stats_hint}
+
+Domain knowledge:
+{domain_json}
+
+{guidance}
 """
 
     llm_start = time.time()
@@ -2673,10 +2967,9 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         if any(word in query_text for word in ["define", "meaning of", "განმარტება"]):
             generate_chart = False
 
-        # Override: Always generate chart for analyst mode with suitable data
-        if intent in ["trend_analysis", "correlation_analysis", "driver_analysis", "identify_drivers"]:
-            if len(df) >= 3:
-                generate_chart = True
+        # NOTE: Removed forced chart generation for analyst mode
+        # Let should_generate_chart decide based on query type classification
+        # Analyst mode influences answer depth, not chart generation
 
         if not generate_chart:
             log.info(f"🧭 Skipping chart generation (query type or data not suitable for visualization, rows={len(df)}).")
