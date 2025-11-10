@@ -3133,58 +3133,15 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
 
 
-        # --- 🧠 Generic chart-type detection based on data structure ---
+        # --- 🧠 Semantic-aware chart-type selection ---
+        # STEP 1: Detect structural features (time, categories, values)
         # Support Georgian column names in addition to English
         cols_lower = [c.lower() for c in df.columns]
         time_cols = [c for c in df.columns if re.search(r"(year|month|date|წელი|თვე|თარიღი)", c.lower())]
         category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category|ტიპი|სექტორი)", c.lower())]
         value_cols = [c for c in df.columns if re.search(r"(quantity|volume|value|amount|price|tariff|cpi|index|mwh|tj|usd|gel|რაოდენობა|მოცულობა|ფასი|ტარიფი|საშუალო|სულ)", c.lower())]
 
-        chart_type = "line"  # default fallback
-
-        # CASE 1: Time + Single Value
-        if len(time_cols) >= 1 and len(category_cols) == 0 and len(value_cols) == 1:
-            chart_type = "line"
-
-        # CASE 2: Time + Category + Value
-        elif len(time_cols) >= 1 and len(category_cols) >= 1 and len(value_cols) >= 1:
-            chart_type = "stackedbar"
-
-        # CASE 3: Category + Value (single-year comparison)
-        elif len(time_cols) == 0 and len(category_cols) == 1 and len(value_cols) >= 1:
-            chart_type = "bar"
-
-        # CASE 4: Category + Subcategory + Value
-        elif len(time_cols) == 0 and len(category_cols) > 1 and len(value_cols) >= 1:
-            chart_type = "stackedbar"
-
-        # CASE 5: Few Categories + Value (distribution)
-        elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) == 1:
-            unique_cats = df[category_cols[0]].nunique()
-            if unique_cats <= 8:
-                chart_type = "pie"
-            else:
-                chart_type = "bar"
-
-        # CASE 6: Time + Multiple Numeric Values
-        elif len(time_cols) >= 1 and len(value_cols) > 1:
-            chart_type = "line"
-
-        # CASE 7: Category + Multiple Numeric Values (no time)
-        elif len(time_cols) == 0 and len(category_cols) >= 1 and len(value_cols) > 1:
-            chart_type = "bar"
-
-        # Fallback
-        else:
-            chart_type = "line"
-
-        log.info(f"🧠 Chart type auto-detected → {chart_type} | Time={len(time_cols)} | Categories={len(category_cols)} | Values={len(value_cols)}")
-
-
-
-
-        # --- Dimension inference (xrate | share | price_tariff | energy_qty | index) ---
-        # Support Georgian column names
+        # STEP 2: Infer dimensions from numeric columns (semantic meaning)
         # IMPORTANT: Check in order of specificity (xrate before price, share before other)
         def infer_dimension(col: str) -> str:
             col_l = col.lower()
@@ -3208,6 +3165,59 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         dim_map = {c: infer_dimension(c) for c in num_cols}
         dims = set(dim_map.values())
         log.info(f"📐 Detected dimensions: {dim_map} → {dims}")
+
+        # STEP 3: Choose chart type based on STRUCTURE + SEMANTICS
+        # Philosophy: LLM = "what to show" (intent), Rules = "how to show it" (viz encoding)
+        chart_type = "line"  # default fallback
+
+        has_time = len(time_cols) >= 1
+        has_categories = len(category_cols) >= 1
+        primary_dimension = list(dims)[0] if len(dims) == 1 else "mixed"
+
+        # DECISION MATRIX: Structure + Dimension Semantics → Chart Type
+
+        if has_time and has_categories:
+            # Time series with categories: decision depends on dimension
+            if "share" in dims:
+                # Shares over time → stacked bar (part-to-whole composition)
+                chart_type = "stackedbar"
+                log.info(f"📊 Chart type: stackedbar (time + categories + share = composition over time)")
+            elif any(d in dims for d in ["price_tariff", "energy_qty", "index", "xrate"]):
+                # Prices, quantities, indices, exchange rate over time → line (trend comparison)
+                chart_type = "line"
+                log.info(f"📊 Chart type: line (time + categories + {dims} = trend comparison)")
+            else:
+                # Mixed or unknown dimensions → default to line for time series
+                chart_type = "line"
+                log.info(f"📊 Chart type: line (time + categories + mixed/unknown dimensions)")
+
+        elif has_time and not has_categories:
+            # Single time series → always line
+            chart_type = "line"
+            log.info(f"📊 Chart type: line (time series without categories)")
+
+        elif not has_time and has_categories:
+            # Categorical comparison (no time): decision depends on dimension
+            if "share" in dims and len(category_cols) == 1:
+                # Single-period composition: pie if few categories, bar if many
+                unique_cats = df[category_cols[0]].nunique()
+                if unique_cats <= 8:
+                    chart_type = "pie"
+                    log.info(f"📊 Chart type: pie (composition snapshot with {unique_cats} categories)")
+                else:
+                    chart_type = "bar"
+                    log.info(f"📊 Chart type: bar (composition snapshot with {unique_cats} categories, too many for pie)")
+            else:
+                # Categorical comparison (prices, quantities, etc.) → bar
+                chart_type = "bar"
+                log.info(f"📊 Chart type: bar (categorical comparison, no time)")
+
+        else:
+            # Fallback: no clear structure
+            chart_type = "line"
+            log.info(f"📊 Chart type: line (fallback)")
+
+        log.info(f"🧠 Chart selection complete → {chart_type} | Time={len(time_cols)} | Categories={len(category_cols)} | Dimensions={dims}")
 
         # --- UNIT inference for axis title (unit only) ---
         def unit_for_price(cols_: list[str]) -> str:
