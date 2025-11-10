@@ -61,6 +61,7 @@ COLUMN_LABELS = {
 # ----------------------------------------------------------
 DERIVED_LABELS = {
     "share_import": "Share of Imports in Balancing Electricity",
+    "share_cfd_scheme": "Share of CfD scheme supported generation in Balancing Electricity",
     "share_deregulated_hydro": "Share of Deregulated Hydro",
     "share_regulated_hpp": "Share of Regulated HPPs",
     "share_regulated_new_tpp": "Share of Regulated New TPPs",
@@ -105,6 +106,7 @@ TECH_TYPE_GROUPS = {
         "thermal": "Thermal Generation",
         "wind": "Wind Generation",
         "import": "Import",
+        "solar": "Solar Generation",
     },
 }
 
