@@ -1158,6 +1158,68 @@ def get_openai() -> ChatOpenAI:
 make_gemini = get_gemini
 make_openai = get_openai
 
+# -----------------------------
+# LLM Response Cache (Phase 1 Optimization)
+# -----------------------------
+import hashlib
+from typing import Optional
+
+class LLMResponseCache:
+    """Simple in-memory cache for LLM responses.
+
+    Phase 1 optimization: Cache identical prompts to avoid repeated LLM calls.
+    Future: Migrate to Redis for persistence across restarts.
+    """
+    def __init__(self, max_size: int = 1000):
+        self._cache = {}
+        self._max_size = max_size
+        self._hits = 0
+        self._misses = 0
+
+    def _make_key(self, prompt: str) -> str:
+        """Generate cache key from prompt hash."""
+        return hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]
+
+    def get(self, prompt: str) -> Optional[str]:
+        """Get cached response if exists."""
+        key = self._make_key(prompt)
+        if key in self._cache:
+            self._hits += 1
+            log.info(f"✅ LLM cache HIT (hit rate: {self.hit_rate():.1%})")
+            return self._cache[key]
+        self._misses += 1
+        return None
+
+    def set(self, prompt: str, response: str):
+        """Cache response for prompt."""
+        if len(self._cache) >= self._max_size:
+            # Simple LRU: Remove oldest 10% when full
+            remove_count = self._max_size // 10
+            for _ in range(remove_count):
+                self._cache.pop(next(iter(self._cache)))
+            log.info(f"🗑️ Cache eviction: removed {remove_count} oldest entries")
+
+        key = self._make_key(prompt)
+        self._cache[key] = response
+
+    def hit_rate(self) -> float:
+        """Calculate cache hit rate."""
+        total = self._hits + self._misses
+        return self._hits / total if total > 0 else 0.0
+
+    def stats(self) -> dict:
+        """Get cache statistics."""
+        return {
+            "size": len(self._cache),
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": self.hit_rate(),
+        }
+
+# Global cache instance
+llm_cache = LLMResponseCache(max_size=1000)
+log.info("✅ LLM response cache initialized (max_size=1000)")
+
 # Optimized: Use set for O(1) lookup instead of list
 ANALYTICAL_KEYWORDS = {
     "trend", "change", "growth", "increase", "decrease", "compare", "impact",
@@ -2022,6 +2084,13 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6))
 def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.") -> str:
+    # Phase 1 Optimization: Check cache first
+    # Create cache key from all inputs
+    cache_input = f"{user_query}|{data_preview}|{stats_hint}|{lang_instruction}"
+    cached_response = llm_cache.get(cache_input)
+    if cached_response:
+        return cached_response
+
     system = (
         "You are Enai, an energy market analyst. "
         "Write a short analytic summary using preview and statistics. "
@@ -2029,12 +2098,23 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
         "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
         f"{lang_instruction}"
     )
-    # Use selective domain knowledge to reduce tokens (30-40% savings)
-    domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
 
-    # Determine query focus to provide relevant guidance only
+    # Phase 1 Optimization: Determine query complexity for conditional guidance
+    query_type = classify_query_type(user_query)
     query_focus = get_query_focus(user_query)
     query_lower = user_query.lower()
+
+    # Simple queries don't need extensive domain knowledge or guidance
+    needs_full_guidance = query_type not in ["single_value", "list"]
+
+    # Use selective domain knowledge to reduce tokens (30-40% savings)
+    # Phase 1 Optimization: Skip domain knowledge for simple queries
+    if needs_full_guidance:
+        domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
+        log.info(f"📚 Using full domain knowledge for {query_type} query")
+    else:
+        domain_json = "{}"  # Minimal for simple queries
+        log.info(f"📚 Skipping domain knowledge for {query_type} query (optimization)")
 
     # Build guidance dynamically based on query focus
     guidance_sections = []
@@ -2051,8 +2131,10 @@ IMPORTANT RULES - STAY FOCUSED:
 7. Keep answers concise (1-3 sentences) unless detailed analysis requested
 """)
 
+    # Phase 1 Optimization: Only include heavy guidance for complex queries
+    # Simple queries (single_value, list) skip balancing/tariff/CPI guidance
     # Conditionally include balancing-specific guidance
-    if query_focus == "balancing" or any(k in query_lower for k in ["balancing", "p_bal", "балансовая", "ბალანსის"]):
+    if needs_full_guidance and (query_focus == "balancing" or any(k in query_lower for k in ["balancing", "p_bal", "балансовая", "ბალანსის"])):
         guidance_sections.append("""
 CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
@@ -2098,8 +2180,8 @@ For every balancing price analysis:
 - This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it.
 """)
 
-    # Conditionally include tariff-specific guidance
-    if query_focus == "tariff" or any(k in query_lower for k in ["tariff", "тариф", "ტარიფ"]):
+    # Conditionally include tariff-specific guidance (only for complex queries)
+    if needs_full_guidance and (query_focus == "tariff" or any(k in query_lower for k in ["tariff", "тариф", "ტარიფ"])):
         guidance_sections.append("""
 TARIFF ANALYSIS GUIDELINES:
 - Tariffs follow GNERC-approved cost-plus methodology.
@@ -2109,8 +2191,8 @@ TARIFF ANALYSIS GUIDELINES:
 - Focus on annual or multi-year trends explained by regulatory cost-plus principles: fixed guaranteed-capacity fee, variable gas-linked component, and exchange-rate sensitivity.
 """)
 
-    # Conditionally include CPI-specific guidance
-    if query_focus == "cpi":
+    # Conditionally include CPI-specific guidance (only for complex queries)
+    if needs_full_guidance and query_focus == "cpi":
         guidance_sections.append("""
 CPI ANALYSIS GUIDELINES:
 - Focus on CPI category 'electricity_gas_and_other_fuels' trends.
@@ -2119,8 +2201,8 @@ CPI ANALYSIS GUIDELINES:
 - Only discuss electricity prices if user asks for affordability comparison.
 """)
 
-    # Conditionally include generation-specific guidance
-    if query_focus == "generation":
+    # Conditionally include generation-specific guidance (only for complex queries)
+    if needs_full_guidance and query_focus == "generation":
         guidance_sections.append("""
 GENERATION ANALYSIS GUIDELINES:
 - Focus on quantities (thousand_mwh) by technology type or entity.
@@ -2188,6 +2270,10 @@ Domain knowledge:
         llm = make_openai()
         out = llm.invoke([("system", system), ("user", prompt)]).content.strip()
         metrics.log_llm_call(time.time() - llm_start)
+
+    # Phase 1 Optimization: Cache the response for future identical requests
+    llm_cache.set(cache_input, out)
+
     return out
 
 
@@ -2325,6 +2411,7 @@ def get_metrics():
     return {
         "status": "healthy",
         "metrics": metrics.get_stats(),
+        "cache": llm_cache.stats(),  # Phase 1 optimization: cache metrics
         "model": {
             "type": MODEL_TYPE,
             "gemini_model": GEMINI_MODEL if MODEL_TYPE == "gemini" else None,
