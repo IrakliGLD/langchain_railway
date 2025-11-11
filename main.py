@@ -17,7 +17,12 @@ from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 # Corrected Pydantic imports for V2 compatibility
-from pydantic import BaseModel, Field, field_validator 
+from pydantic import BaseModel, Field, field_validator
+
+# Phase 1D Security: Rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded 
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
@@ -623,7 +628,11 @@ ENGINE = create_engine(
     pool_timeout=30,
     pool_pre_ping=True,
     pool_recycle=1800,  # Increased from 300 (30 min) for Supabase
-    connect_args={"connect_timeout": 30},
+    connect_args={
+        "connect_timeout": 30,
+        # Phase 1D Security: Database-level query timeout (30 seconds max)
+        "options": "-c statement_timeout=30000"  # 30s in milliseconds
+    },
 )
 
 with ENGINE.connect() as conn:
@@ -1027,6 +1036,11 @@ def compute_share_changes(conn) -> pd.DataFrame:
 # App
 # -----------------------------
 app = FastAPI(title="Enai Analyst (Gemini)", version="18.6") # Version bump
+
+# Phase 1D Security: Configure rate limiter (10 requests/minute per IP)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Request ID middleware for observability and debugging
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -2429,7 +2443,46 @@ def plan_validate_repair(sql: str) -> str:
         _sql = f"{_sql}\nLIMIT {MAX_ROWS}"
 
     return _sql
-    
+
+
+def execute_sql_safely(sql: str, timeout_seconds: int = 30):
+    """
+    Execute SQL with read-only transaction enforcement.
+
+    Phase 1D Security Enhancement:
+    - Enforces READ ONLY transaction mode to prevent data modification
+    - Uses database-level timeout (already configured in ENGINE)
+    - Returns pandas DataFrame for consistency with existing code
+
+    Args:
+        sql: The validated SQL query to execute
+        timeout_seconds: Maximum execution time (already set at connection level)
+
+    Returns:
+        tuple: (DataFrame, column_names, row_count, execution_time)
+
+    Raises:
+        DatabaseError: If query attempts to modify data or exceeds timeout
+    """
+    start = time.time()
+
+    with ENGINE.connect() as conn:
+        # Phase 1D: Enforce read-only mode
+        conn.execute(text("SET TRANSACTION READ ONLY"))
+
+        # Execute query
+        result = conn.execute(text(sql))
+        rows = result.fetchall()
+        cols = list(result.keys())
+
+        # Convert to DataFrame for compatibility
+        df = pd.DataFrame(rows, columns=cols)
+
+    elapsed = time.time() - start
+    log.info(f"⚡ SQL executed safely in {elapsed:.2f}s, returned {len(rows)} rows")
+
+    return df, cols, rows, elapsed
+
 
 @app.get("/ask")
 def ask_get():
@@ -2462,7 +2515,8 @@ def get_metrics():
 
 
 @app.post("/ask", response_model=APIResponse)
-def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
+@limiter.limit("10/minute")  # Phase 1D Security: Rate limiting (10 requests/minute per IP)
+def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     t0 = time.time()
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -2567,13 +2621,9 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
         # DEBUG: Log the actual SQL being executed
         log.info(f"🔍 Executing SQL:\n{safe_sql_final}")
 
-        with ENGINE.connect() as conn:
-            res = conn.execute(text(safe_sql_final))
-            rows = res.fetchall()
-            cols = list(res.keys())
-            df = pd.DataFrame(rows, columns=cols)
-        metrics.log_sql_query(time.time() - sql_start)
-        log.info(f"⚡ SQL executed in {time.time() - sql_start:.2f}s, returned {len(rows)} rows")
+        # Phase 1D Security: Use secure execution wrapper
+        df, cols, rows, elapsed = execute_sql_safely(safe_sql_final)
+        metrics.log_sql_query(elapsed)
 
         try:
             from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
@@ -2628,11 +2678,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
             log.info("CRITICAL: Using segment='balancing' for share calculation")
             safe_sql_final = build_trade_share_cte(safe_sql_final)
-            with ENGINE.connect() as conn:
-                res = conn.execute(text(safe_sql_final))
-                rows = res.fetchall()
-                cols = list(res.keys())
-                df = pd.DataFrame(rows, columns=cols)
+            # Phase 1D Security: Use secure execution wrapper
+            df, cols, rows, _ = execute_sql_safely(safe_sql_final)
 
         elif "UndefinedColumn" in msg:
             # Fallback synonym auto-fix (existing behavior)
@@ -2640,11 +2687,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                 if re.search(rf"\b{bad}\b", safe_sql_final, flags=re.IGNORECASE):
                     safe_sql_final = re.sub(rf"\b{bad}\b", good, safe_sql_final, flags=re.IGNORECASE)
                     log.warning(f"🔁 Auto-corrected column '{bad}' → '{good}' (retry)")
-                    with ENGINE.connect() as conn:
-                        res = conn.execute(text(safe_sql_final))
-                        rows = res.fetchall()
-                        cols = list(res.keys())
-                        df = pd.DataFrame(rows, columns=cols)
+                    # Phase 1D Security: Use secure execution wrapper
+                    df, cols, rows, _ = execute_sql_safely(safe_sql_final)
                     break
             else:
                 log.exception("SQL execution failed (UndefinedColumn)")
@@ -2673,6 +2717,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     if share_query_detected:
         try:
             with ENGINE.connect() as conn:
+                # Phase 1D Security: Enforce read-only mode
+                conn.execute(text("SET TRANSACTION READ ONLY"))
                 resolved_df, used_fallback = ensure_share_dataframe(df, conn)
             if used_fallback:
                 log.warning("🔄 Share query lacked usable rows — using deterministic balancing share pivot.")
@@ -2733,6 +2779,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
 
         try:
             with ENGINE.connect() as conn:
+                # Phase 1D Security: Enforce read-only mode
+                conn.execute(text("SET TRANSACTION READ ONLY"))
                 corr_df = build_balancing_correlation_df(conn)
 
             allowed_targets = ["p_bal_gel", "p_bal_usd"]
@@ -3025,6 +3073,8 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
                         share_panel = pd.DataFrame()
                         try:
                             with ENGINE.connect() as conn:
+                                # Phase 1D Security: Enforce read-only mode
+                                conn.execute(text("SET TRANSACTION READ ONLY"))
                                 share_panel = fetch_balancing_share_panel(conn)
                         except Exception as share_err:
                             log.warning(f"Share panel lookup failed: {share_err}")
