@@ -1819,19 +1819,32 @@ def llm_generate_plan_and_sql(
     user_query: str,
     analysis_mode: str,
     lang_instruction: str = "Respond in English.",
-    domain_reasoning: str = ""  # ← NEW: Pass domain reasoning
+    domain_reasoning: str = ""  # Deprecated - kept for backward compatibility
 ) -> str:
-    # Phase 1B Optimization: Check cache first
-    cache_input = f"sql_generation|{user_query}|{analysis_mode}|{lang_instruction}|{domain_reasoning}"
+    # Phase 1C Optimization: Merged domain reasoning into this call
+    # Check cache first (cache key no longer includes domain_reasoning since it's internal now)
+    cache_input = f"sql_generation_v2|{user_query}|{analysis_mode}|{lang_instruction}"
     cached_response = llm_cache.get(cache_input)
     if cached_response:
         log.info("📝 Plan/SQL: (cached)")
         return cached_response
 
+    # Phase 1C: Include domain reasoning as internal step
     system = (
-        "You are an analytical PostgreSQL generator. Your task is to perform two steps: "
-        "1. **Plan:** Extract the analysis intent, target variables, and period for the user's question. "
-        "2. **Generate SQL:** Write a single, correct PostgreSQL SELECT query to fulfill the plan. "
+        "You are an analytical PostgreSQL generator for Georgian energy market data. "
+        "Your task is to perform THREE steps internally, then output plan + SQL: "
+        "\n"
+        "**STEP 1 (Internal - Analyze Intent):** "
+        "Think like an energy market analyst. What is the user really asking? "
+        "What domain concepts are involved (price drivers, composition, exchange rates, seasonal patterns)? "
+        "What metrics and time periods are needed? "
+        "\n"
+        "**STEP 2 (Output - Plan):** "
+        "Extract the analysis intent, target variables, and period as JSON. "
+        "\n"
+        "**STEP 3 (Output - SQL):** "
+        "Write a single, correct PostgreSQL SELECT query to fulfill the plan. "
+        "\n"
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
         "Use only documented tables and columns. Prefer monthly aggregation. "
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
@@ -1896,18 +1909,16 @@ TARIFF ANALYSIS:
 
     guidance = "\n".join(guidance_sections)
 
+    # Phase 1C: Prompt structure updated - domain reasoning is now internal
     prompt = f"""
-DOMAIN REASONING (USE THIS FIRST):
-{domain_reasoning}
-
 User question:
 {user_query}
 
+Domain knowledge (for Step 1 internal reasoning):
+{domain_json}
+
 Schema:
 {DB_SCHEMA_DOC}
-
-Domain knowledge:
-{domain_json}
 
 Guidance:
 {guidance}
@@ -2463,21 +2474,19 @@ def ask_post(q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     lang_code = detect_language(q.query)
     lang_instruction = get_language_instruction(lang_code)
     log.info(f"🌍 Detected language: {lang_code}")
-# ------------------------------------------------------------------
-    # STEP 2: Domain Reasoning First (NEW - ADD HERE)
-    # ------------------------------------------------------------------
-    domain_reasoning = llm_analyze_with_domain_knowledge(q.query, lang_instruction)
 
-    
+    # Phase 1C: Domain reasoning is now internal to SQL generation (merged into single LLM call)
+    # This saves ~14s by eliminating one network round-trip
+
     plan = {}
 
-    # 1) Generate PLAN and SQL in ONE LLM call
+    # 1) Generate PLAN and SQL in ONE LLM call (now includes internal domain reasoning)
     try:
         combined_output = llm_generate_plan_and_sql(
             user_query=q.query,
             analysis_mode=mode,
-            lang_instruction=lang_instruction,
-            domain_reasoning=domain_reasoning  # ← PASS IT HERE
+            lang_instruction=lang_instruction
+            # domain_reasoning parameter removed - now handled internally
         )
 
         # Validate LLM output format
