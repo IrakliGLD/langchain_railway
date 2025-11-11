@@ -1091,6 +1091,13 @@ def llm_analyze_with_domain_knowledge(user_query: str, lang_instruction: str) ->
     First LLM call: Pure reasoning using domain knowledge.
     Forces the model to think like an energy analyst BEFORE writing SQL.
     """
+    # Phase 1B Optimization: Check cache first
+    cache_input = f"domain_reasoning|{user_query}|{lang_instruction}"
+    cached_response = llm_cache.get(cache_input)
+    if cached_response:
+        log.info("Domain Reasoning: (cached)")
+        return cached_response
+
     system = (
         "You are a senior energy market analyst for Georgia. "
         "Interpret the user's question using ONLY the domain knowledge. "
@@ -1114,10 +1121,16 @@ Respond in structured text only.
         llm = make_gemini()
         response = llm.invoke([("system", system), ("user", prompt)]).content.strip()
         log.info(f"Domain Reasoning:\n{response}")
+
+        # Phase 1B Optimization: Cache the response
+        llm_cache.set(cache_input, response)
+
         return response
     except Exception as e:
         log.warning(f"Domain reasoning failed: {e}. Using fallback.")
-        return "Intent: general\nKey Concepts: balancing price\nReasoning: Use xrate and entity shares from trade_derived_entities."
+        fallback = "Intent: general\nKey Concepts: balancing price\nReasoning: Use xrate and entity shares from trade_derived_entities."
+        llm_cache.set(cache_input, fallback)  # Cache fallback too
+        return fallback
 
 # Cached LLM instances (singleton pattern for performance)
 _gemini_llm = None
@@ -1808,7 +1821,12 @@ def llm_generate_plan_and_sql(
     lang_instruction: str = "Respond in English.",
     domain_reasoning: str = ""  # ← NEW: Pass domain reasoning
 ) -> str:
-    
+    # Phase 1B Optimization: Check cache first
+    cache_input = f"sql_generation|{user_query}|{analysis_mode}|{lang_instruction}|{domain_reasoning}"
+    cached_response = llm_cache.get(cache_input)
+    if cached_response:
+        log.info("📝 Plan/SQL: (cached)")
+        return cached_response
 
     system = (
         "You are an analytical PostgreSQL generator. Your task is to perform two steps: "
@@ -1921,6 +1939,9 @@ SELECT ...
              log.warning(f"Combined generation failed with fallback: {e_f}")
              metrics.log_error()
              raise e_f # Re-raise final exception
+
+    # Phase 1B Optimization: Cache the response
+    llm_cache.set(cache_input, combined_output)
 
     return combined_output
 
