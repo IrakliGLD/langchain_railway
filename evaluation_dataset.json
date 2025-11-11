@@ -1,0 +1,568 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "created": "2025-11-11",
+    "purpose": "Comprehensive evaluation dataset for text-to-SQL quality testing",
+    "total_queries": 75,
+    "query_type_distribution": {
+      "single_value": 23,
+      "list": 11,
+      "comparison": 15,
+      "trend": 19,
+      "analyst": 7
+    }
+  },
+  "queries": [
+    {
+      "id": "sv_001",
+      "type": "single_value",
+      "language": "en",
+      "query": "What was the balancing price in June 2024?",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "date BETWEEN '2024-06-01' AND '2024-06-30'",
+        "AVG(price_gel)"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": ["numeric value", "GEL/MWh unit", "June 2024"],
+        "must_not_include": ["detailed analysis", "drivers", "seasonal patterns"],
+        "max_sentences": 2,
+        "expected_tokens": "50-100"
+      },
+      "expected_performance": {
+        "sql_generation_time_ms": "< 5000",
+        "total_time_ms": "< 8000"
+      }
+    },
+    {
+      "id": "sv_002",
+      "type": "single_value",
+      "language": "ka",
+      "query": "რა არის ტარიფი ენგურჰესისთვის?",
+      "translation": "What is the tariff for Engurhesi?",
+      "expected_sql_patterns": [
+        "tariff",
+        "entity ILIKE '%engurhesi%' OR entity ILIKE '%enguri%'",
+        "tariff_gel"
+      ],
+      "expected_tables": ["tariff"],
+      "quality_criteria": {
+        "must_include": ["numeric value", "GEL/MWh unit", "Engurhesi"],
+        "response_language": "ka",
+        "max_sentences": 2,
+        "expected_tokens": "50-100"
+      }
+    },
+    {
+      "id": "sv_003",
+      "type": "single_value",
+      "language": "ru",
+      "query": "Какова была средняя цена балансирующей электроэнергии в 2024?",
+      "translation": "What was the average balancing electricity price in 2024?",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "EXTRACT(YEAR FROM date) = 2024",
+        "AVG(price_gel)"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": ["numeric value", "2024"],
+        "response_language": "ru",
+        "max_sentences": 2
+      }
+    },
+    {
+      "id": "sv_004",
+      "type": "single_value",
+      "language": "en",
+      "query": "What is the current CPI index?",
+      "expected_sql_patterns": [
+        "cpi",
+        "ORDER BY date DESC",
+        "LIMIT 1"
+      ],
+      "expected_tables": ["cpi"],
+      "quality_criteria": {
+        "must_include": ["numeric value", "index", "date"],
+        "max_sentences": 2
+      }
+    },
+    {
+      "id": "sv_005",
+      "type": "single_value",
+      "language": "en",
+      "query": "Total generation in January 2024",
+      "expected_sql_patterns": [
+        "generation",
+        "date BETWEEN '2024-01-01' AND '2024-01-31'",
+        "SUM(quantity)"
+      ],
+      "expected_tables": ["generation"],
+      "quality_criteria": {
+        "must_include": ["numeric value", "MWh unit", "January 2024"],
+        "max_sentences": 2
+      }
+    },
+    {
+      "id": "list_001",
+      "type": "list",
+      "language": "en",
+      "query": "List all entities selling on balancing market",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "DISTINCT entity",
+        "segment = 'balancing'"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": ["list of entities", "balancing market"],
+        "must_not_include": ["detailed analysis"],
+        "max_sentences": 5,
+        "expected_tokens": "100-150"
+      }
+    },
+    {
+      "id": "list_002",
+      "type": "list",
+      "language": "ka",
+      "query": "ყველა რეგიონი",
+      "translation": "All regions",
+      "expected_sql_patterns": [
+        "DISTINCT region"
+      ],
+      "quality_criteria": {
+        "must_include": ["list"],
+        "response_language": "ka",
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "list_003",
+      "type": "list",
+      "language": "en",
+      "query": "Show me all technology types",
+      "expected_sql_patterns": [
+        "DISTINCT type_tech"
+      ],
+      "expected_tables": ["generation"],
+      "quality_criteria": {
+        "must_include": ["list of technology types"],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "list_004",
+      "type": "list",
+      "language": "en",
+      "query": "List all regulated entities",
+      "expected_sql_patterns": [
+        "DISTINCT entity",
+        "segment = 'regulated'"
+      ],
+      "expected_tables": ["tariff"],
+      "quality_criteria": {
+        "must_include": ["list of entities", "regulated"],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "comp_001",
+      "type": "comparison",
+      "language": "en",
+      "query": "Compare tariffs for regulated vs deregulated entities",
+      "expected_sql_patterns": [
+        "tariff",
+        "segment",
+        "AVG(tariff_gel)",
+        "GROUP BY segment"
+      ],
+      "expected_tables": ["tariff"],
+      "quality_criteria": {
+        "must_include": ["comparison", "regulated", "deregulated", "numeric values", "percentage or ratio"],
+        "max_sentences": 5,
+        "expected_tokens": "250-400"
+      }
+    },
+    {
+      "id": "comp_002",
+      "type": "comparison",
+      "language": "en",
+      "query": "Balancing price vs tariff comparison",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "tariff",
+        "AVG(price_gel)",
+        "AVG(tariff_gel)"
+      ],
+      "expected_tables": ["balancing_price", "tariff"],
+      "quality_criteria": {
+        "must_include": ["balancing price", "tariff", "comparison", "numeric values"],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "comp_003",
+      "type": "comparison",
+      "language": "en",
+      "query": "Compare hydro vs thermal generation",
+      "expected_sql_patterns": [
+        "generation",
+        "type_tech IN ('hydro', 'thermal')",
+        "SUM(quantity)",
+        "GROUP BY type_tech"
+      ],
+      "expected_tables": ["generation"],
+      "quality_criteria": {
+        "must_include": ["hydro", "thermal", "comparison", "numeric values"],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "comp_004",
+      "type": "comparison",
+      "language": "en",
+      "query": "CPI vs electricity prices over time",
+      "expected_sql_patterns": [
+        "cpi",
+        "balancing_price",
+        "JOIN",
+        "date"
+      ],
+      "expected_tables": ["cpi", "balancing_price"],
+      "quality_criteria": {
+        "must_include": ["CPI", "electricity price", "comparison", "correlation"],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "trend_001",
+      "type": "trend",
+      "language": "en",
+      "query": "Balancing price trend over 2023-2024",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "date BETWEEN '2023-01-01' AND '2024-12-31'",
+        "AVG(price_gel)",
+        "GROUP BY DATE_TRUNC('month', date) OR EXTRACT(YEAR FROM date)"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": [
+          "trend direction (increasing/decreasing/stable)",
+          "numeric values",
+          "percentage change or CAGR",
+          "2023 and 2024"
+        ],
+        "max_sentences": 8,
+        "expected_tokens": "400-600"
+      }
+    },
+    {
+      "id": "trend_002",
+      "type": "trend",
+      "language": "ka",
+      "query": "ბალანსის ფასის ტრენდი",
+      "translation": "Balancing price trend",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "AVG(price_gel)",
+        "ORDER BY date"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": ["trend", "numeric values"],
+        "response_language": "ka",
+        "max_sentences": 8
+      }
+    },
+    {
+      "id": "trend_003",
+      "type": "trend",
+      "language": "en",
+      "query": "How has generation changed over time?",
+      "expected_sql_patterns": [
+        "generation",
+        "SUM(quantity)",
+        "GROUP BY DATE_TRUNC OR EXTRACT(YEAR FROM date)",
+        "ORDER BY date"
+      ],
+      "expected_tables": ["generation"],
+      "quality_criteria": {
+        "must_include": ["trend", "generation", "time period", "numeric values"],
+        "max_sentences": 8
+      }
+    },
+    {
+      "id": "trend_004",
+      "type": "trend",
+      "language": "en",
+      "query": "CPI trend in 2024",
+      "expected_sql_patterns": [
+        "cpi",
+        "EXTRACT(YEAR FROM date) = 2024",
+        "ORDER BY date"
+      ],
+      "expected_tables": ["cpi"],
+      "quality_criteria": {
+        "must_include": ["CPI", "trend", "2024", "numeric values"],
+        "max_sentences": 8
+      }
+    },
+    {
+      "id": "trend_005",
+      "type": "trend",
+      "language": "en",
+      "query": "Monthly import quantities in 2024",
+      "expected_sql_patterns": [
+        "trade",
+        "entity = 'import'",
+        "EXTRACT(YEAR FROM date) = 2024",
+        "SUM(quantity)",
+        "GROUP BY EXTRACT(MONTH FROM date)"
+      ],
+      "expected_tables": ["trade"],
+      "quality_criteria": {
+        "must_include": ["import", "monthly", "2024", "numeric values"],
+        "max_sentences": 8
+      }
+    },
+    {
+      "id": "analyst_001",
+      "type": "analyst",
+      "language": "en",
+      "query": "What drives balancing price changes?",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "trade_derived_entities OR (JOIN with trade)",
+        "cpi",
+        "AVG",
+        "correlation OR share"
+      ],
+      "expected_tables": ["balancing_price", "trade_derived_entities", "cpi"],
+      "quality_criteria": {
+        "must_include": [
+          "primary drivers",
+          "composition (import, deregulated_hydro)",
+          "exchange rate",
+          "seasonal patterns (Summer vs Winter)",
+          "correlation coefficients or percentages",
+          "mechanism explanation"
+        ],
+        "must_not_include": ["PPA pricing details"],
+        "min_sentences": 8,
+        "max_sentences": 12,
+        "expected_tokens": "600-1000"
+      },
+      "expected_performance": {
+        "sql_generation_time_ms": "< 15000",
+        "total_time_ms": "< 45000"
+      }
+    },
+    {
+      "id": "analyst_002",
+      "type": "analyst",
+      "language": "en",
+      "query": "Correlation between exchange rate and balancing price",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "cpi",
+        "xrate",
+        "price_gel",
+        "price_usd",
+        "CORR() OR statistical calculation"
+      ],
+      "expected_tables": ["balancing_price", "cpi"],
+      "quality_criteria": {
+        "must_include": [
+          "correlation coefficient",
+          "exchange rate",
+          "balancing price",
+          "statistical significance",
+          "explanation of relationship"
+        ],
+        "min_sentences": 8,
+        "expected_tokens": "600-1000"
+      }
+    },
+    {
+      "id": "analyst_003",
+      "type": "analyst",
+      "language": "en",
+      "query": "Impact of entity composition on price",
+      "expected_sql_patterns": [
+        "trade_derived_entities",
+        "balancing_price",
+        "share_import OR share_deregulated_hydro",
+        "JOIN ON date",
+        "correlation OR comparison"
+      ],
+      "expected_tables": ["trade_derived_entities", "balancing_price"],
+      "quality_criteria": {
+        "must_include": [
+          "entity composition",
+          "import share",
+          "deregulated hydro share",
+          "impact on price",
+          "numeric evidence"
+        ],
+        "min_sentences": 8
+      }
+    },
+    {
+      "id": "edge_001",
+      "type": "single_value",
+      "language": "en",
+      "query": "Price for entity that doesn't exist",
+      "expected_sql_patterns": [
+        "WHERE entity = 'nonexistent_entity'"
+      ],
+      "quality_criteria": {
+        "must_include": ["no data", "not found", "no results"],
+        "max_sentences": 2
+      },
+      "expected_behavior": "graceful_no_results"
+    },
+    {
+      "id": "edge_002",
+      "type": "single_value",
+      "language": "en",
+      "query": "What was the price in year 2050?",
+      "expected_sql_patterns": [
+        "EXTRACT(YEAR FROM date) = 2050"
+      ],
+      "quality_criteria": {
+        "must_include": ["no data", "future date", "not available"],
+        "max_sentences": 2
+      },
+      "expected_behavior": "graceful_no_results"
+    },
+    {
+      "id": "ambig_001",
+      "type": "trend",
+      "language": "en",
+      "query": "Show me price",
+      "expected_sql_patterns": [
+        "balancing_price OR tariff",
+        "price_gel"
+      ],
+      "quality_criteria": {
+        "must_include": ["clarification or assumption", "which price type"],
+        "max_sentences": 8
+      },
+      "expected_behavior": "reasonable_assumption"
+    },
+    {
+      "id": "multi_001",
+      "type": "comparison",
+      "language": "en",
+      "query": "Compare balancing price in Summer vs Winter 2024",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "EXTRACT(YEAR FROM date) = 2024",
+        "EXTRACT(MONTH FROM date) IN (6,7,8) OR IN (12,1,2)",
+        "AVG(price_gel)",
+        "GROUP BY season"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": [
+          "Summer 2024",
+          "Winter 2024",
+          "comparison",
+          "numeric values",
+          "percentage difference",
+          "explanation why"
+        ],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "multi_002",
+      "type": "trend",
+      "language": "en",
+      "query": "How did import share affect balancing price in 2024?",
+      "expected_sql_patterns": [
+        "trade_derived_entities",
+        "balancing_price",
+        "share_import",
+        "JOIN ON date",
+        "EXTRACT(YEAR FROM date) = 2024"
+      ],
+      "expected_tables": ["trade_derived_entities", "balancing_price"],
+      "quality_criteria": {
+        "must_include": [
+          "import share",
+          "balancing price",
+          "2024",
+          "relationship",
+          "numeric evidence"
+        ],
+        "max_sentences": 8
+      }
+    },
+    {
+      "id": "agg_001",
+      "type": "single_value",
+      "language": "en",
+      "query": "Average balancing price by month in 2024",
+      "expected_sql_patterns": [
+        "balancing_price",
+        "EXTRACT(YEAR FROM date) = 2024",
+        "AVG(price_gel)",
+        "GROUP BY EXTRACT(MONTH FROM date)",
+        "ORDER BY month"
+      ],
+      "expected_tables": ["balancing_price"],
+      "quality_criteria": {
+        "must_include": ["monthly averages", "2024", "numeric values"],
+        "max_sentences": 5
+      }
+    },
+    {
+      "id": "agg_002",
+      "type": "comparison",
+      "language": "en",
+      "query": "Total generation by technology type in 2024",
+      "expected_sql_patterns": [
+        "generation",
+        "EXTRACT(YEAR FROM date) = 2024",
+        "SUM(quantity)",
+        "GROUP BY type_tech",
+        "ORDER BY SUM(quantity) DESC"
+      ],
+      "expected_tables": ["generation"],
+      "quality_criteria": {
+        "must_include": ["total generation", "technology types", "2024", "numeric values"],
+        "max_sentences": 5
+      }
+    }
+  ],
+  "validation_rules": {
+    "sql_generation": {
+      "must_validate": true,
+      "allowed_tables": [
+        "balancing_price",
+        "tariff",
+        "generation",
+        "trade",
+        "trade_derived_entities",
+        "cpi"
+      ],
+      "must_have_limit": true,
+      "max_limit": 200,
+      "only_select": true
+    },
+    "performance": {
+      "simple_queries_max_ms": 8000,
+      "complex_queries_max_ms": 45000,
+      "cache_hit_max_ms": 500
+    },
+    "quality": {
+      "must_have_units": true,
+      "must_cite_timeframe": true,
+      "must_respect_language": true,
+      "no_hallucination": true
+    }
+  }
+}
