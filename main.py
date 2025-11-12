@@ -2508,6 +2508,280 @@ def get_metrics():
         }
     }
 
+
+@app.get("/evaluate")
+def evaluate(
+    x_app_key: str = Header(..., alias="X-App-Key"),
+    mode: str = Query("quick", description="Test mode: quick (10 queries) or full (75 queries)"),
+    type: Optional[str] = Query(None, description="Filter by query type: single_value, list, comparison, trend, analyst"),
+    query_id: Optional[str] = Query(None, description="Run specific query by ID (e.g., sv_001)"),
+    format: str = Query("html", description="Output format: html or json")
+):
+    """
+    Run evaluation tests against the query engine.
+
+    Purpose: Validate query generation and answer quality to ensure optimizations
+             don't degrade quality.
+
+    Examples:
+        GET /evaluate?mode=quick&format=html  (Quick test, browser view)
+        GET /evaluate?mode=full&format=json   (Full test, JSON results)
+        GET /evaluate?type=analyst            (Test only analyst queries)
+        GET /evaluate?query_id=sv_001         (Test specific query)
+
+    Authentication: Requires X-App-Key header
+    """
+    if x_app_key != APP_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        # Import evaluation engine
+        from evaluation_engine import (
+            load_evaluation_dataset,
+            filter_queries,
+            run_single_evaluation,
+            generate_summary
+        )
+
+        # Load dataset
+        dataset = load_evaluation_dataset()
+        queries = dataset["queries"]
+
+        # Filter queries
+        filtered_queries = filter_queries(queries, mode=mode, query_type=type, query_id=query_id)
+
+        if not filtered_queries:
+            raise HTTPException(status_code=404, detail=f"No queries found matching filters")
+
+        # Define API function that calls /ask internally
+        def call_api_internal(query_text: str):
+            """Call the ask endpoint internally without HTTP overhead."""
+            try:
+                start = time.time()
+                # Create Question object
+                q = Question(query=query_text)
+                # Call ask_post directly (bypassing HTTP)
+                # Create a mock request object for rate limiting
+                from starlette.datastructures import Headers
+                mock_request = type('Request', (), {
+                    'client': type('Client', (), {'host': '127.0.0.1'})(),
+                    'headers': Headers({'x-app-key': APP_SECRET_KEY})
+                })()
+
+                response = ask_post(mock_request, q, APP_SECRET_KEY)
+                elapsed_ms = (time.time() - start) * 1000
+
+                # Convert response model to dict
+                response_dict = {
+                    "sql": response.sql,
+                    "answer": response.answer,
+                    "data": response.data
+                }
+                return response_dict, elapsed_ms, ""
+
+            except Exception as e:
+                elapsed_ms = (time.time() - start) * 1000 if 'start' in locals() else 0
+                return {}, elapsed_ms, str(e)
+
+        # Run evaluations
+        results = []
+        for query_data in filtered_queries:
+            result = run_single_evaluation(query_data, call_api_internal)
+            results.append(result)
+            # Small delay to avoid overwhelming the system
+            time.sleep(0.1)
+
+        # Generate summary
+        summary = generate_summary(results, dataset)
+
+        # Return results
+        if format == "json":
+            return {
+                "summary": summary,
+                "results": results
+            }
+        else:
+            # Return HTML for browser viewing
+            html = generate_html_report(summary, results, filtered_queries)
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(content=html)
+
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="Evaluation dataset not found. Ensure evaluation_dataset.json is deployed."
+        )
+    except Exception as e:
+        log.exception("Evaluation failed")
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
+
+
+def generate_html_report(summary: Dict[str, Any], results: List[Dict[str, Any]], queries: List[Dict[str, Any]]) -> str:
+    """Generate HTML report for browser viewing."""
+
+    pass_rate = summary["pass_rate"] * 100
+    pass_color = "green" if pass_rate >= 90 else "orange" if pass_rate >= 70 else "red"
+
+    # Build results table
+    results_html = ""
+    for result in results:
+        status_icon = "✓" if result["status"] == "pass" else "✗" if result["status"] == "fail" else "⚠"
+        status_color = "green" if result["status"] == "pass" else "red" if result["status"] == "fail" else "orange"
+
+        details = []
+        if not result.get("sql_valid", True):
+            details.append(f"SQL issues: {', '.join(result.get('sql_missing', []))}")
+        if not result.get("quality_valid", True):
+            details.append(f"Quality issues: {', '.join(result.get('quality_failed', []))}")
+        if not result.get("performance_valid", True):
+            details.append(result.get("performance_msg", "Performance issue"))
+
+        details_html = "<br>".join(details) if details else "All checks passed"
+
+        results_html += f"""
+        <tr style="border-bottom: 1px solid #ddd;">
+            <td style="padding: 8px;"><span style="color: {status_color}; font-weight: bold;">{status_icon}</span></td>
+            <td style="padding: 8px;"><code>{result['id']}</code></td>
+            <td style="padding: 8px;">{result['type']}</td>
+            <td style="padding: 8px;">{result['query'][:80]}...</td>
+            <td style="padding: 8px;">{result['elapsed_ms']:.0f}ms</td>
+            <td style="padding: 8px; font-size: 0.9em;">{details_html}</td>
+        </tr>
+        """
+
+    # Build type breakdown
+    type_rows = ""
+    for qtype, stats in sorted(summary["by_type"].items()):
+        rate = stats["passed"] / stats["total"] * 100 if stats["total"] > 0 else 0
+        type_rows += f"""
+        <tr>
+            <td style="padding: 8px;">{qtype}</td>
+            <td style="padding: 8px;">{stats['passed']}/{stats['total']}</td>
+            <td style="padding: 8px;">{rate:.1f}%</td>
+        </tr>
+        """
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Evaluation Report</title>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
+            .container {{ max-width: 1400px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            h1 {{ color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }}
+            h2 {{ color: #555; margin-top: 30px; }}
+            .summary {{ background: #f9f9f9; padding: 20px; border-radius: 5px; margin: 20px 0; }}
+            .metric {{ display: inline-block; margin: 10px 20px 10px 0; }}
+            .metric-label {{ font-weight: bold; color: #666; }}
+            .metric-value {{ font-size: 1.3em; font-weight: bold; }}
+            table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+            th {{ background: #4CAF50; color: white; padding: 12px; text-align: left; }}
+            td {{ padding: 8px; }}
+            tr:hover {{ background: #f5f5f5; }}
+            .pass-rate {{ font-size: 2em; font-weight: bold; color: {pass_color}; }}
+            code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: monospace; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🧪 Evaluation Report</h1>
+
+            <div class="summary">
+                <div class="metric">
+                    <span class="metric-label">Pass Rate:</span>
+                    <span class="pass-rate">{pass_rate:.1f}%</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Total Queries:</span>
+                    <span class="metric-value">{summary['total_queries']}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Passed:</span>
+                    <span class="metric-value" style="color: green;">{summary['passed']}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Failed:</span>
+                    <span class="metric-value" style="color: red;">{summary['failed']}</span>
+                </div>
+                {f'<div class="metric"><span class="metric-label">Errors:</span><span class="metric-value" style="color: orange;">{summary["errors"]}</span></div>' if summary['errors'] > 0 else ''}
+            </div>
+
+            <h2>📊 Performance Metrics</h2>
+            <div class="summary">
+                <div class="metric">
+                    <span class="metric-label">Avg Response Time:</span>
+                    <span class="metric-value">{summary['performance']['avg_time_ms']:.0f}ms</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Simple Queries:</span>
+                    <span class="metric-value">{summary['performance']['avg_simple_ms']:.0f}ms</span>
+                    <span style="color: #666;">(target: &lt;8s)</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Complex Queries:</span>
+                    <span class="metric-value">{summary['performance']['avg_complex_ms']:.0f}ms</span>
+                    <span style="color: #666;">(target: &lt;45s)</span>
+                </div>
+            </div>
+
+            <h2>📋 Results by Type</h2>
+            <table>
+                <tr>
+                    <th>Query Type</th>
+                    <th>Passed/Total</th>
+                    <th>Pass Rate</th>
+                </tr>
+                {type_rows}
+            </table>
+
+            <h2>🔍 Issue Breakdown</h2>
+            <div class="summary">
+                <div class="metric">
+                    <span class="metric-label">SQL Pattern Issues:</span>
+                    <span class="metric-value">{summary['issues']['sql_pattern_issues']}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Quality Issues:</span>
+                    <span class="metric-value">{summary['issues']['quality_issues']}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Performance Issues:</span>
+                    <span class="metric-value">{summary['issues']['performance_issues']}</span>
+                </div>
+            </div>
+
+            <h2>📝 Detailed Results</h2>
+            <table>
+                <tr>
+                    <th style="width: 40px;">Status</th>
+                    <th>ID</th>
+                    <th>Type</th>
+                    <th>Query</th>
+                    <th>Time</th>
+                    <th>Details</th>
+                </tr>
+                {results_html}
+            </table>
+
+            <div style="margin-top: 30px; padding: 15px; background: #e3f2fd; border-left: 4px solid #2196F3; border-radius: 4px;">
+                <strong>💡 Tip:</strong> Add <code>?format=json</code> to get results as JSON for programmatic access.
+                <br>
+                <strong>🔧 Filters:</strong> Use <code>?mode=full</code>, <code>?type=analyst</code>, or <code>?query_id=sv_001</code> to customize tests.
+            </div>
+
+            <div style="margin-top: 20px; text-align: center; color: #999; font-size: 0.9em;">
+                Generated: {summary['timestamp']}<br>
+                Dataset Version: {summary['dataset_version']}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    return html
+
 # main.py v18.7 — Gemini Analyst (chart rules + period aggregation)
 # (Only added targeted comments/logic for: 1) chart axis restriction; 2) user-defined period aggregation)
 
