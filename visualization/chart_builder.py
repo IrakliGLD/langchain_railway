@@ -25,6 +25,68 @@ from visualization.chart_selector import (
 log = logging.getLogger("Enai")
 
 
+# -----------------------------
+# Dimension Safety Check (Option 2)
+# -----------------------------
+
+def detect_mixed_dimensions(dimensions: Set[str]) -> Tuple[bool, str]:
+    """
+    Detect if dimensions are mixed and incompatible for a single chart.
+
+    This is a safety net to catch cases where LLM didn't properly separate dimensions.
+
+    Incompatible dimension pairs:
+    - 'price_tariff' + 'share' (GEL/MWh vs %)
+    - 'price_tariff' + 'energy_qty' (GEL/MWh vs MWh)
+    - 'price_tariff' + 'xrate' (GEL/MWh vs GEL/USD)
+    - 'share' + 'energy_qty' (% vs MWh)
+    - 'share' + 'xrate' (% vs GEL/USD)
+    - 'xrate' + 'energy_qty' (GEL/USD vs MWh)
+    - Any dimension + 'index' (CPI is separate)
+
+    Args:
+        dimensions: Set of semantic dimensions from columns
+
+    Returns:
+        Tuple of (is_mixed, reason)
+        - is_mixed: True if dimensions should not be on same chart
+        - reason: Human-readable explanation
+
+    Examples:
+        >>> detect_mixed_dimensions({'price_tariff', 'share'})
+        (True, 'Cannot mix price (GEL/MWh) with shares (%)')
+
+        >>> detect_mixed_dimensions({'price_tariff'})
+        (False, 'Single dimension')
+
+        >>> detect_mixed_dimensions({'share'})
+        (False, 'Single dimension')
+    """
+    if len(dimensions) == 1:
+        return False, "Single dimension"
+
+    # Define incompatible pairs
+    incompatible_pairs = [
+        ({'price_tariff', 'share'}, 'Cannot mix price (GEL/MWh) with shares (%)'),
+        ({'price_tariff', 'energy_qty'}, 'Cannot mix price (GEL/MWh) with quantities (MWh)'),
+        ({'price_tariff', 'xrate'}, 'Cannot mix price (GEL/MWh) with exchange rate (GEL/USD)'),
+        ({'share', 'energy_qty'}, 'Cannot mix shares (%) with quantities (MWh)'),
+        ({'share', 'xrate'}, 'Cannot mix shares (%) with exchange rate (GEL/USD)'),
+        ({'xrate', 'energy_qty'}, 'Cannot mix exchange rate (GEL/USD) with quantities (MWh)'),
+    ]
+
+    # Check each incompatible pair
+    for pair, reason in incompatible_pairs:
+        if pair.issubset(dimensions):
+            return True, reason
+
+    # Special case: index should always be separate
+    if 'index' in dimensions and len(dimensions) > 1:
+        return True, 'CPI/index must be on separate chart from other metrics'
+
+    return False, "Dimensions are compatible"
+
+
 def filter_series_by_relevance(
     num_cols: List[str],
     user_query: str,
@@ -319,6 +381,16 @@ def prepare_chart_data(
     dim_map = {c: infer_dimension(c) for c in filtered_num_cols}
     dimensions = set(dim_map.values())
     log.info(f"📐 Detected dimensions: {dim_map} → {dimensions}")
+
+    # Step 2.5: Safety check for mixed dimensions (Option 2)
+    is_mixed, mix_reason = detect_mixed_dimensions(dimensions)
+    if is_mixed:
+        log.warning(f"⚠️ CHART DIMENSION WARNING: {mix_reason}")
+        log.warning(f"⚠️ Detected dimensions: {dimensions}")
+        log.warning(f"⚠️ Columns: {filtered_num_cols}")
+        log.warning(f"⚠️ LLM should have created separate chart groups for these metrics!")
+        # Note: We still proceed with chart generation, but log the warning
+        # In future, could auto-split into multiple charts here
 
     # Step 3: Apply labels
     labeled_df, label_map = apply_labels(df, df.columns.tolist(), time_key)
