@@ -162,9 +162,19 @@ DB_SCHEMA_DOC = """
 - tech_quantity_view(date, type_tech, quantity_tech)
 - trade_derived_entities(date, entity, segment, quantity)
 
-**Type_tech classification:**
-- Demand: abkhazeti, supply_distribution, direct_customers, self_cons, losses, export
-- Supply: hydro, thermal, wind, import
+**CRITICAL: Exact column values (case-sensitive, including spaces/hyphens):**
+
+type_tech values (tech_quantity_view):
+- Demand side: 'abkhazeti', 'supply-distribution' (note: hyphen!), 'direct customers' (note: space!), 'losses', 'export'
+- Supply side: 'hydro', 'thermal', 'wind', 'import', 'solar'
+- IMPORTANT: Use exact strings with hyphens and spaces as shown above!
+
+segment values (trade_derived_entities):
+- 'Balancing Electricity' (note: capital B, capital E, with space!)
+- 'Bilateral Contracts & Exchange'
+- IMPORTANT: Segment values are case-sensitive and may contain spaces!
+- Common mistake: using lowercase 'balancing' - WRONG! Use 'Balancing Electricity'
+- Recommended filter: WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing' (handles case variations)
 
 **Units & Conversions:**
 - Quantities in thousand MWh (multiply ×1000 for MWh)
