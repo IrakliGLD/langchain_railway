@@ -191,7 +191,10 @@ DOMAIN_KNOWLEDGE = {
                 "mechanism": [
                     "Higher share of cheap sources (regulated HPP, deregulated hydro) → lower price",
                     "Higher share of expensive sources (import, thermal PPA, renewable PPA is also higher than average summer prices) → higher price",
-                    "Composition changes seasonally (summer=hydro, winter=thermal/import)"
+                    "Composition changes seasonally (summer=hydro, winter=thermal/import)",
+                    "In summer, renewable PPAs can lift balancing price toward their own tariff level.",
+                    "In winter, thermal dominance limits renewable impact.",
+                    "New power plants mainly are build under CfD scheme or PPA scheme, and because or relatively hight price, new generation, as they have most generation in summer, pushes summer prices up, as share of the most expensive electricity, ppa or cfd, in increasing in the balancing electricity portfolio"
                 ],
                 "data_source": "trade_derived_entities WHERE segment='balancing_electricity'",
                 "calculation_functions": [
@@ -351,7 +354,7 @@ DOMAIN_KNOWLEDGE = {
             "GNERC (Georgian National Energy and Water Supply Regulatory Commission)": {
                 "role": "Independent energy regulator, tariff authority, energy market monitoring and licensing body.",
                 "functions": [
-                    "In electricity sector pproves electricity generation, transmission, and distribution tariffs, including tariff methodologies.",
+                    "In electricity sector aproves electricity generation, transmission, and distribution tariffs, including tariff methodologies.",
                     "Issues, modifies, and revokes licenses for generation, transmission, distribution, martket operator. Authorized electricity activities not subject to license, like suppy, trade, small generation.",
                     "Approves and enforces the Grid Code, network connection rules, and accounting standards for market participants.",
                     "Oversees cost audits, tariff reviews, guaranteed capacity payments, and consumer protection measures."
@@ -553,9 +556,7 @@ DOMAIN_KNOWLEDGE = {
         "Definition": "Captures how renewable PPAs affect market structure and balancing behavior.",
         "Rules": [
             "Renewable PPAs are fixed-price, USD-indexed, reducing residual balancing liquidity.",
-            "Rising renewable share reduces hydro flexibility and increases balancing volatility.",
-            "In summer, renewable PPAs can lift balancing price toward their own tariff level.",
-            "In winter, thermal dominance limits renewable impact."
+            "Rising renewable share reduces hydro flexibility and increases balancing volatility."
         ]
     },
 
