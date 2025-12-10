@@ -1021,106 +1021,11 @@ Respond in structured text only.
         llm_cache.set(cache_input, fallback)  # Cache fallback too
         return fallback
 
-# Cached LLM instances (singleton pattern for performance)
-_gemini_llm = None
-_openai_llm = None
-
-def get_gemini() -> ChatGoogleGenerativeAI:
-    """Get cached Gemini LLM instance (singleton pattern).
-
-    Note: convert_system_message_to_human=True is required because Gemini
-    doesn't natively support SystemMessages in the LangChain interface.
-    """
-    global _gemini_llm
-    if _gemini_llm is None:
-        _gemini_llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL,
-            google_api_key=GOOGLE_API_KEY,
-            temperature=0,
-            convert_system_message_to_human=True
-        )
-        log.info("✅ Gemini LLM instance cached")
-    return _gemini_llm
-
-def get_openai() -> ChatOpenAI:
-    """Get cached OpenAI LLM instance (singleton pattern).
-
-    Raises:
-        RuntimeError: If OPENAI_API_KEY is not configured
-    """
-    global _openai_llm
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
-    if _openai_llm is None:
-        _openai_llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
-        log.info("✅ OpenAI LLM instance cached")
-    return _openai_llm
-
-# Backward compatibility aliases
-make_gemini = get_gemini
-make_openai = get_openai
-
 # -----------------------------
-# LLM Response Cache (Phase 1 Optimization)
+# LLM Functions: Imported from core/llm.py (lines 72-80)
 # -----------------------------
-import hashlib
-from typing import Optional
-
-class LLMResponseCache:
-    """Simple in-memory cache for LLM responses.
-
-    Phase 1 optimization: Cache identical prompts to avoid repeated LLM calls.
-    Future: Migrate to Redis for persistence across restarts.
-    """
-    def __init__(self, max_size: int = 1000):
-        self._cache = {}
-        self._max_size = max_size
-        self._hits = 0
-        self._misses = 0
-
-    def _make_key(self, prompt: str) -> str:
-        """Generate cache key from prompt hash."""
-        return hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]
-
-    def get(self, prompt: str) -> Optional[str]:
-        """Get cached response if exists."""
-        key = self._make_key(prompt)
-        if key in self._cache:
-            self._hits += 1
-            log.info(f"✅ LLM cache HIT (hit rate: {self.hit_rate():.1%})")
-            return self._cache[key]
-        self._misses += 1
-        return None
-
-    def set(self, prompt: str, response: str):
-        """Cache response for prompt."""
-        if len(self._cache) >= self._max_size:
-            # Simple LRU: Remove oldest 10% when full
-            remove_count = self._max_size // 10
-            for _ in range(remove_count):
-                self._cache.pop(next(iter(self._cache)))
-            log.info(f"🗑️ Cache eviction: removed {remove_count} oldest entries")
-
-        key = self._make_key(prompt)
-        self._cache[key] = response
-
-    def hit_rate(self) -> float:
-        """Calculate cache hit rate."""
-        total = self._hits + self._misses
-        return self._hits / total if total > 0 else 0.0
-
-    def stats(self) -> dict:
-        """Get cache statistics."""
-        return {
-            "size": len(self._cache),
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": self.hit_rate(),
-        }
-
-# Global cache instance
-llm_cache = LLMResponseCache(max_size=1000)
-log.info("✅ LLM response cache initialized (max_size=1000)")
+# make_gemini, make_openai, llm_cache, classify_query_type, get_query_focus,
+# llm_generate_plan_and_sql, llm_summarize - all imported from core.llm
 
 # Optimized: Use set for O(1) lookup instead of list
 ANALYTICAL_KEYWORDS = {
