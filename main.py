@@ -46,6 +46,13 @@ from sqlglot import parse_one, exp
 from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS, DERIVED_LABELS
 # Domain knowledge
 from domain_knowledge import DOMAIN_KNOWLEDGE
+# SQL helper functions for aggregation intent detection and validation
+from sql_helpers import (
+    detect_aggregation_intent,
+    validate_aggregation_logic,
+    enhance_sql_examples_for_aggregation,
+    get_aggregation_guidance
+)
 
 # -----------------------------
 # Boot + Config
@@ -1822,6 +1829,70 @@ WHERE entity IN ('ltd "engurhesi"1', 'ltd "gardabni thermal power plant"')
   AND date >= '2024-01-01'
 ORDER BY date, entity
 LIMIT 3750;
+
+-- ============================================================================
+-- AGGREGATION EXAMPLES (CRITICAL for Total vs Breakdown disambiguation)
+-- ============================================================================
+
+-- Example A1: TOTAL generation (single number, all technologies)
+-- User: "What was total generation in 2023?"
+-- Intent: Single total across ALL technologies
+SELECT
+  SUM(quantity_tech) * 1000 AS total_generation_mwh
+FROM tech_quantity_view
+WHERE EXTRACT(YEAR FROM date) = 2023
+  AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
+LIMIT 3750;
+-- IMPORTANT: NO GROUP BY - returns single row
+
+-- Example A2: TOTAL generation BY TECHNOLOGY (breakdown)
+-- User: "What was total generation by technology in 2023?"
+-- Intent: Total for EACH technology
+SELECT
+  type_tech,
+  SUM(quantity_tech) * 1000 AS total_generation_mwh
+FROM tech_quantity_view
+WHERE EXTRACT(YEAR FROM date) = 2023
+  AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
+GROUP BY type_tech
+ORDER BY total_generation_mwh DESC
+LIMIT 3750;
+-- IMPORTANT: Has GROUP BY - returns multiple rows (one per technology)
+
+-- Example A3: AVERAGE balancing price (single number)
+-- User: "What was average balancing price in 2023?"
+-- Intent: Single average across entire year
+SELECT
+  AVG(p_bal_gel) AS average_balancing_price_gel
+FROM price_with_usd
+WHERE EXTRACT(YEAR FROM date) = 2023
+LIMIT 3750;
+-- IMPORTANT: NO GROUP BY - returns single average
+
+-- Example A4: SHARE calculation (percentage breakdown)
+-- User: "What is share of each technology in total generation for 2023?"
+-- Intent: Percentage contribution of each technology
+WITH totals AS (
+  SELECT
+    type_tech,
+    SUM(quantity_tech) AS tech_total
+  FROM tech_quantity_view
+  WHERE EXTRACT(YEAR FROM date) = 2023
+    AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
+  GROUP BY type_tech
+),
+grand_total AS (
+  SELECT SUM(tech_total) AS overall_total FROM totals
+)
+SELECT
+  t.type_tech,
+  t.tech_total * 1000 AS generation_mwh,
+  gt.overall_total * 1000 AS total_generation_mwh,
+  ROUND((t.tech_total / gt.overall_total) * 100, 2) AS share_percent
+FROM totals t, grand_total gt
+ORDER BY share_percent DESC
+LIMIT 3750;
+-- IMPORTANT: Uses CTE to calculate shares properly
 """
 
 
@@ -2837,6 +2908,13 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
     log.info(f"📝 Plan: {plan}")
 
+    # ========================================================================
+    # CRITICAL: Aggregation Intent Detection & SQL Validation
+    # Ensures LLM-generated SQL matches what user actually wants
+    # ========================================================================
+    aggregation_intent = detect_aggregation_intent(q.query)
+    log.info(f"📊 Aggregation intent: {aggregation_intent}")
+
     # --- Period aggregation detection (optional user-defined range) ---
     period_pattern = re.search(
         r"(?P<start>(?:19|20)\d{2}[-/]?\d{0,2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
@@ -2850,6 +2928,19 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         sanitized = raw_sql.strip()
         simple_table_whitelist_check(sanitized)
         safe_sql = plan_validate_repair(sanitized)
+
+        # ========================================================================
+        # CRITICAL: Validate SQL matches aggregation intent
+        # ========================================================================
+        is_valid_aggregation, validation_reason = validate_aggregation_logic(safe_sql, aggregation_intent)
+        if not is_valid_aggregation:
+            log.warning(f"⚠️ SQL doesn't match aggregation intent: {validation_reason}")
+            log.warning(f"⚠️ User query: {q.query}")
+            log.warning(f"⚠️ Generated SQL: {safe_sql[:200]}...")
+            # Don't fail hard - log warning and continue
+            # In future, could regenerate SQL with better guidance
+        else:
+            log.info(f"✅ SQL validation passed: {validation_reason}")
 
         # 🎯 CRITICAL: Force pivot injection for balancing share queries
         # LLM often generates SQL querying trade_derived_entities directly instead of using share columns
