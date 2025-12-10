@@ -2245,6 +2245,13 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
                     log.info(f"📊 Filtered chart metrics (Option B): {len(original_num_cols)} → {len(num_cols)} columns")
                     log.info(f"📊 Showing only: {num_cols}")
                     log.info(f"📊 Chart type: {first_group.get('type', 'auto')} | Title: {first_group.get('title', 'Untitled')}")
+
+                    # CRITICAL: Also filter the DataFrame to only include filtered columns + time_key
+                    # This ensures chart_data sent to frontend only has the filtered metrics
+                    cols_to_keep = [time_key] + num_cols if time_key and time_key in df.columns else num_cols
+                    cols_to_keep = [c for c in cols_to_keep if c in df.columns]  # Safety check
+                    df = df[cols_to_keep]
+                    log.info(f"📊 DataFrame filtered to {len(df.columns)} columns: {list(df.columns)}")
                 else:
                     # Fallback: if no matching columns, keep original (safety net)
                     log.warning(f"⚠️ No matching columns found for chart metrics {chart_metrics}, using all numeric columns")
