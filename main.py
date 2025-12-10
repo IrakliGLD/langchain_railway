@@ -124,9 +124,7 @@ if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
 # Allow the base tables + USD materialized views
 STATIC_ALLOWED_TABLES = {
     "dates_mv",
-    "energy_balance_long_mv",
     "entities_mv",
-    "monthly_cpi_mv",
     "price_with_usd",
     "tariff_with_usd",
     "tech_quantity_view",
@@ -142,7 +140,6 @@ TABLE_SYNONYMS = {
     "price_usd": "price_with_usd",
     "tariff_usd": "tariff_with_usd",
     "price_with_usd": "price_with_usd",
-    "tariff_with_usd": "tariff_with_usd",
 }
 
 # Column synonym map (common misnamings → canonical)
