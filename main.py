@@ -2228,9 +2228,31 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
                 for i, group in enumerate(chart_groups, 1):
                     log.info(f"   Group {i}: {group.get('type', 'unknown')} - {group.get('metrics', [])} - {group.get('title', 'Untitled')}")
             if chart_strategy == "multiple" and len(chart_groups) > 1:
-                log.warning(f"⚠️ LLM requested multiple charts ({len(chart_groups)}), but current implementation only generates one chart")
-                log.warning(f"⚠️ Using first chart group: {chart_groups[0] if chart_groups else 'none'}")
-                # TODO: Future enhancement - implement multiple chart generation
+                log.warning(f"⚠️ LLM requested multiple charts ({len(chart_groups)}), but user wants only 1 chart")
+                log.info(f"✅ Using first chart group: {chart_groups[0].get('title', 'Chart 1')}")
+
+        # Option B: Filter num_cols to first chart group metrics (prevent messy multi-dimension charts)
+        if chart_groups and len(chart_groups) > 0:
+            first_group = chart_groups[0]
+            chart_metrics = first_group.get('metrics', [])
+
+            if chart_metrics:
+                # Filter num_cols to only include metrics specified by LLM for first chart
+                original_num_cols = num_cols.copy()
+                num_cols = [col for col in num_cols if col in chart_metrics]
+
+                if num_cols:
+                    log.info(f"📊 Filtered chart metrics (Option B): {len(original_num_cols)} → {len(num_cols)} columns")
+                    log.info(f"📊 Showing only: {num_cols}")
+                    log.info(f"📊 Chart type: {first_group.get('type', 'auto')} | Title: {first_group.get('title', 'Untitled')}")
+                else:
+                    # Fallback: if no matching columns, keep original (safety net)
+                    log.warning(f"⚠️ No matching columns found for chart metrics {chart_metrics}, using all numeric columns")
+                    num_cols = original_num_cols
+            else:
+                log.info(f"📊 No metrics specified in chart group, using all numeric columns ({len(num_cols)})")
+        else:
+            log.info(f"📊 No chart groups in plan, using all numeric columns ({len(num_cols)})")
 
         # Override: Disable chart for purely explanatory questions
         if any(word in query_text for word in ["why", "how", "reason", "explain", "because", "cause", "რატომ", "როგორ", "почему"]):
