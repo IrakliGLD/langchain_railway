@@ -197,9 +197,9 @@ segment values (trade_derived_entities):
 
 # --- Join Map ---
 DB_JOINS = {
-    "price_with_usd": {"join_on": "date", "related_to": ["tariff_with_usd", "tech_quantity_view", "trade_derived_entities", "monthly_cpi_mv"]},
+    "price_with_usd": {"join_on": "date", "related_to": ["tariff_with_usd", "tech_quantity_view", "trade_derived_entities"]},
     "tariff_with_usd": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "trade_derived_entities"]},
-    "tech_quantity_view": {"join_on": "date", "related_to": ["price_with_usd", "trade_derived_entities", "monthly_cpi_mv"]},
+    "tech_quantity_view": {"join_on": "date", "related_to": ["price_with_usd", "trade_derived_entities"]},
     "trade_derived_entities": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "tariff_with_usd"]},
     "entities_mv": {"join_on": "entity", "related_to": ["tariff_with_usd", "trade_derived_entities"]},
 }
