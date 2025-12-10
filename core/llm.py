@@ -115,6 +115,9 @@ def get_gemini() -> ChatGoogleGenerativeAI:
 
     Note: convert_system_message_to_human=True is required because Gemini
     doesn't natively support SystemMessages in the LangChain interface.
+
+    Retry configuration: max_retries=2 to prevent quota exhaustion from
+    aggressive retry behavior (default is 6 retries with exponential backoff).
     """
     global _gemini_llm
     if _gemini_llm is None:
@@ -122,9 +125,10 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             model=GEMINI_MODEL,
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
-            convert_system_message_to_human=True
+            convert_system_message_to_human=True,
+            max_retries=2  # Limit retries to prevent quota exhaustion
         )
-        log.info("✅ Gemini LLM instance cached")
+        log.info("✅ Gemini LLM instance cached (max_retries=2)")
     return _gemini_llm
 
 
@@ -138,8 +142,13 @@ def get_openai() -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
     if _openai_llm is None:
-        _openai_llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=OPENAI_API_KEY)
-        log.info("✅ OpenAI LLM instance cached")
+        _openai_llm = ChatOpenAI(
+            model=OPENAI_MODEL,
+            temperature=0,
+            openai_api_key=OPENAI_API_KEY,
+            max_retries=2  # Limit retries to prevent quota exhaustion
+        )
+        log.info("✅ OpenAI LLM instance cached (max_retries=2)")
     return _openai_llm
 
 
