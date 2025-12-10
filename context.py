@@ -16,11 +16,6 @@ COLUMN_LABELS = {
     # shared
     "date": "Period (Year-Month-Day)",
 
-    # energy_balance_long_mv
-    "year": "Year",
-    "sector": "Sector",
-    "energy_source": "Energy Source",
-    "volume_tj": "Energy Consumption (TJ)",
 
     # entities_mv
     "entity": "Entity Name",
@@ -29,9 +24,6 @@ COLUMN_LABELS = {
     "ownership": "Ownership",
     "source": "Source (Local vs Import-Dependent)",
 
-    # monthly_cpi_mv
-    "cpi_type": "CPI Category",
-    "cpi": "CPI Value (2015=100)",
 
     # price_with_usd
     "p_dereg_gel": "Deregulated Price (GEL/MWh)",
@@ -82,9 +74,7 @@ DERIVED_LABELS = {
 
 # --- Table label mapping ---
 VIEW_LABELS = {
-    "energy_balance_long_mv": "Energy Balance (by Sector)",
     "entities_mv": "Power Sector Entities",
-    "monthly_cpi_mv": "Consumer Price Index (CPI)",
     "price_with_usd": "Electricity Market Prices (USD)",
     "tariff_with_usd": "Regulated Tariffs (USD)",
     "tech_quantity_view": "Generation & Demand Quantities",
@@ -118,15 +108,6 @@ VALUE_LABELS = {
     "transit": "Transit Flows",
     "HPP": "Hydropower Plant",
     "TPP": "Thermal Power Plant",
-    "overall CPI": "Overall Consumer Price Index",
-    "electricity_gas_and_other_fuels": "Electricity, Gas & Other Fuels CPI",
-    "Coal": "Coal",
-    "Oil products": "Oil Products",
-    "Natural Gas": "Natural Gas",
-    "Biofuel & Waste": "Biofuel & Waste",
-    "Electricity": "Electricity",
-    "Heat": "Heat",
-    "Total": "Total Energy Use",
     "balancing_electricity": "Balancing Electricity",
     "bilateral_exchange": "Bilateral Contracts & Exchange",
     "renewable_ppa": "Renewable PPA",
@@ -140,18 +121,11 @@ VALUE_LABELS = {
 # --- Structured Schema Dict ---
 DB_SCHEMA_DICT = {
     "views": {
-        "energy_balance_long_mv": {
-            "columns": ["year", "sector", "energy_source", "volume_tj"],
-            "desc": "Energy Balance (by Sector, yearly data)",
-        },
         "entities_mv": {
             "columns": ["entity", "entity_normalized", "type", "ownership", "source"],
             "desc": "Power Sector Entities",
         },
-        "monthly_cpi_mv": {
-            "columns": ["date", "cpi_type", "cpi"],
-            "desc": "Consumer Price Index (CPI)",
-        },
+
         "price_with_usd": {
             "columns": ["date", "p_dereg_gel", "p_bal_gel", "p_gcap_gel", "xrate", "p_dereg_usd", "p_bal_usd", "p_gcap_usd"],
             "desc": "Electricity Market Prices (GEL and USD)",
@@ -170,7 +144,7 @@ DB_SCHEMA_DICT = {
         },
     },
     "rules": {
-        "unit_conversion": "1 TJ = 277.778 MWh; tech_quantity/trade data in thousand MWh (×1000 for MWh).",
+       
         "usd_rule": "USD values = GEL / xrate (from price_with_usd joined by date).",
         "granularity": "Monthly data for all except yearly energy_balance_long_mv.",
         "temporal_scope": "2015–present; use full range.",
@@ -182,9 +156,7 @@ DB_SCHEMA_DOC = """
 ### Key Database Rules and Conventions (Materialized Views)
 
 **Available Views:**
-- energy_balance_long_mv(year, sector, energy_source, volume_tj)
 - entities_mv(entity, entity_normalized, type, ownership, source)
-- monthly_cpi_mv(date, cpi_type, cpi)
 - price_with_usd(date, p_dereg_gel, p_bal_gel, p_gcap_gel, xrate, p_dereg_usd, p_bal_usd, p_gcap_usd)
 - tariff_with_usd(date, entity, tariff_gel, tariff_usd)
 - tech_quantity_view(date, type_tech, quantity_tech)
@@ -195,7 +167,6 @@ DB_SCHEMA_DOC = """
 - Supply: hydro, thermal, wind, import
 
 **Units & Conversions:**
-- 1 TJ = 277.778 MWh
 - Quantities in thousand MWh (multiply ×1000 for MWh)
 - *_usd fields = *_gel / xrate
 
@@ -216,12 +187,10 @@ DB_SCHEMA_DOC = """
 
 # --- Join Map ---
 DB_JOINS = {
-    "energy_balance_long_mv": {"join_on": "year", "related_to": ["tech_quantity_view", "price_with_usd", "monthly_cpi_mv"]},
     "price_with_usd": {"join_on": "date", "related_to": ["tariff_with_usd", "tech_quantity_view", "trade_derived_entities", "monthly_cpi_mv"]},
     "tariff_with_usd": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "trade_derived_entities"]},
     "tech_quantity_view": {"join_on": "date", "related_to": ["price_with_usd", "trade_derived_entities", "monthly_cpi_mv"]},
     "trade_derived_entities": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "tariff_with_usd"]},
-    "monthly_cpi_mv": {"join_on": "date", "related_to": ["price_with_usd", "tech_quantity_view", "energy_balance_long_mv"]},
     "entities_mv": {"join_on": "entity", "related_to": ["tariff_with_usd", "trade_derived_entities"]},
 }
 
