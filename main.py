@@ -523,32 +523,9 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
     return " ".join(lines) if lines else None
 
 # -----------------------------
-# DB Engine
+# Database Schema Reflection
 # -----------------------------
-def coerce_to_psycopg_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme in ("postgres", "postgresql"):
-        return url.replace(parsed.scheme, "postgresql+psycopg", 1)
-    if not parsed.scheme.startswith("postgresql+"):
-        return "postgresql+psycopg://" + url.split("://", 1)[-1]
-    return url
-
-DB_URL = coerce_to_psycopg_url(SUPABASE_DB_URL)
-ENGINE = create_engine(
-    DB_URL,
-    poolclass=QueuePool,
-    pool_size=10,  # Increased from 5 for better concurrency
-    max_overflow=5,  # Increased from 2 to handle traffic spikes
-    pool_timeout=30,
-    pool_pre_ping=True,
-    pool_recycle=1800,  # Increased from 300 (30 min) for Supabase
-    connect_args={
-        "connect_timeout": 30,
-        # Phase 1D Security: Database-level query timeout (30 seconds max)
-        "options": "-c statement_timeout=30000"  # 30s in milliseconds
-    },
-)
-
+# Note: ENGINE is imported from core.query_executor
 with ENGINE.connect() as conn:
     conn.execute(text("SELECT 1"))
     log.info("✅ Database connectivity verified")
