@@ -29,7 +29,7 @@ import time
 import logging
 import uuid
 from contextvars import ContextVar
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
