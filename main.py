@@ -83,6 +83,11 @@ from core.llm import (
 # Phase 3: Analysis modules
 from analysis.stats import quick_stats, rows_to_preview
 from analysis.seasonal import compute_seasonal_average
+from analysis.seasonal_stats import (
+    detect_monthly_timeseries,
+    calculate_seasonal_stats,
+    format_seasonal_stats
+)
 from analysis.shares import (
     build_balancing_correlation_df,
     compute_weighted_balancing_price,
@@ -1683,6 +1688,19 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
     preview = rows_to_preview(rows, cols)
     stats_hint = quick_stats(rows, cols)
+
+    # Option 3: Calculate seasonal-adjusted statistics for time series
+    timeseries_info = detect_monthly_timeseries(df)
+    if timeseries_info:
+        time_col, value_col = timeseries_info
+        try:
+            seasonal_stats = calculate_seasonal_stats(df, time_col, value_col)
+            seasonal_text = format_seasonal_stats(seasonal_stats)
+            stats_hint += f"\n\n{seasonal_text}"
+            log.info(f"✅ Added seasonal-adjusted statistics to stats_hint")
+        except Exception as e:
+            log.warning(f"⚠️ Seasonal stats calculation failed: {e}")
+
     share_summary_override = None
     if share_query_detected:
         try:

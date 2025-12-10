@@ -884,6 +884,42 @@ IMPORTANT RULES - STAY FOCUSED:
 7. Keep answers concise (1-3 sentences) unless detailed analysis requested
 """)
 
+    # Add seasonal statistics guidance if stats_hint contains seasonal analysis
+    if "SEASONAL-ADJUSTED TREND ANALYSIS" in stats_hint:
+        guidance_sections.append("""
+CRITICAL: SEASONAL-ADJUSTED TREND ANALYSIS RULES
+The stats_hint contains seasonal-adjusted statistics (year-over-year growth, CAGR, etc.).
+These are ALREADY ADJUSTED for seasonality - use them directly!
+
+MANDATORY RULES:
+1. Use the "Overall growth" percentage from stats_hint for multi-year trends
+   - DO NOT compare first month to last month directly
+   - DO NOT say "doubled" or "tripled" based on raw monthly data
+   - USE the calculated CAGR (average annual growth rate)
+
+2. Pay attention to incomplete year warnings
+   - If stats say "Last year has only X months" → mention this caveat
+   - DO NOT treat incomplete years as full years in trend analysis
+
+3. For trend queries:
+   - Cite the year range: "From [first_year] to [last_year]"
+   - Cite the overall growth: "increased by [overall_growth_pct]%"
+   - Cite the CAGR: "average annual growth of [cagr]%"
+   - Mention seasonal pattern if relevant: "peak in [peak_month], low in [low_month]"
+
+4. Distinguish between:
+   - Long-term trend (use CAGR from stats)
+   - Seasonal variation (use peak_month/low_month from stats)
+   - Recent momentum (use recent_12m_growth if available)
+
+EXAMPLES:
+✅ CORRECT: "From 2015 to 2023, demand increased by 25.5% (overall growth), with an average annual growth rate of 3.2% (CAGR). Demand shows strong seasonality, peaking in January (winter) and reaching lows in July (summer)."
+
+❌ WRONG: "Demand almost doubled from 171k MWh to 313k MWh" (this compares January to August - pure seasonality!)
+
+If seasonal stats are present, they are the AUTHORITATIVE source for trends. Trust them over raw data patterns.
+""")
+
     # Phase 1 Optimization: Only include heavy guidance for complex queries
     # Simple queries (single_value, list) skip balancing/tariff/CPI guidance
     # Conditionally include balancing-specific guidance
