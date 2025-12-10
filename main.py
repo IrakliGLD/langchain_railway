@@ -2218,6 +2218,20 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         intent = str(plan.get("intent", "")).lower()
         query_text = q.query.lower()
 
+        # Check if plan includes chart strategy (Option 1)
+        chart_strategy = plan.get("chart_strategy", "single")
+        chart_groups = plan.get("chart_groups", [])
+        if chart_strategy or chart_groups:
+            log.info(f"📋 Plan includes chart strategy: {chart_strategy}")
+            if chart_groups:
+                log.info(f"📋 Chart groups specified: {len(chart_groups)} group(s)")
+                for i, group in enumerate(chart_groups, 1):
+                    log.info(f"   Group {i}: {group.get('type', 'unknown')} - {group.get('metrics', [])} - {group.get('title', 'Untitled')}")
+            if chart_strategy == "multiple" and len(chart_groups) > 1:
+                log.warning(f"⚠️ LLM requested multiple charts ({len(chart_groups)}), but current implementation only generates one chart")
+                log.warning(f"⚠️ Using first chart group: {chart_groups[0] if chart_groups else 'none'}")
+                # TODO: Future enhancement - implement multiple chart generation
+
         # Override: Disable chart for purely explanatory questions
         if any(word in query_text for word in ["why", "how", "reason", "explain", "because", "cause", "რატომ", "როგორ", "почему"]):
             if len(df) < 5:  # Only skip if result is small

@@ -651,17 +651,27 @@ def llm_generate_plan_and_sql(
     # Phase 1C: Include domain reasoning as internal step
     system = (
         "You are an analytical PostgreSQL generator for Georgian energy market data. "
-        "Your task is to perform THREE steps internally, then output plan + SQL: "
+        "Your task is to perform FOUR steps internally, then output plan + SQL: "
         "\n"
         "**STEP 1 (Internal - Analyze Intent):** "
         "Think like an energy market analyst. What is the user really asking? "
         "What domain concepts are involved (price drivers, composition, exchange rates, seasonal patterns)? "
         "What metrics and time periods are needed? "
         "\n"
-        "**STEP 2 (Output - Plan):** "
-        "Extract the analysis intent, target variables, and period as JSON. "
+        "**STEP 2 (Internal - Chart Strategy):** "
+        "Analyze data dimensions and decide chart organization. "
+        "NEVER mix different dimensions on the same chart: "
+        "- Don't mix % (shares) with prices (GEL/USD) "
+        "- Don't mix prices with quantities (MWh) "
+        "- Don't mix exchange rate (xrate) with prices or shares "
+        "- Don't mix different units (GEL vs USD vs % vs MWh) "
+        "If query involves multiple dimensions → create separate chart groups. "
+        "Chart types: 'line' for trends, 'bar' for comparisons, 'stacked_bar' or 'stacked_area' for composition/shares. "
         "\n"
-        "**STEP 3 (Output - SQL):** "
+        "**STEP 3 (Output - Plan):** "
+        "Extract the analysis intent, target variables, period, AND chart strategy as JSON. "
+        "\n"
+        "**STEP 4 (Output - SQL):** "
         "Write a single, correct PostgreSQL SELECT query to fulfill the plan. "
         "\n"
         "Rules: no INSERT/UPDATE/DELETE; no DDL; NO comments; NO markdown fences. "
@@ -678,7 +688,16 @@ def llm_generate_plan_and_sql(
     plan_format = {
         "intent": "trend_analysis" if analysis_mode == "analyst" else "general",
         "target": "<metric name>",
-        "period": "YYYY-YYYY or YYYY-MM to YYYY-MM"
+        "period": "YYYY-YYYY or YYYY-MM to YYYY-MM",
+        "chart_strategy": "single or multiple",
+        "chart_groups": [
+            {
+                "type": "line or bar or stacked_bar or stacked_area",
+                "metrics": ["column_name1", "column_name2"],
+                "title": "Chart title",
+                "y_axis_label": "Unit (e.g., GEL/MWh, %, thousand MWh)"
+            }
+        ]
     }
 
     # Build guidance dynamically based on query focus
@@ -691,6 +710,25 @@ def llm_generate_plan_and_sql(
     guidance_sections.append("- Use ONLY documented materialized views.")
     guidance_sections.append("- Aggregation default = monthly. For energy_balance_long_mv, use yearly.")
     guidance_sections.append("- When USD values appear, *_usd = *_gel / xrate.")
+
+    # Always include chart strategy rules
+    guidance_sections.append("""
+CHART STRATEGY RULES (CRITICAL):
+- NEVER mix dimensions on same chart: % vs GEL vs MWh vs xrate must be separate
+- Example 1: If query asks for "price and shares" → create 2 chart groups:
+  * Group 1: price (GEL/MWh) - line chart
+  * Group 2: shares (%) - stacked_area or stacked_bar
+- Example 2: If query asks for "price and exchange rate" → create 2 chart groups:
+  * Group 1: balancing_price_gel (GEL/MWh) - line chart
+  * Group 2: xrate (GEL/USD) - line chart
+- Example 3: If query asks for "generation composition" → single chart:
+  * Group 1: share_hydro, share_thermal, share_wind (%) - stacked_area
+- Chart types:
+  * 'line' for price trends, exchange rate trends
+  * 'bar' for entity comparisons, monthly comparisons
+  * 'stacked_bar' or 'stacked_area' for composition (shares, generation mix)
+- Max 5 metrics per chart group to avoid clutter
+""")
 
     # Conditionally include balancing-specific guidance
     if query_focus == "balancing" or any(k in query_lower for k in ["balancing", "p_bal", "საბალანსო"]):
