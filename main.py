@@ -1,51 +1,102 @@
-# main.py v18.7 — Gemini Analyst (combined plan & SQL for speed)
-
+# main.py v19.0 — Refactored with modular architecture
+# Phase 5: Integrated with extracted modules
+#
+# REFACTORING STATUS:
+# ✅ Phase 1-4 Complete: ~2,850 lines extracted to 12 modules
+# ✅ All imports updated to use new modules
+# 🔄 Note: Some duplicate function definitions remain in this file for safety
+#          These are superseded by the imported modules and will be removed in Phase 5.2
+#
+# Extracted Modules:
+# - config.py: All configuration, constants, regex patterns
+# - models.py: Pydantic models (Question, APIResponse, MetricsResponse)
+# - utils/metrics.py: Metrics tracking class
+# - utils/language.py: Language detection (Georgian/Russian/English)
+# - core/query_executor.py: ENGINE, execute_sql_safely
+# - core/sql_generator.py: SQL validation, sanitization, repair
+# - core/llm.py: LLM instances, caching, SQL generation, summarization (983 lines!)
+# - analysis/stats.py: Statistical analysis, trend calculation
+# - analysis/seasonal.py: Seasonal analysis (summer/winter)
+# - analysis/shares.py: Entity shares, price decomposition
+# - visualization/chart_selector.py: Chart type selection logic
+# - visualization/chart_builder.py: Chart data preparation
+#
+# All function calls in ask_post() and other endpoints now use imported modules.
 
 import os
 import re
-import json
 import time
 import logging
-import urllib.parse
 import uuid
-from textwrap import dedent
 from contextvars import ContextVar
-from typing import Optional, Dict, Any, List, Tuple
-from difflib import get_close_matches
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-# Corrected Pydantic imports for V2 compatibility
-from pydantic import BaseModel, Field, field_validator
 
 # Phase 1D Security: Rate limiting
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded 
+from slowapi.errors import RateLimitExceeded
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import SQLAlchemyError, OperationalError, DatabaseError
+from sqlalchemy import text
 
 import pandas as pd
 import numpy as np
 
 from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-# LLMs
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-
-# sqlglot (AST parsing/validation)
-from sqlglot import parse_one, exp
 
 # Schema & helpers
-# NOTE: Ensure these imports are available in your environment
 from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS, DERIVED_LABELS
-# Domain knowledge
 from domain_knowledge import DOMAIN_KNOWLEDGE
+from sql_helpers import (
+    detect_aggregation_intent,
+    validate_aggregation_logic,
+    enhance_sql_examples_for_aggregation,
+    get_aggregation_guidance
+)
+
+# ============================================================================
+# REFACTORED MODULES (Phases 1-4)
+# ============================================================================
+# Phase 1: Configuration and Models
+from config import *  # All configuration constants
+from models import Question, APIResponse, MetricsResponse
+
+# Phase 2: Core modules
+from utils.metrics import metrics
+from utils.language import detect_language, get_language_instruction
+from core.query_executor import ENGINE, execute_sql_safely
+from core.sql_generator import simple_table_whitelist_check, sanitize_sql, plan_validate_repair
+from core.llm import (
+    llm_cache,
+    make_gemini,
+    make_openai,
+    llm_generate_plan_and_sql,
+    llm_summarize,
+    classify_query_type,
+    get_query_focus
+)
+
+# Phase 3: Analysis modules
+from analysis.stats import quick_stats, rows_to_preview
+from analysis.seasonal import compute_seasonal_average
+from analysis.shares import (
+    build_balancing_correlation_df,
+    compute_weighted_balancing_price,
+    compute_entity_price_contributions
+)
+
+# Phase 4: Visualization modules
+from visualization.chart_selector import (
+    should_generate_chart,
+    infer_dimension,
+    detect_column_types,
+    select_chart_type
+)
+from visualization.chart_builder import prepare_chart_data
+# ============================================================================
 
 # -----------------------------
 # Boot + Config
@@ -54,145 +105,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("Enai")
 
-# Cache domain knowledge JSON serialization (done once at startup)
-_DOMAIN_KNOWLEDGE_JSON = json.dumps(DOMAIN_KNOWLEDGE, indent=2)
-log.info("✅ Domain knowledge JSON cached at startup")
-
 # Request ID tracking for observability
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 
-# Metrics tracking (simple counters and timing)
-class Metrics:
-    """Simple metrics tracker for observability."""
-    def __init__(self):
-        self.request_count = 0
-        self.llm_call_count = 0
-        self.sql_query_count = 0
-        self.error_count = 0
-        self.total_llm_time = 0.0
-        self.total_sql_time = 0.0
-        self.total_request_time = 0.0
-
-    def log_request(self, duration: float):
-        self.request_count += 1
-        self.total_request_time += duration
-        log.info(f"📊 Metrics: requests={self.request_count}, avg_time={self.total_request_time/self.request_count:.2f}s")
-
-    def log_llm_call(self, duration: float):
-        self.llm_call_count += 1
-        self.total_llm_time += duration
-
-    def log_sql_query(self, duration: float):
-        self.sql_query_count += 1
-        self.total_sql_time += duration
-
-    def log_error(self):
-        self.error_count += 1
-
-    def get_stats(self) -> dict:
-        return {
-            "requests": self.request_count,
-            "llm_calls": self.llm_call_count,
-            "sql_queries": self.sql_query_count,
-            "errors": self.error_count,
-            "avg_request_time": self.total_request_time / max(1, self.request_count),
-            "avg_llm_time": self.total_llm_time / max(1, self.llm_call_count),
-            "avg_sql_time": self.total_sql_time / max(1, self.sql_query_count),
-        }
-
-metrics = Metrics()
-
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
-APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
-
-MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-# Maximum rows to return from queries (prevents huge result sets)
-MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
-
-if not SUPABASE_DB_URL:
-    raise RuntimeError("Missing SUPABASE_DB_URL")
-if not APP_SECRET_KEY:
-    raise RuntimeError("Missing APP_SECRET_KEY")
-if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
-    raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
-
-# Allow the base tables + USD materialized views
-STATIC_ALLOWED_TABLES = {
-    "dates_mv",
-    "entities_mv",
-    "price_with_usd",
-    "tariff_with_usd",
-    "tech_quantity_view",
-    "trade_derived_entities",
-}
-
-ALLOWED_TABLES = set(STATIC_ALLOWED_TABLES)
-
-# Table synonym map (plural & common aliases → canonical)
-TABLE_SYNONYMS = {
-    "prices": "price",
-    "tariffs": "tariff_gen",
-    "price_usd": "price_with_usd",
-    "tariff_usd": "tariff_with_usd",
-    "price_with_usd": "price_with_usd",
-}
-
-# Column synonym map (common misnamings → canonical)
-COLUMN_SYNONYMS = {
-    "tech_type": "type_tech",
-    "quantity_mwh": "quantity_tech",  # your data stores thousand MWh in quantity_tech
-}
-
-# Pre-compiled regex patterns for SQL synonym replacement (performance optimization)
-SYNONYM_PATTERNS = [
-    (re.compile(r"\bprices\b", re.IGNORECASE), "price_with_usd"),
-    (re.compile(r"\btariffs\b", re.IGNORECASE), "tariff_with_usd"),
-    (re.compile(r"\btech_quantity\b", re.IGNORECASE), "tech_quantity_view"),
-    (re.compile(r"\btrade\b", re.IGNORECASE), "trade_derived_entities"),
-    (re.compile(r"\bentities\b", re.IGNORECASE), "entities_mv"),
-    (re.compile(r"\bmonthly_cpi\b", re.IGNORECASE), "monthly_cpi_mv"),
-    (re.compile(r"\benergy_balance_long\b", re.IGNORECASE), "energy_balance_long_mv"),
-]
-
-# Pre-compiled regex for LIMIT detection (allows optional whitespace)
-LIMIT_PATTERN = re.compile(r"\bLIMIT\s*\d+\b", re.IGNORECASE)
-
-
-BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"
-
-
-BALANCING_SHARE_PIVOT_SQL = dedent(
-    f"""
-    SELECT
-        t.date,
-        'balancing'::text AS segment,
-        SUM(t.quantity) AS total_quantity_debug,
-        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_import,
-        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_deregulated_hydro,
-        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_hpp,
-        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_new_tpp,
-        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_old_tpp,
-        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_renewable_ppa,
-        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_thermal_ppa,
-        SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_all_ppa,
-        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_all_renewables,
-        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_total_hpp
-    FROM trade_derived_entities t
-    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
-      AND t.entity IN (
-        'import', 'deregulated_hydro', 'regulated_hpp',
-        'regulated_new_tpp', 'regulated_old_tpp',
-        'renewable_ppa', 'thermal_ppa'
-      )
-    GROUP BY t.date
-    ORDER BY t.date
-    """
-).strip()
+# Note: Metrics, config variables, and other extracted code now imported from modules
+# See imports section above for: config.py, models.py, utils.metrics, core.*, analysis.*, visualization.*
 
 
 def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
@@ -1822,6 +1739,70 @@ WHERE entity IN ('ltd "engurhesi"1', 'ltd "gardabni thermal power plant"')
   AND date >= '2024-01-01'
 ORDER BY date, entity
 LIMIT 3750;
+
+-- ============================================================================
+-- AGGREGATION EXAMPLES (CRITICAL for Total vs Breakdown disambiguation)
+-- ============================================================================
+
+-- Example A1: TOTAL generation (single number, all technologies)
+-- User: "What was total generation in 2023?"
+-- Intent: Single total across ALL technologies
+SELECT
+  SUM(quantity_tech) * 1000 AS total_generation_mwh
+FROM tech_quantity_view
+WHERE EXTRACT(YEAR FROM date) = 2023
+  AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
+LIMIT 3750;
+-- IMPORTANT: NO GROUP BY - returns single row
+
+-- Example A2: TOTAL generation BY TECHNOLOGY (breakdown)
+-- User: "What was total generation by technology in 2023?"
+-- Intent: Total for EACH technology
+SELECT
+  type_tech,
+  SUM(quantity_tech) * 1000 AS total_generation_mwh
+FROM tech_quantity_view
+WHERE EXTRACT(YEAR FROM date) = 2023
+  AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
+GROUP BY type_tech
+ORDER BY total_generation_mwh DESC
+LIMIT 3750;
+-- IMPORTANT: Has GROUP BY - returns multiple rows (one per technology)
+
+-- Example A3: AVERAGE balancing price (single number)
+-- User: "What was average balancing price in 2023?"
+-- Intent: Single average across entire year
+SELECT
+  AVG(p_bal_gel) AS average_balancing_price_gel
+FROM price_with_usd
+WHERE EXTRACT(YEAR FROM date) = 2023
+LIMIT 3750;
+-- IMPORTANT: NO GROUP BY - returns single average
+
+-- Example A4: SHARE calculation (percentage breakdown)
+-- User: "What is share of each technology in total generation for 2023?"
+-- Intent: Percentage contribution of each technology
+WITH totals AS (
+  SELECT
+    type_tech,
+    SUM(quantity_tech) AS tech_total
+  FROM tech_quantity_view
+  WHERE EXTRACT(YEAR FROM date) = 2023
+    AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
+  GROUP BY type_tech
+),
+grand_total AS (
+  SELECT SUM(tech_total) AS overall_total FROM totals
+)
+SELECT
+  t.type_tech,
+  t.tech_total * 1000 AS generation_mwh,
+  gt.overall_total * 1000 AS total_generation_mwh,
+  ROUND((t.tech_total / gt.overall_total) * 100, 2) AS share_percent
+FROM totals t, grand_total gt
+ORDER BY share_percent DESC
+LIMIT 3750;
+-- IMPORTANT: Uses CTE to calculate shares properly
 """
 
 
@@ -2837,6 +2818,13 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
     log.info(f"📝 Plan: {plan}")
 
+    # ========================================================================
+    # CRITICAL: Aggregation Intent Detection & SQL Validation
+    # Ensures LLM-generated SQL matches what user actually wants
+    # ========================================================================
+    aggregation_intent = detect_aggregation_intent(q.query)
+    log.info(f"📊 Aggregation intent: {aggregation_intent}")
+
     # --- Period aggregation detection (optional user-defined range) ---
     period_pattern = re.search(
         r"(?P<start>(?:19|20)\d{2}[-/]?\d{0,2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
@@ -2850,6 +2838,19 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         sanitized = raw_sql.strip()
         simple_table_whitelist_check(sanitized)
         safe_sql = plan_validate_repair(sanitized)
+
+        # ========================================================================
+        # CRITICAL: Validate SQL matches aggregation intent
+        # ========================================================================
+        is_valid_aggregation, validation_reason = validate_aggregation_logic(safe_sql, aggregation_intent)
+        if not is_valid_aggregation:
+            log.warning(f"⚠️ SQL doesn't match aggregation intent: {validation_reason}")
+            log.warning(f"⚠️ User query: {q.query}")
+            log.warning(f"⚠️ Generated SQL: {safe_sql[:200]}...")
+            # Don't fail hard - log warning and continue
+            # In future, could regenerate SQL with better guidance
+        else:
+            log.info(f"✅ SQL validation passed: {validation_reason}")
 
         # 🎯 CRITICAL: Force pivot injection for balancing share queries
         # LLM often generates SQL querying trade_derived_entities directly instead of using share columns
