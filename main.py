@@ -964,25 +964,9 @@ app.add_middleware(
 )
 
 # -----------------------------
-# Models
+# Models: Imported from models.py (line 64)
 # -----------------------------
-class Question(BaseModel):
-    query: str = Field(..., max_length=2000)
-    user_id: Optional[str] = None
-
-    @field_validator("query")  # Pydantic V2 syntax
-    @classmethod
-    def _not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Query cannot be empty")
-        return v.strip()
-
-class APIResponse(BaseModel):
-    answer: str
-    chart_data: Optional[List[Dict[str, Any]]] = None
-    chart_type: Optional[str] = None
-    chart_metadata: Optional[Dict[str, Any]] = None
-    execution_time: Optional[float] = None
+# Question, APIResponse, MetricsResponse are imported at top of file
 
 # -----------------------------
 # LLM + Planning helpers
