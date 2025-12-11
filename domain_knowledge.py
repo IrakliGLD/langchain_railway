@@ -569,7 +569,7 @@ DOMAIN_KNOWLEDGE = {
             "regardless of the language of the response. Instead, use descriptive terms derived from domain_knowledge.",
             "or natural language equivalents (e.g., the share of renewable PPAs, the average balancing price in USD). If a suitable label is not found, infer a clear and human-readable name based on context before generating the answer.",
 
-            
+
             "For balancing price behavior (summer vs winter, correlation with generation mix), use price_with_usd and trade_derived_entities.",
             "For demand or sectoral structure, reference energy_balance_long_mv.",
             "For import dependence or renewable share dynamics, use trade_derived_entities, focusing on share_import, share_deregulated_hydro, and share_renewable_ppa.",
@@ -590,5 +590,105 @@ DOMAIN_KNOWLEDGE = {
             "so the chart remains interpretable and visually balanced. "
             "When multiple variables differ by unit or scale, group them logically and use dual axes (left for price/tariff, right for share or index)."
         )
+    },
+
+    "TableSelectionGuidance": {
+        "Purpose": "Provides clear rules for choosing the appropriate database view based on query intent.",
+        "Rules": [
+            "When the query needs ONLY technical generation/consumption data (quantities by technology type):",
+            "  → Use tech_quantity_view",
+            "  → Contains: quantity by type_tech (hydro, thermal, wind, solar, import, demand-side types)",
+            "  → Use for: demand trends, supply trends, generation mix by technology",
+            "  → Examples: 'Show me demand trends', 'Hydro generation over time', 'Import quantities'",
+            "",
+            "When the query needs trade information, market prices, or entity-level analysis:",
+            "  → Use trade_derived_entities",
+            "  → Contains: traded quantities by entity and segment (balancing_electricity, bilateral contracts, exchange)",
+            "  → Contains: entity shares (share_import, share_renewable_ppa, share_deregulated_hydro, etc.)",
+            "  → Use for: balancing price analysis, composition changes, entity market behavior",
+            "  → Examples: 'Explain balancing price variations', 'Entity shares in balancing market', 'Trade volumes by segment'",
+            "",
+            "CRITICAL DISTINCTION:",
+            "  tech_quantity_view = Technical data (generation/demand by technology)",
+            "  trade_derived_entities = Market/trade data (prices, segments, entities, shares)",
+            "",
+            "Default preference:",
+            "  - Simple quantity queries → tech_quantity_view",
+            "  - Price explanation queries → trade_derived_entities",
+            "  - If uncertain, prefer tech_quantity_view for cleaner technical analysis"
+        ]
+    },
+
+    "EnergySecurityAnalysis": {
+        "Purpose": "Provides correct framework for analyzing energy security and import dependence.",
+        "CriticalFact": "Thermal generation uses imported natural gas and cannot be considered fully domestic/local generation.",
+        "CorrectClassification": {
+            "LocalGeneration": [
+                "Hydro (all types: regulated HPP, deregulated hydro, reservoir, run-of-river)",
+                "Wind (renewable, no fuel imports)",
+                "Solar (renewable, no fuel imports)",
+                "Note: These have NO import dependence for fuel/energy input"
+            ],
+            "ImportDependentGeneration": [
+                "Thermal (uses imported natural gas for power generation)",
+                "Direct electricity import",
+                "Note: Both depend on cross-border energy supply"
+            ]
+        },
+        "DataSource": {
+            "table": "trade_by_source",
+            "description": "Divides generation into local (renewables) vs import-dependent (thermal + import)",
+            "usage": "Use this view for energy security analysis to correctly categorize thermal as import-dependent"
+        },
+        "AnalyticalImplications": [
+            "When analyzing energy security, thermal is NOT a substitute for imports — it IS import-dependent",
+            "The real choice for Georgia is: import electricity OR import gas to generate electricity",
+            "True energy independence comes from hydro, wind, and solar expansion",
+            "Winter import dependence = direct electricity imports + gas imports for thermal generation",
+            "Summer energy surplus is real because it's based on local hydro without fuel imports"
+        ],
+        "ExampleStatements": [
+            "✅ CORRECT: 'Georgia's energy security depends on local renewables (hydro, wind, solar). Thermal generation, while domestic, relies on imported gas and does not reduce import dependence.'",
+            "✅ CORRECT: 'In winter, Georgia is import-dependent: ~30% direct electricity import + thermal generation using imported gas.'",
+            "❌ WRONG: 'Thermal generation is local production that reduces import dependence.'",
+            "❌ WRONG: 'Georgia can achieve energy independence by increasing thermal capacity.'"
+        ]
+    },
+
+    "PriceComparisonRules": {
+        "Purpose": "Mandatory rules for comparing electricity prices across time periods.",
+        "CriticalRule": "ALWAYS mention summer and winter averages separately when comparing prices — never use annual averages only.",
+        "Reasoning": [
+            "Summer and winter prices are structurally different due to generation mix",
+            "Summer: hydro-dominant, lower prices (~40-60 GEL/MWh)",
+            "Winter: thermal/import-dominant, higher prices (~80-120 GEL/MWh)",
+            "Annual averages obscure these critical seasonal differences"
+        ],
+        "TrendDivergence": {
+            "SummerTrend": [
+                "Rising share of renewable PPA and CfD scheme generation",
+                "Reason: In absence of liquid markets, investors require government support schemes",
+                "New renewable development depends almost entirely on PPA/CfD support",
+                "As renewable PPA/CfD share increases in balancing electricity, summer prices converge toward average support scheme price",
+                "This pushes summer prices UP over time despite high hydro availability"
+            ],
+            "WinterTrend": [
+                "Prices follow gas prices and exchange rate (thermal/import dominant)",
+                "Less affected by renewable PPA/CfD trend (thermal dominates in winter)",
+                "More volatile due to import price variations and gas market dynamics"
+            ]
+        },
+        "MandatoryFormat": [
+            "When comparing prices across years:",
+            "  1. State summer average for period A",
+            "  2. State winter average for period A",
+            "  3. State summer average for period B",
+            "  4. State winter average for period B",
+            "  5. Explain the different drivers for each season's trend"
+        ],
+        "ExampleStatements": [
+            "✅ CORRECT: 'Balancing prices increased from 2020 to 2024. In summer, average prices rose from 45 GEL/MWh to 62 GEL/MWh due to growing renewable PPA share displacing cheap hydro from balancing. In winter, prices increased from 95 GEL/MWh to 118 GEL/MWh primarily due to gas price increases and GEL depreciation.'",
+            "❌ WRONG: 'Balancing prices increased from 70 GEL/MWh in 2020 to 90 GEL/MWh in 2024.' (No seasonal breakdown!)"
+        ]
     }
 }

@@ -845,10 +845,10 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
         return cached_response
 
     system = (
-        "You are Enai, an energy market analyst. "
-        "Write a short analytic summary using preview and statistics. "
+        "Provide a concise analytical answer based on the data preview and statistics. "
         "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
         "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
+        "Do NOT introduce yourself or include greetings - answer the question directly. "
         f"{lang_instruction}"
     )
 
@@ -882,6 +882,11 @@ IMPORTANT RULES - STAY FOCUSED:
 5. If query is about entities/list → provide the list only (no price analysis)
 6. Only discuss balancing price if explicitly asked or if query contains balancing price keywords
 7. Keep answers concise (1-3 sentences) unless detailed analysis requested
+
+CRITICAL: NEVER use raw database column names in your answer
+❌ WRONG: "share_hydro increased", "p_bal_gel rose", "tariff_gel changed"
+✅ CORRECT: "hydro generation share increased", "balancing price in GEL rose", "tariff in GEL changed"
+Always use descriptive, natural language terms regardless of response language.
 """)
 
     # Add seasonal statistics guidance if stats_hint contains seasonal analysis
