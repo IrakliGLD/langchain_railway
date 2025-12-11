@@ -28,7 +28,7 @@ from config import (
 )
 from context import DB_SCHEMA_DOC
 from domain_knowledge import DOMAIN_KNOWLEDGE
-from prompts.few_shot_examples import ALL_EXAMPLES
+from prompts.few_shot_examples import get_relevant_examples
 from utils.metrics import metrics
 
 log = logging.getLogger("Enai")
@@ -780,6 +780,11 @@ TARIFF ANALYSIS:
 
     guidance = "\n".join(guidance_sections)
 
+    # Phase 1C Fix: Use selective example loading to reduce token usage
+    # Load only 2 relevant example categories (~800-1,500 tokens instead of ~5,800)
+    # This keeps domain knowledge prominent and restores detailed answer quality
+    relevant_examples = get_relevant_examples(user_query, max_categories=2)
+
     # Phase 1C: Prompt structure updated - domain reasoning is now internal
     prompt = f"""
 User question:
@@ -795,7 +800,7 @@ Guidance:
 {guidance}
 
 Examples (Few-Shot Learning - Study these patterns):
-{ALL_EXAMPLES}
+{relevant_examples}
 
 Additional SQL Syntax Examples:
 {FEW_SHOT_SQL}
