@@ -589,6 +589,18 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
         ],
         "DataEvidenceIntegration": [
             "evidence", "view", "materialized", "chart", "cpi"
+        ],
+        "TableSelectionGuidance": [
+            "table", "view", "tech_quantity", "trade_derived", "which table", "what table"
+        ],
+        "EnergySecurityAnalysis": [
+            "energy security", "import dependence", "self-sufficiency", "უსაფრთხოება",
+            "დამოკიდებულება", "თვითკმარობა", "local generation", "domestic generation",
+            "independence", "vulnerability", "მოწყვლადობა"
+        ],
+        "PriceComparisonRules": [
+            "price trend", "price comparison", "price increase", "price decrease",
+            "compare price", "ფასის ტენდენცია", "ფასის ზრდა", "how much price"
         ]
     }
 
@@ -1003,6 +1015,35 @@ GENERATION ANALYSIS GUIDELINES:
 - Describe generation trends, shares, and seasonal patterns.
 - Summer vs Winter comparison relevant for hydro vs thermal generation.
 - Only discuss prices if user explicitly asks about price-generation relationships.
+
+CRITICAL: ENERGY SECURITY AND IMPORT DEPENDENCE:
+- Thermal generation uses imported natural gas and is NOT fully domestic/independent
+- True local/independent generation: Hydro, Wind, Solar (no fuel imports)
+- Import-dependent generation: Thermal (imported gas) + Direct electricity import
+- When discussing energy security: "Winter import dependence includes both direct electricity imports AND gas imports for thermal generation"
+- ❌ NEVER say "thermal reduces import dependence" or "thermal is local generation"
+- ✅ ALWAYS clarify "thermal relies on imported gas" when discussing energy security
+""")
+
+    # Add energy security guidance if domain knowledge includes it
+    if "energy security" in query_lower or "უსაფრთხოება" in query_lower or "independence" in query_lower or "dependence" in query_lower:
+        guidance_sections.append("""
+CRITICAL: ENERGY SECURITY ANALYSIS RULES:
+⚠️ MANDATORY: Thermal generation is import-dependent, NOT local generation!
+
+Key Facts:
+- Local/Independent: Hydro, Wind, Solar (no fuel imports)
+- Import-Dependent: Thermal (uses imported gas) + Direct electricity import
+- Georgia's choice: import electricity OR import gas to generate electricity
+- True energy security comes from renewables expansion
+
+When Analyzing Energy Security:
+✅ CORRECT: "Winter import dependence includes direct electricity imports AND thermal generation using imported gas"
+✅ CORRECT: "Georgia's energy security depends on local renewables (hydro, wind, solar). Thermal generation, while domestic infrastructure, relies on imported gas."
+❌ WRONG: "Thermal generation reduces import dependence"
+❌ WRONG: "Georgia is self-sufficient when using thermal plants"
+
+Use trade_by_source table for energy security analysis (divides into local vs import-dependent).
 """)
 
     # General formatting guidelines (always included)
