@@ -799,12 +799,74 @@ ALL_EXAMPLES = f"""
 """
 
 # =============================================================================
-# EXPORT
+# EXPORT - SELECTIVE EXAMPLE LOADING (Phase 1 Fix)
 # =============================================================================
+
+def get_relevant_examples(user_query: str, max_categories: int = 2) -> str:
+    """
+    Load only relevant examples based on query content.
+
+    Reduces token usage from ~5,800 (all examples) to ~800-1,500 (selective),
+    keeping domain knowledge and guidance prominent for better answer quality.
+
+    Args:
+        user_query: The user's query text
+        max_categories: Maximum number of example categories to include (default: 2)
+
+    Returns:
+        String with selected examples only (much smaller than ALL_EXAMPLES)
+    """
+    query_lower = user_query.lower()
+
+    # Category detection with keywords
+    category_keywords = {
+        "energy_security": ["energy security", "უსაფრთხოება", "import dependence",
+                           "დამოკიდებულება", "self-sufficiency", "vulnerability",
+                           "independence", "თვითკმარობა"],
+        "balancing_price": ["balancing price", "საბალანსო ფასი", "price driver",
+                           "why price", "რატომ გაიზარდა", "ფასის ზრდა", "p_bal",
+                           "price increase", "price decrease"],
+        "tariff": ["tariff", "ტარიფი", "regulated", "enguri", "gardabani",
+                  "gnerc approval"],
+        "demand": ["demand", "consumption", "მოთხოვნა", "growth"],
+        "generation": ["generation", "გენერაცია", "produce", "capacity", "mix"],
+        "seasonal": ["seasonal", "summer", "winter", "სეზონური", "ზაფხულ", "ზამთარ"]
+    }
+
+    # Category example mapping
+    category_examples_map = {
+        "energy_security": ENERGY_SECURITY_EXAMPLES,
+        "balancing_price": BALANCING_PRICE_EXAMPLES,
+        "tariff": TARIFF_EXAMPLES,
+        "demand": DEMAND_EXAMPLES,
+        "generation": GENERATION_EXAMPLES,
+        "seasonal": SEASONAL_EXAMPLES
+    }
+
+    # Find matching categories
+    matched = []
+    for category, keywords in category_keywords.items():
+        if any(kw in query_lower for kw in keywords):
+            matched.append(category)
+
+    # Load examples for matched categories (limit to max_categories)
+    selected_examples = []
+    for category in matched[:max_categories]:
+        if category in category_examples_map:
+            selected_examples.append(category_examples_map[category])
+
+    # If no matches, use minimal core set (balancing price only - most common)
+    if not selected_examples:
+        # Return only first 2 balancing price examples (~600 tokens)
+        return BALANCING_PRICE_EXAMPLES[:600] + "\n\n(Core examples loaded)"
+
+    result = "\n\n".join(selected_examples)
+    return result + f"\n\n(Loaded {len(matched[:max_categories])} relevant example categories)"
+
 
 def get_examples_for_prompt(category: str = "all") -> str:
     """
-    Get examples for inclusion in LLM prompt.
+    Get examples for inclusion in LLM prompt (legacy function).
 
     Args:
         category: "all" or specific category name
