@@ -72,7 +72,7 @@ TestCase(
     query="როგორ შეაფასებ საქართველოს ენერგეტიკულ უსაფრთხოებას?",
     description="Energy security assessment in Georgian",
     expected=ExpectedResult(
-        expected_tables=["trade_by_source"],
+        expected_tables=["tech_quantity_view"],
         language="ka",
         should_mention=["იმპორტი", "ჰიდრო", "თერმული", "გაზი"],
         should_clarify_thermal_imports=True,  # CRITICAL

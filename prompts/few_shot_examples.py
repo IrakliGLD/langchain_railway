@@ -33,12 +33,12 @@ Plan:
 ---SQL---
 SELECT
     time_month,
-    SUM(CASE WHEN source_type = 'local' THEN quantity ELSE 0 END) as local_generation_thousand_mwh,
-    SUM(CASE WHEN source_type = 'import_dependent' THEN quantity ELSE 0 END) as import_dependent_thousand_mwh,
-    SUM(quantity) as total_generation_thousand_mwh,
-    ROUND(100.0 * SUM(CASE WHEN source_type = 'local' THEN quantity ELSE 0 END) /
-          NULLIF(SUM(quantity), 0), 1) as local_share_pct
-FROM trade_by_source
+    SUM(CASE WHEN type_tech IN ('hydro', 'wind', 'solar') THEN quantity ELSE 0 END) as local_generation_thousand_mwh,
+    SUM(CASE WHEN type_tech IN ('thermal', 'import') THEN quantity ELSE 0 END) as import_dependent_thousand_mwh,
+    SUM(CASE WHEN type_tech IN ('hydro', 'wind', 'solar', 'thermal', 'import') THEN quantity ELSE 0 END) as total_generation_thousand_mwh,
+    ROUND(100.0 * SUM(CASE WHEN type_tech IN ('hydro', 'wind', 'solar') THEN quantity ELSE 0 END) /
+          NULLIF(SUM(CASE WHEN type_tech IN ('hydro', 'wind', 'solar', 'thermal', 'import') THEN quantity ELSE 0 END), 0), 1) as local_share_pct
+FROM tech_quantity_view
 WHERE time_month >= '2020-01'
 GROUP BY time_month
 ORDER BY time_month;

@@ -636,9 +636,9 @@ DOMAIN_KNOWLEDGE = {
             ]
         },
         "DataSource": {
-            "table": "trade_by_source",
-            "description": "Divides generation into local (renewables) vs import-dependent (thermal + import)",
-            "usage": "Use this view for energy security analysis to correctly categorize thermal as import-dependent"
+            "table": "tech_quantity_view",
+            "description": "Use tech_quantity_view with understanding that thermal + import = import-dependent",
+            "usage": "For energy security: sum thermal + import as import-dependent, sum hydro + wind + solar as local"
         },
         "AnalyticalImplications": [
             "When analyzing energy security, thermal is NOT a substitute for imports — it IS import-dependent",

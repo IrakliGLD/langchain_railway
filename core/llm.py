@@ -28,6 +28,7 @@ from config import (
 )
 from context import DB_SCHEMA_DOC
 from domain_knowledge import DOMAIN_KNOWLEDGE
+from prompts.few_shot_examples import ALL_EXAMPLES
 from utils.metrics import metrics
 
 log = logging.getLogger("Enai")
@@ -793,7 +794,10 @@ Schema:
 Guidance:
 {guidance}
 
-Examples:
+Examples (Few-Shot Learning - Study these patterns):
+{ALL_EXAMPLES}
+
+Additional SQL Syntax Examples:
 {FEW_SHOT_SQL}
 
 Output Format:
@@ -1071,7 +1075,10 @@ When Analyzing Energy Security:
 ❌ WRONG: "Thermal generation reduces import dependence"
 ❌ WRONG: "Georgia is self-sufficient when using thermal plants"
 
-Use trade_by_source table for energy security analysis (divides into local vs import-dependent).
+Use tech_quantity_view for energy security analysis:
+- Sum thermal + import as import-dependent generation
+- Sum hydro + wind + solar as local generation
+- Calculate shares: local_share = local / (local + import_dependent)
 """)
 
     # General formatting guidelines (always included)
