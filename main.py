@@ -42,6 +42,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, DatabaseError, SQLAlchemyError
 
 import pandas as pd
 import numpy as np
