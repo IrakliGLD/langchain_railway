@@ -161,6 +161,7 @@ DB_SCHEMA_DOC = """
 - tariff_with_usd(date, entity, tariff_gel, tariff_usd)
 - tech_quantity_view(date, type_tech, quantity_tech)
 - trade_derived_entities(date, entity, segment, quantity)
+- trade_by_source (date,source,quantity_tech)
 
 **CRITICAL: Exact column values (case-sensitive, including spaces/hyphens):**
 
