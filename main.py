@@ -68,6 +68,11 @@ from models import Question, APIResponse, MetricsResponse
 # Phase 2: Core modules
 from utils.metrics import metrics
 from utils.language import detect_language, get_language_instruction
+from utils.query_validation import (
+    is_conceptual_question,
+    validate_sql_relevance,
+    should_skip_sql_execution
+)
 from core.query_executor import ENGINE, execute_sql_safely
 from core.sql_generator import simple_table_whitelist_check, sanitize_sql, plan_validate_repair
 from core.llm import (
@@ -1502,6 +1507,22 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
     log.info(f"📝 Plan: {plan}")
 
     # ========================================================================
+    # Option 3: Validate SQL Relevance
+    # Check if query is conceptual or if SQL matches the question
+    # ========================================================================
+    skip_sql, skip_reason = should_skip_sql_execution(q.query, plan)
+    sql_is_relevant = True
+    skip_chart_due_to_relevance = False
+
+    if skip_sql:
+        log.info(f"⏭️ Skipping SQL execution: {skip_reason}")
+        # For conceptual questions, answer using domain knowledge only
+        # We'll handle this after the SQL block
+    else:
+        # Validate SQL relevance (will check after SQL is generated)
+        pass
+
+    # ========================================================================
     # CRITICAL: Aggregation Intent Detection & SQL Validation
     # Ensures LLM-generated SQL matches what user actually wants
     # ========================================================================
@@ -1560,110 +1581,129 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         else:
             safe_sql_final = safe_sql
 
+        # Validate SQL relevance after SQL is generated
+        if not skip_sql:
+            sql_is_relevant, relevance_reason, skip_chart_due_to_relevance = validate_sql_relevance(
+                q.query, safe_sql_final, plan
+            )
 
-    
+            if not sql_is_relevant:
+                log.warning(f"⚠️ SQL relevance issue: {relevance_reason}")
+
+            if skip_chart_due_to_relevance:
+                log.info(f"📊 Chart will be skipped due to: {relevance_reason}")
+
+
     except Exception as e:
         log.warning(f"SQL validation failed: {e}")
         raise HTTPException(status_code=400, detail=f"Unsafe or invalid SQL: {e}")
 
-    # 3) Execute SQL
-    df = pd.DataFrame()
-    rows = []
-    cols = []
-    try:
-        sql_start = time.time()
-
-        # DEBUG: Log the actual SQL being executed
-        log.info(f"🔍 Executing SQL:\n{safe_sql_final}")
-
-        # Phase 1D Security: Use secure execution wrapper
-        df, cols, rows, elapsed = execute_sql_safely(safe_sql_final)
-        metrics.log_sql_query(elapsed)
-
+    # 3) Execute SQL (or skip if conceptual question)
+    if skip_sql:
+        # For conceptual questions, skip SQL and use domain knowledge
+        df = pd.DataFrame()
+        rows = []
+        cols = []
+        log.info(f"⏭️ SQL execution skipped, will answer from domain knowledge")
+    else:
+        # Execute SQL query
+        df = pd.DataFrame()
+        rows = []
+        cols = []
         try:
-            from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
-        except ImportError:
-            # Fallback values matching database schema
-            SUPPLY_TECH_TYPES = ["hydro", "thermal", "wind", "solar", "import", "self-cons"]
-            DEMAND_TECH_TYPES = ["abkhazeti", "supply-distribution", "direct customers", "losses", "export"]
-            TRANSIT_TECH_TYPES = ["transit"]
-            log.warning("Using fallback tech type classifications")
+            sql_start = time.time()
 
-        if "type_tech" in df.columns:
-            supply_df = df[df["type_tech"].isin(SUPPLY_TECH_TYPES)]
-            demand_df = df[df["type_tech"].isin(DEMAND_TECH_TYPES)]
-            transit_df = df[df["type_tech"].isin(TRANSIT_TECH_TYPES)]
+            # DEBUG: Log the actual SQL being executed
+            log.info(f"🔍 Executing SQL:\n{safe_sql_final}")
 
-            user_query_lower = q.query.lower()
-
-            if any(w in user_query_lower for w in ["demand", "consumption", "loss", "export"]):
-                if not demand_df.empty:
-                    df = demand_df.copy()
-                    log.info(f"⚙️ Showing DEMAND side only: {DEMAND_TECH_TYPES}")
-                else:
-                    log.info("⚠️ No DEMAND-side data found, using full dataset.")
-            elif "transit" in user_query_lower:
-                if not transit_df.empty:
-                    df = transit_df.copy()
-                    log.info("⚙️ Showing TRANSIT data only.")
-                else:
-                    log.info("⚠️ No TRANSIT data found, using full dataset.")
-            else:
-                if not supply_df.empty:
-                    df = supply_df.copy()
-                    log.info(f"⚙️ Showing SUPPLY side only: {SUPPLY_TECH_TYPES}")
-                else:
-                    log.info("⚠️ No SUPPLY-side data found, using full dataset.")
-
-
-
-    except OperationalError as e:
-        # Handle database connection and timeout errors
-        metrics.log_error()
-        log.error(f"⚠️ Database operational error: {e}")
-        raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again later.")
-
-    except DatabaseError as e:
-        # Handle SQL-specific errors (syntax, undefined columns, etc.)
-        msg = str(e)
-        metrics.log_error()
-
-        # --- 🩹 Auto-pivot fix for hallucinated trade_derived_entities columns ---
-        if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
-            log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
-            log.info("CRITICAL: Using segment='balancing' for share calculation")
-            safe_sql_final = build_trade_share_cte(safe_sql_final)
             # Phase 1D Security: Use secure execution wrapper
-            df, cols, rows, _ = execute_sql_safely(safe_sql_final)
+            df, cols, rows, elapsed = execute_sql_safely(safe_sql_final)
+            metrics.log_sql_query(elapsed)
 
-        elif "UndefinedColumn" in msg:
-            # Fallback synonym auto-fix (existing behavior)
-            for bad, good in COLUMN_SYNONYMS.items():
-                if re.search(rf"\b{bad}\b", safe_sql_final, flags=re.IGNORECASE):
-                    safe_sql_final = re.sub(rf"\b{bad}\b", good, safe_sql_final, flags=re.IGNORECASE)
-                    log.warning(f"🔁 Auto-corrected column '{bad}' → '{good}' (retry)")
-                    # Phase 1D Security: Use secure execution wrapper
-                    df, cols, rows, _ = execute_sql_safely(safe_sql_final)
-                    break
+            try:
+                from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
+            except ImportError:
+                # Fallback values matching database schema
+                SUPPLY_TECH_TYPES = ["hydro", "thermal", "wind", "solar", "import", "self-cons"]
+                DEMAND_TECH_TYPES = ["abkhazeti", "supply-distribution", "direct customers", "losses", "export"]
+                TRANSIT_TECH_TYPES = ["transit"]
+                log.warning("Using fallback tech type classifications")
+
+            if "type_tech" in df.columns:
+                supply_df = df[df["type_tech"].isin(SUPPLY_TECH_TYPES)]
+                demand_df = df[df["type_tech"].isin(DEMAND_TECH_TYPES)]
+                transit_df = df[df["type_tech"].isin(TRANSIT_TECH_TYPES)]
+
+                user_query_lower = q.query.lower()
+
+                if any(w in user_query_lower for w in ["demand", "consumption", "loss", "export"]):
+                    if not demand_df.empty:
+                        df = demand_df.copy()
+                        log.info(f"⚙️ Showing DEMAND side only: {DEMAND_TECH_TYPES}")
+                    else:
+                        log.info("⚠️ No DEMAND-side data found, using full dataset.")
+                elif "transit" in user_query_lower:
+                    if not transit_df.empty:
+                        df = transit_df.copy()
+                        log.info("⚙️ Showing TRANSIT data only.")
+                    else:
+                        log.info("⚠️ No TRANSIT data found, using full dataset.")
+                else:
+                    if not supply_df.empty:
+                        df = supply_df.copy()
+                        log.info(f"⚙️ Showing SUPPLY side only: {SUPPLY_TECH_TYPES}")
+                    else:
+                        log.info("⚠️ No SUPPLY-side data found, using full dataset.")
+
+
+
+        except OperationalError as e:
+            # Handle database connection and timeout errors
+            metrics.log_error()
+            log.error(f"⚠️ Database operational error: {e}")
+            raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again later.")
+
+        except DatabaseError as e:
+            # Handle SQL-specific errors (syntax, undefined columns, etc.)
+            msg = str(e)
+            metrics.log_error()
+
+            # --- 🩹 Auto-pivot fix for hallucinated trade_derived_entities columns ---
+            if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql_final:
+                log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
+                log.info("CRITICAL: Using segment='balancing' for share calculation")
+                safe_sql_final = build_trade_share_cte(safe_sql_final)
+                # Phase 1D Security: Use secure execution wrapper
+                df, cols, rows, _ = execute_sql_safely(safe_sql_final)
+
+            elif "UndefinedColumn" in msg:
+                # Fallback synonym auto-fix (existing behavior)
+                for bad, good in COLUMN_SYNONYMS.items():
+                    if re.search(rf"\b{bad}\b", safe_sql_final, flags=re.IGNORECASE):
+                        safe_sql_final = re.sub(rf"\b{bad}\b", good, safe_sql_final, flags=re.IGNORECASE)
+                        log.warning(f"🔁 Auto-corrected column '{bad}' → '{good}' (retry)")
+                        # Phase 1D Security: Use secure execution wrapper
+                        df, cols, rows, _ = execute_sql_safely(safe_sql_final)
+                        break
+                else:
+                    log.exception("SQL execution failed (UndefinedColumn)")
+                    raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
             else:
-                log.exception("SQL execution failed (UndefinedColumn)")
+                log.exception("SQL execution failed (DatabaseError)")
                 raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-        else:
-            log.exception("SQL execution failed (DatabaseError)")
-            raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+        except SQLAlchemyError as e:
+            # Catch any other SQLAlchemy-related errors
+            metrics.log_error()
+            log.exception("SQLAlchemy error occurred")
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    except SQLAlchemyError as e:
-        # Catch any other SQLAlchemy-related errors
-        metrics.log_error()
-        log.exception("SQLAlchemy error occurred")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-    except Exception as e:
-        # Catch-all for unexpected errors
-        metrics.log_error()
-        log.exception("Unexpected error during SQL execution")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        except Exception as e:
+            # Catch-all for unexpected errors
+            metrics.log_error()
+            log.exception("Unexpected error during SQL execution")
+            raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
     # 4) Summarize and analyze
     share_intent = str(plan.get("intent", "")).lower()
@@ -2287,6 +2327,11 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         # Override: Disable chart for definition queries
         if any(word in query_text for word in ["define", "meaning of", "განმარტება"]):
             generate_chart = False
+
+        # Override: Disable chart if SQL was deemed irrelevant to query (Option 3)
+        if skip_chart_due_to_relevance:
+            generate_chart = False
+            log.info(f"🧭 Skipping chart generation: SQL query not relevant to user question")
 
         # NOTE: Removed forced chart generation for analyst mode
         # Let should_generate_chart decide based on query type classification
