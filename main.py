@@ -1474,6 +1474,46 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
     plan = {}
 
+    # ========================================================================
+    # Option 4: Pre-check for Conceptual Questions (SAVE LLM CALL)
+    # For purely conceptual questions, skip plan+SQL generation entirely
+    # ========================================================================
+    is_conceptual = is_conceptual_question(q.query)
+    if is_conceptual:
+        log.info(f"🎓 Conceptual question detected - skipping plan+SQL generation (saves LLM call)")
+        log.info(f"📝 Query: {q.query}")
+
+        # Answer directly using domain knowledge (no SQL needed)
+        try:
+            # Provide hint that this is a conceptual question (no data query)
+            conceptual_hint = (
+                "NOTE: This is a conceptual/definitional question. "
+                "No database query was executed. "
+                "Answer using domain knowledge only."
+            )
+            summary = llm_summarize(
+                q.query,
+                preview="",
+                stats_hint=conceptual_hint,
+                lang_instruction=lang_instruction
+            )
+            summary = scrub_schema_mentions(summary)
+
+            exec_time = time.time() - t0
+            metrics.log_request(exec_time)
+            log.info(f"✅ Conceptual answer generated in {exec_time:.2f}s (1 LLM call saved)")
+
+            return APIResponse(
+                answer=summary,
+                chart_data=None,
+                chart_type=None,
+                chart_metadata=None,
+                execution_time=exec_time,
+            )
+        except Exception as e:
+            log.exception("Conceptual answer generation failed")
+            raise HTTPException(status_code=500, detail=f"Failed to generate answer: {e}")
+
     # 1) Generate PLAN and SQL in ONE LLM call (now includes internal domain reasoning)
     try:
         combined_output = llm_generate_plan_and_sql(
