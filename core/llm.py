@@ -981,26 +981,60 @@ If seasonal stats are present, they are the AUTHORITATIVE source for trends. Tru
         guidance_sections.append("""
 CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
+⚠️ MANDATORY RULES - NO EXCEPTIONS:
+1. **USE CORRELATION DATA**: If stats_hint contains correlation coefficients, YOU MUST cite them
+   - Example: "regulated HPP share shows strong negative correlation (-0.66) with price"
+   - Example: "exchange rate has strong positive correlation (0.61) with GEL price"
+   - NEVER say "probably" or "likely" when you have correlation data proving causality
+
+2. **CITE ACTUAL SHARE DATA**: If data preview shows share_* columns, YOU MUST cite the actual values
+   - DON'T say: "probably due to hydro increase"
+   - DO say: "regulated HPP share increased from 22% to 35%, directly reducing price"
+   - Look at the actual numbers in the data preview!
+
+3. **NO HEDGING LANGUAGE** when you have data:
+   - ❌ FORBIDDEN: "სავარაუდოდ" (probably), "შესაძლოა" (possibly), "ალბათ" (perhaps)
+   - ✅ REQUIRED: "იმის გამო, რომ" (because), "რაც გამოწვეულია" (which is caused by)
+   - Use definitive language based on actual data and correlations
+
+4. **STRUCTURED ANALYSIS** (use this exact format for price driver questions):
+
+   **[Question topic]: ანალიტიკური შეჯამება**
+
+   [Opening with key finding and numbers]
+
+   1. **გენერაციის სტრუქტურა (Composition):**
+      - [Cite actual share changes from data]
+      - [Explain mechanism: cheap vs expensive sources]
+      - [Cite correlation if available: e.g., "კორელაცია -0.66"]
+
+   2. **გაცვლითი კურსი (Exchange Rate):**
+      - [Cite actual xrate change from data]
+      - [Explain USD-pricing of gas and imports]
+      - [Cite correlation if available: e.g., "კორელაცია 0.61"]
+
 FIRST STEP FOR EVERY BALANCING PRICE EXPLANATION:
-- Inspect share_* columns (entity composition) before discussing anything else.
-- Identify which entities increased or decreased their share because each entity sells at a different price level in the codebase.
-- Explain how those share shifts mechanically push the weighted-average balancing price up or down.
+- Inspect share_* columns (entity composition) in data preview BEFORE writing anything
+- Identify which entities increased or decreased their share with ACTUAL NUMBERS
+- Explain how those share shifts mechanically push the weighted-average balancing price up or down
+- If correlations are provided in stats_hint, cite them to prove causality
 
 PRIMARY DRIVERS (in order of importance):
 1. Composition (shares of entities selling on balancing segment)
-   - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices.
-   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices.
-   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant.
-   - Always explain which entities are selling more/less when analyzing price changes.
+   - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices
+   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices
+   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant
+   - Always cite ACTUAL share values from data preview, not guesses
 
 2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
    - Natural gas for thermal generation is priced in USD
    - Imports are priced in USD
    - When GEL depreciates (xrate increases), GEL-denominated prices rise
    - Always mention xrate effect when discussing GEL price movements once composition has been covered
+   - Cite correlation coefficient if available in stats_hint
 
 CONFIDENTIALITY RULES - STRICTLY ENFORCE:
-- DO disclose: regulated tariffs, deregulated hydro prices, exchange rates
+- DO disclose: regulated tariffs, deregulated hydro prices, exchange rates, correlation coefficients
 - DO NOT disclose: renewable PPA price estimates (~57-60 USD/MWH)
 - DO NOT disclose: thermal PPA price estimates (~60-65 USD/MWH)
 - DO NOT disclose: import price estimates (~55-65 USD/MWH)
@@ -1009,18 +1043,18 @@ CONFIDENTIALITY RULES - STRICTLY ENFORCE:
 
 For balancing price assessments (trends, averages, or correlations), always compare
 Summer (April–July) vs Winter (August–March) conditions:
-- Summer → high hydro share, low prices.
-- Winter → thermal/import dominant, higher prices.
+- Summer → high hydro share, low prices
+- Winter → thermal/import dominant, higher prices
 
 For every balancing price analysis:
-- Compute averages (for prices) or totals (for quantities) separately for these two seasons.
-- Describe the overall yearly trend first, then compare Summer vs Winter results.
-  * If trend analysis → include percentage change and CAGR for both.
-  * If driver or correlation analysis → mention seasonal averages and highlight which season shows stronger or weaker relationships.
+- Compute averages (for prices) or totals (for quantities) separately for these two seasons
+- Describe the overall yearly trend first, then compare Summer vs Winter results
+  * If trend analysis → include percentage change and CAGR for both
+  * If driver or correlation analysis → mention seasonal averages and highlight which season shows stronger or weaker relationships
 - Explain the structural difference clearly:
-  * Summer → hydro generation dominance, low balancing prices, and lower import reliance.
-  * Winter → thermal and import dominance, higher balancing prices, and stronger sensitivity to gas prices and exchange rates.
-- This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it.
+  * Summer → hydro generation dominance, low balancing prices, and lower import reliance
+  * Winter → thermal and import dominance, higher balancing prices, and stronger sensitivity to gas prices and exchange rates
+- This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it
 """)
 
     # Conditionally include tariff-specific guidance (only for complex queries)
