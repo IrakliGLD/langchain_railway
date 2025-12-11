@@ -28,6 +28,7 @@ from config import (
 )
 from context import DB_SCHEMA_DOC
 from domain_knowledge import DOMAIN_KNOWLEDGE
+from prompts.few_shot_examples import ALL_EXAMPLES
 from utils.metrics import metrics
 
 log = logging.getLogger("Enai")
@@ -793,7 +794,10 @@ Schema:
 Guidance:
 {guidance}
 
-Examples:
+Examples (Few-Shot Learning - Study these patterns):
+{ALL_EXAMPLES}
+
+Additional SQL Syntax Examples:
 {FEW_SHOT_SQL}
 
 Output Format:
@@ -858,9 +862,37 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
 
     system = (
         "Provide a concise analytical answer based on the data preview and statistics. "
-        "If multiple years are present, describe direction (increasing, stable or decreasing), magnitude of change, "
-        "seasonal patterns, volatility, and factors from domain knowledge when relevant. "
-        "Do NOT introduce yourself or include greetings - answer the question directly. "
+        "Do NOT introduce yourself or include greetings - answer the question directly.\n\n"
+
+        "OUTPUT STRUCTURE:\n"
+        "1. Opening (1 sentence): Direct answer with key finding/number\n"
+        "2. Evidence (2-3 sentences): Supporting data with proper formatting\n"
+        "3. Explanation (1-2 sentences): Main driver/cause from domain knowledge\n\n"
+
+        "FORMATTING RULES:\n"
+        "- Numbers: Use thousand separators (1,234 not 1234)\n"
+        "- Percentages: One decimal place (15.3% not 15.27% or 15%)\n"
+        "- Units: ALWAYS include (thousand MWh, GEL/MWh, %, GEL/USD)\n"
+        "- Prices: ALWAYS separate summer (April-July) and winter (Aug-Mar) - NEVER annual average only\n"
+        "- Trends: Include direction + magnitude + timeframe\n"
+        "  Example: 'increased by 15%' not just 'increased'\n"
+        "  Example: 'from 2020 to 2023' not just 'over time'\n\n"
+
+        "CONTENT RULES:\n"
+        "- If multiple years present: describe direction (increasing/stable/decreasing), magnitude, "
+        "seasonal patterns, volatility\n"
+        "- Use factors from domain knowledge when relevant\n"
+        "- For price analysis: explain composition changes (entity shares) before other factors\n"
+        "- For energy security: clarify thermal uses imported gas (not fully domestic)\n"
+        "- Never use raw database column names (use 'balancing price in GEL' not 'p_bal_gel')\n\n"
+
+        "EXAMPLE GOOD OUTPUT:\n"
+        "Balancing electricity price increased by 23% in 2024, from an average of 78 GEL/MWh in 2023 "
+        "to 96 GEL/MWh in 2024. Summer prices (April-July) rose from 52 to 68 GEL/MWh (+31%), while "
+        "winter prices (Aug-March) increased from 94 to 115 GEL/MWh (+22%). The main driver was GEL "
+        "depreciation (exchange rate increased 12%) combined with higher renewable PPA share in summer "
+        "balancing electricity (from 18% to 27%), which displaces cheaper deregulated hydro.\n\n"
+
         f"{lang_instruction}"
     )
 
@@ -1043,7 +1075,10 @@ When Analyzing Energy Security:
 ❌ WRONG: "Thermal generation reduces import dependence"
 ❌ WRONG: "Georgia is self-sufficient when using thermal plants"
 
-Use trade_by_source table for energy security analysis (divides into local vs import-dependent).
+Use tech_quantity_view for energy security analysis:
+- Sum thermal + import as import-dependent generation
+- Sum hydro + wind + solar as local generation
+- Calculate shares: local_share = local / (local + import_dependent)
 """)
 
     # General formatting guidelines (always included)
