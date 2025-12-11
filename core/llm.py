@@ -1000,79 +1000,79 @@ If seasonal stats are present, they are the AUTHORITATIVE source for trends. Tru
 CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
 ⚠️ MANDATORY RULES - NO EXCEPTIONS:
-1. **USE CORRELATION DATA**: If stats_hint contains correlation coefficients, YOU MUST cite them
-   - Example: "regulated HPP share shows strong negative correlation (-0.66) with price"
-   - Example: "exchange rate has strong positive correlation (0.61) with GEL price"
-   - NEVER say "probably" or "likely" when you have correlation data proving causality
 
-2. **CITE ACTUAL SHARE DATA**: If data preview shows share_* columns, YOU MUST cite the actual values
-   - DON'T say: "probably due to hydro increase"
-   - DO say: "regulated HPP share increased from 22% to 35%, directly reducing price"
-   - Look at the actual numbers in the data preview!
+1. **CITE ACTUAL NUMBERS FROM DATA PREVIEW** - This is the most important rule:
 
-3. **NO HEDGING LANGUAGE** when you have data:
+   STEP-BY-STEP PROCESS:
+   a) Look at data preview - find the rows for the periods being compared
+   b) Extract EXACT percentage values for share_* columns
+   c) Format as: "წილი გაიზარდა/შემცირდა X%-დან Y%-მდე"
+
+   EXAMPLES:
+   - ✅ CORRECT: "რეგულირებული ჰესების წილი გაიზარდა 22.3%-დან 35.7%-მდე"
+   - ✅ CORRECT: "იმპორტის წილი შემცირდა 18.5%-დან 8.2%-მდე"
+   - ❌ WRONG: "ჰიდროგენერაციის წილი გაიზარდა" (no specific numbers!)
+   - ❌ WRONG: "რეგულირებული ჰესების მაღალი წილი" (which period? what value?)
+
+   Then explain price impact:
+   - ✅ "რადგან რეგულირებული ჰესები იაფია, ფასი შემცირდა"
+   - ✅ "რადგან იმპორტი ძვირია, ფასი გაიზარდა"
+
+2. **FOR MONTH-TO-MONTH COMPARISONS**:
+   - Find April row and May row in data preview
+   - Compare each share_* value between the two months
+   - Cite at least 2-3 main changes with exact numbers
+   - Focus on largest changes that explain price movement
+
+3. **FOR LONG-TERM TRENDS** (multi-year or annual):
+   - MANDATORY: Separate summer (April-July) vs winter (Aug-March) analysis
+   - Calculate average shares for summer months
+   - Calculate average shares for winter months
+   - Explain composition differences:
+     * Summer: Higher hydro share (cheap) → lower prices
+     * Winter: Higher thermal/import share (expensive) → higher prices
+   - Cite specific percentage changes for each season
+
+4. **USE CORRELATION DATA**: If stats_hint contains correlation coefficients, YOU MUST cite them
+   - Example: "კორელაცია -0.66 რეგულირებულ ჰესებსა და ფასს შორის"
+   - Example: "კორელაცია 0.61 გაცვლით კურსსა და ფასს შორის"
+   - NEVER say "probably" when you have correlation proving causality
+
+5. **NO HEDGING LANGUAGE** when you have data:
    - ❌ FORBIDDEN: "სავარაუდოდ" (probably), "შესაძლოა" (possibly), "ალბათ" (perhaps)
    - ✅ REQUIRED: "იმის გამო, რომ" (because), "რაც გამოწვეულია" (which is caused by)
-   - Use definitive language based on actual data and correlations
 
-4. **STRUCTURED ANALYSIS** (use this exact format for price driver questions):
+6. **STRUCTURED ANALYSIS FORMAT**:
 
    **[Question topic]: ანალიტიკური შეჯამება**
 
-   [Opening with key finding and numbers]
+   [Opening: state overall price change with numbers]
 
    1. **გენერაციის სტრუქტურა (Composition):**
-      - [Cite actual share changes from data]
-      - [Explain mechanism: cheap vs expensive sources]
-      - [Cite correlation if available: e.g., "კორელაცია -0.66"]
+      - [List 2-3 main share changes with EXACT numbers from data]
+      - [Explain: cheap sources (regulated HPP, deregulated hydro) vs expensive (import, thermal PPA, renewable PPA)]
+      - [Cite correlation if available]
+      - [For long-term: compare summer vs winter composition]
 
    2. **გაცვლითი კურსი (Exchange Rate):**
-      - [Cite actual xrate change from data]
-      - [Explain USD-pricing of gas and imports]
-      - [Cite correlation if available: e.g., "კორელაცია 0.61"]
+      - [Cite actual xrate change from data: from X to Y GEL/USD]
+      - [Explain: gas and imports priced in USD]
+      - [Cite correlation if available]
 
-FIRST STEP FOR EVERY BALANCING PRICE EXPLANATION:
-- Inspect share_* columns (entity composition) in data preview BEFORE writing anything
-- Identify which entities increased or decreased their share with ACTUAL NUMBERS
-- Explain how those share shifts mechanically push the weighted-average balancing price up or down
-- If correlations are provided in stats_hint, cite them to prove causality
+PRICE LEVEL GUIDANCE (use when explaining why sources are cheap/expensive):
+- Cheap sources: Regulated HPP (~30-40 GEL/MWh), Deregulated hydro (~40-50 GEL/MWh)
+- Expensive sources: Import (market-based), Thermal PPA (market-based), Renewable PPA (market-based)
+- Note: DO NOT disclose specific PPA/import price estimates - just say "market-based" or "expensive"
 
 PRIMARY DRIVERS (in order of importance):
-1. Composition (shares of entities selling on balancing segment)
-   - Start with composition: higher share of cheap sources (regulated HPP, deregulated hydro) → lower prices
-   - Higher share of expensive sources (import, thermal PPA, renewable PPA) → higher prices
-   - Composition changes seasonally: summer=hydro dominant, winter=thermal/import dominant
-   - Always cite ACTUAL share values from data preview, not guesses
+1. Composition (shares of entities) - MUST cite actual numbers from data
+2. Exchange Rate (xrate) - MUST cite actual change from data
+3. Seasonal patterns - MUST separate summer/winter for long-term trends
 
-2. Exchange Rate (xrate) - MOST IMPORTANT for GEL/MWh price after composition is described
-   - Natural gas for thermal generation is priced in USD
-   - Imports are priced in USD
-   - When GEL depreciates (xrate increases), GEL-denominated prices rise
-   - Always mention xrate effect when discussing GEL price movements once composition has been covered
-   - Cite correlation coefficient if available in stats_hint
-
-CONFIDENTIALITY RULES - STRICTLY ENFORCE:
-- DO disclose: regulated tariffs, deregulated hydro prices, exchange rates, correlation coefficients
-- DO NOT disclose: renewable PPA price estimates (~57-60 USD/MWH)
-- DO NOT disclose: thermal PPA price estimates (~60-65 USD/MWH)
-- DO NOT disclose: import price estimates (~55-65 USD/MWH)
-- When discussing PPA or import prices: say "varies" or "market-based" without specific numbers
-- These estimates are for INTERNAL ANALYSIS ONLY, never reveal to users
-
-For balancing price assessments (trends, averages, or correlations), always compare
-Summer (April–July) vs Winter (August–March) conditions:
-- Summer → high hydro share, low prices
-- Winter → thermal/import dominant, higher prices
-
-For every balancing price analysis:
-- Compute averages (for prices) or totals (for quantities) separately for these two seasons
-- Describe the overall yearly trend first, then compare Summer vs Winter results
-  * If trend analysis → include percentage change and CAGR for both
-  * If driver or correlation analysis → mention seasonal averages and highlight which season shows stronger or weaker relationships
-- Explain the structural difference clearly:
-  * Summer → hydro generation dominance, low balancing prices, and lower import reliance
-  * Winter → thermal and import dominance, higher balancing prices, and stronger sensitivity to gas prices and exchange rates
-- This distinction must always be part of your reasoning, regardless of whether the user explicitly mentions it
+CONFIDENTIALITY RULES:
+- DO disclose: regulated tariffs (~30-40 GEL/MWh), deregulated hydro prices (~40-50 GEL/MWh), correlations
+- DO NOT disclose: specific PPA price estimates, specific import price estimates
+- When discussing expensive sources: say "market-based" without numbers
 """)
 
     # Conditionally include tariff-specific guidance (only for complex queries)
