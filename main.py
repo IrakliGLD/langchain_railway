@@ -2401,7 +2401,36 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         else:
             log.info("🎨 Proceeding with chart generation.")
 
+        # --- 📈 Detect trend/forecast requests for trendline feature ---
+        trend_keywords = [
+            "trend", "ტრენდი", "тренд", "trending", "ტრენდინგი",
+            "forecast", "პროგნოზი", "прогноз", "projection", "პროექცია", "проекция",
+            "predict", "პროგნოზირება", "предсказать", "future", "მომავალი", "будущее",
+            "continue", "გაგრძელება", "продолжить", "extrapolate", "ექსტრაპოლაცია"
+        ]
 
+        add_trendlines = any(keyword in q.query.lower() for keyword in trend_keywords)
+
+        # Extract future year from query (e.g., "2030", "2035")
+        trendline_extend_to = None
+        if add_trendlines:
+            import re
+            # Look for 4-digit years in the query
+            year_matches = re.findall(r'\b(20[2-9][0-9])\b', q.query)
+            if year_matches:
+                # Get the latest year mentioned
+                future_year = max(int(year) for year in year_matches)
+                # Extend to December of that year
+                trendline_extend_to = f"{future_year}-12-01"
+                log.info(f"📈 Trendline requested: extending to {trendline_extend_to}")
+            else:
+                # Default: extend 2 years into future
+                from datetime import datetime
+                current_year = datetime.now().year
+                trendline_extend_to = f"{current_year + 2}-12-01"
+                log.info(f"📈 Trendline requested: extending to {trendline_extend_to} (default 2 years)")
+        else:
+            log.info("📈 No trendline keywords detected")
 
         # --- 🧠 Semantic-aware chart-type selection ---
         # STEP 1: Detect structural features (time, categories, values)
@@ -2690,7 +2719,38 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
         log.info(f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')} | labels={chart_labels}")
 
+        # --- 📈 Calculate trendlines if requested ---
+        if add_trendlines and time_key and time_key in df.columns:
+            from visualization.chart_builder import calculate_trendline
 
+            log.info(f"📈 Calculating trendlines for {len(num_cols)} series")
+            trendlines = []
+
+            for col in num_cols:
+                trendline_data = calculate_trendline(
+                    df, time_key, col, extend_to_date=trendline_extend_to
+                )
+                if trendline_data:
+                    # Get the label for this series from chart_labels
+                    label_idx = num_cols.index(col)
+                    label = chart_labels[label_idx] if label_idx < len(chart_labels) else col
+
+                    trendlines.append({
+                        "column": col,
+                        "label": f"{label} (Trend)",
+                        "data": trendline_data,
+                        "original_label": label
+                    })
+                    log.info(f"  ✅ {label}: R²={trendline_data['r_squared']:.3f}, equation={trendline_data['equation']}")
+
+            # Add trendline info to chart metadata
+            if trendlines:
+                chart_meta["trendlines"] = trendlines
+                chart_meta["has_projection"] = bool(trendline_extend_to)
+                chart_meta["projection_to"] = trendline_extend_to if trendline_extend_to else None
+                log.info(f"📊 Added {len(trendlines)} trendlines to chart metadata")
+        elif add_trendlines:
+            log.warning(f"⚠️ Trendlines requested but no time column found (time_key={time_key})")
 
     # 6) Final response
     exec_time = time.time() - t0
