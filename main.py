@@ -2265,16 +2265,24 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
                 # Detect time column
                 time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
 
-                # Get numeric columns
-                num_cols = [c for c in cols if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
+                # Get numeric columns (all non-time columns from SQL results)
+                num_cols = [c for c in cols if c != time_key]
 
-                if time_key and time_key in df.columns and num_cols:
+                # Ensure columns are numeric for trendline calculation
+                df_calc = df.copy()
+                for c in num_cols:
+                    try:
+                        df_calc[c] = pd.to_numeric(df_calc[c], errors='coerce')
+                    except Exception:
+                        pass
+
+                if time_key and time_key in df_calc.columns and num_cols:
                     log.info(f"📈 Pre-calculating trendlines for forecast answer generation")
 
                     trendline_forecasts = {}
                     for col in num_cols:
                         trendline_data = calculate_trendline(
-                            df, time_key, col, extend_to_date=trendline_extend_to
+                            df_calc, time_key, col, extend_to_date=trendline_extend_to
                         )
                         if trendline_data:
                             # Extract forecast value for the target year
