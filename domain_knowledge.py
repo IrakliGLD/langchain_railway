@@ -815,5 +815,111 @@ DOMAIN_KNOWLEDGE = {
             "✅ CORRECT: 'Balancing prices increased from 2020 to 2024. In summer, average prices rose from 45 GEL/MWh to 62 GEL/MWh due to growing renewable PPA share displacing cheap hydro from balancing. In winter, prices increased from 95 GEL/MWh to 118 GEL/MWh primarily due to gas price increases and GEL depreciation.'",
             "❌ WRONG: 'Balancing prices increased from 70 GEL/MWh in 2020 to 90 GEL/MWh in 2024.' (No seasonal breakdown!)"
         ]
+    },
+
+    "BalancingPriceForecastingChallenges": {
+        "description": "Critical limitations and considerations for balancing electricity price forecasting and trend analysis. Balancing price is influenced by many non-market, regulatory, and political factors that make prediction inherently complex.",
+        "CRITICAL_WARNING": "Balancing electricity price prediction is difficult because many factors beyond supply/demand affect price formation. Use linear regression trendlines with extreme caution and ALWAYS mention limitations.",
+
+        "price_formation_complexity": {
+            "PPA_dominance": {
+                "fact": "Significant share of balancing electricity, particularly in summer, comes from PPA-contracted generation",
+                "characteristics": [
+                    "Long-term purchasing guarantees with predetermined prices",
+                    "PPA prices are NOT market-driven - they are fixed by contract",
+                    "Expected to increase as new PPA and CfD capacity enters operation"
+                ],
+                "implication": "Growing PPA share means growing portion of balancing price is administratively determined, not market-driven"
+            },
+            "regulated_thermal_uncertainty": {
+                "fact": "Regulated thermal plants (Gardabani, Mtkvari, Tbilisi, G-POWER) are major contributors with GNERC-regulated tariffs",
+                "characteristics": [
+                    "Tariffs based on gas prices set through bilateral negotiations (Georgia-Azerbaijan)",
+                    "Gas prices are often speculated to be under-priced due to political considerations",
+                    "Gas price for TPPs is subject to state influence, not transparent market mechanisms",
+                    "Tariff adjustments depend on regulatory decisions by GNERC, which can be unpredictable"
+                ],
+                "implication": "Future thermal tariffs depend on political negotiations and regulatory decisions that cannot be extrapolated from historical trends"
+            },
+            "import_price_unpredictability": {
+                "fact": "Import electricity is difficult to predict",
+                "characteristics": [
+                    "Depends on situation in neighboring markets (Azerbaijan, Turkey, Armenia, Russia)",
+                    "Neighboring markets are not transparent - limited public price data",
+                    "Import prices vary significantly based on regional hydrology, gas availability, and political factors",
+                    "Import volumes depend on domestic generation adequacy and seasonal patterns"
+                ],
+                "implication": "Import price trends cannot be reliably extrapolated - they depend on external market conditions"
+            },
+            "market_rule_changes": {
+                "fact": "Deregulated power plant prices are set by market rules",
+                "characteristics": [
+                    "In the past, we observed that market rule changes had significant impact on balancing electricity prices",
+                    "Market design modifications have occurred historically with measurable price effects",
+                    "Future rule changes (e.g., exchange expansion, balancing market reform) are planned but timing is uncertain"
+                ],
+                "implication": "Past price patterns may not hold if market design changes - trendline forecasts assume unchanged rules"
+            },
+            "non_market_drivers": {
+                "summary": "Balancing electricity price is determined by regulatory decisions, bilateral negotiations, contract terms, and market design choices - NOT primarily by supply/demand fundamentals",
+                "key_factors": [
+                    "Regulatory: GNERC tariff approvals, gas price negotiations, market rule design",
+                    "Contractual: PPA strike prices, CfD auction results, thermal fuel contracts",
+                    "Political: State influence on gas prices, regional energy diplomacy, import dependencies",
+                    "Structural: Growing share of price-insulated generation (PPA/CfD) vs market-responsive generation"
+                ]
+            }
+        },
+
+        "forecasting_guidance": {
+            "for_historical_analysis": [
+                "Historical balancing price changes CAN be explained by analyzing composition changes, xrate movements, tariff adjustments, and known market events",
+                "Decompose price changes into: (1) composition effect, (2) exchange rate effect, (3) tariff/PPA price changes, (4) import price changes",
+                "Use seasonal analysis (summer vs winter) to separate hydro-driven patterns from thermal/import-driven patterns",
+                "Cite R² values when showing correlation - strong correlation with historical drivers does NOT guarantee future predictability"
+            ],
+            "for_forecasting": [
+                "MANDATORY DISCLAIMER: Always state that balancing price forecasts have high uncertainty due to regulatory, political, and contractual factors",
+                "Linear regression trendlines show HISTORICAL patterns only - they assume constant market rules, PPA shares, regulatory approach, and import dynamics",
+                "REQUIRED CAVEATS when presenting forecasts:",
+                "  - 'This forecast assumes current market structure, PPA contracts, and regulatory framework remain unchanged'",
+                "  - 'Actual prices may differ significantly due to: gas price negotiations, new PPA capacity, market rule changes, or import price shifts'",
+                "  - If R² < 0.5: 'This forecast has low reliability (R²={r_squared}) because historical prices show high variability not explained by time trends alone'",
+                "  - If R² > 0.7: 'While this trend is statistically strong (R²={r_squared}), it reflects past patterns and may not continue if regulatory or contractual conditions change'"
+            ],
+            "recommended_approach": [
+                "For short-term forecasts (1-2 years): Linear trendlines are reasonable IF accompanied by caveats about regulatory/contractual uncertainties",
+                "For medium-term forecasts (3-5 years): Emphasize scenario-based thinking - show trendline but discuss potential upside/downside from policy changes",
+                "For long-term forecasts (5+ years): Linear extrapolation is unreliable - focus on structural drivers (PPA growth, market reform roadmap, gas contract renewals)",
+                "ALWAYS separate summer and winter forecasts - they have different driver mixes (summer=PPA-heavy, winter=thermal/import-heavy)"
+            ],
+            "what_CAN_be_forecasted": [
+                "Seasonal patterns (summer lower than winter) - this is structurally driven by hydrology",
+                "Direction of composition shift (growing PPA/CfD share) - this follows announced capacity auction results",
+                "Qualitative impact of known events (e.g., new CfD plants entering → summer price increase)"
+            ],
+            "what_CANNOT_be_forecasted": [
+                "Absolute price levels 3+ years ahead - too dependent on gas prices, exchange rate, and tariff decisions",
+                "Sudden market rule changes - these are policy decisions without predictable timing",
+                "Import price levels - depend on regional markets with limited transparency",
+                "Exact PPA/CfD capacity additions - depends on project completion timelines and regulatory approvals"
+            ]
+        },
+
+        "LLM_instructions": {
+            "when_user_asks_for_forecast": [
+                "1. Calculate and present the linear regression forecast with R² value",
+                "2. IMMEDIATELY follow with disclaimer about limitations (use exact wording from 'REQUIRED CAVEATS' above)",
+                "3. Explain which factors are assumed constant (market rules, PPA growth rate, gas prices, import dynamics)",
+                "4. If possible, provide directional guidance based on known structural trends (e.g., 'PPA capacity is expected to grow, which would increase summer prices beyond this trendline')",
+                "5. Recommend scenario thinking for medium/long-term horizons"
+            ],
+            "when_explaining_past_changes": [
+                "1. Decompose into composition changes, exchange rate effects, and tariff/import price changes",
+                "2. Link to specific events when known (e.g., new PPA capacity, gas price revision, market rule change)",
+                "3. Cite correlations but note that correlation does not guarantee future predictability",
+                "4. Separate summer and winter analysis - different drivers dominate each season"
+            ]
+        }
     }
 }
