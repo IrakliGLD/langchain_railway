@@ -157,7 +157,20 @@ DOMAIN_KNOWLEDGE = {
 
 
     "BalancingPriceFormation": {
-        "Definition": "The balancing price is the weighted-average price of electricity sold on the balancing market.",
+        "Definition": "The balancing price is the weighted-average price of electricity sold on the BALANCING MARKET (not the general market or exchange).",
+        "CRITICAL_TERMINOLOGY": "ALWAYS say 'balancing market' or 'balancing segment' - NEVER shorten to just 'market'",
+        "TerminologyInAllLanguages": {
+            "english": "balancing market / balancing electricity / balancing segment",
+            "georgian": "საბალანსო ბაზარი / საბალანსო ელექტროენერგია / საბალანსო სეგმენტი",
+            "russian": "балансирующий рынок / балансирующая электроэнергия / балансовый сегмент",
+            "RULE": "NEVER omit the word 'balancing' when discussing balancing electricity price",
+            "examples": [
+                "✅ CORRECT: 'საბალანსო ბაზარზე გაყიდული ელექტროენერგიის საშუალო შეწონილი ფასი'",
+                "❌ WRONG: 'ბაზარზე გაყიდული ელექტროენერგიის საშუალო შეწონილი ფასი'",
+                "✅ CORRECT: 'weighted average price of electricity sold on the balancing market'",
+                "❌ WRONG: 'weighted average price of electricity sold on the market'"
+            ]
+        },
         "WeightingEntities": [
             "deregulated_hydro", "import", "regulated_hpp",
             "regulated_new_tpp", "regulated_old_tpp",
@@ -176,7 +189,8 @@ DOMAIN_KNOWLEDGE = {
         "PrimaryDrivers": {
             "1_Composition": {
                 "importance": "PRIMARY DRIVER - Most important for BOTH GEL and USD prices",
-                "description": "Shares of different entity categories selling electricity on balancing segment",
+                "description": "Shares of different entity categories selling electricity on the BALANCING SEGMENT (segment='balancing_electricity')",
+                "TERMINOLOGY_REMINDER": "ALWAYS specify 'balancing market' or 'balancing segment' when explaining composition",
                 "categories": [
                     "renewable_ppa - Renewable PPA projects (hydro, solar, wind) under support schemes, USD-priced",
                     "deregulated_hydro - Deregulated hydropower plants, GEL-priced",
@@ -187,7 +201,8 @@ DOMAIN_KNOWLEDGE = {
                     "import - Direct electricity imports, USD-priced"
                 ],
                 "mechanism": [
-                    "Balancing electricity price = weighted average of all categories selling on balancing segment",
+                    "Balancing electricity price = weighted average of all categories selling on the BALANCING SEGMENT",
+                    "CRITICAL: Always say 'balancing segment' or 'balancing market' when explaining this mechanism",
                     "Higher share of cheap sources (regulated_hpp ~30-40 GEL/MWh, deregulated_hydro ~40-50 GEL/MWh) → lower price",
                     "Higher share of expensive sources (import, thermal_ppa, renewable_ppa) → higher price",
                     "Composition changes seasonally: summer=high renewable_ppa and hydro, winter=high thermal_ppa and import"
@@ -245,6 +260,32 @@ DOMAIN_KNOWLEDGE = {
             ],
             "CONFIDENTIALITY_RULE": "Specific PPA and import price estimates are for INTERNAL ANALYSIS ONLY. Never disclose these numbers to users. Say 'market-based' or 'varies' when discussing.",
             "SUPPORT_SCHEME_CLARIFICATION": "In Georgia, support schemes are PPA and CfD contracts ONLY. Regulated tariffs (regulated_hpp, regulated_old_tpp, regulated_new_tpp) are NOT support schemes - they are cost-plus regulated tariffs set by GNERC.",
+            "SupportSchemesCorrectTerminology": {
+                "CRITICAL": "When discussing support schemes, ALWAYS use correct terminology",
+                "support_schemes_in_georgia": [
+                    "1. PPA (Power Purchase Agreements) - for renewable and thermal projects",
+                    "2. CfD (Contracts for Difference) - for new renewable projects from capacity auctions"
+                ],
+                "NOT_support_schemes": [
+                    "Regulated tariffs (regulated_hpp, regulated_old_tpp, regulated_new_tpp) are NOT support schemes",
+                    "These are cost-plus regulated tariffs set by GNERC for cost recovery"
+                ],
+                "additional_support_mechanism": {
+                    "guaranteed_capacity_payments": {
+                        "description": "Capacity fee for old thermal plants (Mtkvari, Tbilisi TPP, G-POWER)",
+                        "purpose": "Ensures cost recovery even at low generation",
+                        "scope": "NOT for new power plants - only for existing regulated old TPPs",
+                        "nature": "Kind of support mechanism but distinct from PPA/CfD schemes"
+                    }
+                },
+                "correct_response_examples": [
+                    "✅ CORRECT: 'Georgia has two main support schemes: PPA and CfD. Additionally, guaranteed capacity payments provide support for old thermal power plants.'",
+                    "✅ CORRECT (Georgian): 'საქართველოში მოქმედებს ორი ძირითადი წახალისების სქემა: PPA და CfD. გარდა ამისა, ძველი თბოელექტროსადგურებისთვის გარანტირებული სიმძლავრის გადასახადი არის დამატებითი მხარდაჭერის მექანიზმი.'",
+                    "✅ CORRECT (Russian): 'В Грузии действуют две основные схемы поддержки: PPA и CfD. Кроме того, гарантированные платежи за мощность обеспечивают поддержку старых тепловых электростанций.'",
+                    "❌ WRONG: 'Two support schemes: renewable PPA and thermal PPA'",
+                    "❌ WRONG: 'Support schemes include regulated tariffs for HPPs'"
+                ]
+            },
             "data_sources": {
                 "regulated_hpp_tariff": "tariff_with_usd view (tariff_gel, tariff_usd columns)",
                 "regulated_thermal_tariff": "tariff_with_usd view (Gardabani, old TPPs) - GEL tariffs that reflect xrate",
@@ -692,6 +733,50 @@ DOMAIN_KNOWLEDGE = {
             "✅ CORRECT: 'In winter, Georgia is import-dependent: ~30% direct electricity import + thermal generation using imported gas.'",
             "❌ WRONG: 'Thermal generation is local production that reduces import dependence.'",
             "❌ WRONG: 'Georgia can achieve energy independence by increasing thermal capacity.'"
+        ]
+    },
+
+    "DefaultTimePeriod": {
+        "Purpose": "Rules for handling time period specifications in user queries",
+        "CRITICAL_RULE": "If user does NOT specify a time period, use ALL available data",
+        "DO_NOT_ADD": [
+            "Do NOT add WHERE clauses filtering by year/month unless user explicitly requests",
+            "Do NOT assume 'recent' means last year - use all data",
+            "Do NOT default to any specific year like 2023 or 2024",
+            "Do NOT add date filters for trend/historical queries without specific time mentions"
+        ],
+        "ONLY_ADD_DATE_FILTER_IF": [
+            "User explicitly mentions year (e.g., '2023', 'last year', 'this year')",
+            "User explicitly mentions month (e.g., 'June', 'last month', 'June 2024')",
+            "User explicitly mentions date range (e.g., 'from 2020 to 2024', 'since 2022')",
+            "User explicitly mentions period (e.g., 'recent 2 years', 'last 6 months', 'past year')"
+        ],
+        "examples": [
+            {
+                "query": "Show balancing electricity price trend",
+                "sql": "SELECT date, p_bal_gel FROM price_with_usd ORDER BY date",
+                "note": "✅ CORRECT: No date filter - use all available data to show full trend"
+            },
+            {
+                "query": "What is the trend in renewable PPA share?",
+                "sql": "SELECT date, share_renewable_ppa FROM trade_derived_entities WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing_electricity' ORDER BY date",
+                "note": "✅ CORRECT: No date filter - user wants to see full historical trend"
+            },
+            {
+                "query": "Show balancing price in 2024",
+                "sql": "SELECT date, p_bal_gel FROM price_with_usd WHERE EXTRACT(YEAR FROM date) = 2024 ORDER BY date",
+                "note": "✅ CORRECT: Date filter added because user specified '2024'"
+            },
+            {
+                "query": "What was the average balancing price last year?",
+                "sql": "SELECT AVG(p_bal_gel) FROM price_with_usd WHERE EXTRACT(YEAR FROM date) = EXTRACT(YEAR FROM CURRENT_DATE) - 1",
+                "note": "✅ CORRECT: Date filter for 'last year'"
+            },
+            {
+                "query": "Compare balancing prices",
+                "sql": "SELECT date, p_bal_gel, p_bal_usd FROM price_with_usd ORDER BY date",
+                "note": "✅ CORRECT: No date filter - show all data for comparison"
+            }
         ]
     },
 
