@@ -230,6 +230,24 @@ SELECT
 FROM price_with_usd
 ORDER BY date;
 NOTE: Do NOT use regr_slope/regr_intercept for forecasting! Return historical data only - Python layer calculates trendlines and extends to 2030.
+
+EXAMPLE 2.6 - Seasonal Forecast Query (CRITICAL - correct pattern for winter/summer forecasts):
+Query: "Forecast winter and summer balancing prices to 2032"
+Plan:
+{
+  "intent": "trend_analysis",
+  "target": "seasonal_balancing_price",
+  "period": "all"
+}
+---SQL---
+SELECT
+    TO_CHAR(date, 'YYYY-MM-01') AS month,
+    p_bal_gel AS balancing_price_gel,
+    p_bal_usd AS balancing_price_usd,
+    CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season
+FROM price_with_usd
+ORDER BY date;
+NOTE: For seasonal forecasts, return MONTHLY data WITH season column. DO NOT aggregate by season (no GROUP BY season) - this preserves time series for separate trendline calculation per season.
 """
 
 # =============================================================================

@@ -1502,7 +1502,8 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
                 q.query,
                 preview="",
                 stats_hint=conceptual_hint,
-                lang_instruction=lang_instruction
+                lang_instruction=lang_instruction,
+                conversation_history=q.conversation_history
             )
             summary = scrub_schema_mentions(summary)
 
@@ -2265,8 +2266,26 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
                 # Detect time column
                 time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
 
-                # Get numeric columns (all non-time columns from SQL results)
-                num_cols = [c for c in cols if c != time_key]
+                # Detect if there's a season column for seasonal forecasts
+                season_col = next((c for c in cols if c.lower() in ["season", "სეზონი"]), None)
+
+                # Fix year-only columns: Convert integer/decimal years to datetime
+                if time_key and time_key in df.columns:
+                    try:
+                        # Check if the time column contains year-only values (integers or decimals like 2014, 2015)
+                        first_val = df[time_key].iloc[0]
+                        # Check if it's a numeric type (int, Decimal) and looks like a year (1900-2100)
+                        if isinstance(first_val, (int, float)) or str(type(first_val).__name__) == 'Decimal':
+                            first_val_num = float(first_val)
+                            if 1900 <= first_val_num <= 2100:
+                                # Convert year integers to datetime (YYYY -> YYYY-01-01)
+                                df[time_key] = pd.to_datetime(df[time_key].astype(int), format='%Y')
+                                log.info(f"📅 Converted year-only column '{time_key}' to datetime format")
+                    except Exception as e:
+                        log.warning(f"Year column conversion check failed: {e}")
+
+                # Get numeric columns (exclude time and season columns)
+                num_cols = [c for c in cols if c != time_key and c != season_col]
 
                 # Ensure columns are numeric for trendline calculation
                 df_calc = df.copy()
@@ -2280,32 +2299,69 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
                     log.info(f"📈 Pre-calculating trendlines for forecast answer generation")
 
                     trendline_forecasts = {}
-                    for col in num_cols:
-                        trendline_data = calculate_trendline(
-                            df_calc, time_key, col, extend_to_date=trendline_extend_to
-                        )
-                        if trendline_data:
-                            # Extract forecast value for the target year
-                            forecast_dates = trendline_data["dates"]
-                            forecast_values = trendline_data["values"]
 
-                            # Get the last forecast value (for the target year)
-                            if forecast_dates and forecast_values:
-                                forecast_value = forecast_values[-1]
-                                trendline_forecasts[col] = {
-                                    "target_date": forecast_dates[-1],
-                                    "forecast_value": round(forecast_value, 2),
-                                    "equation": trendline_data["equation"],
-                                    "r_squared": round(trendline_data["r_squared"], 3)
-                                }
-                                log.info(f"  ✅ {col}: Forecast for {forecast_dates[-1]} = {forecast_value:.2f}, R²={trendline_data['r_squared']:.3f}")
+                    # Check if this is a seasonal forecast query
+                    if season_col and season_col in df_calc.columns:
+                        log.info(f"📈 Seasonal forecast detected - calculating separate trendlines for each season")
+                        seasons = df_calc[season_col].dropna().unique()
+
+                        for season in seasons:
+                            # Filter data for this season
+                            season_df = df_calc[df_calc[season_col] == season].copy()
+
+                            for col in num_cols:
+                                trendline_data = calculate_trendline(
+                                    season_df, time_key, col, extend_to_date=trendline_extend_to
+                                )
+                                if trendline_data:
+                                    forecast_dates = trendline_data["dates"]
+                                    forecast_values = trendline_data["values"]
+
+                                    if forecast_dates and forecast_values:
+                                        forecast_value = forecast_values[-1]
+                                        # Use season-specific key
+                                        forecast_key = f"{col}_{season}"
+                                        trendline_forecasts[forecast_key] = {
+                                            "target_date": forecast_dates[-1],
+                                            "forecast_value": round(forecast_value, 2),
+                                            "equation": trendline_data["equation"],
+                                            "r_squared": round(trendline_data["r_squared"], 3),
+                                            "season": season
+                                        }
+                                        log.info(f"  ✅ {col} ({season}): Forecast for {forecast_dates[-1]} = {forecast_value:.2f}, R²={trendline_data['r_squared']:.3f}")
+                    else:
+                        # Standard (non-seasonal) forecast
+                        for col in num_cols:
+                            trendline_data = calculate_trendline(
+                                df_calc, time_key, col, extend_to_date=trendline_extend_to
+                            )
+                            if trendline_data:
+                                # Extract forecast value for the target year
+                                forecast_dates = trendline_data["dates"]
+                                forecast_values = trendline_data["values"]
+
+                                # Get the last forecast value (for the target year)
+                                if forecast_dates and forecast_values:
+                                    forecast_value = forecast_values[-1]
+                                    trendline_forecasts[col] = {
+                                        "target_date": forecast_dates[-1],
+                                        "forecast_value": round(forecast_value, 2),
+                                        "equation": trendline_data["equation"],
+                                        "r_squared": round(trendline_data["r_squared"], 3)
+                                    }
+                                    log.info(f"  ✅ {col}: Forecast for {forecast_dates[-1]} = {forecast_value:.2f}, R²={trendline_data['r_squared']:.3f}")
 
                     # Add forecast information to stats_hint
                     if trendline_forecasts:
                         forecast_summary = f"\n\n--- TRENDLINE FORECASTS (Linear Regression) ---\n"
                         forecast_summary += f"Target date: {trendline_extend_to}\n"
                         for col, forecast_info in trendline_forecasts.items():
-                            forecast_summary += f"\n{col}:\n"
+                            if "season" in forecast_info:
+                                # Seasonal forecast
+                                forecast_summary += f"\n{col.replace('_' + forecast_info['season'], '')} ({forecast_info['season']}):\n"
+                            else:
+                                # Standard forecast
+                                forecast_summary += f"\n{col}:\n"
                             forecast_summary += f"  - Forecast value: {forecast_info['forecast_value']}\n"
                             forecast_summary += f"  - Equation: {forecast_info['equation']}\n"
                             forecast_summary += f"  - R² (goodness of fit): {forecast_info['r_squared']}\n"
@@ -2321,7 +2377,7 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         summary = share_summary_override
     else:
         try:
-            summary = llm_summarize(q.query, preview, stats_hint, lang_instruction)
+            summary = llm_summarize(q.query, preview, stats_hint, lang_instruction, conversation_history=q.conversation_history)
         except Exception as e:
             log.warning(f"Summarization failed: {e}")
             summary = preview
@@ -2338,6 +2394,21 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         # --- Detect time column ---
         # Support Georgian column names: თვე (month), წელი (year), თარიღი (date)
         time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
+
+        # --- Fix year-only columns: Convert integer/decimal years to datetime ---
+        if time_key and time_key in df.columns:
+            try:
+                # Check if the time column contains year-only values (integers or decimals like 2014, 2015)
+                first_val = df[time_key].iloc[0]
+                # Check if it's a numeric type (int, Decimal) and looks like a year (1900-2100)
+                if isinstance(first_val, (int, float)) or str(type(first_val).__name__) == 'Decimal':
+                    first_val_num = float(first_val)
+                    if 1900 <= first_val_num <= 2100:
+                        # Convert year integers to datetime (YYYY -> YYYY-01-01)
+                        df[time_key] = pd.to_datetime(df[time_key].astype(int), format='%Y')
+                        log.info(f"📅 Converted year-only column '{time_key}' to datetime format for chart building")
+            except Exception as e:
+                log.warning(f"Year column conversion check failed in chart builder: {e}")
 
         # --- Detect and preserve categorical columns ---
         # Support Georgian column names: ტიპი (type), სექტორი (sector), etc.

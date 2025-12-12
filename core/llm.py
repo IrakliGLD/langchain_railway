@@ -798,7 +798,19 @@ BALANCING PRICE ANALYSIS:
 
     # Conditionally include seasonal guidance
     if any(k in query_lower for k in ["season", "summer", "winter", "сезон", "ზაფხულ", "ზამთარ"]):
-        guidance_sections.append("- Season is a derived dimension: use CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season")
+        # Check if this is a forecast/trend query with seasonal split
+        is_forecast = any(k in query_lower for k in ["trend", "ტრენდი", "forecast", "პროგნოზი", "predict", "პროგნოზირება", "future", "მომავალი"])
+        if is_forecast:
+            guidance_sections.append("""
+SEASONAL FORECAST QUERIES (CRITICAL):
+- For seasonal forecast/trend queries, return MONTHLY data WITH a season column
+- DO NOT aggregate by season (no GROUP BY season) - this loses time series data
+- Pattern: SELECT month, value, CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season
+- The Python layer will calculate separate trendlines for summer/winter months
+- Example: "forecast winter and summer prices to 2032" → return monthly price data with season column, NOT aggregated seasonal averages
+""")
+        else:
+            guidance_sections.append("- Season is a derived dimension: use CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season")
 
     # Conditionally include tariff guidance
     if query_focus == "tariff" or any(k in query_lower for k in ["tariff", "ტარიფი", "тариф"]):
@@ -875,7 +887,7 @@ SELECT ...
 # Answer Summarization
 # -----------------------------
 
-def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.") -> str:
+def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_instruction: str = "Respond in English.", conversation_history: list = None) -> str:
     """
     Generate analytical summary from data and statistics.
 
@@ -886,6 +898,7 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
         data_preview: Preview of query results
         stats_hint: Statistical summary of results
         lang_instruction: Language instruction for response
+        conversation_history: Optional list of previous Q&A pairs for context
 
     Returns:
         Natural language summary
@@ -894,8 +907,9 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
         Exception: If both Gemini and OpenAI fail
     """
     # Phase 1 Optimization: Check cache first
-    # Create cache key from all inputs
-    cache_input = f"{user_query}|{data_preview}|{stats_hint}|{lang_instruction}"
+    # Create cache key from all inputs (including history)
+    history_str = str(conversation_history) if conversation_history else ""
+    cache_input = f"{user_query}|{data_preview}|{stats_hint}|{lang_instruction}|{history_str}"
     cached_response = llm_cache.get(cache_input)
     if cached_response:
         return cached_response
@@ -1243,8 +1257,21 @@ FOR ANALYTICAL QUERIES (drivers, correlations, trends, price analysis):
         guidance_types.append("generation")
     log.info(f"💬 Answer guidance: focus={query_focus}, sections={guidance_types}")
 
+    # Build conversation context if history is provided
+    conversation_context = ""
+    if conversation_history:
+        conversation_context = "Recent conversation history (for context):\n"
+        for i, qa_pair in enumerate(conversation_history[-3:], 1):  # Limit to last 3 Q&A pairs
+            question = qa_pair.get("question", "")
+            answer = qa_pair.get("answer", "")
+            if question and answer:
+                # Truncate long answers to save tokens
+                answer_truncated = answer[:500] + "..." if len(answer) > 500 else answer
+                conversation_context += f"\nQ{i}: {question}\nA{i}: {answer_truncated}\n"
+        conversation_context += "\n---\n"
+
     prompt = f"""
-User question:
+{conversation_context}User question:
 {user_query}
 
 Data preview:
