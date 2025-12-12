@@ -2230,9 +2230,56 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         except Exception as _e:
             log.warning(f"'Why' reasoning context build failed: {_e}")
 
-    
+    # --- 📈 Calculate trendlines BEFORE summarization for forecast queries ---
+    # This allows the LLM to access forecast values when generating the answer
+    trendline_forecasts = {}
+    if add_trendlines and trendline_extend_to:
+        try:
+            from visualization.chart_builder import calculate_trendline
 
-    
+            # Detect time column
+            time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
+
+            # Get numeric columns
+            num_cols = [c for c in cols if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
+
+            if time_key and time_key in df.columns and num_cols:
+                log.info(f"📈 Pre-calculating trendlines for forecast answer generation")
+
+                for col in num_cols:
+                    trendline_data = calculate_trendline(
+                        df, time_key, col, extend_to_date=trendline_extend_to
+                    )
+                    if trendline_data:
+                        # Extract forecast value for the target year
+                        forecast_dates = trendline_data["dates"]
+                        forecast_values = trendline_data["values"]
+
+                        # Get the last forecast value (for the target year)
+                        if forecast_dates and forecast_values:
+                            forecast_value = forecast_values[-1]
+                            trendline_forecasts[col] = {
+                                "target_date": forecast_dates[-1],
+                                "forecast_value": round(forecast_value, 2),
+                                "equation": trendline_data["equation"],
+                                "r_squared": round(trendline_data["r_squared"], 3)
+                            }
+                            log.info(f"  ✅ {col}: Forecast for {forecast_dates[-1]} = {forecast_value:.2f}, R²={trendline_data['r_squared']:.3f}")
+
+                # Add forecast information to stats_hint
+                if trendline_forecasts:
+                    forecast_summary = f"\n\n--- TRENDLINE FORECASTS (Linear Regression) ---\n"
+                    forecast_summary += f"Target date: {trendline_extend_to}\n"
+                    for col, forecast_info in trendline_forecasts.items():
+                        forecast_summary += f"\n{col}:\n"
+                        forecast_summary += f"  - Forecast value: {forecast_info['forecast_value']}\n"
+                        forecast_summary += f"  - Equation: {forecast_info['equation']}\n"
+                        forecast_summary += f"  - R² (goodness of fit): {forecast_info['r_squared']}\n"
+
+                    stats_hint = stats_hint + forecast_summary
+                    log.info(f"📊 Added {len(trendline_forecasts)} forecast values to stats_hint")
+        except Exception as e:
+            log.warning(f"Trendline pre-calculation failed: {e}")
 
     if share_summary_override:
         summary = share_summary_override
