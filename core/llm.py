@@ -1050,23 +1050,31 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
    1. **გენერაციის სტრუქტურა (Composition):**
       - [List 2-3 main share changes with EXACT numbers from data]
-      - [Explain: cheap sources (regulated HPP, deregulated hydro) vs expensive (import, thermal PPA, renewable PPA)]
+      - [Analyze these 7 entity categories: renewable_ppa, deregulated_hydro, thermal_ppa, regulated_hpp, regulated_old_tpp, regulated_new_tpp, import]
+      - [Explain: cheap sources (regulated_hpp ~30-40 GEL/MWh, deregulated_hydro ~40-50 GEL/MWh) vs expensive (import, thermal_ppa, renewable_ppa - all market-based)]
+      - [Important: regulated_old_tpp and regulated_new_tpp have GEL tariffs that directly reflect current xrate]
       - [Cite correlation if available]
-      - [For long-term: compare summer vs winter composition]
+      - [For long-term: MUST compare summer vs winter composition + mention structural trends]
+      - [Structural trends: declining deregulated_hydro/regulated_hpp, increasing renewable_ppa/import/thermal_ppa]
+      - [Main contributors now: renewable_ppa (biggest in summer), import, thermal_ppa, regulated_old_tpp, regulated_new_tpp]
 
    2. **გაცვლითი კურსი (Exchange Rate):**
       - [Cite actual xrate change from data: from X to Y GEL/USD]
-      - [Explain: gas and imports priced in USD]
+      - [Explain: renewable_ppa, thermal_ppa, deregulated_hydro, import are USD-priced]
+      - [Explain: regulated_old_tpp and regulated_new_tpp are GEL tariffs BUT directly reflect current xrate]
+      - [Important: xrate affects GEL price only, NOT USD price - to see price excluding xrate, look at USD price]
       - [Cite correlation if available]
 
 PRICE LEVEL GUIDANCE (use when explaining why sources are cheap/expensive):
-- Cheap sources: Regulated HPP (~30-40 GEL/MWh), Deregulated hydro (~40-50 GEL/MWh)
-- Expensive sources: Import (market-based), Thermal PPA (market-based), Renewable PPA (market-based)
+- Cheap sources: Regulated HPP (regulated_hpp) ~30-40 GEL/MWh, Deregulated hydro (deregulated_hydro) ~40-50 GEL/MWh
+- Regulated thermal (regulated_old_tpp, regulated_new_tpp): GEL tariffs that directly reflect current xrate
+- Expensive sources: Import, Thermal PPA (thermal_ppa), Renewable PPA (renewable_ppa) - all market-based, USD-priced
 - Note: DO NOT disclose specific PPA/import price estimates - just say "market-based" or "expensive"
+- Support schemes = PPA + CfD ONLY (regulated tariffs are NOT support schemes)
 
 PRIMARY DRIVERS (in order of importance):
-1. Composition (shares of entities) - MUST cite actual numbers from data
-2. Exchange Rate (xrate) - MUST cite actual change from data
+1. Composition (shares of 7 entity categories) - PRIMARY DRIVER for BOTH GEL and USD prices - MUST cite actual numbers from data
+2. Exchange Rate (xrate) - CRITICAL for GEL price, NO IMPACT on USD price - MUST cite actual change from data
 3. Seasonal patterns - MUST separate summer/winter for long-term trends
 
 CONFIDENTIALITY RULES:
