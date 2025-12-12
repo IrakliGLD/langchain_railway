@@ -692,6 +692,14 @@ def llm_generate_plan_and_sql(
         "If USD prices are requested, prefer price_with_usd / tariff_with_usd views. "
         "CRITICAL: Always use ENGLISH column aliases in SQL output (e.g., AS month, AS balancing_price_gel), "
         "never use Georgian/Russian names in column aliases, even if the user query is in Georgian/Russian. "
+        "\n"
+        "CRITICAL - FORECASTING/TRENDLINES: "
+        "NEVER use SQL regression functions (regr_slope, regr_intercept, etc.) for forecasting or trendline calculation. "
+        "For trend/forecast queries, return ONLY historical data - the Python visualization layer will automatically "
+        "calculate trendlines and forecasts using scipy.stats.linregress. "
+        "DO NOT attempt to predict future values in SQL. "
+        "Example: For 'forecast 2032 price', return historical price data (SELECT date, p_bal_gel FROM price_with_usd ORDER BY date), "
+        "and the system will extend the trendline to 2032. "
         f"{lang_instruction}"
     )
 
