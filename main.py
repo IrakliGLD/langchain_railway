@@ -120,6 +120,12 @@ log = logging.getLogger("Enai")
 # Request ID tracking for observability
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 
+# CORS Configuration: Parse allowed origins from environment
+# Default to localhost for development if not specified
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS if origin.strip()]  # Clean up whitespace
+log.info(f"🔒 CORS: Allowed origins: {ALLOWED_ORIGINS}")
+
 # Note: Metrics, config variables, and other extracted code now imported from modules
 # See imports section above for: config.py, models.py, utils.metrics, core.*, analysis.*, visualization.*
 
@@ -619,10 +625,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,  # Specific origins from environment (SECURITY FIX)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Only needed methods
+    allow_headers=["Content-Type", "x-app-key", "Authorization"],  # Only needed headers
 )
 
 # -----------------------------
