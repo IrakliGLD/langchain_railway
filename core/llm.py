@@ -1203,6 +1203,14 @@ FORMATTING AND LENGTH GUIDELINES:
 FOR SIMPLE LOOKUPS (single value, current status):
 - Respond in 1-2 clear sentences with the requested value and brief context
 
+FOR FORECAST/TRENDLINE QUERIES:
+- CRITICAL: If stats_hint contains "TRENDLINE FORECASTS", YOU MUST cite the forecast values explicitly
+- Use the forecast value from stats_hint, NOT guesses or calculations
+- Include the R² value to indicate forecast reliability (R² > 0.5 = reliable, R² < 0.3 = uncertain)
+- Format: "Based on linear regression (R²={r_squared}), the price is forecast to reach {forecast_value} GEL/MWh by {target_year}"
+- If R² is low (<0.3), mention: "However, this forecast has low reliability (R²={r_squared}) due to high variability in historical data"
+- NEVER say "forecast is the same as current" unless the trendline slope is actually near zero
+
 FOR ANALYTICAL QUERIES (drivers, correlations, trends, price analysis):
 - Provide DETAILED, MULTI-PARAGRAPH analysis following the structured format shown above
 - Include bold headers (**Factor Name:**) and numbered points
