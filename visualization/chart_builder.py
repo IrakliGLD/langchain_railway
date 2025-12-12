@@ -6,11 +6,15 @@ Handles:
 - Label mapping from context
 - Chart metadata generation
 - Axis title determination
+- Trendline calculation and projection
 """
 import logging
 from typing import Dict, List, Set, Tuple, Optional
+import re
 
 import pandas as pd
+import numpy as np
+from scipy import stats
 
 from visualization.chart_selector import (
     infer_dimension,
@@ -85,6 +89,102 @@ def detect_mixed_dimensions(dimensions: Set[str]) -> Tuple[bool, str]:
         return True, 'CPI/index must be on separate chart from other metrics'
 
     return False, "Dimensions are compatible"
+
+
+def calculate_trendline(
+    df: pd.DataFrame,
+    date_col: str,
+    value_col: str,
+    extend_to_date: Optional[str] = None
+) -> Optional[Dict]:
+    """
+    Calculate linear trendline for time series data.
+
+    Args:
+        df: DataFrame with time series data
+        date_col: Name of date column
+        value_col: Name of value column to trend
+        extend_to_date: Optional future date to extend trendline (e.g., "2035-12-01")
+
+    Returns:
+        Dictionary with trendline data:
+        {
+            "dates": List of dates (including extended dates if requested),
+            "values": List of trendline values,
+            "equation": "y = mx + b",
+            "r_squared": R² coefficient,
+            "slope": slope value,
+            "intercept": intercept value
+        }
+        Returns None if insufficient data points
+
+    Examples:
+        >>> df = pd.DataFrame({'date': ['2020-01-01', '2021-01-01'], 'price': [50, 60]})
+        >>> trendline = calculate_trendline(df, 'date', 'price')
+        >>> print(trendline['equation'])
+        'y = 10.0x + 50.0'
+    """
+    try:
+        # Convert dates to numeric (days since first date)
+        df_sorted = df[[date_col, value_col]].copy().sort_values(date_col)
+        df_sorted[date_col] = pd.to_datetime(df_sorted[date_col])
+
+        # Remove NaN values
+        df_clean = df_sorted.dropna(subset=[value_col])
+
+        if len(df_clean) < 2:
+            log.warning(f"⚠️ Trendline: insufficient data points ({len(df_clean)} < 2)")
+            return None
+
+        dates = df_clean[date_col]
+        values = df_clean[value_col].values
+
+        # Convert dates to days since first date
+        days = (dates - dates.min()).dt.days.values
+
+        # Linear regression
+        slope, intercept, r_value, p_value, std_err = stats.linregress(days, values)
+        r_squared = r_value ** 2
+
+        # Calculate trendline for existing dates
+        trendline_dates = dates.tolist()
+        trendline_values = (slope * days + intercept).tolist()
+
+        # Extend to future date if requested
+        if extend_to_date:
+            try:
+                future_date = pd.to_datetime(extend_to_date)
+                if future_date > dates.max():
+                    # Add monthly points from last date to future date
+                    extended_dates = pd.date_range(
+                        start=dates.max() + pd.DateOffset(months=1),
+                        end=future_date,
+                        freq='MS'  # Month start
+                    )
+                    extended_days = (extended_dates - dates.min()).days.values
+                    extended_values = slope * extended_days + intercept
+
+                    trendline_dates.extend(extended_dates.tolist())
+                    trendline_values.extend(extended_values.tolist())
+
+                    log.info(f"📈 Trendline extended to {future_date.strftime('%Y-%m')}")
+            except Exception as e:
+                log.warning(f"⚠️ Could not extend trendline to {extend_to_date}: {e}")
+
+        # Format dates as strings
+        trendline_dates_str = [d.strftime("%Y-%m-%d") if hasattr(d, 'strftime') else str(d) for d in trendline_dates]
+
+        return {
+            "dates": trendline_dates_str,
+            "values": [float(v) for v in trendline_values],
+            "equation": f"y = {slope:.4f}x + {intercept:.2f}",
+            "r_squared": float(r_squared),
+            "slope": float(slope),
+            "intercept": float(intercept)
+        }
+    except Exception as e:
+        log.error(f"❌ Trendline calculation failed: {e}")
+        return None
 
 
 def filter_series_by_relevance(
@@ -337,16 +437,19 @@ def prepare_chart_data(
     num_cols: List[str],
     user_query: str,
     time_key: Optional[str] = None,
-    max_series: int = 3
+    max_series: int = 3,
+    add_trendlines: bool = False,
+    trendline_extend_to: Optional[str] = None
 ) -> Tuple[List[Dict], Dict[str, any], List[str], Set[str]]:
     """
-    Complete chart data preparation pipeline.
+    Complete chart data preparation pipeline with optional trendline support.
 
     Performs:
     1. Series filtering (if needed)
     2. Dimension inference
     3. Label application
     4. Metadata generation
+    5. Trendline calculation (if requested)
 
     Args:
         df: DataFrame with query results
@@ -354,11 +457,13 @@ def prepare_chart_data(
         user_query: User's query for relevance filtering
         time_key: Time column name
         max_series: Maximum number of series
+        add_trendlines: If True, calculate trendlines for time series data
+        trendline_extend_to: Optional future date to extend trendlines (e.g., "2035-12-01")
 
     Returns:
         Tuple of:
         - chart_data: List of dicts (records format)
-        - chart_metadata: Dict with axis info and labels
+        - chart_metadata: Dict with axis info, labels, and trendline data
         - filtered_num_cols: List of selected numeric columns
         - dimensions: Set of semantic dimensions
 
@@ -373,6 +478,13 @@ def prepare_chart_data(
         ... )
         >>> meta['axisMode']
         'dual'
+
+        >>> # With trendlines
+        >>> data, meta, cols, dims = prepare_chart_data(
+        ...     df, ['p_bal_gel'], 'show trend', 'date', add_trendlines=True
+        ... )
+        >>> 'trendlines' in meta
+        True
     """
     # Step 1: Filter series if needed
     filtered_num_cols = filter_series_by_relevance(num_cols, user_query, max_series)
@@ -408,5 +520,31 @@ def prepare_chart_data(
 
     # Step 6: Convert to records format
     chart_data = labeled_df.to_dict("records")
+
+    # Step 7: Calculate trendlines if requested and time_key exists
+    trendlines = []
+    if add_trendlines and time_key and time_key in df.columns:
+        log.info(f"📈 Calculating trendlines for {len(filtered_num_cols)} series")
+        for col in filtered_num_cols:
+            trendline_data = calculate_trendline(
+                df, time_key, col, extend_to_date=trendline_extend_to
+            )
+            if trendline_data:
+                # Get the label for this series
+                label = label_map.get(col, col)
+                trendlines.append({
+                    "column": col,
+                    "label": f"{label} (Trend)",
+                    "data": trendline_data,
+                    "original_label": label
+                })
+                log.info(f"  ✅ {label}: R²={trendline_data['r_squared']:.3f}, equation={trendline_data['equation']}")
+
+    # Add trendline info to metadata
+    if trendlines:
+        chart_metadata["trendlines"] = trendlines
+        chart_metadata["has_projection"] = bool(trendline_extend_to)
+        chart_metadata["projection_to"] = trendline_extend_to if trendline_extend_to else None
+        log.info(f"📊 Added {len(trendlines)} trendlines to chart metadata")
 
     return chart_data, chart_metadata, filtered_num_cols, dimensions

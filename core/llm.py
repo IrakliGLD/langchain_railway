@@ -724,6 +724,20 @@ def llm_generate_plan_and_sql(
     guidance_sections.append("- Aggregation default = monthly. For energy_balance_long_mv, use yearly.")
     guidance_sections.append("- When USD values appear, *_usd = *_gel / xrate.")
 
+    # CRITICAL: Date filtering rules
+    guidance_sections.append("""
+CRITICAL: Date filtering rules:
+- DO NOT add date filters unless user explicitly specifies a time period
+- If user asks for "trends", "changes over time", "historical", show ALL available data
+- Only add WHERE date filters if user says: specific year, specific month, "recent N years", "last N months", date range
+- Examples:
+  ✅ "Show balancing price trend" → No date filter (show all data)
+  ✅ "What changed in the last 5 years?" → WHERE date >= CURRENT_DATE - INTERVAL '5 years'
+  ✅ "Price in 2024" → WHERE EXTRACT(YEAR FROM date) = 2024
+  ❌ "What is the trend?" → Do NOT add WHERE EXTRACT(YEAR FROM date) = 2023
+  ❌ "Compare prices" → Do NOT add date filter unless user specifies period
+""")
+
     # Always include chart strategy rules
     guidance_sections.append("""
 CHART STRATEGY RULES (CRITICAL):
@@ -741,6 +755,19 @@ CHART STRATEGY RULES (CRITICAL):
   * 'bar' for entity comparisons, monthly comparisons
   * 'stacked_bar' or 'stacked_area' for composition (shares, generation mix)
 - Max 5 metrics per chart group to avoid clutter
+""")
+
+    # Support schemes guidance (if mentioned)
+    if any(k in query_lower for k in ["support scheme", "წახალისების სქემა", "схема поддержки", "ppa", "cfd", "capacity"]):
+        guidance_sections.append("""
+SUPPORT SCHEMES TERMINOLOGY (CRITICAL):
+- Georgia has TWO support schemes: PPA and CfD
+- PPA (Power Purchase Agreements) - for renewable and thermal projects
+- CfD (Contracts for Difference) - for new renewables from capacity auctions
+- Guaranteed capacity for old thermals is a separate support mechanism (not a scheme for new plants)
+- Regulated tariffs (HPP, old/new TPP) are NOT support schemes - they are cost-plus regulation
+- ✅ CORRECT: "Two support schemes: PPA and CfD"
+- ❌ WRONG: "Two support schemes: renewable PPA and thermal PPA"
 """)
 
     # Conditionally include balancing-specific guidance
@@ -1000,6 +1027,14 @@ If seasonal stats are present, they are the AUTHORITATIVE source for trends. Tru
 CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
 ⚠️ MANDATORY RULES - NO EXCEPTIONS:
+
+0. **TERMINOLOGY - CRITICAL**:
+   - ALWAYS say "balancing market" or "balancing segment" - NEVER shorten to just "market"
+   - English: "balancing market / balancing electricity"
+   - Georgian: "საბალანსო ბაზარი / საბალანსო ელექტროენერგია"
+   - Russian: "балансирующий рынок / балансирующая электроэнергия"
+   - ✅ CORRECT: "საბალანსო ბაზარზე გაყიდული ელექტროენერგიის ფასი"
+   - ❌ WRONG: "ბაზარზე გაყიდული ელექტროენერგიის ფასი"
 
 1. **CITE ACTUAL NUMBERS FROM DATA PREVIEW** - This is the most important rule:
 

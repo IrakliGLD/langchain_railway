@@ -25,6 +25,7 @@ pydantic==2.6.4
 pandas==2.1.4
 numpy==1.26.4
 statsmodels==0.14.1
+scipy==1.11.4  # For trendline calculations (linear regression)
 
 # Utilities
 tenacity==8.2.3
