@@ -14,9 +14,14 @@ class Question(BaseModel):
     Attributes:
         query: Natural language query in English, Georgian, or Russian
         user_id: Optional user identifier for tracking
+        conversation_history: Optional list of previous Q&A pairs for context
     """
     query: str = Field(..., max_length=2000, description="Natural language query")
     user_id: Optional[str] = None
+    conversation_history: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description="Last 1-3 Q&A pairs: [{'question': '...', 'answer': '...'}]"
+    )
 
     @field_validator("query")
     @classmethod
