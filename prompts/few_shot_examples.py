@@ -213,6 +213,23 @@ WHERE p.time_month >= '2024-01'
 GROUP BY p.time_month, p.p_bal_gel, p.xrate
 ORDER BY p.time_month DESC
 LIMIT 12;
+
+EXAMPLE 2.5 - Trendline/Forecast Query (CRITICAL - correct pattern):
+Query: "Forecast balancing price to 2030"
+Plan:
+{
+  "intent": "trend_analysis",
+  "target": "balancing_price",
+  "period": "all"
+}
+---SQL---
+SELECT
+    TO_CHAR(date, 'YYYY-MM-01') AS month,
+    p_bal_gel AS balancing_price_gel,
+    p_bal_usd AS balancing_price_usd
+FROM price_with_usd
+ORDER BY date;
+NOTE: Do NOT use regr_slope/regr_intercept for forecasting! Return historical data only - Python layer calculates trendlines and extends to 2030.
 """
 
 # =============================================================================
