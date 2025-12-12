@@ -34,6 +34,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 
+# Memory Limits (PRODUCTION SAFETY: Prevents OOM errors)
+MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
+
 # ===================================================================
 # Validation
 # ===================================================================

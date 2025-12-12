@@ -16,8 +16,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import SQLAlchemyError, OperationalError, DatabaseError
 import pandas as pd
+from fastapi import HTTPException
 
-from config import SUPABASE_DB_URL
+from config import SUPABASE_DB_URL, MAX_RESULT_SIZE_MB
 
 log = logging.getLogger("Enai")
 
@@ -64,6 +65,42 @@ ENGINE = create_engine(
         "options": "-c statement_timeout=30000"  # 30s in milliseconds
     },
 )
+
+
+def check_dataframe_memory(df: pd.DataFrame, max_mb: int = None) -> None:
+    """
+    Check if DataFrame exceeds memory limit and raise error if so.
+
+    PRODUCTION SAFETY: Prevents Out-Of-Memory (OOM) errors from large query results.
+
+    Args:
+        df: DataFrame to check
+        max_mb: Maximum allowed memory in megabytes (uses MAX_RESULT_SIZE_MB from config if None)
+
+    Raises:
+        HTTPException 413: If DataFrame exceeds memory limit
+
+    Examples:
+        >>> df = pd.DataFrame({'col': range(1000000)})
+        >>> check_dataframe_memory(df, max_mb=50)
+        # Raises HTTPException if > 50MB
+    """
+    if max_mb is None:
+        max_mb = MAX_RESULT_SIZE_MB
+
+    # Calculate memory usage (including object overhead)
+    memory_bytes = df.memory_usage(deep=True).sum()
+    memory_mb = memory_bytes / (1024 * 1024)
+
+    if memory_mb > max_mb:
+        log.error(f"❌ Result set too large: {memory_mb:.2f} MB (limit: {max_mb} MB)")
+        log.error(f"   Rows: {len(df):,}, Columns: {len(df.columns)}")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Query result too large ({memory_mb:.0f} MB exceeds {max_mb} MB limit). Please add filters to reduce result size (e.g., add date range, LIMIT clause, or specific conditions)."
+        )
+
+    log.info(f"✅ Memory check passed: {memory_mb:.2f} MB / {max_mb} MB limit")
 
 
 def test_connection() -> bool:
@@ -128,6 +165,10 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
         df = pd.DataFrame(rows, columns=cols)
 
     elapsed = time.time() - start
+
+    # PRODUCTION SAFETY: Check memory limits to prevent OOM errors
+    check_dataframe_memory(df)
+
     log.info(f"⚡ SQL executed safely in {elapsed:.2f}s, returned {len(rows)} rows")
 
     return df, cols, rows, elapsed
