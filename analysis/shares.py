@@ -177,8 +177,8 @@ def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
     CRITICAL NOTES:
     - Regulated entities (regulated_hpp, regulated TPPs): use tariff_gel from tariff_with_usd
     - Deregulated hydro: use p_dereg_gel from price_with_usd
-    - PPAs and imports: reference prices NOT available in database (confidential)
-    - Actual balancing transaction prices may differ from reference prices
+    - PPAs and imports: reference prices NOT available in database (confidential), but reference number are provided in domain_knowldege.py
+    - Actual balancing transaction prices differ from reference prices
     - This provides directional insight, not exact decomposition
 
     Use this to explain:
