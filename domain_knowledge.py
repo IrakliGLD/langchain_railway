@@ -179,7 +179,7 @@ DOMAIN_KNOWLEDGE = {
                 "description": "Shares of different entity categories selling electricity on balancing segment",
                 "categories": [
                     "renewable_ppa - Renewable PPA projects (hydro, solar, wind) under support schemes, USD-priced",
-                    "deregulated_hydro - Deregulated hydropower plants, USD-priced",
+                    "deregulated_hydro - Deregulated hydropower plants, GEL-priced",
                     "thermal_ppa - Thermal PPA projects, USD-priced",
                     "regulated_hpp - Regulated hydro power plants, GEL tariffs",
                     "regulated_old_tpp - Regulated old thermal power plants (Mtkvari, Tbilisi, G-POWER), GEL tariffs that directly reflect current xrate",
@@ -211,20 +211,25 @@ DOMAIN_KNOWLEDGE = {
                 ]
             },
             "2_ExchangeRate": {
-                "importance": "CRITICAL for GEL price, NO IMPACT on USD price",
+                "importance": "CRITICAL for GEL price, SMALL impact on USD price",
                 "variable": "xrate (GEL/USD)",
+                "entity_pricing": [
+                    "USD-priced entities: renewable_ppa, thermal_ppa, import",
+                    "GEL-priced entities: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp",
+                    "Note: regulated_old_tpp and regulated_new_tpp are GEL tariffs that directly reflect current xrate"
+                ],
                 "mechanism": [
-                    "renewable_ppa, thermal_ppa, deregulated_hydro, import are all USD-priced",
-                    "regulated_old_tpp and regulated_new_tpp tariffs are set in GEL BUT directly reflect current xrate",
-                    "When GEL depreciates (xrate increases), GEL-denominated price rises",
-                    "USD-denominated price is NOT affected by xrate (to see price excluding xrate effect, look at USD price)",
-                    "All USD-priced categories and regulated TPP tariffs translate to higher GEL prices when xrate increases"
+                    "When GEL depreciates (xrate increases):",
+                    "- GEL price rises significantly (all USD-priced entities convert at higher xrate + GEL-priced entities)",
+                    "- USD price rises slightly (only GEL-priced entities like deregulated_hydro, regulated_hpp affected)",
+                    "The impact on USD price is SMALL because GEL-priced entity shares (deregulated_hydro + regulated_hpp) are very small",
+                    "regulated_old_tpp and regulated_new_tpp tariffs adjust with xrate, so they affect both GEL and USD prices"
                 ],
                 "data_source": "price_with_usd view, column: xrate",
                 "analysis_requirement": [
-                    "For GEL price analysis: xrate is a major factor alongside composition",
-                    "For USD price analysis: xrate has NO impact, only composition matters",
-                    "regulated_old_tpp and regulated_new_tpp: GEL tariffs that adjust with xrate"
+                    "For GEL price analysis: xrate is a MAJOR factor alongside composition",
+                    "For USD price analysis: xrate has SMALL impact (through GEL-priced entities), composition is PRIMARY driver",
+                    "When comparing GEL vs USD price trends: USD price shows composition effect with minimal xrate noise"
                 ]
             }
         },

@@ -948,7 +948,7 @@ IMPORTANT RULES - STAY FOCUSED:
 4. If query is about generation/quantities → discuss generation only (not prices)
 5. If query is about entities/list → provide the list only (no price analysis)
 6. Only discuss balancing price if explicitly asked or if query contains balancing price keywords
-7. Keep answers concise (1-3 sentences) unless detailed analysis requested
+7. For analytical queries (drivers, correlations, trends): provide DETAILED, STRUCTURED answers with bold headers, numbered points, specific data citations, and correlation coefficients. For simple lookups (single value): 1-2 sentences is sufficient
 
 CRITICAL: NEVER use raw database column names in your answer
 ❌ WRONG: "share_hydro increased", "p_bal_gel rose", "tariff_gel changed"
@@ -1051,8 +1051,8 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
    1. **გენერაციის სტრუქტურა (Composition):**
       - [List 2-3 main share changes with EXACT numbers from data]
       - [Analyze these 7 entity categories: renewable_ppa, deregulated_hydro, thermal_ppa, regulated_hpp, regulated_old_tpp, regulated_new_tpp, import]
+      - [USD-priced: renewable_ppa, thermal_ppa, import / GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
       - [Explain: cheap sources (regulated_hpp ~30-40 GEL/MWh, deregulated_hydro ~40-50 GEL/MWh) vs expensive (import, thermal_ppa, renewable_ppa - all market-based)]
-      - [Important: regulated_old_tpp and regulated_new_tpp have GEL tariffs that directly reflect current xrate]
       - [Cite correlation if available]
       - [For long-term: MUST compare summer vs winter composition + mention structural trends]
       - [Structural trends: declining deregulated_hydro/regulated_hpp, increasing renewable_ppa/import/thermal_ppa]
@@ -1060,9 +1060,11 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
    2. **გაცვლითი კურსი (Exchange Rate):**
       - [Cite actual xrate change from data: from X to Y GEL/USD]
-      - [Explain: renewable_ppa, thermal_ppa, deregulated_hydro, import are USD-priced]
-      - [Explain: regulated_old_tpp and regulated_new_tpp are GEL tariffs BUT directly reflect current xrate]
-      - [Important: xrate affects GEL price only, NOT USD price - to see price excluding xrate, look at USD price]
+      - [USD-priced entities: renewable_ppa, thermal_ppa, import]
+      - [GEL-priced entities: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
+      - [Important: xrate has MAJOR impact on GEL price, SMALL impact on USD price (through GEL-priced entities)]
+      - [The small USD price impact is because GEL-priced shares (deregulated_hydro + regulated_hpp) are very small]
+      - [regulated_old_tpp and regulated_new_tpp are GEL tariffs that directly reflect current xrate]
       - [Cite correlation if available]
 
 PRICE LEVEL GUIDANCE (use when explaining why sources are cheap/expensive):
@@ -1074,8 +1076,12 @@ PRICE LEVEL GUIDANCE (use when explaining why sources are cheap/expensive):
 
 PRIMARY DRIVERS (in order of importance):
 1. Composition (shares of 7 entity categories) - PRIMARY DRIVER for BOTH GEL and USD prices - MUST cite actual numbers from data
-2. Exchange Rate (xrate) - CRITICAL for GEL price, NO IMPACT on USD price - MUST cite actual change from data
+2. Exchange Rate (xrate) - CRITICAL for GEL price, SMALL impact on USD price (through GEL-priced entities) - MUST cite actual change from data
 3. Seasonal patterns - MUST separate summer/winter for long-term trends
+
+Entity Pricing:
+- USD-priced: renewable_ppa, thermal_ppa, import
+- GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp (note: regulated TPPs reflect current xrate)
 
 CONFIDENTIALITY RULES:
 - DO disclose: regulated tariffs (~30-40 GEL/MWh), deregulated hydro prices (~40-50 GEL/MWh), correlations
@@ -1150,16 +1156,23 @@ Use tech_quantity_view for energy security analysis:
     guidance_sections.append("""
 FORMATTING AND LENGTH GUIDELINES:
 - When referring to electricity prices or tariffs, always include the correct physical unit (GEL/MWh or USD/MWh) rather than currency only.
-- If the question is exploratory or simple (e.g., requesting only a current value, single-month trend, or brief comparison),
-  respond in 1–3 clear sentences focusing on the key number or short interpretation.
-- If the mode involves correlation, drivers, or in-depth analysis (intent = correlation_analysis, driver_analysis, or trend_analysis),
-  write a more detailed summary of about 5–10 sentences following this structure:
-  1. Start with the overall yearly trend (using yearly averages).
-  2. Present seasonal or period-specific trends if relevant, including CAGRs if available.
-  3. If correlation results are provided, discuss primary drivers from domain knowledge.
-  4. For GEL vs USD comparisons, explain divergence through exchange rate.
-  5. Conclude with a concise analytical insight linking findings to domain knowledge drivers.
-- When summarizing, combine numeric findings (averages, CAGRs, correlations) with short explanatory sentences so that the reasoning reads smoothly.
+
+FOR SIMPLE LOOKUPS (single value, current status):
+- Respond in 1-2 clear sentences with the requested value and brief context
+
+FOR ANALYTICAL QUERIES (drivers, correlations, trends, price analysis):
+- Provide DETAILED, MULTI-PARAGRAPH analysis following the structured format shown above
+- Include bold headers (**Factor Name:**) and numbered points
+- MANDATORY: Cite ACTUAL DATA VALUES from data preview (exact percentages, correlations, price changes)
+- MANDATORY: If correlation data is available, cite it explicitly
+- Structure should include:
+  1. Opening paragraph with overall finding
+  2. Factor 1 with detailed explanation, data citations, correlation, causality (2-3 paragraphs)
+  3. Factor 2 with detailed explanation, data citations, correlation, causality (2-3 paragraphs)
+  4. Additional factors if relevant
+  5. For long-term trends: MUST separate summer vs winter analysis
+- NO LENGTH RESTRICTION for analytical queries - provide comprehensive insights
+- When summarizing, combine numeric findings (averages, CAGRs, correlations, share changes) with detailed explanatory paragraphs showing causality and mechanisms from domain knowledge
 """)
 
     # Assemble final prompt
