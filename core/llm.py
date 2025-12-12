@@ -589,6 +589,9 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
             "forecast", "predict", "projection", "future", "trend", "trendline",
             "პროგნოზი", "პროგნოზირება", "მომავალი", "ტრენდი", "прогноз", "тренд"
         ],
+        "AbkhazetiConsumption": [
+            "abkhaz", "აფხაზეთ", "abkhazeti", "occupied territory"
+        ],
         "MarketParticipantsAndDataSources": [
             "gnerc", "esco", "gse", "genex", "geostat", "participant"
         ],

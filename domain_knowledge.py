@@ -817,6 +817,34 @@ DOMAIN_KNOWLEDGE = {
         ]
     },
 
+    "AbkhazetiConsumption": {
+        "description": "Electricity consumption patterns in Abkhazia (occupied territory of Georgia supplied by Enguri HPP and Vardnili HPP)",
+        "key_facts": [
+            "Abkhazia's electricity consumption is measured separately in tech_quantity_view (type_tech = 'abkhazeti')",
+            "Consumption shows strong seasonal variation and long-term growth trends"
+        ],
+        "consumption_drivers": {
+            "seasonal_pattern": {
+                "description": "Winter consumption significantly exceeds summer consumption",
+                "primary_driver": "Electric heating demand - Abkhazia relies heavily on electricity for heating during winter months",
+                "magnitude": "Winter consumption (November-March) roughly doubles compared to summer (June-August)"
+            },
+            "long_term_growth": {
+                "description": "Substantial consumption growth observed since 2015",
+                "known_factors": [
+                    "Increased electric heating adoption in residential and commercial sectors",
+                    "Cryptocurrency mining activities - energy-intensive operations that have contributed to electricity demand growth",
+                    "General economic activity expansion in the region"
+                ],
+                "note": "Multiple factors contribute to growth; relative contribution of each factor may vary over time"
+            }
+        },
+        "tariff_context": {
+            "regulatory_change": "From May 2025, Enguri HPP and Vardnili HPP tariffs increased to recover costs of electricity supplied to Abkhazia",
+            "reference": "See TariffStructure domain knowledge for tariff adjustment details"
+        }
+    },
+
     "BalancingPriceForecastingChallenges": {
         "description": "Critical limitations and considerations for balancing electricity price forecasting and trend analysis. Balancing price is influenced by many non-market, regulatory, and political factors that make prediction inherently complex.",
         "CRITICAL_WARNING": "Balancing electricity price prediction is difficult because many factors beyond supply/demand affect price formation. Use linear regression trendlines with extreme caution and ALWAYS mention limitations.",
