@@ -2414,7 +2414,6 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         # Extract future year from query (e.g., "2030", "2035")
         trendline_extend_to = None
         if add_trendlines:
-            import re
             # Look for 4-digit years in the query
             year_matches = re.findall(r'\b(20[2-9][0-9])\b', q.query)
             if year_matches:
