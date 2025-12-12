@@ -2230,56 +2230,84 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         except Exception as _e:
             log.warning(f"'Why' reasoning context build failed: {_e}")
 
-    # --- 📈 Calculate trendlines BEFORE summarization for forecast queries ---
-    # This allows the LLM to access forecast values when generating the answer
-    trendline_forecasts = {}
-    if add_trendlines and trendline_extend_to:
-        try:
-            from visualization.chart_builder import calculate_trendline
+    # --- 📈 Detect trend/forecast requests and pre-calculate trendlines for answer generation ---
+    trend_keywords = [
+        "trend", "ტრენდი", "тренд", "trending", "ტრენდინგი",
+        "forecast", "პროგნოზი", "прогноз", "projection", "პროექცია", "проекция",
+        "predict", "პროგნოზირება", "предсказать", "future", "მომავალი", "будущее",
+        "continue", "გაგრძელება", "продолжить", "extrapolate", "ექსტრაპოლაცია"
+    ]
+    add_trendlines = any(keyword in q.query.lower() for keyword in trend_keywords)
 
-            # Detect time column
-            time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
+    # Extract future year from query (e.g., "2030", "2035")
+    trendline_extend_to = None
+    if add_trendlines:
+        # Look for 4-digit years in the query
+        year_matches = re.findall(r'\b(20[2-9][0-9])\b', q.query)
+        if year_matches:
+            # Get the latest year mentioned
+            future_year = max(int(year) for year in year_matches)
+            # Extend to December of that year
+            trendline_extend_to = f"{future_year}-12-01"
+            log.info(f"📈 Trendline requested: extending to {trendline_extend_to}")
+        else:
+            # Default: extend 2 years into future
+            from datetime import datetime
+            current_year = datetime.now().year
+            trendline_extend_to = f"{current_year + 2}-12-01"
+            log.info(f"📈 Trendline requested: extending to {trendline_extend_to} (default 2 years)")
 
-            # Get numeric columns
-            num_cols = [c for c in cols if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
+        # Calculate trendlines NOW for forecast answer generation
+        if trendline_extend_to:
+            try:
+                from visualization.chart_builder import calculate_trendline
 
-            if time_key and time_key in df.columns and num_cols:
-                log.info(f"📈 Pre-calculating trendlines for forecast answer generation")
+                # Detect time column
+                time_key = next((c for c in cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
 
-                for col in num_cols:
-                    trendline_data = calculate_trendline(
-                        df, time_key, col, extend_to_date=trendline_extend_to
-                    )
-                    if trendline_data:
-                        # Extract forecast value for the target year
-                        forecast_dates = trendline_data["dates"]
-                        forecast_values = trendline_data["values"]
+                # Get numeric columns
+                num_cols = [c for c in cols if c != time_key and pd.api.types.is_numeric_dtype(df[c])]
 
-                        # Get the last forecast value (for the target year)
-                        if forecast_dates and forecast_values:
-                            forecast_value = forecast_values[-1]
-                            trendline_forecasts[col] = {
-                                "target_date": forecast_dates[-1],
-                                "forecast_value": round(forecast_value, 2),
-                                "equation": trendline_data["equation"],
-                                "r_squared": round(trendline_data["r_squared"], 3)
-                            }
-                            log.info(f"  ✅ {col}: Forecast for {forecast_dates[-1]} = {forecast_value:.2f}, R²={trendline_data['r_squared']:.3f}")
+                if time_key and time_key in df.columns and num_cols:
+                    log.info(f"📈 Pre-calculating trendlines for forecast answer generation")
 
-                # Add forecast information to stats_hint
-                if trendline_forecasts:
-                    forecast_summary = f"\n\n--- TRENDLINE FORECASTS (Linear Regression) ---\n"
-                    forecast_summary += f"Target date: {trendline_extend_to}\n"
-                    for col, forecast_info in trendline_forecasts.items():
-                        forecast_summary += f"\n{col}:\n"
-                        forecast_summary += f"  - Forecast value: {forecast_info['forecast_value']}\n"
-                        forecast_summary += f"  - Equation: {forecast_info['equation']}\n"
-                        forecast_summary += f"  - R² (goodness of fit): {forecast_info['r_squared']}\n"
+                    trendline_forecasts = {}
+                    for col in num_cols:
+                        trendline_data = calculate_trendline(
+                            df, time_key, col, extend_to_date=trendline_extend_to
+                        )
+                        if trendline_data:
+                            # Extract forecast value for the target year
+                            forecast_dates = trendline_data["dates"]
+                            forecast_values = trendline_data["values"]
 
-                    stats_hint = stats_hint + forecast_summary
-                    log.info(f"📊 Added {len(trendline_forecasts)} forecast values to stats_hint")
-        except Exception as e:
-            log.warning(f"Trendline pre-calculation failed: {e}")
+                            # Get the last forecast value (for the target year)
+                            if forecast_dates and forecast_values:
+                                forecast_value = forecast_values[-1]
+                                trendline_forecasts[col] = {
+                                    "target_date": forecast_dates[-1],
+                                    "forecast_value": round(forecast_value, 2),
+                                    "equation": trendline_data["equation"],
+                                    "r_squared": round(trendline_data["r_squared"], 3)
+                                }
+                                log.info(f"  ✅ {col}: Forecast for {forecast_dates[-1]} = {forecast_value:.2f}, R²={trendline_data['r_squared']:.3f}")
+
+                    # Add forecast information to stats_hint
+                    if trendline_forecasts:
+                        forecast_summary = f"\n\n--- TRENDLINE FORECASTS (Linear Regression) ---\n"
+                        forecast_summary += f"Target date: {trendline_extend_to}\n"
+                        for col, forecast_info in trendline_forecasts.items():
+                            forecast_summary += f"\n{col}:\n"
+                            forecast_summary += f"  - Forecast value: {forecast_info['forecast_value']}\n"
+                            forecast_summary += f"  - Equation: {forecast_info['equation']}\n"
+                            forecast_summary += f"  - R² (goodness of fit): {forecast_info['r_squared']}\n"
+
+                        stats_hint = stats_hint + forecast_summary
+                        log.info(f"📊 Added {len(trendline_forecasts)} forecast values to stats_hint")
+            except Exception as e:
+                log.warning(f"Trendline pre-calculation failed: {e}")
+    else:
+        log.info("📈 No trendline keywords detected")
 
     if share_summary_override:
         summary = share_summary_override
@@ -2448,35 +2476,7 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         else:
             log.info("🎨 Proceeding with chart generation.")
 
-        # --- 📈 Detect trend/forecast requests for trendline feature ---
-        trend_keywords = [
-            "trend", "ტრენდი", "тренд", "trending", "ტრენდინგი",
-            "forecast", "პროგნოზი", "прогноз", "projection", "პროექცია", "проекция",
-            "predict", "პროგნოზირება", "предсказать", "future", "მომავალი", "будущее",
-            "continue", "გაგრძელება", "продолжить", "extrapolate", "ექსტრაპოლაცია"
-        ]
-
-        add_trendlines = any(keyword in q.query.lower() for keyword in trend_keywords)
-
-        # Extract future year from query (e.g., "2030", "2035")
-        trendline_extend_to = None
-        if add_trendlines:
-            # Look for 4-digit years in the query
-            year_matches = re.findall(r'\b(20[2-9][0-9])\b', q.query)
-            if year_matches:
-                # Get the latest year mentioned
-                future_year = max(int(year) for year in year_matches)
-                # Extend to December of that year
-                trendline_extend_to = f"{future_year}-12-01"
-                log.info(f"📈 Trendline requested: extending to {trendline_extend_to}")
-            else:
-                # Default: extend 2 years into future
-                from datetime import datetime
-                current_year = datetime.now().year
-                trendline_extend_to = f"{current_year + 2}-12-01"
-                log.info(f"📈 Trendline requested: extending to {trendline_extend_to} (default 2 years)")
-        else:
-            log.info("📈 No trendline keywords detected")
+        # Note: add_trendlines and trendline_extend_to are already defined earlier (before llm_summarize)
 
         # --- 🧠 Semantic-aware chart-type selection ---
         # STEP 1: Detect structural features (time, categories, values)
