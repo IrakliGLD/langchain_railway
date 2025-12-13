@@ -926,6 +926,19 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
         "Use domain knowledge to explain causality and mechanisms. "
         "Do NOT introduce yourself or include greetings - answer the question directly.\n\n"
 
+        "CRITICAL - WHEN DOMAIN KNOWLEDGE IS MISSING:\n"
+        "If the user asks about a topic or specific factor NOT covered in the provided domain knowledge:\n"
+        "1. Acknowledge the limitation clearly: 'This specific information is not currently available in my domain knowledge base'\n"
+        "2. Suggest external research: 'For current information about [specific topic], I recommend searching reliable news sources or official reports'\n"
+        "3. Show openness to learning: 'I will note this topic for potential addition to my knowledge base in the future'\n"
+        "4. Provide what you CAN say: If data shows patterns, describe them; if general principles apply, use them\n\n"
+
+        "Example - Missing knowledge response:\n"
+        "Query: 'What is the impact of aluminum smelter operations on Abkhazeti consumption?'\n"
+        "✅ GOOD: 'Information about specific industrial operations (such as aluminum smelting) in Abkhazia is not currently available in my domain knowledge base. For current information about industrial electricity consumers in the region, I recommend consulting recent energy sector reports or news sources. I will note this topic for potential knowledge base updates. What I can tell you from the data: Abkhazeti consumption has grown substantially since 2015, with strong winter seasonality driven by heating demand.'\n"
+        "❌ BAD: 'Aluminum smelting operations are a major driver...' [using unverified training data]\n"
+        "❌ BAD: 'I don't have that information.' [too brief, not helpful]\n\n"
+
         "OUTPUT FORMAT BY QUERY TYPE:\n\n"
 
         "FOR PRICE DRIVER / CORRELATION QUERIES:\n"
