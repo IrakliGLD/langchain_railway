@@ -166,7 +166,7 @@ DB_SCHEMA_DOC = """
 **CRITICAL: Exact column values (case-sensitive, including spaces/hyphens):**
 
 type_tech values (tech_quantity_view):
-- Demand side: 'abkhazeti', 'supply-distribution' (note: hyphen!), 'direct customers' (note: space!), 'losses', 'export'
+- Demand side: 'abkhazeti', 'supply-distribution' (note: hyphen!), 'direct customers' (note: space! - MARKET CATEGORY not industry sector, see DirectCustomers domain knowledge), 'losses', 'export'
 - Supply side: 'hydro', 'thermal', 'wind', 'import', 'solar'
 - IMPORTANT: Use exact strings with hyphens and spaces as shown above!
 

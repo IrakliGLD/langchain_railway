@@ -902,6 +902,78 @@ DOMAIN_KNOWLEDGE = {
         }
     },
 
+    "DirectCustomers": {
+        "description": "Direct customers are large industrial and commercial electricity consumers who purchase directly from the wholesale market, not through retail suppliers",
+        "CRITICAL_MISUNDERSTANDING": "Direct customers are NOT a specific industry sector (like metallurgy, mining, etc.) - they are a MARKET PARTICIPANT CATEGORY",
+
+        "what_direct_customers_are": {
+            "definition": "Large electricity consumers who are eligible and choose to purchase electricity directly on the wholesale market (exchange or bilateral contracts)",
+            "eligibility": "Typically large industrial facilities and commercial consumers meeting minimum consumption thresholds",
+            "market_structure": "Buy from wholesale market instead of from supplier-distributors on retail market",
+            "data_source": "tech_quantity_view where type_tech = 'direct customers'"
+        },
+
+        "composition_diversity": {
+            "CRITICAL": "Direct customers include MULTIPLE different industries and sectors",
+            "examples_of_sectors_included": [
+                "Metallurgical enterprises",
+                "Mining operations",
+                "Large manufacturing facilities",
+                "Commercial centers and shopping malls",
+                "Other large industrial consumers"
+            ],
+            "key_point": "Cannot determine WHICH specific industry's consumption from 'direct customers' aggregate data",
+            "implication": "Queries about specific industries (metallurgy, mining, etc.) CANNOT be answered using direct customers data"
+        },
+
+        "consumption_dynamics": {
+            "changing_participant_count": {
+                "description": "Number of direct customers changes over time as consumers switch between retail and wholesale markets",
+                "growth_pattern": "Number of direct customers typically increases as more large consumers move from retail to wholesale market",
+                "impact_on_consumption": "Consumption changes reflect BOTH: (1) actual consumption growth/decline of participants AND (2) new participants joining or leaving direct customer category"
+            },
+            "relationship_to_supply_distribution": {
+                "inverse_relationship": "When consumers switch from retail (supplier-distributor) to wholesale (direct customers), we observe:",
+                "effect_on_supply_distribution": "Decrease in 'supply-distribution' consumption (retail suppliers lose customers)",
+                "effect_on_direct_customers": "Increase in 'direct customers' consumption (wholesale market gains customers)",
+                "note": "This is a MARKET STRUCTURE shift, not necessarily a change in total consumption"
+            }
+        },
+
+        "data_limitations": {
+            "no_sectoral_breakdown": {
+                "problem": "Direct customers data is aggregated - no breakdown by industry sector",
+                "cannot_answer": [
+                    "How much do metallurgical enterprises consume?",
+                    "What is mining sector electricity consumption?",
+                    "Which industries are the largest direct customers?"
+                ],
+                "recommended_response": "Use missing knowledge template - acknowledge gap, suggest industry association data or GNERC reports",
+                "what_CAN_be_said": "Total direct customers consumption trends, seasonal patterns, comparison with other market segments"
+            }
+        },
+
+        "correct_interpretation": {
+            "when_user_asks_about_specific_industry": {
+                "example_query": "How much electricity do metallurgical enterprises consume?",
+                "WRONG_answer": "Provide direct customers data and claim it represents metallurgy",
+                "CORRECT_answer": "Acknowledge that sectoral consumption data is not available. Direct customers include multiple industries without sectoral breakdown. Suggest consulting industry associations or GNERC sectoral reports. Note for knowledge base addition."
+            },
+            "when_user_asks_about_direct_customers": {
+                "example_query": "What is the trend in direct customers consumption?",
+                "CORRECT_answer": "Analyze direct customers aggregate data, noting that changes reflect both consumption shifts AND market participant movements (retail to wholesale switching)"
+            }
+        },
+
+        "analytical_guidance": [
+            "NEVER equate 'direct customers' with a specific industry sector",
+            "When analyzing direct customers trends, acknowledge dual dynamics: consumption changes + participant migration",
+            "For industry-specific queries, use missing knowledge response - no sectoral breakdown available",
+            "Link direct customers growth to supply-distribution decline (market structure shift)",
+            "Always clarify that direct customers = wholesale market participants, not industry category"
+        ]
+    },
+
     "BalancingPriceForecastingChallenges": {
         "description": "Critical limitations and considerations for balancing electricity price forecasting and trend analysis. Balancing price is influenced by many non-market, regulatory, and political factors that make prediction inherently complex.",
         "CRITICAL_WARNING": "Balancing electricity price prediction is difficult because many factors beyond supply/demand affect price formation. Use linear regression trendlines with extreme caution and ALWAYS mention limitations.",

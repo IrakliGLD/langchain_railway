@@ -597,6 +597,12 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
             "გადამცემი ხაზი", "სიმძლავრე", "neighboring countries", "მეზობელ ქვეყნებთან",
             "turkey", "azerbaijan", "armenia", "russia", "თურქეთ", "აზერბაიჯან"
         ],
+        "DirectCustomers": [
+            "direct customer", "პირდაპირი მომხმარებელი", "wholesale market", "საბითუმო ბაზარი",
+            "industrial consumer", "ინდუსტრიული მომხმარებელი", "large consumer",
+            "metallurg", "მეტალურგი", "mining", "მოპოვება", "industry sector", "სექტორი",
+            "manufacturing", "წარმოება", "sectoral consumption"
+        ],
         "MarketParticipantsAndDataSources": [
             "gnerc", "esco", "gse", "genex", "geostat", "participant"
         ],
