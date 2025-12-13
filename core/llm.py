@@ -592,6 +592,11 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
         "AbkhazetiConsumption": [
             "abkhaz", "აფხაზეთ", "abkhazeti", "occupied territory"
         ],
+        "TransmissionInterconnections": [
+            "interconnection", "დაკავშირება", "cross-border", "transmission capacity",
+            "გადამცემი ხაზი", "სიმძლავრე", "neighboring countries", "მეზობელ ქვეყნებთან",
+            "turkey", "azerbaijan", "armenia", "russia", "თურქეთ", "აზერბაიჯან"
+        ],
         "MarketParticipantsAndDataSources": [
             "gnerc", "esco", "gse", "genex", "geostat", "participant"
         ],
@@ -929,15 +934,21 @@ def llm_summarize(user_query: str, data_preview: str, stats_hint: str, lang_inst
         "CRITICAL - WHEN DOMAIN KNOWLEDGE IS MISSING:\n"
         "If the user asks about a topic or specific factor NOT covered in the provided domain knowledge:\n"
         "1. Acknowledge the limitation clearly: 'This specific information is not currently available in my domain knowledge base'\n"
-        "2. Suggest external research: 'For current information about [specific topic], I recommend searching reliable news sources or official reports'\n"
+        "2. Suggest external research: 'For current information about [specific topic], I recommend searching reliable sources or official reports'\n"
         "3. Show openness to learning: 'I will note this topic for potential addition to my knowledge base in the future'\n"
         "4. Provide what you CAN say: If data shows patterns, describe them; if general principles apply, use them\n\n"
 
-        "Example - Missing knowledge response:\n"
-        "Query: 'What is the impact of aluminum smelter operations on Abkhazeti consumption?'\n"
-        "✅ GOOD: 'Information about specific industrial operations (such as aluminum smelting) in Abkhazia is not currently available in my domain knowledge base. For current information about industrial electricity consumers in the region, I recommend consulting recent energy sector reports or news sources. I will note this topic for potential knowledge base updates. What I can tell you from the data: Abkhazeti consumption has grown substantially since 2015, with strong winter seasonality driven by heating demand.'\n"
-        "❌ BAD: 'Aluminum smelting operations are a major driver...' [using unverified training data]\n"
-        "❌ BAD: 'I don't have that information.' [too brief, not helpful]\n\n"
+        "APPLY THIS TO ALL TOPICS - Examples:\n"
+        "- Interconnection capacity (MW) with neighboring countries → data not available, suggest consulting GSE technical reports\n"
+        "- Specific industrial operations → data not available, suggest energy sector reports\n"
+        "- Recent policy changes → data not available, suggest official GNERC publications\n"
+        "- Future project timelines → data not available, suggest checking official announcements\n\n"
+
+        "Example response template:\n"
+        "Query: 'What is the interconnection capacity with Turkey?'\n"
+        "✅ GOOD: 'Information about transmission interconnection capacity (MW) with neighboring countries is not currently available in my domain knowledge base. For technical specifications of Georgia's cross-border transmission lines, I recommend consulting GSE (Georgian State Electrosystem) technical documentation or the Ten-Year Network Development Plan. I will note this for potential knowledge base updates. What I can tell you from the data: Georgia imports electricity from neighboring countries, with volumes varying seasonally...'\n"
+        "❌ BAD: 'The interconnection capacity with Turkey is approximately 500 MW...' [using unverified training data]\n"
+        "❌ BAD: 'Export is zero according to the data.' [incomplete analysis - didn't check both import AND export]\n\n"
 
         "OUTPUT FORMAT BY QUERY TYPE:\n\n"
 
