@@ -811,6 +811,91 @@ DOMAIN_KNOWLEDGE = {
         ]
     },
 
+    "AbkhazetiConsumption": {
+        "description": "Electricity consumption patterns in Abkhazia (occupied territory of Georgia supplied by Enguri HPP and Vardnili HPP)",
+        "key_facts": [
+            "Abkhazia's electricity consumption is measured separately in tech_quantity_view (type_tech = 'abkhazeti')",
+            "Consumption shows strong seasonal variation and long-term growth trends"
+        ],
+        "consumption_drivers": {
+            "seasonal_pattern": {
+                "description": "Winter consumption significantly exceeds summer consumption",
+                "primary_driver": "Electric heating demand - Abkhazia relies heavily on electricity for heating during winter months",
+                "magnitude": "Winter consumption (November-March) roughly doubles compared to summer (June-August)"
+            },
+            "long_term_growth": {
+                "description": "Substantial consumption growth observed since 2015",
+                "known_factors": [
+                    "Increased electric heating adoption in residential and commercial sectors",
+                    "Cryptocurrency mining activities - energy-intensive operations that have contributed to electricity demand growth",
+                    "General economic activity expansion in the region"
+                ],
+                "note": "Multiple factors contribute to growth; relative contribution of each factor may vary over time"
+            }
+        },
+        "tariff_context": {
+            "regulatory_change": "From May 2025, Enguri HPP and Vardnili HPP tariffs increased to recover costs of electricity supplied to Abkhazia",
+            "reference": "See TariffStructure domain knowledge for tariff adjustment details"
+        }
+    },
+
+    "TransmissionInterconnections": {
+        "description": "Cross-border electricity interconnections between Georgia and neighboring countries",
+        "CRITICAL_DISTINCTION": "Interconnection CAPACITY (MW) vs Import/Export VOLUMES (MWh)",
+
+        "what_IS_available": {
+            "import_volumes": {
+                "description": "Historical import volumes (electricity quantities purchased from neighboring countries)",
+                "data_source": "tech_quantity_view where type_tech = 'import'",
+                "unit": "thousand MWh per month",
+                "coverage": "Monthly data available from 2014 onwards"
+            },
+            "export_volumes": {
+                "description": "Historical export volumes (electricity quantities sold to neighboring countries)",
+                "data_source": "tech_quantity_view where type_tech = 'export'",
+                "unit": "thousand MWh per month",
+                "coverage": "Monthly data available from 2014 onwards",
+                "IMPORTANT": "Export volumes exist in the data - ALWAYS check both import AND export when analyzing cross-border flows"
+            }
+        },
+
+        "what_is_NOT_available": {
+            "interconnection_capacity": {
+                "description": "Transmission line capacity (MW) for cross-border connections with Azerbaijan, Turkey, Armenia, Russia",
+                "missing_data": [
+                    "Maximum transmission capacity (MW) of each cross-border line",
+                    "Technical specifications of interconnection infrastructure",
+                    "Simultaneous import/export limits",
+                    "Planned capacity expansions or upgrades"
+                ],
+                "recommended_sources": [
+                    "GSE (Georgian State Electrosystem) technical documentation",
+                    "Ten-Year Network Development Plan (TYNDP)",
+                    "ENTSO-E regional transmission planning documents"
+                ],
+                "when_asked": "Use the missing knowledge response template - acknowledge gap, suggest sources, note for future addition"
+            },
+            "interconnection_partners_details": {
+                "description": "Specific information about bilateral connections with each country",
+                "missing_data": [
+                    "Which specific transmission lines connect to which country",
+                    "Voltage levels and technical characteristics",
+                    "Operational constraints or limitations"
+                ],
+                "recommended_sources": "GSE technical reports, TYNDP"
+            }
+        },
+
+        "correct_interpretation": {
+            "when_user_asks_about_interconnections": {
+                "likely_meaning": "User wants to know about transmission CAPACITY (MW) and technical infrastructure",
+                "WRONG_answer": "Analyze only import/export volumes from data and claim this answers the question",
+                "CORRECT_answer": "Acknowledge that capacity data is not available, suggest sources, then provide what IS available: import/export volume trends"
+            },
+            "example_good_response": "ინფორმაცია გადამცემი ხაზების სიმძლავრის (მგვტ) შესახებ მეზობელ ქვეყნებთან არ არის ხელმისაწვდომი ჩემს ცოდნის ბაზაში. ტექნიკური სპეციფიკაციებისთვის გირჩევთ GSE-ს (საქართველოს სახელმწიფო ელექტროსისტემა) ტექნიკური დოკუმენტაციის ან ქსელის განვითარების ათწლიანი გეგმის (TYNDP) მოძიებას. რასაც მონაცემები გვიჩვენებენ: საქართველო როგორც იმპორტს, ისე ექსპორტს ახორციელებს მეზობელ ქვეყნებთან. [then provide volume trends from data]"
+        }
+    },
+
     "BalancingPriceForecastingChallenges": {
         "description": "Critical limitations and considerations for balancing electricity price forecasting and trend analysis. Balancing price is influenced by many non-market, regulatory, and political factors that make prediction inherently complex.",
         "CRITICAL_WARNING": "Balancing electricity price prediction is difficult because many factors beyond supply/demand affect price formation. Use linear regression trendlines with extreme caution and ALWAYS mention limitations.",
