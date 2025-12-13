@@ -404,12 +404,7 @@ DOMAIN_KNOWLEDGE = {
             "As of 2023, total installed capacity in Georgia was about 4,621 MW, of which 73% was hydropower (51% regulating, 22% seasonal), 23% thermal, and 0.5% wind.",
             "The generation–demand pattern is highly seasonal: in summer, hydro generation exceeds demand allowing exports; in winter, hydro output declines and thermal generation covers up to 28% of total supply."
         ],
-        "forecast_to_2034": [
-            "Total installed capacity is expected to reach around 10,336 MW by 2034, more than doubling the current level.",
-            "Of this, 4,314 MW will be regulating HPPs, 2,908 MW seasonal HPPs, 1,291 MW wind, 232 MW solar, 110 MW gas turbines, and 1,480 MW combined-cycle and existing Gardabani TPP units.",
-            "Hydropower will remain dominant, with about 70% of total capacity, while wind and solar will together provide roughly 15%.",
-            "This capacity mix aims to reduce import dependence in winter and fossil-fuel exposure, but will increase seasonal and spatial variability of generation."
-        ],
+
         "demand_and_balance_scenarios": [
             "Three demand growth scenarios are modeled — L1 (1% annual), L2 (3% base case), and L3 (5%) — paired with generation build-out cases G1, G2, and G3 representing different commissioning delays.",
             "Base-case assumption (L2G3) foresees 3% annual consumption growth and on-time integration of all planned generation projects.",
@@ -544,7 +539,6 @@ DOMAIN_KNOWLEDGE = {
     "BalancingMarketLogic": {
         "Definition": "The balancing market reflects short-term deviations between forecasted and actual generation or consumption.",
         "Rules": [
-            "When hydro inflows are strong, surplus deregulated HPP output reduces balancing price and volume.",
             "Low-hydro months push balancing to thermal and imports, raising volatility and cost.",
             "Balancing prices reflect the residual mix, not just cost; cheap hydro depresses prices, gas/import raise them.",
             "Rising renewable PPA share lifts summer prices as it displaces cheap hydro from balancing volumes."
@@ -781,7 +775,7 @@ DOMAIN_KNOWLEDGE = {
     },
 
     "PriceComparisonRules": {
-        "Purpose": "Mandatory rules for comparing electricity prices across time periods.",
+        "Purpose": "Mandatory rules for comparing balancing electricity prices across time periods.",
         "CriticalRule": "ALWAYS mention summer and winter averages separately when comparing prices — never use annual averages only.",
         "Reasoning": [
             "Summer and winter prices are structurally different due to generation mix",
