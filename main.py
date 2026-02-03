@@ -1500,7 +1500,7 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
             )
             summary = llm_summarize(
                 q.query,
-                preview="",
+                data_preview="",
                 stats_hint=conceptual_hint,
                 lang_instruction=lang_instruction,
                 conversation_history=q.conversation_history
