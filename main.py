@@ -1492,12 +1492,74 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
         # Answer directly using domain knowledge (no SQL needed)
         try:
-            # Provide hint that this is a conceptual question (no data query)
-            conceptual_hint = (
-                "NOTE: This is a conceptual/definitional question. "
-                "No database query was executed. "
-                "Answer using domain knowledge only."
-            )
+            # Classify the type of conceptual question for better guidance
+            query_lower = q.query.lower()
+
+            # General energy terms that have definitions in GeneralDefinitions
+            general_terms = [
+                "renewable energy", "განახლებადი ენერგია", "возобновляемая энергия",
+                "electricity market", "ელექტროენერგიის ბაზარი", "рынок электроэнергии",
+                "balancing market", "საბალანსო ბაზარი", "балансирующий рынок",
+                "tariff", "ტარიფი", "тариф",
+                "ppa", "power purchase agreement",
+                "cfd", "contract for difference",
+                "hydropower", "ჰიდროენერგია", "гидроэнергия",
+                "thermal power", "თერმული ენერგია", "тепловая энергия",
+                "import", "export", "იმპორტი", "ექსპორტი",
+                "demand", "მოთხოვნა", "generation mix", "გენერაციის სტრუქტურა",
+                "capacity", "სიმძლავრე", "regulated", "deregulated",
+                "exchange rate", "გაცვლითი კურსი", "обменный курс"
+            ]
+
+            # Domain-specific terms (Georgia market specifics)
+            domain_terms = [
+                "enguri", "vardnili", "gardabani", "gnerc", "esco", "gse",
+                "ენგური", "ვარდნილი", "გარდაბანი",
+                "საქართველო", "georgia"
+            ]
+
+            is_general_question = any(term in query_lower for term in general_terms)
+            is_domain_specific = any(term in query_lower for term in domain_terms)
+
+            # Determine the appropriate hint based on question type
+            if is_general_question and not is_domain_specific:
+                # Pure general question - provide definition + Georgia context
+                conceptual_hint = (
+                    "NOTE: This is a GENERAL conceptual/definitional question about energy terminology. "
+                    "No database query was executed. "
+                    "\n\n"
+                    "RESPONSE FORMAT (MANDATORY):\n"
+                    "1. **General Definition**: Start with a clear, universal definition of the concept "
+                    "(2-3 sentences explaining what it is, how it works generally).\n"
+                    "2. **Georgia Context**: Then provide Georgia-specific context showing how this concept "
+                    "applies in the Georgian electricity market (2-3 sentences).\n"
+                    "\n"
+                    "Use the GeneralDefinitions section from domain knowledge if the term is defined there. "
+                    "Structure your answer with these two clear sections."
+                )
+                log.info("📖 General conceptual question - will provide definition + Georgia context")
+            elif is_domain_specific:
+                # Domain-specific question - use domain knowledge directly
+                conceptual_hint = (
+                    "NOTE: This is a domain-specific conceptual question about the Georgian electricity market. "
+                    "No database query was executed. "
+                    "Answer using domain knowledge about Georgia's energy sector."
+                )
+                log.info("🇬🇪 Domain-specific conceptual question - will use Georgia domain knowledge")
+            else:
+                # Unknown/other conceptual question
+                conceptual_hint = (
+                    "NOTE: This is a conceptual/definitional question. "
+                    "No database query was executed. "
+                    "\n\n"
+                    "If this topic is covered in domain knowledge, provide a clear explanation. "
+                    "If NOT covered, acknowledge the limitation: "
+                    "'This specific topic is not currently in my domain knowledge base. "
+                    "For accurate information, I recommend consulting official sources.' "
+                    "Then provide what general context you can."
+                )
+                log.info("❓ Conceptual question - topic may be outside domain scope")
+
             summary = llm_summarize(
                 q.query,
                 data_preview="",
