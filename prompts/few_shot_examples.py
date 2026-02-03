@@ -4,6 +4,7 @@ Few-Shot Examples for LLM Plan+SQL Generation
 These examples demonstrate correct patterns for common query types.
 Used in llm_generate_plan_and_sql() to guide the model.
 
+
 Categories:
 1. Energy Security
 2. Balancing Price (drivers, trends, summer/winter)
