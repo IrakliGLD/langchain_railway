@@ -531,6 +531,21 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
     # Keyword triggers – each key must exist in DOMAIN_KNOWLEDGE
     # ------------------------------------------------------------------
     triggers = {
+        # GeneralDefinitions - for conceptual/definitional questions
+        "GeneralDefinitions": [
+            # Definition question patterns
+            "what is", "what are", "რა არის", "что такое", "define", "explain",
+            "meaning of", "განმარტე", "объясни",
+            # General energy terms
+            "renewable energy", "განახლებადი ენერგია", "возобновляемая энергия",
+            "electricity market", "ელექტროენერგიის ბაზარი", "рынок электроэнергии",
+            "balancing market", "საბალანსო ბაზარი", "балансирующий рынок",
+            "hydropower", "ჰიდროენერგია", "гидроэнергия",
+            "thermal power", "თერმული ენერგია", "тепловая энергия",
+            "generation mix", "გენერაციის სტრუქტურა",
+            "capacity vs energy", "სიმძლავრე vs ენერგია",
+            "regulated vs deregulated", "რეგულირებული vs დერეგულირებული"
+        ],
         "BalancingPriceDrivers": [
             "balancing", "price", "p_bal", "cost", "driver", "why", "increase", "decrease",
             "xrate", "share", "composition", "hydro", "thermal", "import", "ppa"
@@ -629,13 +644,25 @@ def get_relevant_domain_knowledge(user_query: str, use_cache: bool = True) -> st
                 relevant[section] = DOMAIN_KNOWLEDGE[section]
 
     # ------------------------------------------------------------------
-    # FALLBACK: always include BalancingPriceDrivers (core for price questions)
+    # FALLBACK: Include appropriate default based on query type
     # ------------------------------------------------------------------
     if not relevant:
-        relevant = {
-            "note": "No specific domain knowledge matched the query.",
-            "BalancingPriceDrivers": DOMAIN_KNOWLEDGE.get("BalancingPriceDrivers", {})
-        }
+        # Check if this looks like a conceptual/definitional question
+        definition_patterns = ["what is", "what are", "რა არის", "что такое", "define", "explain"]
+        is_conceptual = any(p in query_lower for p in definition_patterns)
+
+        if is_conceptual:
+            # For conceptual questions, include GeneralDefinitions
+            relevant = {
+                "note": "This appears to be a conceptual question. Using GeneralDefinitions.",
+                "GeneralDefinitions": DOMAIN_KNOWLEDGE.get("GeneralDefinitions", {})
+            }
+        else:
+            # For data queries, default to BalancingPriceDrivers
+            relevant = {
+                "note": "No specific domain knowledge matched the query.",
+                "BalancingPriceDrivers": DOMAIN_KNOWLEDGE.get("BalancingPriceDrivers", {})
+            }
 
     return json.dumps(relevant, indent=2)
 
