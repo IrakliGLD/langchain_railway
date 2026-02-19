@@ -29,6 +29,7 @@ import time
 import logging
 import uuid
 import json
+from urllib.parse import urlparse
 from contextvars import ContextVar
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -596,7 +597,7 @@ with ENGINE.connect() as conn:
 # -----------------------------
 app = FastAPI(title="Enai Analyst (Gemini)", version="18.6") # Version bump
 
-# Phase 1D Security: Configure rate limiter (10 requests/minute per IP)
+# Phase 1D Security: Configure rate limiter (5 requests/minute per IP)
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -1462,11 +1463,25 @@ def generate_html_report(summary: Dict[str, Any], results: List[Dict[str, Any]],
 
 
 @app.post("/ask", response_model=APIResponse)
-@limiter.limit("10/minute")  # Phase 1D Security: Rate limiting (10 requests/minute per IP)
+@limiter.limit("5/minute")  # Phase 1D Security: Rate limiting (5 requests/minute per IP)
 def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="X-App-Key")):
     t0 = time.time()
     if x_app_key != APP_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Referer validation: if present, it must originate from an allowed origin.
+    # Browser requests always carry this header; direct API calls (no Referer) pass through
+    # since X-App-Key already guards those.
+    referer = request.headers.get("referer") or request.headers.get("Referer")
+    if referer:
+        try:
+            parsed = urlparse(referer)
+            referer_origin = f"{parsed.scheme}://{parsed.netloc}"
+        except Exception:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        if not any(referer_origin == origin.rstrip("/") for origin in ALLOWED_ORIGINS):
+            log.warning(f"🚫 Blocked request with disallowed Referer: {referer_origin}")
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     mode = detect_analysis_mode(q.query)
     log.info(f"🧭 Selected mode: {mode}")
