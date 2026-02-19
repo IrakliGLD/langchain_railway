@@ -127,9 +127,10 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
             convert_system_message_to_human=True,
-            max_retries=2  # Limit retries to prevent quota exhaustion
+            max_retries=2,  # Limit retries to prevent quota exhaustion
+            timeout=120     # Allow up to 120s for large prompts (default is 60s)
         )
-        log.info("✅ Gemini LLM instance cached (max_retries=2)")
+        log.info("✅ Gemini LLM instance cached (max_retries=2, timeout=120s)")
     return _gemini_llm
 
 
