@@ -51,7 +51,11 @@ def is_conceptual_question(query: str) -> bool:
         if re.search(pattern, query_lower):
             # Check if NOT followed by data-specific keywords
             # e.g., "What is the price in June 2024?" is data query, not conceptual
-            if not re.search(r"(in \d{4}|for \d{4}|last month|this year|\d+-\d+)", query_lower):
+            # e.g., "Explain balancing price between april 2025 and september 2025" → data query
+            if not re.search(
+                r"(in \d{4}|for \d{4}|last month|this year|\d+-\d+|\b\d{4}\b|between .{0,40}\d{4})",
+                query_lower,
+            ):
                 return True
 
     # Explanation indicators
