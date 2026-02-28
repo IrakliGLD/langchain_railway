@@ -142,6 +142,8 @@ DOMAIN_KNOWLEDGE = {
 
     "trade": {
         "description": "Monthly trading data from market participants.",
+        "data_availability": "trade_derived_entities has reliable data ONLY from 2020 onwards. No entity-level balancing composition data exists before 2020.",
+        "null_interpretation": "If share values are NULL for a period, this means DATA IS NOT AVAILABLE — never interpret NULL as 0% share.",
         "dependencies": [
             "Includes transactions across exchange and balancing segments. The Exchange was introduced in July 2024.",
             "Trade volumes determine the weights used in calculating the balancing electricity price."

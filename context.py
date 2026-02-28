@@ -1,15 +1,7 @@
 # === context.py v2.1 ===
 # Updated for main.py v18.5: materialized-view schema, OpenAI context alignment, demand/supply groups.
 
-import os
 import re
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from dotenv import load_dotenv
-
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # --- Column label mapping ---
 COLUMN_LABELS = {
@@ -194,6 +186,14 @@ segment values (trade_derived_entities):
 - Avoid system tables or undefined joins.
 
 **Time Coverage:** 2015–latest month
+
+**CRITICAL – Per-View Data Availability:**
+- price_with_usd: complete from 2006 onwards
+- tariff_with_usd: complete from 2008 onwards
+- tech_quantity_view: complete from 2014 onwards
+- trade_derived_entities: complete from **2020** onwards (NO data before 2020)
+  * If shares are NULL for a period → data is NOT available, do NOT treat as 0%
+  * For balancing composition analysis, always filter: date >= '2020-01-01'
 """
 
 # --- Join Map ---
@@ -209,6 +209,9 @@ DB_JOINS = {
 def scrub_schema_mentions(text: str) -> str:
     if not text:
         return text
+    # Apply DERIVED_LABELS first (longer, more specific names like share_renewable_ppa)
+    for col, label in DERIVED_LABELS.items():
+        text = re.sub(rf"\b{re.escape(col)}\b", label, text, flags=re.IGNORECASE)
     for col, label in COLUMN_LABELS.items():
         text = re.sub(rf"\b{re.escape(col)}\b", label, text, flags=re.IGNORECASE)
     for tbl, label in VIEW_LABELS.items():
@@ -219,14 +222,6 @@ def scrub_schema_mentions(text: str) -> str:
     for term in schema_terms:
         text = re.sub(rf"\b{re.escape(term)}\b", "data", text, flags=re.IGNORECASE)
     text = text.replace("```", "").strip()
-    if any(re.search(rf"\b{term}\b", text, re.IGNORECASE) for term in schema_terms):
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
-        fallback_prompt = ChatPromptTemplate.from_messages([
-            ("system", "Remove technical jargon (schema, SQL, join, etc.) while keeping meaning clear."),
-            ("human", text),
-        ])
-        chain = fallback_prompt | llm | StrOutputParser()
-        text = chain.invoke({})
     return text
 
 # --- Supply/Demand/Transit explicit lists for backend filtering ---
