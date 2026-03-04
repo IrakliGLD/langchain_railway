@@ -777,6 +777,11 @@ def llm_generate_plan_and_sql(
     guidance_sections.append("- Use ONLY documented materialized views.")
     guidance_sections.append("- Aggregation default = monthly. For energy_balance_long_mv, use yearly.")
     guidance_sections.append("- When USD values appear, *_usd = *_gel / xrate.")
+    guidance_sections.append(
+        "- CRITICAL: trade_derived_entities has data ONLY from 2020 onwards. "
+        "For balancing composition (share) queries, always add: date >= '2020-01-01'. "
+        "NULL shares mean data is NOT available — never interpret NULL as 0%."
+    )
 
     # CRITICAL: Date filtering rules
     guidance_sections.append("""
@@ -1068,6 +1073,11 @@ CRITICAL: NEVER use raw database column names in your answer
 ❌ WRONG: "share_hydro increased", "p_bal_gel rose", "tariff_gel changed"
 ✅ CORRECT: "hydro generation share increased", "balancing price in GEL rose", "tariff in GEL changed"
 Always use descriptive, natural language terms regardless of response language.
+
+CRITICAL: DATA AVAILABILITY
+- Balancing composition (entity share) data is available ONLY from 2020 onwards.
+- If shares show NULL or 0 for periods before 2020, this means data was NOT collected — NOT that the share was zero.
+- NEVER say "share was 0%" for pre-2020 periods. Instead say "data is not available for this period."
 """)
 
     # Add seasonal statistics guidance if stats_hint contains seasonal analysis

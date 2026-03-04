@@ -1851,8 +1851,12 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
         except Exception as fallback_err:
             log.warning(f"Share pivot resolution failed: {fallback_err}")
 
-    preview = rows_to_preview(rows, cols)
-    stats_hint = quick_stats(rows, cols)
+    # Apply human-readable labels to column names before LLM sees the preview
+    from context import COLUMN_LABELS, DERIVED_LABELS
+    _all_labels = {**COLUMN_LABELS, **DERIVED_LABELS}
+    cols_labeled = [_all_labels.get(c, c) for c in cols]
+    preview = rows_to_preview(rows, cols_labeled)
+    stats_hint = quick_stats(rows, cols_labeled)
 
     # Option 3: Calculate seasonal-adjusted statistics for time series
     timeseries_info = detect_monthly_timeseries(df)
@@ -1906,15 +1910,19 @@ def ask_post(request: Request, q: Question, x_app_key: str = Header(..., alias="
 
 
     # --- Consolidated correlation analysis (overall + seasonal) ---
+    # Cache correlation df to avoid duplicate DB queries within same request
+    _cached_corr_df = None
     if plan.get("intent") == "correlation":
         log.info("🔍 Building comprehensive balancing-price correlation analysis (overall + seasonal)")
         correlation_results = {}
 
         try:
-            with ENGINE.connect() as conn:
-                # Phase 1D Security: Enforce read-only mode
-                conn.execute(text("SET TRANSACTION READ ONLY"))
-                corr_df = build_balancing_correlation_df(conn)
+            if _cached_corr_df is None:
+                with ENGINE.connect() as conn:
+                    # Phase 1D Security: Enforce read-only mode
+                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                    _cached_corr_df = build_balancing_correlation_df(conn)
+            corr_df = _cached_corr_df
 
             allowed_targets = ["p_bal_gel", "p_bal_usd"]
             allowed_drivers = [
