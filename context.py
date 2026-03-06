@@ -100,7 +100,7 @@ VALUE_LABELS = {
     "transit": "Transit Flows",
     "HPP": "Hydropower Plant",
     "TPP": "Thermal Power Plant",
-    "balancing_electricity": "Balancing Electricity",
+    "balancing": "Balancing Electricity",
     "bilateral_exchange": "Bilateral Contracts & Exchange",
     "renewable_ppa": "Renewable PPA",
     "thermal_ppa": "Thermal PPA",
@@ -163,11 +163,9 @@ type_tech values (tech_quantity_view):
 - IMPORTANT: Use exact strings with hyphens and spaces as shown above!
 
 segment values (trade_derived_entities):
-- 'Balancing Electricity' (note: capital B, capital E, with space!)
-- 'Bilateral Contracts & Exchange'
-- IMPORTANT: Segment values are case-sensitive and may contain spaces!
-- Common mistake: using lowercase 'balancing' - WRONG! Use 'Balancing Electricity'
-- Recommended filter: WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing' (handles case variations)
+- For balancing-segment trade, use the canonical normalized segment token 'balancing'
+- IMPORTANT: User phrasing like "balancing electricity" refers to electricity traded in the balancing segment
+- Recommended filter: WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
 
 **Units & Conversions:**
 - Quantities in thousand MWh (multiply ×1000 for MWh)
@@ -225,6 +223,6 @@ def scrub_schema_mentions(text: str) -> str:
     return text
 
 # --- Supply/Demand/Transit explicit lists for backend filtering ---
-SUPPLY_TECH_TYPES = list(TECH_TYPE_GROUPS["supply"].keys()) + ["solar", "self-cons"]
+SUPPLY_TECH_TYPES = list(dict.fromkeys(list(TECH_TYPE_GROUPS["supply"].keys()) + ["self-cons"]))
 DEMAND_TECH_TYPES = list(TECH_TYPE_GROUPS["demand"].keys())
 TRANSIT_TECH_TYPES = ["transit"]

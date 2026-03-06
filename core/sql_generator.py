@@ -149,9 +149,31 @@ def sanitize_sql(sql: str) -> str:
     # Remove single-line comments
     sql = re.sub(r"--.*", "", sql)
 
-    # Basic protection against non-SELECT statements
-    if not sql.lower().startswith("select"):
-        raise HTTPException(400, "Only SELECT statements are allowed.")
+    # Parse and enforce read-only query shape.
+    try:
+        parsed = parse_one(sql, read="postgres")
+    except ParseError:
+        raise HTTPException(400, "Invalid SQL syntax.")
+
+    allowed_roots = (exp.Select, exp.Union, exp.Except, exp.Intersect)
+    if not isinstance(parsed, allowed_roots):
+        raise HTTPException(400, "Only read-only SELECT statements are allowed.")
+
+    forbidden_node_names = (
+        "Insert",
+        "Update",
+        "Delete",
+        "Create",
+        "Drop",
+        "Alter",
+        "Merge",
+        "TruncateTable",
+        "Command",
+    )
+    for node_name in forbidden_node_names:
+        node_type = getattr(exp, node_name, None)
+        if node_type is not None and any(True for _ in parsed.find_all(node_type)):
+            raise HTTPException(400, "Only read-only SELECT statements are allowed.")
 
     return sql
 

@@ -27,9 +27,9 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
     - Drivers: xrate, entity shares (import, deregulated_hydro, regulated_hpp,
                renewable_ppa, thermal_ppa), tariffs (Enguri, Gardabani, old TPPs)
 
-    CRITICAL: Shares calculated using ONLY balancing_electricity segment to
-    properly reflect the composition affecting balancing price. Uses
-    case-insensitive segment matching.
+    CRITICAL: Shares are calculated using ONLY the canonical balancing
+    segment filter LOWER(REPLACE(segment, ' ', '_')) = 'balancing' to
+    properly reflect the composition affecting balancing price.
 
     Args:
         conn: SQLAlchemy connection object

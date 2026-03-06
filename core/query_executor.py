@@ -19,6 +19,8 @@ import pandas as pd
 from fastapi import HTTPException
 
 from config import SUPABASE_DB_URL, MAX_RESULT_SIZE_MB
+from utils.metrics import metrics
+from utils.resilience import db_circuit_breaker
 
 log = logging.getLogger("Enai")
 
@@ -103,24 +105,27 @@ def check_dataframe_memory(df: pd.DataFrame, max_mb: int = None) -> None:
     log.info(f"✅ Memory check passed: {memory_mb:.2f} MB / {max_mb} MB limit")
 
 
-def test_connection() -> bool:
-    """
-    Test database connectivity.
+def is_database_available() -> bool:
+    """Best-effort database readiness check.
 
-    Returns:
-        True if connection successful, False otherwise
-
-    Raises:
-        SQLAlchemyError: If connection test fails
+    This must never raise during startup paths; readiness endpoints can call it
+    and return degraded status instead of crashing process initialization.
     """
+    allowed, reason = db_circuit_breaker.allow_request()
+    if not allowed:
+        metrics.log_circuit_open("db")
+        log.warning("Database availability check skipped due to open circuit: %s", reason)
+        return False
+
     try:
         with ENGINE.connect() as conn:
             conn.execute(text("SELECT 1"))
-            log.info("✅ Database connectivity verified")
-            return True
-    except SQLAlchemyError as e:
-        log.error(f"❌ Database connection failed: {e}")
-        raise
+        db_circuit_breaker.record_success()
+        return True
+    except SQLAlchemyError as exc:
+        db_circuit_breaker.record_failure()
+        log.warning("Database readiness check failed: %s", exc)
+        return False
 
 
 def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFrame, List[str], List[Any], float]:
@@ -151,18 +156,31 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
         >>> print(f"Returned {len(rows)} rows in {elapsed:.2f}s")
     """
     start = time.time()
+    allowed, reason = db_circuit_breaker.allow_request()
+    if not allowed:
+        metrics.log_circuit_open("db")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database temporarily unavailable (circuit breaker: {reason}). Please retry shortly.",
+        )
 
-    with ENGINE.connect() as conn:
-        # Phase 1D: Enforce read-only mode
-        conn.execute(text("SET TRANSACTION READ ONLY"))
+    try:
+        with ENGINE.connect() as conn:
+            # Phase 1D: Enforce read-only mode
+            conn.execute(text("SET TRANSACTION READ ONLY"))
 
-        # Execute query
-        result = conn.execute(text(sql))
-        rows = result.fetchall()
-        cols = list(result.keys())
+            # Execute query
+            result = conn.execute(text(sql))
+            rows = result.fetchall()
+            cols = list(result.keys())
 
-        # Convert to DataFrame for compatibility
-        df = pd.DataFrame(rows, columns=cols)
+            # Convert to DataFrame for compatibility
+            df = pd.DataFrame(rows, columns=cols)
+    except (OperationalError, DatabaseError, SQLAlchemyError):
+        db_circuit_breaker.record_failure()
+        raise
+    else:
+        db_circuit_breaker.record_success()
 
     elapsed = time.time() - start
 
@@ -173,6 +191,3 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
 
     return df, cols, rows, elapsed
 
-
-# Test connection on module import
-test_connection()

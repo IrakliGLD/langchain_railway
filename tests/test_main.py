@@ -10,6 +10,8 @@ import pytest
 import pandas as pd
 import numpy as np
 import sqlalchemy
+from fastapi import HTTPException
+from sqlalchemy import text
 
 
 class DummyResult:
@@ -53,14 +55,16 @@ sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore
 from main import (
     BALANCING_SEGMENT_NORMALIZER,
     BALANCING_SHARE_PIVOT_SQL,
-    quick_stats,
-    rows_to_preview,
     build_trade_share_cte,
     generate_share_summary,
     fetch_balancing_share_panel,
     build_share_shift_notes,
     ensure_share_dataframe,
 )  # noqa: E402
+from analysis.stats import quick_stats, rows_to_preview
+from agent.tools import composition_tools
+from agent.tools import common as tool_common
+from core.sql_generator import sanitize_sql
 
 
 class TestQuickStats:
@@ -133,8 +137,103 @@ class TestSQLValidation:
 
     def test_cte_alias_handling(self):
         """Test that CTEs without aliases don't crash."""
-        # Placeholder - would test simple_table_whitelist_check
-        pass
+        sql = "WITH x AS (SELECT 1 AS a) SELECT * FROM x"
+        out = sanitize_sql(sql)
+        assert out.strip().upper().startswith("WITH")
+
+    def test_rejects_data_modifying_cte(self):
+        """CTEs with DML must be rejected by sanitizer."""
+        sql = "WITH x AS (DELETE FROM price_with_usd RETURNING *) SELECT * FROM x"
+        with pytest.raises(HTTPException) as exc:
+            sanitize_sql(sql)
+        assert "read-only SELECT" in str(exc.value.detail)
+
+
+class TestTypedToolRowContract:
+    """Ensure typed tools return rows as plain tuples (same contract as SQL fallback path)."""
+
+    class _RowLike:
+        def __init__(self, *values):
+            self._values = values
+
+        def __iter__(self):
+            return iter(self._values)
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, index):
+            return self._values[index]
+
+    class _FakeResult:
+        def __init__(self, rows, cols):
+            self._rows = rows
+            self._cols = cols
+
+        def fetchall(self):
+            return self._rows
+
+        def keys(self):
+            return self._cols
+
+    class _FakeConnection:
+        def __init__(self, rows, cols):
+            self._result = TestTypedToolRowContract._FakeResult(rows, cols)
+            self._calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            self._calls += 1
+            if self._calls == 1:
+                return DummyResult()  # SET TRANSACTION READ ONLY
+            return self._result
+
+    class _FakeEngine:
+        def __init__(self, rows, cols):
+            self._rows = rows
+            self._cols = cols
+
+        def connect(self):
+            return TestTypedToolRowContract._FakeConnection(self._rows, self._cols)
+
+    def test_run_text_query_normalizes_rows_to_tuples(self, monkeypatch):
+        rows = [
+            self._RowLike(1, "alpha"),
+            self._RowLike(2, "beta"),
+        ]
+        cols = ["id", "name"]
+
+        monkeypatch.setattr(tool_common, "ENGINE", self._FakeEngine(rows, cols))
+        monkeypatch.setattr(tool_common, "check_dataframe_memory", lambda _df: None)
+
+        df, out_cols, out_rows = tool_common.run_text_query("SELECT id, name FROM t")
+
+        assert out_cols == cols
+        assert out_rows == [(1, "alpha"), (2, "beta")]
+        assert all(isinstance(r, tuple) for r in out_rows)
+        assert list(df.columns) == cols
+
+    def test_run_statement_normalizes_rows_to_tuples(self, monkeypatch):
+        rows = [
+            self._RowLike("2024-01-01", 10.5),
+            self._RowLike("2024-02-01", 11.5),
+        ]
+        cols = ["date", "p_bal_usd"]
+
+        monkeypatch.setattr(tool_common, "ENGINE", self._FakeEngine(rows, cols))
+        monkeypatch.setattr(tool_common, "check_dataframe_memory", lambda _df: None)
+
+        df, out_cols, out_rows = tool_common.run_statement(text("SELECT date, p_bal_usd FROM t"))
+
+        assert out_cols == cols
+        assert out_rows == [("2024-01-01", 10.5), ("2024-02-01", 11.5)]
+        assert all(isinstance(r, tuple) for r in out_rows)
+        assert list(df.columns) == cols
 
 
 class TestTradeSharePivot:
@@ -143,12 +242,12 @@ class TestTradeSharePivot:
     def test_basic_wrapping(self):
         original = (
             "SELECT date, share_renewable_ppa FROM trade_derived_entities "
-            "WHERE segment = 'balancing_electricity'"
+            "WHERE segment = 'balancing'"
         )
         rewritten = build_trade_share_cte(original)
         assert rewritten.strip().startswith("WITH tde AS"), rewritten
         assert "FROM tde" in rewritten
-        assert "WHERE segment = 'balancing_electricity'" in rewritten
+        assert "WHERE segment = 'balancing'" in rewritten
 
     def test_preserves_existing_cte(self):
         original = (
@@ -178,7 +277,7 @@ class TestBalancingSharePanel:
         rows = [
             (
                 pd.Timestamp("2024-06-01"),
-                "balancing_electricity",
+                "balancing",
                 0.1,
                 0.2,
                 0.3,
@@ -260,7 +359,7 @@ class TestEnsureShareDataFrame:
         rows = [
             (
                 pd.Timestamp("2024-06-01"),
-                "balancing_electricity",
+                "balancing",
                 0.11,
                 0.22,
             )
@@ -370,6 +469,27 @@ class TestShareShiftNotes:
         assert summary is not None
         assert "41.0%" in summary
         assert "Import" in summary or "Imports" in summary
+
+
+class TestBalancingCompositionTool:
+    def test_uses_canonical_balancing_segment(self, monkeypatch):
+        captured = {}
+
+        def _fake_run(sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return pd.DataFrame(), [], []
+
+        monkeypatch.setattr(composition_tools, "run_text_query", _fake_run)
+        composition_tools.get_balancing_composition(
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            entities=["import"],
+        )
+
+        assert "LOWER(REPLACE(segment, ' ', '_')) = 'balancing'" in captured["sql"]
+        assert "'balancing'::text AS segment" in captured["sql"]
+        assert captured["params"]["start_date"] == "2024-01-01"
 
 
 if __name__ == "__main__":

@@ -33,6 +33,40 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
+ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
+ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "false").lower() in ("1", "true", "yes", "on")
+AGENT_MAX_ROUNDS = max(1, int(os.getenv("AGENT_MAX_ROUNDS", "3")))
+AGENT_TOOL_PREVIEW_ROWS = max(1, int(os.getenv("AGENT_TOOL_PREVIEW_ROWS", "10")))
+AGENT_TOOL_PREVIEW_MAX_CHARS = max(200, int(os.getenv("AGENT_TOOL_PREVIEW_MAX_CHARS", "3000")))
+AGENT_TOOL_TIMEOUT_SECONDS = max(1, int(os.getenv("AGENT_TOOL_TIMEOUT_SECONDS", "15")))
+AGENT_TOOL_RETRY_ATTEMPTS = max(1, int(os.getenv("AGENT_TOOL_RETRY_ATTEMPTS", "2")))
+PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "30000")))
+ROUTER_ENABLE_SEMANTIC_FALLBACK = os.getenv("ROUTER_ENABLE_SEMANTIC_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+ROUTER_SEMANTIC_MIN_SCORE = min(
+    1.0,
+    max(0.1, float(os.getenv("ROUTER_SEMANTIC_MIN_SCORE", "0.62"))),
+)
+SESSION_HISTORY_MAX_TURNS = max(1, int(os.getenv("SESSION_HISTORY_MAX_TURNS", "3")))
+SESSION_IDLE_TTL_SECONDS = max(60, int(os.getenv("SESSION_IDLE_TTL_SECONDS", "3600")))
+ASK_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("ASK_MAX_CONCURRENT_REQUESTS", "8")))
+ASK_BACKPRESSURE_TIMEOUT_SECONDS = max(0.0, float(os.getenv("ASK_BACKPRESSURE_TIMEOUT_SECONDS", "0.0")))
+PROVENANCE_MIN_COVERAGE = min(
+    1.0,
+    max(0.0, float(os.getenv("PROVENANCE_MIN_COVERAGE", "1.0"))),
+)
+
+# Reliability / circuit breaker settings
+LLM_CB_FAILURE_THRESHOLD = max(1, int(os.getenv("LLM_CB_FAILURE_THRESHOLD", "5")))
+LLM_CB_RESET_TIMEOUT_SECONDS = max(5, int(os.getenv("LLM_CB_RESET_TIMEOUT_SECONDS", "30")))
+DB_CB_FAILURE_THRESHOLD = max(1, int(os.getenv("DB_CB_FAILURE_THRESHOLD", "5")))
+DB_CB_RESET_TIMEOUT_SECONDS = max(5, int(os.getenv("DB_CB_RESET_TIMEOUT_SECONDS", "30")))
+
+# Optional LLM cost telemetry rates (USD per 1K tokens).
+# Defaults to 0 so deployments can explicitly configure their own pricing.
+OPENAI_INPUT_COST_PER_1K_USD = float(os.getenv("OPENAI_INPUT_COST_PER_1K_USD", "0"))
+OPENAI_OUTPUT_COST_PER_1K_USD = float(os.getenv("OPENAI_OUTPUT_COST_PER_1K_USD", "0"))
+GEMINI_INPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_INPUT_COST_PER_1K_USD", "0"))
+GEMINI_OUTPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_OUTPUT_COST_PER_1K_USD", "0"))
 
 # Memory Limits (PRODUCTION SAFETY: Prevents OOM errors)
 MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))

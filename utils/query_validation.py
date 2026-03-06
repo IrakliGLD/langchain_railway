@@ -306,3 +306,26 @@ def should_skip_sql_execution(
         return True, f"Plan intent is explanatory: {intent}"
 
     return False, "Data query - SQL needed"
+
+
+def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = 0.3) -> Tuple[bool, str]:
+    """Validate if selected typed tool is relevant to the query topics."""
+    query_topics = extract_query_topics(query)
+    if not query_topics:
+        return True, "No specific query topics detected"
+
+    tool_topics = {
+        "get_prices": {"price", "balancing", "exchange_rate"},
+        "get_tariffs": {"tariff", "price"},
+        "get_generation_mix": {"generation", "demand", "quantity", "share"},
+        "get_balancing_composition": {"share", "composition", "balancing"},
+    }.get((tool_name or "").strip(), set())
+
+    if not tool_topics:
+        return False, f"Unknown tool relevance mapping: {tool_name}"
+
+    common = query_topics & tool_topics
+    overlap = len(common) / len(query_topics)
+    if overlap >= min_overlap:
+        return True, f"Tool relevance validated: topics={sorted(common)}"
+    return False, f"Tool relevance mismatch: query={sorted(query_topics)} tool={sorted(tool_topics)}"

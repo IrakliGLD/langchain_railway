@@ -1,0 +1,222 @@
+"""
+Pipeline Stage 1: Query Planning
+
+Detects query type (conceptual vs data), analysis mode, language,
+and generates the LLM plan + raw SQL.
+"""
+import json
+import logging
+
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from models import QueryContext
+from core.llm import (
+    llm_cache,
+    make_gemini,
+    llm_generate_plan_and_sql,
+    get_relevant_domain_knowledge,
+)
+from utils.language import detect_language, get_language_instruction
+from utils.query_validation import is_conceptual_question, should_skip_sql_execution
+from agent.aggregation import detect_aggregation_intent
+
+log = logging.getLogger("Enai")
+
+
+# ---------------------------------------------------------------------------
+# Constants (moved from main.py)
+# ---------------------------------------------------------------------------
+
+ANALYTICAL_KEYWORDS = {
+    "trend", "change", "growth", "increase", "decrease", "compare", "impact",
+    "volatility", "pattern", "season", "relationship", "correlation", "evolution",
+    "driver", "cause", "effect", "factor", "reason", "influence", "depend", "why", "behind"
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers (moved from main.py)
+# ---------------------------------------------------------------------------
+
+def detect_analysis_mode(user_query: str) -> str:
+    """Detect if query requires analytical mode based on keywords."""
+    query_lower = user_query.lower()
+
+    # Simple fact queries -> light mode (higher priority)
+    simple_patterns = [
+        "what is", "what was", "list", "show", "give me",
+        "რა არის", "რამდენი", "покажи", "что такое"
+    ]
+    if any(p in query_lower for p in simple_patterns):
+        return "light"
+
+    # Deep analysis keywords -> analyst mode
+    analyst_keywords = [
+        "trend over time", "correlation", "driver", "impact on",
+        "relationship between", "explain the dynamics", "analyze",
+        "what drives", "what causes", "why does"
+    ]
+    if any(k in query_lower for k in analyst_keywords):
+        return "analyst"
+
+    # Fallback to old logic for other analytical keywords
+    if any(kw in query_lower for kw in ANALYTICAL_KEYWORDS):
+        return "analyst"
+
+    return "light"
+
+
+def llm_analyze_with_domain_knowledge(user_query: str, lang_instruction: str) -> str:
+    """First LLM call: Pure reasoning using domain knowledge.
+    Forces the model to think like an energy analyst BEFORE writing SQL.
+    """
+    cache_input = f"domain_reasoning|{user_query}|{lang_instruction}"
+    cached_response = llm_cache.get(cache_input)
+    if cached_response:
+        log.info("Domain Reasoning: (cached)")
+        return cached_response
+
+    system = (
+        "You are a senior energy market analyst for Georgia. "
+        "Interpret the user's question using ONLY the domain knowledge. "
+        "Do not write SQL. Do not mention tables. "
+        "Answer in 3 parts: "
+        "1. Intent: What is the user asking? (e.g., price trend, share, driver) "
+        "2. Key Concepts: List domain concepts involved "
+        "3. Reasoning: Explain using domain knowledge "
+        f"{lang_instruction}"
+    )
+    domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
+    prompt = f"""
+User question: {user_query}
+
+Domain Knowledge:
+{domain_json}
+
+Respond in structured text only.
+"""
+    try:
+        llm = make_gemini()
+        response = llm.invoke([("system", system), ("user", prompt)]).content.strip()
+        log.info(f"Domain Reasoning:\n{response}")
+        llm_cache.set(cache_input, response)
+        return response
+    except Exception as e:
+        log.warning(f"Domain reasoning failed: {e}. Using fallback.")
+        fallback = "Intent: general\nKey Concepts: balancing price\nReasoning: Use xrate and entity shares from trade_derived_entities."
+        llm_cache.set(cache_input, fallback)
+        return fallback
+
+
+def _extract_plan_and_sql(combined_output: str) -> tuple[dict, str]:
+    separator = "---SQL---"
+    if separator not in combined_output:
+        raise ValueError("LLM output malformed: missing '---SQL---' separator")
+
+    plan_text, raw_sql = combined_output.split(separator, 1)
+    normalized_sql = raw_sql.strip()
+    if not normalized_sql:
+        raise ValueError("LLM output malformed: SQL part is empty")
+
+    parsed_plan = json.loads(plan_text.strip())
+    if not isinstance(parsed_plan, dict):
+        raise ValueError("LLM output malformed: plan is not a JSON object")
+    normalized_plan = {
+        "intent": str(parsed_plan.get("intent", "general")),
+        "target": str(parsed_plan.get("target", "")),
+        "period": str(parsed_plan.get("period", "")),
+    }
+    if "chart_strategy" in parsed_plan:
+        normalized_plan["chart_strategy"] = str(parsed_plan.get("chart_strategy", ""))
+    if "chart_groups" in parsed_plan and isinstance(parsed_plan.get("chart_groups"), list):
+        normalized_plan["chart_groups"] = parsed_plan.get("chart_groups")
+    return normalized_plan, normalized_sql
+
+
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
+def _generate_plan_and_sql_with_retry(
+    user_query: str,
+    analysis_mode: str,
+    lang_instruction: str,
+) -> tuple[dict, str]:
+    combined_output = llm_generate_plan_and_sql(
+        user_query=user_query,
+        analysis_mode=analysis_mode,
+        lang_instruction=lang_instruction,
+    )
+    return _extract_plan_and_sql(combined_output)
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline stage
+# ---------------------------------------------------------------------------
+
+def prepare_context(ctx: QueryContext) -> QueryContext:
+    """Stage 0: Fast context preparation before any heavy LLM call."""
+    ctx.mode = detect_analysis_mode(ctx.query)
+    log.info(f"Selected mode: {ctx.mode}")
+
+    ctx.lang_code = detect_language(ctx.query)
+    ctx.lang_instruction = get_language_instruction(ctx.lang_code)
+    log.info(f"Detected language: {ctx.lang_code}")
+
+    ctx.is_conceptual = is_conceptual_question(ctx.query)
+    if ctx.is_conceptual:
+        log.info("Conceptual question detected - skipping plan+SQL generation")
+
+    return ctx
+
+
+def generate_plan(ctx: QueryContext) -> QueryContext:
+    """Stage 1: Generate plan + SQL using LLM fallback path.
+
+    Expects prepare_context() to already have been called in pipeline.
+    """
+    if not ctx.lang_instruction or not ctx.mode:
+        ctx = prepare_context(ctx)
+    if ctx.is_conceptual:
+        return ctx
+
+    # Generate plan + SQL in one LLM call
+    try:
+        ctx.plan, ctx.raw_sql = _generate_plan_and_sql_with_retry(
+            user_query=ctx.query,
+            analysis_mode=ctx.mode,
+            lang_instruction=ctx.lang_instruction,
+        )
+
+    except Exception as exc:
+        log.warning("Strict plan parsing failed after retries, attempting SQL salvage: %s", exc)
+        combined_output = llm_generate_plan_and_sql(
+            user_query=ctx.query,
+            analysis_mode=ctx.mode,
+            lang_instruction=ctx.lang_instruction,
+        )
+        separator = "---SQL---"
+        if separator not in combined_output:
+            log.exception("Combined Plan/SQL generation failed (missing separator)")
+            raise
+        plan_text, raw_sql = combined_output.split(separator, 1)
+        ctx.raw_sql = raw_sql.strip()
+        if not ctx.raw_sql:
+            log.exception("Combined Plan/SQL generation failed (empty SQL)")
+            raise ValueError("LLM output malformed: SQL part is empty")
+        try:
+            parsed_plan = json.loads(plan_text.strip())
+            ctx.plan = parsed_plan if isinstance(parsed_plan, dict) else {"intent": "general", "target": "", "period": ""}
+        except json.JSONDecodeError:
+            log.warning("Plan JSON decoding failed, defaulting to general plan.")
+            ctx.plan = {"intent": "general", "target": "", "period": ""}
+
+    log.info(f"Plan: {ctx.plan}")
+
+    # Check if SQL should be skipped
+    ctx.skip_sql, ctx.skip_sql_reason = should_skip_sql_execution(ctx.query, ctx.plan)
+    if ctx.skip_sql:
+        log.info(f"Skipping SQL execution: {ctx.skip_sql_reason}")
+
+    # Detect aggregation intent
+    ctx.aggregation_intent = detect_aggregation_intent(ctx.query)
+    log.info(f"Aggregation intent: {ctx.aggregation_intent}")
+
+    return ctx

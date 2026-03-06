@@ -336,12 +336,12 @@ SUPPORT_SCHEME_TESTS = [
         expected=ExpectedResult(
             expected_tables=["trade_derived_entities"],
             expected_intent="trend_analysis",
-            should_have_where_clause=True,  # segment = 'Balancing Electricity'
+            should_have_where_clause=True,  # LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
             language="en",
             should_mention=["renewable PPA", "share", "percent"],
             should_have_chart=True
         ),
-        notes="Should filter for segment='Balancing Electricity'"
+        notes="Should filter with LOWER(REPLACE(segment, ' ', '_')) = 'balancing'"
     ),
 ]
 
