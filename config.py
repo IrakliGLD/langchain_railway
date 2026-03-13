@@ -24,7 +24,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 
 # API Security
-APP_SECRET_KEY = os.getenv("APP_SECRET_KEY")
+GATEWAY_SHARED_SECRET = os.getenv("GATEWAY_SHARED_SECRET")
+SESSION_SIGNING_SECRET = os.getenv("SESSION_SIGNING_SECRET")
+EVALUATE_ADMIN_SECRET = os.getenv("EVALUATE_ADMIN_SECRET")
 
 # LLM Configuration
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
@@ -77,8 +79,12 @@ MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
 
 if not SUPABASE_DB_URL:
     raise RuntimeError("Missing SUPABASE_DB_URL")
-if not APP_SECRET_KEY:
-    raise RuntimeError("Missing APP_SECRET_KEY")
+if not GATEWAY_SHARED_SECRET:
+    raise RuntimeError("Missing GATEWAY_SHARED_SECRET")
+if not SESSION_SIGNING_SECRET:
+    raise RuntimeError("Missing SESSION_SIGNING_SECRET")
+if not EVALUATE_ADMIN_SECRET:
+    raise RuntimeError("Missing EVALUATE_ADMIN_SECRET")
 if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
     raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
 

@@ -25,7 +25,7 @@ load_dotenv()
 
 # Configuration
 API_URL = os.getenv("API_URL", "http://localhost:8000/ask")
-APP_KEY = os.getenv("APP_SECRET_KEY", "")
+GATEWAY_KEY = os.getenv("GATEWAY_SHARED_SECRET", "")
 
 # Colors for terminal output
 class Colors:
@@ -55,7 +55,7 @@ def run_query(query_text: str, timeout: int = 60) -> Tuple[Dict[str, Any], float
         response = requests.post(
             API_URL,
             json={"query": query_text},
-            headers={"X-App-Key": APP_KEY},
+            headers={"X-App-Key": GATEWAY_KEY},
             timeout=timeout
         )
         elapsed_ms = (time.time() - start) * 1000

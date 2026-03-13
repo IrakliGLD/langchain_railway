@@ -41,9 +41,11 @@ Test endpoint:
 ```bash
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
-  -H "X-App-Key: <APP_KEY>" \
+  -H "X-App-Key: <GATEWAY_SHARED_SECRET>" \
   -d '{"query":"What is balancing price trend in 2024?","mode":"light"}'
 ```
+
+`/evaluate` is now separate: call it with `X-App-Key: <EVALUATE_ADMIN_SECRET>`.
 
 ## Validation Checklist
 

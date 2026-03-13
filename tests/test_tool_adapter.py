@@ -7,7 +7,9 @@ import pandas as pd
 
 # Ensure config validation passes before importing project modules.
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
-os.environ.setdefault("APP_SECRET_KEY", "test-key")
+os.environ.setdefault("GATEWAY_SHARED_SECRET", "test-gateway-key")
+os.environ.setdefault("SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("EVALUATE_ADMIN_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
@@ -70,4 +72,3 @@ def test_format_tool_preview_message_error_path():
     rendered = tool_adapter.format_tool_preview_message("ds_1", result)
     assert "status: error" in rendered
     assert "unsupported params" in rendered
-

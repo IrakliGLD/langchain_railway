@@ -4,7 +4,9 @@ Tests for session-bound memory controls.
 import os
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
-os.environ.setdefault("APP_SECRET_KEY", "test-key")
+os.environ.setdefault("GATEWAY_SHARED_SECRET", "test-gateway-key")
+os.environ.setdefault("SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("EVALUATE_ADMIN_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 

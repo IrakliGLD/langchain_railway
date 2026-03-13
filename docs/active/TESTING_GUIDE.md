@@ -51,9 +51,11 @@ Run sample request:
 ```bash
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
-  -H "X-App-Key: <APP_KEY>" \
+  -H "X-App-Key: <GATEWAY_SHARED_SECRET>" \
   -d '{"query":"Compare tariffs for 2024","mode":"light"}'
 ```
+
+If you test `/evaluate`, use `X-App-Key: <EVALUATE_ADMIN_SECRET>` instead of the gateway secret.
 
 ## Debugging Order
 

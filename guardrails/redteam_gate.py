@@ -13,7 +13,9 @@ from typing import Any, Dict, List
 
 # Ensure config validation succeeds when gate runs standalone.
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
-os.environ.setdefault("APP_SECRET_KEY", "redteam-gate-key")
+os.environ.setdefault("GATEWAY_SHARED_SECRET", "redteam-gate-gateway-key")
+os.environ.setdefault("SESSION_SIGNING_SECRET", "redteam-gate-session-key")
+os.environ.setdefault("EVALUATE_ADMIN_SECRET", "redteam-gate-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "redteam-gate-openai-key")
 

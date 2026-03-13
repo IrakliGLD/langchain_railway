@@ -4,6 +4,7 @@ Basic tests for main.py functionality.
 To run tests: pytest tests/
 """
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ import pandas as pd
 import numpy as np
 import sqlalchemy
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 
@@ -46,7 +48,9 @@ class DummyEngine:
 
 # Provide required environment variables and stub the engine *before* importing main.
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
-os.environ.setdefault("APP_SECRET_KEY", "test-key")
+os.environ.setdefault("GATEWAY_SHARED_SECRET", "test-gateway-key")
+os.environ.setdefault("SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("EVALUATE_ADMIN_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore[assignment]
@@ -61,6 +65,7 @@ from main import (
     build_share_shift_notes,
     ensure_share_dataframe,
 )  # noqa: E402
+import main as main_module  # noqa: E402
 from analysis.stats import quick_stats, rows_to_preview
 from agent.tools import composition_tools
 from agent.tools import common as tool_common
@@ -234,6 +239,53 @@ class TestTypedToolRowContract:
         assert out_rows == [("2024-01-01", 10.5), ("2024-02-01", 11.5)]
         assert all(isinstance(r, tuple) for r in out_rows)
         assert list(df.columns) == cols
+
+
+def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
+    def fake_process_query(**_kwargs):
+        return SimpleNamespace(
+            summary="ok",
+            chart_data=None,
+            chart_type=None,
+            chart_meta={},
+            stage_timings_ms={},
+            summary_claims=[],
+            summary_citations=[],
+            summary_confidence=1.0,
+            summary_provenance_coverage=1.0,
+            summary_claim_provenance=[],
+            summary_provenance_gate_passed=True,
+            summary_provenance_gate_reason="ok",
+            provenance_query_hash="",
+            provenance_source="tool",
+        )
+
+    monkeypatch.setattr(main_module, "process_query", fake_process_query)
+    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+
+    client = TestClient(main_module.app)
+
+    ok = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"X-App-Key": "test-gateway-key"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["answer"] == "ok"
+    assert ok.headers.get("X-Session-Token")
+
+    unauthorized = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"X-App-Key": "test-evaluate-key"},
+    )
+    assert unauthorized.status_code == 401
+
+
+def test_evaluate_rejects_gateway_secret():
+    client = TestClient(main_module.app)
+    response = client.get("/evaluate", headers={"X-App-Key": "test-gateway-key"})
+    assert response.status_code == 401
 
 
 class TestTradeSharePivot:

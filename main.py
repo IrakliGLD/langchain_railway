@@ -564,7 +564,7 @@ def on_startup() -> None:
 @app.get("/ask")
 def ask_get():
     return {
-        "message": "✅ /ask is active. Send POST with JSON: {'query': 'What was the average balancing price in 2023?'} and header X-App-Key."
+        "message": "✅ /ask is active. Send POST with JSON: {'query': 'What was the average balancing price in 2023?'} and header X-App-Key using the gateway secret."
     }
 
 @app.get("/healthz")
@@ -639,9 +639,9 @@ def evaluate(
         GET /evaluate?type=analyst            (Test only analyst queries)
         GET /evaluate?query_id=sv_001         (Test specific query)
 
-    Authentication: Requires X-App-Key header
+    Authentication: Requires X-App-Key header using the evaluate admin secret
     """
-    if x_app_key != APP_SECRET_KEY:
+    if x_app_key != EVALUATE_ADMIN_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
@@ -911,7 +911,7 @@ def ask_post(
         response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
         return request_llm_telemetry
 
-    if x_app_key != APP_SECRET_KEY:
+    if x_app_key != GATEWAY_SHARED_SECRET:
         _finalize_request_telemetry()
         log_security_event(
             "unauthorized_app_key",
@@ -956,7 +956,10 @@ def ask_post(
         raise HTTPException(status_code=503, detail="Service busy. Please retry shortly.")
 
     try:
-        session_id, session_token, reused_existing_session = get_or_issue_session(x_session_token, APP_SECRET_KEY)
+        session_id, session_token, reused_existing_session = get_or_issue_session(
+            x_session_token,
+            SESSION_SIGNING_SECRET,
+        )
         response.headers["X-Session-Token"] = session_token
         if x_session_token and not reused_existing_session:
             log_security_event(
