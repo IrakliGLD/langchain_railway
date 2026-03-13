@@ -154,6 +154,7 @@ The upstream `D:\export_enai` source is strong evidence that chat access is now 
 - edge-function quota pre-check
 - DB-side own-row and quota enforcement
 
+
 For `langchain_railway`, this means the main upstream boundary concern has shifted:
 - before: the proxy function itself appeared under-enforced
 - now: the remaining risk is mainly that Railway still trusts the proxy by shared secret rather than by end-user or service principal identity
