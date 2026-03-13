@@ -83,6 +83,7 @@ def get_tariffs(
     if not select_parts:
         raise ValueError("No tariff entities selected")
 
+    select_clause = ",\n    ".join(select_parts)
     sql = f"""
 WITH dates AS (
     SELECT DISTINCT date
@@ -92,11 +93,10 @@ WITH dates AS (
 )
 SELECT
     d.date,
-    {",\n    ".join(select_parts)}
+    {select_clause}
 FROM dates d
 ORDER BY d.date
 LIMIT :limit
 """.strip()
 
     return run_text_query(sql, params)
-

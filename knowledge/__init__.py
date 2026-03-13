@@ -7,7 +7,7 @@ and a simple keyword-to-file mapping for context selection.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional, Set
 
 log = logging.getLogger("Enai")
 
@@ -262,3 +262,50 @@ def get_knowledge_json(user_query: str = "", use_cache: bool = True) -> str:
             relevant[stem] = content
 
     return json.dumps(relevant, indent=2, ensure_ascii=False)
+
+
+def get_knowledge_json_with_topics(
+    preferred_topics: Optional[Iterable[str]],
+    *,
+    fallback_query: str = "",
+    use_cache: bool = False,
+) -> str:
+    """Return knowledge JSON using preferred topics first, with query fallback."""
+
+    if use_cache and not preferred_topics:
+        return _KNOWLEDGE_JSON
+
+    preferred = {
+        topic_name
+        for topic_name in (str(topic).strip() for topic in (preferred_topics or []))
+        if topic_name in _KNOWLEDGE
+    }
+
+    if preferred:
+        relevant = {
+            stem: _KNOWLEDGE[stem]
+            for stem in sorted(preferred)
+            if stem in _KNOWLEDGE
+        }
+        return json.dumps(relevant, indent=2, ensure_ascii=False)
+
+    return get_knowledge_json(fallback_query, use_cache=use_cache)
+
+
+def get_knowledge_for_topics(
+    preferred_topics: Optional[Iterable[str]],
+    *,
+    fallback_query: str = "",
+) -> str:
+    """Return concatenated Markdown using preferred topics first, with query fallback."""
+
+    preferred = {
+        topic_name
+        for topic_name in (str(topic).strip() for topic in (preferred_topics or []))
+        if topic_name in _KNOWLEDGE
+    }
+    if preferred:
+        sections = [_KNOWLEDGE[stem] for stem in sorted(preferred) if stem in _KNOWLEDGE]
+        return "\n\n---\n\n".join(sections)
+
+    return get_knowledge_for_query(fallback_query)

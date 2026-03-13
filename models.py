@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
+from contracts.question_analysis import QuestionAnalysis
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +30,9 @@ class QueryContext:
     conversation_history: Optional[List[Dict[str, str]]] = None
     trace_id: str = ""
     session_id: str = ""
+    question_analysis: Optional[QuestionAnalysis] = None
+    question_analysis_error: str = ""
+    question_analysis_source: str = ""
 
     # --- planner outputs ---
     plan: Dict[str, Any] = dc_field(default_factory=dict)
@@ -65,6 +69,8 @@ class QueryContext:
     preview: str = ""
     stats_hint: str = ""
     share_summary_override: Optional[str] = None
+    why_summary_override: Optional[str] = None
+    why_summary_claims: List[str] = dc_field(default_factory=list)
     correlation_results: Dict[str, Any] = dc_field(default_factory=dict)
     add_trendlines: bool = False
     trendline_extend_to: Optional[str] = None

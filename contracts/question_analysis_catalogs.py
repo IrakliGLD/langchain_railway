@@ -1,0 +1,150 @@
+"""Compact runtime catalogs for the question-analyzer stage."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+
+QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
+    {
+        "name": "conceptual_definition",
+        "use_for": "Definition or meaning questions about terms, entities, or market concepts.",
+    },
+    {
+        "name": "factual_lookup",
+        "use_for": "Single fact or direct value lookup for a known entity, metric, or period.",
+    },
+    {
+        "name": "data_retrieval",
+        "use_for": "Requests for data series, tables, or descriptive retrieval without explanation.",
+    },
+    {
+        "name": "data_explanation",
+        "use_for": "Why/how questions about observed change, variation, or drivers in data.",
+    },
+    {
+        "name": "comparison",
+        "use_for": "Queries comparing entities, periods, or metrics.",
+    },
+    {
+        "name": "forecast",
+        "use_for": "Questions about projection, forecast, future trend, or trendline extension.",
+    },
+    {
+        "name": "ambiguous",
+        "use_for": "The query is too unclear or underspecified to route confidently.",
+    },
+    {
+        "name": "unsupported",
+        "use_for": "The query is outside the supported scope of the system.",
+    },
+]
+
+
+QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
+    {
+        "name": "general_definitions",
+        "concepts": ["definition", "terminology", "general electricity market concepts"],
+        "use_for": "General definitions and conceptual electricity-market explanations.",
+    },
+    {
+        "name": "balancing_price",
+        "concepts": ["balancing price", "p_bal", "price drivers", "shares", "xrate", "variation"],
+        "use_for": "Balancing price formation, variation, drivers, and seasonal patterns.",
+    },
+    {
+        "name": "market_structure",
+        "concepts": ["GENEX", "ESCO", "GSE", "participants", "market roles", "balancing market"],
+        "use_for": "Market participants, institutions, and market structure questions.",
+    },
+    {
+        "name": "tariffs",
+        "concepts": ["regulated tariff", "GNERC", "Enguri", "Gardabani", "cost-plus"],
+        "use_for": "Tariff entities, tariff logic, and regulated pricing questions.",
+    },
+    {
+        "name": "cfd_ppa",
+        "concepts": ["CfD", "PPA", "support scheme", "strike price"],
+        "use_for": "Support schemes, PPA/CfD concepts, and scheme-specific explanations.",
+    },
+    {
+        "name": "currency_influence",
+        "concepts": ["exchange rate", "GEL/USD", "xrate", "USD-linked costs"],
+        "use_for": "Exchange-rate impact and currency-linked price pressure.",
+    },
+    {
+        "name": "seasonal_patterns",
+        "concepts": ["seasonality", "summer", "winter", "seasonal trend"],
+        "use_for": "Seasonal market behavior and seasonal trend questions.",
+    },
+    {
+        "name": "generation_mix",
+        "concepts": ["generation", "technology mix", "hydro", "thermal", "wind", "solar"],
+        "use_for": "Generation composition and generation quantity questions.",
+    },
+    {
+        "name": "sql_examples",
+        "concepts": ["query patterns", "SQL examples", "analysis templates"],
+        "use_for": "Planning support for SQL-oriented data queries.",
+    },
+]
+
+
+QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
+    {
+        "name": "get_prices",
+        "concepts": [
+            "balancing price",
+            "deregulated price",
+            "guaranteed capacity price",
+            "exchange rate",
+            "GEL",
+            "USD",
+            "trend",
+        ],
+        "use_for": "Price or exchange-rate retrieval over time or for a stated period.",
+        "avoid_for": "Conceptual definitions, tariff questions, and share-only composition queries.",
+        "main_params": ["metric", "currency", "granularity", "start_date", "end_date"],
+    },
+    {
+        "name": "get_tariffs",
+        "concepts": ["regulated tariffs", "GNERC", "Enguri", "Gardabani", "cost-plus"],
+        "use_for": "Tariff lookups and tariff comparisons.",
+        "avoid_for": "Balancing price questions, conceptual definitions, and generation mix questions.",
+        "main_params": ["entities", "currency", "start_date", "end_date"],
+    },
+    {
+        "name": "get_generation_mix",
+        "concepts": ["generation", "technology mix", "hydro", "thermal", "wind", "solar", "quantity", "share"],
+        "use_for": "Generation mix or quantity by technology or type.",
+        "avoid_for": "Tariffs, balancing price, and conceptual definitions.",
+        "main_params": ["types", "mode", "granularity", "start_date", "end_date"],
+    },
+    {
+        "name": "get_balancing_composition",
+        "concepts": ["balancing shares", "composition", "imports", "PPA share", "hydro share"],
+        "use_for": "Balancing market composition and share questions.",
+        "avoid_for": "Price-only questions, conceptual definitions, and tariffs.",
+        "main_params": ["entities", "start_date", "end_date"],
+    },
+]
+
+
+QUESTION_ANALYSIS_CHART_POLICY: List[Dict[str, str]] = [
+    {
+        "case": "definition_or_conceptual",
+        "hint": "Usually no chart.",
+    },
+    {
+        "case": "single_period_explanation",
+        "hint": "Usually no chart unless the user explicitly asks.",
+    },
+    {
+        "case": "trend_or_time_series",
+        "hint": "Usually recommend a line chart.",
+    },
+    {
+        "case": "share_or_composition",
+        "hint": "Usually recommend stacked or composition-style charts.",
+    },
+]

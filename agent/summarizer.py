@@ -4,6 +4,7 @@ Pipeline Stage 4: LLM Summarization
 Generates natural language answers — either from domain knowledge (conceptual)
 or from SQL query results (data summarization).
 """
+import json
 import logging
 import re
 import hashlib
@@ -12,7 +13,12 @@ from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Set
 
 from models import QueryContext
-from core.llm import llm_summarize, llm_summarize_structured, SummaryEnvelope
+from core.llm import (
+    llm_summarize,
+    llm_summarize_structured,
+    SummaryEnvelope,
+    get_relevant_domain_knowledge,
+)
 from context import scrub_schema_mentions
 from config import PROVENANCE_MIN_COVERAGE
 from utils.metrics import metrics
@@ -307,7 +313,39 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     Reads: ctx.query, ctx.lang_instruction, ctx.conversation_history
     Writes: ctx.summary
     """
-    query_lower = ctx.query.lower()
+    analyzer_active = ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+    routing_query = (
+        ctx.question_analysis.canonical_query_en
+        if analyzer_active and ctx.question_analysis is not None
+        else ctx.query
+    )
+    preferred_topics = None
+    if analyzer_active and ctx.question_analysis is not None:
+        ranked_topics = sorted(
+            ctx.question_analysis.knowledge.candidate_topics,
+            key=lambda candidate: candidate.score,
+            reverse=True,
+        )
+        preferred_topics = [
+            candidate.name.value
+            for candidate in ranked_topics
+            if candidate.score >= 0.25
+        ][:3]
+    query_lower = routing_query.lower()
+    domain_knowledge = get_relevant_domain_knowledge(
+        routing_query,
+        use_cache=False,
+        preferred_topics=preferred_topics,
+    )
+    if analyzer_active and preferred_topics:
+        log.info("Using active question-analyzer topics for conceptual answer: %s", preferred_topics)
+    try:
+        knowledge_payload = json.loads(domain_knowledge) if domain_knowledge else {}
+    except json.JSONDecodeError:
+        knowledge_payload = {}
+    matched_topics = list(knowledge_payload.keys()) if isinstance(knowledge_payload, dict) else []
+    has_filtered_knowledge = bool(matched_topics)
+    has_domain_specific_knowledge = any(topic != "general_definitions" for topic in matched_topics)
 
     # General energy terms
     general_terms = [
@@ -332,7 +370,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     ]
 
     is_general_question = any(term in query_lower for term in general_terms)
-    is_domain_specific = any(term in query_lower for term in domain_terms)
+    is_domain_specific = any(term in query_lower for term in domain_terms) or has_domain_specific_knowledge
 
     if is_general_question and not is_domain_specific:
         conceptual_hint = (
@@ -349,11 +387,12 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             "Structure your answer with these two clear sections."
         )
         log.info("📖 General conceptual question - will provide definition + Georgia context")
-    elif is_domain_specific:
+    elif is_domain_specific or has_filtered_knowledge:
         conceptual_hint = (
             "NOTE: This is a domain-specific conceptual question about the Georgian electricity market. "
             "No database query was executed. "
-            "Answer using domain knowledge about Georgia's energy sector."
+            "Answer using the provided domain knowledge about Georgia's energy sector. "
+            "If the concept appears in the domain knowledge, define it directly from that material."
         )
         log.info("🇬🇪 Domain-specific conceptual question - will use Georgia domain knowledge")
     else:
@@ -376,6 +415,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             stats_hint=conceptual_hint,
             lang_instruction=ctx.lang_instruction,
             conversation_history=ctx.conversation_history,
+            domain_knowledge=domain_knowledge,
         )
         ctx.summary = envelope.answer
         ctx.summary_claims = list(envelope.claims)
@@ -394,6 +434,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             stats_hint=conceptual_hint,
             lang_instruction=ctx.lang_instruction,
             conversation_history=ctx.conversation_history,
+            domain_knowledge=domain_knowledge,
         )
         ctx.summary_claims = []
         ctx.summary_citations = ["legacy_text_fallback"]
@@ -419,6 +460,11 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
         ctx.summary_citations = ["deterministic_share_summary"]
         ctx.summary_confidence = 1.0
+    elif ctx.why_summary_override:
+        ctx.summary = ctx.why_summary_override
+        ctx.summary_claims = list(ctx.why_summary_claims or _derive_claims_from_text(ctx.summary))
+        ctx.summary_citations = ["deterministic_why_summary"]
+        ctx.summary_confidence = 0.9
     else:
         try:
             envelope = llm_summarize_structured(

@@ -109,6 +109,229 @@ def build_share_shift_notes(
     return notes
 
 
+def _share_label(key: str) -> str:
+    meta = BALANCING_SHARE_METADATA.get(key, {})
+    return str(meta.get("label", key.replace("share_", "").replace("_", " ")))
+
+
+def _title_share_label(key: str) -> str:
+    label = _share_label(key)
+    return label[:1].upper() + label[1:] if label else label
+
+
+def _join_labels(keys: List[str]) -> str:
+    labels = [_share_label(key) for key in keys if key]
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return f"{', '.join(labels[:-1])}, and {labels[-1]}"
+
+
+def _is_balancing_price_query(query_text: str) -> bool:
+    query_lower = query_text.lower()
+    has_price = any(term in query_lower for term in ["price", "p_bal"])
+    has_balancing_context = any(
+        term in query_lower
+        for term in [
+            "balancing price",
+            "balancing electricity price",
+            "balancing electricity",
+            "balancing market",
+            " p_bal",
+        ]
+    ) or query_lower.startswith("p_bal")
+    return has_price and has_balancing_context
+
+
+def _format_share_pct(value: float) -> str:
+    numeric = float(value)
+    if abs(numeric) <= 1:
+        numeric *= 100.0
+    return f"{numeric:.1f}%"
+
+
+def _build_why_claims(
+    cur_gel: Optional[float],
+    prev_gel: Optional[float],
+    cur_xrate: Optional[float],
+    prev_xrate: Optional[float],
+    cur_shares: dict[str, float],
+    prev_shares: dict[str, float],
+) -> List[str]:
+    claims: List[str] = []
+    if cur_gel is not None and prev_gel is not None:
+        claims.append(f"Balancing price moved from {prev_gel:.1f} to {cur_gel:.1f} GEL/MWh.")
+    if cur_xrate is not None and prev_xrate is not None:
+        claims.append(f"Exchange rate moved from {prev_xrate:.2f} to {cur_xrate:.2f}.")
+
+    deltas = []
+    for key in sorted(set(cur_shares) | set(prev_shares)):
+        cur_val = cur_shares.get(key)
+        prev_val = prev_shares.get(key)
+        if cur_val is None or prev_val is None:
+            continue
+        delta = float(cur_val) - float(prev_val)
+        if abs(delta) < 0.005:
+            continue
+        deltas.append((key, delta))
+
+    deltas.sort(key=lambda item: abs(item[1]), reverse=True)
+    for key, _delta in deltas[:3]:
+        claims.append(
+            f"{_title_share_label(key)} share moved from "
+            f"{_format_share_pct(prev_shares[key])} to {_format_share_pct(cur_shares[key])}."
+        )
+    return claims[:8]
+
+
+def _build_why_provenance_snapshot(
+    current_ts: Optional[pd.Timestamp],
+    previous_ts: Optional[pd.Timestamp],
+    *,
+    cur_gel: Optional[float],
+    prev_gel: Optional[float],
+    cur_usd: Optional[float],
+    prev_usd: Optional[float],
+    cur_xrate: Optional[float],
+    prev_xrate: Optional[float],
+    cur_shares: dict[str, float],
+    prev_shares: dict[str, float],
+) -> pd.DataFrame:
+    share_cols = sorted(set(cur_shares) | set(prev_shares))
+    cols = ["date", "p_bal_gel", "p_bal_usd", "xrate"] + share_cols
+    records: List[Dict[str, Any]] = []
+
+    def _build_record(
+        ts: Optional[pd.Timestamp],
+        gel: Optional[float],
+        usd: Optional[float],
+        xrate: Optional[float],
+        shares: dict[str, float],
+    ) -> None:
+        if ts is None or pd.isna(ts):
+            return
+        record: Dict[str, Any] = {
+            "date": pd.to_datetime(ts),
+            "p_bal_gel": gel,
+            "p_bal_usd": usd,
+            "xrate": xrate,
+        }
+        for key in share_cols:
+            record[key] = shares.get(key)
+        records.append(record)
+
+    _build_record(previous_ts, prev_gel, prev_usd, prev_xrate, prev_shares)
+    _build_record(current_ts, cur_gel, cur_usd, cur_xrate, cur_shares)
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)[cols]
+
+
+def _generate_why_summary_payload(
+    cur_gel: Optional[float],
+    prev_gel: Optional[float],
+    cur_xrate: Optional[float],
+    prev_xrate: Optional[float],
+    cur_shares: dict[str, float],
+    prev_shares: dict[str, float],
+) -> Tuple[Optional[str], List[str]]:
+    """Build an evidence-based explanation for balancing-price variation."""
+    if cur_gel is None or prev_gel is None:
+        return None, []
+
+    deltas = {
+        key: cur_shares.get(key, 0.0) - prev_shares.get(key, 0.0)
+        for key in sorted(set(cur_shares) | set(prev_shares))
+    }
+    significant = [
+        (key, delta, BALANCING_SHARE_METADATA.get(key, {}).get("cost", "unknown"))
+        for key, delta in deltas.items()
+        if abs(delta) >= 0.005
+    ]
+    significant.sort(key=lambda item: abs(item[1]), reverse=True)
+
+    expensive_up = [key for key, delta, cost in significant if delta > 0 and cost in ("expensive", "moderate")]
+    expensive_down = [key for key, delta, cost in significant if delta < 0 and cost in ("expensive", "moderate")]
+    cheap_up = [key for key, delta, cost in significant if delta > 0 and cost == "cheap"]
+    cheap_down = [key for key, delta, cost in significant if delta < 0 and cost == "cheap"]
+    mix_pressure = 0
+    if (expensive_up or cheap_down) and not (expensive_down or cheap_up):
+        mix_pressure = 1
+    elif (expensive_down or cheap_up) and not (expensive_up or cheap_down):
+        mix_pressure = -1
+
+    price_delta = cur_gel - prev_gel
+    price_direction = 1 if price_delta > 0 else -1 if price_delta < 0 else 0
+    xrate_direction = 0
+    if cur_xrate is not None and prev_xrate is not None:
+        xrate_delta = cur_xrate - prev_xrate
+        xrate_direction = 1 if xrate_delta > 0 else -1 if xrate_delta < 0 else 0
+
+    sentences: List[str] = []
+    if price_direction > 0:
+        sentences.append("Compared with the previous month, the observed balancing price was higher.")
+    elif price_direction < 0:
+        sentences.append("Compared with the previous month, the observed balancing price was lower.")
+    else:
+        sentences.append("Compared with the previous month, the observed balancing price was broadly stable.")
+
+    if mix_pressure > 0:
+        parts: List[str] = []
+        if expensive_up:
+            parts.append(f"higher-cost sources such as {_join_labels(expensive_up[:2])} gained weight")
+        if cheap_down:
+            parts.append(f"cheaper sources such as {_join_labels(cheap_down[:2])} lost weight")
+        sentences.append(f"{' while '.join(parts).capitalize()}. That is consistent with upward pressure on the weighted-average balancing price.")
+    elif mix_pressure < 0:
+        parts = []
+        if expensive_down:
+            parts.append(f"higher-cost sources such as {_join_labels(expensive_down[:2])} lost weight")
+        if cheap_up:
+            parts.append(f"cheaper sources such as {_join_labels(cheap_up[:2])} gained weight")
+        sentences.append(f"{' while '.join(parts).capitalize()}. That is consistent with downward pressure on the weighted-average balancing price.")
+    elif significant:
+        gained = [key for key, delta, _ in significant if delta > 0][:2]
+        lost = [key for key, delta, _ in significant if delta < 0][:2]
+        mix_parts: List[str] = []
+        if gained:
+            mix_parts.append(f"{_join_labels(gained)} expanded")
+        if lost:
+            mix_parts.append(f"{_join_labels(lost)} contracted")
+        if mix_parts:
+            sentences.append(
+                f"The balancing mix changed, but the observed share shifts do not point to a single clear cost direction: {' while '.join(mix_parts)}."
+            )
+    else:
+        sentences.append("The available month-over-month share data do not show a large mix shift.")
+
+    if xrate_direction > 0:
+        sentences.append(
+            "The exchange rate also moved higher, which is consistent with upward pressure on USD-linked imports and thermal PPAs."
+        )
+    elif xrate_direction < 0:
+        sentences.append(
+            "The exchange rate moved lower, which is consistent with downward pressure on USD-linked imports and thermal PPAs."
+        )
+
+    if mix_pressure == 0 and xrate_direction == 0:
+        sentences.append(
+            "From the available mix and exchange-rate signals, there is no single dominant observed driver for the month-over-month price change."
+        )
+    elif price_direction != 0 and mix_pressure != 0 and mix_pressure != price_direction and xrate_direction != price_direction:
+        sentences.append(
+            "The observed mix and exchange-rate signals do not fully explain the direction of the price move, so other pricing components may also have mattered."
+        )
+
+    sentences.append(
+        "Balancing price is a weighted average of the electricity actually sold as balancing energy, so variation usually follows supplier mix and currency-sensitive costs."
+    )
+    claims = _build_why_claims(cur_gel, prev_gel, cur_xrate, prev_xrate, cur_shares, prev_shares)
+    return (" ".join(sentence.strip() for sentence in sentences if sentence.strip()) or None, claims)
+
+
 def _parse_period_hint(period_hint: str, user_query: str) -> Optional[pd.Period]:
     """Derive a pandas Period (monthly or yearly) from the LLM plan or the raw query."""
     if not period_hint:
@@ -603,6 +826,7 @@ def _build_why_context(ctx: QueryContext) -> None:
         return
 
     prev_row = df[df[t_series_col] < cur_row[t_series_col].iloc[0]].tail(1)
+    prev_ts = pd.to_datetime(prev_row[t_series_col].iloc[0], errors="coerce") if not prev_row.empty else None
 
     def _get_val(row, cols_):
         if row.empty:
@@ -734,6 +958,44 @@ def _build_why_context(ctx: QueryContext) -> None:
     why_ctx["notes"].append("When GEL depreciates, electricity prices generally rise because USD-denominated constituents (like imported gas) become more expensive.")
     why_ctx["notes"].append("If GEL depreciates, GEL-denominated balancing price rises due to USD-linked gas/import costs.")
     why_ctx["notes"].append("Composition shift toward thermal or import increases price; more hydro or renewable lowers it.")
+
+    if _is_balancing_price_query(ctx.query):
+        why_summary, why_claims = _generate_why_summary_payload(
+            cur_gel,
+            prev_gel,
+            cur_xrate,
+            prev_xrate,
+            cur_shares,
+            prev_shares,
+        )
+        if why_summary and why_claims:
+            ctx.why_summary_override = why_summary
+            ctx.why_summary_claims = why_claims
+            why_prov_df = _build_why_provenance_snapshot(
+                target_ts,
+                prev_ts,
+                cur_gel=cur_gel,
+                prev_gel=prev_gel,
+                cur_usd=cur_usd,
+                prev_usd=prev_usd,
+                cur_xrate=cur_xrate,
+                prev_xrate=prev_xrate,
+                cur_shares=cur_shares,
+                prev_shares=prev_shares,
+            )
+            if not why_prov_df.empty:
+                base_hash = str(ctx.provenance_query_hash or "")
+                if cur_shares or prev_shares:
+                    why_hash = sql_query_hash(f"{base_hash}|why_summary|{BALANCING_SHARE_PIVOT_SQL}")
+                else:
+                    why_hash = base_hash or sql_query_hash(f"{ctx.query}|why_summary")
+                stamp_provenance(
+                    ctx,
+                    list(why_prov_df.columns),
+                    [tuple(r) for r in why_prov_df.itertuples(index=False, name=None)],
+                    source=str(ctx.provenance_source or "sql"),
+                    query_hash=why_hash,
+                )
 
     ctx.stats_hint += "\n\n--- CAUSAL CONTEXT ---\n" + json.dumps(why_ctx, default=str, indent=2)
     log.info("Why-context attached to stats_hint.")

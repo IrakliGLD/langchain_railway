@@ -1,6 +1,7 @@
 """
 Tests for Stage-0 firewall and prompt/guardrail enforcement paths.
 """
+import importlib
 import os
 
 import pandas as pd
@@ -50,6 +51,83 @@ from agent import summarizer, sql_executor  # noqa: E402
 from agent import analyzer  # noqa: E402
 from agent.provenance import sql_query_hash  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
+import core.llm as llm_core  # noqa: E402
+
+
+def test_tool_registry_imports_without_syntax_error():
+    registry = importlib.import_module("agent.tools.registry")
+    tools = registry.list_tools()
+
+    assert "get_prices" in tools
+    assert "get_tariffs" in tools
+
+
+def test_conceptual_answer_uses_filtered_domain_knowledge_for_genex(monkeypatch):
+    captured = {}
+
+    def _fake_structured(*_args, **kwargs):
+        captured["domain_knowledge"] = kwargs.get("domain_knowledge", "")
+        return SummaryEnvelope(
+            answer="GENEX is the Georgian Energy Exchange and operates the day-ahead and intraday electricity markets.",
+            claims=["GENEX is the Georgian Energy Exchange."],
+            citations=["domain_knowledge"],
+            confidence=0.95,
+        )
+
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: '{"market_structure": "### GENEX (Georgian Energy Exchange)\\nOperates day-ahead and intraday markets."}',
+    )
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+
+    ctx = QueryContext(query="What is genex?", lang_instruction="Respond in English.")
+    out = summarizer.answer_conceptual(ctx)
+
+    assert "GENEX" in captured["domain_knowledge"]
+    assert "day-ahead and intraday" in out.summary
+    assert out.summary_citations == ["domain_knowledge"]
+    assert out.summary_provenance_gate_reason == "not_applicable_conceptual"
+
+
+def test_structured_summary_cache_key_changes_with_domain_knowledge(monkeypatch):
+    cache_keys = []
+
+    class _DummyCache:
+        def get(self, key):
+            cache_keys.append(("get", key))
+            return None
+
+        def set(self, key, value):
+            cache_keys.append(("set", key))
+
+    class _DummyMessage:
+        content = '{"answer":"GENEX is an exchange.","claims":["GENEX is an exchange."],"citations":["domain_knowledge"],"confidence":0.9}'
+
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "make_openai", lambda: object())
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", lambda *_args, **_kwargs: _DummyMessage())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    llm_core.llm_summarize_structured(
+        user_query="What is genex?",
+        data_preview="",
+        stats_hint="conceptual",
+        lang_instruction="Respond in English.",
+        domain_knowledge='{"market_structure":"GENEX entry"}',
+    )
+    llm_core.llm_summarize_structured(
+        user_query="What is genex?",
+        data_preview="",
+        stats_hint="conceptual",
+        lang_instruction="Respond in English.",
+        domain_knowledge='{"market_structure":"UPDATED GENEX entry"}',
+    )
+
+    get_keys = [key for action, key in cache_keys if action == "get"]
+    assert len(get_keys) == 2
+    assert get_keys[0] != get_keys[1]
 
 
 def test_firewall_blocks_instruction_override():
@@ -314,3 +392,222 @@ def test_share_fallback_restamps_provenance_and_passes_gate(monkeypatch):
     assert out.summary_provenance_gate_passed is True
     assert out.summary_claim_provenance[0]["cell_refs"]
     assert any(ref["column"] == "share_import" for ref in out.summary_claim_provenance[0]["cell_refs"])
+
+
+def test_why_price_queries_use_deterministic_summary_override(monkeypatch):
+    corr_df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+            "p_bal_gel": [100.0, 120.0],
+            "p_bal_usd": [31.7, 36.4],
+            "xrate": [3.15, 3.30],
+            "share_import": [0.20, 0.30],
+            "share_deregulated_hydro": [0.50, 0.35],
+            "share_regulated_hpp": [0.20, 0.15],
+            "share_renewable_ppa": [0.05, 0.05],
+            "enguri_tariff_gel": [10.0, 10.0],
+            "gardabani_tpp_tariff_gel": [20.0, 20.0],
+            "grouped_old_tpp_tariff_gel": [18.0, 18.0],
+        }
+    )
+    share_panel = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+            "segment": ["balancing", "balancing"],
+            "share_import": [0.20, 0.30],
+            "share_deregulated_hydro": [0.50, 0.35],
+            "share_regulated_hpp": [0.20, 0.15],
+            "share_renewable_ppa": [0.05, 0.05],
+            "share_thermal_ppa": [0.05, 0.15],
+        }
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: share_panel)
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM path should not be used")),
+    )
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2021?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+                "p_bal_gel": [100.0, 120.0],
+                "xrate": [3.15, 3.30],
+            }
+        ),
+        cols=["date", "p_bal_gel", "xrate"],
+        rows=[
+            (pd.Timestamp("2021-10-01"), 100.0, 3.15),
+            (pd.Timestamp("2021-11-01"), 120.0, 3.30),
+        ],
+        provenance_cols=["date", "p_bal_gel", "xrate"],
+        provenance_rows=[
+            (pd.Timestamp("2021-10-01"), 100.0, 3.15),
+            (pd.Timestamp("2021-11-01"), 120.0, 3.30),
+        ],
+        provenance_query_hash="why123",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+    out = summarizer.summarize_data(enriched)
+
+    assert "citation-grade grounding" not in out.summary
+    assert "weighted average" in out.summary.lower()
+    assert "import" in out.summary.lower() or "hydro" in out.summary.lower()
+    assert out.summary_claims
+    assert "Balancing price moved from 100.0 to 120.0 GEL/MWh." in out.summary_claims
+    assert "Imports share moved from 20.0% to 30.0%." in out.summary_claims
+    assert "deterministic_why_summary" in out.summary_citations
+    assert any(citation.startswith("claim_") for citation in out.summary_citations)
+    assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)
+    assert out.summary_claim_provenance
+    assert out.summary_provenance_gate_passed is True
+
+
+def test_why_share_queries_do_not_trigger_price_override(monkeypatch):
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: pd.DataFrame({"date": []}))
+
+    ctx = QueryContext(
+        query="Why did import share in balancing electricity change in November 2021?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+                "share_import": [0.20, 0.30],
+            }
+        ),
+        cols=["date", "share_import"],
+        rows=[
+            (pd.Timestamp("2021-10-01"), 0.20),
+            (pd.Timestamp("2021-11-01"), 0.30),
+        ],
+    )
+
+    enriched = analyzer.enrich(ctx)
+
+    assert enriched.why_summary_override is None
+    assert enriched.why_summary_claims == []
+
+
+def test_why_price_summary_does_not_claim_mix_shift_without_evidence(monkeypatch):
+    corr_df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+            "p_bal_gel": [120.0, 115.0],
+            "p_bal_usd": [36.4, 35.9],
+            "xrate": [3.35, 3.20],
+            "share_import": [0.25, 0.25],
+            "share_deregulated_hydro": [0.35, 0.35],
+            "share_regulated_hpp": [0.20, 0.20],
+            "share_renewable_ppa": [0.10, 0.10],
+            "enguri_tariff_gel": [10.0, 10.0],
+            "gardabani_tpp_tariff_gel": [20.0, 20.0],
+            "grouped_old_tpp_tariff_gel": [18.0, 18.0],
+        }
+    )
+    flat_share_panel = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+            "segment": ["balancing", "balancing"],
+            "share_import": [0.25, 0.25],
+            "share_deregulated_hydro": [0.35, 0.35],
+            "share_regulated_hpp": [0.20, 0.20],
+            "share_renewable_ppa": [0.10, 0.10],
+            "share_thermal_ppa": [0.10, 0.10],
+        }
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: flat_share_panel)
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM path should not be used")),
+    )
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2021?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+                "p_bal_gel": [120.0, 115.0],
+                "xrate": [3.35, 3.20],
+            }
+        ),
+        cols=["date", "p_bal_gel", "xrate"],
+        rows=[
+            (pd.Timestamp("2021-10-01"), 120.0, 3.35),
+            (pd.Timestamp("2021-11-01"), 115.0, 3.20),
+        ],
+        provenance_cols=["date", "p_bal_gel", "xrate"],
+        provenance_rows=[
+            (pd.Timestamp("2021-10-01"), 120.0, 3.35),
+            (pd.Timestamp("2021-11-01"), 115.0, 3.20),
+        ],
+        provenance_query_hash="whyxrate",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+    out = summarizer.summarize_data(enriched)
+
+    assert "mix shifted toward costlier supply" not in out.summary.lower()
+    assert "exchange rate moved lower" in out.summary.lower()
+    assert out.summary_claims == [
+        "Balancing price moved from 120.0 to 115.0 GEL/MWh.",
+        "Exchange rate moved from 3.35 to 3.20.",
+    ]
+    assert out.summary_provenance_gate_passed is True
+    assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)

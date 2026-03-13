@@ -15,7 +15,12 @@ import json
 import logging
 import time
 
-from config import ENABLE_AGENT_LOOP, ENABLE_TYPED_TOOLS
+from config import (
+    ENABLE_AGENT_LOOP,
+    ENABLE_TYPED_TOOLS,
+    ENABLE_QUESTION_ANALYZER_HINTS,
+    ENABLE_QUESTION_ANALYZER_SHADOW,
+)
 from models import QueryContext
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
@@ -57,6 +62,44 @@ def process_query(
     t_stage = time.time()
     ctx = planner.prepare_context(ctx)
     _trace_stage("stage_0_prepare_context", t_stage, conceptual=ctx.is_conceptual, lang=ctx.lang_code)
+
+    # Stage 0.2: structured question analysis
+    if ENABLE_QUESTION_ANALYZER_SHADOW or ENABLE_QUESTION_ANALYZER_HINTS:
+        t_stage = time.time()
+        analyzer_mode = "active" if ENABLE_QUESTION_ANALYZER_HINTS else "shadow"
+        if ENABLE_QUESTION_ANALYZER_HINTS:
+            ctx = planner.analyze_question_active(ctx)
+        else:
+            ctx = planner.analyze_question_shadow(ctx)
+        qa_type = ""
+        qa_path = ""
+        qa_conf = 0.0
+        analyzer_conceptual = False
+        conceptual_disagree = False
+        mode_disagree = False
+        if ctx.question_analysis is not None:
+            qa_type = ctx.question_analysis.classification.query_type.value
+            qa_path = ctx.question_analysis.routing.preferred_path.value
+            qa_conf = ctx.question_analysis.classification.confidence
+            analyzer_conceptual = qa_type == "conceptual_definition"
+            conceptual_disagree = analyzer_conceptual != bool(ctx.is_conceptual)
+            mode_disagree = ctx.question_analysis.classification.analysis_mode.value != str(ctx.mode)
+        _trace_stage(
+            "stage_0_2_question_analyzer",
+            t_stage,
+            mode=analyzer_mode,
+            ok=bool(ctx.question_analysis),
+            error=bool(ctx.question_analysis_error),
+            query_type=qa_type,
+            preferred_path=qa_path,
+            confidence=qa_conf,
+            heuristic_conceptual=bool(ctx.is_conceptual),
+            analyzer_conceptual=analyzer_conceptual,
+            conceptual_disagree=conceptual_disagree,
+            heuristic_mode=str(ctx.mode),
+            analyzer_mode=(ctx.question_analysis.classification.analysis_mode.value if ctx.question_analysis else ""),
+            mode_disagree=mode_disagree,
+        )
 
     # Conceptual short-circuit
     if ctx.is_conceptual:

@@ -1,0 +1,611 @@
+{
+  "$defs": {
+    "AnalysisMode": {
+      "enum": [
+        "light",
+        "analyst"
+      ],
+      "title": "AnalysisMode",
+      "type": "string"
+    },
+    "ChartFamily": {
+      "enum": [
+        "line",
+        "bar",
+        "stacked",
+        "pie",
+        "dualaxis"
+      ],
+      "title": "ChartFamily",
+      "type": "string"
+    },
+    "ClassificationInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "query_type": {
+          "$ref": "#/$defs/QueryType"
+        },
+        "analysis_mode": {
+          "$ref": "#/$defs/AnalysisMode"
+        },
+        "intent": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Intent",
+          "type": "string"
+        },
+        "needs_clarification": {
+          "title": "Needs Clarification",
+          "type": "boolean"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "ambiguities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Ambiguities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "query_type",
+        "analysis_mode",
+        "intent",
+        "needs_clarification",
+        "confidence"
+      ],
+      "title": "ClassificationInfo",
+      "type": "object"
+    },
+    "DimensionName": {
+      "enum": [
+        "price",
+        "xrate",
+        "share",
+        "tariff",
+        "energy_qty",
+        "generation",
+        "cpi",
+        "seasonality",
+        "market_structure"
+      ],
+      "title": "DimensionName",
+      "type": "string"
+    },
+    "KnowledgeInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_topics": {
+          "items": {
+            "$ref": "#/$defs/TopicCandidate"
+          },
+          "maxItems": 5,
+          "title": "Candidate Topics",
+          "type": "array"
+        }
+      },
+      "title": "KnowledgeInfo",
+      "type": "object"
+    },
+    "KnowledgeTopicName": {
+      "enum": [
+        "general_definitions",
+        "balancing_price",
+        "market_structure",
+        "tariffs",
+        "cfd_ppa",
+        "currency_influence",
+        "seasonal_patterns",
+        "generation_mix",
+        "sql_examples"
+      ],
+      "title": "KnowledgeTopicName",
+      "type": "string"
+    },
+    "LanguageCode": {
+      "enum": [
+        "en",
+        "ka",
+        "ru",
+        "zh",
+        "other"
+      ],
+      "title": "LanguageCode",
+      "type": "string"
+    },
+    "LanguageInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "input_language": {
+          "$ref": "#/$defs/LanguageCode"
+        },
+        "answer_language": {
+          "$ref": "#/$defs/LanguageCode"
+        }
+      },
+      "required": [
+        "input_language",
+        "answer_language"
+      ],
+      "title": "LanguageInfo",
+      "type": "object"
+    },
+    "PeriodGranularity": {
+      "enum": [
+        "day",
+        "month",
+        "quarter",
+        "year",
+        "range",
+        "relative"
+      ],
+      "title": "PeriodGranularity",
+      "type": "string"
+    },
+    "PeriodInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PeriodKind"
+        },
+        "start_date": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "title": "Start Date",
+          "type": "string"
+        },
+        "end_date": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "title": "End Date",
+          "type": "string"
+        },
+        "granularity": {
+          "$ref": "#/$defs/PeriodGranularity"
+        },
+        "raw_text": {
+          "anyOf": [
+            {
+              "maxLength": 120,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Text"
+        }
+      },
+      "required": [
+        "kind",
+        "start_date",
+        "end_date",
+        "granularity"
+      ],
+      "title": "PeriodInfo",
+      "type": "object"
+    },
+    "PeriodKind": {
+      "enum": [
+        "day",
+        "month",
+        "quarter",
+        "year",
+        "range",
+        "relative"
+      ],
+      "title": "PeriodKind",
+      "type": "string"
+    },
+    "PreferredPath": {
+      "enum": [
+        "knowledge",
+        "tool",
+        "sql",
+        "clarify",
+        "reject"
+      ],
+      "title": "PreferredPath",
+      "type": "string"
+    },
+    "QueryType": {
+      "enum": [
+        "conceptual_definition",
+        "factual_lookup",
+        "data_retrieval",
+        "data_explanation",
+        "comparison",
+        "forecast",
+        "ambiguous",
+        "unsupported"
+      ],
+      "title": "QueryType",
+      "type": "string"
+    },
+    "RoutingInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "preferred_path": {
+          "$ref": "#/$defs/PreferredPath"
+        },
+        "needs_sql": {
+          "title": "Needs Sql",
+          "type": "boolean"
+        },
+        "needs_knowledge": {
+          "title": "Needs Knowledge",
+          "type": "boolean"
+        },
+        "prefer_tool": {
+          "title": "Prefer Tool",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preferred_path",
+        "needs_sql",
+        "needs_knowledge",
+        "prefer_tool"
+      ],
+      "title": "RoutingInfo",
+      "type": "object"
+    },
+    "SqlAggregation": {
+      "enum": [
+        "none",
+        "daily",
+        "monthly",
+        "quarterly",
+        "yearly"
+      ],
+      "title": "SqlAggregation",
+      "type": "string"
+    },
+    "SqlHints": {
+      "additionalProperties": false,
+      "properties": {
+        "metric": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric"
+        },
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Entities",
+          "type": "array"
+        },
+        "aggregation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SqlAggregation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dimensions": {
+          "items": {
+            "$ref": "#/$defs/DimensionName"
+          },
+          "maxItems": 8,
+          "title": "Dimensions",
+          "type": "array"
+        },
+        "period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PeriodInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SqlHints",
+      "type": "object"
+    },
+    "ToolCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "params_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolParamsHint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "score"
+      ],
+      "title": "ToolCandidate",
+      "type": "object"
+    },
+    "ToolName": {
+      "enum": [
+        "get_prices",
+        "get_tariffs",
+        "get_generation_mix",
+        "get_balancing_composition"
+      ],
+      "title": "ToolName",
+      "type": "string"
+    },
+    "ToolParamsHint": {
+      "additionalProperties": false,
+      "properties": {
+        "metric": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currency"
+        },
+        "granularity": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Granularity"
+        },
+        "start_date": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Date"
+        },
+        "end_date": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Date"
+        },
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Entities",
+          "type": "array"
+        },
+        "types": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Types",
+          "type": "array"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mode"
+        }
+      },
+      "title": "ToolParamsHint",
+      "type": "object"
+    },
+    "ToolingInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_tools": {
+          "items": {
+            "$ref": "#/$defs/ToolCandidate"
+          },
+          "maxItems": 5,
+          "title": "Candidate Tools",
+          "type": "array"
+        }
+      },
+      "title": "ToolingInfo",
+      "type": "object"
+    },
+    "TopicCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/KnowledgeTopicName"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "score"
+      ],
+      "title": "TopicCandidate",
+      "type": "object"
+    },
+    "VisualizationInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "chart_requested_by_user": {
+          "title": "Chart Requested By User",
+          "type": "boolean"
+        },
+        "chart_recommended": {
+          "title": "Chart Recommended",
+          "type": "boolean"
+        },
+        "chart_confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Chart Confidence",
+          "type": "number"
+        },
+        "preferred_chart_family": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChartFamily"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "chart_requested_by_user",
+        "chart_recommended",
+        "chart_confidence"
+      ],
+      "title": "VisualizationInfo",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Validated output for the question-analyzer LLM call.",
+  "properties": {
+    "version": {
+      "const": "question_analysis_v1",
+      "title": "Version",
+      "type": "string"
+    },
+    "raw_query": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Raw Query",
+      "type": "string"
+    },
+    "canonical_query_en": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Canonical Query En",
+      "type": "string"
+    },
+    "language": {
+      "$ref": "#/$defs/LanguageInfo"
+    },
+    "classification": {
+      "$ref": "#/$defs/ClassificationInfo"
+    },
+    "routing": {
+      "$ref": "#/$defs/RoutingInfo"
+    },
+    "knowledge": {
+      "$ref": "#/$defs/KnowledgeInfo"
+    },
+    "tooling": {
+      "$ref": "#/$defs/ToolingInfo"
+    },
+    "sql_hints": {
+      "$ref": "#/$defs/SqlHints"
+    },
+    "visualization": {
+      "$ref": "#/$defs/VisualizationInfo"
+    }
+  },
+  "required": [
+    "version",
+    "raw_query",
+    "canonical_query_en",
+    "language",
+    "classification",
+    "routing",
+    "knowledge",
+    "tooling",
+    "sql_hints",
+    "visualization"
+  ],
+  "title": "QuestionAnalysis",
+  "type": "object"
+}

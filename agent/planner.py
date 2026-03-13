@@ -6,15 +6,18 @@ and generates the LLM plan + raw SQL.
 """
 import json
 import logging
+from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from contracts.question_analysis import QuestionAnalysis
 from models import QueryContext
 from core.llm import (
     llm_cache,
     make_gemini,
     llm_generate_plan_and_sql,
     get_relevant_domain_knowledge,
+    llm_analyze_question,
 )
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
@@ -138,11 +141,13 @@ def _generate_plan_and_sql_with_retry(
     user_query: str,
     analysis_mode: str,
     lang_instruction: str,
+    question_analysis: Optional[QuestionAnalysis] = None,
 ) -> tuple[dict, str]:
     combined_output = llm_generate_plan_and_sql(
         user_query=user_query,
         analysis_mode=analysis_mode,
         lang_instruction=lang_instruction,
+        question_analysis=question_analysis,
     )
     return _extract_plan_and_sql(combined_output)
 
@@ -167,6 +172,41 @@ def prepare_context(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
+    """Stage 0.2: Run structured question analysis and stamp its source."""
+
+    try:
+        ctx.question_analysis = llm_analyze_question(
+            user_query=ctx.query,
+            conversation_history=ctx.conversation_history,
+        )
+        ctx.question_analysis_error = ""
+        ctx.question_analysis_source = source
+        log.info(
+            "Question analyzer result | source=%s type=%s path=%s confidence=%.2f",
+            source,
+            ctx.question_analysis.classification.query_type.value,
+            ctx.question_analysis.routing.preferred_path.value,
+            ctx.question_analysis.classification.confidence,
+        )
+    except Exception as exc:
+        ctx.question_analysis = None
+        ctx.question_analysis_error = str(exc)
+        ctx.question_analysis_source = f"{source}_error"
+        log.warning("Question analyzer failed | source=%s error=%s", source, exc)
+    return ctx
+
+
+def analyze_question_shadow(ctx: QueryContext) -> QueryContext:
+    """Stage 0.2: Run structured question analysis without changing routing behavior."""
+    return analyze_question(ctx, source="llm_shadow")
+
+
+def analyze_question_active(ctx: QueryContext) -> QueryContext:
+    """Stage 0.2: Run structured question analysis for downstream hint consumption."""
+    return analyze_question(ctx, source="llm_active")
+
+
 def generate_plan(ctx: QueryContext) -> QueryContext:
     """Stage 1: Generate plan + SQL using LLM fallback path.
 
@@ -183,6 +223,11 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
             user_query=ctx.query,
             analysis_mode=ctx.mode,
             lang_instruction=ctx.lang_instruction,
+            question_analysis=(
+                ctx.question_analysis
+                if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+                else None
+            ),
         )
 
     except Exception as exc:
@@ -191,6 +236,11 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
             user_query=ctx.query,
             analysis_mode=ctx.mode,
             lang_instruction=ctx.lang_instruction,
+            question_analysis=(
+                ctx.question_analysis
+                if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+                else None
+            ),
         )
         separator = "---SQL---"
         if separator not in combined_output:
