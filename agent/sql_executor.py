@@ -18,6 +18,7 @@ from core.sql_generator import sanitize_sql, simple_table_whitelist_check, plan_
 from core.query_executor import ENGINE, execute_sql_safely
 from agent.aggregation import validate_aggregation_logic
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance
+from utils.trace_logging import trace_detail
 from utils.query_validation import validate_sql_relevance
 
 log = logging.getLogger("Enai")
@@ -162,6 +163,11 @@ def ensure_share_dataframe(
     return fallback_df, True
 
 
+def _extract_sql_tables(sql: str) -> list[str]:
+    matches = re.findall(r"\b(?:from|join)\s+([a-zA-Z_][\w.]*)", sql or "", flags=re.IGNORECASE)
+    return sorted(dict.fromkeys(match.lower() for match in matches))
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline stage
 # ---------------------------------------------------------------------------
@@ -178,6 +184,13 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         ctx.rows = []
         ctx.cols = []
         clear_provenance(ctx)
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "skipped",
+            reason=ctx.skip_sql_reason or "skip_sql_flag",
+        )
         log.info("⏭️ SQL execution skipped, will answer from domain knowledge")
         return ctx
 
@@ -216,6 +229,24 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             log.warning("⚠️ Period aggregation requested but wrapper is disabled")
 
     ctx.safe_sql = safe_sql
+    trace_detail(
+        log,
+        ctx,
+        "stage_2_sql_execute",
+        "sql_ready",
+        sql_hash=sql_query_hash(safe_sql),
+        tables=_extract_sql_tables(safe_sql),
+        aggregation_valid=is_valid_aggregation,
+        aggregation_reason=validation_reason,
+    )
+    trace_detail(
+        log,
+        ctx,
+        "stage_2_sql_execute",
+        "artifact",
+        debug=True,
+        safe_sql=safe_sql,
+    )
 
     # Validate SQL relevance
     ctx.sql_is_relevant, relevance_reason, ctx.skip_chart_due_to_relevance = validate_sql_relevance(
@@ -236,6 +267,14 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         ctx.cols = []
         clear_provenance(ctx)
         log.warning("🚫 Blocking SQL execution due to hard relevance policy: %s", relevance_reason)
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "blocked",
+            reason=relevance_reason,
+            skip_chart_due_to_relevance=ctx.skip_chart_due_to_relevance,
+        )
         return ctx
 
     # --- Execute SQL ---
@@ -267,6 +306,18 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         ctx.df = df
         ctx.cols = list(df.columns)
         ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "sql_result",
+            sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
+            rows=len(ctx.rows),
+            cols=len(ctx.cols),
+            elapsed_ms=round(float(elapsed) * 1000.0, 2),
+            sql_is_relevant=ctx.sql_is_relevant,
+            skip_chart_due_to_relevance=ctx.skip_chart_due_to_relevance,
+        )
         stamp_provenance(
             ctx,
             ctx.cols,
@@ -278,6 +329,15 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
     except OperationalError as e:
         from utils.metrics import metrics
         metrics.log_error()
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "error",
+            error_type="OperationalError",
+            error=str(e),
+            sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
+        )
         log.error(f"⚠️ Database operational error: {e}")
         raise
 
@@ -285,6 +345,15 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         from utils.metrics import metrics
         metrics.log_error()
         msg = str(e)
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "error",
+            error_type="DatabaseError",
+            error=msg,
+            sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
+        )
 
         # Auto-pivot fix for hallucinated trade_derived_entities columns
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql:
@@ -334,12 +403,30 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
     except SQLAlchemyError as e:
         from utils.metrics import metrics
         metrics.log_error()
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "error",
+            error_type="SQLAlchemyError",
+            error=str(e),
+            sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
+        )
         log.exception("SQLAlchemy error occurred")
         raise
 
     except Exception as e:
         from utils.metrics import metrics
         metrics.log_error()
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "error",
+            error_type=type(e).__name__,
+            error=str(e),
+            sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
+        )
         log.exception("Unexpected error during SQL execution")
         raise
 

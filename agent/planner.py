@@ -21,6 +21,7 @@ from core.llm import (
 )
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
+from utils.trace_logging import trace_detail
 from agent.aggregation import detect_aggregation_intent
 
 log = logging.getLogger("Enai")
@@ -189,11 +190,40 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             ctx.question_analysis.routing.preferred_path.value,
             ctx.question_analysis.classification.confidence,
         )
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_2_question_analyzer",
+            "validated",
+            source=source,
+            query_type=ctx.question_analysis.classification.query_type.value,
+            preferred_path=ctx.question_analysis.routing.preferred_path.value,
+            confidence=ctx.question_analysis.classification.confidence,
+            candidate_topics=[topic.name.value for topic in ctx.question_analysis.knowledge.candidate_topics],
+            candidate_tools=[tool.name.value for tool in ctx.question_analysis.tooling.candidate_tools],
+            canonical_query_en=ctx.question_analysis.canonical_query_en,
+        )
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_2_question_analyzer",
+            "artifact",
+            debug=True,
+            question_analysis=ctx.question_analysis,
+        )
     except Exception as exc:
         ctx.question_analysis = None
         ctx.question_analysis_error = str(exc)
         ctx.question_analysis_source = f"{source}_error"
         log.warning("Question analyzer failed | source=%s error=%s", source, exc)
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_2_question_analyzer",
+            "error",
+            source=source,
+            error=str(exc),
+        )
     return ctx
 
 
@@ -259,6 +289,28 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
             ctx.plan = {"intent": "general", "target": "", "period": ""}
 
     log.info(f"Plan: {ctx.plan}")
+    trace_detail(
+        log,
+        ctx,
+        "stage_1_generate_plan",
+        "plan_ready",
+        question_analysis_used=bool(
+            ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+        ),
+        question_analysis_source=ctx.question_analysis_source,
+        plan=ctx.plan,
+        raw_sql_present=bool(ctx.raw_sql),
+        raw_sql_len=len(ctx.raw_sql or ""),
+    )
+    trace_detail(
+        log,
+        ctx,
+        "stage_1_generate_plan",
+        "artifact",
+        debug=True,
+        plan=ctx.plan,
+        raw_sql=ctx.raw_sql or "",
+    )
 
     # Check if SQL should be skipped
     ctx.skip_sql, ctx.skip_sql_reason = should_skip_sql_execution(ctx.query, ctx.plan)

@@ -22,6 +22,7 @@ from core.llm import (
 from context import scrub_schema_mentions
 from config import PROVENANCE_MIN_COVERAGE
 from utils.metrics import metrics
+from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
@@ -274,10 +275,30 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
     if not claim_entries:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "no_claims"
+        trace_detail(
+            log,
+            ctx,
+            "stage_4_summarize_data",
+            "provenance_gate",
+            gate_passed=True,
+            gate_reason=ctx.summary_provenance_gate_reason,
+            numeric_claims=0,
+            coverage=0.0,
+        )
         return
     if not numeric_claims:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "no_numeric_claims"
+        trace_detail(
+            log,
+            ctx,
+            "stage_4_summarize_data",
+            "provenance_gate",
+            gate_passed=True,
+            gate_reason=ctx.summary_provenance_gate_reason,
+            numeric_claims=0,
+            coverage=float(ctx.summary_provenance_coverage or 0.0),
+        )
         return
 
     has_ungrounded_claim = any(not bool(entry.get("is_fully_grounded")) for entry in numeric_claims)
@@ -286,6 +307,16 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
     if gate_passed:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "ok"
+        trace_detail(
+            log,
+            ctx,
+            "stage_4_summarize_data",
+            "provenance_gate",
+            gate_passed=True,
+            gate_reason=ctx.summary_provenance_gate_reason,
+            numeric_claims=len(numeric_claims),
+            coverage=coverage,
+        )
         return
 
     metrics.log_summary_grounding_failure()
@@ -300,11 +331,39 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
         "I could not produce citation-grade grounding for all numeric claims from the retrieved dataset. "
         "Please refine the query scope (period/entity/metric) and retry."
     )
+    ctx.summary_source = "citation_gate_fallback"
     ctx.summary_claims = []
     ctx.summary_citations = ["citation_gate_fallback"]
     ctx.summary_confidence = min(float(ctx.summary_confidence or 0.0), 0.2)
     ctx.summary_claim_provenance = []
     ctx.summary_provenance_coverage = 0.0
+    unmatched = [
+        {
+            "claim_index": entry.get("claim_index"),
+            "unmatched_tokens": list(entry.get("unmatched_tokens") or []),
+        }
+        for entry in numeric_claims
+        if entry.get("unmatched_tokens")
+    ]
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_summarize_data",
+        "provenance_gate",
+        gate_passed=False,
+        gate_reason=ctx.summary_provenance_gate_reason,
+        numeric_claims=len(numeric_claims),
+        coverage=coverage,
+        unmatched_tokens=unmatched,
+    )
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_summarize_data",
+        "artifact",
+        debug=True,
+        summary_claim_provenance=claim_entries,
+    )
 
 
 def answer_conceptual(ctx: QueryContext) -> QueryContext:
@@ -418,6 +477,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             domain_knowledge=domain_knowledge,
         )
         ctx.summary = envelope.answer
+        ctx.summary_source = "structured_conceptual_summary"
         ctx.summary_claims = list(envelope.claims)
         ctx.summary_citations = list(envelope.citations)
         ctx.summary_confidence = float(envelope.confidence)
@@ -436,6 +496,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             conversation_history=ctx.conversation_history,
             domain_knowledge=domain_knowledge,
         )
+        ctx.summary_source = "legacy_conceptual_text_fallback"
         ctx.summary_claims = []
         ctx.summary_citations = ["legacy_text_fallback"]
         ctx.summary_confidence = 0.5
@@ -455,13 +516,18 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
            ctx.conversation_history, ctx.share_summary_override
     Writes: ctx.summary
     """
+    strict_grounding_retry = False
+    ctx.summary_source = ""
+
     if ctx.share_summary_override:
         ctx.summary = ctx.share_summary_override
+        ctx.summary_source = "deterministic_share_summary"
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
         ctx.summary_citations = ["deterministic_share_summary"]
         ctx.summary_confidence = 1.0
     elif ctx.why_summary_override:
         ctx.summary = ctx.why_summary_override
+        ctx.summary_source = "deterministic_why_summary"
         ctx.summary_claims = list(ctx.why_summary_claims or _derive_claims_from_text(ctx.summary))
         ctx.summary_citations = ["deterministic_why_summary"]
         ctx.summary_confidence = 0.9
@@ -475,6 +541,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 conversation_history=ctx.conversation_history,
             )
             if not _is_summary_grounded(envelope, ctx):
+                strict_grounding_retry = True
                 metrics.log_summary_grounding_failure()
                 log.warning("Summary grounding check failed; retrying with strict grounding.")
                 envelope = llm_summarize_structured(
@@ -497,9 +564,22 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                     )
 
             ctx.summary = envelope.answer
+            ctx.summary_source = (
+                "structured_summary_grounding_fallback"
+                if "guardrail_grounding_fallback" in list(envelope.citations or [])
+                else "structured_summary"
+            )
             ctx.summary_claims = list(envelope.claims)
             ctx.summary_citations = list(envelope.citations)
             ctx.summary_confidence = float(envelope.confidence)
+            trace_detail(
+                log,
+                ctx,
+                "stage_4_summarize_data",
+                "artifact",
+                debug=True,
+                summary_envelope=envelope,
+            )
         except Exception as e:
             metrics.log_summary_schema_failure()
             log.warning(f"Structured summarization failed: {e}")
@@ -510,11 +590,24 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 ctx.lang_instruction,
                 conversation_history=ctx.conversation_history,
             )
+            ctx.summary_source = "legacy_text_fallback"
             ctx.summary_claims = []
             ctx.summary_citations = ["legacy_text_fallback"]
             ctx.summary_confidence = 0.5
 
     ctx.summary = scrub_schema_mentions(ctx.summary)
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_summarize_data",
+        "pre_gate",
+        summary_source=ctx.summary_source,
+        strict_grounding_retry=strict_grounding_retry,
+        claims_count=len(ctx.summary_claims or []),
+        citations=list(ctx.summary_citations or []),
+        confidence=ctx.summary_confidence,
+        summary_preview=ctx.summary,
+    )
     _attach_claim_provenance(ctx)
     _enforce_provenance_gate(ctx)
     return ctx

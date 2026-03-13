@@ -77,6 +77,7 @@ class QueryContext:
 
     # --- summarizer outputs ---
     summary: str = ""
+    summary_source: str = ""
     summary_claims: List[str] = dc_field(default_factory=list)
     summary_citations: List[str] = dc_field(default_factory=list)
     summary_confidence: float = 0.0

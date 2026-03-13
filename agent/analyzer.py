@@ -24,6 +24,7 @@ from analysis.seasonal_stats import (
 from analysis.shares import build_balancing_correlation_df
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
+from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
@@ -798,6 +799,19 @@ def enrich(ctx: QueryContext) -> QueryContext:
         # Pre-calculate trendlines for forecast answer generation
         _precalculate_trendlines(ctx, cols_labeled)
 
+    trace_detail(
+        log,
+        ctx,
+        "stage_3_analyzer_enrich",
+        "enrichment_ready",
+        preview_len=len(ctx.preview or ""),
+        stats_hint_len=len(ctx.stats_hint or ""),
+        share_override=bool(ctx.share_summary_override),
+        why_override=bool(ctx.why_summary_override),
+        correlation_keys=list(ctx.correlation_results.keys()),
+        add_trendlines=bool(ctx.add_trendlines),
+        trendline_extend_to=ctx.trendline_extend_to or "",
+    )
     return ctx
 
 
@@ -997,6 +1011,25 @@ def _build_why_context(ctx: QueryContext) -> None:
                     query_hash=why_hash,
                 )
 
+    trace_detail(
+        log,
+        ctx,
+        "stage_3_analyzer_enrich",
+        "why_context",
+        why_override_generated=bool(ctx.why_summary_override),
+        why_claim_count=len(ctx.why_summary_claims or []),
+        signals=why_ctx.get("signals", {}),
+    )
+    trace_detail(
+        log,
+        ctx,
+        "stage_3_analyzer_enrich",
+        "artifact",
+        debug=True,
+        why_context=why_ctx,
+        why_summary_override=ctx.why_summary_override or "",
+        why_summary_claims=ctx.why_summary_claims,
+    )
     ctx.stats_hint += "\n\n--- CAUSAL CONTEXT ---\n" + json.dumps(why_ctx, default=str, indent=2)
     log.info("Why-context attached to stats_hint.")
 

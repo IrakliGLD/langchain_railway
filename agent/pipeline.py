@@ -256,13 +256,26 @@ def process_query(
     # Stage 3: enrich
     t_stage = time.time()
     ctx = analyzer.enrich(ctx)
-    _trace_stage("stage_3_analyzer_enrich", t_stage)
+    _trace_stage(
+        "stage_3_analyzer_enrich",
+        t_stage,
+        share_override=bool(ctx.share_summary_override),
+        why_override=bool(ctx.why_summary_override),
+        correlation_keys=list(ctx.correlation_results.keys()),
+    )
     log.info("Stage 3 complete | analysis enrichment done")
 
     # Stage 4: summarize
     t_stage = time.time()
     ctx = summarizer.summarize_data(ctx)
-    _trace_stage("stage_4_summarize_data", t_stage)
+    _trace_stage(
+        "stage_4_summarize_data",
+        t_stage,
+        summary_source=ctx.summary_source,
+        gate_passed=ctx.summary_provenance_gate_passed,
+        gate_reason=ctx.summary_provenance_gate_reason,
+        coverage=ctx.summary_provenance_coverage,
+    )
     log.info("Stage 4 complete | summary generated")
 
     # Stage 5: chart
