@@ -138,7 +138,7 @@ This upstream review does not remove the Railway-side issues already identified 
    - A compromise of that secret or of the edge function still bypasses principal-aware identity inside Railway.
 
 2. Railway secret reuse has been closed in repo, but that does not eliminate the shared-secret trust model.
-   - Current repo code now expects separate `GATEWAY_SHARED_SECRET`, `SESSION_SIGNING_SECRET`, and `EVALUATE_ADMIN_SECRET`.
+   - Current repo code now prefers separate `ENAI_GATEWAY_SECRET`, `ENAI_SESSION_SIGNING_SECRET`, and `ENAI_EVALUATE_SECRET`, with legacy fallback to the earlier split-secret names.
    - Deployment environments still need secret rollout/rotation for that closure to be effective operationally.
 
 3. Railway `/metrics` exposure remains a separate issue.

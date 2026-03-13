@@ -25,7 +25,7 @@ load_dotenv()
 
 # Configuration
 API_URL = os.getenv("API_URL", "http://localhost:8000/ask")
-GATEWAY_KEY = os.getenv("GATEWAY_SHARED_SECRET", "")
+GATEWAY_KEY = os.getenv("ENAI_GATEWAY_SECRET") or os.getenv("GATEWAY_SHARED_SECRET", "")
 
 # Colors for terminal output
 class Colors:

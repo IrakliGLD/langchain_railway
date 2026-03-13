@@ -62,7 +62,7 @@ Top current blockers:
 Score notes:
 - Security rises modestly, but is still graded conservatively because the upstream auth/quota closure is based on supplemental source review outside this repo and was not runtime-verified in this environment.
 - The specific concern that the Railway app secret might be exposed in browser code is now closed by supplemental upstream evidence and checked-in frontend bundle review.
-- Repo-level secret reuse is also now closed in code: `GATEWAY_SHARED_SECRET`, `SESSION_SIGNING_SECRET`, and `EVALUATE_ADMIN_SECRET` replace the single `APP_SECRET_KEY` path. Deployment rollout and secret rotation are still operational work, not repo-evidenced closure.
+- Repo-level secret reuse is also now closed in code: preferred env names are `ENAI_GATEWAY_SECRET`, `ENAI_SESSION_SIGNING_SECRET`, and `ENAI_EVALUATE_SECRET`, with legacy fallback to the earlier split-secret names. Deployment rollout and secret rotation are still operational work, not repo-evidenced closure.
 - The main boundary gap shifted from browser secret exposure and missing proxy auth/quota checks to Railway's continued reliance on a shared proxy secret rather than principal-aware identity.
 - The core analytical path improved materially even where the overall score moved only slightly.
 
@@ -103,7 +103,7 @@ P0:
 - No explicit PII redaction/minimization step exists before prompts, provider calls, or structured security/error logging.
 
 P1:
-- Repo now expects `GATEWAY_SHARED_SECRET`, `SESSION_SIGNING_SECRET`, and `EVALUATE_ADMIN_SECRET`. Runtime risk remains until Railway env vars are added and the Supabase `CHAT_BACKEND_SECRET` value is rotated to the new gateway secret.
+- Repo now prefers `ENAI_GATEWAY_SECRET`, `ENAI_SESSION_SIGNING_SECRET`, and `ENAI_EVALUATE_SECRET`, while still accepting the earlier split-secret names as fallback. Runtime risk remains until Railway env vars are added and the Supabase `CHAT_BACKEND_SECRET` value is rotated to the new gateway secret.
 - Checked-in frontend review of `D:\export_enai` found no server-side secrets in browser code or checked-in built assets. Browser-exposed values are limited to the expected Supabase URL and anon key, while `SUPABASE_SERVICE_ROLE_KEY` and `CHAT_BACKEND_SECRET` are documented as server-side only (`D:\export_enai\src\lib\customSupabaseClient.js:6-21`, `D:\export_enai\.env.example:4-55`, `D:\export_enai\ENVIRONMENT.md:5-28`). No committed real `.env` file was found, and the checked-in bundle resolves only the placeholder `https://example.supabase.co` fallback.
 - Supplemental upstream source review in `docs/active/EXPORT_ENAI_CHAT_AUTH_REVIEW.md` indicates `chat-with-enerbot` now enforces `Authorization`, active account status, and pre-backend quota before proxying, but those controls live outside this repo and were not runtime-verified in this environment.
 - Operator-reported legacy JWT verification disablement on the Supabase function is less material if deployment matches the reviewed source because the function now performs explicit `auth.getUser()` checks in code; deployment parity should still be confirmed.

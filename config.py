@@ -23,10 +23,24 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Database
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 
+def _read_secret_env(*names: str):
+    """Read a secret env var, preferring the first name and tolerating wrapped quotes."""
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        return value or None
+    return None
+
+
 # API Security
-GATEWAY_SHARED_SECRET = os.getenv("GATEWAY_SHARED_SECRET")
-SESSION_SIGNING_SECRET = os.getenv("SESSION_SIGNING_SECRET")
-EVALUATE_ADMIN_SECRET = os.getenv("EVALUATE_ADMIN_SECRET")
+# Prefer the new ENAI_* names; fall back to the earlier split-secret names during rollout.
+GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
+SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSION_SIGNING_SECRET")
+EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 
 # LLM Configuration
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
@@ -80,11 +94,11 @@ MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
 if not SUPABASE_DB_URL:
     raise RuntimeError("Missing SUPABASE_DB_URL")
 if not GATEWAY_SHARED_SECRET:
-    raise RuntimeError("Missing GATEWAY_SHARED_SECRET")
+    raise RuntimeError("Missing ENAI_GATEWAY_SECRET (or legacy GATEWAY_SHARED_SECRET)")
 if not SESSION_SIGNING_SECRET:
-    raise RuntimeError("Missing SESSION_SIGNING_SECRET")
+    raise RuntimeError("Missing ENAI_SESSION_SIGNING_SECRET (or legacy SESSION_SIGNING_SECRET)")
 if not EVALUATE_ADMIN_SECRET:
-    raise RuntimeError("Missing EVALUATE_ADMIN_SECRET")
+    raise RuntimeError("Missing ENAI_EVALUATE_SECRET (or legacy EVALUATE_ADMIN_SECRET)")
 if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
     raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
 

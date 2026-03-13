@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SUPABASE_DB_URL: postgresql://user:pass@localhost/db
-      GATEWAY_SHARED_SECRET: ci-gateway-key
-      SESSION_SIGNING_SECRET: ci-session-key
-      EVALUATE_ADMIN_SECRET: ci-evaluate-key
+      ENAI_GATEWAY_SECRET: ci-gateway-key
+      ENAI_SESSION_SIGNING_SECRET: ci-session-key
+      ENAI_EVALUATE_SECRET: ci-evaluate-key
       MODEL_TYPE: openai
       OPENAI_API_KEY: ci-openai-key
     steps:
