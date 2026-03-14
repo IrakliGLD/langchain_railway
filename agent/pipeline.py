@@ -111,7 +111,16 @@ def process_query(
     # Stage 0.5: pre-LLM typed tool routing
     if ENABLE_TYPED_TOOLS:
         t_stage = time.time()
-        invocation = match_tool(ctx.query)
+        
+        is_exp = False
+        if ctx.question_analysis:
+            qa_type = ctx.question_analysis.classification.query_type.value
+            if qa_type in ("data_explanation", "conceptual_definition"):
+                is_exp = True
+        elif any(w in ctx.query.lower() for w in ["why", "explain", "reason", "რატომ", "ახსენი", "почему", "объясни"]):
+            is_exp = True
+            
+        invocation = match_tool(ctx.query, is_explanation=is_exp)
         _trace_stage("stage_0_5_router_match", t_stage, matched=bool(invocation))
         if invocation:
             if "semantic fallback" in (invocation.reason or "").lower():

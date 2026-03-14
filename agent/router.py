@@ -177,7 +177,7 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date: 
     return _build_semantic_invocation(top_tool, query_lower, start_date, end_date, top_score)
 
 
-def _extract_date_range(query_lower: str) -> Tuple[Optional[str], Optional[str]]:
+def _extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """Extract coarse date range hints from NL query."""
     # from 2020 to 2024 / between 2020 and 2024
     m = re.search(r"(?:from|between)\s+(20\d{2})\s+(?:to|and|\-)\s+(20\d{2})", query_lower)
@@ -201,14 +201,25 @@ def _extract_date_range(query_lower: str) -> Tuple[Optional[str], Optional[str]]
     if m:
         month = MONTH_MAP[m.group(1)]
         year = int(m.group(2))
-        start = f"{year}-{month:02d}-01"
-        return start, start
+        end = f"{year}-{month:02d}-01"
+        if is_explanation:
+            start_month = month - 1
+            start_year = year
+            if start_month == 0:
+                start_month = 12
+                start_year -= 1
+            start = f"{start_year}-{start_month:02d}-01"
+            return start, end
+        return end, end
 
     # explicit year
     years = re.findall(r"\b(20\d{2})\b", query_lower)
     if years:
         year = int(years[0])
-        return f"{year}-01-01", f"{year}-12-31"
+        end = f"{year}-12-31"
+        if is_explanation:
+            return f"{year-1}-01-01", end
+        return f"{year}-01-01", end
 
     # relative "last N years"
     m = re.search(r"\blast\s+(\d+)\s+years?\b", query_lower)
@@ -293,10 +304,10 @@ def _extract_generation_types(query_lower: str) -> List[str]:
     return list(dict.fromkeys(hits))
 
 
-def match_tool(query: str) -> Optional[ToolInvocation]:
+def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocation]:
     """Return a deterministic tool invocation when confidence is high."""
     q = query.lower().strip()
-    start_date, end_date = _extract_date_range(q)
+    start_date, end_date = _extract_date_range(q, is_explanation=is_explanation)
 
     composition_terms = ["share", "composition", "mix", "proportion", "წილი", "доля"]
     explicit_share_terms = ["share", "proportion", "percentage", "percent", "წილი", "доля"]

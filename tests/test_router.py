@@ -57,3 +57,27 @@ def test_semantic_fallback_matches_long_tail_price_intent():
 def test_no_tool_match_for_generic_text():
     inv = match_tool("hello, can you help me")
     assert inv is None
+
+
+def test_explanation_mode_expands_month_range():
+    # Regular matching
+    inv_normal = match_tool("balancing price in november 2022")
+    assert inv_normal.params["start_date"] == "2022-11-01"
+    assert inv_normal.params["end_date"] == "2022-11-01"
+    
+    # Explanation matching expands to start of previous month
+    inv_exp = match_tool("why did balancing price change in november 2022?", is_explanation=True)
+    assert inv_exp.params["start_date"] == "2022-10-01"
+    assert inv_exp.params["end_date"] == "2022-11-01"
+
+
+def test_explanation_mode_expands_year_range():
+    # Regular matching
+    inv_normal = match_tool("generation mix in 2024")
+    assert inv_normal.params["start_date"] == "2024-01-01"
+    assert inv_normal.params["end_date"] == "2024-12-31"
+    
+    # Explanation matching expands to start of previous year
+    inv_exp = match_tool("explain the generation mix change in 2024", is_explanation=True)
+    assert inv_exp.params["start_date"] == "2023-01-01"
+    assert inv_exp.params["end_date"] == "2024-12-31"
