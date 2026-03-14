@@ -56,12 +56,19 @@ This is the most critical branching point: **Deterministic (Fast) vs. Generative
     - *Action:* Automatically trigger `get_balancing_composition`.
     - *Rationale:* Users asking "Why" about prices always need the "What" (supplier mix) to form a valid answer.
 
-#### Stage 1/2: Generative Fallback (`sql_executor`)
-*   **Why:** Handle queries like "Compare total imports of the top 3 buyers in 2022."
-*   **Decision Driver:** If Stage 0.5 returns `None`, the system falls back to LLM SQL generation.
-*   **Auto-Repair Logic:** If SQL execution fails with `UndefinedColumn`:
-    - *Decision:* Search `context.py` for column synonyms.
-    - *Action:* If "time" was used instead of "date," the system intercepts the error, replaces the code, and re-executes.
+#### Stage 1/2: Agent Loop Fallback (`orchestrator.run_agent_loop`)
+*   **Why:** If the deterministic router misses, the system attempts a multi-step ReACT-style agent loop to find the right combination of tools before resorting to raw SQL.
+*   **Decisions & Drivers:** 
+    - Checks tool relevance via `utils.query_validation.validate_tool_relevance`.
+    - *Outcomes:* Can trigger a `conceptual_exit`, `data_exit` (tool succeeded), or a `fallback_exit` (tool blocked or failed, forcing SQL).
+
+#### Stage 1 & 2: Legacy Generative Fallbacks
+*   **Why:** Handle queries like "Compare total imports of the top 3 buyers in 2022" when no typed tool exists.
+*   **Stage 1: Generate Plan (`planner.generate_plan`)**
+    - *Decision Driver:* Slower LLM call to establish intent. If intent evaluates to a purely conceptual short-circuit or is flagged by policy to skip SQL, it aborts the data path.
+*   **Stage 2: SQL Execution (`sql_executor.validate_and_execute`)**
+    - *Decision Driver:* Gemini writes raw SQL. The executor sanitizes and applies a strict table whitelist.
+    - *Auto-Repair Logic:* If SQL fails with `UndefinedColumn` (e.g., "time" instead of "date"), the system intercepts, replaces the code, and re-executes.
 
 ---
 
@@ -80,7 +87,9 @@ This is the most critical branching point: **Deterministic (Fast) vs. Generative
 
 ---
 
-### Phase 4: Summarization & Verification (`summarizer.summarize_data`)
+### Phase 4: Summarization & Verification
+
+#### Stage 4: Summarization (`summarizer.summarize_data`)
 *   **Why:** Prevent LLM "hallucination of numbers" and ensure analytical narratives are strictly grounded in retrieved data.
 *   **Decisions & Drivers:**
     1.  **Deterministic Payloads vs Generative:** If `share_summary_override` or `why_summary_override` is populated (e.g., by the Contradiction Guard), the LLM path is completely bypassed.
@@ -92,6 +101,12 @@ This is the most critical branching point: **Deterministic (Fast) vs. Generative
         - After generation (and optional retry), it calculates the `summary_provenance_coverage` (number of grounded tokens / total numeric tokens).
         - *Threshold:* If there is ANY ungrounded claim (`has_ungrounded_claim == True`), or if coverage falls below `PROVENANCE_MIN_COVERAGE`.
         - *Action:* The response is completely redacted and replaced with a conservative fallback: "I could not produce citation-grade grounding for all numeric claims..." and the confidence is pegged to 0.2.
+
+---
+
+### Phase 5: Visualization
+
+#### Stage 5: Chart Building (`chart_pipeline.build_chart`)
 
 ---
 
