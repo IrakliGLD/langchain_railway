@@ -66,23 +66,32 @@ This is the most critical branching point: **Deterministic (Fast) vs. Generative
 ---
 
 ### Phase 3: Qualitative Analysis (`analyzer.enrich`)
-*   **Why:** A table of numbers is not an "explanation."
+*   **Why:** A table of numbers is not an "explanation." The system must compute derived metrics (correlations, shifts, trends) to provide an analytical payload to the LLM.
 *   **Decisions & Drivers:**
-    1.  **Correlation Signaling:** Pearson coefficients are computed.
-        - *Threshold:* If |r| > 0.7, inject "Strong Correlation" hint.
-    2.  **Contradiction Logic (Priority 1):** 
-        - *Condition:* If Price Direction != (Mix Pressure + Xrate Pressure).
-        - *Impact:* The analyzer **overrides** generic LLM summarization with a "Contradiction Guard" to force the analyst to acknowledge the anomaly.
-    3.  **Significance Filter:** Only movements > 0.5% in entity shares are reported as "shifts" to filter out noise.
+    1.  **Semantic Intent Detection:** Scans the combined intent string and user query for causal keywords (e.g., `driver`, `cause`, `why`, `impact`) or Regex patterns (e.g., `what.*affect`). 
+        - *Driver:* If a match is found, the system dynamically changes the execution plan `intent` to `correlation`.
+    2.  **Statistically Significant Shifts:**
+        - *Threshold:* The system filters out noise by only evaluating month-over-month balancing share shifts where the absolute delta magnitude is `>= 0.005` (0.5 percentage points).
+    3.  **Contradiction Logic (Priority 1 for 'Why' queries):** 
+        - computes the `price_direction` vs the `mix_pressure` (did expensive sources go up?) and `xrate_direction`.
+        - *Condition:* If `price_direction` contradicts both `mix_pressure` and `xrate_direction`, or contradicts one while the other is neutral.
+        - *Impact:* The analyzer **overrides** generic LLM summarization with a deterministic "Contradiction Guard" string (e.g., "The observed composition shift points in the opposite direction...") ensuring the LLM cannot hallucinate an aligned cause.
+        - *Fallback:* If no share data is available, it explicitly outputs "No balancing composition data was available" rather than a false negative "No shift observed."
 
 ---
 
 ### Phase 4: Summarization & Verification (`summarizer.summarize_data`)
-*   **Why:** Prevent LLM "hallucination of numbers."
-*   **Provenance Decisions:**
-    - **Stage 4 Gate:** The system compares every number in the LLM's final text against the `ctx.rows`.
-    - *Decision:* If a number like "14.5%" appears in text but not in data → **Automatic Fail/Redact**.
-    - *Driver:* `summary_provenance_coverage` score. If < 0.9, the response is flagged for human review or rejected.
+*   **Why:** Prevent LLM "hallucination of numbers" and ensure analytical narratives are strictly grounded in retrieved data.
+*   **Decisions & Drivers:**
+    1.  **Deterministic Payloads vs Generative:** If `share_summary_override` or `why_summary_override` is populated (e.g., by the Contradiction Guard), the LLM path is completely bypassed.
+    2.  **Structured Generation & Strict Grounding Retry:**
+        - The system prompts the LLM to generate an answer and extract claims arrays.
+        - It compares every numeric token in the claims to the raw `ctx.rows`.
+        - *Decision:* If validation fails the first time, the system **automatically retries** the LLM generation with `strict_grounding=True`.
+    3.  **Provenance Gate (Security):** 
+        - After generation (and optional retry), it calculates the `summary_provenance_coverage` (number of grounded tokens / total numeric tokens).
+        - *Threshold:* If there is ANY ungrounded claim (`has_ungrounded_claim == True`), or if coverage falls below `PROVENANCE_MIN_COVERAGE`.
+        - *Action:* The response is completely redacted and replaced with a conservative fallback: "I could not produce citation-grade grounding for all numeric claims..." and the confidence is pegged to 0.2.
 
 ---
 
