@@ -53,6 +53,20 @@ def get_prices(
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
 
+    # Build WHERE clause and params dynamically so each bind parameter appears
+    # exactly once.  PostgreSQL rejects the "(:p IS NULL OR col >= :p)" pattern
+    # as AmbiguousParameter when a named param is used in two different type
+    # contexts in the same statement.
+    where_parts: list[str] = []
+    params: dict = {"limit": limit}
+    if start_date:
+        where_parts.append("date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where_parts.append("date <= :end_date")
+        params["end_date"] = end_date
+    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
     if granularity == "yearly":
         select_cols = ", ".join([f"AVG({c}) AS {c}" for c in cols])
         sql = f"""
@@ -60,8 +74,7 @@ SELECT
     EXTRACT(YEAR FROM date)::int AS year,
     {select_cols}
 FROM price_with_usd
-WHERE (:start_date IS NULL OR date >= :start_date)
-  AND (:end_date IS NULL OR date <= :end_date)
+{where_clause}
 GROUP BY 1
 ORDER BY 1
 LIMIT :limit
@@ -73,16 +86,10 @@ SELECT
     date,
     {select_cols}
 FROM price_with_usd
-WHERE (:start_date IS NULL OR date >= :start_date)
-  AND (:end_date IS NULL OR date <= :end_date)
+{where_clause}
 ORDER BY date
 LIMIT :limit
 """.strip()
 
-    params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "limit": limit,
-    }
     return run_text_query(sql, params)
 

@@ -272,6 +272,31 @@ def validate_sql_relevance(
         return False, reason, should_skip_chart
 
 
+# Matches any four-digit year, YYYY-MM, or phrases like "last month / this year"
+_TIME_PATTERN = re.compile(
+    r"(\b\d{4}\b|\d{4}-\d{2}|last month|this year|last year|"
+    r"ბოლო თვე|ამ წელს|прошлый месяц|в \d{4})",
+    re.IGNORECASE,
+)
+
+# At least one recognised price/energy metric term
+_METRIC_TERMS = {
+    "price", "tariff", "ფასი", "balancing", "deregulated",
+    "guaranteed_capacity", "exchange_rate", "xrate",
+    "demand", "generation", "quantity",
+}
+
+def _has_specific_time_bound(query: str) -> bool:
+    """Return True if the query contains a specific time reference."""
+    return bool(_TIME_PATTERN.search(query))
+
+
+def _has_specific_metric(query: str) -> bool:
+    """Return True if the query contains a recognisable metric term."""
+    q = query.lower()
+    return any(term in q for term in _METRIC_TERMS)
+
+
 def should_skip_sql_execution(
     query: str,
     plan: dict
@@ -303,7 +328,11 @@ def should_skip_sql_execution(
     # Check plan intent
     intent = str(plan.get("intent", "")).lower()
     if any(keyword in intent for keyword in ["განმარტება", "explanation", "definition"]):
-        return True, f"Plan intent is explanatory: {intent}"
+        # Only skip SQL if the question has no specific time period and no metric.
+        # "why did balancing price change in November 2022?" has both -> must run SQL.
+        if not _has_specific_time_bound(query) or not _has_specific_metric(query):
+            return True, f"Plan intent is explanatory: {intent}"
+        # Fall through to run SQL for time-bound data-explanation questions
 
     return False, "Data query - SQL needed"
 

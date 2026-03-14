@@ -56,3 +56,42 @@ def test_conceptual_queries_are_conceptual(query):
     assert is_conceptual_question(query) is True, (
         f"Expected conceptual, but was classified as data query: {query!r}"
     )
+
+
+# -----------------------------------------------------------------------
+# Regression: time-bound "why" questions must never skip SQL
+# -----------------------------------------------------------------------
+from utils.query_validation import should_skip_sql_execution
+
+TIME_BOUND_WHY_CASES = [
+    ("why did balancing electricity price change in November 2022?", {"intent": "price_explanation"}),
+    ("why did balancing electricity price change in 2022?", {"intent": "explanation"}),
+    ("explain the price spike in November 2022", {"intent": "price_explanation"}),
+    ("what caused the tariff change in 2023-03?", {"intent": "definition"}),
+]
+
+@pytest.mark.parametrize("query,plan", TIME_BOUND_WHY_CASES)
+def test_time_bound_explanation_must_not_skip_sql(query, plan):
+    """A 'why' question that names a specific period+metric must run SQL."""
+    skip, reason = should_skip_sql_execution(query, plan)
+    assert skip is False, (
+        f"Expected SQL to run, but got skip=True for: {query!r}\nReason: {reason}"
+    )
+
+
+# -----------------------------------------------------------------------
+# Regression: pure conceptual explanations (no time, no metric) still skip
+# -----------------------------------------------------------------------
+PURE_CONCEPTUAL_CASES = [
+    ("explain how balancing electricity works", {"intent": "explanation"}),
+    ("what is the definition of a PPA?", {"intent": "definition"}),
+    ("explain the concept of deregulated market", {"intent": "explanation"}),
+]
+
+@pytest.mark.parametrize("query,plan", PURE_CONCEPTUAL_CASES)
+def test_pure_conceptual_with_explanation_intent_skips_sql(query, plan):
+    """Pure conceptual questions with explanation intent should still skip SQL."""
+    skip, reason = should_skip_sql_execution(query, plan)
+    assert skip is True, (
+        f"Expected SQL to be skipped, but got skip=False for: {query!r}\nReason: {reason}"
+    )
