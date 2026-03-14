@@ -9,91 +9,80 @@ The pipeline is a multi-stage orchestrator designed to balance **speed** (via de
 
 ## Stage-by-Stage Breakdown
 
-### Phase 1: Ingestion & Analysis (The "Brain")
+## Stage-by-Stage Deep Dive: Decision Drivers & Logic
 
-#### Stage 0: Context Preparation (`planner.prepare_context`)
-*   **Purpose:** Fast, heuristic-based classification.
-*   **Sub-steps:**
-    1.  **Language Detection:** Determines code (`en`, `ka`, `ru`) and corresponding instructions.
-    2.  **Mode Selection:** Heuristically chooses `light` (fact-seeking) vs `analyst` (causal-seeking).
-    3.  **Conceptual Detection:** Determines if the query is a request for a definition (short-circuiting data paths).
-*   **Decision Driver:** Keyword-based matching in `planner.py`.
+### Phase 1: Ingestion & Intent Analysis
+The goal of this phase is to classify the query with minimum latency to determine the most efficient execution path.
 
-#### Stage 0.2: Question Analysis (`planner.analyze_question`)
-*   **Purpose:** Deep LLM-based reasoning about intent BEFORE writing code/SQL.
-*   **Sub-steps:**
-    1.  **Canonicalization:** Rewrites the query into a standard English analytical query.
-    2.  **Routing Preference:** LLM suggests whether the query should follow a `tool`, `sql`, or `conceptual` path.
-    3.  **Knowledge Retrieval:** Pulls domain segments (e.g. "Balancing Price") to ground the LLM's understanding.
-*   **Decision Driver:** Structured JSON output from Gemini-1.5-Pro.
+#### Stage 0: Heuristic Context Preparation (`planner.prepare_context`)
+*   **Why:** To avoid expensive LLM calls for simple language detection or conceptual short-circuits.
+*   **Decisions & Drivers:**
+    1.  **Language Detection:** Uses `langdetect` on the raw query string. 
+        - *Direct Result:* Selects the `lang_instruction` (en/ka/ru) used for all subsequent LLM prompts.
+    2.  **Mode Selection:** Scans for keywords in `ANALYTICAL_KEYWORDS` (e.g., "trend", "impact", "why").
+        - *Decision:* If query contains "what is" or "list" → `light` mode. If contains "analyze" or "correlation" → `analyst` mode.
+        - *Driver:* Higher priority given to "simple fact" patterns to minimize complexity for direct status checks.
+    3.  **Conceptual Detection:** Scans for definition-seeking patterns (e.g., "რა არის...", "что такое...").
+        - *Decision:* If positive, the pipeline **exits data paths immediately** and jumps to `summarizer.answer_conceptual`.
 
----
-
-### Phase 2: Routing & Execution (The "Hands")
-
-#### Stage 0.5: Tool Selection (`router.match_tool`)
-*   **Purpose:** Bypassing slow SQL generation for common typed retrieval.
-*   **Logic:**
-    - Checks semantic similarity against a registry of tools (`get_prices`, `get_balancing_composition`, etc.).
-    - If a high-confidence match is found, the system enters the **Typed Tool Path**.
-*   **Decision Driver:** Vector-based similarity or deterministic keyword triggers.
-
-#### Stage 0.6: Tool Execution & Enrichment
-*   **Standard Path:** Executes the primary tool and stamps provenance.
-*   **Enrichment Sub-step (New):** If the query is a "Why" question about Balancing Prices:
-    1.  Calls `get_prices`.
-    2.  Automatically triggers a secondary call to `get_balancing_composition`.
-    3.  Merges share-composition columns into the price dataset.
-*   **Decision Driver:** Intent detection (is it an explanation query?) + Metric detection (is it about balancing?).
-
-#### Fallback Path: SQL Generation (`sql_executor.validate_and_execute`)
-*   **Purpose:** Handling long-tail queries that tools can't satisfy.
-*   **Sub-steps:**
-    1.  **SQL Generation:** Gemini writes raw SQL for DuckDB/Supabase.
-    2.  **Sanitization:** Strict whitelist check for tables.
-    3.  **Auto-Repair:** If a query fails with `UndefinedColumn`, the system checks for synonyms or attempts to inject a trade-share pivot CTE.
+#### Stage 0.2: LLM Structured Analysis (`planner.analyze_question`)
+*   **Why:** Heuristics can miss nuance (e.g., "Why is the list so long?" is not a data explanation).
+*   **Decisions & Drivers:**
+    1.  **Routing Preference:** The LLM evaluates the query against the available tool schemas and domain knowledge.
+        - *Driver:* If the query targets a specific metric (e.g., "balancing price") and a known tool exists (`get_prices`) → `tool` preference.
+        - *Driver:* If it requires complex joins or non-standard aggregation → `sql` preference.
+    2.  **Confidence Score:** The LLM provides a confidence float (0.0 to 1.0).
+        - *Logic:* If confidence < 0.7, the system treats the analysis as a "hint" rather than a command.
 
 ---
 
-### Phase 3: Analysis & Summarization (The "Voice")
+### Phase 2: Execution Path Selection
+This is the most critical branching point: **Deterministic (Fast) vs. Generative (Flexible)**.
 
-#### Stage 3: Data Enrichment (`analyzer.enrich`)
-*   **Purpose:** Generating analytical "finds" that simple SQL cannot express.
-*   **Sub-steps:**
-    1.  **Correlation Logic:** Computes Pearson coefficients (e.g. xrate vs price).
-    2.  **Causal Overrides (New):** For balancing prices, it checks for contradictions. 
-        - *Example:* If xrate rose but price fell, it injects a "Contradiction Guard" sentence.
-    3.  **Observational Wording:** Separates factual findings ("Shares shifted") from causal claims ("Consistent with").
-*   **Decision Driver:** Statistical thresholds (e.g. shifts > 0.5% are significant).
+#### Stage 0.5: Deterministic Routing (`router.match_tool`)
+*   **Why:** SQL generation is slow (3-5s) and prone to hallucinations. Tools are fast (<500ms) and type-safe.
+*   **Decisions & Drivers:**
+    1.  **Keyword Hits:** Scans for metric triggers (e.g., `has_price`, `has_tariff`).
+    2.  **Semantic Similarity:** If keyword hits are inconclusive, it computes a "Semantic Score" based on term hits (e.g., "cost" counts for `get_prices`).
+        - *Threshold:* `ROUTER_SEMANTIC_MIN_SCORE` (default 0.62).
+        - *Decision Driver:* The "Score Gap." If the top tool's score isn't at least 0.08 higher than the second-best, the match is rejected as ambiguous to prevent misrouting.
+    3.  **Date Extraction:** Uses Regex to find years (2020-2024) or months (june 2023).
+        - *Special Logic:* For "Why" queries, the router **automatically expands the range** to include the previous month to allow for MoM delta calculations.
 
-#### Stage 4: Summarization (`summarizer.summarize_data`)
-*   **Purpose:** Final natural language response generation.
-*   **Sub-steps:**
-    1.  **Deterministic Payloads:** Merges the "Finds" from Stage 3 with raw data.
-    2.  **Provenance Gate (Security):** Verifies that every number mentioned by the LLM exists in the source SQL/Tool output.
-*   **Decision Driver:** Coverage score (must be > 0.9 for the gate to pass).
+#### Stage 0.6: Execution & Enrichment Policy
+*   **Why:** Raw data is often insufficient for causal analysis.
+*   **Enrichment Decision:** 
+    - *Condition:* If `is_explanation` is True AND tool is `get_prices` AND metric is `balancing`.
+    - *Action:* Automatically trigger `get_balancing_composition`.
+    - *Rationale:* Users asking "Why" about prices always need the "What" (supplier mix) to form a valid answer.
 
----
-
-### Phase 4: Visualization
-
-#### Stage 5: Chart Building (`chart_pipeline.build_chart`)
-*   **Purpose:** Deciding the best way to visualize the result.
-*   **Decision Drivers:**
-    - Number of rows (2 rows = no chart).
-    - Data types (Time-series = Line chart; Categories = Bar chart).
-    - Analyzer hints (e.g. `add_trendlines`).
+#### Stage 1/2: Generative Fallback (`sql_executor`)
+*   **Why:** Handle queries like "Compare total imports of the top 3 buyers in 2022."
+*   **Decision Driver:** If Stage 0.5 returns `None`, the system falls back to LLM SQL generation.
+*   **Auto-Repair Logic:** If SQL execution fails with `UndefinedColumn`:
+    - *Decision:* Search `context.py` for column synonyms.
+    - *Action:* If "time" was used instead of "date," the system intercepts the error, replaces the code, and re-executes.
 
 ---
 
-## Summary of Key Decision Drivers
+### Phase 3: Qualitative Analysis (`analyzer.enrich`)
+*   **Why:** A table of numbers is not an "explanation."
+*   **Decisions & Drivers:**
+    1.  **Correlation Signaling:** Pearson coefficients are computed.
+        - *Threshold:* If |r| > 0.7, inject "Strong Correlation" hint.
+    2.  **Contradiction Logic (Priority 1):** 
+        - *Condition:* If Price Direction != (Mix Pressure + Xrate Pressure).
+        - *Impact:* The analyzer **overrides** generic LLM summarization with a "Contradiction Guard" to force the analyst to acknowledge the anomaly.
+    3.  **Significance Filter:** Only movements > 0.5% in entity shares are reported as "shifts" to filter out noise.
 
-| Decision | Driver | Mechanism |
-| :--- | :--- | :--- |
-| **Tool vs SQL** | Precision/Speed | Router semantic match score |
-| **Conceptual vs Data** | Task Complexity | Keyword heuristics + LLM Classifier |
-| **Causal Enrichment** | Intent Type | "Why/Explain" query detection in Pipeline |
-| **Truth-Clamping** | Reliability | Provenance Gate coverage score |
+---
+
+### Phase 4: Summarization & Verification (`summarizer.summarize_data`)
+*   **Why:** Prevent LLM "hallucination of numbers."
+*   **Provenance Decisions:**
+    - **Stage 4 Gate:** The system compares every number in the LLM's final text against the `ctx.rows`.
+    - *Decision:* If a number like "14.5%" appears in text but not in data → **Automatic Fail/Redact**.
+    - *Driver:* `summary_provenance_coverage` score. If < 0.9, the response is flagged for human review or rejected.
 
 ---
 
