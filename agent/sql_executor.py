@@ -51,7 +51,7 @@ BALANCING_SEGMENT_NORMALIZER = "balancing"
 
 BALANCING_SHARE_PIVOT_SQL = f"""
 SELECT
-    time_month AS date,
+    date,
     '{BALANCING_SEGMENT_NORMALIZER}' AS segment,
     MAX(CASE WHEN entity='import' THEN share ELSE 0 END) AS share_import,
     MAX(CASE WHEN entity='deregulated_hydro' THEN share ELSE 0 END) AS share_deregulated_hydro,
@@ -65,14 +65,14 @@ SELECT
     MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro','renewable_ppa') THEN share ELSE 0 END) AS share_all_renewables,
     MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro') THEN share ELSE 0 END) AS share_total_hpp
 FROM (
-    SELECT time_month, entity,
-           ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) AS share
+    SELECT date, entity,
+           ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) AS share
     FROM trade_derived_entities
     WHERE LOWER(REPLACE(segment, ' ', '_')) = '{BALANCING_SEGMENT_NORMALIZER}'
-    GROUP BY time_month, entity
+    GROUP BY date, entity
 ) sub
-GROUP BY time_month
-ORDER BY time_month DESC
+GROUP BY date
+ORDER BY date DESC
 LIMIT 120
 """.strip()
 
@@ -102,23 +102,23 @@ def build_trade_share_cte(original_sql: str) -> str:
     cte_name = "tde"
     cte = f"""WITH {cte_name} AS (
     SELECT
-        time_month AS date,
+        date,
         entity,
         SUM(quantity) AS quantity,
-        ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) AS share,
-        MAX(CASE WHEN entity='import' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_import,
-        MAX(CASE WHEN entity='deregulated_hydro' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_deregulated_hydro,
-        MAX(CASE WHEN entity='regulated_hpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_regulated_hpp,
-        MAX(CASE WHEN entity='regulated_new_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_regulated_new_tpp,
-        MAX(CASE WHEN entity='regulated_old_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_regulated_old_tpp,
-        MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_renewable_ppa,
-        MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) AS share_thermal_ppa,
-        (MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month) +
-         MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month)) AS share_all_ppa,
-        (MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro','renewable_ppa') THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) ELSE 0 END) OVER (PARTITION BY time_month)) AS share_all_renewables
+        ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) AS share,
+        MAX(CASE WHEN entity='import' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_import,
+        MAX(CASE WHEN entity='deregulated_hydro' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_deregulated_hydro,
+        MAX(CASE WHEN entity='regulated_hpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_hpp,
+        MAX(CASE WHEN entity='regulated_new_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_new_tpp,
+        MAX(CASE WHEN entity='regulated_old_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_old_tpp,
+        MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_renewable_ppa,
+        MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_thermal_ppa,
+        (MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
+         MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_ppa,
+        (MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro','renewable_ppa') THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_renewables
     FROM trade_derived_entities
     WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
-    GROUP BY time_month, entity
+    GROUP BY date, entity
 )
 """
     # Replace trade_derived_entities references in original SQL

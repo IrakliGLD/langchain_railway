@@ -68,12 +68,12 @@ def get_balancing_composition(
     sql = f"""
 WITH base AS (
     SELECT
-        time_month AS date,
+        date,
         entity,
-        ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) AS share
+        ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) AS share
     FROM trade_derived_entities
     WHERE {where_clause}
-    GROUP BY time_month, entity
+    GROUP BY date, entity
 )
 SELECT
     date,
