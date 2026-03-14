@@ -60,17 +60,20 @@ def get_generation_mix(
         period_expr = "date AS period"
         period_ref = "period"
 
-    type_filter = ""
-    params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "limit": limit,
-    }
+    where_parts = []
+    params = {"limit": limit}
 
-    statement = None
+    if start_date:
+        where_parts.append("date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where_parts.append("date <= :end_date")
+        params["end_date"] = end_date
     if selected_types:
-        type_filter = "AND type_tech IN :types"
+        where_parts.append("type_tech IN :types")
         params["types"] = selected_types
+
+    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     if mode == "share":
         sql = f"""
@@ -80,9 +83,7 @@ WITH base AS (
         type_tech,
         SUM(quantity_tech) AS quantity_tech
     FROM tech_quantity_view
-    WHERE (:start_date IS NULL OR date >= :start_date)
-      AND (:end_date IS NULL OR date <= :end_date)
-      {type_filter}
+    {where_clause}
     GROUP BY period, type_tech
 )
 SELECT
@@ -101,9 +102,7 @@ SELECT
     type_tech,
     SUM(quantity_tech) AS quantity_tech
 FROM tech_quantity_view
-WHERE (:start_date IS NULL OR date >= :start_date)
-  AND (:end_date IS NULL OR date <= :end_date)
-  {type_filter}
+{where_clause}
 GROUP BY period, type_tech
 ORDER BY period, type_tech
 LIMIT :limit

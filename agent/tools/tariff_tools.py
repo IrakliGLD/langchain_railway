@@ -84,12 +84,18 @@ def get_tariffs(
         raise ValueError("No tariff entities selected")
 
     select_clause = ",\n    ".join(select_parts)
+    where_parts = []
+    if start_date:
+        where_parts.append("date >= :start_date")
+    if end_date:
+        where_parts.append("date <= :end_date")
+    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
     sql = f"""
 WITH dates AS (
     SELECT DISTINCT date
     FROM tariff_with_usd
-    WHERE (:start_date IS NULL OR date >= :start_date)
-      AND (:end_date IS NULL OR date <= :end_date)
+    {where_clause}
 )
 SELECT
     d.date,

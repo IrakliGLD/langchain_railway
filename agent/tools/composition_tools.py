@@ -50,6 +50,21 @@ def get_balancing_composition(
         [f"MAX(CASE WHEN entity='{e}' THEN share ELSE 0 END) AS share_{e}" for e in selected_entities]
     )
 
+    where_parts = [
+        "LOWER(REPLACE(segment, ' ', '_')) = 'balancing'",
+        f"entity IN ({all_entities_sql})"
+    ]
+    params = {"limit": limit}
+
+    if start_date:
+        where_parts.append("time_month >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where_parts.append("time_month <= :end_date")
+        params["end_date"] = end_date
+    
+    where_clause = " AND ".join(where_parts)
+
     sql = f"""
 WITH base AS (
     SELECT
@@ -57,10 +72,7 @@ WITH base AS (
         entity,
         ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY time_month), 0), 4) AS share
     FROM trade_derived_entities
-    WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
-      AND entity IN ({all_entities_sql})
-      AND (:start_date IS NULL OR time_month >= :start_date)
-      AND (:end_date IS NULL OR time_month <= :end_date)
+    WHERE {where_clause}
     GROUP BY time_month, entity
 )
 SELECT
@@ -73,9 +85,4 @@ ORDER BY date
 LIMIT :limit
 """.strip()
 
-    params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "limit": limit,
-    }
     return run_text_query(sql, params)

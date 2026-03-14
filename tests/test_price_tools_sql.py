@@ -7,7 +7,17 @@ import sys
 from unittest.mock import patch, MagicMock
 import pandas as pd
 
+# Mock required environment variables before importing any agent modules
+import os
+os.environ["SUPABASE_DB_URL"] = "postgresql://user:pass@host:5432/db"
+os.environ["ENAI_GATEWAY_SECRET"] = "dummy"
+os.environ["ENAI_SESSION_SIGNING_SECRET"] = "dummy"
+os.environ["ENAI_EVALUATE_SECRET"] = "dummy"
+os.environ["GOOGLE_API_KEY"] = "dummy"
+
 # Mock DB engine creation before importing anything from agent
+import sys
+from unittest.mock import patch, MagicMock
 sys.modules['psycopg'] = MagicMock()
 sys.modules['sqlalchemy'] = MagicMock()
 sys.modules['core.query_executor'] = MagicMock()

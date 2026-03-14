@@ -73,7 +73,7 @@ FROM (
 ) sub
 GROUP BY time_month
 ORDER BY time_month DESC
-LIMIT 36
+LIMIT 120
 """.strip()
 
 

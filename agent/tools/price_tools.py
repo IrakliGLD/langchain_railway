@@ -23,9 +23,19 @@ def _resolve_columns(metric: str, currency: str) -> List[str]:
         "guaranteed_capacity": {"gel": "p_gcap_gel", "usd": "p_gcap_usd"},
     }
 
+    cols = []
     if currency == "both":
-        return [metric_map[metric]["gel"], metric_map[metric]["usd"]]
-    return [metric_map[metric][currency]]
+        cols.extend([metric_map[metric]["gel"], metric_map[metric]["usd"]])
+    else:
+        cols.append(metric_map[metric][currency])
+        
+    # Always include xrate, p_bal_gel, p_bal_usd for causal context if metric is balancing
+    if metric == "balancing":
+        for implicit_col in ["p_bal_gel", "p_bal_usd", "xrate"]:
+            if implicit_col not in cols:
+                cols.append(implicit_col)
+                
+    return cols
 
 
 def get_prices(
