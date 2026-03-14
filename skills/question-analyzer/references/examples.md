@@ -29,6 +29,8 @@ Expected shape:
 - `knowledge.candidate_topics` should prioritize `balancing_price`
 - `sql_hints.period.start_date = 2021-11-01`
 - `sql_hints.period.end_date = 2021-11-30`
+- `analysis_requirements.needs_driver_analysis = true`
+- `analysis_requirements.derived_metrics` should include bounded requests such as `mom_absolute_change`, `mom_percent_change`, and `share_delta_mom`
 - `visualization.chart_recommended = false`
 
 ## Example 3

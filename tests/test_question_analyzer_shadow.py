@@ -87,6 +87,12 @@ def _valid_payload() -> dict:
             "chart_confidence": 0.95,
             "preferred_chart_family": None,
         },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
     }
 
 

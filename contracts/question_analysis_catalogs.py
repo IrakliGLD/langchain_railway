@@ -148,3 +148,42 @@ QUESTION_ANALYSIS_CHART_POLICY: List[Dict[str, str]] = [
         "hint": "Usually recommend stacked or composition-style charts.",
     },
 ]
+
+
+QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
+    {
+        "name": "mom_absolute_change",
+        "use_for": "Month-over-month absolute change for a metric when the question asks why a monthly value changed.",
+        "examples": ["p_bal_gel", "xrate"],
+    },
+    {
+        "name": "mom_percent_change",
+        "use_for": "Month-over-month percentage change for a metric when relative movement matters.",
+        "examples": ["p_bal_gel", "xrate"],
+    },
+    {
+        "name": "yoy_absolute_change",
+        "use_for": "Year-over-year absolute change for the same month or period.",
+        "examples": ["p_bal_gel", "xrate"],
+    },
+    {
+        "name": "yoy_percent_change",
+        "use_for": "Year-over-year percent change for the same month or period.",
+        "examples": ["p_bal_gel", "xrate"],
+    },
+    {
+        "name": "share_delta_mom",
+        "use_for": "Month-over-month share change for balancing composition metrics.",
+        "examples": ["share_import", "share_thermal_ppa", "share_renewable_ppa"],
+    },
+    {
+        "name": "correlation_to_target",
+        "use_for": "Longer-term correlation between a driver and a target metric.",
+        "examples": ["xrate -> p_bal_gel", "share_import -> p_bal_gel"],
+    },
+    {
+        "name": "trend_slope",
+        "use_for": "Long-term trend slope for a metric over time.",
+        "examples": ["p_bal_gel", "xrate"],
+    },
+]

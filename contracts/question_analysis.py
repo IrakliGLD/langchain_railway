@@ -109,6 +109,16 @@ class ChartFamily(str, Enum):
     DUALAXIS = "dualaxis"
 
 
+class DerivedMetricName(str, Enum):
+    MOM_ABSOLUTE_CHANGE = "mom_absolute_change"
+    MOM_PERCENT_CHANGE = "mom_percent_change"
+    YOY_ABSOLUTE_CHANGE = "yoy_absolute_change"
+    YOY_PERCENT_CHANGE = "yoy_percent_change"
+    SHARE_DELTA_MOM = "share_delta_mom"
+    CORRELATION_TO_TARGET = "correlation_to_target"
+    TREND_SLOPE = "trend_slope"
+
+
 class LanguageInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -222,6 +232,34 @@ class VisualizationInfo(BaseModel):
     preferred_chart_family: Optional[ChartFamily] = None
 
 
+class DerivedMetricRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metric_name: DerivedMetricName
+    metric: str = Field(min_length=1, max_length=64)
+    target_metric: Optional[str] = Field(default=None, max_length=64)
+    rank_limit: Optional[int] = Field(default=None, ge=1, le=10)
+
+    @field_validator("metric", "target_metric")
+    @classmethod
+    def _strip_metric_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("metric fields must not be empty or whitespace")
+        return trimmed
+
+
+class AnalysisRequirementsInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    needs_driver_analysis: bool = False
+    needs_trend_context: bool = False
+    needs_correlation_context: bool = False
+    derived_metrics: List[DerivedMetricRequest] = Field(default_factory=list, max_length=12)
+
+
 class QuestionAnalysis(BaseModel):
     """Validated output for the question-analyzer LLM call."""
 
@@ -237,6 +275,7 @@ class QuestionAnalysis(BaseModel):
     tooling: ToolingInfo
     sql_hints: SqlHints
     visualization: VisualizationInfo
+    analysis_requirements: AnalysisRequirementsInfo = Field(default_factory=AnalysisRequirementsInfo)
 
     @field_validator("raw_query", "canonical_query_en")
     @classmethod

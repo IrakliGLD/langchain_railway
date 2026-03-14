@@ -123,6 +123,8 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
         numeric = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return tokens
+    if not numeric.is_finite():
+        return tokens
 
     # Allow claims written as percentages (e.g., 32%) to match ratio cells (0.32).
     if abs(numeric) <= 1:

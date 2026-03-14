@@ -41,6 +41,7 @@ import knowledge as knowledge_module
 from contracts.question_analysis import QuestionAnalysis
 from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_CHART_POLICY,
+    QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG,
     QUESTION_ANALYSIS_QUERY_TYPE_GUIDE,
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
@@ -686,6 +687,7 @@ def _question_analysis_hint_payload(question_analysis: Optional[QuestionAnalysis
                 else None
             ),
         },
+        "analysis_requirements": question_analysis.analysis_requirements.model_dump(mode="json"),
     }
 
 
@@ -1560,7 +1562,8 @@ def llm_analyze_question(
         f"question_analysis_v1|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOPIC_CATALOG)}|"
-        f"{_compact_json(QUESTION_ANALYSIS_TOOL_CATALOG)}"
+        f"{_compact_json(QUESTION_ANALYSIS_TOOL_CATALOG)}|"
+        f"{_compact_json(QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG)}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -1595,6 +1598,9 @@ TOOL_CATALOG:
 CHART_POLICY_HINTS:
 <<<{_compact_json(QUESTION_ANALYSIS_CHART_POLICY)}>>>
 
+DERIVED_METRIC_CATALOG:
+<<<{_compact_json(QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG)}>>>
+
 Respond with JSON exactly matching this schema:
 {_compact_json(schema_hint)}
 
@@ -1602,6 +1608,8 @@ Important rules:
 - `canonical_query_en` must preserve the meaning, not answer the question.
 - `preferred_path` must be one of the allowed enum values.
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
+- `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
+- `analysis_requirements` should specify needed derived evidence, but must not compute any values.
 - Dates must use YYYY-MM-DD.
 - `chart_requested_by_user` and `chart_recommended` must be booleans.
 """

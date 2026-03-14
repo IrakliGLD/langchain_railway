@@ -17,6 +17,7 @@ The generated schema snapshot is [schemas/question_analysis.schema.json](../../.
 - `tooling`
 - `sql_hints`
 - `visualization`
+- `analysis_requirements`
 
 ## Important rules
 
@@ -24,5 +25,7 @@ The generated schema snapshot is [schemas/question_analysis.schema.json](../../.
 - `preferred_path` must be one of: `knowledge`, `tool`, `sql`, `clarify`, `reject`.
 - `query_type` must be one of the runtime enum values.
 - `candidate_topics` and `candidate_tools` are ranked lists, not final decisions.
+- `analysis_requirements.derived_metrics` must choose only supported derived metric names from the runtime catalog.
+- `analysis_requirements` specifies needed derived evidence only; it must never include computed values.
 - `chart_requested_by_user` and `chart_recommended` are booleans.
 - `preferred_chart_family` is a hint only.

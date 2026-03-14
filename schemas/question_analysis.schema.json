@@ -8,6 +8,36 @@
       "title": "AnalysisMode",
       "type": "string"
     },
+    "AnalysisRequirementsInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "needs_driver_analysis": {
+          "default": false,
+          "title": "Needs Driver Analysis",
+          "type": "boolean"
+        },
+        "needs_trend_context": {
+          "default": false,
+          "title": "Needs Trend Context",
+          "type": "boolean"
+        },
+        "needs_correlation_context": {
+          "default": false,
+          "title": "Needs Correlation Context",
+          "type": "boolean"
+        },
+        "derived_metrics": {
+          "items": {
+            "$ref": "#/$defs/DerivedMetricRequest"
+          },
+          "maxItems": 12,
+          "title": "Derived Metrics",
+          "type": "array"
+        }
+      },
+      "title": "AnalysisRequirementsInfo",
+      "type": "object"
+    },
     "ChartFamily": {
       "enum": [
         "line",
@@ -61,6 +91,66 @@
         "confidence"
       ],
       "title": "ClassificationInfo",
+      "type": "object"
+    },
+    "DerivedMetricName": {
+      "enum": [
+        "mom_absolute_change",
+        "mom_percent_change",
+        "yoy_absolute_change",
+        "yoy_percent_change",
+        "share_delta_mom",
+        "correlation_to_target",
+        "trend_slope"
+      ],
+      "title": "DerivedMetricName",
+      "type": "string"
+    },
+    "DerivedMetricRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "metric_name": {
+          "$ref": "#/$defs/DerivedMetricName"
+        },
+        "metric": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Metric",
+          "type": "string"
+        },
+        "target_metric": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Metric"
+        },
+        "rank_limit": {
+          "anyOf": [
+            {
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rank Limit"
+        }
+      },
+      "required": [
+        "metric_name",
+        "metric"
+      ],
+      "title": "DerivedMetricRequest",
       "type": "object"
     },
     "DimensionName": {
@@ -592,6 +682,9 @@
     },
     "visualization": {
       "$ref": "#/$defs/VisualizationInfo"
+    },
+    "analysis_requirements": {
+      "$ref": "#/$defs/AnalysisRequirementsInfo"
     }
   },
   "required": [

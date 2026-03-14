@@ -50,6 +50,7 @@ from models import QueryContext  # noqa: E402
 from agent import summarizer, sql_executor  # noqa: E402
 from agent import analyzer  # noqa: E402
 from agent.provenance import sql_query_hash  # noqa: E402
+from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 import core.llm as llm_core  # noqa: E402
 
@@ -611,3 +612,169 @@ def test_why_price_summary_does_not_claim_mix_shift_without_evidence(monkeypatch
     ]
     assert out.summary_provenance_gate_passed is True
     assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_derived_analysis_evidence_supports_alias_columns_and_llm_numeric_claims(monkeypatch):
+    corr_df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+            "p_bal_gel": [175.2, 168.5],
+            "p_bal_usd": [55.4, 54.5],
+            "xrate": [3.16, 3.09],
+            "share_import": [0.0078, 0.2186],
+            "share_deregulated_hydro": [0.0003, 0.0010],
+            "share_regulated_hpp": [0.0, 0.0],
+            "share_renewable_ppa": [0.7709, 0.3180],
+            "share_thermal_ppa": [0.1653, 0.4625],
+        }
+    )
+    share_panel = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+            "segment": ["balancing", "balancing"],
+            "share_import": [0.0078, 0.2186],
+            "share_deregulated_hydro": [0.0003, 0.0010],
+            "share_regulated_hpp": [0.0, 0.0],
+            "share_regulated_new_tpp": [0.0505, 0.0],
+            "share_regulated_old_tpp": [0.0052, 0.0],
+            "share_renewable_ppa": [0.7709, 0.3180],
+            "share_thermal_ppa": [0.1653, 0.4625],
+        }
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": "Why did balancing electricity price change in November 2021?",
+            "canonical_query_en": "Why did balancing electricity price change in November 2021?",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "data_explanation",
+                "analysis_mode": "analyst",
+                "intent": "balancing_price_why",
+                "needs_clarification": False,
+                "confidence": 0.95,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "sql",
+                "needs_sql": True,
+                "needs_knowledge": True,
+                "prefer_tool": False,
+            },
+            "knowledge": {
+                "candidate_topics": [
+                    {"name": "balancing_price", "score": 0.98},
+                    {"name": "currency_influence", "score": 0.75},
+                ]
+            },
+            "tooling": {"candidate_tools": []},
+            "sql_hints": {
+                "metric": "p_bal_gel",
+                "entities": [],
+                "aggregation": "monthly",
+                "dimensions": ["price", "xrate", "share"],
+                "period": {
+                    "kind": "month",
+                    "start_date": "2021-11-01",
+                    "end_date": "2021-11-30",
+                    "granularity": "month",
+                    "raw_text": "November 2021",
+                },
+            },
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.8,
+                "preferred_chart_family": None,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": True,
+                "needs_trend_context": False,
+                "needs_correlation_context": True,
+                "derived_metrics": [
+                    {"metric_name": "mom_absolute_change", "metric": "p_bal_gel", "target_metric": None, "rank_limit": None},
+                    {"metric_name": "mom_percent_change", "metric": "p_bal_gel", "target_metric": None, "rank_limit": None},
+                    {"metric_name": "mom_absolute_change", "metric": "xrate", "target_metric": None, "rank_limit": None},
+                    {"metric_name": "share_delta_mom", "metric": "share_import", "target_metric": None, "rank_limit": None},
+                    {"metric_name": "share_delta_mom", "metric": "share_thermal_ppa", "target_metric": None, "rank_limit": None},
+                    {"metric_name": "share_delta_mom", "metric": "share_renewable_ppa", "target_metric": None, "rank_limit": None},
+                ],
+            },
+        }
+    )
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: share_panel)
+    monkeypatch.setattr(analyzer, "_is_balancing_price_query", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: SummaryEnvelope(
+            answer=(
+                "In November 2021, the balancing electricity price decreased to 168.5 GEL from 175.2 GEL "
+                "in October 2021. The exchange rate moved from 3.16 to 3.09, while the month-over-month "
+                "share changes included 0.2972 for thermal PPAs, 0.2108 for imports, and -0.4529 for renewable PPAs."
+            ),
+            claims=[
+                "Balancing electricity price changed from 175.2 to 168.5 GEL/MWh.",
+                "Exchange rate changed from 3.16 to 3.09.",
+                "Month-over-month share deltas were 0.2972 for thermal PPAs, 0.2108 for imports, and -0.4529 for renewable PPAs.",
+            ],
+            citations=["data_preview", "statistics"],
+            confidence=0.9,
+        ),
+    )
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2021?",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "month": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+                "balancing_price_gel": [175.2, 168.5],
+                "exchange_rate": [3.16, 3.09],
+            }
+        ),
+        cols=["month", "balancing_price_gel", "exchange_rate"],
+        rows=[
+            (pd.Timestamp("2021-10-01"), 175.2, 3.16),
+            (pd.Timestamp("2021-11-01"), 168.5, 3.09),
+        ],
+        provenance_cols=["month", "balancing_price_gel", "exchange_rate"],
+        provenance_rows=[
+            (pd.Timestamp("2021-10-01"), 175.2, 3.16),
+            (pd.Timestamp("2021-11-01"), 168.5, 3.09),
+        ],
+        provenance_query_hash="why-derived-123",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+    out = summarizer.summarize_data(enriched)
+
+    assert enriched.analysis_evidence
+    assert any(
+        item["metric"] == "share_thermal_ppa" and item["absolute_change"] == pytest.approx(0.2972, rel=1e-6)
+        for item in enriched.analysis_evidence
+    )
+    assert any(0.2972 in [value for value in row if isinstance(value, float)] for row in enriched.provenance_rows)
+    assert out.summary_provenance_gate_passed is True
+    assert "citation-grade grounding" not in out.summary

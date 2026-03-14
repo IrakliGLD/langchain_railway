@@ -76,6 +76,16 @@ def _valid_payload() -> dict:
             "chart_confidence": 0.82,
             "preferred_chart_family": None,
         },
+        "analysis_requirements": {
+            "needs_driver_analysis": True,
+            "needs_trend_context": False,
+            "needs_correlation_context": True,
+            "derived_metrics": [
+                {"metric_name": "mom_absolute_change", "metric": "p_bal_gel", "target_metric": None, "rank_limit": None},
+                {"metric_name": "mom_percent_change", "metric": "p_bal_gel", "target_metric": None, "rank_limit": None},
+                {"metric_name": "share_delta_mom", "metric": "share_import", "target_metric": None, "rank_limit": None},
+            ],
+        },
     }
 
 

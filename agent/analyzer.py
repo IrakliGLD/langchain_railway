@@ -45,6 +45,22 @@ BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
     "share_all_renewables": {"label": "all renewables", "cost": "mixed", "usd_linked": True},
 }
 
+METRIC_VALUE_ALIASES: dict[str, list[str]] = {
+    "p_bal_gel": ["p_bal_gel", "balancing_price_gel"],
+    "p_bal_usd": ["p_bal_usd", "balancing_price_usd"],
+    "xrate": ["xrate", "exchange_rate"],
+}
+
+DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
+    {"metric_name": "mom_absolute_change", "metric": "p_bal_gel"},
+    {"metric_name": "mom_percent_change", "metric": "p_bal_gel"},
+    {"metric_name": "mom_absolute_change", "metric": "xrate"},
+    {"metric_name": "mom_percent_change", "metric": "xrate"},
+    {"metric_name": "share_delta_mom", "metric": "share_import"},
+    {"metric_name": "share_delta_mom", "metric": "share_thermal_ppa"},
+    {"metric_name": "share_delta_mom", "metric": "share_renewable_ppa"},
+]
+
 MONTH_NAME_TO_NUMBER = {
     "january": 1, "jan": 1, "february": 2, "feb": 2,
     "march": 3, "mar": 3, "april": 4, "apr": 4,
@@ -152,6 +168,183 @@ def _format_share_pct(value: float) -> str:
     if abs(numeric) <= 1:
         numeric *= 100.0
     return f"{numeric:.1f}%"
+
+
+def _metric_aliases(metric: str) -> list[str]:
+    metric_name = str(metric or "").strip()
+    if not metric_name:
+        return []
+    return METRIC_VALUE_ALIASES.get(metric_name, [metric_name])
+
+
+def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        requests = [
+            req.model_dump(mode="json")
+            for req in ctx.question_analysis.analysis_requirements.derived_metrics
+        ]
+        if requests:
+            return requests
+    return [dict(item) for item in DERIVED_METRIC_DEFAULTS]
+
+
+def _find_yoy_row(df: pd.DataFrame, time_col: str, ts: Optional[pd.Timestamp]) -> pd.DataFrame:
+    if ts is None or pd.isna(ts):
+        return pd.DataFrame()
+    ts = pd.to_datetime(ts)
+    yoy_match = df[df[time_col].dt.to_period("M") == (ts - pd.DateOffset(years=1)).to_period("M")]
+    if not yoy_match.empty:
+        return yoy_match.tail(1)
+    return pd.DataFrame()
+
+
+def _build_requested_analysis_evidence(
+    ctx: QueryContext,
+    df: pd.DataFrame,
+    time_col: str,
+    current_ts: Optional[pd.Timestamp],
+    current_row: pd.DataFrame,
+    previous_ts: Optional[pd.Timestamp],
+    previous_row: pd.DataFrame,
+    cur_shares: dict[str, float],
+    prev_shares: dict[str, float],
+) -> pd.DataFrame:
+    requests = _active_analysis_requests(ctx)
+    if not requests:
+        return pd.DataFrame()
+
+    yoy_row = _find_yoy_row(df, time_col, current_ts)
+    yoy_ts = pd.to_datetime(yoy_row[time_col].iloc[0], errors="coerce") if not yoy_row.empty else None
+
+    def _row_value(frame: pd.DataFrame, metric_name: str) -> Optional[float]:
+        if frame is None or frame.empty:
+            return None
+        for candidate in _metric_aliases(metric_name):
+            if candidate not in frame.columns:
+                continue
+            value = frame[candidate].iloc[0]
+            if value is None or pd.isna(value):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _share_value(snapshot: dict[str, float], metric_name: str) -> Optional[float]:
+        value = snapshot.get(metric_name)
+        return None if value is None else float(value)
+
+    evidence_rows: list[dict[str, Any]] = []
+    for request in requests:
+        metric_name = str(request.get("metric_name", "")).strip()
+        metric = str(request.get("metric", "")).strip()
+        target_metric = str(request.get("target_metric", "")).strip() or None
+        if not metric_name or not metric:
+            continue
+
+        record: dict[str, Any] = {
+            "record_type": "derived",
+            "derived_metric_name": metric_name,
+            "metric": metric,
+            "target_metric": target_metric,
+            "period": str(current_ts) if current_ts is not None and not pd.isna(current_ts) else None,
+            "comparison_period": None,
+            "current_value": None,
+            "previous_value": None,
+            "absolute_change": None,
+            "percent_change": None,
+            "correlation_value": None,
+            "trend_slope": None,
+            "formula": "",
+        }
+
+        if metric_name in {"mom_absolute_change", "mom_percent_change"}:
+            cur_val = _share_value(cur_shares, metric) if metric.startswith("share_") else _row_value(current_row, metric)
+            prev_val = _share_value(prev_shares, metric) if metric.startswith("share_") else _row_value(previous_row, metric)
+            if cur_val is None or prev_val is None:
+                continue
+            delta = cur_val - prev_val
+            pct = None if abs(prev_val) < 1e-12 else (delta / prev_val) * 100.0
+            record.update(
+                {
+                    "comparison_period": str(previous_ts) if previous_ts is not None and not pd.isna(previous_ts) else None,
+                    "current_value": round(cur_val, 6),
+                    "previous_value": round(prev_val, 6),
+                    "absolute_change": round(delta, 6),
+                    "percent_change": None if pct is None else round(pct, 4),
+                    "formula": "current_value - previous_value",
+                }
+            )
+        elif metric_name in {"yoy_absolute_change", "yoy_percent_change"}:
+            cur_val = _share_value(cur_shares, metric) if metric.startswith("share_") else _row_value(current_row, metric)
+            yoy_val = _share_value(prev_shares, metric) if metric.startswith("share_") else _row_value(yoy_row, metric)
+            if cur_val is None or yoy_val is None:
+                continue
+            delta = cur_val - yoy_val
+            pct = None if abs(yoy_val) < 1e-12 else (delta / yoy_val) * 100.0
+            record.update(
+                {
+                    "comparison_period": str(yoy_ts) if yoy_ts is not None and not pd.isna(yoy_ts) else None,
+                    "current_value": round(cur_val, 6),
+                    "previous_value": round(yoy_val, 6),
+                    "absolute_change": round(delta, 6),
+                    "percent_change": None if pct is None else round(pct, 4),
+                    "formula": "current_value - previous_value_same_period_last_year",
+                }
+            )
+        elif metric_name == "share_delta_mom":
+            cur_val = _share_value(cur_shares, metric)
+            prev_val = _share_value(prev_shares, metric)
+            if cur_val is None or prev_val is None:
+                continue
+            delta = cur_val - prev_val
+            record.update(
+                {
+                    "comparison_period": str(previous_ts) if previous_ts is not None and not pd.isna(previous_ts) else None,
+                    "current_value": round(cur_val, 6),
+                    "previous_value": round(prev_val, 6),
+                    "absolute_change": round(delta, 6),
+                    "formula": "current_share - previous_share",
+                }
+            )
+        elif metric_name == "correlation_to_target":
+            corr_target = target_metric or "p_bal_gel"
+            corr_map = ctx.correlation_results.get(corr_target, {})
+            corr_value = corr_map.get(metric)
+            if corr_value is None:
+                continue
+            record.update(
+                {
+                    "target_metric": corr_target,
+                    "correlation_value": round(float(corr_value), 6),
+                    "formula": f"corr({metric}, {corr_target}) over available series",
+                }
+            )
+        elif metric_name == "trend_slope":
+            candidates = _metric_aliases(metric)
+            value_col = next((candidate for candidate in candidates if candidate in df.columns), None)
+            if value_col is None or len(df) < 2:
+                continue
+            numeric_series = pd.to_numeric(df[value_col], errors="coerce")
+            valid = numeric_series.notna()
+            if valid.sum() < 2:
+                continue
+            x = np.arange(valid.sum(), dtype=float)
+            y = numeric_series[valid].astype(float).to_numpy()
+            slope = np.polyfit(x, y, deg=1)[0]
+            record.update(
+                {
+                    "trend_slope": round(float(slope), 6),
+                    "formula": f"linear_slope({metric}) over ordered observations",
+                }
+            )
+        else:
+            continue
+
+        evidence_rows.append(record)
+
+    return pd.DataFrame(evidence_rows)
 
 
 def _build_why_claims(
@@ -727,7 +920,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
                 "enguri_tariff_gel", "gardabani_tpp_tariff_gel",
                 "grouped_old_tpp_tariff_gel"
             ]
-            corr_df = corr_df[[c for c in corr_df.columns if c in (["date"] + allowed_targets + allowed_drivers)]]
+            corr_df = corr_df[[c for c in corr_df.columns if c in (["date"] + allowed_targets + allowed_drivers)]].copy()
 
             # Overall correlations
             numeric_df = corr_df.drop(columns=["date"], errors="ignore").apply(pd.to_numeric, errors="coerce")
@@ -808,6 +1001,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
         stats_hint_len=len(ctx.stats_hint or ""),
         share_override=bool(ctx.share_summary_override),
         why_override=bool(ctx.why_summary_override),
+        analysis_evidence_count=len(ctx.analysis_evidence or []),
         correlation_keys=list(ctx.correlation_results.keys()),
         add_trendlines=bool(ctx.add_trendlines),
         trendline_extend_to=ctx.trendline_extend_to or "",
@@ -855,12 +1049,12 @@ def _build_why_context(ctx: QueryContext) -> None:
                         continue
         return None
 
-    cur_gel = _get_val(cur_row, ["p_bal_gel"])
-    prev_gel = _get_val(prev_row, ["p_bal_gel"]) if not prev_row.empty else None
-    cur_usd = _get_val(cur_row, ["p_bal_usd"])
-    prev_usd = _get_val(prev_row, ["p_bal_usd"]) if not prev_row.empty else None
-    cur_xrate = _get_val(cur_row, ["xrate"])
-    prev_xrate = _get_val(prev_row, ["xrate"]) if not prev_row.empty else None
+    cur_gel = _get_val(cur_row, _metric_aliases("p_bal_gel"))
+    prev_gel = _get_val(prev_row, _metric_aliases("p_bal_gel")) if not prev_row.empty else None
+    cur_usd = _get_val(cur_row, _metric_aliases("p_bal_usd"))
+    prev_usd = _get_val(prev_row, _metric_aliases("p_bal_usd")) if not prev_row.empty else None
+    cur_xrate = _get_val(cur_row, _metric_aliases("xrate"))
+    prev_xrate = _get_val(prev_row, _metric_aliases("xrate")) if not prev_row.empty else None
 
     share_cols = [c for c in df.columns if c.startswith("share_")]
     cur_shares: dict[str, float] = {}
@@ -973,6 +1167,54 @@ def _build_why_context(ctx: QueryContext) -> None:
     why_ctx["notes"].append("If GEL depreciates, GEL-denominated balancing price rises due to USD-linked gas/import costs.")
     why_ctx["notes"].append("Composition shift toward thermal or import increases price; more hydro or renewable lowers it.")
 
+    analysis_evidence_df = _build_requested_analysis_evidence(
+        ctx,
+        df,
+        t_series_col,
+        target_ts,
+        cur_row,
+        prev_ts,
+        prev_row,
+        cur_shares,
+        prev_shares,
+    )
+    ctx.analysis_evidence = (
+        analysis_evidence_df.replace({np.nan: None}).to_dict(orient="records")
+        if not analysis_evidence_df.empty
+        else []
+    )
+    if ctx.analysis_evidence:
+        why_ctx["derived_evidence"] = ctx.analysis_evidence
+
+    why_prov_df = _build_why_provenance_snapshot(
+        target_ts,
+        prev_ts,
+        cur_gel=cur_gel,
+        prev_gel=prev_gel,
+        cur_usd=cur_usd,
+        prev_usd=prev_usd,
+        cur_xrate=cur_xrate,
+        prev_xrate=prev_xrate,
+        cur_shares=cur_shares,
+        prev_shares=prev_shares,
+    )
+    combined_prov_df = why_prov_df
+    if not analysis_evidence_df.empty:
+        combined_prov_df = pd.concat([why_prov_df, analysis_evidence_df], ignore_index=True, sort=False)
+    if not combined_prov_df.empty:
+        base_hash = str(ctx.provenance_query_hash or "")
+        if cur_shares or prev_shares:
+            why_hash = sql_query_hash(f"{base_hash}|why_summary|{BALANCING_SHARE_PIVOT_SQL}")
+        else:
+            why_hash = base_hash or sql_query_hash(f"{ctx.query}|why_summary")
+        stamp_provenance(
+            ctx,
+            list(combined_prov_df.columns),
+            [tuple(r) for r in combined_prov_df.itertuples(index=False, name=None)],
+            source=str(ctx.provenance_source or "sql"),
+            query_hash=why_hash,
+        )
+
     if _is_balancing_price_query(ctx.query):
         why_summary, why_claims = _generate_why_summary_payload(
             cur_gel,
@@ -997,19 +1239,6 @@ def _build_why_context(ctx: QueryContext) -> None:
                 cur_shares=cur_shares,
                 prev_shares=prev_shares,
             )
-            if not why_prov_df.empty:
-                base_hash = str(ctx.provenance_query_hash or "")
-                if cur_shares or prev_shares:
-                    why_hash = sql_query_hash(f"{base_hash}|why_summary|{BALANCING_SHARE_PIVOT_SQL}")
-                else:
-                    why_hash = base_hash or sql_query_hash(f"{ctx.query}|why_summary")
-                stamp_provenance(
-                    ctx,
-                    list(why_prov_df.columns),
-                    [tuple(r) for r in why_prov_df.itertuples(index=False, name=None)],
-                    source=str(ctx.provenance_source or "sql"),
-                    query_hash=why_hash,
-                )
 
     trace_detail(
         log,
@@ -1018,6 +1247,7 @@ def _build_why_context(ctx: QueryContext) -> None:
         "why_context",
         why_override_generated=bool(ctx.why_summary_override),
         why_claim_count=len(ctx.why_summary_claims or []),
+        analysis_evidence_count=len(ctx.analysis_evidence or []),
         signals=why_ctx.get("signals", {}),
     )
     trace_detail(
@@ -1029,7 +1259,10 @@ def _build_why_context(ctx: QueryContext) -> None:
         why_context=why_ctx,
         why_summary_override=ctx.why_summary_override or "",
         why_summary_claims=ctx.why_summary_claims,
+        analysis_evidence=ctx.analysis_evidence,
     )
+    if ctx.analysis_evidence:
+        ctx.stats_hint += "\n\n--- DERIVED ANALYSIS EVIDENCE ---\n" + json.dumps(ctx.analysis_evidence, default=str, indent=2)
     ctx.stats_hint += "\n\n--- CAUSAL CONTEXT ---\n" + json.dumps(why_ctx, default=str, indent=2)
     log.info("Why-context attached to stats_hint.")
 
