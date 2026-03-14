@@ -15,6 +15,8 @@ import json
 import logging
 import time
 
+import pandas as pd
+
 from config import (
     ENABLE_AGENT_LOOP,
     ENABLE_TYPED_TOOLS,
@@ -28,6 +30,7 @@ from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, o
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
 from agent.router import match_tool
 from agent.tools import execute_tool
+from agent.tools.types import ToolInvocation
 
 log = logging.getLogger("Enai")
 def process_query(
@@ -164,6 +167,67 @@ def process_query(
                     log.warning("Typed tool relevance blocked. reason=%s", tool_reason)
                 else:
                     log.info("Typed tool relevance validated. reason=%s", tool_reason)
+
+                    # --- Phase 2: Enrich price data with composition for why-queries ---
+                    if (
+                        is_exp
+                        and invocation.name == "get_prices"
+                        and not ctx.df.empty
+                        and not any(c.startswith("share_") for c in ctx.cols)
+                    ):
+                        try:
+                            comp_invocation = ToolInvocation(
+                                name="get_balancing_composition",
+                                params={
+                                    "start_date": invocation.params.get("start_date"),
+                                    "end_date": invocation.params.get("end_date"),
+                                },
+                            )
+                            comp_df, comp_cols, comp_rows = execute_tool(comp_invocation)
+                            if not comp_df.empty:
+                                # Merge share columns into price df on date
+                                date_col_price = next(
+                                    (c for c in ctx.df.columns if "date" in c.lower()),
+                                    None,
+                                )
+                                date_col_comp = next(
+                                    (c for c in comp_df.columns if "date" in c.lower()),
+                                    None,
+                                )
+                                if date_col_price and date_col_comp:
+                                    ctx.df[date_col_price] = pd.to_datetime(
+                                        ctx.df[date_col_price], errors="coerce"
+                                    )
+                                    comp_df[date_col_comp] = pd.to_datetime(
+                                        comp_df[date_col_comp], errors="coerce"
+                                    )
+                                    share_cols = [
+                                        c for c in comp_df.columns if c.startswith("share_")
+                                    ]
+                                    merge_cols = [date_col_comp] + share_cols
+                                    merged = ctx.df.merge(
+                                        comp_df[merge_cols].rename(
+                                            columns={date_col_comp: date_col_price}
+                                        ),
+                                        on=date_col_price,
+                                        how="left",
+                                    )
+                                    ctx.df = merged
+                                    ctx.cols = list(merged.columns)
+                                    ctx.rows = [
+                                        tuple(r)
+                                        for r in merged.itertuples(index=False, name=None)
+                                    ]
+                                    log.info(
+                                        "✅ Enriched price data with %d composition columns for why-query",
+                                        len(share_cols),
+                                    )
+                        except Exception as enrich_err:
+                            log.warning(
+                                "⚠️ Composition enrichment for why-query failed: %s",
+                                enrich_err,
+                            )
+
                 log.info(
                     "Typed tool route hit: tool=%s confidence=%.2f reason=%s",
                     invocation.name,

@@ -431,8 +431,15 @@ def _generate_why_summary_payload(
     prev_xrate: Optional[float],
     cur_shares: dict[str, float],
     prev_shares: dict[str, float],
+    has_share_evidence: bool = True,
 ) -> Tuple[Optional[str], List[str]]:
-    """Build an evidence-based explanation for balancing-price variation."""
+    """Build an evidence-based explanation for balancing-price variation.
+
+    ``has_share_evidence`` should be False when the pipeline was unable to
+    retrieve any share/composition data at all.  When False the summary
+    explicitly says composition evidence was unavailable rather than
+    claiming "no shift was observed".
+    """
     if cur_gel is None or prev_gel is None:
         return None, []
 
@@ -472,6 +479,7 @@ def _generate_why_summary_payload(
     else:
         sentences.append("Compared with the previous month, the observed balancing price was broadly stable.")
 
+    # --- Composition evidence ---
     if mix_pressure > 0:
         parts: List[str] = []
         if expensive_up:
@@ -498,9 +506,16 @@ def _generate_why_summary_payload(
             sentences.append(
                 f"The balancing mix changed, but the observed share shifts do not point to a single clear cost direction: {' while '.join(mix_parts)}."
             )
+    elif not has_share_evidence:
+        # Critically different from "no shift observed": we had NO data.
+        sentences.append(
+            "No balancing composition data was available for this comparison, "
+            "so the role of supplier-mix changes cannot be assessed from this evidence alone."
+        )
     else:
         sentences.append("The available month-over-month share data do not show a large mix shift.")
 
+    # --- Exchange rate ---
     if xrate_direction > 0:
         sentences.append(
             "The exchange rate also moved higher, which is consistent with upward pressure on USD-linked imports and thermal PPAs."
@@ -510,13 +525,32 @@ def _generate_why_summary_payload(
             "The exchange rate moved lower, which is consistent with downward pressure on USD-linked imports and thermal PPAs."
         )
 
-    if mix_pressure == 0 and xrate_direction == 0:
-        sentences.append(
-            "From the available mix and exchange-rate signals, there is no single dominant observed driver for the month-over-month price change."
-        )
-    elif price_direction != 0 and mix_pressure != 0 and mix_pressure != price_direction and xrate_direction != price_direction:
+    # --- Contradiction / insufficiency guards ---
+    xrate_contradicts = (price_direction != 0 and xrate_direction != 0 and xrate_direction != price_direction)
+    mix_contradicts = (price_direction != 0 and mix_pressure != 0 and mix_pressure != price_direction)
+    no_signals = (mix_pressure == 0 and xrate_direction == 0)
+
+    if xrate_contradicts and mix_contradicts:
+        # Both signals oppose the observed price direction
         sentences.append(
             "The observed mix and exchange-rate signals do not fully explain the direction of the price move, so other pricing components may also have mattered."
+        )
+    elif xrate_contradicts:
+        # xrate opposes price but mix is neutral or agrees
+        sentences.append(
+            "However, the observed price moved in the opposite direction to the exchange-rate pressure, "
+            "suggesting that other factors (such as composition shifts or entity-level pricing changes) "
+            "offset the currency effect."
+        )
+    elif mix_contradicts:
+        # Mix opposes price but xrate is neutral or agrees
+        sentences.append(
+            "The observed composition shift points in the opposite direction to the price move, "
+            "suggesting that exchange-rate effects or entity-level pricing changes offset the mix effect."
+        )
+    elif no_signals:
+        sentences.append(
+            "From the available mix and exchange-rate signals, there is no single dominant observed driver for the month-over-month price change."
         )
 
     sentences.append(
@@ -1134,6 +1168,9 @@ def _build_why_context(ctx: QueryContext) -> None:
                             except (ValueError, TypeError):
                                 continue
 
+    # Track whether any share evidence was found at all
+    share_data_available = bool(cur_shares or prev_shares)
+
     deltas = {k: round(cur_shares.get(k, 0) - prev_shares.get(k, 0), 4) for k in cur_shares}
 
     why_ctx["signals"] = {
@@ -1223,6 +1260,7 @@ def _build_why_context(ctx: QueryContext) -> None:
             prev_xrate,
             cur_shares,
             prev_shares,
+            has_share_evidence=share_data_available,
         )
         if why_summary and why_claims:
             ctx.why_summary_override = why_summary
