@@ -58,10 +58,10 @@ def get_balancing_composition(
     params = {"limit": limit}
 
     if start_date:
-        where_parts.append("time_month >= :start_date")
+        where_parts.append("date >= :start_date")
         params["start_date"] = start_date
     if end_date:
-        where_parts.append("time_month <= :end_date")
+        where_parts.append("date <= :end_date")
         params["end_date"] = end_date
     
     where_clause = " AND ".join(where_parts)

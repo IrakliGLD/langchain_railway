@@ -32,6 +32,14 @@
 | share_regulated_new_tpp | new regulated TPP share |
 | quantity_tech | generation (thousand MWh) |
 | type_tech | technology type |
+| p_dereg_gel | deregulated price in GEL |
+| p_dereg_usd | deregulated price in USD |
+| p_gcap_gel | guaranteed capacity fee in GEL |
+| p_gcap_usd | guaranteed capacity fee in USD |
+| cpi | consumer price index |
+| share_all_ppa | all PPAs share |
+| share_all_renewables | all renewables share |
+| share_total_hpp | total HPP share |
 
 ## Length guidelines by query type
 

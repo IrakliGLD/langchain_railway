@@ -2,16 +2,9 @@
 
 Canonical SQL patterns per view. These serve as few-shot templates for the planner.
 
-## Views available
+## Schema reference
 
-| View | Key columns | Notes |
-|------|-------------|-------|
-| `price_with_usd` | date, p_bal_gel, p_bal_usd, xrate | Monthly balancing prices + exchange rate |
-| `tariff_with_usd` | date, entity, tariff_gel, tariff_usd | Monthly entity tariffs |
-| `trade_derived_entities` | date, segment, entity, quantity | Entity quantities. **Data from 2020 only**. Segment filter: `LOWER(REPLACE(segment, ' ', '_')) = 'balancing'` |
-| `tech_quantity_view` | date, time_month, type_tech, quantity_tech | Generation by technology (thousand MWh) |
-| `monthly_cpi_mv` | date, cpi_type, cpi | CPI indices. Filter: `cpi_type = 'electricity_gas_and_other_fuels'` |
-| `energy_balance_long_mv` | year, category, value | Annual energy balance. Use yearly aggregation. |
+For complete view definitions with columns and exact value enums, see `UNTRUSTED_SCHEMA_TEXT` injected in the prompt. Patterns below use these views.
 
 ## Pattern: Monthly balancing price
 

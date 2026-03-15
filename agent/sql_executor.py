@@ -25,10 +25,10 @@ log = logging.getLogger("Enai")
 
 
 # ---------------------------------------------------------------------------
-# SQL column synonym auto-fix (from context.py)
+# SQL column synonym auto-fix (from config.py)
 # ---------------------------------------------------------------------------
 try:
-    from context import COLUMN_SYNONYMS
+    from config import COLUMN_SYNONYMS
 except ImportError:
     COLUMN_SYNONYMS = {}
 

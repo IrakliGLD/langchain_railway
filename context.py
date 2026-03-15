@@ -37,6 +37,15 @@ COLUMN_LABELS = {
     # trade_derived_entities
     "segment": "Market Segment",
     "quantity": "Trade Volume (thousand MWh)",
+
+    # monthly_cpi_mv
+    "cpi_type": "CPI Category",
+    "cpi": "Consumer Price Index",
+
+    # energy_balance_long_mv
+    "year": "Year",
+    "category": "Energy Balance Category",
+    "value": "Value",
 }
 
 # ----------------------------------------------------------
@@ -71,6 +80,9 @@ VIEW_LABELS = {
     "tariff_with_usd": "Regulated Tariffs (USD)",
     "tech_quantity_view": "Generation & Demand Quantities",
     "trade_derived_entities": "Electricity Trade",
+    "energy_balance_long_mv": "Annual Energy Balance",
+    "monthly_cpi_mv": "Monthly Consumer Price Index",
+    "dates_mv": "Date Reference",
 }
 
 # --- Demand/Supply classification for type_tech ---
@@ -108,6 +120,7 @@ VALUE_LABELS = {
     "regulated_hpp": "Regulated HPP",
     "regulated_new_tpp": "Regulated new TPP",
     "regulated_old_tpp": "Regulated old TPP",
+    "CfD_scheme": "CfD Scheme",
 }
 
 # --- Structured Schema Dict ---
@@ -134,6 +147,18 @@ DB_SCHEMA_DICT = {
             "columns": ["date", "entity", "segment", "quantity"],
             "desc": "Electricity Trade Volumes (Derived)",
         },
+        "energy_balance_long_mv": {
+            "columns": ["year", "category", "value"],
+            "desc": "Annual Energy Balance",
+        },
+        "monthly_cpi_mv": {
+            "columns": ["date", "cpi_type", "cpi"],
+            "desc": "Monthly Consumer Price Index",
+        },
+        "dates_mv": {
+            "columns": ["date"],
+            "desc": "Date Reference (Utility View)",
+        },
     },
     "rules": {
        
@@ -153,7 +178,6 @@ DB_SCHEMA_DOC = """
 - tariff_with_usd(date, entity, tariff_gel, tariff_usd)
 - tech_quantity_view(date, type_tech, quantity_tech)
 - trade_derived_entities(date, entity, segment, quantity)
-- trade_by_source (date,source,quantity_tech)
 
 **CRITICAL: Exact column values (case-sensitive, including spaces/hyphens):**
 
@@ -166,6 +190,11 @@ segment values (trade_derived_entities):
 - For balancing-segment trade, use the canonical normalized segment token 'balancing'
 - IMPORTANT: User phrasing like "balancing electricity" refers to electricity traded in the balancing segment
 - Recommended filter: WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
+
+entity values (trade_derived_entities, balancing segment):
+- 'import', 'deregulated_hydro', 'regulated_hpp', 'regulated_new_tpp',
+  'regulated_old_tpp', 'renewable_ppa', 'thermal_ppa'
+- IMPORTANT: Use exact strings as shown above!
 
 **Units & Conversions:**
 - Quantities in thousand MWh (multiply ×1000 for MWh)
@@ -201,6 +230,9 @@ DB_JOINS = {
     "tech_quantity_view": {"join_on": "date", "related_to": ["price_with_usd", "trade_derived_entities"]},
     "trade_derived_entities": {"join_on": ["date", "entity"], "related_to": ["price_with_usd", "tariff_with_usd"]},
     "entities_mv": {"join_on": "entity", "related_to": ["tariff_with_usd", "trade_derived_entities"]},
+    "energy_balance_long_mv": {"join_on": "year", "related_to": []},
+    "monthly_cpi_mv": {"join_on": "date", "related_to": ["price_with_usd"]},
+    "dates_mv": {"join_on": "date", "related_to": ["price_with_usd", "tariff_with_usd", "tech_quantity_view", "trade_derived_entities", "monthly_cpi_mv"]},
 }
 
 # --- Output scrubber ---
