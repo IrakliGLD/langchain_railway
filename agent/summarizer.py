@@ -126,11 +126,16 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
     if not numeric.is_finite():
         return tokens
 
-    # Allow claims written as percentages (e.g., 32%) to match ratio cells (0.32).
+    # Allow claims written as percentages (e.g., 32%, 54.6%) to match ratio cells (0.32, 0.5457).
     if abs(numeric) <= 1:
-        percent_alias = _normalize_number_token(str(numeric * Decimal("100")))
+        percent_raw = numeric * Decimal("100")
+        percent_alias = _normalize_number_token(str(percent_raw))
         if percent_alias:
             tokens.add(percent_alias)
+        # Also allow matching if the LLM rounds a percentage to 1 decimal place (e.g., 0.5457 -> 54.6%)
+        percent_rounded = _normalize_number_token(str(round(percent_raw, 1)))
+        if percent_rounded:
+            tokens.add(percent_rounded)
     return tokens
 
 
