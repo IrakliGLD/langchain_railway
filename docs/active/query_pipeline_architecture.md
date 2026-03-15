@@ -12,30 +12,31 @@ Enai is a conversational Q&A system for the Georgian electricity market. Users a
 
 ### Key Design Principles
 
-1. **Deterministic over generative.** Typed tools with parameterized SQL are preferred over LLM-generated SQL. The LLM is never trusted to produce numbers — all numeric claims are verified against raw database cells.
-2. **Provenance-gated output.** Every numeric token in the final answer must trace back to a specific database cell with a SHA256 fingerprint. If coverage drops below 100%, the answer is replaced with a conservative fallback.
-3. **Defense in depth.** A firewall blocks prompt injection before any LLM call. SQL is validated against a table whitelist. Read-only transactions are enforced. The provenance gate catches any remaining hallucination.
-4. **Fast path first.** The keyword router handles >80% of queries in <500ms with zero LLM cost. The LLM analyzer and agent loop only activate when the fast path misses.
+1. **Deterministic over generative.** Typed tools with parameterized SQL are preferred over LLM-generated SQL. The LLM identifies intent, but Python executes the logic. The system never trusts an LLM to produce numbers — all numeric claims are verified against raw database cells.
+2. **Context-Aware Intent Routing (Option A).** The pipeline leverages a fast LLM (Question Analyzer) to maintain conversational memory. It resolves follow-up queries (e.g., "What about 2024?") by resolving the context before selecting a deterministic Python tool.
+3. **Provenance-gated output.** Every numeric token in the final answer must trace back to a specific database cell with a SHA256 fingerprint. If coverage drops below 100%, the answer is replaced with a conservative fallback.
+4. **Defense in depth.** A firewall blocks prompt injection; typed tools prevent SQL errors; read-only transactions are enforced; and the provenance gate catches hallucination.
+5. **Decoupled Pipeline.** By separating intent identification (LLM) from data retrieval (Python), we achieve the semantic power of an LLM with the stability and security of deterministic code.
 
 ### Architecture Diagram
 
 ```
  Browser → Supabase Edge Function → Railway Backend
                                       │
-                                      ├─ Stage 0:   Firewall + Prepare Context
-                                      ├─ Stage 0.2: LLM Question Analyzer (optional)
-                                      ├─ Stage 0.5: Keyword Router (fast path)
+                                      ├─ Stage 0:   Firewall + Heuristic Bypass
+                                      ├─ Stage 0.2: LLM Question Analyzer (Intent identification)
+                                      ├─ Stage 0.5: Keyword Router (Fast path - stateless)
                                       │   ├─ HIT → Stage 0.6: Tool Execute
                                       │   │         └─ Composition Enrichment (for why-queries)
-                                      │   └─ MISS → Stage 0.7: LLM Analyzer Routing (fallback)
+                                      │   └─ MISS → Stage 0.7: LLM Analyzer Routing (Fallback - context aware)
                                       │              ├─ HIT → Tool Execute + Enrichment
                                       │              └─ MISS ─┐
-                                      ├─ Agent Loop ←─────────┘ (bounded ReACT, max 3 rounds)
+                                      ├─ Agent Loop ←─────────┘ (Bounded ReACT / Skills / Knowledge)
                                       │   ├─ data_exit → continue
                                       │   ├─ conceptual_exit → return
                                       │   └─ fallback_exit ─┐
-                                      ├─ SQL Fallback ←─────┘ (LLM plan + validated SQL)
-                                      ├─ Stage 3:   Analysis Enrichment (stats, correlations, trends)
+                                      ├─ SQL Fallback ←─────┘ (LLM plan + Validated SQL)
+                                      ├─ Stage 3:   Analysis Enrichment (Stats, Correlations, Trends)
                                       ├─ Stage 4:   Summarization + Provenance Gate
                                       └─ Stage 5:   Chart Pipeline
 ```
@@ -596,3 +597,21 @@ End-to-end flow of conversation context:
 ```
 
 **Key constraint:** The keyword router (Stage 0.5) is stateless by design — it only sees the current query. Conversation continuity depends on the LLM Question Analyzer (Stage 0.2/0.7), which receives the full conversation history. When a follow-up query like "What about 2024?" arrives, the keyword router misses (no price/tariff keywords), but the analyzer correctly identifies it as a continuation and routes to the appropriate tool.
+
+---
+
+## 9. Evolution: The Decoupled Pipeline (Option A)
+
+The system has transitioned from a brittle, purely keyword-based router to a robust **LLM-Driven Intent Routing** layer.
+
+### Why the Shift?
+1. **Conversational Memory:** Heuristics evaluate queries in isolation. Option A allows the system to understand that "What about 2024?" refers back to "Balancing prices."
+2. **Semantic Nuance:** Distinguishes "Explain why prices changed" (requires composition enrichment) from "Show the prices" (standard retrieval) with high confidence.
+
+### Preserved Core Assets
+While routing has become more "intelligent," the following pillars remain unchanged and central to the system's stability:
+- **Deterministic Tools:** Hand-written Python tools (`get_prices`, etc.) remain the only way to touch the data. The LLM picks the tool, but the Python logic executes it.
+- **AI Firewall:** No query reaches the LLM without passing the heuristic safety gate.
+- **Provenance Gate:** No number reaches the user without passing the cell-matching verification.
+- **Agent Loop & SQL Fallback:** These serve as robust catch-alls for highly complex or ad-hoc queries that don't fit pre-defined tools.
+- **Skills & Knowledge:** The `skills/` directory provides the specific domain knowledge the LLM uses to interpret intent and summarize results.
