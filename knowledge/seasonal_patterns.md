@@ -20,6 +20,18 @@
 - Summer prices rise faster as cheap hydro shares decline and more output moves to contracts
 - Winter prices increase moderately due to higher gas costs and import reliance
 
+## Seasonal-Adjusted Statistics (CAGR)
+
+When analyzing multi-year trends in seasonal data, raw month-to-month comparisons are misleading because they conflate seasonal variation with long-term trends. For example, comparing a January value to an August value shows seasonality, not growth.
+
+**Correct approach:**
+- Use Compound Annual Growth Rate (CAGR) for multi-year trend statements
+- Use "Overall growth" percentages that account for seasonal composition
+- Use peak_month / low_month from seasonal decomposition for seasonal characterization
+- When pre-calculated seasonal-adjusted statistics are available (CAGR, overall growth, peak/low months), they are the authoritative source for trend analysis
+
+**Incomplete year handling:** If the last year in a dataset has fewer than 12 months, it must be flagged as incomplete. Do not treat partial years as full years in trend calculations.
+
 ## Price Comparison Rules
 
 **CRITICAL:** ALWAYS mention summer and winter averages separately when comparing prices — never use annual averages only.

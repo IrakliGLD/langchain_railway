@@ -1,5 +1,10 @@
 # CfD Contracts and PPA Support Schemes
 
+## Support Schemes Clarification
+**CRITICAL:** In Georgia, support schemes are PPA and CfD contracts ONLY.
+- PPA (Power Purchase Agreements) — for renewable and thermal projects
+- CfD (Contracts for Difference) — for new renewable projects from capacity auctions
+
 ## CfD (Contracts for Difference)
 Contracts for Difference introduced for new renewable power plant projects developed under Georgia's capacity auction scheme.
 
@@ -33,17 +38,13 @@ Contracts for Difference introduced for new renewable power plant projects devel
 
 **CRITICAL:** When discussing support schemes, ALWAYS use correct terminology.
 
-### Support Schemes in Georgia
-1. **PPA** (Power Purchase Agreements) — for renewable and thermal projects
-2. **CfD** (Contracts for Difference) — for new renewable projects from capacity auctions
-
 ### NOT Support Schemes
 - Regulated tariffs (regulated_hpp, regulated_old_tpp, regulated_new_tpp) are NOT support schemes
 - These are cost-plus regulated tariffs set by GNERC for cost recovery
 
 ### Additional Support Mechanism
 **Guaranteed Capacity Payments:**
-- Capacity fee for old thermal plants (Mtkvari, Tbilisi TPP, G-POWER)
+- Capacity fee for regulated thermal plants (Mtkvari, Tbilisi TPP, G-POWER)
 - Purpose: Ensures cost recovery even at low generation
 - Scope: NOT for new power plants — only for existing regulated old TPPs
 - Nature: Kind of support mechanism but distinct from PPA/CfD schemes

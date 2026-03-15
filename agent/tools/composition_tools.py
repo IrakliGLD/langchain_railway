@@ -16,6 +16,7 @@ ALLOWED_BALANCING_ENTITIES = (
     "regulated_old_tpp",
     "renewable_ppa",
     "thermal_ppa",
+    "CfD_scheme",
 )
 
 
