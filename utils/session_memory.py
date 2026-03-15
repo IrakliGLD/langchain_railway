@@ -109,6 +109,33 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
         return [dict(item) for item in history if isinstance(item, dict)]
 
 
+def seed_history(session_id: str, turns: List[Dict[str, str]]) -> None:
+    """Write initial turns into a session that has no history yet.
+
+    This is used to bridge edge-function-provided DB history into the
+    in-process session store so that subsequent ``append_exchange`` calls
+    accumulate *on top of* the seed rather than starting from scratch.
+
+    If the session already has history, this is a no-op.
+    """
+    if not turns:
+        return
+    now_ts = time.time()
+    with _SESSION_LOCK:
+        payload = _SESSION_STORE.setdefault(
+            session_id,
+            {"updated_at": now_ts, "history": []},
+        )
+        existing = payload.get("history")
+        if existing:
+            return  # already populated — don't overwrite
+        payload["history"] = [
+            {"question": str(t.get("question", "")), "answer": str(t.get("answer", ""))}
+            for t in turns[:SESSION_HISTORY_MAX_TURNS]
+        ]
+        payload["updated_at"] = now_ts
+
+
 def append_exchange(session_id: str, question: str, answer: str) -> None:
     """Append Q/A pair and keep only the last N turns."""
     now_ts = time.time()

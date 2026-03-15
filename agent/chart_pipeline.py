@@ -14,6 +14,7 @@ import pandas as pd
 from models import QueryContext
 from visualization.chart_selector import should_generate_chart
 from context import COLUMN_LABELS
+from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
@@ -227,23 +228,41 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     has_time = len(time_cols) >= 1
     has_categories = len(category_cols) >= 1
 
+    chart_reason = "default_line"
     if has_time and has_categories:
         if "share" in dims:
             chart_type = "stackedbar"
+            chart_reason = "time+category+share_dim"
         else:
             chart_type = "line"
+            chart_reason = "time+category"
     elif has_time and not has_categories:
         chart_type = "line"
+        chart_reason = "time_series"
     elif not has_time and has_categories:
         if "share" in dims and len(category_cols) == 1:
             unique_cats = df[category_cols[0]].nunique()
             chart_type = "pie" if unique_cats <= 8 else "bar"
+            chart_reason = f"categorical_share(cats={unique_cats})"
         else:
             chart_type = "bar"
+            chart_reason = "categorical"
     else:
         chart_type = "line"
+        chart_reason = "no_time_no_category_fallback"
 
     log.info(f"🧠 Chart type: {chart_type}")
+
+    trace_detail(
+        log, ctx, "stage_5_chart_build", "selection",
+        chart_type=chart_type,
+        row_count=len(df),
+        dimension_count=len(dims),
+        series_count=len(num_cols),
+        reason=chart_reason,
+        has_time=has_time,
+        has_categories=has_categories,
+    )
 
     # --- Limit series ---
     MAX_SERIES = 3

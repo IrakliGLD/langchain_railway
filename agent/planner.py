@@ -10,7 +10,7 @@ from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from contracts.question_analysis import QuestionAnalysis
+from contracts.question_analysis import QuestionAnalysis, PreferredPath, ToolName
 from models import QueryContext
 from core.llm import (
     llm_cache,
@@ -23,6 +23,15 @@ from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
 from utils.trace_logging import trace_detail
 from agent.aggregation import detect_aggregation_intent
+from agent.tools.types import ToolInvocation
+from agent.router import (
+    extract_date_range,
+    extract_currency,
+    extract_price_metric,
+    extract_balancing_entities,
+    extract_tariff_entities,
+    extract_generation_types,
+)
 
 log = logging.getLogger("Enai")
 
@@ -322,3 +331,117 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
     log.info(f"Aggregation intent: {ctx.aggregation_intent}")
 
     return ctx
+
+
+# -----------------------------------------------------------------------
+# QuestionAnalysis → ToolInvocation bridge
+# -----------------------------------------------------------------------
+
+# Minimum score on the top tool candidate for the analyzer to drive routing.
+_ANALYZER_TOOL_MIN_SCORE = 0.55
+
+
+def build_tool_invocation_from_analysis(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> Optional[ToolInvocation]:
+    """Convert the LLM question-analyzer output into a concrete ToolInvocation.
+
+    Returns ``None`` when:
+    - ``preferred_path`` is not ``tool`` or ``prefer_tool`` is False,
+    - no candidate tool meets the minimum score threshold,
+    - parameter resolution fails for the chosen tool.
+
+    The function reuses the deterministic parameter extractors from
+    ``agent.router`` so that dates, entities, metrics, and currency are
+    resolved identically regardless of whether the keyword router or the
+    LLM analyzer drove the routing decision.
+    """
+    # Primary gate: require preferred_path == TOOL.  The prefer_tool flag
+    # acts as a soft boost only for ambiguous paths — it must NOT override
+    # an explicit SQL or KNOWLEDGE recommendation.
+    if qa.routing.preferred_path != PreferredPath.TOOL:
+        if not qa.routing.prefer_tool or qa.routing.preferred_path in (
+            PreferredPath.SQL,
+            PreferredPath.KNOWLEDGE,
+        ):
+            return None
+
+    candidates = qa.tooling.candidate_tools
+    if not candidates:
+        return None
+
+    top = candidates[0]
+    if top.score < _ANALYZER_TOOL_MIN_SCORE:
+        log.info(
+            "Analyzer top tool score too low: tool=%s score=%.2f (min=%.2f)",
+            top.name.value, top.score, _ANALYZER_TOOL_MIN_SCORE,
+        )
+        return None
+
+    tool_name = top.name.value
+    hint = top.params_hint
+    # Use the canonical English query for parameter extraction so that
+    # keyword extractors work reliably even for non-English input.
+    effective_query = (qa.canonical_query_en or raw_query).lower()
+
+    # --- Resolve dates ---
+    # Prefer the analyzer's structured period; fall back to regex extraction.
+    start_date = None
+    end_date = None
+    if hint and hint.start_date:
+        start_date = hint.start_date
+    if hint and hint.end_date:
+        end_date = hint.end_date
+    if (not start_date or not end_date) and qa.sql_hints.period:
+        start_date = start_date or qa.sql_hints.period.start_date
+        end_date = end_date or qa.sql_hints.period.end_date
+    if not start_date or not end_date:
+        regex_start, regex_end = extract_date_range(effective_query)
+        start_date = start_date or regex_start
+        end_date = end_date or regex_end
+
+    params: dict = {}
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+
+    # --- Tool-specific parameter resolution ---
+    if tool_name == ToolName.GET_PRICES.value:
+        metric = (hint.metric if hint and hint.metric else None) or extract_price_metric(effective_query)
+        currency = (hint.currency if hint and hint.currency else None) or extract_currency(effective_query)
+        granularity = (hint.granularity if hint and hint.granularity else None) or "monthly"
+        params.update({"metric": metric, "currency": currency, "granularity": granularity})
+
+    elif tool_name == ToolName.GET_TARIFFS.value:
+        entities = (hint.entities if hint and hint.entities else []) or extract_tariff_entities(effective_query)
+        currency = (hint.currency if hint and hint.currency else None) or extract_currency(effective_query)
+        if entities:
+            params["entities"] = entities
+        params["currency"] = currency
+
+    elif tool_name == ToolName.GET_GENERATION_MIX.value:
+        types = (hint.types if hint and hint.types else []) or extract_generation_types(effective_query)
+        mode = (hint.mode if hint and hint.mode else None) or "quantity"
+        granularity = (hint.granularity if hint and hint.granularity else None) or "monthly"
+        if types:
+            params["types"] = types
+        params.update({"mode": mode, "granularity": granularity})
+
+    elif tool_name == ToolName.GET_BALANCING_COMPOSITION.value:
+        entities = (hint.entities if hint and hint.entities else []) or extract_balancing_entities(effective_query)
+        if entities:
+            params["entities"] = entities
+
+    else:
+        log.warning("Unknown tool from analyzer: %s", tool_name)
+        return None
+
+    reason = f"analyzer:{top.reason or top.name.value} (score={top.score:.2f})"
+    return ToolInvocation(
+        name=tool_name,
+        params=params,
+        confidence=top.score,
+        reason=reason,
+    )

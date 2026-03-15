@@ -47,10 +47,18 @@ MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+# Per-stage model overrides.  When set, the named pipeline stage uses this
+# model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
+# empty) to inherit the global default.  Only Gemini model names are supported
+# for overrides; the global MODEL_TYPE still governs the provider choice.
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "").strip() or None
+PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip() or None
+SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "").strip() or None
+
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
-ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "false").lower() in ("1", "true", "yes", "on")
+ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_TRACE_DEBUG_ARTIFACTS = os.getenv("ENABLE_TRACE_DEBUG_ARTIFACTS", "false").lower() in ("1", "true", "yes", "on")

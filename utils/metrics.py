@@ -50,6 +50,9 @@ class Metrics:
         self.llm_total_tokens = 0
         self.llm_estimated_cost_usd = 0.0
         self.llm_usage_by_model = {}
+        self.session_history_with_count = 0
+        self.session_history_without_count = 0
+        self.session_history_total_turns = 0
         self.error_count = 0
         self.total_llm_time = 0.0
         self.total_sql_time = 0.0
@@ -277,6 +280,15 @@ class Metrics:
         key = (component or "unknown").strip().lower() or "unknown"
         self.circuit_open_events[key] = self.circuit_open_events.get(key, 0) + 1
 
+    def log_session_history_context(self, turns: int):
+        """Track whether requests arrive with conversation history."""
+        turns = max(0, int(turns or 0))
+        if turns > 0:
+            self.session_history_with_count += 1
+            self.session_history_total_turns += turns
+        else:
+            self.session_history_without_count += 1
+
     def log_error(self):
         """Log an error occurrence."""
         self.error_count += 1
@@ -321,6 +333,11 @@ class Metrics:
                     key=lambda kv: kv[1],
                     reverse=True,
                 )[:20]
+            ),
+            "session_history_with": self.session_history_with_count,
+            "session_history_without": self.session_history_without_count,
+            "session_history_avg_turns": (
+                self.session_history_total_turns / max(1, self.session_history_with_count)
             ),
             "relevance_blocks": self.relevance_block_count,
             "load_shed_events": self.load_shed_count,

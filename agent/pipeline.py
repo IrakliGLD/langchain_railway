@@ -28,11 +28,101 @@ from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
 from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
-from agent.router import match_tool
+from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
+from contracts.question_analysis import PreferredPath
+from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
+
+
+def _enrich_prices_with_composition(
+    ctx: QueryContext,
+    invocation: ToolInvocation,
+    is_explanation: bool,
+) -> QueryContext:
+    """Auto-fetch balancing composition shares and merge into price data.
+
+    Called for 'why' queries routed to ``get_prices`` so the summarizer
+    can explain structural drivers behind price movements.  Safe to call
+    from any routing path (keyword, analyzer, agent).
+    """
+    if (
+        not is_explanation
+        or invocation.name != "get_prices"
+        or ctx.df.empty
+        or any(c.startswith("share_") for c in ctx.cols)
+    ):
+        return ctx
+
+    try:
+        comp_invocation = ToolInvocation(
+            name="get_balancing_composition",
+            params={
+                "start_date": invocation.params.get("start_date"),
+                "end_date": invocation.params.get("end_date"),
+            },
+        )
+        comp_df, comp_cols, comp_rows = execute_tool(comp_invocation)
+        if not comp_df.empty:
+            date_col_price = next(
+                (c for c in ctx.df.columns if "date" in c.lower()), None,
+            )
+            date_col_comp = next(
+                (c for c in comp_df.columns if "date" in c.lower()), None,
+            )
+            if date_col_price and date_col_comp:
+                ctx.df[date_col_price] = pd.to_datetime(
+                    ctx.df[date_col_price], errors="coerce",
+                )
+                comp_df[date_col_comp] = pd.to_datetime(
+                    comp_df[date_col_comp], errors="coerce",
+                )
+                share_cols = [
+                    c for c in comp_df.columns if c.startswith("share_")
+                ]
+                merge_cols = [date_col_comp] + share_cols
+                merged = ctx.df.merge(
+                    comp_df[merge_cols].rename(
+                        columns={date_col_comp: date_col_price},
+                    ),
+                    on=date_col_price,
+                    how="left",
+                )
+                ctx.df = merged
+                ctx.cols = list(merged.columns)
+                ctx.rows = [
+                    tuple(r)
+                    for r in merged.itertuples(index=False, name=None)
+                ]
+                log.info(
+                    "Enriched price data with %d composition columns for why-query",
+                    len(share_cols),
+                )
+                trace_detail(
+                    log, ctx, "composition_enrichment", "result",
+                    attempted=True, success=True,
+                    share_cols_added=len(share_cols),
+                )
+                return ctx
+        # comp_df was empty
+        trace_detail(
+            log, ctx, "composition_enrichment", "result",
+            attempted=True, success=False, share_cols_added=0,
+        )
+    except Exception as enrich_err:
+        log.warning(
+            "Composition enrichment for why-query failed: %s", enrich_err,
+        )
+        trace_detail(
+            log, ctx, "composition_enrichment", "result",
+            attempted=True, success=False, share_cols_added=0,
+            error=str(enrich_err),
+        )
+    return ctx
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -167,66 +257,7 @@ def process_query(
                     log.warning("Typed tool relevance blocked. reason=%s", tool_reason)
                 else:
                     log.info("Typed tool relevance validated. reason=%s", tool_reason)
-
-                    # --- Phase 2: Enrich price data with composition for why-queries ---
-                    if (
-                        is_exp
-                        and invocation.name == "get_prices"
-                        and not ctx.df.empty
-                        and not any(c.startswith("share_") for c in ctx.cols)
-                    ):
-                        try:
-                            comp_invocation = ToolInvocation(
-                                name="get_balancing_composition",
-                                params={
-                                    "start_date": invocation.params.get("start_date"),
-                                    "end_date": invocation.params.get("end_date"),
-                                },
-                            )
-                            comp_df, comp_cols, comp_rows = execute_tool(comp_invocation)
-                            if not comp_df.empty:
-                                # Merge share columns into price df on date
-                                date_col_price = next(
-                                    (c for c in ctx.df.columns if "date" in c.lower()),
-                                    None,
-                                )
-                                date_col_comp = next(
-                                    (c for c in comp_df.columns if "date" in c.lower()),
-                                    None,
-                                )
-                                if date_col_price and date_col_comp:
-                                    ctx.df[date_col_price] = pd.to_datetime(
-                                        ctx.df[date_col_price], errors="coerce"
-                                    )
-                                    comp_df[date_col_comp] = pd.to_datetime(
-                                        comp_df[date_col_comp], errors="coerce"
-                                    )
-                                    share_cols = [
-                                        c for c in comp_df.columns if c.startswith("share_")
-                                    ]
-                                    merge_cols = [date_col_comp] + share_cols
-                                    merged = ctx.df.merge(
-                                        comp_df[merge_cols].rename(
-                                            columns={date_col_comp: date_col_price}
-                                        ),
-                                        on=date_col_price,
-                                        how="left",
-                                    )
-                                    ctx.df = merged
-                                    ctx.cols = list(merged.columns)
-                                    ctx.rows = [
-                                        tuple(r)
-                                        for r in merged.itertuples(index=False, name=None)
-                                    ]
-                                    log.info(
-                                        "✅ Enriched price data with %d composition columns for why-query",
-                                        len(share_cols),
-                                    )
-                        except Exception as enrich_err:
-                            log.warning(
-                                "⚠️ Composition enrichment for why-query failed: %s",
-                                enrich_err,
-                            )
+                    ctx = _enrich_prices_with_composition(ctx, invocation, is_exp)
 
                 log.info(
                     "Typed tool route hit: tool=%s confidence=%.2f reason=%s",
@@ -247,7 +278,99 @@ def process_query(
                 )
         else:
             metrics.log_router_match("miss")
-            metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
+            trace_detail(
+                log, ctx, "stage_0_5_router_match", "miss_detail",
+                semantic_fallback_enabled=ROUTER_ENABLE_SEMANTIC_FALLBACK,
+            )
+
+            # --- Stage 0.7: LLM analyzer-driven tool routing (fallback) ---
+            # When the keyword router misses, check whether the question
+            # analyzer (which sees conversation history) identified a tool.
+            # Only use analyzer output when running in active/hints mode —
+            # shadow mode must never influence routing decisions.
+            t_stage = time.time()
+            analyzer_invocation = None
+            if ctx.question_analysis and ENABLE_QUESTION_ANALYZER_HINTS:
+                try:
+                    analyzer_invocation = planner.build_tool_invocation_from_analysis(
+                        ctx.question_analysis, ctx.query,
+                    )
+                except Exception as exc:
+                    log.warning("Analyzer tool invocation build failed: %s", exc)
+
+            # Trace the analyzer routing decision regardless of outcome
+            qa = ctx.question_analysis
+            trace_detail(
+                log, ctx, "stage_0_7_analyzer_route", "decision",
+                invocation_built=bool(analyzer_invocation),
+                preferred_path=qa.routing.preferred_path.value if qa else "",
+                prefer_tool=qa.routing.prefer_tool if qa else False,
+                top_tool=analyzer_invocation.name if analyzer_invocation else None,
+                top_score=analyzer_invocation.confidence if analyzer_invocation else None,
+                analyzer_available=bool(qa),
+                hints_enabled=ENABLE_QUESTION_ANALYZER_HINTS,
+            )
+
+            if analyzer_invocation:
+                _trace_stage(
+                    "stage_0_7_analyzer_route", t_stage,
+                    tool=analyzer_invocation.name,
+                    confidence=analyzer_invocation.confidence,
+                )
+                metrics.log_router_match("analyzer")
+                ctx.used_tool = True
+                ctx.tool_name = analyzer_invocation.name
+                ctx.tool_params = dict(analyzer_invocation.params)
+                ctx.tool_match_reason = analyzer_invocation.reason
+                ctx.tool_confidence = analyzer_invocation.confidence
+
+                try:
+                    t_tool = time.time()
+                    df, cols, rows = execute_tool(analyzer_invocation)
+                    metrics.log_tool_call(time.time() - t_tool)
+                    _trace_stage(
+                        "stage_0_7_analyzer_tool_execute", t_tool,
+                        tool=analyzer_invocation.name, rows=len(rows),
+                    )
+                    ctx.df = df
+                    ctx.cols = list(cols)
+                    ctx.rows = [tuple(r) for r in rows]
+                    stamp_provenance(
+                        ctx, ctx.cols, ctx.rows, source="tool",
+                        query_hash=tool_invocation_hash(analyzer_invocation.name, analyzer_invocation.params),
+                    )
+                    ctx.plan.setdefault("intent", "tool_query")
+                    ctx.plan.setdefault("target", analyzer_invocation.name)
+                    tool_relevant, tool_reason = validate_tool_relevance(ctx.query, analyzer_invocation.name)
+                    if not tool_relevant:
+                        metrics.log_relevance_block()
+                        ctx.used_tool = False
+                        ctx.tool_fallback_reason = f"analyzer_tool_relevance_blocked:{tool_reason}"
+                        ctx.df = ctx.df.iloc[0:0]
+                        ctx.cols = []
+                        ctx.rows = []
+                        clear_provenance(ctx)
+                        log.warning("Analyzer tool relevance blocked. reason=%s", tool_reason)
+                    else:
+                        log.info(
+                            "Analyzer tool route hit: tool=%s confidence=%.2f reason=%s",
+                            analyzer_invocation.name,
+                            analyzer_invocation.confidence,
+                            analyzer_invocation.reason,
+                        )
+                        ctx = _enrich_prices_with_composition(ctx, analyzer_invocation, is_exp)
+                except Exception as exc:
+                    metrics.log_tool_error()
+                    ctx.used_tool = False
+                    ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
+                    metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_execution_error")
+                    clear_provenance(ctx)
+                    log.warning(
+                        "Analyzer tool failed; falling back. tool=%s err=%s",
+                        analyzer_invocation.name, exc,
+                    )
+            else:
+                metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
 
     # Stage 1/2: fallback SQL path when no tool route was used
     if not ctx.used_tool and ENABLE_AGENT_LOOP:

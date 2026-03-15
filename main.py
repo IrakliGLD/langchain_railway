@@ -73,7 +73,7 @@ from agent.pipeline import process_query
 
 # Phase 2: Core modules
 from utils.metrics import metrics
-from utils.session_memory import get_or_issue_session, get_history, append_exchange
+from utils.session_memory import get_or_issue_session, get_history, append_exchange, seed_history
 from utils.resilience import request_backpressure_gate, get_resilience_snapshot
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import (
@@ -967,13 +967,38 @@ def ask_post(
                 request=request,
                 provided=True,
             )
-        if q.conversation_history:
-            log_security_event(
-                "client_history_ignored",
-                request=request,
-                provided_turns=len(q.conversation_history),
-            )
         bound_history = get_history(session_id)
+
+        # If the in-process session has no history yet (e.g. first request after
+        # deploy or session expiry) but the edge function provided server-loaded
+        # history from the chat_history table, use it as a seed.  This bridges
+        # the gap where the edge function cannot forward session tokens but *can*
+        # load persisted turns from the database on behalf of the authenticated user.
+        _MAX_HISTORY_ITEM_CHARS = 2000  # ~500 tokens per item, 6 items max
+        if not bound_history and q.conversation_history:
+            bound_history = [
+                {
+                    "question": str(t.get("question", ""))[:_MAX_HISTORY_ITEM_CHARS],
+                    "answer": str(t.get("answer", ""))[:_MAX_HISTORY_ITEM_CHARS],
+                }
+                for t in q.conversation_history[:3]
+                if isinstance(t, dict) and t.get("question")
+            ]
+            if bound_history:
+                seed_history(session_id, bound_history)
+                log.info(
+                    "Seeded session history from edge-function-provided turns. "
+                    "session_id=%s turns=%d",
+                    session_id, len(bound_history),
+                )
+        elif q.conversation_history and bound_history:
+            # Session already has history — ignore the client-provided duplicate
+            log.debug(
+                "Ignoring edge-function history; session already has %d turns.",
+                len(bound_history),
+            )
+
+        metrics.log_session_history_context(len(bound_history))
 
         firewall_decision = inspect_query(q.query)
         metrics.log_firewall_decision(firewall_decision.action)

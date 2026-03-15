@@ -94,8 +94,8 @@ def _build_semantic_invocation(
     has_share = any(t in query_lower for t in ["share", "shares", "proportion", "percentage", "percent"])
     has_balancing = any(t in query_lower for t in ["balancing", "p_bal", "balance market", "balancing electricity"])
     if tool_name == "get_tariffs":
-        entities = _extract_tariff_entities(query_lower)
-        currency = _extract_currency(query_lower)
+        entities = extract_tariff_entities(query_lower)
+        currency = extract_currency(query_lower)
         if currency == "both":
             currency = "gel"
         return ToolInvocation(
@@ -113,7 +113,7 @@ def _build_semantic_invocation(
     if tool_name == "get_balancing_composition":
         if not has_balancing:
             return None
-        entities = _extract_balancing_entities(query_lower)
+        entities = extract_balancing_entities(query_lower)
         return ToolInvocation(
             name="get_balancing_composition",
             params={
@@ -126,7 +126,7 @@ def _build_semantic_invocation(
         )
 
     if tool_name == "get_generation_mix":
-        types = _extract_generation_types(query_lower)
+        types = extract_generation_types(query_lower)
         granularity = "yearly" if any(t in query_lower for t in ["yearly", "annual"]) else "monthly"
         return ToolInvocation(
             name="get_generation_mix",
@@ -142,14 +142,14 @@ def _build_semantic_invocation(
         )
 
     if tool_name == "get_prices":
-        metric = _extract_price_metric(query_lower)
+        metric = extract_price_metric(query_lower)
         granularity = "yearly" if any(t in query_lower for t in ["yearly", "annual"]) else "monthly"
         return ToolInvocation(
             name="get_prices",
             params={
                 "start_date": start_date,
                 "end_date": end_date,
-                "currency": _extract_currency(query_lower),
+                "currency": extract_currency(query_lower),
                 "metric": metric,
                 "granularity": granularity,
             },
@@ -177,7 +177,7 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date: 
     return _build_semantic_invocation(top_tool, query_lower, start_date, end_date, top_score)
 
 
-def _extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[Optional[str], Optional[str]]:
+def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """Extract coarse date range hints from NL query."""
     # from 2020 to 2024 / between 2020 and 2024
     m = re.search(r"(?:from|between)\s+(20\d{2})\s+(?:to|and|\-)\s+(20\d{2})", query_lower)
@@ -232,7 +232,7 @@ def _extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple
     return None, None
 
 
-def _extract_currency(query_lower: str) -> str:
+def extract_currency(query_lower: str) -> str:
     has_usd = any(t in query_lower for t in ["usd", "dollar", "доллар", "დოლარ"])
     has_gel = any(t in query_lower for t in ["gel", "lari", "ლარი", "лари"])
     if has_usd and has_gel:
@@ -242,7 +242,7 @@ def _extract_currency(query_lower: str) -> str:
     return "gel"
 
 
-def _extract_price_metric(query_lower: str) -> str:
+def extract_price_metric(query_lower: str) -> str:
     if any(t in query_lower for t in ["dereg", "დერეგულ", "дерег"]):
         return "deregulated"
     if any(t in query_lower for t in ["gcap", "guaranteed capacity", "გარანტირებულ", "гарантирован"]):
@@ -252,7 +252,7 @@ def _extract_price_metric(query_lower: str) -> str:
     return "balancing"
 
 
-def _extract_balancing_entities(query_lower: str) -> List[str]:
+def extract_balancing_entities(query_lower: str) -> List[str]:
     entity_map = {
         "import": "import",
         "deregulated hydro": "deregulated_hydro",
@@ -273,7 +273,7 @@ def _extract_balancing_entities(query_lower: str) -> List[str]:
     return list(dict.fromkeys(hits))
 
 
-def _extract_tariff_entities(query_lower: str) -> List[str]:
+def extract_tariff_entities(query_lower: str) -> List[str]:
     hits = []
     if any(t in query_lower for t in ["enguri", "ენგურ", "энгур"]):
         hits.append("enguri")
@@ -284,7 +284,7 @@ def _extract_tariff_entities(query_lower: str) -> List[str]:
     return [h for h in hits if h in ALLOWED_TARIFF_ENTITY_ALIASES]
 
 
-def _extract_generation_types(query_lower: str) -> List[str]:
+def extract_generation_types(query_lower: str) -> List[str]:
     type_map = {
         "hydro": "hydro",
         "thermal": "thermal",
@@ -307,7 +307,7 @@ def _extract_generation_types(query_lower: str) -> List[str]:
 def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocation]:
     """Return a deterministic tool invocation when confidence is high."""
     q = query.lower().strip()
-    start_date, end_date = _extract_date_range(q, is_explanation=is_explanation)
+    start_date, end_date = extract_date_range(q, is_explanation=is_explanation)
 
     composition_terms = ["share", "composition", "mix", "proportion", "წილი", "доля"]
     explicit_share_terms = ["share", "proportion", "percentage", "percent", "წილი", "доля"]
@@ -325,8 +325,8 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
 
     # 1) Tariffs
     if has_tariff or any(t in q for t in ["enguri", "gardabani", "ენგურ", "გარდაბ", "энгур", "гардаб"]):
-        entities = _extract_tariff_entities(q)
-        currency = _extract_currency(q)
+        entities = extract_tariff_entities(q)
+        currency = extract_currency(q)
         if currency == "both":
             currency = "gel"
         return ToolInvocation(
@@ -343,7 +343,7 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
 
     # 2) Balancing composition
     if has_composition and has_balancing:
-        entities = _extract_balancing_entities(q)
+        entities = extract_balancing_entities(q)
         return ToolInvocation(
             name="get_balancing_composition",
             params={
@@ -357,7 +357,7 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
 
     # 3) Generation mix / demand quantities
     if has_generation and not has_tariff:
-        types = _extract_generation_types(q)
+        types = extract_generation_types(q)
         mode = "share" if has_share else "quantity"
         granularity = "yearly" if any(t in q for t in ["yearly", "annual", "წლიურ", "год"]) else "monthly"
         return ToolInvocation(
@@ -375,14 +375,14 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
 
     # 4) Prices
     if has_price and not has_tariff:
-        metric = _extract_price_metric(q)
+        metric = extract_price_metric(q)
         granularity = "yearly" if any(t in q for t in ["yearly", "annual", "წლიურ", "год"]) else "monthly"
         return ToolInvocation(
             name="get_prices",
             params={
                 "start_date": start_date,
                 "end_date": end_date,
-                "currency": _extract_currency(q),
+                "currency": extract_currency(q),
                 "metric": metric,
                 "granularity": granularity,
             },
