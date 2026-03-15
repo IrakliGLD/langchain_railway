@@ -136,6 +136,14 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
         percent_rounded = _normalize_number_token(str(round(percent_raw, 1)))
         if percent_rounded:
             tokens.add(percent_rounded)
+        # LLMs occasionally truncate instead of using standard banker's rounding (e.g., 0.3755 -> 37.5%)
+        pr_str = str(percent_raw)
+        if "." in pr_str:
+            dec_idx = pr_str.find(".")
+            if len(pr_str) > dec_idx + 1:
+                percent_trunc = _normalize_number_token(pr_str[:dec_idx + 2])
+                if percent_trunc:
+                    tokens.add(percent_trunc)
     return tokens
 
 
