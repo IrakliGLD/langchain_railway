@@ -201,8 +201,22 @@ def _build_claim_provenance(
     rows: List[tuple],
     query_hash: str = "",
     source: str = "",
+    stats_hint: str = "",
 ) -> tuple[List[Dict[str, Any]], float, List[str]]:
     token_index: Dict[str, List[Dict[str, Any]]] = {}
+    
+    # --- Index statistics and derived analysis ---
+    if stats_hint:
+        for token in _extract_number_tokens(stats_hint):
+            refs = token_index.setdefault(token, [])
+            refs.append({
+                "source": "derived_analysis",
+                "column": "Statistics/Causal Evidence",
+                "value": token,
+                "cell_id": f"derived:{hashlib.md5(token.encode()).hexdigest()[:8]}",
+                "row_context": {"Type": "System Analysis"},
+                "coordinate": "stats_hint",
+            })
     for row_idx, row in enumerate(rows):
         row_context = _build_row_context(cols, row)
         for col_idx, col_name in enumerate(cols):
@@ -308,6 +322,7 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         source_rows,
         query_hash=ctx.provenance_query_hash or "unknown",
         source=ctx.provenance_source or "unknown",
+        stats_hint=ctx.stats_hint or "",
     )
     ctx.summary_claim_provenance = claim_prov
     ctx.summary_provenance_coverage = round(float(coverage), 4)
