@@ -126,35 +126,44 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
     if not numeric.is_finite():
         return tokens
 
-    # Allow claims written as percentages (e.g., 32%, 54.6%) to match ratio cells (0.32, 0.5457).
+    # Support rounding and truncation for all numeric values
+    # This ensures that raw data like 37.9913 can be matched by LLM-rounded "37.99" or "38"
+    
+    # 1. Direct percentage support for ratio cells (abs <= 1)
     if abs(numeric) <= 1:
         percent_raw = numeric * Decimal("100")
-        percent_alias = _normalize_number_token(str(percent_raw))
-        if percent_alias:
-            tokens.add(percent_alias)
-            if percent_alias.startswith("-"):
-                tokens.add(percent_alias[1:])
+        for val in [percent_raw, round(percent_raw, 1), round(percent_raw, 2)]:
+            t = _normalize_number_token(str(val))
+            if t:
+                tokens.add(t)
         
-        # Rounded version (e.g., 0.5457 -> 54.6)
-        percent_rounded = _normalize_number_token(str(round(percent_raw, 1)))
-        if percent_rounded:
-            tokens.add(percent_rounded)
-            if percent_rounded.startswith("-"):
-                tokens.add(percent_rounded[1:])
-
-        # Truncated version (e.g., 0.3755 -> 37.5)
+        # Truncation for ratios
         pr_str = str(percent_raw)
         if "." in pr_str:
             dec_idx = pr_str.find(".")
-            if len(pr_str) > dec_idx + 1:
-                percent_trunc = _normalize_number_token(pr_str[:dec_idx + 2])
-                if percent_trunc:
-                    tokens.add(percent_trunc)
-                    if percent_trunc.startswith("-"):
-                        tokens.add(percent_trunc[1:])
+            for i in [1, 2]: # Truncate at 1 or 2 decimals
+                if len(pr_str) > dec_idx + i:
+                    t = _normalize_number_token(pr_str[:dec_idx + i + 1])
+                    if t:
+                        tokens.add(t)
 
-    # Crucial: Add unsigned versions for ALL tokens in this cell
-    # (Fixes "dropped by 5" matching "-5")
+    # 2. General rounding support for all numbers (including the primary value)
+    for val in [numeric, round(numeric, 1), round(numeric, 2)]:
+        t = _normalize_number_token(str(val))
+        if t:
+            tokens.add(t)
+
+    # 3. General truncation
+    num_str = str(numeric)
+    if "." in num_str:
+        dec_idx = num_str.find(".")
+        for i in [1, 2]:
+            if len(num_str) > dec_idx + i:
+                t = _normalize_number_token(num_str[:dec_idx + i + 1])
+                if t:
+                    tokens.add(t)
+
+    # 4. Unsigned versions for ALL generated tokens (e.g., "dropped by 5" matching "-5")
     unsigned_extra = set()
     for t in tokens:
         if t.startswith("-"):
