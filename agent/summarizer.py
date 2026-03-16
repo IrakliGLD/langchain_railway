@@ -211,11 +211,14 @@ def _build_claim_provenance(
             refs = token_index.setdefault(token, [])
             refs.append({
                 "source": "derived_analysis",
+                "row_number": 0,
+                "row_index": -1,
                 "column": "Statistics/Causal Evidence",
                 "value": token,
                 "cell_id": f"derived:{hashlib.md5(token.encode()).hexdigest()[:8]}",
                 "row_context": {"Type": "System Analysis"},
                 "coordinate": "stats_hint",
+                "query_hash": query_hash,
             })
     for row_idx, row in enumerate(rows):
         row_context = _build_row_context(cols, row)
