@@ -395,7 +395,8 @@ def test_share_fallback_restamps_provenance_and_passes_gate(monkeypatch):
     assert any(ref["column"] == "share_import" for ref in out.summary_claim_provenance[0]["cell_refs"])
 
 
-def test_why_price_queries_use_deterministic_summary_override(monkeypatch):
+def test_why_price_queries_use_llm_summary(monkeypatch):
+    """Why-queries for balancing prices go through the LLM path (not deterministic override)."""
     corr_df = pd.DataFrame(
         {
             "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
@@ -437,14 +438,20 @@ def test_why_price_queries_use_deterministic_summary_override(monkeypatch):
         def connect(self):
             return _Conn()
 
+    llm_called = []
+    def _mock_llm(*args, **kwargs):
+        llm_called.append(True)
+        return SummaryEnvelope(
+            answer="Balancing price rose from 100.0 to 120.0 GEL/MWh driven by import share increase.",
+            claims=["Balancing price moved from 100.0 to 120.0 GEL/MWh."],
+            citations=["llm_structured"],
+            confidence=0.85,
+        )
+
     monkeypatch.setattr(analyzer, "ENGINE", _Engine())
     monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
     monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: share_panel)
-    monkeypatch.setattr(
-        summarizer,
-        "llm_summarize_structured",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM path should not be used")),
-    )
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _mock_llm)
 
     ctx = QueryContext(
         query="Why did balancing electricity price change in November 2021?",
@@ -471,19 +478,20 @@ def test_why_price_queries_use_deterministic_summary_override(monkeypatch):
     )
 
     enriched = analyzer.enrich(ctx)
+
+    # Deterministic override must NOT be set
+    assert enriched.why_summary_override is None
+    assert enriched.why_summary_claims == []
+
+    # Why-context must still be attached for the LLM
+    assert "CAUSAL CONTEXT" in enriched.stats_hint
+
     out = summarizer.summarize_data(enriched)
 
-    assert "citation-grade grounding" not in out.summary
-    assert "weighted average" in out.summary.lower()
-    assert "import" in out.summary.lower() or "hydro" in out.summary.lower()
-    assert out.summary_claims
-    assert "Balancing price moved from 100.0 to 120.0 GEL/MWh." in out.summary_claims
-    assert "Imports share moved from 20.0% to 30.0%." in out.summary_claims
-    assert "deterministic_why_summary" in out.summary_citations
-    assert any(citation.startswith("claim_") for citation in out.summary_citations)
-    assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)
-    assert out.summary_claim_provenance
-    assert out.summary_provenance_gate_passed is True
+    # LLM path was used
+    assert llm_called, "LLM summarizer should have been called for why-queries"
+    assert "deterministic_why_summary" not in (out.summary_citations or [])
+    assert out.summary_source == "structured_summary"
 
 
 def test_why_share_queries_do_not_trigger_price_override(monkeypatch):
@@ -526,7 +534,8 @@ def test_why_share_queries_do_not_trigger_price_override(monkeypatch):
     assert enriched.why_summary_claims == []
 
 
-def test_why_price_summary_does_not_claim_mix_shift_without_evidence(monkeypatch):
+def test_why_price_no_mix_shift_still_routes_to_llm(monkeypatch):
+    """When shares are flat (no mix shift), why-queries still go to LLM — not deterministic."""
     corr_df = pd.DataFrame(
         {
             "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
@@ -568,14 +577,23 @@ def test_why_price_summary_does_not_claim_mix_shift_without_evidence(monkeypatch
         def connect(self):
             return _Conn()
 
+    llm_called = []
+    def _mock_llm(*args, **kwargs):
+        llm_called.append(True)
+        return SummaryEnvelope(
+            answer="Balancing price fell from 120.0 to 115.0 GEL/MWh. Exchange rate moved from 3.35 to 3.20.",
+            claims=[
+                "Balancing price moved from 120.0 to 115.0 GEL/MWh.",
+                "Exchange rate moved from 3.35 to 3.20.",
+            ],
+            citations=["llm_structured"],
+            confidence=0.85,
+        )
+
     monkeypatch.setattr(analyzer, "ENGINE", _Engine())
     monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
     monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: flat_share_panel)
-    monkeypatch.setattr(
-        summarizer,
-        "llm_summarize_structured",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM path should not be used")),
-    )
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _mock_llm)
 
     ctx = QueryContext(
         query="Why did balancing electricity price change in November 2021?",
@@ -602,16 +620,16 @@ def test_why_price_summary_does_not_claim_mix_shift_without_evidence(monkeypatch
     )
 
     enriched = analyzer.enrich(ctx)
+
+    # No deterministic override
+    assert enriched.why_summary_override is None
+
     out = summarizer.summarize_data(enriched)
 
-    assert "mix shifted toward costlier supply" not in out.summary.lower()
-    assert "exchange rate moved lower" in out.summary.lower()
-    assert out.summary_claims == [
-        "Balancing price moved from 120.0 to 115.0 GEL/MWh.",
-        "Exchange rate moved from 3.35 to 3.20.",
-    ]
-    assert out.summary_provenance_gate_passed is True
-    assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)
+    # LLM was called
+    assert llm_called, "LLM summarizer should have been called"
+    assert "deterministic_why_summary" not in (out.summary_citations or [])
+    assert out.summary_source == "structured_summary"
 
 
 def test_derived_analysis_evidence_supports_alias_columns_and_llm_numeric_claims(monkeypatch):

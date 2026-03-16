@@ -132,8 +132,7 @@ def test_why_context_emits_signal_trace(monkeypatch, caplog):
     payloads = _parse_trace_payloads(caplog.records)
     why_trace = next(p for p in payloads if p["event"] == "why_context")
     assert why_trace["stage"] == "stage_3_analyzer_enrich"
-    assert why_trace["extra"]["why_override_generated"] is True
-    assert why_trace["extra"]["why_claim_count"] >= 1
+    assert why_trace["extra"]["why_override"] is False
     assert "p_bal_gel" in why_trace["extra"]["signals"]
 
 

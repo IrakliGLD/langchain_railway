@@ -1252,39 +1252,17 @@ def _build_why_context(ctx: QueryContext) -> None:
             query_hash=why_hash,
         )
 
-    if _is_balancing_price_query(ctx.query):
-        why_summary, why_claims = _generate_why_summary_payload(
-            cur_gel,
-            prev_gel,
-            cur_xrate,
-            prev_xrate,
-            cur_shares,
-            prev_shares,
-            has_share_evidence=share_data_available,
-        )
-        if why_summary and why_claims:
-            ctx.why_summary_override = why_summary
-            ctx.why_summary_claims = why_claims
-            why_prov_df = _build_why_provenance_snapshot(
-                target_ts,
-                prev_ts,
-                cur_gel=cur_gel,
-                prev_gel=prev_gel,
-                cur_usd=cur_usd,
-                prev_usd=prev_usd,
-                cur_xrate=cur_xrate,
-                prev_xrate=prev_xrate,
-                cur_shares=cur_shares,
-                prev_shares=prev_shares,
-            )
+    # Why-queries are handled by the LLM summarizer using the enriched
+    # stats_hint (composition data, correlations, why-context JSON attached
+    # below). The deterministic override is removed — the LLM produces
+    # more nuanced multi-factor causal analysis.
 
     trace_detail(
         log,
         ctx,
         "stage_3_analyzer_enrich",
         "why_context",
-        why_override_generated=bool(ctx.why_summary_override),
-        why_claim_count=len(ctx.why_summary_claims or []),
+        why_override=False,
         analysis_evidence_count=len(ctx.analysis_evidence or []),
         signals=why_ctx.get("signals", {}),
     )
@@ -1295,8 +1273,6 @@ def _build_why_context(ctx: QueryContext) -> None:
         "artifact",
         debug=True,
         why_context=why_ctx,
-        why_summary_override=ctx.why_summary_override or "",
-        why_summary_claims=ctx.why_summary_claims,
         analysis_evidence=ctx.analysis_evidence,
     )
     if ctx.analysis_evidence:
