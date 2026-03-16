@@ -632,6 +632,106 @@ def test_why_price_no_mix_shift_still_routes_to_llm(monkeypatch):
     assert out.summary_source == "structured_summary"
 
 
+def test_share_delta_percentage_points_pass_provenance_gate(monkeypatch):
+    """Share-delta values (0.0666 → 6.66pp) must be grounded by the provenance gate."""
+    corr_df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2023-10-01"), pd.Timestamp("2023-11-01")],
+            "p_bal_gel": [150.0, 149.3],
+            "p_bal_usd": [55.56, 55.09],
+            "xrate": [2.70, 2.71],
+            "share_import": [0.0001, 0.0028],
+            "share_deregulated_hydro": [0.0098, 0.0061],
+            "share_regulated_hpp": [0.0, 0.0015],
+            "share_renewable_ppa": [0.3755, 0.4421],
+            "share_thermal_ppa": [0.6146, 0.5457],
+            "enguri_tariff_gel": [10.0, 10.0],
+            "gardabani_tpp_tariff_gel": [20.0, 20.0],
+            "grouped_old_tpp_tariff_gel": [18.0, 18.0],
+        }
+    )
+    share_panel = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2023-10-01"), pd.Timestamp("2023-11-01")],
+            "segment": ["balancing", "balancing"],
+            "share_import": [0.0001, 0.0028],
+            "share_deregulated_hydro": [0.0098, 0.0061],
+            "share_regulated_hpp": [0.0, 0.0015],
+            "share_renewable_ppa": [0.3755, 0.4421],
+            "share_thermal_ppa": [0.6146, 0.5457],
+        }
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    def _mock_llm(*args, **kwargs):
+        return SummaryEnvelope(
+            answer=(
+                "Balancing price fell from 150.0 to 149.3 GEL/MWh. "
+                "Thermal PPAs contracted by 6.89 percentage points (from 61.46% to 54.57%), "
+                "while Renewable PPAs expanded by 6.66 percentage points (from 37.55% to 44.21%)."
+            ),
+            claims=[
+                "Balancing price moved from 150.0 to 149.3 GEL/MWh.",
+                "Thermal PPAs contracted by 6.89 percentage points.",
+                "Renewable PPAs expanded by 6.66 percentage points.",
+            ],
+            citations=["data_preview", "statistics"],
+            confidence=0.95,
+        )
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: share_panel)
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _mock_llm)
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2023?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2023-10-01"), pd.Timestamp("2023-11-01")],
+                "p_bal_gel": [150.0, 149.3],
+                "xrate": [2.70, 2.71],
+            }
+        ),
+        cols=["date", "p_bal_gel", "xrate"],
+        rows=[
+            (pd.Timestamp("2023-10-01"), 150.0, 2.70),
+            (pd.Timestamp("2023-11-01"), 149.3, 2.71),
+        ],
+        provenance_cols=["date", "p_bal_gel", "xrate"],
+        provenance_rows=[
+            (pd.Timestamp("2023-10-01"), 150.0, 2.70),
+            (pd.Timestamp("2023-11-01"), 149.3, 2.71),
+        ],
+        provenance_query_hash="whydelta",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+    out = summarizer.summarize_data(enriched)
+
+    # Share-delta percentage points (6.89, 6.66) must be grounded
+    assert out.summary_provenance_gate_passed is True, (
+        f"Gate should pass; coverage={out.summary_provenance_coverage}"
+    )
+    assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)
+    assert out.summary_source == "structured_summary"
+
+
 def test_derived_analysis_evidence_supports_alias_columns_and_llm_numeric_claims(monkeypatch):
     corr_df = pd.DataFrame(
         {

@@ -72,6 +72,12 @@ def _build_grounding_corpus(ctx: QueryContext) -> str:
 
 def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
     tokens = _extract_number_tokens(_build_grounding_corpus(ctx))
+    # Expand text-extracted numbers with cell-level tokenization so that
+    # ratios in stats_hint (e.g. 0.0666) also register as percentages (6.66).
+    expanded: Set[str] = set()
+    for t in tokens:
+        expanded.update(_tokenize_cell_value(t))
+    tokens.update(expanded)
     if ctx.df is not None and not ctx.df.empty:
         for _, series in ctx.df.head(200).items():
             for value in series.tolist():

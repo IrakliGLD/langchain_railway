@@ -497,7 +497,7 @@ class TestShareShiftNotes:
         notes = build_share_shift_notes(cur, prev)
         assert any("Share shifts month-over-month" in n for n in notes)
         assert any("Cheaper balancing supply contracted" in n for n in notes)
-        assert any("Higher-cost groups expanded" in n for n in notes)
+        assert any("Expensive balancing supply expanded" in n for n in notes)
         assert any("USD-denominated sellers" in n for n in notes)
 
     def test_specific_share_selection(self):

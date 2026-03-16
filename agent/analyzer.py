@@ -1247,6 +1247,19 @@ def _build_why_context(ctx: QueryContext) -> None:
     combined_prov_df = why_prov_df
     if not analysis_evidence_df.empty:
         combined_prov_df = pd.concat([why_prov_df, analysis_evidence_df], ignore_index=True, sort=False)
+    # Add share-delta values as a provenance row so the provenance gate can
+    # ground LLM claims like "6.66 pp" via _tokenize_cell_value(0.0666) → 6.66.
+    if cur_shares and prev_shares:
+        delta_record: dict[str, Any] = {}
+        for key in sorted(set(cur_shares) | set(prev_shares)):
+            delta = cur_shares.get(key, 0) - prev_shares.get(key, 0)
+            if abs(delta) >= 0.005:
+                delta_record[key] = round(delta, 6)
+        if delta_record:
+            delta_df = pd.DataFrame([delta_record])
+            combined_prov_df = pd.concat(
+                [combined_prov_df, delta_df], ignore_index=True, sort=False,
+            )
     if not combined_prov_df.empty:
         base_hash = str(ctx.provenance_query_hash or "")
         if cur_shares or prev_shares:

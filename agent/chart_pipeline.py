@@ -200,8 +200,11 @@ def build_chart(ctx: QueryContext) -> QueryContext:
 
     # Override: disable chart for explanatory questions with small results
     if any(word in query_text for word in ["why", "how", "reason", "explain", "because", "cause", "რატომ", "როგორ", "почему"]):
-        if len(df) < 5:
+        # Allow chart even for 2 rows if it's a compositional comparison (shares available)
+        has_shares = any("share" in c.lower() for c in num_cols)
+        if len(df) < 2 or (len(df) < 5 and not has_shares):
             generate_chart = False
+            log.info(f"🧭 Skipping chart: explanatory query with small non-compositional result (rows={len(df)}, has_shares={has_shares})")
 
     if any(word in query_text for word in ["define", "meaning of", "განმარტება"]):
         generate_chart = False
