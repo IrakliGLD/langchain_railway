@@ -1,0 +1,248 @@
+﻿commit ada846aba1be15853402d6aad8ee022d28987775
+Author: Irakli GLD <galdavika@gmail.com>
+Date:   Sat Mar 14 17:49:03 2026 +0400
+
+    Fix query routing failures for November 2022
+    
+    - Fix AmbiguousParameter SQL crash on get_prices() by building WHERE dynamically.
+    - Narrow should_skip_sql_execution in query_validation so it does not falsely skip purely based on the explanation intent.
+    - Expand ENABLE_QUESTION_ANALYZER_HINTS locally.
+    - Implement explicit phase 4 regressions
+
+diff --git a/agent/tools/price_tools.py b/agent/tools/price_tools.py
+index 4c5e3f7..c570e0c 100644
+--- a/agent/tools/price_tools.py
++++ b/agent/tools/price_tools.py
+@@ -53,6 +53,20 @@ def get_prices(
+     end_date = normalize_date(end_date)
+     limit = normalize_limit(limit)
+ 
++    # Build WHERE clause and params dynamically so each bind parameter appears
++    # exactly once.  PostgreSQL rejects the "(:p IS NULL OR col >= :p)" pattern
++    # as AmbiguousParameter when a named param is used in two different type
++    # contexts in the same statement.
++    where_parts: list[str] = []
++    params: dict = {"limit": limit}
++    if start_date:
++        where_parts.append("date >= :start_date")
++        params["start_date"] = start_date
++    if end_date:
++        where_parts.append("date <= :end_date")
++        params["end_date"] = end_date
++    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
++
+     if granularity == "yearly":
+         select_cols = ", ".join([f"AVG({c}) AS {c}" for c in cols])
+         sql = f"""
+@@ -60,8 +74,7 @@ SELECT
+     EXTRACT(YEAR FROM date)::int AS year,
+     {select_cols}
+ FROM price_with_usd
+-WHERE (:start_date IS NULL OR date >= :start_date)
+-  AND (:end_date IS NULL OR date <= :end_date)
++{where_clause}
+ GROUP BY 1
+ ORDER BY 1
+ LIMIT :limit
+@@ -73,16 +86,10 @@ SELECT
+     date,
+     {select_cols}
+ FROM price_with_usd
+-WHERE (:start_date IS NULL OR date >= :start_date)
+-  AND (:end_date IS NULL OR date <= :end_date)
++{where_clause}
+ ORDER BY date
+ LIMIT :limit
+ """.strip()
+ 
+-    params = {
+-        "start_date": start_date,
+-        "end_date": end_date,
+-        "limit": limit,
+-    }
+     return run_text_query(sql, params)
+ 
+diff --git a/config.py b/config.py
+index 6da4cc2..32b5aa5 100644
+--- a/config.py
++++ b/config.py
+@@ -52,7 +52,7 @@ MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
+ ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
+ ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "false").lower() in ("1", "true", "yes", "on")
+ ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
+-ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "false").lower() in ("1", "true", "yes", "on")
++ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")
+ ENABLE_TRACE_DEBUG_ARTIFACTS = os.getenv("ENABLE_TRACE_DEBUG_ARTIFACTS", "false").lower() in ("1", "true", "yes", "on")
+ TRACE_TEXT_MAX_CHARS = max(120, int(os.getenv("TRACE_TEXT_MAX_CHARS", "800")))
+ TRACE_MAX_LIST_ITEMS = max(1, int(os.getenv("TRACE_MAX_LIST_ITEMS", "8")))
+diff --git a/tests/test_price_tools_sql.py b/tests/test_price_tools_sql.py
+new file mode 100644
+index 0000000..7262fb2
+--- /dev/null
++++ b/tests/test_price_tools_sql.py
+@@ -0,0 +1,69 @@
++"""
++Regression: get_prices() must not raise AmbiguousParameter when date filters
++are passed. Tests the SQL generation path, not the DB connection.
++"""
++import pytest
++import sys
++from unittest.mock import patch, MagicMock
++import pandas as pd
++
++# Mock DB engine creation before importing anything from agent
++sys.modules['psycopg'] = MagicMock()
++sys.modules['sqlalchemy'] = MagicMock()
++sys.modules['core.query_executor'] = MagicMock()
++
++import agent.tools.price_tools
++
++MOCK_RESULT = (pd.DataFrame(), [], [])
++
++
++def _call_get_prices(**kwargs):
++    """Call get_prices with mocked run_text_query, return (sql, params)."""
++    captured = {}
++    def fake_run(sql, params):
++        captured["sql"] = sql
++        captured["params"] = params
++        return MOCK_RESULT
++    
++    with patch("agent.tools.price_tools.run_text_query", side_effect=fake_run):
++        from agent.tools import price_tools
++        price_tools.get_prices(**kwargs)
++        
++    return captured["sql"], captured["params"]
++
++
++def test_both_dates_no_null_check():
++    sql, params = _call_get_prices(
++        start_date="2022-11-01", end_date="2022-11-30",
++        metric="balancing", currency="gel",
++    )
++    # Old pattern would put :start_date in both IS NULL and >= positions
++    assert "IS NULL" not in sql, "AmbiguousParameter pattern must not appear in SQL"
++    assert "start_date" in params
++    assert "end_date" in params
++    assert params["start_date"] == "2022-11-01"
++    assert params["end_date"] == "2022-11-30"
++
++
++def test_no_dates_no_where_clause():
++    sql, params = _call_get_prices(metric="balancing", currency="gel")
++    assert "start_date" not in params
++    assert "end_date" not in params
++    assert "IS NULL" not in sql
++
++
++def test_only_start_date():
++    sql, params = _call_get_prices(start_date="2022-11-01", metric="balancing", currency="gel")
++    assert "start_date" in params
++    assert "end_date" not in params
++    assert "IS NULL" not in sql
++
++
++def test_yearly_granularity_no_ambiguous_params():
++    sql, params = _call_get_prices(
++        start_date="2022-01-01", end_date="2022-12-31",
++        metric="balancing", currency="gel", granularity="yearly",
++    )
++    assert "IS NULL" not in sql
++    assert params.get("start_date") == "2022-01-01"
++    assert params.get("end_date") == "2022-12-31"
+diff --git a/tests/test_query_validation.py b/tests/test_query_validation.py
+index bb1b82c..fcfba1b 100644
+--- a/tests/test_query_validation.py
++++ b/tests/test_query_validation.py
+@@ -56,3 +56,42 @@ def test_conceptual_queries_are_conceptual(query):
+     assert is_conceptual_question(query) is True, (
+         f"Expected conceptual, but was classified as data query: {query!r}"
+     )
++
++
++# -----------------------------------------------------------------------
++# Regression: time-bound "why" questions must never skip SQL
++# -----------------------------------------------------------------------
++from utils.query_validation import should_skip_sql_execution
++
++TIME_BOUND_WHY_CASES = [
++    ("why did balancing electricity price change in November 2022?", {"intent": "price_explanation"}),
++    ("why did balancing electricity price change in 2022?", {"intent": "explanation"}),
++    ("explain the price spike in November 2022", {"intent": "price_explanation"}),
++    ("what caused the tariff change in 2023-03?", {"intent": "definition"}),
++]
++
++@pytest.mark.parametrize("query,plan", TIME_BOUND_WHY_CASES)
++def test_time_bound_explanation_must_not_skip_sql(query, plan):
++    """A 'why' question that names a specific period+metric must run SQL."""
++    skip, reason = should_skip_sql_execution(query, plan)
++    assert skip is False, (
++        f"Expected SQL to run, but got skip=True for: {query!r}\nReason: {reason}"
++    )
++
++
++# -----------------------------------------------------------------------
++# Regression: pure conceptual explanations (no time, no metric) still skip
++# -----------------------------------------------------------------------
++PURE_CONCEPTUAL_CASES = [
++    ("explain how balancing electricity works", {"intent": "explanation"}),
++    ("what is the definition of a PPA?", {"intent": "definition"}),
++    ("explain the concept of deregulated market", {"intent": "explanation"}),
++]
++
++@pytest.mark.parametrize("query,plan", PURE_CONCEPTUAL_CASES)
++def test_pure_conceptual_with_explanation_intent_skips_sql(query, plan):
++    """Pure conceptual questions with explanation intent should still skip SQL."""
++    skip, reason = should_skip_sql_execution(query, plan)
++    assert skip is True, (
++        f"Expected SQL to be skipped, but got skip=False for: {query!r}\nReason: {reason}"
++    )
+diff --git a/utils/query_validation.py b/utils/query_validation.py
+index cf00d4c..0611acf 100644
+--- a/utils/query_validation.py
++++ b/utils/query_validation.py
+@@ -272,6 +272,31 @@ def validate_sql_relevance(
+         return False, reason, should_skip_chart
+ 
+ 
++# Matches any four-digit year, YYYY-MM, or phrases like "last month / this year"
++_TIME_PATTERN = re.compile(
++    r"(\b\d{4}\b|\d{4}-\d{2}|last month|this year|last year|"
++    r"ßâæßâ¥ßâÜßâ¥ ßâùßâòßâö|ßâÉßâ¢ ßâ¼ßâößâÜßâí|╨┐╤Ç╨╛╤ê╨╗╤ï╨╣ ╨╝╨╡╤ü╤Å╤å|╨▓ \d{4})",
++    re.IGNORECASE,
++)
++
++# At least one recognised price/energy metric term
++_METRIC_TERMS = {
++    "price", "tariff", "ßâñßâÉßâíßâÿ", "balancing", "deregulated",
++    "guaranteed_capacity", "exchange_rate", "xrate",
++    "demand", "generation", "quantity",
++}
++
++def _has_specific_time_bound(query: str) -> bool:
++    """Return True if the query contains a specific time reference."""
++    return bool(_TIME_PATTERN.search(query))
++
++
++def _has_specific_metric(query: str) -> bool:
++    """Return True if the query contains a recognisable metric term."""
++    q = query.lower()
++    return any(term in q for term in _METRIC_TERMS)
++
++
+ def should_skip_sql_execution(
+     query: str,
+     plan: dict
+@@ -303,7 +328,11 @@ def should_skip_sql_execution(
+     # Check plan intent
+     intent = str(plan.get("intent", "")).lower()
+     if any(keyword in intent for keyword in ["ßâÆßâÉßâ£ßâ¢ßâÉßâáßâóßâößâæßâÉ", "explanation", "definition"]):
+-        return True, f"Plan intent is explanatory: {intent}"
++        # Only skip SQL if the question has no specific time period and no metric.
++        # "why did balancing price change in November 2022?" has both -> must run SQL.
++        if not _has_specific_time_bound(query) or not _has_specific_metric(query):
++            return True, f"Plan intent is explanatory: {intent}"
++        # Fall through to run SQL for time-bound data-explanation questions
+ 
+     return False, "Data query - SQL needed"
+ 

@@ -1,0 +1,119 @@
+﻿commit dfe0d8ea63f1d65ac89073f9683b3746bc7192df
+Author: Irakli GLD <galdavika@gmail.com>
+Date:   Sat Mar 14 18:05:34 2026 +0400
+
+    Expand tool date bounds for data explanations
+    
+    - pipeline.py now calculates is_explanation and feeds to router
+    - router.py expands explicitly stated months into prev_month - curr_month ranges so the analyzer has baseline data to explain changes
+    - Add unit tests verifying explanation boundary logic
+
+diff --git a/agent/pipeline.py b/agent/pipeline.py
+index 076c5b0..0116b06 100644
+--- a/agent/pipeline.py
++++ b/agent/pipeline.py
+@@ -111,7 +111,16 @@ def process_query(
+     # Stage 0.5: pre-LLM typed tool routing
+     if ENABLE_TYPED_TOOLS:
+         t_stage = time.time()
+-        invocation = match_tool(ctx.query)
++        
++        is_exp = False
++        if ctx.question_analysis:
++            qa_type = ctx.question_analysis.classification.query_type.value
++            if qa_type in ("data_explanation", "conceptual_definition"):
++                is_exp = True
++        elif any(w in ctx.query.lower() for w in ["why", "explain", "reason", "ßâáßâÉßâóßâ¥ßâ¢", "ßâÉßâ«ßâíßâößâ£ßâÿ", "╨┐╨╛╤ç╨╡╨╝╤â", "╨╛╨▒╤è╤Å╤ü╨╜╨╕"]):
++            is_exp = True
++            
++        invocation = match_tool(ctx.query, is_explanation=is_exp)
+         _trace_stage("stage_0_5_router_match", t_stage, matched=bool(invocation))
+         if invocation:
+             if "semantic fallback" in (invocation.reason or "").lower():
+diff --git a/agent/router.py b/agent/router.py
+index 4e21b60..d7a3fbf 100644
+--- a/agent/router.py
++++ b/agent/router.py
+@@ -177,7 +177,7 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date:
+     return _build_semantic_invocation(top_tool, query_lower, start_date, end_date, top_score)
+ 
+ 
+-def _extract_date_range(query_lower: str) -> Tuple[Optional[str], Optional[str]]:
++def _extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[Optional[str], Optional[str]]:
+     """Extract coarse date range hints from NL query."""
+     # from 2020 to 2024 / between 2020 and 2024
+     m = re.search(r"(?:from|between)\s+(20\d{2})\s+(?:to|and|\-)\s+(20\d{2})", query_lower)
+@@ -201,14 +201,25 @@ def _extract_date_range(query_lower: str) -> Tuple[Optional[str], Optional[str]]
+     if m:
+         month = MONTH_MAP[m.group(1)]
+         year = int(m.group(2))
+-        start = f"{year}-{month:02d}-01"
+-        return start, start
++        end = f"{year}-{month:02d}-01"
++        if is_explanation:
++            start_month = month - 1
++            start_year = year
++            if start_month == 0:
++                start_month = 12
++                start_year -= 1
++            start = f"{start_year}-{start_month:02d}-01"
++            return start, end
++        return end, end
+ 
+     # explicit year
+     years = re.findall(r"\b(20\d{2})\b", query_lower)
+     if years:
+         year = int(years[0])
+-        return f"{year}-01-01", f"{year}-12-31"
++        end = f"{year}-12-31"
++        if is_explanation:
++            return f"{year-1}-01-01", end
++        return f"{year}-01-01", end
+ 
+     # relative "last N years"
+     m = re.search(r"\blast\s+(\d+)\s+years?\b", query_lower)
+@@ -293,10 +304,10 @@ def _extract_generation_types(query_lower: str) -> List[str]:
+     return list(dict.fromkeys(hits))
+ 
+ 
+-def match_tool(query: str) -> Optional[ToolInvocation]:
++def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocation]:
+     """Return a deterministic tool invocation when confidence is high."""
+     q = query.lower().strip()
+-    start_date, end_date = _extract_date_range(q)
++    start_date, end_date = _extract_date_range(q, is_explanation=is_explanation)
+ 
+     composition_terms = ["share", "composition", "mix", "proportion", "ßâ¼ßâÿßâÜßâÿ", "╨┤╨╛╨╗╤Å"]
+     explicit_share_terms = ["share", "proportion", "percentage", "percent", "ßâ¼ßâÿßâÜßâÿ", "╨┤╨╛╨╗╤Å"]
+diff --git a/tests/test_router.py b/tests/test_router.py
+index 7bfd7b1..cdffc01 100644
+--- a/tests/test_router.py
++++ b/tests/test_router.py
+@@ -57,3 +57,27 @@ def test_semantic_fallback_matches_long_tail_price_intent():
+ def test_no_tool_match_for_generic_text():
+     inv = match_tool("hello, can you help me")
+     assert inv is None
++
++
++def test_explanation_mode_expands_month_range():
++    # Regular matching
++    inv_normal = match_tool("balancing price in november 2022")
++    assert inv_normal.params["start_date"] == "2022-11-01"
++    assert inv_normal.params["end_date"] == "2022-11-01"
++    
++    # Explanation matching expands to start of previous month
++    inv_exp = match_tool("why did balancing price change in november 2022?", is_explanation=True)
++    assert inv_exp.params["start_date"] == "2022-10-01"
++    assert inv_exp.params["end_date"] == "2022-11-01"
++
++
++def test_explanation_mode_expands_year_range():
++    # Regular matching
++    inv_normal = match_tool("generation mix in 2024")
++    assert inv_normal.params["start_date"] == "2024-01-01"
++    assert inv_normal.params["end_date"] == "2024-12-31"
++    
++    # Explanation matching expands to start of previous year
++    inv_exp = match_tool("explain the generation mix change in 2024", is_explanation=True)
++    assert inv_exp.params["start_date"] == "2023-01-01"
++    assert inv_exp.params["end_date"] == "2024-12-31"
