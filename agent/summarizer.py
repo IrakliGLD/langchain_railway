@@ -132,11 +132,17 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
         percent_alias = _normalize_number_token(str(percent_raw))
         if percent_alias:
             tokens.add(percent_alias)
-        # Also allow matching if the LLM rounds a percentage to 1 decimal place (e.g., 0.5457 -> 54.6%)
+            if percent_alias.startswith("-"):
+                tokens.add(percent_alias[1:])
+        
+        # Rounded version (e.g., 0.5457 -> 54.6)
         percent_rounded = _normalize_number_token(str(round(percent_raw, 1)))
         if percent_rounded:
             tokens.add(percent_rounded)
-        # LLMs occasionally truncate instead of using standard banker's rounding (e.g., 0.3755 -> 37.5%)
+            if percent_rounded.startswith("-"):
+                tokens.add(percent_rounded[1:])
+
+        # Truncated version (e.g., 0.3755 -> 37.5)
         pr_str = str(percent_raw)
         if "." in pr_str:
             dec_idx = pr_str.find(".")
@@ -144,6 +150,17 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
                 percent_trunc = _normalize_number_token(pr_str[:dec_idx + 2])
                 if percent_trunc:
                     tokens.add(percent_trunc)
+                    if percent_trunc.startswith("-"):
+                        tokens.add(percent_trunc[1:])
+
+    # Crucial: Add unsigned versions for ALL tokens in this cell
+    # (Fixes "dropped by 5" matching "-5")
+    unsigned_extra = set()
+    for t in tokens:
+        if t.startswith("-"):
+            unsigned_extra.add(t[1:])
+    tokens.update(unsigned_extra)
+
     return tokens
 
 

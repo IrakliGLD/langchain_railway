@@ -174,7 +174,14 @@ def process_query(
             qa_type = ctx.question_analysis.classification.query_type.value
             qa_path = ctx.question_analysis.routing.preferred_path.value
             qa_conf = ctx.question_analysis.classification.confidence
-            analyzer_conceptual = qa_type == "conceptual_definition"
+            
+            # If the analyzer explicitly prefers knowledge, or classifies as conceptual
+            analyzer_conceptual = (qa_path == "knowledge" or qa_type == "conceptual_definition")
+            
+            # Override heuristic if analyzer is high confidence or we are in active mode
+            if ENABLE_QUESTION_ANALYZER_HINTS and analyzer_conceptual:
+                ctx.is_conceptual = True
+
             conceptual_disagree = analyzer_conceptual != bool(ctx.is_conceptual)
             mode_disagree = ctx.question_analysis.classification.analysis_mode.value != str(ctx.mode)
         _trace_stage(

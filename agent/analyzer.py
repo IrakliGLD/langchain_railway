@@ -109,14 +109,23 @@ def build_share_shift_notes(
     notes.append(f"Share shifts month-over-month: {', '.join(parts)}.")
 
     cheap_delta = sum(d for _, d, c, _, _ in significant if c == "cheap")
-    expensive_delta = sum(d for _, d, c, _, _ in significant if c in ("expensive", "moderate"))
+    moderate_delta = sum(d for _, d, c, _, _ in significant if c == "moderate")
+    expensive_delta = sum(d for _, d, c, _, _ in significant if c == "expensive")
 
     if cheap_delta < -0.01:
         notes.append("Cheaper balancing supply contracted — upward price pressure.")
+    if cheap_delta > 0.01:
+        notes.append("Cheaper balancing supply expanded — downward price pressure.")
+        
+    if moderate_delta > 0.01:
+        notes.append("Moderate-cost groups expanded.")
+    if moderate_delta < -0.01:
+        notes.append("Moderate-cost groups contracted.")
+
     if expensive_delta > 0.01:
-        notes.append("Higher-cost groups expanded — upward price pressure.")
+        notes.append("Expensive balancing supply expanded — upward price pressure.")
     if expensive_delta < -0.01:
-        notes.append("Higher-cost groups contracted — downward price pressure.")
+        notes.append("Expensive balancing supply contracted — downward price pressure.")
 
     usd_delta = sum(d for _, d, _, u, _ in significant if u)
     if abs(usd_delta) >= 0.01:
