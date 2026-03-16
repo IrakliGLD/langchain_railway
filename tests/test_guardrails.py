@@ -1622,3 +1622,146 @@ def test_pydantic_types_limit_accepts_15_types():
     types = [f"type_{i}" for i in range(15)]
     hint = ToolParamsHint(types=types)
     assert len(hint.types) == 15
+
+
+# ---------------------------------------------------------------------------
+# Chart pipeline: column leak, seriesConfig, yearly aggregation
+# ---------------------------------------------------------------------------
+
+
+def _make_chart_ctx(df, query="What is a trend of balancing electricity price? What is the main driver?"):
+    """Build a minimal QueryContext suitable for build_chart tests."""
+    from models import QueryContext
+    ctx = QueryContext(query=query)
+    ctx.df = df.copy()
+    ctx.rows = [tuple(row) for row in df.itertuples(index=False)]
+    ctx.cols = list(df.columns)
+    ctx.plan = {"intent": "price_trend_analysis"}
+    return ctx
+
+
+def test_chart_column_leak_fix():
+    """build_chart must only include selected series (<=3) + time column in chart_data records."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    # 30 rows × 11 numeric columns (prices + xrate + 8 shares) — same shape as production bug
+    dates = pd.date_range("2023-01-01", periods=30, freq="MS")
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({"date": dates})
+    df["p_bal_gel"] = rng.uniform(5, 15, 30)
+    df["p_bal_usd"] = rng.uniform(2, 6, 30)
+    df["xrate"] = rng.uniform(2.5, 3.0, 30)
+    for i in range(8):
+        df[f"share_{chr(97 + i)}"] = rng.uniform(0, 1, 30)
+
+    ctx = _make_chart_ctx(df)
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_data is not None, "Chart should have been generated"
+    # Each record should have at most MAX_SERIES + 1 (time) keys
+    record_keys = set(ctx.chart_data[0].keys())
+    # MAX_SERIES = 3, plus the time column
+    assert len(record_keys) <= 4, (
+        f"Expected <=4 keys per record (time + 3 series), got {len(record_keys)}: {record_keys}"
+    )
+
+
+def test_chart_series_config_dimensions():
+    """seriesConfig should assign 'bar' to shares and 'line' to prices."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=12, freq="MS")
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": rng.uniform(5, 15, 12),
+        "share_import": rng.uniform(0, 1, 12),
+    })
+
+    ctx = _make_chart_ctx(df, query="price and share trend")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_meta is not None
+    sc = ctx.chart_meta.get("seriesConfig", {})
+    assert len(sc) >= 2, f"Expected seriesConfig for at least 2 series, got {sc}"
+
+    for label, cfg in sc.items():
+        if "share" in label.lower() or "Share" in label:
+            assert cfg["type"] == "bar", f"Share series should be bar, got {cfg}"
+            assert cfg.get("stack") == "shares", f"Share series should be stacked, got {cfg}"
+        else:
+            assert cfg["type"] == "line", f"Price series should be line, got {cfg}"
+
+
+def test_chart_yearly_aggregation():
+    """When shares + prices have >24 monthly rows, data should be aggregated to yearly."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    # 60 monthly rows (5 years) with both prices and shares
+    dates = pd.date_range("2019-01-01", periods=60, freq="MS")
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": rng.uniform(5, 15, 60),
+        "share_import": rng.uniform(0.1, 0.5, 60),
+    })
+
+    ctx = _make_chart_ctx(df, query="price and share trend")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_data is not None
+    assert ctx.chart_meta is not None
+    # Should be aggregated to yearly (~5 rows, not 60)
+    assert len(ctx.chart_data) <= 10, (
+        f"Expected yearly aggregation (<=10 rows), got {len(ctx.chart_data)}"
+    )
+    assert ctx.chart_meta.get("aggregation") == "yearly", (
+        f"Expected aggregation='yearly' in metadata, got {ctx.chart_meta.get('aggregation')}"
+    )
+
+
+def test_chart_no_aggregation_when_few_rows():
+    """When row count is <=24, no yearly aggregation should be applied."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=12, freq="MS")
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": rng.uniform(5, 15, 12),
+        "share_import": rng.uniform(0.1, 0.5, 12),
+    })
+
+    ctx = _make_chart_ctx(df, query="price and share trend")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_meta is not None
+    assert "aggregation" not in ctx.chart_meta, (
+        f"Should NOT aggregate with <=24 rows, but got aggregation={ctx.chart_meta.get('aggregation')}"
+    )
+    # Data rows preserved (not collapsed to yearly)
+    assert ctx.chart_data is not None
+    assert len(ctx.chart_data) == 12
+
+
+def test_chart_no_time_column_does_not_crash():
+    """build_chart with no time column should still produce a chart without crashing."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({
+        "sector": ["A", "B", "C", "D"],
+        "p_bal_gel": rng.uniform(5, 15, 4),
+        "share_import": rng.uniform(0.1, 0.5, 4),
+    })
+
+    ctx = _make_chart_ctx(df, query="price by sector")
+    ctx = build_chart(ctx)
+
+    # Should not crash; chart may or may not be generated depending on generate_chart logic
+    # but no exception should be raised

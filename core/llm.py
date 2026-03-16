@@ -1761,7 +1761,7 @@ def llm_summarize_structured(
     history_str = str(conversation_history) if conversation_history else ""
     domain_knowledge = str(domain_knowledge or "")
     cache_input = (
-        f"summary_structured_v3|{user_query}|{data_preview}|{stats_hint}|"
+        f"summary_structured_v4|{user_query}|{data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}"
     )
@@ -1855,11 +1855,11 @@ def llm_summarize_structured(
 UNTRUSTED_USER_QUESTION:
 <<<{user_query}>>>
 
-UNTRUSTED_DATA_PREVIEW:
-<<<{data_preview}>>>
-
 UNTRUSTED_STATISTICS:
 <<<{stats_hint}>>>
+
+UNTRUSTED_DATA_PREVIEW:
+<<<{data_preview}>>>
 
 UNTRUSTED_DOMAIN_KNOWLEDGE:
 <<<{domain_knowledge}>>>

@@ -120,6 +120,32 @@ class TestRowsToPreview:
         # Should round to 3 decimal places
         assert "3.142" in result or "3.141" in result
 
+    def test_csv_format(self):
+        """Output should be CSV (comma-separated), not padded table."""
+        rows = [(1, "alpha", 10.5), (2, "beta", 20.3)]
+        cols = ["id", "name", "value"]
+        result = rows_to_preview(rows, cols)
+        lines = [line.strip() for line in result.strip().splitlines()]
+        # Header must be CSV
+        assert lines[0] == "id,name,value"
+        # Data rows comma-separated
+        assert "alpha" in lines[1]
+        assert "," in lines[1]
+
+    def test_large_preview_triggers_truncation(self):
+        """When preview exceeds max_preview_chars, rows are dropped from the middle."""
+        # 200 rows × 10 numeric columns → would exceed a small cap
+        import random
+        random.seed(42)
+        rows = [("row_" + str(i), *(random.random() for _ in range(9))) for i in range(200)]
+        cols = ["label"] + [f"col_{j}" for j in range(9)]
+        result = rows_to_preview(rows, cols, max_preview_chars=5000)
+        assert len(result) <= 5500  # some tolerance for final iteration
+        # First and last rows preserved
+        lines = [line.strip() for line in result.strip().splitlines()]
+        assert lines[1].startswith("row_0,")     # first data row
+        assert lines[-1].startswith("row_199,")  # last data row
+
 
 class TestCAGRCalculation:
     """Test CAGR calculation edge cases."""

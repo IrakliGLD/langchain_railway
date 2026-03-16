@@ -16,25 +16,25 @@ import numpy as np
 log = logging.getLogger("Enai")
 
 
-def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 200) -> str:
+def rows_to_preview(
+    rows: List[Tuple],
+    cols: List[str],
+    max_rows: int = 200,
+    max_preview_chars: int = 18_000,
+) -> str:
     """
-    Convert query results to formatted string preview.
+    Convert query results to compact CSV preview for LLM consumption.
 
     Args:
         rows: List of tuples containing query results
         cols: List of column names
         max_rows: Maximum number of rows to include in preview
+        max_preview_chars: Soft cap on output size; if exceeded, middle rows
+            are progressively dropped while preserving the first and last rows
+            so the LLM sees the full date range.
 
     Returns:
-        Formatted string representation of data
-
-    Examples:
-        >>> rows = [(1, 'A', 10.5), (2, 'B', 20.3)]
-        >>> cols = ['id', 'name', 'value']
-        >>> print(rows_to_preview(rows, cols))
-        id name  value
-         1    A  10.5
-         2    B  20.3
+        CSV-formatted string (header + data rows)
     """
     if not rows:
         return "No rows returned."
@@ -46,7 +46,18 @@ def rows_to_preview(rows: List[Tuple], cols: List[str], max_rows: int = 200) -> 
         if pd.api.types.is_numeric_dtype(df[c]):
             df[c] = df[c].astype(float).round(3)
 
-    return df.to_string(index=False)
+    preview = df.to_csv(index=False)
+    if len(preview) <= max_preview_chars:
+        return preview
+
+    # Progressive truncation: keep first half + last quarter of rows
+    while len(preview) > max_preview_chars and len(df) > 20:
+        keep_head = max(10, len(df) // 2)
+        keep_tail = max(5, len(df) // 4)
+        df = pd.concat([df.head(keep_head), df.tail(keep_tail)])
+        preview = df.to_csv(index=False)
+
+    return preview
 
 
 def quick_stats(rows: List[Tuple], cols: List[str]) -> str:

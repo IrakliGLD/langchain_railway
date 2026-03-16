@@ -297,6 +297,24 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         dim_map = {c: infer_dimension(c) for c in num_cols}
         dims = set(dim_map.values())
 
+    # --- Filter DataFrame to selected series only ---
+    cols_to_keep = ([time_key] if time_key and time_key in df.columns else []) + num_cols
+    df = df[[c for c in cols_to_keep if c in df.columns]]
+
+    # --- Yearly aggregation for mixed-dimension charts ---
+    chart_aggregation = None
+    if "share" in dims and len(df) > 24 and time_key and time_key in df.columns:
+        try:
+            df[time_key] = pd.to_datetime(df[time_key])
+            # Trim to overlapping range (rows where all series have data)
+            df = df.dropna(subset=num_cols, how="any")
+            if not df.empty:
+                df = df.set_index(time_key).resample("YS").mean().reset_index()
+                chart_aggregation = "yearly"
+                log.info(f"📊 Aggregated to yearly: {len(df)} rows (shares + mixed dims)")
+        except Exception as e:
+            log.warning(f"Yearly aggregation failed, using raw data: {e}")
+
     # --- Label map ---
     chart_labels = [label_map_all.get(c, c) for c in num_cols]
     df_labeled = df.rename(columns=label_map_all)
@@ -308,6 +326,9 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     )
     if chart_meta.get("axisMode") == "dual":
         chart_type = "dualaxis"
+
+    if chart_aggregation:
+        chart_meta["aggregation"] = chart_aggregation
 
     log.info(f"✅ Chart built | type={chart_type} | axisMode={chart_meta.get('axisMode')}")
 
@@ -321,10 +342,33 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _build_series_config(num_cols: list, chart_labels: list) -> Dict[str, Dict[str, str]]:
+    """Build per-series render config based on dimension semantics.
+
+    Tells the frontend how to render each series:
+    - shares → stacked bars on right axis
+    - prices → lines on left axis
+    - xrate  → dashed line on left axis
+    - others → line on left axis
+    """
+    config: Dict[str, Dict[str, str]] = {}
+    for col, label in zip(num_cols, chart_labels):
+        dim = infer_dimension(col)
+        if dim == "share":
+            config[label] = {"type": "bar", "stack": "shares", "yAxis": "right"}
+        elif dim == "xrate":
+            config[label] = {"type": "line", "yAxis": "left", "dashStyle": "dash"}
+        else:
+            config[label] = {"type": "line", "yAxis": "left"}
+    return config
+
+
 def _build_chart_metadata(
     dims: set, chart_type: str, num_cols: list, chart_labels: list, time_key: Optional[str]
 ) -> Dict[str, Any]:
     """Build chart metadata based on dimension semantics."""
+
+    series_config = _build_series_config(num_cols, chart_labels)
 
     # Dual-axis combinations
     dual_axis_combos = [
@@ -350,6 +394,7 @@ def _build_chart_metadata(
                 "title": title,
                 "axisMode": "dual",
                 "labels": chart_labels,
+                "seriesConfig": series_config,
             }
 
     # Single axis
@@ -372,6 +417,7 @@ def _build_chart_metadata(
         "title": "Indicator Comparison (same dimension)",
         "axisMode": "single",
         "labels": chart_labels,
+        "seriesConfig": series_config,
     }
 
 
