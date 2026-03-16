@@ -46,12 +46,28 @@ BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
 }
 
 METRIC_VALUE_ALIASES: dict[str, list[str]] = {
+    # Balancing prices
     "p_bal_gel": ["p_bal_gel", "balancing_price_gel"],
     "p_bal_usd": ["p_bal_usd", "balancing_price_usd"],
+    # Deregulated prices
+    "p_dereg_gel": ["p_dereg_gel", "deregulated_price_gel"],
+    "p_dereg_usd": ["p_dereg_usd", "deregulated_price_usd"],
+    # Guaranteed capacity
+    "p_gcap_gel": ["p_gcap_gel", "guaranteed_capacity_gel"],
+    "p_gcap_usd": ["p_gcap_usd", "guaranteed_capacity_usd"],
+    # Exchange rate
     "xrate": ["xrate", "exchange_rate"],
+    # Tariffs
+    "tariff_gel": ["tariff_gel", "regulated_tariff_gel"],
+    "tariff_usd": ["tariff_usd", "regulated_tariff_usd"],
+    # Generation
+    "quantity_tech": ["quantity_tech", "generation_quantity"],
+    # CPI
+    "cpi": ["cpi", "consumer_price_index"],
 }
 
 DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
+    # MoM
     {"metric_name": "mom_absolute_change", "metric": "p_bal_gel"},
     {"metric_name": "mom_percent_change", "metric": "p_bal_gel"},
     {"metric_name": "mom_absolute_change", "metric": "xrate"},
@@ -59,6 +75,11 @@ DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
     {"metric_name": "share_delta_mom", "metric": "share_import"},
     {"metric_name": "share_delta_mom", "metric": "share_thermal_ppa"},
     {"metric_name": "share_delta_mom", "metric": "share_renewable_ppa"},
+    # YoY — seasonal context for balancing price analysis
+    {"metric_name": "yoy_absolute_change", "metric": "p_bal_gel"},
+    {"metric_name": "yoy_percent_change", "metric": "p_bal_gel"},
+    {"metric_name": "yoy_absolute_change", "metric": "xrate"},
+    {"metric_name": "yoy_percent_change", "metric": "xrate"},
 ]
 
 MONTH_NAME_TO_NUMBER = {
@@ -197,6 +218,15 @@ def _build_requested_analysis_evidence(
 
     yoy_row = _find_yoy_row(df, time_col, current_ts)
     yoy_ts = pd.to_datetime(yoy_row[time_col].iloc[0], errors="coerce") if not yoy_row.empty else None
+    yoy_shares: dict[str, float] = {}
+    if not yoy_row.empty:
+        for col in [c for c in yoy_row.columns if c.startswith("share_")]:
+            val = yoy_row[col].iloc[0]
+            if pd.notna(val):
+                try:
+                    yoy_shares[col] = float(val)
+                except (ValueError, TypeError):
+                    pass
 
     def _row_value(frame: pd.DataFrame, metric_name: str) -> Optional[float]:
         if frame is None or frame.empty:
@@ -260,7 +290,7 @@ def _build_requested_analysis_evidence(
             )
         elif metric_name in {"yoy_absolute_change", "yoy_percent_change"}:
             cur_val = _share_value(cur_shares, metric) if metric.startswith("share_") else _row_value(current_row, metric)
-            yoy_val = _share_value(prev_shares, metric) if metric.startswith("share_") else _row_value(yoy_row, metric)
+            yoy_val = _share_value(yoy_shares, metric) if metric.startswith("share_") else _row_value(yoy_row, metric)
             if cur_val is None or yoy_val is None:
                 continue
             delta = cur_val - yoy_val
@@ -901,11 +931,18 @@ def _build_why_context(ctx: QueryContext) -> None:
     cur_xrate = _get_val(cur_row, _metric_aliases("xrate"))
     prev_xrate = _get_val(prev_row, _metric_aliases("xrate")) if not prev_row.empty else None
 
+    target_ts = pd.to_datetime(cur_row[t_series_col].iloc[0], errors="coerce") if not cur_row.empty else None
+
+    # YoY: same month from the previous year
+    yoy_row = _find_yoy_row(df, t_series_col, target_ts)
+    yoy_gel = _get_val(yoy_row, _metric_aliases("p_bal_gel")) if not yoy_row.empty else None
+    yoy_usd = _get_val(yoy_row, _metric_aliases("p_bal_usd")) if not yoy_row.empty else None
+    yoy_xrate = _get_val(yoy_row, _metric_aliases("xrate")) if not yoy_row.empty else None
+
     share_cols = [c for c in df.columns if c.startswith("share_")]
     cur_shares: dict[str, float] = {}
     prev_shares: dict[str, float] = {}
-
-    target_ts = pd.to_datetime(cur_row[t_series_col].iloc[0], errors="coerce") if not cur_row.empty else None
+    yoy_shares: dict[str, float] = {}
 
     def _populate_from_frame(frame, dest):
         if frame is None or frame.empty:
@@ -923,6 +960,8 @@ def _build_why_context(ctx: QueryContext) -> None:
         _populate_from_frame(cur_row, cur_shares)
         if not prev_row.empty:
             _populate_from_frame(prev_row, prev_shares)
+        if not yoy_row.empty:
+            _populate_from_frame(yoy_row, yoy_shares)
     else:
         # Fall back to deterministic panel
         try:
@@ -978,6 +1017,17 @@ def _build_why_context(ctx: QueryContext) -> None:
                                 prev_shares[col] = float(val)
                             except (ValueError, TypeError):
                                 continue
+                # YoY shares from panel
+                if target_ts is not None:
+                    yoy_share_row = _match_share_row(target_ts - pd.DateOffset(years=1))
+                    if not yoy_share_row.empty:
+                        for col in share_cols:
+                            val = yoy_share_row[col].iloc[0]
+                            if pd.notna(val):
+                                try:
+                                    yoy_shares[col] = float(val)
+                                except (ValueError, TypeError):
+                                    continue
 
     # Track whether any share evidence was found at all
     share_data_available = bool(cur_shares or prev_shares)
@@ -986,9 +1036,9 @@ def _build_why_context(ctx: QueryContext) -> None:
 
     why_ctx["signals"] = {
         "period": str(cur_row[t_series_col].iloc[0]) if not cur_row.empty else None,
-        "p_bal_gel": {"cur": cur_gel, "prev": prev_gel},
-        "p_bal_usd": {"cur": cur_usd, "prev": prev_usd},
-        "xrate": {"cur": cur_xrate, "prev": prev_xrate},
+        "p_bal_gel": {"cur": cur_gel, "prev": prev_gel, "yoy": yoy_gel},
+        "p_bal_usd": {"cur": cur_usd, "prev": prev_usd, "yoy": yoy_usd},
+        "xrate": {"cur": cur_xrate, "prev": prev_xrate, "yoy": yoy_xrate},
         "share_deltas": deltas,
     }
 
@@ -996,6 +1046,8 @@ def _build_why_context(ctx: QueryContext) -> None:
         why_ctx["signals"]["share_snapshot"] = {k: round(v, 4) for k, v in cur_shares.items()}
     if prev_shares:
         why_ctx["signals"]["share_prev_snapshot"] = {k: round(v, 4) for k, v in prev_shares.items()}
+    if yoy_shares:
+        why_ctx["signals"]["share_yoy_snapshot"] = {k: round(v, 4) for k, v in yoy_shares.items()}
 
     if cur_shares:
         sorted_mix = sorted(cur_shares.items(), key=lambda kv: kv[1], reverse=True)
@@ -1008,6 +1060,16 @@ def _build_why_context(ctx: QueryContext) -> None:
 
     share_notes = build_share_shift_notes(cur_shares, prev_shares)
     why_ctx["notes"].extend(share_notes)
+
+    # YoY comparison note
+    if yoy_gel is not None and cur_gel is not None:
+        yoy_delta = cur_gel - yoy_gel
+        direction = "higher" if yoy_delta > 0 else ("lower" if yoy_delta < 0 else "unchanged from")
+        yoy_period = str(yoy_row[t_series_col].iloc[0]) if not yoy_row.empty else "same month last year"
+        why_ctx["notes"].append(
+            f"Year-over-year: balancing price is {direction} than {yoy_period} "
+            f"({yoy_gel:.1f} \u2192 {cur_gel:.1f} GEL/MWh, {yoy_delta:+.1f})."
+        )
 
     why_ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")
     why_ctx["notes"].append("Regulated and deregulated hydro depend weakly on xrate; thermal PPAs and imports depend strongly on xrate.")
@@ -1047,8 +1109,15 @@ def _build_why_context(ctx: QueryContext) -> None:
         prev_shares=prev_shares,
     )
     combined_prov_df = why_prov_df
+    # Add YoY row to provenance so the grounding gate can verify YoY claims.
+    if not yoy_row.empty:
+        yoy_prov_cols = [c for c in combined_prov_df.columns if c in yoy_row.columns]
+        combined_prov_df = pd.concat(
+            [combined_prov_df, yoy_row[yoy_prov_cols] if yoy_prov_cols else yoy_row],
+            ignore_index=True, sort=False,
+        )
     if not analysis_evidence_df.empty:
-        combined_prov_df = pd.concat([why_prov_df, analysis_evidence_df], ignore_index=True, sort=False)
+        combined_prov_df = pd.concat([combined_prov_df, analysis_evidence_df], ignore_index=True, sort=False)
     # Add share-delta values as a provenance row so the provenance gate can
     # ground LLM claims like "6.66 pp" via _tokenize_cell_value(0.0666) → 6.66.
     if cur_shares and prev_shares:

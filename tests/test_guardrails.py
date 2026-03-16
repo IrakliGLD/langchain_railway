@@ -891,3 +891,385 @@ def test_derived_analysis_evidence_supports_alias_columns_and_llm_numeric_claims
     assert any(0.2972 in [value for value in row if isinstance(value, float)] for row in enriched.provenance_rows)
     assert out.summary_provenance_gate_passed is True
     assert "citation-grade grounding" not in out.summary
+
+
+def test_why_context_includes_yoy_signals(monkeypatch):
+    """When data spans multiple years, _build_why_context populates YoY signals and notes."""
+    # Nov 2022 (YoY reference), Oct 2023 (MoM reference), Nov 2023 (target)
+    corr_df = pd.DataFrame(
+        {
+            "date": [
+                pd.Timestamp("2022-11-01"),
+                pd.Timestamp("2023-10-01"),
+                pd.Timestamp("2023-11-01"),
+            ],
+            "p_bal_gel": [130.0, 145.0, 155.0],
+            "p_bal_usd": [48.1, 53.7, 57.4],
+            "xrate": [2.70, 2.70, 2.70],
+            "share_import": [0.15, 0.22, 0.28],
+            "share_deregulated_hydro": [0.40, 0.35, 0.30],
+            "share_regulated_hpp": [0.20, 0.18, 0.17],
+            "share_renewable_ppa": [0.15, 0.15, 0.15],
+            "share_thermal_ppa": [0.10, 0.10, 0.10],
+            "enguri_tariff_gel": [10.0, 10.0, 10.0],
+            "gardabani_tpp_tariff_gel": [20.0, 20.0, 20.0],
+            "grouped_old_tpp_tariff_gel": [18.0, 18.0, 18.0],
+        }
+    )
+    share_panel = pd.DataFrame(
+        {
+            "date": [
+                pd.Timestamp("2022-11-01"),
+                pd.Timestamp("2023-10-01"),
+                pd.Timestamp("2023-11-01"),
+            ],
+            "segment": ["balancing", "balancing", "balancing"],
+            "share_import": [0.15, 0.22, 0.28],
+            "share_deregulated_hydro": [0.40, 0.35, 0.30],
+            "share_regulated_hpp": [0.20, 0.18, 0.17],
+            "share_renewable_ppa": [0.15, 0.15, 0.15],
+            "share_thermal_ppa": [0.10, 0.10, 0.10],
+        }
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_args, **_kwargs: share_panel)
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2023?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [
+                    pd.Timestamp("2022-11-01"),
+                    pd.Timestamp("2023-10-01"),
+                    pd.Timestamp("2023-11-01"),
+                ],
+                "p_bal_gel": [130.0, 145.0, 155.0],
+                "p_bal_usd": [48.1, 53.7, 57.4],
+                "xrate": [2.70, 2.70, 2.70],
+                "share_import": [0.15, 0.22, 0.28],
+                "share_deregulated_hydro": [0.40, 0.35, 0.30],
+                "share_regulated_hpp": [0.20, 0.18, 0.17],
+                "share_renewable_ppa": [0.15, 0.15, 0.15],
+                "share_thermal_ppa": [0.10, 0.10, 0.10],
+            }
+        ),
+        cols=["date", "p_bal_gel", "p_bal_usd", "xrate"],
+        rows=[
+            (pd.Timestamp("2022-11-01"), 130.0, 48.1, 2.70),
+            (pd.Timestamp("2023-10-01"), 145.0, 53.7, 2.70),
+            (pd.Timestamp("2023-11-01"), 155.0, 57.4, 2.70),
+        ],
+        provenance_cols=["date", "p_bal_gel", "p_bal_usd", "xrate"],
+        provenance_rows=[
+            (pd.Timestamp("2022-11-01"), 130.0, 48.1, 2.70),
+            (pd.Timestamp("2023-10-01"), 145.0, 53.7, 2.70),
+            (pd.Timestamp("2023-11-01"), 155.0, 57.4, 2.70),
+        ],
+        provenance_query_hash="yoy-test-123",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+
+    # stats_hint must contain causal context with YoY data
+    assert "CAUSAL CONTEXT" in enriched.stats_hint
+
+    import json
+    # Extract the JSON block from stats_hint
+    hint = enriched.stats_hint
+    json_start = hint.index("{", hint.index("CAUSAL CONTEXT"))
+    # Find matching closing brace
+    brace_depth = 0
+    json_end = json_start
+    for i, ch in enumerate(hint[json_start:], start=json_start):
+        if ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                json_end = i + 1
+                break
+    why_ctx = json.loads(hint[json_start:json_end])
+
+    # Signals must include YoY values
+    signals = why_ctx["signals"]
+    assert signals["p_bal_gel"]["yoy"] == pytest.approx(130.0)
+    assert signals["p_bal_usd"]["yoy"] == pytest.approx(48.1)
+    assert signals["p_bal_gel"]["cur"] == pytest.approx(155.0)
+    assert signals["p_bal_gel"]["prev"] == pytest.approx(145.0)
+
+    # YoY share snapshot must be present
+    assert "share_yoy_snapshot" in signals
+    assert signals["share_yoy_snapshot"]["share_import"] == pytest.approx(0.15, abs=0.01)
+
+    # Notes must contain a Year-over-year comparison
+    notes = why_ctx["notes"]
+    yoy_notes = [n for n in notes if "Year-over-year" in n]
+    assert yoy_notes, "Expected at least one Year-over-year note"
+    assert "higher" in yoy_notes[0]  # 130 -> 155 = higher
+    assert "130.0" in yoy_notes[0]
+    assert "155.0" in yoy_notes[0]
+
+    # analysis_evidence should contain YoY-derived metrics
+    assert enriched.analysis_evidence
+    yoy_evidence = [e for e in enriched.analysis_evidence if "yoy" in e.get("derived_metric_name", "")]
+    assert yoy_evidence, "Expected YoY-derived metrics in analysis_evidence"
+
+    # Provenance must be populated (includes raw data + derived evidence rows)
+    assert enriched.provenance_cols, "Provenance columns must be populated"
+    assert enriched.provenance_rows, "Provenance rows must be populated"
+
+
+def test_why_yoy_graceful_when_no_yoy_data(monkeypatch):
+    """When data has only 2 consecutive months (no YoY possible), signals still work without YoY."""
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_a, **_k: pd.DataFrame({"date": []}))
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_a, **_k: pd.DataFrame())
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2023?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2023-10-01"), pd.Timestamp("2023-11-01")],
+                "p_bal_gel": [145.0, 155.0],
+                "xrate": [2.70, 2.70],
+            }
+        ),
+        cols=["date", "p_bal_gel", "xrate"],
+        rows=[
+            (pd.Timestamp("2023-10-01"), 145.0, 2.70),
+            (pd.Timestamp("2023-11-01"), 155.0, 2.70),
+        ],
+        provenance_cols=["date", "p_bal_gel", "xrate"],
+        provenance_rows=[
+            (pd.Timestamp("2023-10-01"), 145.0, 2.70),
+            (pd.Timestamp("2023-11-01"), 155.0, 2.70),
+        ],
+        provenance_query_hash="no-yoy-123",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+
+    import json
+    assert "CAUSAL CONTEXT" in enriched.stats_hint
+
+    hint = enriched.stats_hint
+    json_start = hint.index("{", hint.index("CAUSAL CONTEXT"))
+    brace_depth = 0
+    json_end = json_start
+    for i, ch in enumerate(hint[json_start:], start=json_start):
+        if ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                json_end = i + 1
+                break
+    why_ctx = json.loads(hint[json_start:json_end])
+
+    # YoY values should be None (no data available)
+    assert why_ctx["signals"]["p_bal_gel"]["yoy"] is None
+    assert why_ctx["signals"]["xrate"]["yoy"] is None
+
+    # No Year-over-year note should appear
+    yoy_notes = [n for n in why_ctx["notes"] if "Year-over-year" in n]
+    assert not yoy_notes, "No YoY note expected when YoY data is unavailable"
+
+    # MoM still works
+    assert why_ctx["signals"]["p_bal_gel"]["cur"] == pytest.approx(155.0)
+    assert why_ctx["signals"]["p_bal_gel"]["prev"] == pytest.approx(145.0)
+
+
+def test_why_yoy_zero_delta_says_unchanged(monkeypatch):
+    """When YoY price delta is exactly zero, note should say 'unchanged' not 'lower'."""
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_a, **_k: pd.DataFrame({"date": []}))
+    monkeypatch.setattr(analyzer, "fetch_balancing_share_panel", lambda *_a, **_k: pd.DataFrame())
+
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2023?",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [
+                    pd.Timestamp("2022-11-01"),
+                    pd.Timestamp("2023-10-01"),
+                    pd.Timestamp("2023-11-01"),
+                ],
+                "p_bal_gel": [155.0, 145.0, 155.0],  # YoY delta = 0
+                "xrate": [2.70, 2.70, 2.70],
+            }
+        ),
+        cols=["date", "p_bal_gel", "xrate"],
+        rows=[
+            (pd.Timestamp("2022-11-01"), 155.0, 2.70),
+            (pd.Timestamp("2023-10-01"), 145.0, 2.70),
+            (pd.Timestamp("2023-11-01"), 155.0, 2.70),
+        ],
+        provenance_cols=["date", "p_bal_gel", "xrate"],
+        provenance_rows=[
+            (pd.Timestamp("2022-11-01"), 155.0, 2.70),
+            (pd.Timestamp("2023-10-01"), 145.0, 2.70),
+            (pd.Timestamp("2023-11-01"), 155.0, 2.70),
+        ],
+        provenance_query_hash="zero-yoy-123",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+
+    import json
+    hint = enriched.stats_hint
+    json_start = hint.index("{", hint.index("CAUSAL CONTEXT"))
+    brace_depth = 0
+    json_end = json_start
+    for i, ch in enumerate(hint[json_start:], start=json_start):
+        if ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                json_end = i + 1
+                break
+    why_ctx = json.loads(hint[json_start:json_end])
+
+    yoy_notes = [n for n in why_ctx["notes"] if "Year-over-year" in n]
+    assert yoy_notes, "Expected YoY note even when delta is zero"
+    assert "unchanged" in yoy_notes[0], f"Expected 'unchanged' but got: {yoy_notes[0]}"
+    assert "lower" not in yoy_notes[0], f"Should NOT say 'lower' when delta=0: {yoy_notes[0]}"
+
+
+# ---------------------------------------------------------------------------
+# Reliability fix tests
+# ---------------------------------------------------------------------------
+
+
+def test_chart_metric_alias_resolves_plan_names():
+    """Chart filtering should match plan name 'balancing_price_gel' to DB column 'p_bal_gel'."""
+    from agent.chart_pipeline import _CHART_METRIC_ALIASES
+
+    # Bidirectional: plan alias → DB column
+    assert "p_bal_gel" in _CHART_METRIC_ALIASES.get("balancing_price_gel", [])
+    # DB column → plan alias
+    assert "balancing_price_gel" in _CHART_METRIC_ALIASES.get("p_bal_gel", [])
+    # xrate ↔ exchange_rate
+    assert "exchange_rate" in _CHART_METRIC_ALIASES.get("xrate", [])
+    assert "xrate" in _CHART_METRIC_ALIASES.get("exchange_rate", [])
+    # Unknown metric returns empty (no crash)
+    assert _CHART_METRIC_ALIASES.get("share_import", []) == []
+
+
+def test_chart_filter_expands_aliases_before_filtering():
+    """When plan says 'balancing_price_gel', the chart filter should keep 'p_bal_gel' column."""
+    from agent.chart_pipeline import _CHART_METRIC_ALIASES
+
+    # Simulate the expansion logic from chart_pipeline
+    chart_metrics = ["balancing_price_gel", "exchange_rate"]
+    expanded = set(chart_metrics)
+    for m in chart_metrics:
+        expanded.update(_CHART_METRIC_ALIASES.get(m, []))
+
+    # DB columns that the SQL query returned
+    data_columns = ["p_bal_gel", "xrate", "share_import"]
+
+    # Filter as chart_pipeline does
+    filtered = [col for col in data_columns if col in expanded]
+
+    # p_bal_gel and xrate should survive via alias expansion
+    assert "p_bal_gel" in filtered, "p_bal_gel should match via balancing_price_gel alias"
+    assert "xrate" in filtered, "xrate should match via exchange_rate alias"
+    # share_import has no alias in plan, should be filtered out
+    assert "share_import" not in filtered
+
+
+def test_chart_alias_covers_all_metric_families():
+    """Expanded METRIC_VALUE_ALIASES should cover tariff, dereg, gcap, cpi families."""
+    from agent.chart_pipeline import _CHART_METRIC_ALIASES
+
+    # Deregulated prices
+    assert "p_dereg_gel" in _CHART_METRIC_ALIASES.get("deregulated_price_gel", [])
+    assert "deregulated_price_gel" in _CHART_METRIC_ALIASES.get("p_dereg_gel", [])
+    # Guaranteed capacity
+    assert "p_gcap_usd" in _CHART_METRIC_ALIASES.get("guaranteed_capacity_usd", [])
+    # Tariffs
+    assert "tariff_gel" in _CHART_METRIC_ALIASES.get("regulated_tariff_gel", [])
+    assert "regulated_tariff_usd" in _CHART_METRIC_ALIASES.get("tariff_usd", [])
+    # Generation
+    assert "quantity_tech" in _CHART_METRIC_ALIASES.get("generation_quantity", [])
+    # CPI
+    assert "cpi" in _CHART_METRIC_ALIASES.get("consumer_price_index", [])
+
+
+def test_pydantic_entity_limit_accepts_15_entities():
+    """ToolParamsHint should accept 15 entities (above old limit of 10)."""
+    from contracts.question_analysis import ToolParamsHint
+
+    entities = [f"entity_{i}" for i in range(15)]
+    hint = ToolParamsHint(entities=entities)
+    assert len(hint.entities) == 15
+
+
+def test_pydantic_entity_limit_rejects_above_25():
+    """ToolParamsHint should reject more than 25 entities."""
+    from contracts.question_analysis import ToolParamsHint
+    from pydantic import ValidationError
+
+    entities = [f"entity_{i}" for i in range(26)]
+    with pytest.raises(ValidationError):
+        ToolParamsHint(entities=entities)
+
+
+def test_pydantic_types_limit_accepts_15_types():
+    """ToolParamsHint should accept 15 types (above old limit of 10)."""
+    from contracts.question_analysis import ToolParamsHint
+
+    types = [f"type_{i}" for i in range(15)]
+    hint = ToolParamsHint(types=types)
+    assert len(hint.types) == 15

@@ -75,7 +75,7 @@ PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "30
 ROUTER_ENABLE_SEMANTIC_FALLBACK = os.getenv("ROUTER_ENABLE_SEMANTIC_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
 ROUTER_SEMANTIC_MIN_SCORE = min(
     1.0,
-    max(0.1, float(os.getenv("ROUTER_SEMANTIC_MIN_SCORE", "0.62"))),
+    max(0.1, float(os.getenv("ROUTER_SEMANTIC_MIN_SCORE", "0.55"))),
 )
 SESSION_HISTORY_MAX_TURNS = max(1, int(os.getenv("SESSION_HISTORY_MAX_TURNS", "3")))
 SESSION_IDLE_TTL_SECONDS = max(60, int(os.getenv("SESSION_IDLE_TTL_SECONDS", "3600")))

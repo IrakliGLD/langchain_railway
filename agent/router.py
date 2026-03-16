@@ -8,6 +8,10 @@ from typing import Dict, List, Optional, Set, Tuple
 from agent.tools.types import ToolInvocation
 from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_MIN_SCORE
 
+# Populated by _semantic_match_tool on each call so pipeline.py can
+# include scores in the miss-detail trace event.
+_last_semantic_scores: Dict[str, float] = {}
+
 
 ALLOWED_BALANCING_ENTITIES = {
     "import",
@@ -163,6 +167,10 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date: 
         score = _semantic_score(query_lower, words, terms)
         scores.append((tool_name, score))
     ranked = sorted(scores, key=lambda item: item[1], reverse=True)
+    # Expose scores for observability (pipeline.py reads these on miss).
+    _last_semantic_scores.clear()
+    for tool_name, score in ranked:
+        _last_semantic_scores[tool_name] = round(score, 3)
     if not ranked:
         return None
     top_tool, top_score = ranked[0]

@@ -28,7 +28,7 @@ from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
 from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
-from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK
+from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from contracts.question_analysis import PreferredPath
@@ -288,6 +288,7 @@ def process_query(
             trace_detail(
                 log, ctx, "stage_0_5_router_match", "miss_detail",
                 semantic_fallback_enabled=ROUTER_ENABLE_SEMANTIC_FALLBACK,
+                semantic_scores=_last_semantic_scores.copy(),
             )
 
             # --- Stage 0.7: LLM analyzer-driven tool routing (fallback) ---

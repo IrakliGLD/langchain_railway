@@ -78,7 +78,7 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 10,
+          "maxItems": 25,
           "title": "Ambiguities",
           "type": "array"
         }
@@ -379,7 +379,7 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 10,
+          "maxItems": 25,
           "title": "Entities",
           "type": "array"
         },
@@ -543,7 +543,7 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 10,
+          "maxItems": 25,
           "title": "Entities",
           "type": "array"
         },
@@ -551,7 +551,7 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 10,
+          "maxItems": 25,
           "title": "Types",
           "type": "array"
         },

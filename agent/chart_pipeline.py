@@ -14,9 +14,21 @@ import pandas as pd
 from models import QueryContext
 from visualization.chart_selector import should_generate_chart
 from context import COLUMN_LABELS
+from agent.analyzer import METRIC_VALUE_ALIASES
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
+
+# ---------------------------------------------------------------------------
+# Chart metric alias map: any name → set of equivalent names.
+# Built from METRIC_VALUE_ALIASES so plan names like "balancing_price_gel"
+# resolve to the DB column "p_bal_gel" and vice versa.
+# ---------------------------------------------------------------------------
+_CHART_METRIC_ALIASES: dict[str, list[str]] = {}
+for _canonical, _aliases in METRIC_VALUE_ALIASES.items():
+    _all = list(set(_aliases) | {_canonical})
+    for _name in _all:
+        _CHART_METRIC_ALIASES[_name] = _all
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +200,21 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         first_group = chart_groups[0]
         chart_metrics = first_group.get("metrics", [])
         if chart_metrics:
+            # Expand chart_metrics with known aliases so that plan names
+            # like "balancing_price_gel" also match the DB column "p_bal_gel".
+            expanded = set(chart_metrics)
+            for m in chart_metrics:
+                expanded.update(_CHART_METRIC_ALIASES.get(m, []))
             original_num_cols = num_cols.copy()
-            num_cols = [col for col in num_cols if col in chart_metrics]
+            num_cols = [col for col in num_cols if col in expanded]
             if num_cols:
                 log.info(f"📊 Filtered chart metrics: {len(original_num_cols)} → {len(num_cols)} columns")
                 cols_to_keep = [time_key] + num_cols if time_key and time_key in df.columns else num_cols
                 cols_to_keep = [c for c in cols_to_keep if c in df.columns]
                 df = df[cols_to_keep]
             else:
+                log.warning("Chart plan metrics %s matched none of data columns %s; using all columns",
+                            chart_metrics, original_num_cols)
                 num_cols = original_num_cols
 
     # Override: disable chart for explanatory questions with small results

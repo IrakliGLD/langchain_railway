@@ -137,7 +137,7 @@ class ClassificationInfo(BaseModel):
     intent: str = Field(min_length=1, max_length=128)
     needs_clarification: bool
     confidence: float = Field(ge=0.0, le=1.0)
-    ambiguities: List[str] = Field(default_factory=list, max_length=10)
+    ambiguities: List[str] = Field(default_factory=list, max_length=25)
 
 
 class RoutingInfo(BaseModel):
@@ -170,8 +170,8 @@ class ToolParamsHint(BaseModel):
     granularity: Optional[str] = Field(default=None, max_length=16)
     start_date: Optional[ISODate] = None
     end_date: Optional[ISODate] = None
-    entities: List[str] = Field(default_factory=list, max_length=10)
-    types: List[str] = Field(default_factory=list, max_length=10)
+    entities: List[str] = Field(default_factory=list, max_length=25)
+    types: List[str] = Field(default_factory=list, max_length=25)
     mode: Optional[str] = Field(default=None, max_length=32)
 
     @field_validator("end_date")
@@ -220,7 +220,7 @@ class SqlHints(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metric: Optional[str] = Field(default=None, max_length=64)
-    entities: List[str] = Field(default_factory=list, max_length=10)
+    entities: List[str] = Field(default_factory=list, max_length=25)
     aggregation: Optional[SqlAggregation] = None
     dimensions: List[DimensionName] = Field(default_factory=list, max_length=8)
     period: Optional[PeriodInfo] = None

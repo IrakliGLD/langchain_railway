@@ -51,7 +51,7 @@ def simple_table_whitelist_check(sql: str) -> None:
     cleaned_tables: Set[str] = set()
 
     try:
-        parsed_expression = parse_one(sql, read='bigquery')
+        parsed_expression = parse_one(sql, read='postgres')
 
         # --- FIX: 1. Extract CTE names ---
         cte_names: Set[str] = set()
