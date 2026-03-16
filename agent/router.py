@@ -198,6 +198,21 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
         start_year, end_year = min(y1, y2), max(y1, y2)
         return f"{start_year}-01-01", f"{end_year}-12-31"
 
+    # month-year range, e.g. jan 2023 to dec 2024
+    m = re.search(
+        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\s+(?:to|and|\-\s|until)\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\b",
+        query_lower,
+    )
+    if m:
+        m1 = MONTH_MAP[m.group(1)]
+        y1 = int(m.group(2))
+        m2 = MONTH_MAP[m.group(3)]
+        y2 = int(m.group(4))
+        # normalize order
+        if (y1 > y2) or (y1 == y2 and m1 > m2):
+            y1, m1, y2, m2 = y2, m2, y1, m1
+        return f"{y1}-{m1:02d}-01", f"{y2}-{m2:02d}-01"
+
     # month + year, e.g. june 2024
     m = re.search(
         r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\b",
@@ -208,8 +223,9 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
         year = int(m.group(2))
         end = f"{year}-{month:02d}-01"
         if is_explanation:
+            # Shift back 1 year and 1 month to support MoM and YoY enrichment
             start_month = month - 1
-            start_year = year
+            start_year = year - 1
             if start_month == 0:
                 start_month = 12
                 start_year -= 1

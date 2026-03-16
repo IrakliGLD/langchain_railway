@@ -27,6 +27,13 @@ DATA_QUERIES = [
     # Already covered by original code
     "Show me demand trends",
     "What is the price in June 2024?",
+    # Analytical queries with definitional prefixes (greedy short-circuit fix)
+    "What is a trend of balancing electricity price?",
+    "What are the main drivers of the trend?",
+    "What is the evolution of demand?",
+    "Explain the dynamics of exchange rate",
+    "What is the growth of hydro generation?",
+    "Explain the decline in thermal generation",
 ]
 
 # ---------------------------------------------------------------------------

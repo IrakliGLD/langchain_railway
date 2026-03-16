@@ -1247,6 +1247,174 @@ def test_chart_alias_covers_all_metric_families():
     assert "cpi" in _CHART_METRIC_ALIASES.get("consumer_price_index", [])
 
 
+def test_analyzer_overrides_heuristic_conceptual_for_data_query(monkeypatch):
+    """When heuristic says conceptual but analyzer confidently says sql/tool, override to data path."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    data_payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "What is a trend of balancing electricity price?",
+        "canonical_query_en": "What is a trend of balancing electricity price?",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_explanation",
+            "analysis_mode": "light",
+            "intent": "price_trend_analysis",
+            "needs_clarification": False,
+            "confidence": 0.9,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "sql",
+            "needs_sql": True,
+            "needs_knowledge": False,
+            "prefer_tool": False,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": "monthly",
+            "dimensions": [],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": True,
+            "chart_confidence": 0.85,
+            "preferred_chart_family": "line",
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": True,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(data_payload)
+
+    # Simulate: heuristic marks conceptual, but analyzer says sql with conf=0.9
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+    )
+
+    # Need to mock the remaining pipeline stages to prevent actual execution
+    monkeypatch.setattr(
+        pipeline.planner, "generate_plan",
+        lambda ctx, **kw: setattr(ctx, "plan", {"intent": "price_trend"}) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.sql_executor, "validate_and_execute",
+        lambda ctx: ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.analyzer, "enrich",
+        lambda ctx: ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "Data answer with trend") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.chart_pipeline, "build_chart",
+        lambda ctx: ctx,
+    )
+
+    out = pipeline.process_query("What is a trend of balancing electricity price?")
+
+    # Key assertion: analyzer should have overridden is_conceptual to False
+    assert out.is_conceptual is False, (
+        "Analyzer with preferred_path=sql and conf=0.9 should override heuristic conceptual=True"
+    )
+    # Should have gone through data path, not conceptual
+    assert out.summary == "Data answer with trend"
+
+
+def test_planner_expands_single_point_dates_for_comparison_query():
+    """When analyzer returns identical start/end dates for a COMPARISON query,
+    the planner should fall back to regex for a wider range."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "compare enguri and gardabani tariffs from 2022 to 2024",
+        "canonical_query_en": "Compare Enguri and Gardabani tariffs from 2022 to 2024",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "comparison",
+            "analysis_mode": "analyst",
+            "intent": "tariff_comparison",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_tariffs",
+                "score": 0.95,
+                "reason": "Tariff comparison",
+                "params_hint": {
+                    "start_date": "2023-01-01",
+                    "end_date": "2023-01-01",
+                    "entities": ["enguri", "gardabani_tpp"],
+                    "currency": "gel",
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "tariff_gel",
+            "entities": ["enguri", "gardabani_tpp"],
+            "aggregation": None,
+            "dimensions": [],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": True,
+            "chart_confidence": 0.85,
+            "preferred_chart_family": "line",
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, "compare enguri and gardabani tariffs from 2022 to 2024")
+
+    assert inv is not None
+    assert inv.name == "get_tariffs"
+    # The analyzer collapsed dates to 2023-01-01, but regex should expand to 2022-2024
+    assert inv.params["start_date"] == "2022-01-01", (
+        f"Expected regex expansion to 2022-01-01, got {inv.params['start_date']}"
+    )
+    assert inv.params["end_date"] == "2024-12-31", (
+        f"Expected regex expansion to 2024-12-31, got {inv.params['end_date']}"
+    )
+
+
 def test_pydantic_entity_limit_accepts_15_entities():
     """ToolParamsHint should accept 15 entities (above old limit of 10)."""
     from contracts.question_analysis import ToolParamsHint

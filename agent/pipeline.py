@@ -178,9 +178,19 @@ def process_query(
             # If the analyzer explicitly prefers knowledge, or classifies as conceptual
             analyzer_conceptual = (qa_path == "knowledge" or qa_type == "conceptual_definition")
             
-            # Override heuristic if analyzer is high confidence or we are in active mode
-            if ENABLE_QUESTION_ANALYZER_HINTS and analyzer_conceptual:
-                ctx.is_conceptual = True
+            # Override heuristic based on analyzer output (active mode only)
+            if ENABLE_QUESTION_ANALYZER_HINTS:
+                if analyzer_conceptual:
+                    ctx.is_conceptual = True
+                elif qa_conf >= 0.8 and qa_path in ("tool", "sql"):
+                    # Analyzer confidently identifies data intent — override heuristic
+                    if ctx.is_conceptual:
+                        log.info(
+                            "Analyzer override: heuristic said conceptual, "
+                            "but analyzer says %s (conf=%.2f)",
+                            qa_path, qa_conf,
+                        )
+                    ctx.is_conceptual = False
 
             conceptual_disagree = analyzer_conceptual != bool(ctx.is_conceptual)
             mode_disagree = ctx.question_analysis.classification.analysis_mode.value != str(ctx.mode)

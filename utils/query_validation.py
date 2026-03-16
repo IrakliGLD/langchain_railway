@@ -14,6 +14,14 @@ from typing import Tuple, Set, Optional
 log = logging.getLogger("Enai")
 
 
+_ANALYTICAL_KEYWORDS = re.compile(
+    r"\b(trend|trends|driver|drivers|change|changes|evolution|dynamics|"
+    r"volatility|forecast|growth|decline|spike|drop|increase|decrease|"
+    r"comparison|compare|correlat|ტენდენც|ტრენდ|тренд|динамик)\b",
+    re.IGNORECASE,
+)
+
+
 def is_conceptual_question(query: str) -> bool:
     """
     Detect if query is conceptual/definitional (doesn't need data).
@@ -38,6 +46,10 @@ def is_conceptual_question(query: str) -> bool:
         False
     """
     query_lower = query.lower()
+
+    # Analytical keywords signal data intent — never conceptual
+    if _ANALYTICAL_KEYWORDS.search(query_lower):
+        return False
 
     # Definition indicators (strong signals)
     definition_patterns = [

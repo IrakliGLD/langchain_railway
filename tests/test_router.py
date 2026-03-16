@@ -65,9 +65,9 @@ def test_explanation_mode_expands_month_range():
     assert inv_normal.params["start_date"] == "2022-11-01"
     assert inv_normal.params["end_date"] == "2022-11-01"
     
-    # Explanation matching expands to start of previous month
+    # Explanation matching expands back 1 year + 1 month for YoY/MoM enrichment
     inv_exp = match_tool("why did balancing price change in november 2022?", is_explanation=True)
-    assert inv_exp.params["start_date"] == "2022-10-01"
+    assert inv_exp.params["start_date"] == "2021-10-01"
     assert inv_exp.params["end_date"] == "2022-11-01"
 
 

@@ -10,7 +10,7 @@ from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from contracts.question_analysis import QuestionAnalysis, PreferredPath, ToolName
+from contracts.question_analysis import QuestionAnalysis, PreferredPath, QueryType, ToolName
 from models import QueryContext
 from core.llm import (
     llm_cache,
@@ -400,6 +400,20 @@ def build_tool_invocation_from_analysis(
         regex_start, regex_end = extract_date_range(effective_query)
         start_date = start_date or regex_start
         end_date = end_date or regex_end
+
+    # Sanity check: if the query is a comparison or trend but dates collapsed
+    # to a single point, fall back to regex for a wider range.
+    _RANGE_QUERY_TYPES = {QueryType.COMPARISON, QueryType.DATA_EXPLANATION, QueryType.DATA_RETRIEVAL}
+    if qa.classification.query_type in _RANGE_QUERY_TYPES and start_date and start_date == end_date:
+        regex_start, regex_end = extract_date_range(effective_query)
+        if regex_start and regex_end and regex_start != regex_end:
+            log.info(
+                "Analyzer returned single-point dates (%s) for %s query; "
+                "expanding to regex range %s–%s",
+                start_date, qa.classification.query_type.value,
+                regex_start, regex_end,
+            )
+            start_date, end_date = regex_start, regex_end
 
     params: dict = {}
     if start_date:
