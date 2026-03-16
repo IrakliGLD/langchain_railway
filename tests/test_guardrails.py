@@ -1341,6 +1341,187 @@ def test_analyzer_overrides_heuristic_conceptual_for_data_query(monkeypatch):
     assert out.summary == "Data answer with trend"
 
 
+def _make_analyzer_payload(query_type: str, preferred_path: str, confidence: float = 1.0):
+    """Helper to build a minimal QuestionAnalysis payload for routing tests."""
+    return {
+        "version": "question_analysis_v1",
+        "raw_query": "test query",
+        "canonical_query_en": "test query",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": query_type,
+            "analysis_mode": "analyst",
+            "intent": "test_intent",
+            "needs_clarification": False,
+            "confidence": confidence,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": preferred_path,
+            "needs_sql": preferred_path != "knowledge",
+            "needs_knowledge": preferred_path == "knowledge",
+            "prefer_tool": False,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": "monthly",
+            "dimensions": [],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": "line",
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+
+def test_data_explanation_with_knowledge_path_not_conceptual(monkeypatch):
+    """Production bug: query_type=data_explanation + preferred_path=knowledge must NOT be conceptual.
+
+    This is the exact scenario from Railway logs where the analyzer correctly identifies
+    data_explanation but routes to knowledge, causing the pipeline to short-circuit.
+    """
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("data_explanation", "knowledge", confidence=1.0)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+    )
+    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "trend"}) or ctx)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "data answer") or ctx)
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("What is a trend of balancing electricity price?")
+
+    assert out.is_conceptual is False, (
+        "data_explanation + knowledge path should NOT be treated as conceptual"
+    )
+    assert out.summary == "data answer"
+
+
+def test_conceptual_definition_with_knowledge_path_stays_conceptual(monkeypatch):
+    """Regression guard: conceptual_definition + knowledge path must remain conceptual."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "conceptual answer") or ctx,
+    )
+
+    out = pipeline.process_query("What is CfD?")
+
+    assert out.is_conceptual is True, (
+        "conceptual_definition + knowledge must stay conceptual"
+    )
+    assert out.summary == "conceptual answer"
+
+
+def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
+    """Ambiguous queries with knowledge path should stay conceptual (safe fallback)."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("ambiguous", "knowledge", confidence=0.5)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "ambiguous answer") or ctx,
+    )
+
+    out = pipeline.process_query("tell me something")
+
+    assert out.is_conceptual is True, (
+        "ambiguous + knowledge must stay conceptual"
+    )
+
+
+def test_comparison_with_knowledge_path_not_conceptual(monkeypatch):
+    """comparison query_type must override knowledge preferred_path."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("comparison", "knowledge", confidence=0.9)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+    )
+    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "compare"}) or ctx)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "comparison answer") or ctx)
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("Compare Enguri and Gardabani tariffs")
+
+    assert out.is_conceptual is False, (
+        "comparison + knowledge path should NOT be treated as conceptual"
+    )
+
+
 def test_planner_expands_single_point_dates_for_comparison_query():
     """When analyzer returns identical start/end dates for a COMPARISON query,
     the planner should fall back to regex for a wider range."""

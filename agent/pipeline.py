@@ -175,20 +175,31 @@ def process_query(
             qa_path = ctx.question_analysis.routing.preferred_path.value
             qa_conf = ctx.question_analysis.classification.confidence
             
-            # If the analyzer explicitly prefers knowledge, or classifies as conceptual
-            analyzer_conceptual = (qa_path == "knowledge" or qa_type == "conceptual_definition")
-            
+            # Data-oriented query types should never be treated as conceptual,
+            # even when preferred_path is "knowledge" (LLM routing mismatch).
+            _DATA_QUERY_TYPES = {
+                "data_explanation", "data_retrieval", "comparison",
+                "forecast", "factual_lookup",
+            }
+            analyzer_conceptual = (
+                qa_type == "conceptual_definition"
+                or (qa_path == "knowledge" and qa_type not in _DATA_QUERY_TYPES)
+            )
+
             # Override heuristic based on analyzer output (active mode only)
             if ENABLE_QUESTION_ANALYZER_HINTS:
                 if analyzer_conceptual:
                     ctx.is_conceptual = True
-                elif qa_conf >= 0.8 and qa_path in ("tool", "sql"):
+                elif qa_conf >= 0.8 and (
+                    qa_path in ("tool", "sql")
+                    or qa_type in _DATA_QUERY_TYPES
+                ):
                     # Analyzer confidently identifies data intent — override heuristic
                     if ctx.is_conceptual:
                         log.info(
                             "Analyzer override: heuristic said conceptual, "
-                            "but analyzer says %s (conf=%.2f)",
-                            qa_path, qa_conf,
+                            "but analyzer says %s/%s (conf=%.2f)",
+                            qa_type, qa_path, qa_conf,
                         )
                     ctx.is_conceptual = False
 

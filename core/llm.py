@@ -1660,7 +1660,7 @@ def llm_analyze_question(
     history_str = str(conversation_history) if conversation_history else ""
     schema_hint = QuestionAnalysis.model_json_schema()
     cache_input = (
-        f"question_analysis_v1|{user_query}|{history_str}|"
+        f"question_analysis_v2|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOPIC_CATALOG)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOOL_CATALOG)}|"
@@ -1708,6 +1708,7 @@ Respond with JSON exactly matching this schema:
 Important rules:
 - `canonical_query_en` must preserve the meaning, not answer the question.
 - `preferred_path` must be one of the allowed enum values.
+- `preferred_path` routing: use `knowledge` for `conceptual_definition`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, `comparison`, `forecast`, and `factual_lookup`.
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
