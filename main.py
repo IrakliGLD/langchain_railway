@@ -54,12 +54,6 @@ from dotenv import load_dotenv
 # Schema & helpers
 from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS, DERIVED_LABELS
 import knowledge as knowledge_module
-from agent.aggregation import (
-    detect_aggregation_intent,
-    validate_aggregation_logic,
-    enhance_sql_examples_for_aggregation,
-    get_aggregation_guidance
-)
 
 # ============================================================================
 # REFACTORED MODULES (Phases 1-4)
@@ -557,8 +551,11 @@ LIMIT 3750;
 # rows_to_preview() and quick_stats() are imported from analysis.stats
 @app.on_event("startup")
 def on_startup() -> None:
-    """Non-blocking startup hook to prime schema cache when DB is reachable."""
+    """Non-blocking startup hook to prime schema cache and validate skills."""
     refresh_schema_map()
+    from skills.loader import validate_skills, warmup_cache
+    validate_skills()
+    warmup_cache()
 
 
 @app.get("/ask")

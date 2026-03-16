@@ -58,16 +58,16 @@ Mainly fixed O&M and depreciation; minimal variable costs.
 - Energo-Pro hydro plants (Rioni, Lajanuri, Shaori, Gumati, Dzevruli) have similar cost structures
 - Entity labels are provided for clearer chart legends and report outputs
 
+## Key Events
+
+- **Jan 2024:** Natural gas procurement price for regulated thermal plants increased substantially after being fixed at a low level for several years. GNERC raised thermal tariffs (Gardabani, old TPPs) accordingly. Direct upward pressure on balancing price via thermal component.
+- **May 2025:** Enguri HPP and Vardnili HPP Cascade tariffs increased — legislative amendment requires these plants to cover cost of electricity supplied to the occupied territory of Abkhazia.
+
 ## Tariff Context
 
-### Recent Regulatory Changes
-- **From May 2025:** Tariffs for Enguri HPP and Vardnili HPP Cascade increased due to a legislative amendment requiring these plants to cover the cost of electricity supplied to the occupied territory of Abkhazia
-- **From January 2024:** Regulated tariffs for all thermal power plants increased substantially because the procurement price of natural gas rose sharply after being fixed at a low level for several years
+- Tariff increases in 2024–2025 are primarily cost-driven, reflecting gas price rises, currency depreciation, and compensation mechanisms for unreimbursed energy
 - Renewable PPAs generally have higher fixed tariffs than average summer balancing prices; as renewable share grows and cheap hydro share declines, summer balancing prices converge toward average PPA prices
 - Balancing electricity is the residual of total generation minus volumes sold under bilateral contracts or on exchanges
-
-### Interpretation
-- Tariff increases in 2024–2025 are primarily cost-driven, reflecting gas price rises, currency depreciation, and compensation mechanisms for unreimbursed energy
 - Seasonal price differences must be read in context of regulatory cost adjustments and evolving generation mix
 
 ## Tariff Dependencies

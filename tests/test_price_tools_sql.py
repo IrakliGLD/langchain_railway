@@ -4,25 +4,32 @@ are passed. Tests the SQL generation path, not the DB connection.
 """
 import pytest
 import sys
+import os
 from unittest.mock import patch, MagicMock
 import pandas as pd
 
 # Mock required environment variables before importing any agent modules
-import os
-os.environ["SUPABASE_DB_URL"] = "postgresql://user:pass@host:5432/db"
-os.environ["ENAI_GATEWAY_SECRET"] = "dummy"
-os.environ["ENAI_SESSION_SIGNING_SECRET"] = "dummy"
-os.environ["ENAI_EVALUATE_SECRET"] = "dummy"
-os.environ["GOOGLE_API_KEY"] = "dummy"
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@host:5432/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "dummy")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "dummy")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "dummy")
+os.environ.setdefault("GOOGLE_API_KEY", "dummy")
 
-# Mock DB engine creation before importing anything from agent
-import sys
-from unittest.mock import patch, MagicMock
-sys.modules['psycopg'] = MagicMock()
-sys.modules['sqlalchemy'] = MagicMock()
-sys.modules['core.query_executor'] = MagicMock()
+# Mock DB-dependent modules, saving originals so we can restore them after
+# import and avoid poisoning other tests that share the same process.
+_mocked_keys = ['psycopg', 'sqlalchemy', 'core.query_executor']
+_saved: dict = {k: sys.modules.get(k) for k in _mocked_keys}
+for _k in _mocked_keys:
+    sys.modules[_k] = MagicMock()
 
-import agent.tools.price_tools
+import agent.tools.price_tools  # noqa: E402
+
+# Restore original modules so other tests are not affected.
+for _k, _v in _saved.items():
+    if _v is None:
+        sys.modules.pop(_k, None)
+    else:
+        sys.modules[_k] = _v
 
 MOCK_RESULT = (pd.DataFrame(), [], [])
 
@@ -34,11 +41,11 @@ def _call_get_prices(**kwargs):
         captured["sql"] = sql
         captured["params"] = params
         return MOCK_RESULT
-    
+
     with patch("agent.tools.price_tools.run_text_query", side_effect=fake_run):
         from agent.tools import price_tools
         price_tools.get_prices(**kwargs)
-        
+
     return captured["sql"], captured["params"]
 
 

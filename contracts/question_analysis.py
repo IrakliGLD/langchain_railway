@@ -99,6 +99,9 @@ class DimensionName(str, Enum):
     CPI = "cpi"
     SEASONALITY = "seasonality"
     MARKET_STRUCTURE = "market_structure"
+    ENTITY = "entity"
+    POWER_PLANT = "power_plant"
+    REGULATION_STATUS = "regulation_status"
 
 
 class ChartFamily(str, Enum):

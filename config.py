@@ -204,31 +204,4 @@ BALANCING_SHARE_PIVOT_SQL = dedent(
     """
 ).strip()
 
-# Balancing share metadata
-BALANCING_SHARE_METADATA = {
-    "share_import": {"label": "Import"},
-    "share_deregulated_hydro": {"label": "Deregulated Hydro"},
-    "share_regulated_hpp": {"label": "Regulated HPP"},
-    "share_regulated_new_tpp": {"label": "Regulated New TPP"},
-    "share_regulated_old_tpp": {"label": "Regulated Old TPP"},
-    "share_renewable_ppa": {"label": "Renewable PPA"},
-    "share_thermal_ppa": {"label": "Thermal PPA"},
-    "share_all_ppa": {"label": "All PPAs"},
-    "share_all_renewables": {"label": "All Renewables"},
-    "share_total_hpp": {"label": "Total HPP"},
-}
 
-# ===================================================================
-# Cache Configuration
-# ===================================================================
-
-CACHE_MAX_SIZE = 1000
-CACHE_EVICTION_PERCENT = 0.1
-
-# ===================================================================
-# SQL Security
-# ===================================================================
-
-SQL_TIMEOUT_SECONDS = 30
-DATABASE_POOL_SIZE = 10
-DATABASE_MAX_OVERFLOW = 5

@@ -572,12 +572,6 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
         ctx.summary_citations = ["deterministic_share_summary"]
         ctx.summary_confidence = 1.0
-    elif ctx.why_summary_override:
-        ctx.summary = ctx.why_summary_override
-        ctx.summary_source = "deterministic_why_summary"
-        ctx.summary_claims = list(ctx.why_summary_claims or _derive_claims_from_text(ctx.summary))
-        ctx.summary_citations = ["deterministic_why_summary"]
-        ctx.summary_confidence = 0.9
     else:
         try:
             envelope = llm_summarize_structured(

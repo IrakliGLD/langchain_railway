@@ -2,14 +2,11 @@
 Phase 3 fast router: deterministic pre-LLM tool routing.
 """
 import re
-import os
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 from agent.tools.types import ToolInvocation
-
-ROUTER_ENABLE_SEMANTIC_FALLBACK = os.getenv("ROUTER_ENABLE_SEMANTIC_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
-ROUTER_SEMANTIC_MIN_SCORE = min(1.0, max(0.1, float(os.getenv("ROUTER_SEMANTIC_MIN_SCORE", "0.62"))))
+from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_MIN_SCORE
 
 
 ALLOWED_BALANCING_ENTITIES = {

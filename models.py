@@ -69,8 +69,6 @@ class QueryContext:
     preview: str = ""
     stats_hint: str = ""
     share_summary_override: Optional[str] = None
-    why_summary_override: Optional[str] = None
-    why_summary_claims: List[str] = dc_field(default_factory=list)
     analysis_evidence: List[Dict[str, Any]] = dc_field(default_factory=list)
     correlation_results: Dict[str, Any] = dc_field(default_factory=dict)
     add_trendlines: bool = False

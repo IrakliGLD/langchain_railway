@@ -173,47 +173,6 @@ def get_forecast_caveats() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Grounding contract
-# ---------------------------------------------------------------------------
-
-def get_grounding_contract() -> str:
-    """Return the grounding contract for structured summarizer."""
-    return load_reference("answer-composer", "grounding-contract.md")
-
-
-# ---------------------------------------------------------------------------
-# Knowledge topic mapping
-# ---------------------------------------------------------------------------
-
-# Maps query focus → knowledge topic names that should be loaded alongside skill guidance.
-# This ensures the runtime co-injects the right domain facts when skills are active.
-_FOCUS_TO_KNOWLEDGE_TOPICS: dict[str, list[str]] = {
-    "balancing": ["balancing_price", "currency_influence", "seasonal_patterns"],
-    "tariff": ["balancing_price", "currency_influence"],
-    "cpi": ["currency_influence"],
-    "generation": ["balancing_price", "seasonal_patterns"],
-    "trade": ["balancing_price", "seasonal_patterns"],
-    "general": ["balancing_price"],
-}
-
-
-def get_knowledge_topics_for_focus(focus: str) -> list[str]:
-    """Return the knowledge topic names relevant to a query focus.
-
-    These topics should be loaded from the knowledge module to provide
-    domain facts alongside skill behavioral rules.
-
-    Args:
-        focus: Return value from get_query_focus()
-            (balancing, tariff, cpi, generation, trade, general)
-
-    Returns:
-        List of knowledge topic names (e.g., ["balancing_price", "currency_influence"]).
-    """
-    return list(_FOCUS_TO_KNOWLEDGE_TOPICS.get(focus, _FOCUS_TO_KNOWLEDGE_TOPICS["general"]))
-
-
-# ---------------------------------------------------------------------------
 # Startup validation
 # ---------------------------------------------------------------------------
 

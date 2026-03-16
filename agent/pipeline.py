@@ -463,7 +463,6 @@ def process_query(
         "stage_3_analyzer_enrich",
         t_stage,
         share_override=bool(ctx.share_summary_override),
-        why_override=bool(ctx.why_summary_override),
         correlation_keys=list(ctx.correlation_results.keys()),
     )
     log.info("Stage 3 complete | analysis enrichment done")

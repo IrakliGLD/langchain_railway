@@ -480,8 +480,6 @@ def test_why_price_queries_use_llm_summary(monkeypatch):
     enriched = analyzer.enrich(ctx)
 
     # Deterministic override must NOT be set
-    assert enriched.why_summary_override is None
-    assert enriched.why_summary_claims == []
 
     # Why-context must still be attached for the LLM
     assert "CAUSAL CONTEXT" in enriched.stats_hint
@@ -530,8 +528,6 @@ def test_why_share_queries_do_not_trigger_price_override(monkeypatch):
 
     enriched = analyzer.enrich(ctx)
 
-    assert enriched.why_summary_override is None
-    assert enriched.why_summary_claims == []
 
 
 def test_why_price_no_mix_shift_still_routes_to_llm(monkeypatch):
@@ -622,7 +618,6 @@ def test_why_price_no_mix_shift_still_routes_to_llm(monkeypatch):
     enriched = analyzer.enrich(ctx)
 
     # No deterministic override
-    assert enriched.why_summary_override is None
 
     out = summarizer.summarize_data(enriched)
 

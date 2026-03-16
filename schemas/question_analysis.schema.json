@@ -163,7 +163,10 @@
         "generation",
         "cpi",
         "seasonality",
-        "market_structure"
+        "market_structure",
+        "entity",
+        "power_plant",
+        "regulation_status"
       ],
       "title": "DimensionName",
       "type": "string"

@@ -30,6 +30,11 @@ Contracts for Difference introduced for new renewable power plant projects devel
 - Describe CfD projects as a distinct category: centrally dispatched, renewable, fully price-insulated, subject to curtailment risk
 - All CfD-related data originates from official GSE auction documentation and Georgian electricity market transitional rules
 
+## Key Events
+
+- **2023:** First CfD capacity auction conducted — awarded ~170 MW to hydro, solar, and wind projects.
+- **2024–2025:** First CfD projects entering operation, appearing as `CfD_scheme` in balancing composition.
+
 ## Renewable Integration
 - Renewable PPAs are fixed-price, USD-indexed, reducing residual balancing liquidity
 - Rising renewable share reduces hydro flexibility and increases balancing volatility

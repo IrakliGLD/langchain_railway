@@ -92,7 +92,6 @@ TOPIC_MAP: Dict[str, List[str]] = {
 
     # CfD / PPA
     "cfd": ["cfd_ppa"],
-    "cfd": ["cfd_ppa"],
     "contract for difference": ["cfd_ppa"],
     "strike price": ["cfd_ppa"],
     "ppa": ["cfd_ppa"],

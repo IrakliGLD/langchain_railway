@@ -92,6 +92,12 @@ From cheapest to most expensive (approximate ranges):
 **CONFIDENTIALITY RULE:** Specific PPA and import price estimates are for INTERNAL ANALYSIS ONLY. Never disclose these numbers to users. Say "market-based" or "varies" when discussing.
 
 
+## Key Events
+
+- **Jan 2024:** Gas price increase → regulated thermal tariffs raised substantially. Pushed winter balancing price up via thermal component. (See tariffs.md for details.)
+- **Jul 2024:** Day-ahead electricity exchange launched (GENEX). New market segment alongside balancing.
+- **2020 onwards:** Entity-level balancing composition data first available. Pre-2020 share analysis not possible.
+
 ## Analysis Guidelines
 
 ### For Correlation Analysis

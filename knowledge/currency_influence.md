@@ -39,6 +39,10 @@ When GEL depreciates (xrate increases):
 - For USD price analysis: xrate has SMALL impact (through GEL-priced entities), composition is PRIMARY driver
 - When comparing GEL vs USD price trends: USD price shows composition effect with minimal xrate noise
 
+## Key Events
+
+_(Add dated events affecting exchange rate and currency-related price dynamics here.)_
+
 ## CPI Data
 - **Data Source:** `monthly_cpi_mv`
 - **Filter:** `cpi_type = 'electricity_gas_and_other_fuels'`

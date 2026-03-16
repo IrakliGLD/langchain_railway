@@ -59,17 +59,14 @@ def test_new_transfer_modules_present():
 def test_runtime_imports_use_new_paths():
     from agent import planner, sql_executor
     from core import llm
-    import main
 
     planner_imports = planner.detect_aggregation_intent.__module__
     sql_imports = sql_executor.validate_aggregation_logic.__module__
     llm_imports = llm.get_relevant_examples.__module__
-    main_imports = main.detect_aggregation_intent.__module__
 
     assert planner_imports == "agent.aggregation"
     assert sql_imports == "agent.aggregation"
     assert llm_imports == "knowledge.sql_example_selector"
-    assert main_imports == "agent.aggregation"
 
 
 def test_prompt_assets_use_canonical_balancing_segment_rule():

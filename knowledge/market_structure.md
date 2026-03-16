@@ -68,6 +68,12 @@ Despite being formally called a "balancing market", Georgia's current system fun
 - Maintains the CPI series including "electricity, gas, and other fuels" category
 - **Data source for:** `monthly_cpi_mv` and `energy_balance_long_mv`
 
+## Key Events
+
+- **2006:** Balancing market established.
+- **Jul 2024:** Day-ahead electricity exchange launched (GENEX). Exchange segment added to `trade_derived_entities`.
+- **Jul 2027 (planned):** EU-style balancing market with BRPs and hourly imbalance responsibility.
+
 ## Import Dependence
 - Georgia imports in winter, exports in summer; import exposure sets upper bound on domestic prices
 - Imports are USD-denominated and follow Turkish/Azeri prices, transmitting regional volatility
