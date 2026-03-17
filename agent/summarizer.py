@@ -17,6 +17,7 @@ from core.llm import (
     llm_summarize,
     llm_summarize_structured,
     SummaryEnvelope,
+    classify_query_type,
     get_relevant_domain_knowledge,
 )
 from context import scrub_schema_mentions
@@ -597,6 +598,13 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_citations = ["deterministic_share_summary"]
         ctx.summary_confidence = 1.0
     else:
+        # Load domain knowledge for complex queries so the LLM can explain
+        # causal mechanisms, not just describe data patterns.
+        query_type = classify_query_type(ctx.query)
+        domain_knowledge = ""
+        if query_type not in ("single_value", "list"):
+            domain_knowledge = get_relevant_domain_knowledge(ctx.query, use_cache=False)
+
         try:
             envelope = llm_summarize_structured(
                 ctx.query,
@@ -604,6 +612,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 ctx.stats_hint,
                 ctx.lang_instruction,
                 conversation_history=ctx.conversation_history,
+                domain_knowledge=domain_knowledge,
             )
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True
@@ -616,6 +625,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                     ctx.lang_instruction,
                     conversation_history=ctx.conversation_history,
                     strict_grounding=True,
+                    domain_knowledge=domain_knowledge,
                 )
                 if not _is_summary_grounded(envelope, ctx):
                     metrics.log_summary_grounding_failure()
@@ -660,6 +670,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 ctx.stats_hint,
                 ctx.lang_instruction,
                 conversation_history=ctx.conversation_history,
+                domain_knowledge=domain_knowledge,
             )
             ctx.summary_source = "legacy_text_fallback"
             ctx.summary_claims = []

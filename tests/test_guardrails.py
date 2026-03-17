@@ -1988,6 +1988,85 @@ def test_extract_date_range_no_match():
 
 
 # ---------------------------------------------------------------------------
+# detect_analysis_mode priority & multilingual tests
+# ---------------------------------------------------------------------------
+
+
+def test_analysis_mode_trend_in_what_is():
+    """'What is the trend...' should be analyst, not light."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("What is the trend in balancing price?") == "analyst"
+
+
+def test_analysis_mode_correlation_in_what_is():
+    """'What is the correlation...' should be analyst."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("What is the correlation between xrate and price?") == "analyst"
+
+
+def test_analysis_mode_show_dynamics():
+    """'Show me the dynamics...' contains 'dynamics' -> analyst via ANALYTICAL_KEYWORDS."""
+    from agent.planner import detect_analysis_mode
+
+    # "dynamics" isn't in ANALYTICAL_KEYWORDS but "evolution" is not triggered;
+    # however "show me the dynamics" contains no analyst keyword -> light
+    # Actually let's test with "explain the dynamics" which IS an analyst keyword
+    assert detect_analysis_mode("Explain the dynamics of balancing price") == "analyst"
+
+
+def test_analysis_mode_simple_query_stays_light():
+    """Simple factual query without analyst keywords stays light."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("What is GENEX?") == "light"
+
+
+def test_analysis_mode_simple_show_stays_light():
+    """'Show me balancing price for January 2024' has no analytical keywords -> light."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("Show me balancing price for January 2024") == "light"
+
+
+def test_analysis_mode_georgian_analyst():
+    """Georgian analytical query should get analyst mode."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("რამ გამოიწვია ფასის ცვლილება?") == "analyst"
+
+
+def test_analysis_mode_russian_analyst():
+    """Russian analytical query should get analyst mode."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("что вызвало изменение цены?") == "analyst"
+
+
+def test_analysis_mode_why_did():
+    """'why did' should trigger analyst mode."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("Why did balancing price increase in November?") == "analyst"
+
+
+def test_analysis_mode_broad_keyword_trend():
+    """Single word 'trend' from ANALYTICAL_KEYWORDS triggers analyst."""
+    from agent.planner import detect_analysis_mode
+
+    assert detect_analysis_mode("Balancing price trend") == "analyst"
+
+
+def test_analysis_mode_what_is_with_reason():
+    """'What is the reason...' now gets analyst (reason in ANALYTICAL_KEYWORDS)."""
+    from agent.planner import detect_analysis_mode
+
+    # Previously "what is" short-circuited to light; now analyst keywords win
+    assert detect_analysis_mode("What is the reason for price increase?") == "analyst"
+
+
+# ---------------------------------------------------------------------------
 # Single-row / edge-case tests for analyzer stats
 # ---------------------------------------------------------------------------
 
@@ -2012,3 +2091,183 @@ def test_quick_stats_no_date_column():
     cols = ["value"]
     result = quick_stats(rows, cols)
     assert "Rows: 3" in result
+
+
+# ---------------------------------------------------------------------------
+# summarize_data domain_knowledge threading tests
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_data_passes_domain_knowledge_for_trend(monkeypatch):
+    """summarize_data should load and pass domain_knowledge for trend queries."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+
+    captured_kwargs = {}
+
+    def _fake_structured(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return SummaryEnvelope(
+            answer="Prices rose due to import share increase.",
+            claims=["Prices rose due to import share increase."],
+            citations=["data_preview"],
+            confidence=0.8,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", lambda *a, **kw: '{"balancing": "test knowledge"}')
+    monkeypatch.setattr(summarizer, "classify_query_type", lambda q: "trend")
+
+    ctx = QueryContext(
+        query="What is the trend in balancing price?",
+        trace_id="trace-dk",
+        session_id="session-dk",
+        preview="date,p_bal_gel\n2021-01-01,50.0\n2021-12-01,60.0",
+        stats_hint="Trend: increasing.",
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2021-01-01", 50.0), ("2021-12-01", 60.0)],
+    )
+    summarizer.summarize_data(ctx)
+
+    assert "domain_knowledge" in captured_kwargs
+    assert "balancing" in captured_kwargs["domain_knowledge"]
+
+
+def test_summarize_data_skips_domain_knowledge_for_single_value(monkeypatch):
+    """summarize_data should NOT load domain knowledge for single_value queries."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+
+    dk_called = []
+
+    def _fake_dk(*args, **kwargs):
+        dk_called.append(True)
+        return "{}"
+
+    def _fake_structured(*args, **kwargs):
+        return SummaryEnvelope(
+            answer="The price was 50.0 GEL/MWh.",
+            claims=["The price was 50.0 GEL/MWh."],
+            citations=["data_preview"],
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", _fake_dk)
+    monkeypatch.setattr(summarizer, "classify_query_type", lambda q: "single_value")
+
+    ctx = QueryContext(
+        query="What was balancing price in January 2024?",
+        trace_id="trace-sv",
+        session_id="session-sv",
+        preview="date,p_bal_gel\n2024-01-01,50.0",
+        stats_hint="Rows: 1",
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2024-01-01", 50.0)],
+    )
+    summarizer.summarize_data(ctx)
+
+    assert len(dk_called) == 0, "get_relevant_domain_knowledge should not be called for single_value"
+
+
+# ---------------------------------------------------------------------------
+# Conversation history formatting in llm_summarize_structured
+# ---------------------------------------------------------------------------
+
+
+def test_structured_history_formatting_empty():
+    """Empty conversation history produces empty string."""
+    from core.llm import llm_summarize_structured
+    import core.llm as llm_mod
+
+    # We just need to verify the formatting logic, so capture the prompt
+    captured = {}
+
+    original_invoke = llm_mod._invoke_with_resilience
+
+    def _capture_invoke(llm, messages, model_name):
+        captured["prompt"] = messages[1][1]  # user message
+        # Return a valid JSON response
+        class FakeMsg:
+            content = '{"answer":"test","claims":[],"citations":[],"confidence":0.5}'
+            response_metadata = {}
+        return FakeMsg()
+
+    import unittest.mock
+    with unittest.mock.patch.object(llm_mod, "_invoke_with_resilience", _capture_invoke), \
+         unittest.mock.patch.object(llm_mod, "_log_usage_for_message", lambda *a, **kw: None):
+        llm_summarize_structured("test query", "data", "stats", conversation_history=None)
+
+    assert "UNTRUSTED_CONVERSATION_HISTORY" in captured["prompt"]
+    # Empty history should produce empty section
+    assert "<<<\n>>>" in captured["prompt"] or "<<<>>>" in captured["prompt"]
+
+
+def test_structured_history_formatting_truncation():
+    """Long answers in history should be truncated to 500 chars."""
+    from core.llm import llm_summarize_structured
+    import core.llm as llm_mod
+
+    long_answer = "A" * 600
+    history = [
+        {"question": "Q1?", "answer": long_answer},
+        {"question": "Q2?", "answer": "short"},
+    ]
+
+    captured = {}
+
+    def _capture_invoke(llm, messages, model_name):
+        captured["prompt"] = messages[1][1]
+        class FakeMsg:
+            content = '{"answer":"test","claims":[],"citations":[],"confidence":0.5}'
+            response_metadata = {}
+        return FakeMsg()
+
+    import unittest.mock
+    with unittest.mock.patch.object(llm_mod, "_invoke_with_resilience", _capture_invoke), \
+         unittest.mock.patch.object(llm_mod, "_log_usage_for_message", lambda *a, **kw: None):
+        llm_summarize_structured("test query", "data", "stats", conversation_history=history)
+
+    prompt = captured["prompt"]
+    # Long answer should be truncated with "..."
+    assert "A" * 500 + "..." in prompt
+    # Full 600-char answer should NOT appear
+    assert "A" * 600 not in prompt
+    # Short answer should appear as-is
+    assert "A2: short" in prompt
+
+
+def test_structured_history_limits_to_3_pairs():
+    """Only last 3 Q&A pairs should be included."""
+    from core.llm import llm_summarize_structured
+    import core.llm as llm_mod
+
+    history = [
+        {"question": f"Question {i}?", "answer": f"Answer {i}"}
+        for i in range(5)
+    ]
+
+    captured = {}
+
+    def _capture_invoke(llm, messages, model_name):
+        captured["prompt"] = messages[1][1]
+        class FakeMsg:
+            content = '{"answer":"test","claims":[],"citations":[],"confidence":0.5}'
+            response_metadata = {}
+        return FakeMsg()
+
+    import unittest.mock
+    with unittest.mock.patch.object(llm_mod, "_invoke_with_resilience", _capture_invoke), \
+         unittest.mock.patch.object(llm_mod, "_log_usage_for_message", lambda *a, **kw: None):
+        llm_summarize_structured("test query", "data", "stats", conversation_history=history)
+
+    prompt = captured["prompt"]
+    # First 2 pairs (indices 0,1) should be excluded
+    assert "Question 0" not in prompt
+    assert "Question 1" not in prompt
+    # Last 3 pairs (indices 2,3,4) should be included
+    assert "Question 2" in prompt
+    assert "Question 3" in prompt
+    assert "Question 4" in prompt

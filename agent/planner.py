@@ -52,30 +52,34 @@ ANALYTICAL_KEYWORDS = {
 # ---------------------------------------------------------------------------
 
 def detect_analysis_mode(user_query: str) -> str:
-    """Detect if query requires analytical mode based on keywords."""
+    """Detect if query requires analytical mode based on keywords.
+
+    Priority: analyst keywords checked FIRST so that queries like
+    "What is the trend in balancing price?" get analyst mode even
+    though they also contain simple patterns like "what is".
+    """
     query_lower = user_query.lower()
 
-    # Simple fact queries -> light mode (higher priority)
-    simple_patterns = [
-        "what is", "what was", "list", "show", "give me",
-        "რა არის", "რამდენი", "покажи", "что такое"
-    ]
-    if any(p in query_lower for p in simple_patterns):
-        return "light"
-
-    # Deep analysis keywords -> analyst mode
+    # Deep analysis keywords -> analyst mode (HIGHEST PRIORITY)
     analyst_keywords = [
         "trend over time", "correlation", "driver", "impact on",
         "relationship between", "explain the dynamics", "analyze",
-        "what drives", "what causes", "why does"
+        "what drives", "what causes", "why does", "why did",
+        # Georgian
+        "რამ გამოიწვია", "ტენდენცია", "კორელაცია", "დინამიკა", "ანალიზი",
+        "რატომ", "რა იწვევს",
+        # Russian
+        "что вызвало", "тренд", "корреляция", "динамика", "анализ",
+        "почему", "что влияет",
     ]
     if any(k in query_lower for k in analyst_keywords):
         return "analyst"
 
-    # Fallback to old logic for other analytical keywords
+    # Broader analytical keywords (single-word triggers)
     if any(kw in query_lower for kw in ANALYTICAL_KEYWORDS):
         return "analyst"
 
+    # Default: simple/factual queries
     return "light"
 
 
