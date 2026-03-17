@@ -14,6 +14,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from config import MAX_ROWS
+from core.query_executor import check_dataframe_memory
 
 log = logging.getLogger("Enai")
 
@@ -107,7 +108,9 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
     # Add LIMIT using configured MAX_ROWS
     sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
     res = conn.execute(text(sql_with_limit))
-    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    check_dataframe_memory(df)
+    return df
 
 
 def compute_weighted_balancing_price(conn: Any) -> pd.DataFrame:
@@ -161,7 +164,9 @@ def compute_weighted_balancing_price(conn: Any) -> pd.DataFrame:
     ORDER BY p.date;
     """
     res = conn.execute(text(sql))
-    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    check_dataframe_memory(df)
+    return df
 
 
 def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
@@ -314,4 +319,6 @@ def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
     # Add LIMIT using configured MAX_ROWS
     sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
     res = conn.execute(text(sql_with_limit))
-    return pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    check_dataframe_memory(df)
+    return df

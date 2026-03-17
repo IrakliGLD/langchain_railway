@@ -550,9 +550,15 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         ctx.summary_provenance_coverage = 0.0
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "not_applicable_conceptual"
+    except RuntimeError:
+        # Circuit breaker open — system-level issue, don't mask with fallback
+        raise
     except Exception as exc:
         metrics.log_summary_schema_failure()
-        log.warning("Structured conceptual summarization failed: %s", exc)
+        log.warning(
+            "Structured conceptual summarization failed (%s): %s",
+            type(exc).__name__, exc,
+        )
         ctx.summary = llm_summarize(
             ctx.query,
             data_preview="",
@@ -639,9 +645,15 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 debug=True,
                 summary_envelope=envelope,
             )
+        except RuntimeError:
+            # Circuit breaker open — system-level issue, don't mask with fallback
+            raise
         except Exception as e:
             metrics.log_summary_schema_failure()
-            log.warning(f"Structured summarization failed: {e}")
+            log.warning(
+                "Structured summarization failed (%s): %s",
+                type(e).__name__, e,
+            )
             ctx.summary = llm_summarize(
                 ctx.query,
                 ctx.preview,

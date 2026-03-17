@@ -1765,3 +1765,250 @@ def test_chart_no_time_column_does_not_crash():
 
     # Should not crash; chart may or may not be generated depending on generate_chart logic
     # but no exception should be raised
+
+
+# ---------------------------------------------------------------------------
+# SQL function whitelisting
+# ---------------------------------------------------------------------------
+
+
+def test_sql_function_whitelist_blocks_pg_sleep():
+    """pg_sleep must be rejected by function whitelisting."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check("SELECT pg_sleep(30) FROM price_with_usd")
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+    assert "pg_sleep" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_current_setting():
+    """current_setting must be rejected — could exfiltrate config."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "SELECT current_setting('work_mem') FROM price_with_usd"
+        )
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_pg_read_file():
+    """pg_read_file must be rejected — filesystem access."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "SELECT pg_read_file('/etc/passwd') FROM price_with_usd"
+        )
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_allows_standard_functions():
+    """Standard SQL functions (round, avg, date_trunc, cast) must pass."""
+    from core.sql_generator import simple_table_whitelist_check
+
+    # Should NOT raise — all standard SQL functions
+    simple_table_whitelist_check(
+        "SELECT round(avg(p_bal_gel), 2), count(*), min(date), max(date) "
+        "FROM price_with_usd"
+    )
+
+
+def test_sql_function_whitelist_allows_window_functions():
+    """Window functions (row_number, lag, lead) must pass."""
+    from core.sql_generator import simple_table_whitelist_check
+
+    simple_table_whitelist_check(
+        "SELECT date, p_bal_gel, "
+        "row_number() OVER (ORDER BY date), "
+        "lag(p_bal_gel, 1) OVER (ORDER BY date) "
+        "FROM price_with_usd"
+    )
+
+
+def test_sql_function_whitelist_allows_make_date():
+    """make_date is a safe PG function on the allowlist."""
+    from core.sql_generator import simple_table_whitelist_check
+
+    simple_table_whitelist_check(
+        "SELECT * FROM price_with_usd WHERE date >= make_date(2024, 1, 1)"
+    )
+
+
+def test_sql_function_whitelist_blocks_version():
+    """version() is a named sqlglot class but leaks server info — must be denied."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check("SELECT version() FROM price_with_usd")
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_current_database():
+    """current_database() is a named class — must be denied."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check("SELECT current_database() FROM price_with_usd")
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_dblink():
+    """dblink must be blocked — SSRF/remote query execution."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "SELECT * FROM dblink('host=evil.com', 'SELECT 1') AS t(a int)"
+        )
+    # dblink appears as a table reference, which also gets caught by table whitelist
+    assert exc.value.status_code == 400
+
+
+def test_sql_function_whitelist_blocks_lo_import():
+    """lo_import must be blocked — filesystem read."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "SELECT lo_import('/etc/passwd') FROM price_with_usd"
+        )
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_set_config():
+    """set_config must be blocked — runtime parameter mutation."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "SELECT set_config('work_mem', '1GB', false) FROM price_with_usd"
+        )
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_function_in_cte():
+    """Dangerous function inside a CTE must still be caught."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "WITH t AS (SELECT pg_sleep(5) FROM price_with_usd) SELECT * FROM t"
+        )
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+def test_sql_function_whitelist_blocks_function_in_where():
+    """Dangerous function in WHERE clause must be caught."""
+    from core.sql_generator import simple_table_whitelist_check
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        simple_table_whitelist_check(
+            "SELECT * FROM price_with_usd WHERE pg_sleep(5) IS NOT NULL"
+        )
+    assert "Unauthorized SQL function" in str(exc.value.detail)
+
+
+# ---------------------------------------------------------------------------
+# Temporal extraction tests
+# ---------------------------------------------------------------------------
+
+
+def test_extract_date_range_last_3_years():
+    """'last 3 years' should produce a 3-year range ending at current year."""
+    from agent.router import extract_date_range
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    start, end = extract_date_range("what happened in the last 3 years")
+    now_year = datetime.now(tz=ZoneInfo("Asia/Tbilisi")).year
+    assert start == f"{now_year - 2}-01-01"
+    assert end == f"{now_year}-12-31"
+
+
+def test_extract_date_range_last_6_months():
+    """'last 6 months' should produce a 6-month lookback from current month."""
+    from agent.router import extract_date_range
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    start, end = extract_date_range("show me the last 6 months")
+    assert start is not None
+    assert end is not None
+    # Verify it's roughly 6 months back
+    now = datetime.now(tz=ZoneInfo("Asia/Tbilisi"))
+    assert end == f"{now.year}-{now.month:02d}-01"
+
+
+def test_extract_date_range_explicit_year():
+    """Explicit '2024' should produce full year range."""
+    from agent.router import extract_date_range
+
+    start, end = extract_date_range("balancing price in 2024")
+    assert start == "2024-01-01"
+    assert end == "2024-12-31"
+
+
+def test_extract_date_range_month_year_range():
+    """'jan 2023 to dec 2024' should produce correct month boundaries."""
+    from agent.router import extract_date_range
+
+    start, end = extract_date_range("price from jan 2023 to dec 2024")
+    assert start == "2023-01-01"
+    assert end == "2024-12-01"
+
+
+def test_extract_date_range_year_range():
+    """'from 2020 to 2024' should produce correct year boundaries."""
+    from agent.router import extract_date_range
+
+    start, end = extract_date_range("trend from 2020 to 2024")
+    assert start == "2020-01-01"
+    assert end == "2024-12-31"
+
+
+def test_extract_date_range_no_match():
+    """Query without temporal expression should return None, None."""
+    from agent.router import extract_date_range
+
+    start, end = extract_date_range("what is balancing electricity")
+    assert start is None
+    assert end is None
+
+
+# ---------------------------------------------------------------------------
+# Single-row / edge-case tests for analyzer stats
+# ---------------------------------------------------------------------------
+
+
+def test_quick_stats_single_row():
+    """quick_stats should handle a 1-row DataFrame without crashing."""
+    from analysis.stats import quick_stats
+
+    rows = [("2024-01-01", 55.3)]
+    cols = ["date", "price"]
+    result = quick_stats(rows, cols)
+    assert "Rows: 1" in result
+    # Should not crash and should note insufficient data for comparison
+    assert "Insufficient" in result or "Less than" in result
+
+
+def test_quick_stats_no_date_column():
+    """quick_stats with no date/year/month column should return row count only."""
+    from analysis.stats import quick_stats
+
+    rows = [(100,), (200,), (300,)]
+    cols = ["value"]
+    result = quick_stats(rows, cols)
+    assert "Rows: 3" in result

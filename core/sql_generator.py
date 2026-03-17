@@ -18,6 +18,8 @@ from sqlglot.errors import ParseError
 
 from config import (
     ALLOWED_TABLES,
+    ALLOWED_PG_FUNCTIONS,
+    DENIED_SQL_FUNC_CLASSES,
     TABLE_SYNONYMS,
     SYNONYM_PATTERNS,
     MAX_ROWS,
@@ -84,6 +86,30 @@ def simple_table_whitelist_check(sql: str) -> None:
                     status_code=400,
                     detail=f"❌ Unauthorized table or view: `{t_name}`. Allowed: {sorted(ALLOWED_TABLES)}"
                 )
+
+        # 3. Validate function calls — reject dangerous PostgreSQL functions.
+        # Standard SQL functions (SUM, ROUND, CAST, etc.) are recognized by
+        # sqlglot as named Func subclasses and are generally safe.
+        # Anonymous nodes (PG-specific functions sqlglot doesn't know)
+        # must be on the explicit allowlist.
+        for func_node in parsed_expression.find_all(exp.Func):
+            # 3a. Deny-listed named classes (info-leak functions like version())
+            func_key = type(func_node).key
+            if func_key in DENIED_SQL_FUNC_CLASSES:
+                log.warning(f"🚫 Blocked denied SQL function class: {func_key}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"❌ Unauthorized SQL function: `{func_key}`.",
+                )
+            # 3b. Anonymous nodes must be on the allowlist
+            if isinstance(func_node, exp.Anonymous):
+                func_name = func_node.name.lower()
+                if func_name not in ALLOWED_PG_FUNCTIONS:
+                    log.warning(f"🚫 Blocked unauthorized SQL function: {func_name}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"❌ Unauthorized SQL function: `{func_name}`.",
+                    )
 
     except ParseError as e:
         # If the SQL is too broken to parse (e.g., truly invalid SQL), reject it.

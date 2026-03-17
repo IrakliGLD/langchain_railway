@@ -135,6 +135,35 @@ STATIC_ALLOWED_TABLES = {
 
 ALLOWED_TABLES = set(STATIC_ALLOWED_TABLES)
 
+# Allowed PostgreSQL-specific functions (Anonymous in sqlglot).
+# Standard SQL functions (SUM, AVG, ROUND, CAST, etc.) are recognized by
+# sqlglot as named classes and allowed implicitly.  Only functions that
+# sqlglot cannot classify end up as Anonymous nodes — these must be on
+# this allowlist or they are rejected by simple_table_whitelist_check().
+ALLOWED_PG_FUNCTIONS = {
+    # PostgreSQL-specific functions that sqlglot classifies as Anonymous.
+    # Standard SQL functions (SUM, ROUND, CAST, COALESCE, window functions,
+    # etc.) are recognized by sqlglot as named Func subclasses and are
+    # allowed implicitly — they do NOT need to be listed here.
+    #
+    # NEVER add to this list: pg_sleep, pg_read_file, pg_terminate_backend,
+    # pg_cancel_backend, set_config, dblink, lo_import, lo_export, pg_ls_dir,
+    # pg_stat_file, pg_advisory_lock, pg_reload_conf, query_to_xml,
+    # inet_server_addr, inet_client_addr, current_setting.
+    "make_date", "age",
+    "clock_timestamp", "statement_timestamp",
+    "regexp_matches", "regexp_split_to_table",
+    "json_build_object", "jsonb_build_object",
+    "row_to_json", "jsonb_agg",
+}
+
+# Named sqlglot Func subclasses that leak server info or pose risk.
+# These bypass the Anonymous check, so we deny them explicitly.
+DENIED_SQL_FUNC_CLASSES = {
+    "currentdatabase", "currentversion", "currentuser",
+    "sessionuser", "currentschema",
+}
+
 # Table synonyms for auto-correction
 TABLE_SYNONYMS = {
     "prices": "price",

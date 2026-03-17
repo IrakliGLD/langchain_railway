@@ -4,6 +4,9 @@ Phase 3 fast router: deterministic pre-LLM tool routing.
 import re
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
+
+_TZ_GEORGIA = ZoneInfo("Asia/Tbilisi")
 
 from agent.tools.types import ToolInvocation
 from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_MIN_SCORE
@@ -246,9 +249,23 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
     m = re.search(r"\blast\s+(\d+)\s+years?\b", query_lower)
     if m:
         n = max(1, int(m.group(1)))
-        end_year = datetime.utcnow().year
+        end_year = datetime.now(tz=_TZ_GEORGIA).year
         start_year = end_year - n + 1
         return f"{start_year}-01-01", f"{end_year}-12-31"
+
+    # relative "last N months"
+    m = re.search(r"\blast\s+(\d+)\s+months?\b", query_lower)
+    if m:
+        n = max(1, int(m.group(1)))
+        now = datetime.now(tz=_TZ_GEORGIA)
+        end_year, end_month = now.year, now.month
+        # Walk back N months
+        start_month = end_month - n
+        start_year = end_year
+        while start_month <= 0:
+            start_month += 12
+            start_year -= 1
+        return f"{start_year}-{start_month:02d}-01", f"{end_year}-{end_month:02d}-01"
 
     return None, None
 

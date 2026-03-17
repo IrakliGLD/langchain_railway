@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError, OperationalError, DatabaseError
 import pandas as pd
 from fastapi import HTTPException
 
-from config import SUPABASE_DB_URL, MAX_RESULT_SIZE_MB
+from config import SUPABASE_DB_URL, MAX_RESULT_SIZE_MB, MAX_ROWS
 from utils.metrics import metrics
 from utils.resilience import db_circuit_breaker
 
@@ -169,10 +169,24 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
             # Phase 1D: Enforce read-only mode
             conn.execute(text("SET TRANSACTION READ ONLY"))
 
-            # Execute query
+            # Execute query with incremental fetch to limit memory pressure.
+            # LIMIT is already enforced upstream by plan_validate_repair(),
+            # but fetchmany provides a defense-in-depth safety net.
             result = conn.execute(text(sql))
-            rows = result.fetchall()
             cols = list(result.keys())
+            rows = []
+            _BATCH = 1000
+            while True:
+                batch = result.fetchmany(_BATCH)
+                if not batch:
+                    break
+                rows.extend(batch)
+                if len(rows) >= MAX_ROWS:
+                    log.warning(
+                        "Row safety cap hit (%d rows), truncating result", len(rows),
+                    )
+                    rows = rows[:MAX_ROWS]
+                    break
 
             # Convert to DataFrame for compatibility
             df = pd.DataFrame(rows, columns=cols)

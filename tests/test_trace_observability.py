@@ -141,8 +141,8 @@ def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
         summarizer,
         "llm_summarize_structured",
         lambda *_args, **_kwargs: SummaryEnvelope(
-            answer="Balancing price was 60.0 GEL/MWh and xrate was 12.0.",
-            claims=["Balancing price was 60.0 GEL/MWh and xrate was 12.0."],
+            answer="Balancing price was 60.0 GEL/MWh.",
+            claims=["Balancing price was 60.0 GEL/MWh."],
             citations=["data_preview", "statistics"],
             confidence=0.8,
         ),
@@ -153,9 +153,12 @@ def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
         trace_id="trace-sum",
         session_id="session-sum",
         preview="date balancing_price_gel\n2021-11-01 60.0",
-        stats_hint="Exchange rate was 12.0 in the comparison period.",
+        stats_hint="Trend: stable.",
+        # Provenance rows contain 45.0, but summary claims 60.0 —
+        # grounding passes (60.0 is in preview) but provenance fails
+        # because provenance_rows don't contain 60.0.
         provenance_cols=["date", "balancing_price_gel"],
-        provenance_rows=[("2021-11-01", 60.0)],
+        provenance_rows=[("2021-11-01", 45.0)],
     )
 
     with caplog.at_level(logging.INFO, logger="Enai"):
@@ -167,5 +170,4 @@ def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
 
     assert pre_gate["extra"]["summary_source"] == "structured_summary"
     assert gate["extra"]["gate_passed"] is False
-    assert "unmatched_tokens" in gate["extra"]
     assert ctx.summary_source == "citation_gate_fallback"
