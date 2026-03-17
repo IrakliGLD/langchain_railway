@@ -1767,6 +1767,90 @@ def test_chart_no_time_column_does_not_crash():
     # but no exception should be raised
 
 
+def test_chart_dimension_cap():
+    """build_chart must keep at most 2 dimensions, dropping the least relevant."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=30, freq="MS")
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": rng.uniform(5, 15, 30),
+        "xrate": rng.uniform(2.5, 3.0, 30),
+        "share_import": rng.uniform(0.1, 0.5, 30),
+    })
+    ctx = _make_chart_ctx(df, query="price trend")
+    ctx = build_chart(ctx)
+
+    # share_import should be dropped (lowest relevance for "price trend")
+    assert ctx.chart_data is not None
+    record_keys = set(ctx.chart_data[0].keys())
+    # Only date + price + xrate columns should survive (share dropped)
+    for key in record_keys:
+        assert "share" not in key.lower(), f"Share column '{key}' should have been dropped by dimension cap"
+
+
+def test_chart_price_forced_line():
+    """Categorical price data (no time axis) must still be rendered as line, not bar."""
+    from agent.chart_pipeline import build_chart
+
+    df = pd.DataFrame({
+        "sector": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+        "p_bal_gel": [5.0, 10.0, 15.0, 12.0, 8.0, 6.0, 11.0, 14.0, 9.0, 7.0],
+    })
+    ctx = _make_chart_ctx(df, query="price by sector")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_type == "line", f"Expected 'line' for price data, got '{ctx.chart_type}'"
+
+
+def test_chart_xrate_forced_line():
+    """Categorical xrate data (no time axis) must be rendered as line, not bar."""
+    from agent.chart_pipeline import build_chart
+
+    df = pd.DataFrame({
+        "sector": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+        "xrate": [2.5, 2.6, 2.7, 2.55, 2.65, 2.75, 2.58, 2.68, 2.72, 2.62],
+    })
+    ctx = _make_chart_ctx(df, query="exchange rate by sector")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_type == "line", f"Expected 'line' for xrate data, got '{ctx.chart_type}'"
+
+
+def test_chart_price_unit_mixed_currency():
+    """GEL + USD prices on one chart must have Y-axis labeled 'currency/MWh'."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=12, freq="MS")
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": range(5, 17),
+        "p_bal_usd": range(2, 14),
+    })
+    ctx = _make_chart_ctx(df, query="balancing price in GEL and USD")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_meta is not None
+    y_label = ctx.chart_meta.get("yAxisTitle", "")
+    assert y_label == "currency/MWh", f"Expected 'currency/MWh', got '{y_label}'"
+
+
+def test_chart_share_not_forced_line():
+    """Share-only categorical data should remain bar/pie, not forced to line."""
+    from agent.chart_pipeline import build_chart
+
+    df = pd.DataFrame({
+        "entity": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"],
+        "share_import": [0.1, 0.2, 0.15, 0.25, 0.3, 0.12, 0.18, 0.22, 0.28, 0.14],
+    })
+    ctx = _make_chart_ctx(df, query="share of imports by entity")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_type in ("bar", "pie"), f"Share data should be bar/pie, got '{ctx.chart_type}'"
+
+
 # ---------------------------------------------------------------------------
 # SQL function whitelisting
 # ---------------------------------------------------------------------------

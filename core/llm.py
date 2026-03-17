@@ -33,6 +33,7 @@ from config import (
     GEMINI_INPUT_COST_PER_1K_USD,
     GEMINI_OUTPUT_COST_PER_1K_USD,
     ROUTER_MODEL,
+    ROUTER_THINKING_BUDGET,
     PLANNER_MODEL,
     SUMMARIZER_MODEL,
     ENABLE_SKILL_PROMPTS_SUMMARIZER,
@@ -289,40 +290,71 @@ make_openai = get_openai
 _stage_model_cache: dict = {}
 
 
-def get_llm_for_stage(stage_model: Optional[str] = None):
+def get_llm_for_stage(
+    stage_model: Optional[str] = None,
+    *,
+    thinking_budget: Optional[int] = None,
+):
     """Return an LLM instance for a pipeline stage.
 
     If *stage_model* is set and differs from the global default, a dedicated
     Gemini instance for that model is created (and cached).  Otherwise the
     global singleton is returned — zero overhead for the common case.
 
+    When *thinking_budget* is provided the returned instance will have its
+    thinking-token budget capped (Gemini 2.5 models only; non-thinking models
+    silently ignore the parameter).  A separate cached instance is created so
+    the cap never leaks to other callers of the same model.
+
     Falls back to ``make_openai()`` when Gemini is unavailable.
     """
-    if not stage_model or stage_model == GEMINI_MODEL:
-        # No override — use the global singleton path
-        return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+    # No thinking-budget override — fast path unchanged
+    if thinking_budget is None:
+        if not stage_model or stage_model == GEMINI_MODEL:
+            return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
 
-    # Override requested — requires a valid Google API key since per-stage
-    # overrides only support Gemini model names (see config.py docs).
-    if not GOOGLE_API_KEY:
-        log.warning(
-            "Stage model override %s requested but GOOGLE_API_KEY is missing; "
-            "falling back to global default.",
-            stage_model,
-        )
-        return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+        if not GOOGLE_API_KEY:
+            log.warning(
+                "Stage model override %s requested but GOOGLE_API_KEY is missing; "
+                "falling back to global default.",
+                stage_model,
+            )
+            return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
 
-    if stage_model not in _stage_model_cache:
-        _stage_model_cache[stage_model] = ChatGoogleGenerativeAI(
-            model=stage_model,
+        if stage_model not in _stage_model_cache:
+            _stage_model_cache[stage_model] = ChatGoogleGenerativeAI(
+                model=stage_model,
+                google_api_key=GOOGLE_API_KEY,
+                temperature=0,
+                convert_system_message_to_human=True,
+                max_retries=2,
+                timeout=120,
+            )
+            log.info("Stage-specific LLM cached: model=%s", stage_model)
+        return _stage_model_cache[stage_model]
+
+    # Thinking-budget requested — create a dedicated cached instance.
+    effective_model = stage_model or GEMINI_MODEL
+    if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
+        return make_openai()
+
+    cache_key = f"{effective_model}|tb={thinking_budget}"
+    if cache_key not in _stage_model_cache:
+        _stage_model_cache[cache_key] = ChatGoogleGenerativeAI(
+            model=effective_model,
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
             convert_system_message_to_human=True,
             max_retries=2,
             timeout=120,
+            thinking_budget=thinking_budget,
         )
-        log.info("Stage-specific LLM cached: model=%s", stage_model)
-    return _stage_model_cache[stage_model]
+        log.info(
+            "Stage-specific LLM cached: model=%s thinking_budget=%s",
+            effective_model,
+            thinking_budget,
+        )
+    return _stage_model_cache[cache_key]
 
 
 # Per-stage convenience accessors
@@ -1719,7 +1751,7 @@ Important rules:
 
     llm_start = time.time()
     try:
-        llm = get_llm_for_stage(ROUTER_MODEL)
+        llm = get_llm_for_stage(ROUTER_MODEL, thinking_budget=ROUTER_THINKING_BUDGET)
         primary_model_name = ROUTER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
         message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
         raw_output = message.content.strip()

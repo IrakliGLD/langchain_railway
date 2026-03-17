@@ -274,21 +274,21 @@ def unit_for_price(cols: List[str]) -> str:
         'USD/MWh'
 
         >>> unit_for_price(['p_bal_gel', 'p_bal_usd'])
-        'per MWh'  # Mixed currencies
+        'currency/MWh'  # Mixed currencies
     """
     has_gel = any("_gel" in c.lower() for c in cols)
     has_usd = any("_usd" in c.lower() for c in cols)
 
     # Mixed currencies share the same physical unit
     if has_gel and has_usd:
-        return "per MWh"
+        return "currency/MWh"
     if has_gel:
         return "GEL/MWh"
     if has_usd:
         return "USD/MWh"
 
     # Fallback for generic price columns
-    return "per MWh"
+    return "currency/MWh"
 
 
 def unit_for_qty(cols: List[str]) -> str:

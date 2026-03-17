@@ -55,12 +55,12 @@ def unit_for_price(cols_: list[str]) -> str:
     has_gel = any("_gel" in c.lower() for c in cols_)
     has_usd = any("_usd" in c.lower() for c in cols_)
     if has_gel and has_usd:
-        return "per MWh"
+        return "currency/MWh"
     if has_gel:
         return "GEL/MWh"
     if has_usd:
         return "USD/MWh"
-    return "per MWh"
+    return "currency/MWh"
 
 
 def unit_for_qty(cols_: list[str]) -> str:
@@ -104,6 +104,13 @@ def relevance_score(col: str, query_lower: str) -> int:
         score += 2
 
     return score
+
+
+# Tiebreaker when multiple dimensions have the same relevance score.
+_DIM_PRIORITY = {
+    "price_tariff": 6, "energy_qty": 5, "xrate": 4,
+    "share": 3, "index": 2, "other": 1,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -238,18 +245,56 @@ def build_chart(ctx: QueryContext) -> QueryContext:
 
     log.info("🎨 Proceeding with chart generation.")
 
-    # --- Chart type selection ---
+    # --- Detect structural column types ---
     time_cols = [c for c in df.columns if re.search(r"(year|month|date|წელი|თვე|თარიღი)", c.lower())]
     category_cols = [c for c in df.columns if re.search(r"(type|sector|entity|source|segment|ownership|technology|region|area|category|ტიპი|სექტორი)", c.lower())]
+    has_time = len(time_cols) >= 1
+    has_categories = len(category_cols) >= 1
 
+    # --- Infer dimensions ---
     dim_map = {c: infer_dimension(c) for c in num_cols}
     dims = set(dim_map.values())
     log.info(f"📐 Detected dimensions: {dim_map} → {dims}")
 
-    chart_type = "line"
-    has_time = len(time_cols) >= 1
-    has_categories = len(category_cols) >= 1
+    # --- Limit series ---
+    MAX_SERIES = 3
+    if len(num_cols) > MAX_SERIES:
+        query_lower = ctx.query.lower()
+        scored_cols = [(col, relevance_score(col, query_lower)) for col in num_cols]
+        scored_cols.sort(key=lambda x: x[1], reverse=True)
+        num_cols = [col for col, _ in scored_cols[:MAX_SERIES]]
+        log.info(f"📊 Limited to {MAX_SERIES} series: {num_cols}")
+        dim_map = {c: infer_dimension(c) for c in num_cols}
+        dims = set(dim_map.values())
 
+    # --- Enforce max 2 dimensions per chart ---
+    if len(dims) > 2:
+        query_lower = ctx.query.lower()
+        dim_best: dict[str, int] = {}
+        for col in num_cols:
+            d = dim_map[col]
+            dim_best[d] = max(dim_best.get(d, 0), relevance_score(col, query_lower))
+        ranked = sorted(
+            dim_best,
+            key=lambda d: (dim_best[d], _DIM_PRIORITY.get(d, 0)),
+            reverse=True,
+        )
+        top_dims = set(ranked[:2])
+        dropped = set(ranked[2:])
+        num_cols = [c for c in num_cols if dim_map[c] in top_dims]
+        dim_map = {c: dim_map[c] for c in num_cols}
+        dims = set(dim_map.values())
+        log.info("📐 Dimension cap: kept %s, dropped %s", top_dims, dropped)
+
+    # --- Filter DataFrame to selected series only ---
+    # Keep time, category, and numeric series columns so chart type selection
+    # can access category columns (e.g., for unique-category count in pie logic).
+    cat_cols_in_df = [c for c in category_cols if c in df.columns]
+    cols_to_keep = ([time_key] if time_key and time_key in df.columns else []) + cat_cols_in_df + num_cols
+    df = df[[c for c in dict.fromkeys(cols_to_keep) if c in df.columns]]
+
+    # --- Chart type selection ---
+    chart_type = "line"
     chart_reason = "default_line"
     if has_time and has_categories:
         if "share" in dims:
@@ -273,6 +318,13 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         chart_type = "line"
         chart_reason = "no_time_no_category_fallback"
 
+    # --- Force line chart for price/xrate data (Rule 1) ---
+    if ("price_tariff" in dims or "xrate" in dims) and "share" not in dims:
+        if chart_type in ("bar", "stackedbar", "pie"):
+            log.info("📊 Forced chart_type to 'line': price/xrate must be line (was %s)", chart_type)
+            chart_type = "line"
+            chart_reason = "forced_line(price_xrate)"
+
     log.info(f"🧠 Chart type: {chart_type}")
 
     trace_detail(
@@ -285,21 +337,6 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         has_time=has_time,
         has_categories=has_categories,
     )
-
-    # --- Limit series ---
-    MAX_SERIES = 3
-    if len(num_cols) > MAX_SERIES:
-        query_lower = ctx.query.lower()
-        scored_cols = [(col, relevance_score(col, query_lower)) for col in num_cols]
-        scored_cols.sort(key=lambda x: x[1], reverse=True)
-        num_cols = [col for col, _ in scored_cols[:MAX_SERIES]]
-        log.info(f"📊 Limited to {MAX_SERIES} series: {num_cols}")
-        dim_map = {c: infer_dimension(c) for c in num_cols}
-        dims = set(dim_map.values())
-
-    # --- Filter DataFrame to selected series only ---
-    cols_to_keep = ([time_key] if time_key and time_key in df.columns else []) + num_cols
-    df = df[[c for c in cols_to_keep if c in df.columns]]
 
     # --- Yearly aggregation for mixed-dimension charts ---
     chart_aggregation = None

@@ -55,6 +55,13 @@ ROUTER_MODEL = os.getenv("ROUTER_MODEL", "").strip() or None
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip() or None
 SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "").strip() or None
 
+# Thinking-budget cap for the router/question-analyzer stage.
+# Limits thinking tokens on Gemini 2.5 models to prevent latency spirals.
+# Default 2048 is enough for classification; set to 0 to disable thinking.
+# Non-thinking models silently ignore this parameter.
+_raw_tb = os.getenv("ROUTER_THINKING_BUDGET", "2048").strip()
+ROUTER_THINKING_BUDGET: int | None = int(_raw_tb) if _raw_tb else None
+
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
