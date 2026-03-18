@@ -400,13 +400,13 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
-def _build_series_config(num_cols: list, chart_labels: list) -> Dict[str, Dict[str, str]]:
+def _build_series_config(num_cols: list, chart_labels: list, dims: set) -> Dict[str, Dict[str, str]]:
     """Build per-series render config based on dimension semantics.
 
     Tells the frontend how to render each series:
     - shares → stacked bars on right axis
     - prices → lines on left axis
-    - xrate  → dashed line on left axis
+    - xrate  → dashed line on right axis (if dual with price)
     - others → line on left axis
     """
     config: Dict[str, Dict[str, str]] = {}
@@ -415,7 +415,15 @@ def _build_series_config(num_cols: list, chart_labels: list) -> Dict[str, Dict[s
         if dim == "share":
             config[label] = {"type": "bar", "stack": "shares", "yAxis": "right"}
         elif dim == "xrate":
-            config[label] = {"type": "line", "yAxis": "left", "dashStyle": "dash"}
+            # Use right axis if we are in a dual-axis chart with prices
+            y_axis = "right" if "price_tariff" in dims else "left"
+            config[label] = {"type": "line", "yAxis": y_axis, "dashStyle": "dash"}
+        elif dim == "price_tariff" and "energy_qty" in dims:
+            # If Qty + Price, Price goes to right (Qty is primary)
+            config[label] = {"type": "line", "yAxis": "right"}
+        elif dim == "energy_qty" and "price_tariff" in dims:
+            # Qty is primary (left)
+            config[label] = {"type": "line", "yAxis": "left"}
         else:
             config[label] = {"type": "line", "yAxis": "left"}
     return config
@@ -426,7 +434,7 @@ def _build_chart_metadata(
 ) -> Dict[str, Any]:
     """Build chart metadata based on dimension semantics."""
 
-    series_config = _build_series_config(num_cols, chart_labels)
+    series_config = _build_series_config(num_cols, chart_labels, dims)
 
     # Dual-axis combinations
     dual_axis_combos = [

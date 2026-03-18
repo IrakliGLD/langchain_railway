@@ -1335,10 +1335,18 @@ def _build_why_context(ctx: QueryContext) -> None:
         why_context=why_ctx,
         analysis_evidence=ctx.analysis_evidence,
     )
-    if ctx.analysis_evidence:
-        ctx.stats_hint += "\n\n--- DERIVED ANALYSIS EVIDENCE ---\n" + json.dumps(ctx.analysis_evidence, default=str, indent=2)
+
+    # PRIORITY 1: Causal Context (High value, small size)
+    # Put this first so it survives prompt truncation.
     ctx.stats_hint += "\n\n--- CAUSAL CONTEXT ---\n" + json.dumps(why_ctx, default=str, indent=2)
-    log.info("Why-context attached to stats_hint.")
+
+    # PRIORITY 2: Detailed Evidence (Lower value, large size)
+    # Prune to top 12 to reduce prompt bloat and truncation risk.
+    if ctx.analysis_evidence:
+        evidence_subset = ctx.analysis_evidence[:12]
+        ctx.stats_hint += "\n\n--- DERIVED ANALYSIS EVIDENCE (TOP 12) ---\n" + json.dumps(evidence_subset, default=str, indent=2)
+
+    log.info("Why-context (prioritized) attached to stats_hint.")
 
 
 def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
