@@ -228,7 +228,7 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
         if is_explanation:
             # Shift back 1 year and 1 month to support MoM and YoY enrichment
             start_month = month - 1
-            start_year = year - 1
+            start_year = year - 5
             if start_month == 0:
                 start_month = 12
                 start_year -= 1
@@ -242,7 +242,7 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
         year = int(years[0])
         end = f"{year}-12-31"
         if is_explanation:
-            return f"{year-1}-01-01", end
+            return f"{year-5}-01-01", end
         return f"{year}-01-01", end
 
     # relative "last N years"
