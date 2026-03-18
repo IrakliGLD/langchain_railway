@@ -1851,6 +1851,61 @@ def test_chart_share_not_forced_line():
     assert ctx.chart_type in ("bar", "pie"), f"Share data should be bar/pie, got '{ctx.chart_type}'"
 
 
+def test_chart_price_xrate_stays_line_not_dualaxis():
+    """price+xrate must keep chart_type='line', not be overridden to 'dualaxis'."""
+    import numpy as np
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=12, freq="MS")
+    rng = np.random.RandomState(42)
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": rng.uniform(5, 15, 12),
+        "xrate": rng.uniform(2.5, 3.0, 12),
+    })
+    ctx = _make_chart_ctx(df, query="balancing price and exchange rate trend")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_type == "line", f"Expected 'line' for price+xrate, got '{ctx.chart_type}'"
+    # axisMode should still be dual in metadata for frontend axis config
+    assert ctx.chart_meta.get("axisMode") == "dual"
+
+
+def test_chart_dates_monthly_format():
+    """Monthly chart dates should be formatted as YYYY-MM, not ISO timestamps."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": [5, 6, 7, 8, 9, 10],
+    })
+    ctx = _make_chart_ctx(df, query="price trend")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_data is not None
+    first_date = ctx.chart_data[0]["date"]
+    assert first_date == "2023-01", f"Expected '2023-01', got '{first_date}'"
+    assert "T" not in str(first_date), "Date should not contain ISO timestamp"
+
+
+def test_chart_dates_yearly_format():
+    """Yearly chart dates should be formatted as YYYY, not YYYY-01."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.to_datetime(["2020-01-01", "2021-01-01", "2022-01-01", "2023-01-01"])
+    df = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": [5, 6, 7, 8],
+    })
+    ctx = _make_chart_ctx(df, query="price trend")
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_data is not None
+    first_date = ctx.chart_data[0]["date"]
+    assert first_date == "2020", f"Expected '2020', got '{first_date}'"
+
+
 # ---------------------------------------------------------------------------
 # SQL function whitelisting
 # ---------------------------------------------------------------------------

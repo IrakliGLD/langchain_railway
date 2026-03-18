@@ -356,13 +356,34 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     chart_labels = [label_map_all.get(c, c) for c in num_cols]
     df_labeled = df.rename(columns=label_map_all)
 
+    # --- Format date labels for chart ---
+    if time_key and time_key in df_labeled.columns:
+        try:
+            dt_col = pd.to_datetime(df_labeled[time_key])
+            all_first_of_month = dt_col.dt.day.eq(1).all()
+            all_january = all_first_of_month and dt_col.dt.month.eq(1).all()
+            if all_january and len(dt_col) > 1:
+                # Yearly data (all Jan-1) — show just the year
+                df_labeled[time_key] = dt_col.dt.strftime("%Y")
+            elif all_first_of_month:
+                # Monthly data — show YYYY-MM
+                df_labeled[time_key] = dt_col.dt.strftime("%Y-%m")
+            else:
+                # Daily or irregular — show YYYY-MM-DD
+                df_labeled[time_key] = dt_col.dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass  # Non-datetime time columns (e.g., year integers) — leave as-is
+
     # --- Axis mode & metadata ---
     chart_data = df_labeled.to_dict("records")
     chart_meta = _build_chart_metadata(
         dims, chart_type, num_cols, chart_labels, time_key
     )
     if chart_meta.get("axisMode") == "dual":
-        chart_type = "dualaxis"
+        # Keep "line" when price/xrate force-line was applied — the frontend
+        # uses axisMode from metadata for axis config independently of chart_type.
+        if chart_type != "line" or "share" in dims:
+            chart_type = "dualaxis"
 
     if chart_aggregation:
         chart_meta["aggregation"] = chart_aggregation
