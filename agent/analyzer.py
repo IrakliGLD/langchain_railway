@@ -671,7 +671,17 @@ def _detect_forecast_mode(text_: str) -> bool:
 
 
 def _detect_why_mode(text_: str) -> bool:
-    keys = ["why", "reason", "cause", "factor", "explain", "due to", "behind", "what caused", "what influenced"]
+    """Detect if the query requires causal/driver analysis."""
+    keys = [
+        # English
+        "why", "reason", "cause", "factor", "explain", "due to", "behind",
+        "what caused", "what influenced", "driver", "impact", "influence",
+        "relationship", "correlation", "depend", "determinant",
+        # Georgian
+        "რატომ", "მიზეზი", "ფაქტორი", "ახსენი", "გავლენა", "დრაივერი",
+        # Russian
+        "почему", "причина", "фактор", "объясни", "влияние", "драйвер"
+    ]
     t = text_.lower()
     return any(k in t for k in keys)
 
