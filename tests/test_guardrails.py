@@ -1907,6 +1907,132 @@ def test_chart_dates_yearly_format():
 
 
 # ---------------------------------------------------------------------------
+# 5-year historical month analysis
+# ---------------------------------------------------------------------------
+
+
+def test_find_historical_month_rows():
+    """_find_historical_month_rows returns up to 5 same-month rows from prior years."""
+    from agent.analyzer import _find_historical_month_rows
+
+    dates = pd.date_range("2019-01-01", periods=72, freq="MS")  # 6 years
+    df = pd.DataFrame({"date": dates, "p_bal_gel": range(72)})
+    df["date"] = pd.to_datetime(df["date"])
+
+    target = pd.Timestamp("2024-06-01")
+    result = _find_historical_month_rows(df, "date", target, lookback_years=5)
+
+    assert len(result) == 5, f"Expected 5 rows, got {len(result)}"
+    # Should be June 2023, 2022, 2021, 2020, 2019
+    result_months = result["date"].dt.month.unique().tolist()
+    assert result_months == [6], f"All rows should be June, got months {result_months}"
+    result_years = sorted(result["date"].dt.year.tolist())
+    assert result_years == [2019, 2020, 2021, 2022, 2023]
+
+
+def test_find_historical_month_rows_partial():
+    """Returns fewer rows when fewer years available."""
+    from agent.analyzer import _find_historical_month_rows
+
+    dates = pd.date_range("2022-01-01", periods=24, freq="MS")  # 2 years
+    df = pd.DataFrame({"date": dates, "p_bal_gel": range(24)})
+    df["date"] = pd.to_datetime(df["date"])
+
+    target = pd.Timestamp("2024-03-01")
+    result = _find_historical_month_rows(df, "date", target, lookback_years=5)
+
+    assert len(result) == 2, f"Expected 2 rows, got {len(result)}"
+
+
+def test_historical_month_context_stats():
+    """_build_historical_month_context computes correct min/max/avg/trend."""
+    import numpy as np
+    from agent.analyzer import _build_historical_month_context, _metric_aliases
+
+    dates = pd.to_datetime(["2019-06-01", "2020-06-01", "2021-06-01", "2022-06-01", "2023-06-01"])
+    hist = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": [8.0, 9.0, 10.0, 11.0, 12.0],
+        "p_bal_usd": [3.0, 3.2, 3.4, 3.6, 3.8],
+    })
+    cur = pd.DataFrame({
+        "date": [pd.Timestamp("2024-06-01")],
+        "p_bal_gel": [13.0],
+        "p_bal_usd": [4.0],
+    })
+
+    def _get_val(row, cols):
+        if row.empty:
+            return None
+        for c in cols:
+            if c in row.columns:
+                v = row[c].iloc[0]
+                if v is not None and pd.notna(v):
+                    return float(v)
+        return None
+
+    result = _build_historical_month_context(hist, cur, "date", _get_val)
+
+    assert result["years_found"] == 5
+    gel = result["price_gel"]
+    assert gel["min"] == 8.0
+    assert gel["max"] == 12.0
+    assert gel["avg"] == 10.0
+    assert gel["trend_direction"] == "rising"
+    assert gel["current_vs_history"] == "above_historical_max"
+
+    usd = result["price_usd"]
+    assert usd["min"] == 3.0
+    assert usd["max"] == 3.8
+
+
+def test_historical_month_context_cross_currency():
+    """Cross-currency comparison separates real price move from xrate effect."""
+    from agent.analyzer import _build_historical_month_context
+
+    dates = pd.to_datetime(["2020-06-01", "2021-06-01", "2022-06-01"])
+    hist = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": [9.5, 10.0, 10.5],  # avg = 10
+        "p_bal_usd": [3.8, 4.0, 4.2],    # avg = 4
+    })
+    # GEL rose 20%, USD rose 5% → ~15pp currency effect
+    cur = pd.DataFrame({
+        "date": [pd.Timestamp("2023-06-01")],
+        "p_bal_gel": [12.0],  # +20%
+        "p_bal_usd": [4.2],   # +5%
+    })
+
+    def _get_val(row, cols):
+        if row.empty:
+            return None
+        for c in cols:
+            if c in row.columns:
+                v = row[c].iloc[0]
+                if v is not None and pd.notna(v):
+                    return float(v)
+        return None
+
+    result = _build_historical_month_context(hist, cur, "date", _get_val)
+
+    cc = result.get("cross_currency")
+    assert cc is not None, "cross_currency should be present"
+    assert abs(cc["gel_vs_5yr_avg_pct"] - 20.0) < 0.1
+    assert abs(cc["usd_vs_5yr_avg_pct"] - 5.0) < 0.1
+    assert abs(cc["currency_effect_pct"] - 15.0) < 0.1
+
+
+def test_historical_month_context_empty():
+    """Empty historical rows returns empty dict."""
+    from agent.analyzer import _build_historical_month_context
+
+    result = _build_historical_month_context(
+        pd.DataFrame(), pd.DataFrame(), "date", lambda r, c: None,
+    )
+    assert result == {}
+
+
+# ---------------------------------------------------------------------------
 # SQL function whitelisting
 # ---------------------------------------------------------------------------
 

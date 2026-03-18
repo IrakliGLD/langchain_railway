@@ -78,6 +78,8 @@ DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
     # YoY — seasonal context for balancing price analysis
     {"metric_name": "yoy_absolute_change", "metric": "p_bal_gel"},
     {"metric_name": "yoy_percent_change", "metric": "p_bal_gel"},
+    {"metric_name": "yoy_absolute_change", "metric": "p_bal_usd"},
+    {"metric_name": "yoy_percent_change", "metric": "p_bal_usd"},
     {"metric_name": "yoy_absolute_change", "metric": "xrate"},
     {"metric_name": "yoy_percent_change", "metric": "xrate"},
 ]
@@ -199,6 +201,123 @@ def _find_yoy_row(df: pd.DataFrame, time_col: str, ts: Optional[pd.Timestamp]) -
     if not yoy_match.empty:
         return yoy_match.tail(1)
     return pd.DataFrame()
+
+
+def _find_historical_month_rows(
+    df: pd.DataFrame, time_col: str, ts: Optional[pd.Timestamp], lookback_years: int = 5
+) -> pd.DataFrame:
+    """Return rows for the same calendar month from up to ``lookback_years`` previous years."""
+    if ts is None or pd.isna(ts):
+        return pd.DataFrame()
+    ts = pd.to_datetime(ts)
+    rows: list[pd.DataFrame] = []
+    for offset in range(1, lookback_years + 1):
+        candidate_period = (ts - pd.DateOffset(years=offset)).to_period("M")
+        match = df[df[time_col].dt.to_period("M") == candidate_period]
+        if not match.empty:
+            rows.append(match.tail(1))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def _build_historical_month_context(
+    historical_rows: pd.DataFrame,
+    current_row: pd.DataFrame,
+    time_col: str,
+    _get_val,
+) -> dict[str, Any]:
+    """Build 5-year historical context for the same calendar month.
+
+    Returns a dict with price_gel / price_usd stats (min, max, avg, trend)
+    and a cross_currency comparison separating real price movement from
+    exchange-rate effects.
+    """
+    if historical_rows.empty:
+        return {}
+
+    result: dict[str, Any] = {
+        "years_found": len(historical_rows),
+        "periods": [str(historical_rows[time_col].iloc[i]) for i in range(len(historical_rows))],
+    }
+
+    for metric_key, label in [("p_bal_gel", "gel"), ("p_bal_usd", "usd")]:
+        aliases = _metric_aliases(metric_key)
+        values: list[float] = []
+        periods: list[str] = []
+        for i in range(len(historical_rows)):
+            row_slice = historical_rows.iloc[[i]]
+            val = None
+            for alias in aliases:
+                if alias in row_slice.columns:
+                    v = row_slice[alias].iloc[0]
+                    if v is not None and pd.notna(v):
+                        try:
+                            val = float(v)
+                        except (ValueError, TypeError):
+                            continue
+                        break
+            if val is not None:
+                values.append(val)
+                periods.append(str(row_slice[time_col].iloc[0]))
+
+        if not values:
+            continue
+
+        cur_val = _get_val(current_row, aliases)
+        stats: dict[str, Any] = {
+            "min": round(min(values), 2),
+            "max": round(max(values), 2),
+            "avg": round(sum(values) / len(values), 2),
+            "observations": len(values),
+            "values_by_year": dict(zip(periods, [round(v, 2) for v in values])),
+        }
+
+        # Trend: linear slope over historical observations (oldest → newest)
+        if len(values) >= 3:
+            x = np.arange(len(values), dtype=float)
+            slope = float(np.polyfit(x, values, deg=1)[0])
+            stats["trend_slope_per_year"] = round(slope, 2)
+            stats["trend_direction"] = "rising" if slope > 0.5 else ("falling" if slope < -0.5 else "stable")
+
+        # Current month's position in historical range
+        if cur_val is not None:
+            range_size = stats["max"] - stats["min"]
+            if range_size > 0:
+                percentile = (cur_val - stats["min"]) / range_size * 100
+                stats["current_value"] = round(cur_val, 2)
+                stats["current_percentile_in_range"] = round(percentile, 1)
+                if cur_val > stats["max"]:
+                    stats["current_vs_history"] = "above_historical_max"
+                elif cur_val < stats["min"]:
+                    stats["current_vs_history"] = "below_historical_min"
+                else:
+                    stats["current_vs_history"] = "within_range"
+
+        result[f"price_{label}"] = stats
+
+    # Cross-currency comparison: separate real price movement from xrate effect
+    gel_stats = result.get("price_gel")
+    usd_stats = result.get("price_usd")
+    if (
+        gel_stats and usd_stats
+        and "current_value" in gel_stats
+        and "current_value" in usd_stats
+    ):
+        gel_avg, usd_avg = gel_stats["avg"], usd_stats["avg"]
+        gel_cur, usd_cur = gel_stats["current_value"], usd_stats["current_value"]
+        if gel_avg > 0 and usd_avg > 0:
+            gel_change_pct = (gel_cur - gel_avg) / gel_avg * 100
+            usd_change_pct = (usd_cur - usd_avg) / usd_avg * 100
+            result["cross_currency"] = {
+                "gel_vs_5yr_avg_pct": round(gel_change_pct, 1),
+                "usd_vs_5yr_avg_pct": round(usd_change_pct, 1),
+                "currency_effect_pct": round(gel_change_pct - usd_change_pct, 1),
+                "note": (
+                    "If GEL change >> USD change, the difference is currency depreciation effect. "
+                    "If both change similarly, the price movement is real (not currency-driven)."
+                ),
+            }
+
+    return result
 
 
 def _build_requested_analysis_evidence(
@@ -939,6 +1058,9 @@ def _build_why_context(ctx: QueryContext) -> None:
     yoy_usd = _get_val(yoy_row, _metric_aliases("p_bal_usd")) if not yoy_row.empty else None
     yoy_xrate = _get_val(yoy_row, _metric_aliases("xrate")) if not yoy_row.empty else None
 
+    # 5-year historical month context
+    historical_rows = _find_historical_month_rows(df, t_series_col, target_ts, lookback_years=5)
+
     share_cols = [c for c in df.columns if c.startswith("share_")]
     cur_shares: dict[str, float] = {}
     prev_shares: dict[str, float] = {}
@@ -1049,6 +1171,13 @@ def _build_why_context(ctx: QueryContext) -> None:
     if yoy_shares:
         why_ctx["signals"]["share_yoy_snapshot"] = {k: round(v, 4) for k, v in yoy_shares.items()}
 
+    # 5-year historical month stats
+    historical_ctx = _build_historical_month_context(
+        historical_rows, cur_row, t_series_col, _get_val,
+    )
+    if historical_ctx:
+        why_ctx["signals"]["historical_month"] = historical_ctx
+
     if cur_shares:
         sorted_mix = sorted(cur_shares.items(), key=lambda kv: kv[1], reverse=True)
         mix_parts = []
@@ -1070,6 +1199,34 @@ def _build_why_context(ctx: QueryContext) -> None:
             f"Year-over-year: balancing price is {direction} than {yoy_period} "
             f"({yoy_gel:.1f} \u2192 {cur_gel:.1f} GEL/MWh, {yoy_delta:+.1f})."
         )
+
+    # 5-year historical month notes
+    if historical_ctx:
+        month_name = target_ts.strftime("%B") if target_ts else "this month"
+        n_years = historical_ctx.get("years_found", 0)
+
+        for hist_label, metric_label in [("price_gel", "GEL/MWh"), ("price_usd", "USD/MWh")]:
+            hist_stats = historical_ctx.get(hist_label)
+            if not hist_stats:
+                continue
+            note = (
+                f"Historical {month_name} ({n_years}-year window): "
+                f"{metric_label} ranged {hist_stats['min']:.1f}\u2013{hist_stats['max']:.1f}, "
+                f"avg {hist_stats['avg']:.1f}"
+            )
+            if "trend_direction" in hist_stats:
+                note += f", trend: {hist_stats['trend_direction']}"
+            if "current_vs_history" in hist_stats:
+                note += f". Current is {hist_stats['current_vs_history'].replace('_', ' ')}"
+            why_ctx["notes"].append(note + ".")
+
+        cc = historical_ctx.get("cross_currency")
+        if cc:
+            why_ctx["notes"].append(
+                f"GEL price is {cc['gel_vs_5yr_avg_pct']:+.1f}% vs 5-year {month_name} avg, "
+                f"USD price is {cc['usd_vs_5yr_avg_pct']:+.1f}% \u2014 "
+                f"currency effect accounts for ~{cc['currency_effect_pct']:+.1f}pp of the GEL change."
+            )
 
     why_ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")
     why_ctx["notes"].append("Regulated and deregulated hydro depend weakly on xrate; thermal PPAs and imports depend strongly on xrate.")
@@ -1114,6 +1271,13 @@ def _build_why_context(ctx: QueryContext) -> None:
         yoy_prov_cols = [c for c in combined_prov_df.columns if c in yoy_row.columns]
         combined_prov_df = pd.concat(
             [combined_prov_df, yoy_row[yoy_prov_cols] if yoy_prov_cols else yoy_row],
+            ignore_index=True, sort=False,
+        )
+    # Add 5-year historical month rows to provenance for grounding gate.
+    if not historical_rows.empty:
+        hist_prov_cols = [c for c in combined_prov_df.columns if c in historical_rows.columns]
+        combined_prov_df = pd.concat(
+            [combined_prov_df, historical_rows[hist_prov_cols] if hist_prov_cols else historical_rows],
             ignore_index=True, sort=False,
         )
     if not analysis_evidence_df.empty:
