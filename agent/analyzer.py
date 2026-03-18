@@ -818,7 +818,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         def format_cagr(cagr_val):
             return f"{cagr_val*100:.2f}" if not np.isnan(cagr_val) else "N/A"
 
-        note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_s)}%.")
+        note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_w)}%.")
 
         horizon = _extract_forecast_horizon(user_query)
         yrs_in_q = re.findall(r"(20\d{2})", user_query)
