@@ -686,6 +686,23 @@ def _detect_why_mode(text_: str) -> bool:
     return any(k in t for k in keys)
 
 
+def _extract_forecast_horizon(query: str) -> int:
+    """Extract forecast duration (in years) from user query."""
+    q = query.lower()
+    # Handle patterns like "10 year", "10-year", "10 years"
+    match = re.search(r"(\d+)\s*-?year", q)
+    if match:
+        val = int(match.group(1))
+        return min(max(val, 1), 20)  # Clamp between 1 and 20 years
+
+    # Handle "next decade"
+    if "decade" in q:
+        return 10
+
+    # Default to 3 years if not specified
+    return 3
+
+
 def _month_from_text(s: str) -> Optional[int]:
     months = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
               "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
@@ -752,12 +769,14 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             return df_in, "Invalid data for CAGR."
         cagr = (last[value_col] / first[value_col]) ** (1 / span) - 1
         note_parts.append(f"Yearly CAGR={cagr*100:.2f}% ({int(first['year'])}→{int(last['year'])}).")
+        horizon = _extract_forecast_horizon(user_query)
         yrs_in_q = re.findall(r"(20\d{2})", user_query)
-        target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [last["year"] + i for i in range(1, 4)]
+        target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [int(last["year"]) + i for i in range(1, horizon + 1)]
         f_rows = []
         for y in target_years:
             val = last[value_col] * ((1 + cagr) ** (y - last["year"]))
-            f_rows.append({time_col: pd.to_datetime(f"{y}-01-01"), value_col: val, "is_forecast": True})
+            # Force year to int to avoid 2026.0-01-01 errors
+            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-01-01"), value_col: val, "is_forecast": True})
         if "is_forecast" not in df.columns:
             df["is_forecast"] = False
         df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
@@ -799,18 +818,20 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         def format_cagr(cagr_val):
             return f"{cagr_val*100:.2f}" if not np.isnan(cagr_val) else "N/A"
 
-        note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_w)}%.")
+        note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_s)}%.")
 
+        horizon = _extract_forecast_horizon(user_query)
         yrs_in_q = re.findall(r"(20\d{2})", user_query)
-        target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [last["year"] + i for i in range(1, 4)]
+        target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [int(last["year"]) + i for i in range(1, horizon + 1)]
 
         f_rows = []
         for y in target_years:
             val_y = last[value_col] * ((1 + cagr_y) ** (y - last["year"]))
             val_s = last[value_col] * ((1 + cagr_s) ** (y - last["year"])) if not np.isnan(cagr_s) else val_y
             val_w = last[value_col] * ((1 + cagr_w) ** (y - last["year"])) if not np.isnan(cagr_w) else val_y
-            f_rows.append({time_col: pd.to_datetime(f"{y}-04-01"), "season": "summer", value_col: val_s, "is_forecast": True})
-            f_rows.append({time_col: pd.to_datetime(f"{y}-12-01"), "season": "winter", value_col: val_w, "is_forecast": True})
+            # Force year to int
+            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-04-01"), "season": "summer", value_col: val_s, "is_forecast": True})
+            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-12-01"), "season": "winter", value_col: val_w, "is_forecast": True})
 
         if "is_forecast" not in df.columns:
             df["is_forecast"] = False
@@ -994,7 +1015,8 @@ def enrich(ctx: QueryContext) -> QueryContext:
         else:
             from datetime import datetime
             current_year = datetime.now().year
-            ctx.trendline_extend_to = f"{current_year + 2}-12-01"
+            horizon = _extract_forecast_horizon(ctx.query)
+            ctx.trendline_extend_to = f"{current_year + horizon}-12-01"
         log.info(f"📈 Trendline requested: extending to {ctx.trendline_extend_to}")
 
         # Pre-calculate trendlines for forecast answer generation
