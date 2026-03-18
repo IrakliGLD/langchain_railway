@@ -276,21 +276,24 @@ def _build_historical_month_context(
             x = np.arange(len(values), dtype=float)
             slope = float(np.polyfit(x, values, deg=1)[0])
             stats["trend_slope_per_year"] = round(slope, 2)
-            stats["trend_direction"] = "rising" if slope > 0.5 else ("falling" if slope < -0.5 else "stable")
+            # Use relative threshold (2% of average) so the label works for
+            # both GEL (~5-15) and USD (~2-5) price scales.
+            threshold = stats["avg"] * 0.02 if stats["avg"] > 0 else 0.5
+            stats["trend_direction"] = "rising" if slope > threshold else ("falling" if slope < -threshold else "stable")
 
         # Current month's position in historical range
         if cur_val is not None:
+            stats["current_value"] = round(cur_val, 2)
             range_size = stats["max"] - stats["min"]
             if range_size > 0:
                 percentile = (cur_val - stats["min"]) / range_size * 100
-                stats["current_value"] = round(cur_val, 2)
                 stats["current_percentile_in_range"] = round(percentile, 1)
-                if cur_val > stats["max"]:
-                    stats["current_vs_history"] = "above_historical_max"
-                elif cur_val < stats["min"]:
-                    stats["current_vs_history"] = "below_historical_min"
-                else:
-                    stats["current_vs_history"] = "within_range"
+            if cur_val > stats["max"]:
+                stats["current_vs_history"] = "above_historical_max"
+            elif cur_val < stats["min"]:
+                stats["current_vs_history"] = "below_historical_min"
+            else:
+                stats["current_vs_history"] = "within_range"
 
         result[f"price_{label}"] = stats
 
@@ -1225,7 +1228,7 @@ def _build_why_context(ctx: QueryContext) -> None:
             why_ctx["notes"].append(
                 f"GEL price is {cc['gel_vs_5yr_avg_pct']:+.1f}% vs 5-year {month_name} avg, "
                 f"USD price is {cc['usd_vs_5yr_avg_pct']:+.1f}% \u2014 "
-                f"currency effect accounts for ~{cc['currency_effect_pct']:+.1f}pp of the GEL change."
+                f"~{cc['currency_effect_pct']:+.1f}pp of the GEL change is associated with currency movement."
             )
 
     why_ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")

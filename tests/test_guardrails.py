@@ -2032,6 +2032,42 @@ def test_historical_month_context_empty():
     assert result == {}
 
 
+def test_historical_month_context_equal_values():
+    """cross_currency works even when all historical values are identical (range=0)."""
+    from agent.analyzer import _build_historical_month_context
+
+    dates = pd.to_datetime(["2021-06-01", "2022-06-01", "2023-06-01"])
+    hist = pd.DataFrame({
+        "date": dates,
+        "p_bal_gel": [10.0, 10.0, 10.0],
+        "p_bal_usd": [4.0, 4.0, 4.0],
+    })
+    cur = pd.DataFrame({
+        "date": [pd.Timestamp("2024-06-01")],
+        "p_bal_gel": [12.0],
+        "p_bal_usd": [4.2],
+    })
+
+    def _get_val(row, cols):
+        if row.empty:
+            return None
+        for c in cols:
+            if c in row.columns:
+                v = row[c].iloc[0]
+                if v is not None and pd.notna(v):
+                    return float(v)
+        return None
+
+    result = _build_historical_month_context(hist, cur, "date", _get_val)
+
+    # current_value should be set even when range_size == 0
+    assert result["price_gel"]["current_value"] == 12.0
+    assert result["price_gel"]["current_vs_history"] == "above_historical_max"
+    # cross_currency should still work
+    cc = result.get("cross_currency")
+    assert cc is not None, "cross_currency should be present even with zero-range history"
+
+
 # ---------------------------------------------------------------------------
 # SQL function whitelisting
 # ---------------------------------------------------------------------------
