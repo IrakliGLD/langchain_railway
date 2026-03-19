@@ -295,6 +295,10 @@ Key features:
   - flexible generation (CCGT)
   - reservoir HPPs
 
+### Emerging Risks:
+- Electric vehicles → increase peak demand
+- Prosumers → reduce predictability
+- Decentralization → complicates balancing
 ---
 
 ### Cross-Border Projects

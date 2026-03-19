@@ -11,17 +11,33 @@ Materialized view: `tech_quantity_view`
   - `time_month`
 
 ### Technologies Included
-- hydro
-- thermal
-- wind
-- solar
-- import
-- export
-- supply-distribution
-- direct customers
-- losses
-- abkhazeti
+- hydro - generation
+- thermal - generation
+- wind - generation
+- solar - generation
+- import - import
+- export - export
+- supply-distribution -demand
+- direct customers - demand
+- losses - demand
+- abkhazeti - demand
 
+### Hydropower types matter:
+
+- Reservoir HPP (Enguri):
+  - provides stable supply
+  - can shift generation
+
+- Seasonal / run-of-river HPP:
+  - highly dependent on water inflow
+  - drives volatility
+
+### Renewable Integration Constraints:
+
+Renewable expansion depends on:
+- availability of flexible capacity (CCGT, reservoir HPP)
+- transmission capacity
+- system balancing capability
 ---
 
 ## 2. Core Aggregations
@@ -40,7 +56,7 @@ Total electricity demand is calculated as:
 ### Total Domestic Generation
 Total domestic generation is calculated as:
 
-- hydro  
+- + hydro  
 - + thermal  
 - + wind  
 - + solar  
@@ -89,6 +105,15 @@ Thermal generation uses imported natural gas and cannot be considered fully dome
 - Hydro (regulated HPP, deregulated hydro, reservoir, run-of-river)
 - Wind (renewable, no fuel imports)
 - Solar (renewable, no fuel imports)
+
+---
+#### Energy Security (Extended):
+
+Energy security is not only about local generation,
+but also about:
+- flexibility (storage, reservoir hydro)
+- system balancing capability
+- transmission reliability
 
 ---
 

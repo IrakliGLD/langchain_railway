@@ -62,7 +62,7 @@ Contracts for Difference are introduced for new renewable power plant projects u
 ### Transitional Market Model (Current)
 - Dispatch: **central dispatch by GSE**
 - Market access: **no  participation in exchange**
-- Sales: electricity sold to ESCO as balancing electricity
+- Sales: electricity sold to ESCO as balancing electricity. generation quantity = quantity sold to ESCO.
 - Risk profile:
   - **No price risk**
   - **Quantity risk (curtailment not compensated)**
@@ -94,9 +94,6 @@ Contracts for Difference are introduced for new renewable power plant projects u
 - As CfD capacity increases:
   - central dispatch complexity for GSE increases
 
-- Because CfD energy bypasses the exchange:
-  - reduces market liquidity
-  - weakens price formation transparency
 
 - CfD electricity is effectively treated as balancing electricity:
   - contributes to balancing volumes
@@ -107,10 +104,9 @@ Contracts for Difference are introduced for new renewable power plant projects u
   - quantity risk from unsold electricity decreases
   - imbalance risk becomes the dominant operational risk
 
-- Price effect is uncertain:
-  - increased renewable capacity increases supply
-  - production is seasonal (mainly summer)
-  - if strike price > market price → may increase observed seasonal price signals
+- Price effect is uncertain,but generally:
+  - in summer, higher share of CfD/PPA lead to higher market price
+  - in winter, the CfD/PPA price may appear lower than the alternatives import/old regulated thermals, and its higher share may contribute to lower balancing electricity price.
 
 ---
 
