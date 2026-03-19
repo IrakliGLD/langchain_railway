@@ -115,8 +115,9 @@ Price changes are driven by deviations from this baseline:
 - Higher share of expensive sources (`import`, `regulated_old_tpp`, `thermal_ppa`, `renewable_ppa`, `CfD_scheme`) → higher price  
 
 **Seasonal Effect:**
-- Summer → high hydro and renewable → lower price  
-- Winter → high thermal and import → higher price  
+- Summer → high hydro and renewable → lower price
+- Winter → balancing mix dominated by PPA/CfD (baseline), regulated thermal, and imports → higher price
+  - Higher-cost sources have limited ability to displace this mix because buyers prefer the cheapest available balancing supply
 
 **Balancing vs Total Generation (CRITICAL DISTINCTION):**
 - Only electricity sold on the balancing segment affects the balancing price  
@@ -160,7 +161,27 @@ Price changes are driven by deviations from this baseline:
 
 ---
 
-### 2. Exchange Rate
+### Transmission Constraints
+
+Even if cheap generation exists (e.g. Enguri HPP), it may NOT affect balancing price if:
+- transmission constraints prevent delivery to demand centers
+
+Therefore:
+- balancing composition depends on **deliverable energy**, not total generation
+
+---
+
+### Export Effect
+
+If hydro is exported:
+- it is NOT available for balancing
+- does NOT reduce balancing price
+
+Export acts as competing sink for cheap generation
+
+---
+
+### Exchange Rate
 **Importance:** CRITICAL for GEL price, SMALL impact on USD price.
 
 **Variable:** `xrate` (GEL/USD) from `price_with_usd`.
@@ -189,6 +210,7 @@ Price changes are driven by deviations from this baseline:
 **Mechanism:**
 - GEL depreciation → strong increase in GEL balancing price
 - Majority of balancing electricity is **directly or indirectly USD-linked**
+- See `currency_influence.md` for the full FX transmission logic and the detailed treatment of seasonally USD-linked deregulated hydro
 
 ---
 
@@ -305,35 +327,3 @@ Calculates monthly entity contributions.
   - tariffs
   - composition  
 
----
-
-## Balancing Market Logic
-- Price is determined by **composition of balancing electricity**, not total system generation  
-
-- High hydro generation lowers price ONLY if:
-  - regulated_hpp or deregulated_hydro are actually sold on balancing  
-
-- If cheap hydro is not present in balancing segment:
-  - it does NOT affect balancing price  
-  - price remains driven by other sources  
-
-- Summer:
-  - Lower prices depend on **share of cheap hydro in balancing**, not total hydro output  
-  - Over time, cheap hydro share in balancing has declined → weaker price reduction effect  
-
-- Winter:
-  - Balancing mix is dominated by:
-    - PPA/CfD (baseline)
-    - regulated thermal
-    - imports  
-  - More expensive sources have limited ability to enter balancing because:
-    - buyers prefer cheaper available mix  
-    - higher-cost generation is less competitive in contracting  
-
-- Price reflects **relative composition around PPA/CfD baseline**, not absolute generation availability  
-
-- Overall:
-  - balancing price is driven by:
-    - which sources are present in balancing  
-    - their relative shares  
-  - not by total generation or installed capacity

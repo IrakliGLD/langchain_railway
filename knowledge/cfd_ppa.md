@@ -226,12 +226,8 @@ Support schemes are not directly stored as tariffs but can be observed indirectl
   - fully sold as **balancing electricity** during the support period
   - not traded in the competitive exchange
 
-- Therefore:
-  - CfD/PPA generation forms a **core component of balancing supply**
-  - acts as a **reference base for balancing price formation**
-  - If lower-cost generation (e.g. deregulated or regulated hydro) are added in balancing electricity mix to CfD/PPA generation dominates → balancing price decreases
-  - If higher-cost sources (e.g. often import and old regulated thermals) are added in balancing electricity mix to CfD/PPA  → balancing price increases
-
+- Therefore, CfD/PPA forms a **core component of balancing supply** and acts as a **reference base for balancing price formation**
+  - See `balancing_price.md` → "Core Pricing Logic" for how composition shifts affect balancing price
 
 - Pricing characteristics:
   - CfD/PPA prices are typically **USD-linked**

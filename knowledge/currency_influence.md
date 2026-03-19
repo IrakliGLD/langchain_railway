@@ -156,6 +156,7 @@ USD analysis is better for identifying:
 - strongly affected by USD-linked CfD/PPA, imports, and thermal costs
 - highly sensitive to `xrate`
 - especially important in the transitional market model because contract-based electricity is sold as balancing electricity
+- See `balancing_price.md` for the canonical explanation of how balancing-market composition and supplier mix form the weighted-average balancing price
 
 ### Deregulated Price
 - affected primarily by market structure and composition
@@ -223,8 +224,4 @@ Important interpretation:
 - CfD and PPA electricity is contract-based and strongly FX-sensitive
 - In the current transitional model, CfD and PPA electricity is a core balancing-price driver
 - USD-based analysis is useful for removing part of the exchange-rate noise and isolating structural price movements
-
----
-
-## 11. Key Events
 
