@@ -26,8 +26,8 @@ Example provider choices:
 
 - Gemini
   - `VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER=gemini`
-  - `VECTOR_KNOWLEDGE_EMBEDDING_MODEL=models/text-embedding-004`
-  - `VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION=<must match actual Gemini output and SQL schema>`
+  - `VECTOR_KNOWLEDGE_EMBEDDING_MODEL=gemini-embedding-001`
+  - `VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION=1536`
 
 ## Runtime Flags
 
@@ -331,7 +331,7 @@ Gemini-specific environment example before running ingestion:
 
 ```powershell
 $env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
-$env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "models/text-embedding-004"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
 $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
 ```
 
@@ -431,7 +431,7 @@ If you want to use Gemini embeddings in Railway, set:
 
 ```text
 VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER=gemini
-VECTOR_KNOWLEDGE_EMBEDDING_MODEL=models/text-embedding-004
+VECTOR_KNOWLEDGE_EMBEDDING_MODEL=gemini-embedding-001
 VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION=1536
 GOOGLE_API_KEY=...
 ```

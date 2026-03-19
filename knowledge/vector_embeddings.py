@@ -91,30 +91,39 @@ class OpenAIEmbeddingProvider:
 
 
 class GeminiEmbeddingProvider:
-    """Gemini-backed embedding provider using Google Generative AI embeddings."""
+    """Gemini-backed embedding provider using the Google GenAI SDK."""
 
     def __init__(self, model: str | None = None) -> None:
         api_key = os.getenv("GOOGLE_API_KEY", "").strip()
         resolved_model = (
-            model or os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "models/text-embedding-004")
+            model or os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
         ).strip()
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY is required for Gemini vector embeddings")
         try:
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            from google import genai
+            from google.genai import types
         except ImportError as exc:
             raise RuntimeError(
-                "langchain_google_genai is required for Gemini vector embeddings"
+                "google-genai is required for Gemini vector embeddings"
             ) from exc
 
         self._expected_dimension = _expected_dimension()
-        self._client = GoogleGenerativeAIEmbeddings(
-            model=resolved_model,
-            google_api_key=api_key,
+        self._model = resolved_model
+        self._client = genai.Client(api_key=api_key)
+        self._config = types.EmbedContentConfig(
+            output_dimensionality=self._expected_dimension,
         )
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        embeddings = self._client.embed_documents(list(texts))
+        if not texts:
+            return []
+        result = self._client.models.embed_content(
+            model=self._model,
+            contents=list(texts),
+            config=self._config,
+        )
+        embeddings = [list(item.values) for item in (result.embeddings or [])]
         return _validate_embedding_dimensions(
             embeddings,
             expected_dimension=self._expected_dimension,
@@ -122,7 +131,15 @@ class GeminiEmbeddingProvider:
         )
 
     def embed_query(self, text: str) -> List[float]:
-        embedding = self._client.embed_query(text)
+        result = self._client.models.embed_content(
+            model=self._model,
+            contents=text,
+            config=self._config,
+        )
+        embeddings = [list(item.values) for item in (result.embeddings or [])]
+        if not embeddings:
+            raise RuntimeError("Gemini embedding response did not contain any embeddings")
+        embedding = embeddings[0]
         return _validate_embedding_dimensions(
             [embedding],
             expected_dimension=self._expected_dimension,

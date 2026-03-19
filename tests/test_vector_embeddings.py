@@ -51,51 +51,84 @@ def test_get_embedding_provider_selects_openai(monkeypatch):
 def test_get_embedding_provider_selects_gemini(monkeypatch):
     captured = {}
 
-    class FakeEmbeddings:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    class FakeClient:
+        def __init__(self, *, api_key):
+            captured["api_key"] = api_key
+            self.models = self
 
-        def embed_documents(self, texts):
-            return [[0.2] * 768 for _ in texts]
+        def embed_content(self, *, model, contents, config):
+            captured["model"] = model
+            captured["output_dimensionality"] = config.output_dimensionality
+            embeddings = [[0.2] * 768] if isinstance(contents, str) else [[0.2] * 768 for _ in contents]
+            return types.SimpleNamespace(
+                embeddings=[types.SimpleNamespace(values=value) for value in embeddings]
+            )
 
-        def embed_query(self, text):
-            return [0.2] * 768
+    class FakeEmbedContentConfig:
+        def __init__(self, *, output_dimensionality):
+            self.output_dimensionality = output_dimensionality
 
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "gemini")
-    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "models/text-embedding-004")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
     monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeClient
+    genai_module.types = types.SimpleNamespace(EmbedContentConfig=FakeEmbedContentConfig)
+    google_module.genai = genai_module
     monkeypatch.setitem(
         sys.modules,
-        "langchain_google_genai",
-        types.SimpleNamespace(GoogleGenerativeAIEmbeddings=FakeEmbeddings),
+        "google",
+        google_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "google.genai",
+        genai_module,
     )
 
     provider = vector_embeddings.get_embedding_provider()
+    provider.embed_query("hello")
 
     assert isinstance(provider, vector_embeddings.GeminiEmbeddingProvider)
-    assert captured["model"] == "models/text-embedding-004"
-    assert captured["google_api_key"] == "test-google-key"
+    assert captured["model"] == "gemini-embedding-001"
+    assert captured["api_key"] == "test-google-key"
+    assert captured["output_dimensionality"] == 768
 
 
 def test_gemini_provider_validates_embedding_dimensions(monkeypatch):
-    class FakeEmbeddings:
-        def __init__(self, **kwargs):
-            pass
+    class FakeClient:
+        def __init__(self, *, api_key):
+            self.models = self
 
-        def embed_documents(self, texts):
-            return [[0.2] * 767 for _ in texts]
+        def embed_content(self, *, model, contents, config):
+            embeddings = [[0.2] * 767] if isinstance(contents, str) else [[0.2] * 767 for _ in contents]
+            return types.SimpleNamespace(
+                embeddings=[types.SimpleNamespace(values=value) for value in embeddings]
+            )
 
-        def embed_query(self, text):
-            return [0.2] * 767
+    class FakeEmbedContentConfig:
+        def __init__(self, *, output_dimensionality):
+            self.output_dimensionality = output_dimensionality
 
-    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "models/text-embedding-004")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
     monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeClient
+    genai_module.types = types.SimpleNamespace(EmbedContentConfig=FakeEmbedContentConfig)
+    google_module.genai = genai_module
     monkeypatch.setitem(
         sys.modules,
-        "langchain_google_genai",
-        types.SimpleNamespace(GoogleGenerativeAIEmbeddings=FakeEmbeddings),
+        "google",
+        google_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "google.genai",
+        genai_module,
     )
 
     provider = vector_embeddings.GeminiEmbeddingProvider()
