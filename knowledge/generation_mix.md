@@ -1,48 +1,169 @@
 # Generation Mix and Energy Security
 
-## Generation by Technology
+## 1. Generation by Technology
 
 ### Data Source
-Table: `tech_quantity_view`
-- Columns: `type_tech`, `quantity` (thousand MWh), `time_month`
-- Technologies: hydro, thermal, wind, solar, import, export, supply-distribution, direct customers, losses, abkhazeti
+Materialized view: `tech_quantity_view`
 
-### Total Demand Calculation
-Total electricity demand = SUM of: abkhazeti + supply-distribution + direct customers + losses + export
+- Columns:
+  - `type_tech` — generation type
+  - `quantity` — thousand MWh
+  - `time_month`
 
-### Total Generation Calculation
-Total domestic generation = SUM of: hydro + thermal + wind + solar
+### Technologies Included
+- hydro
+- thermal
+- wind
+- solar
+- import
+- export
+- supply-distribution
+- direct customers
+- losses
+- abkhazeti
 
-## Energy Security Analysis
+---
 
-**CRITICAL FACT:** Thermal generation uses imported natural gas and cannot be considered fully domestic/local generation.
+## 2. Core Aggregations
 
-### Correct Classification
+### Total Demand
+Total electricity demand is calculated as:
 
-**Local Generation (NO import dependence):**
-- Hydro (all types: regulated HPP, deregulated hydro, reservoir, run-of-river)
+- abkhazeti  
+- + supply-distribution  
+- + direct customers  
+- + losses  
+- + export  
+
+---
+
+### Total Domestic Generation
+Total domestic generation is calculated as:
+
+- hydro  
+- + thermal  
+- + wind  
+- + solar  
+
+---
+
+## 3. Generation by Ownership (Reference)
+
+Generation can also be analyzed by ownership structure.
+
+### Data Source
+Materialized view: `trade_by_ownership`
+
+- Columns:
+  - `date`
+  - `ownership`
+  - `quantity`
+
+### Ownership Groups
+- state
+- energo-pro group
+- vartsikhe 2005 jsc
+- inter-rao
+- GIG
+- georgian water and power jcs
+- other (aggregated)
+
+### Usage Note
+- Ownership-based analysis is useful for:
+  - market concentration assessment
+  - dependency on specific companies/groups
+  - linking generation structure with tariff and support schemes
+
+---
+
+## 4. Energy Security Analysis
+
+**CRITICAL FACT:**  
+Thermal generation uses imported natural gas and cannot be considered fully domestic/local generation.
+
+---
+
+### 4.1 Correct Classification
+
+#### Local Generation (NO import dependence)
+- Hydro (regulated HPP, deregulated hydro, reservoir, run-of-river)
 - Wind (renewable, no fuel imports)
 - Solar (renewable, no fuel imports)
 
-**Import-Dependent Generation:**
-- Thermal (uses imported natural gas for power generation)
+---
+
+#### Import-Dependent Generation
+- Thermal (uses imported natural gas)
 - Direct electricity import
-- Note: Both depend on cross-border energy supply
 
-### Analytical Implications
-- When analyzing energy security, thermal is NOT a substitute for imports — it IS import-dependent
-- The real choice for Georgia is: import electricity OR import gas to generate electricity
-- True energy independence comes from hydro, wind, and solar expansion
-- Winter import dependence = direct electricity imports + gas imports for thermal generation
-- Summer energy surplus is real because it's based on local hydro without fuel imports
+**Note:**  
+Both depend on cross-border energy supply (fuel or electricity).
 
-### Example Statements
-- ✅ CORRECT: "Georgia's energy security depends on local renewables (hydro, wind, solar). Thermal generation, while domestic, relies on imported gas and does not reduce import dependence."
-- ✅ CORRECT: "In winter, Georgia is import-dependent: ~30% direct electricity import + thermal generation using imported gas."
-- ❌ WRONG: "Thermal generation is local production that reduces import dependence."
-- ❌ WRONG: "Georgia can achieve energy independence by increasing thermal capacity."
+---
 
-## Energy Balance
-**Data Source:** `energy_balance_long_mv` (from GEOSTAT)
-- Use yearly aggregation (not monthly)
-- Contains national energy balances and sectoral demand indicators
+## 5. Analytical Implications
+
+- Thermal generation is **not a substitute for imports** — it is import-dependent
+- The real choice for Georgia is:
+  - import electricity  
+  - OR import gas to generate electricity  
+
+- True energy independence comes from:
+  - hydro
+  - wind
+  - solar
+
+- Winter import dependence includes:
+  - direct electricity imports
+  - thermal generation using imported gas
+
+- Summer surplus is:
+  - based on hydro generation
+  - not dependent on imported fuel
+
+---
+
+## 6. Example Statements
+
+- ✅ CORRECT:  
+  "Georgia's energy security depends on local renewables (hydro, wind, solar). Thermal generation, while domestic, relies on imported gas and does not reduce import dependence."
+
+- ✅ CORRECT:  
+  "In winter, Georgia is import-dependent: direct electricity imports plus thermal generation using imported gas."
+
+- ❌ WRONG:  
+  "Thermal generation is local production that reduces import dependence."
+
+- ❌ WRONG:  
+  "Georgia can achieve energy independence by increasing thermal capacity."
+
+---
+
+## 7. Energy Balance (Reference)
+
+### Data Source
+Materialized view: `energy_balance_long_mv` (GEOSTAT)
+
+### Usage Notes
+- Use **yearly aggregation** (not monthly)
+- Contains:
+  - national energy balances
+  - sectoral demand indicators
+
+---
+
+## 8. Analytical Notes
+
+- Always distinguish between:
+  - **generation mix (technical)**  
+  - **energy security (dependency-based)**  
+
+- Combine this document with:
+  - **Currency Influence** → for FX exposure of generation types  
+  - **Tariff Structure** → for regulated cost-based components  
+  - **Support Schemes (CfD/PPA)** → for contract-based generation  
+
+- Generation mix should be interpreted together with:
+  - seasonality (hydro vs thermal)
+  - exchange rate (impact on thermal and imports)
+  - support schemes (impact on balancing and price formation)
