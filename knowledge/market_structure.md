@@ -1,167 +1,363 @@
 # Market Structure
 
-## Balancing Market Design
+## 1. Market Model Overview
 
-### Current Design
-Despite being formally called a "balancing market", Georgia's current system functions as an imbalance settlement mechanism rather than a real-time balancing market in the European sense.
+Georgia’s electricity market currently operates under a **transitional market model**, which differs significantly from the EU target model.
 
-- Balancing responsibility is not defined on an hourly basis — there is no concept of Balance Responsible Parties (BRPs) with continuous imbalance settlement
-- The current balancing period is one month, and the imbalance is calculated as the difference between the total electricity consumed or generated and the electricity sold or purchased during that same month
+### Core Characteristics (Current)
+- **Monthly balancing model**
+- **Centralized dispatch by GSE**
+- **Limited role of competitive exchange**
+- **Balancing settlement is retrospective (not real-time)**
 
-### Price Determination
-- The balancing electricity price is calculated as a weighted average price of electricity sold as balancing energy during the month
-- This price formation principle aggregates transactions across generation entities based on their quantities and individual tariffs or market values
-- Therefore, the current "balancing price" represents a settlement value for deviations over a month, not an hourly marginal price
+### Transitional Nature (CRITICAL)
+- The current model is an **interim / limited design**, not a fully developed market
+- It represents a **phased transition** toward the EU target model
+- Market opening is ongoing and incomplete
 
-### Comparison with EU Practice
-- In the European electricity market model, the balancing market includes trading of balancing products such as FCR, aFRR, and mFRR
-- Those products are activated on a sub-hourly basis to maintain system frequency and resolve imbalances in real time
-- Georgia's system does not yet have such hourly or product-based balancing — it performs monthly imbalance settlement after-the-fact
+---
 
-### Future Direction
-- Full transition toward an EU-style balancing market is expected in future market reforms, with the introduction of BRPs, hourly metering, and separate balancing product procurement
-- GSE is licensed operator of a balancing market; real balancing market and hourly imbalance responsibility was set to launch on July 2027
-- Until that transition, interpret any reference to the "balancing market" as meaning "monthly imbalance settlement"
+## 2. Transitional Market Model (Current)
 
-## Trade Data
+### 2.1 Core Design
+
+Despite being formally called a "balancing market", the current system functions as a **monthly imbalance settlement mechanism**, not a real-time balancing market.
+
+- No hourly balancing responsibility
+- No Balance Responsible Parties (BRPs)
+- Imbalance is calculated **monthly**, not hourly
+- System is **centrally dispatched by GSE**
+- Generators do not self-dispatch
+
+---
+
+### 2.2 Settlement Logic
+
+- Balancing period = **one month**
+- Imbalance is calculated as:
+
+> total electricity consumed or generated  
+> MINUS  
+> electricity sold or purchased during the same month
+
+- Settlement is done **after the month ends**
+
+---
+
+### 2.3 Price Determination
+
+- Balancing electricity price is a **weighted average price (WAP)** of electricity sold as balancing energy during the month
+- Price reflects:
+  - generation composition
+  - regulated tariffs
+  - contract-based prices (CfD, PPA)
+  - market-based sources
+
+**Important:**
+- This is NOT a marginal price
+- It is an **average settlement price**
+
+---
+
+### 2.4 Role of Exchange (from July 2024)
+
+- Day-ahead exchange (GENEX) introduced in **July 2024**
+- Trade on exchange is **hourly**
+- However:
+  - exchange is layered on top of the existing monthly balancing model
+  - does NOT replace balancing settlement
+
+**Implication:**
+- Market is a **hybrid structure**:
+  - monthly balancing settlement remains dominant
+  - exchange provides partial price signals
+
+---
+
+### 2.5 Structural Characteristics
+
+- Market still has **limited competition and participation**
+- A large share of electricity is settled through balancing rather than competitive trading
+- Balancing electricity represents a **significant share of total system volume**
+- Price formation is therefore:
+  - not purely market-based
+  - strongly influenced by regulated and contract-based components
+
+---
+
+## 3. Target Market Model (Future)
+
+### 3.1 Planned Design
+
+Georgia aims to transition to an **EU-style electricity market model**.
+
+Key features:
+- **Self-dispatch**
+- **Balance Responsible Parties (BRPs)**
+- **Hourly imbalance settlement**
+- **Real balancing market with products (FCR, aFRR, mFRR)**
+
+---
+
+### 3.2 Timeline
+
+- Planned launch: **July 2027**
+- There is a **significant risk of delay**, as previous reform steps have already been postponed
+
+---
+
+### 3.3 Expected Changes
+
+- Shift from:
+  - monthly settlement → hourly settlement
+- Shift from:
+  - centralized dispatch → decentralized (self-dispatch)
+- Introduction of:
+  - real-time balancing products
+  - marginal price formation
+
+---
+
+### 3.4 Price Formation Changes
+
+- Balancing price:
+  - will become **marginal and time-dependent**
+- Exchange:
+  - will play a **central role in price formation**
+- CfD/PPA:
+  - will interact with market prices rather than fully shaping balancing price
+
+---
+
+## 4. Comparison with EU Practice
+
+### Current Georgian Model
+- Monthly imbalance settlement
+- No balancing products
+- No hourly imbalance responsibility
+- Central dispatch
+- Average price (WAP)
+
+---
+
+### EU Model
+- Real-time balancing markets
+- Products: FCR, aFRR, mFRR
+- Hourly or sub-hourly settlement
+- Self-dispatch
+- Marginal pricing
+
+---
+
+## 5. Reform Context and Legal Framework
+
+- Georgia has already adopted a **legal and regulatory framework aligned with the EU electricity market model**
+- Market rules include:
+  - day-ahead market
+  - intraday market
+  - balancing market
+  - ancillary services
+
+**Important:**
+- The full market design is already defined
+- The main gap is **implementation and operational transition**, not conceptual design
+
+---
+
+## 6. International Context
+
+- Georgia is a member of the **Energy Community (since 2017)**
+- Market reform is driven by:
+  - alignment with EU electricity market rules
+  - integration into regional and European electricity markets
+
+**Implication:**
+- Market evolution is **externally anchored**
+- Transition toward EU model is a **regulatory obligation**, not optional
+
+---
+
+## 7. Trade Data
 
 ### Data Availability
-- `trade_derived_entities` has reliable data ONLY from 2020 onwards
-- No entity-level balancing composition data exists before 2020
-- NULL share values mean DATA IS NOT AVAILABLE — never interpret NULL as 0% share
-- Includes transactions across exchange and balancing segments; the Exchange was introduced in July 2024
-- Trade volumes determine the weights used in calculating the balancing electricity price
+- `trade_derived_entities`:
+  - reliable from 2020 onwards
+  - contains balancing and exchange segments
+- No entity-level balancing composition data before 2020
+- NULL values mean **data not available**, not zero
 
-## Market Participants and Data Sources
+### Important
+- Trade volumes determine weights used in balancing price calculation
+- Exchange segment appears only from **July 2024**
 
-### GNERC (Georgian National Energy and Water Supply Regulatory Commission)
-**Role:** Independent energy regulator, tariff authority, energy market monitoring and licensing body.
-- Approves electricity generation, transmission, and distribution tariffs
-- Issues, modifies, and revokes licenses for generation, transmission, distribution, market operator
-- Approves and enforces the Grid Code, network connection rules
-- Oversees cost audits, tariff reviews, guaranteed capacity payments
-- **Data source for:** `tariff_with_usd`, `price_with_usd`, `tech_quantity_view`
+---
 
-### ESCO (Electricity System Commercial Operator)
-**Role:** Responsible for buying and selling balancing electricity.
-- Administers the balancing and guaranteed capacity settlement processes
-- Registers wholesale market participants, manages direct contracts
-- Handles import/export settlements and acts as counterparty for CfD and guaranteed capacity contracts
-- **Data source for:** `trade_derived_entities` and other balancing-related views
+## 8. Market Participants and Roles
 
-### GSE (Georgian State Electrosystem)
-**Role:** Transmission System Operator (TSO), system dispatcher, and transmission network owner.
-- Owns and operates Georgia's transmission infrastructure
-- Performs real-time system dispatch, grid stability control
-- Manages cross-border interconnections with neighboring systems (Turkey, Azerbaijan, Armenia, Russia)
-- Plans transmission development and publishes the Ten-Year Network Development Plan (TYNDP)
+### GNERC
+- Regulator and tariff authority
+- Approves tariffs and licenses
+- Data source for:
+  - `tariff_with_usd`
+  - `price_with_usd`
+  - `tech_quantity_view`
 
-### GENEX (Georgian Energy Exchange)
-**Role:** Electricity Exchange Operator for electricity day-ahead and intraday markets.
-- Operates day-ahead and intraday markets
-- Publishes market prices, traded volumes, and clearing results
-- Established jointly by GSE and ESCO in 2019; current shareholders are GSE, ESCO, GGTC and GOGC
+---
 
-### GEOSTAT (National Statistics Office of Georgia)
-**Role:** Official statistical agency providing macroeconomic and energy data.
-- Publishes national energy balances, sectoral demand indicators, and inflation indices
-- Maintains the CPI series including "electricity, gas, and other fuels" category
-- **Data source for:** `monthly_cpi_mv` and `energy_balance_long_mv`
+### ESCO
+- Balancing electricity buyer/seller
+- Counterparty for:
+  - CfD
+  - guaranteed capacity
+- Handles settlement processes
+- Data source for:
+  - `trade_derived_entities`
 
-## Key Events
+---
 
-- **2006:** Balancing market established.
-- **Jul 2024:** Day-ahead electricity exchange launched (GENEX). Exchange segment added to `trade_derived_entities`.
-- **Jul 2027 (planned):** EU-style balancing market with BRPs and hourly imbalance responsibility.
+### GSE
+- Transmission System Operator (TSO)
+- Central dispatcher (current model)
+- Responsible for:
+  - system stability
+  - cross-border interconnections
 
-## Import Dependence
-- Georgia imports in winter, exports in summer; import exposure sets upper bound on domestic prices
-- Imports are USD-denominated and follow Turkish/Azeri prices, transmitting regional volatility
-- Higher import share + weaker GEL → higher balancing prices
-- Hydro shortfall or Enguri/Vardnili outages trigger import reliance and winter spikes
+---
 
-## Transmission Interconnections
+### GENEX
+- Exchange operator
+- Runs:
+  - day-ahead market
+  - intraday market
+- Exchange introduced in July 2024
+
+---
+
+### GEOSTAT
+- National statistics office
+- Provides:
+  - energy balance data
+  - macroeconomic indicators
+- Data source:
+  - `energy_balance_long_mv`
+
+---
+
+## 9. Key Events
+
+- **2006:** Balancing market established
+- **Jul 2024:** Exchange launched (GENEX) — hybrid model begins
+- **Jul 2027 (planned):** Target model launch (EU-style market) — delay risk exists
+
+---
+
+## 10. Import Dependence
+
+- Georgia imports in winter, exports in summer
+- Imports are USD-denominated
+- Import prices follow regional markets (Turkey, Azerbaijan)
+- Higher import share + weaker GEL → higher prices
+- Hydro shortages increase import reliance and winter price pressure
+
+---
+
+## 11. Transmission Interconnections
 
 ### Available Data
-- **Import volumes:** `tech_quantity_view` where `type_tech = 'import'` — thousand MWh per month, from 2014 onwards
-- **Export volumes:** `tech_quantity_view` where `type_tech = 'export'` — thousand MWh per month, from 2014 onwards
-- **IMPORTANT:** Export volumes exist in the data — ALWAYS check both import AND export when analyzing cross-border flows
+- Import: `tech_quantity_view`, `type_tech = 'import'`
+- Export: `tech_quantity_view`, `type_tech = 'export'`
 
-### NOT Available
-- Interconnection capacity (MW) for cross-border connections
-- Technical specifications of interconnection infrastructure
-- Simultaneous import/export limits
-- For this data, recommend: GSE technical documentation or TYNDP
+### Not Available
+- Interconnection capacity (MW)
+- Technical limits
 
 ### Correct Interpretation
-When user asks about "interconnections", they likely want capacity data (MW):
-- ❌ WRONG: Analyze only import/export volumes and claim this answers the question
-- ✅ CORRECT: Acknowledge that capacity data is not available, suggest sources, then provide what IS available (volume trends)
+- Do not confuse volume with capacity
+- For capacity → refer to GSE / TYNDP
 
-## Transmission Network Development (TYNDP 2024–2034)
+---
 
-### Main Objectives
-- Ensure security of supply through meeting N-1, G-1, and N-G-1 criteria
-- Address west–east transmission imbalance (hydro generation in west, consumption in east)
-- Eliminate critical bottlenecks along the Enguri–Zestaponi–Imereti 500/220 kV corridor
-- Modernize substations for growing urban demand (Tbilisi and Batumi)
+## 12. Transmission Network Development (TYNDP)
+
+### Objectives
+- Ensure system reliability (N-1, G-1, N-G-1)
+- Address west–east imbalance
+- Remove transmission bottlenecks
+- Modernize substations
+
+---
 
 ### Renewable Integration
-- Up to 750 MW new wind and 500 MW new solar by 2028 under existing balancing resources
-- Integration contingent on new flexible capacity (CCGT) and reservoir HPPs
-- West–east imbalance intensifies during high-hydro summer periods
+- Up to:
+  - 750 MW wind
+  - 500 MW solar (by 2028)
+- Requires:
+  - flexible generation (CCGT)
+  - reservoir HPPs
+
+---
 
 ### Cross-Border Projects
-- Georgia–Romania Black Sea Submarine Cable (HVDC) — direct electricity trade with EU markets
-- Georgia–Russia–Azerbaijan Power System Connection — synchronized or coordinated operation
-- Additional Turkey and Armenia interconnections planned
+- Black Sea cable (Georgia–Romania)
+- Georgia–Russia–Azerbaijan link
+- Expansion with Turkey and Armenia
 
-**Source:** All data must be attributed to "GSE Ten-Year Network Development Plan 2024–2034 (TYNDP)".
+---
 
-## Direct Customers
-**CRITICAL:** Direct customers are NOT a specific industry sector — they are a MARKET PARTICIPANT CATEGORY.
+## 13. Direct Customers
 
-- Large electricity consumers who purchase directly on the wholesale market
-- Include MULTIPLE different industries: metallurgy, mining, manufacturing, commercial centers
-- Cannot determine which specific industry's consumption from aggregate data
-- Number of direct customers changes over time as consumers switch between retail and wholesale
-- When consumers switch from retail to wholesale: "supply-distribution" decreases, "direct customers" increases (market structure shift, not necessarily total consumption change)
+- Market participant category (not sector)
+- Large consumers buying directly in wholesale market
+- Includes multiple industries
+- Structure changes over time
 
-**Data Source:** `tech_quantity_view` where `type_tech = 'direct customers'`
+### Data Source
+- `tech_quantity_view`, `type_tech = 'direct customers'`
 
-### Data Limitations
-- No sectoral breakdown available
-- Cannot answer: "How much do metallurgical enterprises consume?"
-- Can answer: Total direct customers consumption trends, seasonal patterns, comparison with other market segments
+---
 
-## Abkhazeti Consumption
-- Measured separately in `tech_quantity_view` (`type_tech = 'abkhazeti'`)
-- Strong seasonal variation: winter consumption roughly doubles compared to summer (electric heating)
-- Long-term growth drivers: electric heating adoption, cryptocurrency mining, general economic activity
-- From May 2025: Enguri and Vardnili tariffs increased to recover costs of electricity supplied to Abkhazia
+## 14. Abkhazeti Consumption
 
-## Table Selection Guidance
+- Separate category in `tech_quantity_view`
+- Strong seasonality (winter peak)
+- Growth drivers:
+  - electric heating
+  - crypto mining
+  - economic activity
+
+- From May 2025:
+  - Enguri/Vardnili tariffs increased to cover supply costs
+
+---
+
+## 15. Table Selection Guidance
 
 ### tech_quantity_view
-Use for ONLY technical generation/consumption data:
-- Contains: quantity by type_tech (hydro, thermal, wind, solar, import, demand-side types)
-- Use for: demand trends, supply trends, generation mix by technology
-- Examples: "Show me demand trends", "Hydro generation over time", "Import quantities"
+- Technical data (generation, demand)
+
+---
 
 ### trade_derived_entities
-Use for trade information, market prices, or entity-level analysis:
-- Contains: traded quantities by entity and segment (use canonical normalized token `balancing` for balancing-segment trade; also covers bilateral contract/exchange activity)
-- Contains: entity shares (share_import, share_renewable_ppa, share_deregulated_hydro, etc.)
-- Use for: balancing price analysis, composition changes, entity market behavior
-- Examples: "Explain balancing price variations", "Entity shares in balancing market"
+- Market/trade data
+- Includes:
+  - balancing segment
+  - exchange
+  - entity shares
 
-### CRITICAL DISTINCTION
-- `tech_quantity_view` = Technical data (generation/demand by technology)
-- `trade_derived_entities` = Market/trade data (prices, segments, entities, shares)
-- Default: simple quantity queries → tech_quantity_view; price explanation → trade_derived_entities
+---
 
-## Data Evidence Integration
-- Every analytical or causal statement should be justified by trends or values from materialized views
-- Never include raw database column names in narrative text — use descriptive terms
-- Prioritize causal storytelling supported by numeric evidence
-- When comparing across currencies, units, or dimensions, explicitly reflect the measurement unit
+### Critical Distinction
+- `tech_quantity_view` → physical system
+- `trade_derived_entities` → market behavior
+
+---
+
+## 16. Data Evidence Integration
+
+- Always support analysis with data trends
+- Avoid raw column names in narrative explanations
+- Use clear units and consistent interpretation
+- Separate:
+  - currency effects
+  - composition effects
+  - structural effects
