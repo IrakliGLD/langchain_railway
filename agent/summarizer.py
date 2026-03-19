@@ -533,6 +533,11 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         )
         log.info("❓ Conceptual question - topic may be outside domain scope")
 
+    vector_knowledge = (
+        ctx.vector_knowledge_prompt
+        if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
+        else ""
+    )
     try:
         envelope = llm_summarize_structured(
             ctx.query,
@@ -541,6 +546,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             lang_instruction=ctx.lang_instruction,
             conversation_history=ctx.conversation_history,
             domain_knowledge=domain_knowledge,
+            vector_knowledge=vector_knowledge,
         )
         ctx.summary = envelope.answer
         ctx.summary_source = "structured_conceptual_summary"
@@ -567,6 +573,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             lang_instruction=ctx.lang_instruction,
             conversation_history=ctx.conversation_history,
             domain_knowledge=domain_knowledge,
+            vector_knowledge=vector_knowledge,
         )
         ctx.summary_source = "legacy_conceptual_text_fallback"
         ctx.summary_claims = []
@@ -604,6 +611,11 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         domain_knowledge = ""
         if query_type not in ("single_value", "list"):
             domain_knowledge = get_relevant_domain_knowledge(ctx.query, use_cache=False)
+        vector_knowledge = (
+            ctx.vector_knowledge_prompt
+            if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
+            else ""
+        )
 
         try:
             envelope = llm_summarize_structured(
@@ -613,6 +625,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 ctx.lang_instruction,
                 conversation_history=ctx.conversation_history,
                 domain_knowledge=domain_knowledge,
+                vector_knowledge=vector_knowledge,
             )
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True
@@ -626,6 +639,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                     conversation_history=ctx.conversation_history,
                     strict_grounding=True,
                     domain_knowledge=domain_knowledge,
+                    vector_knowledge=vector_knowledge,
                 )
                 if not _is_summary_grounded(envelope, ctx):
                     metrics.log_summary_grounding_failure()
@@ -671,6 +685,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 ctx.lang_instruction,
                 conversation_history=ctx.conversation_history,
                 domain_knowledge=domain_knowledge,
+                vector_knowledge=vector_knowledge,
             )
             ctx.summary_source = "legacy_text_fallback"
             ctx.summary_claims = []

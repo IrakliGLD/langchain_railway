@@ -156,13 +156,17 @@ def _generate_plan_and_sql_with_retry(
     analysis_mode: str,
     lang_instruction: str,
     question_analysis: Optional[QuestionAnalysis] = None,
+    vector_knowledge: str = "",
 ) -> tuple[dict, str]:
-    combined_output = llm_generate_plan_and_sql(
+    kwargs = dict(
         user_query=user_query,
         analysis_mode=analysis_mode,
         lang_instruction=lang_instruction,
         question_analysis=question_analysis,
     )
+    if vector_knowledge:
+        kwargs["vector_knowledge"] = vector_knowledge
+    combined_output = llm_generate_plan_and_sql(**kwargs)
     return _extract_plan_and_sql(combined_output)
 
 
@@ -262,7 +266,7 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
 
     # Generate plan + SQL in one LLM call
     try:
-        ctx.plan, ctx.raw_sql = _generate_plan_and_sql_with_retry(
+        retry_kwargs = dict(
             user_query=ctx.query,
             analysis_mode=ctx.mode,
             lang_instruction=ctx.lang_instruction,
@@ -272,10 +276,18 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
                 else None
             ),
         )
+        vector_knowledge = (
+            ctx.vector_knowledge_prompt
+            if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
+            else ""
+        )
+        if vector_knowledge:
+            retry_kwargs["vector_knowledge"] = vector_knowledge
+        ctx.plan, ctx.raw_sql = _generate_plan_and_sql_with_retry(**retry_kwargs)
 
     except Exception as exc:
         log.warning("Strict plan parsing failed after retries, attempting SQL salvage: %s", exc)
-        combined_output = llm_generate_plan_and_sql(
+        kwargs = dict(
             user_query=ctx.query,
             analysis_mode=ctx.mode,
             lang_instruction=ctx.lang_instruction,
@@ -285,6 +297,14 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
                 else None
             ),
         )
+        vector_knowledge = (
+            ctx.vector_knowledge_prompt
+            if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
+            else ""
+        )
+        if vector_knowledge:
+            kwargs["vector_knowledge"] = vector_knowledge
+        combined_output = llm_generate_plan_and_sql(**kwargs)
         separator = "---SQL---"
         if separator not in combined_output:
             log.exception("Combined Plan/SQL generation failed (missing separator)")

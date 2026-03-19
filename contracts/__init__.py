@@ -8,6 +8,17 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
+from contracts.vector_knowledge import (
+    ChunkIngestRecord,
+    DocumentRegistration,
+    IngestionResult,
+    RetrievalStrategy,
+    VectorChunkRecord,
+    VectorDocumentRecord,
+    VectorKnowledgeBundle,
+    VectorKnowledgeMode,
+    VectorRetrievalFilters,
+)
 
 __all__ = [
     "QuestionAnalysis",
@@ -16,4 +27,13 @@ __all__ = [
     "QUESTION_ANALYSIS_TOOL_CATALOG",
     "QUESTION_ANALYSIS_CHART_POLICY",
     "QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG",
+    "VectorKnowledgeMode",
+    "RetrievalStrategy",
+    "VectorDocumentRecord",
+    "VectorChunkRecord",
+    "VectorRetrievalFilters",
+    "VectorKnowledgeBundle",
+    "DocumentRegistration",
+    "ChunkIngestRecord",
+    "IngestionResult",
 ]

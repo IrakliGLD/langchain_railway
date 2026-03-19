@@ -22,6 +22,8 @@ from config import (
     ENABLE_TYPED_TOOLS,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
+    ENABLE_VECTOR_KNOWLEDGE_HINTS,
+    ENABLE_VECTOR_KNOWLEDGE_SHADOW,
 )
 from models import QueryContext
 from utils.metrics import metrics
@@ -32,6 +34,8 @@ from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_sema
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from contracts.question_analysis import PreferredPath
+from contracts.vector_knowledge import VectorKnowledgeMode
+from knowledge.vector_retrieval import format_vector_knowledge_for_prompt, retrieve_vector_knowledge
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -220,6 +224,48 @@ def process_query(
             heuristic_mode=str(ctx.mode),
             analyzer_mode=(ctx.question_analysis.classification.analysis_mode.value if ctx.question_analysis else ""),
             mode_disagree=mode_disagree,
+        )
+
+    # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
+    if ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS:
+        t_stage = time.time()
+        retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
+        routing_query = ctx.query
+        if ctx.question_analysis is not None and ctx.question_analysis.canonical_query_en.strip():
+            routing_query = ctx.question_analysis.canonical_query_en
+        bundle = retrieve_vector_knowledge(
+            routing_query,
+            retrieval_mode=(
+                VectorKnowledgeMode.active
+                if ENABLE_VECTOR_KNOWLEDGE_HINTS
+                else VectorKnowledgeMode.shadow
+            ),
+            question_analysis=ctx.question_analysis,
+        )
+        ctx.vector_knowledge = bundle
+        ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
+        ctx.vector_knowledge_error = bundle.error
+        ctx.vector_knowledge_prompt = format_vector_knowledge_for_prompt(bundle)
+        top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_3_vector_knowledge",
+            "validated",
+            mode=retrieval_mode,
+            chunk_count=bundle.chunk_count,
+            strategy=bundle.strategy.value,
+            preferred_topics=bundle.filters.preferred_topics,
+            top_sources=top_sources,
+            error=bundle.error,
+        )
+        _trace_stage(
+            "stage_0_3_vector_knowledge",
+            t_stage,
+            mode=retrieval_mode,
+            chunk_count=bundle.chunk_count,
+            error=bool(bundle.error),
+            strategy=bundle.strategy.value,
         )
 
     # Conceptual short-circuit

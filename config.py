@@ -22,6 +22,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Database
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 def _read_secret_env(*names: str):
     """Read a secret env var, preferring the first name and tolerating wrapped quotes."""
@@ -71,6 +73,8 @@ ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "tr
 ENABLE_TRACE_DEBUG_ARTIFACTS = os.getenv("ENABLE_TRACE_DEBUG_ARTIFACTS", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_SKILL_PROMPTS_SUMMARIZER = os.getenv("ENABLE_SKILL_PROMPTS_SUMMARIZER", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_SKILL_PROMPTS_PLANNER = os.getenv("ENABLE_SKILL_PROMPTS_PLANNER", "true").lower() in ("1", "true", "yes", "on")
+ENABLE_VECTOR_KNOWLEDGE_SHADOW = os.getenv("ENABLE_VECTOR_KNOWLEDGE_SHADOW", "false").lower() in ("1", "true", "yes", "on")
+ENABLE_VECTOR_KNOWLEDGE_HINTS = os.getenv("ENABLE_VECTOR_KNOWLEDGE_HINTS", "false").lower() in ("1", "true", "yes", "on")
 TRACE_TEXT_MAX_CHARS = max(120, int(os.getenv("TRACE_TEXT_MAX_CHARS", "800")))
 TRACE_MAX_LIST_ITEMS = max(1, int(os.getenv("TRACE_MAX_LIST_ITEMS", "8")))
 AGENT_MAX_ROUNDS = max(1, int(os.getenv("AGENT_MAX_ROUNDS", "3")))
@@ -88,6 +92,17 @@ SESSION_HISTORY_MAX_TURNS = max(1, int(os.getenv("SESSION_HISTORY_MAX_TURNS", "3
 SESSION_IDLE_TTL_SECONDS = max(60, int(os.getenv("SESSION_IDLE_TTL_SECONDS", "3600")))
 ASK_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("ASK_MAX_CONCURRENT_REQUESTS", "8")))
 ASK_BACKPRESSURE_TIMEOUT_SECONDS = max(0.0, float(os.getenv("ASK_BACKPRESSURE_TIMEOUT_SECONDS", "0.0")))
+VECTOR_KNOWLEDGE_TOP_K = max(1, int(os.getenv("VECTOR_KNOWLEDGE_TOP_K", "4")))
+VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER = max(1, int(os.getenv("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", "3")))
+VECTOR_KNOWLEDGE_MAX_CHARS = max(500, int(os.getenv("VECTOR_KNOWLEDGE_MAX_CHARS", "3500")))
+VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower() or "openai"
+VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = max(1, int(os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "1536")))
+VECTOR_KNOWLEDGE_EMBEDDING_MODEL = os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
+VECTOR_KNOWLEDGE_SCHEMA = os.getenv("VECTOR_KNOWLEDGE_SCHEMA", "knowledge").strip() or "knowledge"
+VECTOR_KNOWLEDGE_STORAGE_BUCKET = os.getenv("VECTOR_KNOWLEDGE_STORAGE_BUCKET", "knowledge-documents").strip() or "knowledge-documents"
+VECTOR_KNOWLEDGE_MIN_SIMILARITY = min(1.0, max(0.0, float(os.getenv("VECTOR_KNOWLEDGE_MIN_SIMILARITY", "0.2"))))
+VECTOR_KNOWLEDGE_CHUNK_TARGET_TOKENS = max(100, int(os.getenv("VECTOR_KNOWLEDGE_CHUNK_TARGET_TOKENS", "650")))
+VECTOR_KNOWLEDGE_CHUNK_OVERLAP_TOKENS = max(0, int(os.getenv("VECTOR_KNOWLEDGE_CHUNK_OVERLAP_TOKENS", "100")))
 PROVENANCE_MIN_COVERAGE = min(
     1.0,
     max(0.0, float(os.getenv("PROVENANCE_MIN_COVERAGE", "1.0"))),

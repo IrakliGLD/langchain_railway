@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 from contracts.question_analysis import QuestionAnalysis
+from contracts.vector_knowledge import VectorKnowledgeBundle
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,10 @@ class QueryContext:
     question_analysis: Optional[QuestionAnalysis] = None
     question_analysis_error: str = ""
     question_analysis_source: str = ""
+    vector_knowledge: Optional[VectorKnowledgeBundle] = None
+    vector_knowledge_error: str = ""
+    vector_knowledge_source: str = ""
+    vector_knowledge_prompt: str = ""
 
     # --- planner outputs ---
     plan: Dict[str, Any] = dc_field(default_factory=dict)
