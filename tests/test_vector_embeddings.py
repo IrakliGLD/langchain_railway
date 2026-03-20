@@ -135,3 +135,43 @@ def test_gemini_provider_validates_embedding_dimensions(monkeypatch):
 
     with pytest.raises(RuntimeError):
         provider.embed_query("hello")
+
+
+def test_gemini_provider_batches_document_embeddings(monkeypatch):
+    captured_batches = []
+
+    class FakeClient:
+        def __init__(self, *, api_key):
+            self.models = self
+
+        def embed_content(self, *, model, contents, config):
+            if isinstance(contents, str):
+                batch = [contents]
+            else:
+                batch = list(contents)
+            captured_batches.append(len(batch))
+            return types.SimpleNamespace(
+                embeddings=[types.SimpleNamespace(values=[0.2] * 768) for _ in batch]
+            )
+
+    class FakeEmbedContentConfig:
+        def __init__(self, *, output_dimensionality):
+            self.output_dimensionality = output_dimensionality
+
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_BATCH_SIZE", "100")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeClient
+    genai_module.types = types.SimpleNamespace(EmbedContentConfig=FakeEmbedContentConfig)
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    provider = vector_embeddings.GeminiEmbeddingProvider()
+    embeddings = provider.embed_documents([f"text {idx}" for idx in range(205)])
+
+    assert len(embeddings) == 205
+    assert captured_batches == [100, 100, 5]

@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import urllib.parse
+from functools import lru_cache
 from typing import List
 
-from sqlalchemy import bindparam, text
-
-from config import (
-    VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION,
-    VECTOR_KNOWLEDGE_MIN_SIMILARITY,
-    VECTOR_KNOWLEDGE_SCHEMA,
-)
+from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy.pool import QueuePool
 from contracts.vector_knowledge import (
     ChunkIngestRecord,
     DocumentRegistration,
@@ -19,7 +17,65 @@ from contracts.vector_knowledge import (
     VectorChunkRecord,
     VectorRetrievalFilters,
 )
-from core.query_executor import ENGINE
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = _env_int("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", 1536)
+VECTOR_KNOWLEDGE_MIN_SIMILARITY = _env_float("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
+VECTOR_KNOWLEDGE_SCHEMA = os.getenv("VECTOR_KNOWLEDGE_SCHEMA", "knowledge").strip() or "knowledge"
+
+
+def _coerce_to_psycopg_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme in ("postgres", "postgresql"):
+        return url.replace(parsed.scheme, "postgresql+psycopg", 1)
+    if not parsed.scheme.startswith("postgresql+"):
+        return "postgresql+psycopg://" + url.split("://", 1)[-1]
+    return url
+
+
+@lru_cache(maxsize=1)
+def _get_engine():
+    db_url = os.getenv("SUPABASE_DB_URL", "").strip()
+    if not db_url:
+        raise RuntimeError("Missing SUPABASE_DB_URL")
+    return create_engine(
+        _coerce_to_psycopg_url(db_url),
+        poolclass=QueuePool,
+        pool_size=5,
+        max_overflow=2,
+        pool_timeout=30,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        connect_args={
+            "connect_timeout": 30,
+            "options": "-c statement_timeout=30000",
+            # Supabase commonly fronts Postgres with PgBouncer; disable
+            # psycopg auto-prepared statements to avoid duplicate statement
+            # errors during repeated inserts in transaction-pooled sessions.
+            "prepare_threshold": None,
+        },
+    )
+
+
+ENGINE = None
+
+
+def _resolve_engine():
+    return ENGINE or _get_engine()
 
 
 def _vector_literal(values: List[float]) -> str:
@@ -77,7 +133,7 @@ class KnowledgeVectorStore:
         )
         params = document.model_dump(mode="json")
         params["metadata"] = json.dumps(params["metadata"])
-        with ENGINE.begin() as conn:
+        with _resolve_engine().begin() as conn:
             result = conn.execute(sql, params).scalar_one()
         return str(result)
 
@@ -93,7 +149,7 @@ class KnowledgeVectorStore:
             raise ValueError("chunks and embeddings length mismatch")
         for idx, embedding in enumerate(embeddings):
             _validate_embedding_length(embedding, label=f"chunk_embedding[{idx}]")
-        with ENGINE.begin() as conn:
+        with _resolve_engine().begin() as conn:
             conn.execute(
                 text(f"delete from {self.schema}.document_chunks where document_id = :document_id"),
                 {"document_id": document_id},
@@ -203,7 +259,7 @@ class KnowledgeVectorStore:
         )
         if bind_params:
             sql = sql.bindparams(*bind_params)
-        with ENGINE.begin() as conn:
+        with _resolve_engine().begin() as conn:
             rows = conn.execute(sql, params).mappings().all()
 
         results: List[VectorChunkRecord] = []

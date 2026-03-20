@@ -24,6 +24,14 @@ def _expected_dimension() -> int:
         return 1536
 
 
+def _batch_size() -> int:
+    raw = os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_BATCH_SIZE", "100").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 100
+
+
 def _resolved_provider(value: str | None = None) -> Literal["openai", "gemini"]:
     raw = (value or os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "openai")).strip().lower()
     if raw in {"google", "gemini"}:
@@ -109,6 +117,7 @@ class GeminiEmbeddingProvider:
             ) from exc
 
         self._expected_dimension = _expected_dimension()
+        self._batch_size = _batch_size()
         self._model = resolved_model
         self._client = genai.Client(api_key=api_key)
         self._config = types.EmbedContentConfig(
@@ -118,12 +127,16 @@ class GeminiEmbeddingProvider:
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
-        result = self._client.models.embed_content(
-            model=self._model,
-            contents=list(texts),
-            config=self._config,
-        )
-        embeddings = [list(item.values) for item in (result.embeddings or [])]
+        embeddings: List[List[float]] = []
+        items = list(texts)
+        for start in range(0, len(items), self._batch_size):
+            batch = items[start : start + self._batch_size]
+            result = self._client.models.embed_content(
+                model=self._model,
+                contents=batch,
+                config=self._config,
+            )
+            embeddings.extend(list(item.values) for item in (result.embeddings or []))
         return _validate_embedding_dimensions(
             embeddings,
             expected_dimension=self._expected_dimension,

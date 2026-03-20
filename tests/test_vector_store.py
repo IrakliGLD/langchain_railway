@@ -128,3 +128,20 @@ def test_search_chunks_rejects_wrong_embedding_dimension():
     store = vector_store.KnowledgeVectorStore()
     with pytest.raises(ValueError):
         store.search_chunks(query_embedding=[0.1, 0.2, 0.3])
+
+
+def test_get_engine_disables_prepared_statements(monkeypatch):
+    captured = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return _DummyEngine()
+
+    vector_store._get_engine.cache_clear()
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+    monkeypatch.setattr(vector_store, "create_engine", fake_create_engine)
+
+    vector_store._get_engine()
+
+    assert captured["kwargs"]["connect_args"]["prepare_threshold"] is None

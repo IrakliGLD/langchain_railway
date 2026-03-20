@@ -13,7 +13,7 @@ def main() -> None:
 
     document = DocumentRegistration(
         # Replace these values before running.
-        source_key="gnerc-electricity-market-rules-2020-46-annex-1-v2024-07-01",
+        source_key="exchange_rules_july24",
         title="Electricity Day-Ahead and Intraday Market Rules",
         document_type="regulation",
         issuer="GNERC",
@@ -34,12 +34,12 @@ def main() -> None:
             "city": "tbilisi",
             "resolution_number": "46",
             "annex_number": "1",
-            "notes": "Pilot ingestion for annex 1 excerpt",
+            "notes": "Pilot ingestion for exchange rules",
         },
     )
 
     # Replace these topic tags with the best matching retrieval topics.
-    topics = ["market_structure", "exchange_rules", "day_ahead_market"]
+    topics = ["market_structure", "exchange_rules", "day_ahead_market", "intraday_market", "financial_clearing", "exchange_price_formation", "exchange_participation", "exchange_operations"]
 
     ingestor = VectorKnowledgeIngestor()
     result = ingestor.ingest_text_document(
