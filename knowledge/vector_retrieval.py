@@ -96,6 +96,16 @@ def retrieve_vector_knowledge(
             candidate_k=candidate_k,
             min_similarity=min_similarity,
         )
+        if not chunks and filters.languages:
+            relaxed_filters = filters.model_copy(update={"languages": []})
+            chunks = store.search_chunks(
+                query_embedding=query_embedding,
+                filters=relaxed_filters,
+                top_k=top_k,
+                candidate_k=candidate_k,
+                min_similarity=min_similarity,
+            )
+            filters = relaxed_filters
         return VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,

@@ -150,3 +150,67 @@ def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):
 
     assert bundle.chunk_count == 0
     assert bundle.error == "gemini sdk missing"
+
+
+def test_retrieve_vector_knowledge_retries_without_language_filter_when_empty():
+    calls = []
+
+    class RetryStore:
+        def search_chunks(self, **kwargs):
+            calls.append(kwargs["filters"].model_dump())
+            if kwargs["filters"].languages:
+                return []
+            return [
+                VectorChunkRecord(
+                    id="chunk-ka-1",
+                    document_id="doc-ka-1",
+                    document_title="Electricity Day-Ahead and Intraday Market Rules",
+                    source_key="exchange-rules-ka",
+                    section_title="Participant registration",
+                    text_content="Registration on the exchange is governed by the exchange operator rules.",
+                    topics=["market_structure"],
+                    language="ka",
+                    similarity_score=0.88,
+                )
+            ]
+
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What is the process for registering on the electricity exchange?",
+            "canonical_query_en": "What is the process for registering on the electricity exchange?",
+            "language": LanguageInfo(
+                input_language=LanguageCode.EN,
+                answer_language=LanguageCode.EN,
+            ),
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9)]
+            ),
+            "classification": ClassificationInfo(
+                query_type=QueryType.CONCEPTUAL_DEFINITION,
+                analysis_mode=AnalysisMode.LIGHT,
+                intent="exchange_registration",
+                needs_clarification=False,
+                confidence=0.9,
+            ),
+            "routing": RoutingInfo(
+                preferred_path=PreferredPath.KNOWLEDGE,
+                needs_sql=False,
+                needs_knowledge=True,
+                prefer_tool=False,
+            ),
+        }
+    )
+
+    bundle = retrieve_vector_knowledge(
+        "What is the process for registering on the electricity exchange?",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        question_analysis=analysis,
+        store=RetryStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.chunk_count == 1
+    assert bundle.chunks[0].language == "ka"
+    assert len(calls) == 2
+    assert calls[0]["languages"] == ["en"]
+    assert calls[1]["languages"] == []
