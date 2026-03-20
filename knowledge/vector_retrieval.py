@@ -79,16 +79,15 @@ def retrieve_vector_knowledge(
     top_k = _int_env("VECTOR_KNOWLEDGE_TOP_K", 4)
     candidate_k = top_k * _int_env("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", 3)
     min_similarity = _float_env("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
-    if store is None:
-        from knowledge.vector_store import KnowledgeVectorStore
-
-        store = KnowledgeVectorStore()
-    if embedding_provider is None:
-        from knowledge.vector_embeddings import get_embedding_provider
-
-        embedding_provider = get_embedding_provider()
-
     try:
+        if store is None:
+            from knowledge.vector_store import KnowledgeVectorStore
+
+            store = KnowledgeVectorStore()
+        if embedding_provider is None:
+            from knowledge.vector_embeddings import get_embedding_provider
+
+            embedding_provider = get_embedding_provider()
         query_embedding = embedding_provider.embed_query(query_text)
         chunks = store.search_chunks(
             query_embedding=query_embedding,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import List, Literal, Protocol
+from typing import Any, List, Literal, Protocol
 
 
 class EmbeddingProvider(Protocol):
@@ -99,7 +99,7 @@ class OpenAIEmbeddingProvider:
 
 
 class GeminiEmbeddingProvider:
-    """Gemini-backed embedding provider using the Google GenAI SDK."""
+    """Gemini-backed embedding provider using the available Google SDK."""
 
     def __init__(self, model: str | None = None) -> None:
         api_key = os.getenv("GOOGLE_API_KEY", "").strip()
@@ -108,35 +108,94 @@ class GeminiEmbeddingProvider:
         ).strip()
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY is required for Gemini vector embeddings")
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError as exc:
-            raise RuntimeError(
-                "google-genai is required for Gemini vector embeddings"
-            ) from exc
 
         self._expected_dimension = _expected_dimension()
         self._batch_size = _batch_size()
         self._model = resolved_model
-        self._client = genai.Client(api_key=api_key)
-        self._config = types.EmbedContentConfig(
+        self._legacy_model = (
+            resolved_model
+            if resolved_model.startswith("models/")
+            else f"models/{resolved_model}"
+        )
+        self._backend: Literal["google_genai", "google_generativeai"]
+
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            try:
+                import google.generativeai as legacy_genai
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Gemini vector embeddings require either google-genai or google-generativeai"
+                ) from exc
+            configure = getattr(legacy_genai, "configure", None)
+            if callable(configure):
+                configure(api_key=api_key)
+            self._backend = "google_generativeai"
+            self._client = legacy_genai
+            self._config = None
+        else:
+            self._backend = "google_genai"
+            self._client = genai.Client(api_key=api_key)
+            self._config = types.EmbedContentConfig(
+                output_dimensionality=self._expected_dimension,
+            )
+
+    @staticmethod
+    def _vector_from_legacy_embedding(value: Any) -> List[float]:
+        if hasattr(value, "values"):
+            value = value.values
+        if isinstance(value, dict):
+            if "embedding" in value:
+                return GeminiEmbeddingProvider._vector_from_legacy_embedding(value["embedding"])
+            if "values" in value:
+                return GeminiEmbeddingProvider._vector_from_legacy_embedding(value["values"])
+        if isinstance(value, (list, tuple)):
+            return [float(item) for item in value]
+        raise RuntimeError("Legacy Gemini embedding response had an unsupported shape")
+
+    def _embed_legacy_single(self, text: str, *, task_type: str) -> List[float]:
+        result = self._client.embed_content(
+            model=self._legacy_model,
+            content=text,
+            task_type=task_type,
             output_dimensionality=self._expected_dimension,
         )
+        if isinstance(result, dict):
+            if "embedding" in result:
+                return self._vector_from_legacy_embedding(result["embedding"])
+            if "embeddings" in result and result["embeddings"]:
+                return self._vector_from_legacy_embedding(result["embeddings"][0])
+        if isinstance(result, list) and result:
+            return self._vector_from_legacy_embedding(result[0])
+        if hasattr(result, "embedding"):
+            return self._vector_from_legacy_embedding(result.embedding)
+        if hasattr(result, "embeddings"):
+            embeddings = getattr(result, "embeddings")
+            if embeddings:
+                return self._vector_from_legacy_embedding(embeddings[0])
+        raise RuntimeError("Gemini embedding response did not contain any embeddings")
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
         embeddings: List[List[float]] = []
         items = list(texts)
-        for start in range(0, len(items), self._batch_size):
-            batch = items[start : start + self._batch_size]
-            result = self._client.models.embed_content(
-                model=self._model,
-                contents=batch,
-                config=self._config,
-            )
-            embeddings.extend(list(item.values) for item in (result.embeddings or []))
+        if self._backend == "google_generativeai":
+            for item in items:
+                embeddings.append(
+                    self._embed_legacy_single(item, task_type="retrieval_document")
+                )
+        else:
+            for start in range(0, len(items), self._batch_size):
+                batch = items[start : start + self._batch_size]
+                result = self._client.models.embed_content(
+                    model=self._model,
+                    contents=batch,
+                    config=self._config,
+                )
+                embeddings.extend(list(item.values) for item in (result.embeddings or []))
         return _validate_embedding_dimensions(
             embeddings,
             expected_dimension=self._expected_dimension,
@@ -144,15 +203,18 @@ class GeminiEmbeddingProvider:
         )
 
     def embed_query(self, text: str) -> List[float]:
-        result = self._client.models.embed_content(
-            model=self._model,
-            contents=text,
-            config=self._config,
-        )
-        embeddings = [list(item.values) for item in (result.embeddings or [])]
-        if not embeddings:
-            raise RuntimeError("Gemini embedding response did not contain any embeddings")
-        embedding = embeddings[0]
+        if self._backend == "google_generativeai":
+            embedding = self._embed_legacy_single(text, task_type="retrieval_query")
+        else:
+            result = self._client.models.embed_content(
+                model=self._model,
+                contents=text,
+                config=self._config,
+            )
+            embeddings = [list(item.values) for item in (result.embeddings or [])]
+            if not embeddings:
+                raise RuntimeError("Gemini embedding response did not contain any embeddings")
+            embedding = embeddings[0]
         return _validate_embedding_dimensions(
             [embedding],
             expected_dimension=self._expected_dimension,

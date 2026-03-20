@@ -120,3 +120,33 @@ def test_format_vector_knowledge_for_prompt_includes_source_headers():
     assert "EXTERNAL_SOURCE_PASSAGES:" in prompt
     assert "Electricity Market Rules" in prompt
     assert "Specific balancing settlement rule." in prompt
+
+
+def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):
+    import knowledge.vector_retrieval as retrieval_module
+
+    monkeypatch.setattr(
+        retrieval_module,
+        "_int_env",
+        lambda name, default: default,
+    )
+
+    class FakeStore:
+        def search_chunks(self, **kwargs):
+            raise AssertionError("search_chunks should not be reached when provider init fails")
+
+    def fail_provider():
+        raise RuntimeError("gemini sdk missing")
+
+    monkeypatch.setattr("knowledge.vector_embeddings.get_embedding_provider", fail_provider)
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        question_analysis=_analysis(),
+        store=FakeStore(),
+        embedding_provider=None,
+    )
+
+    assert bundle.chunk_count == 0
+    assert bundle.error == "gemini sdk missing"
