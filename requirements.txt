@@ -18,8 +18,8 @@ langchain-google-genai==0.0.11
 langchain-openai==0.1.1
 
 # Data validation and serialization
-# Note: Using pydantic 2.6.4 for compatibility with langchain 0.1.20
-pydantic==2.6.4
+# Note: pydantic must stay compatible with both langchain 0.1.20 and google-genai
+pydantic==2.9.2
 
 # Data processing and analysis
 pandas==2.1.4
@@ -33,6 +33,7 @@ python-dotenv==1.0.1
 
 # AI/ML services
 google-generativeai==0.4.1
+google-genai==1.65.0
 litellm==1.44.10
 
 # Database services
