@@ -33,6 +33,7 @@ python-dotenv==1.0.1
 
 # AI/ML services
 google-generativeai==0.4.1
+google-genai==1.65.0
 litellm==1.44.10
 
 # Database services
