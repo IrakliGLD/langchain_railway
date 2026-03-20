@@ -77,9 +77,10 @@ def _analysis():
 
 
 def test_build_vector_filters_uses_candidate_topics():
-    filters = build_vector_filters(_analysis())
+    filters = build_vector_filters(_analysis(), query_text="Why did balancing electricity price change?")
     assert filters.preferred_topics == ["balancing_price"]
     assert filters.languages == ["en"]
+    assert "balancing" in filters.boost_terms
 
 
 def test_build_vector_filters_adds_english_fallback_for_translated_queries():
@@ -92,8 +93,31 @@ def test_build_vector_filters_adds_english_fallback_for_translated_queries():
             "canonical_query_en": "Why did balancing electricity price change?",
         }
     )
-    filters = build_vector_filters(analysis)
+    filters = build_vector_filters(
+        analysis,
+        query_text="რატომ შეიცვალა საბალანსო ელექტროენერგიის ფასი?",
+    )
     assert filters.languages == ["ka", "en"]
+    assert "balancing" in filters.boost_terms
+
+
+def test_build_vector_filters_extracts_specific_boost_terms():
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What regulations and procedures are required for electricity export?",
+            "canonical_query_en": "What regulations and procedures are required for electricity export?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9)]
+            ),
+        }
+    )
+    filters = build_vector_filters(
+        analysis,
+        query_text="What regulations and procedures are required for electricity export?",
+    )
+
+    assert "export" in filters.boost_terms
+    assert "registration" not in filters.boost_terms
 
 
 def test_retrieve_vector_knowledge_returns_bundle():
@@ -214,3 +238,46 @@ def test_retrieve_vector_knowledge_retries_without_language_filter_when_empty():
     assert len(calls) == 2
     assert calls[0]["languages"] == ["en"]
     assert calls[1]["languages"] == []
+
+
+def test_retrieve_vector_knowledge_expands_candidate_window_when_boost_terms_exist():
+    captured = {}
+
+    class CaptureStore:
+        def search_chunks(self, **kwargs):
+            captured.setdefault("candidate_k", []).append(kwargs["candidate_k"])
+            return []
+
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What regulations and procedures are required for electricity export?",
+            "canonical_query_en": "What regulations and procedures are required for electricity export?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9)]
+            ),
+            "classification": ClassificationInfo(
+                query_type=QueryType.CONCEPTUAL_DEFINITION,
+                analysis_mode=AnalysisMode.LIGHT,
+                intent="export_rules",
+                needs_clarification=False,
+                confidence=1.0,
+            ),
+            "routing": RoutingInfo(
+                preferred_path=PreferredPath.KNOWLEDGE,
+                needs_sql=False,
+                needs_knowledge=True,
+                prefer_tool=False,
+            ),
+        }
+    )
+
+    bundle = retrieve_vector_knowledge(
+        "What regulations and procedures are required for electricity export?",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        question_analysis=analysis,
+        store=CaptureStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.chunk_count == 0
+    assert captured["candidate_k"] == [24, 24]

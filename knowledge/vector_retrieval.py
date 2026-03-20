@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import TYPE_CHECKING, Optional
 
 from contracts.question_analysis import QuestionAnalysis
@@ -32,11 +33,74 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-def build_vector_filters(question_analysis: Optional[QuestionAnalysis]) -> VectorRetrievalFilters:
+_GENERIC_BOOST_STOPWORDS = {
+    "a", "an", "and", "are", "electricity", "explain", "formed", "formation",
+    "how", "in", "is", "market", "of", "on", "the", "what", "who",
+    "when", "where", "why", "რა", "არის", "როგორ", "ვინ", "როდის", "ბაზარი",
+    "ელექტროენერგიის", "ელექტროენერგია", "explanation", "process", "required",
+}
+
+
+def _normalized_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _extract_boost_terms(
+    query_text: str,
+    question_analysis: Optional[QuestionAnalysis],
+) -> list[str]:
+    combined = " ".join(
+        part
+        for part in [
+            str(query_text or "").strip(),
+            (question_analysis.canonical_query_en.strip() if question_analysis else ""),
+        ]
+        if part
+    )
+    normalized = _normalized_text(combined)
+    boost_terms: list[str] = []
+
+    def _add(term: str) -> None:
+        normalized_term = _normalized_text(term)
+        if (
+            not normalized_term
+            or normalized_term in _GENERIC_BOOST_STOPWORDS
+            or normalized_term in boost_terms
+        ):
+            return
+        boost_terms.append(normalized_term)
+
+    phrase_rules = [
+        (("capacity market", "capacity", "guaranteed capacity", "სიმძლავრის", "სიმძლავრე"), ["capacity market", "capacity", "guaranteed capacity"]),
+        (("export", "exports", "ექსპორტ", "экспорт", "cross-border", "interconnection", "interconnector"), ["export", "cross-border", "interconnection"]),
+        (("balancing", "balancing electricity", "საბალანსო", "баланс"), ["balancing", "balancing electricity"]),
+        (("buyer", "buyers", "purchaser", "consumer", "customers", "მყიდველ", "მომხმარებ"), ["buyer", "buyers", "consumer", "customer"]),
+        (("participant", "participants", "registration", "register", "candidate", "მონაწილ", "რეგისტრ"), ["participant", "participants", "registration", "register"]),
+        (("day-ahead", "day ahead", "intraday", "დღით ადრე", "დღიური"), ["day-ahead", "intraday"]),
+        (("transitory", "transition", "transitional", "გარდამავალი", "transition model"), ["transitory", "transition", "transitional"]),
+    ]
+    for triggers, terms in phrase_rules:
+        if any(trigger in normalized for trigger in triggers):
+            for term in terms:
+                _add(term)
+
+    for token in re.findall(r"[\w\u10A0-\u10FF-]+", normalized):
+        if len(token) < 4:
+            continue
+        _add(token)
+
+    return boost_terms[:10]
+
+
+def build_vector_filters(
+    question_analysis: Optional[QuestionAnalysis],
+    *,
+    query_text: str = "",
+) -> VectorRetrievalFilters:
     """Convert question-analyzer output into retrieval filters."""
 
     if question_analysis is None:
-        return VectorRetrievalFilters()
+        return VectorRetrievalFilters(boost_terms=_extract_boost_terms(query_text, None))
     topics = [
         candidate.name.value
         for candidate in sorted(
@@ -62,6 +126,7 @@ def build_vector_filters(question_analysis: Optional[QuestionAnalysis]) -> Vecto
     return VectorRetrievalFilters(
         preferred_topics=topics,
         languages=languages,
+        boost_terms=_extract_boost_terms(query_text, question_analysis),
     )
 
 
@@ -75,9 +140,11 @@ def retrieve_vector_knowledge(
 ) -> VectorKnowledgeBundle:
     """Fetch top vector chunks for a user query."""
 
-    filters = build_vector_filters(question_analysis)
+    filters = build_vector_filters(question_analysis, query_text=query_text)
     top_k = _int_env("VECTOR_KNOWLEDGE_TOP_K", 4)
     candidate_k = top_k * _int_env("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", 3)
+    if filters.boost_terms:
+        candidate_k = max(candidate_k, top_k * 6)
     min_similarity = _float_env("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
     try:
         if store is None:

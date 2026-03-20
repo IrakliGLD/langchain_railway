@@ -97,6 +97,7 @@ class VectorRetrievalFilters(BaseModel):
     languages: List[str] = Field(default_factory=list)
     issuers: List[str] = Field(default_factory=list)
     preferred_topics: List[str] = Field(default_factory=list)
+    boost_terms: List[str] = Field(default_factory=list)
 
 
 class VectorKnowledgeBundle(BaseModel):

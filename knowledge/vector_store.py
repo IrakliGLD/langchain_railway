@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
 from functools import lru_cache
 from typing import List
@@ -36,6 +37,11 @@ def _env_float(name: str, default: float) -> float:
 VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = _env_int("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", 1536)
 VECTOR_KNOWLEDGE_MIN_SIMILARITY = _env_float("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
 VECTOR_KNOWLEDGE_SCHEMA = os.getenv("VECTOR_KNOWLEDGE_SCHEMA", "knowledge").strip() or "knowledge"
+VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT = _env_int("VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT", 2)
+VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE = _env_float(
+    "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE",
+    0.08,
+)
 
 
 def _coerce_to_psycopg_url(url: str) -> str:
@@ -88,6 +94,106 @@ def _validate_embedding_length(values: List[float], *, label: str) -> None:
         raise ValueError(
             f"{label} dimension mismatch: expected {VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION}, got {actual_dimension}"
         )
+
+
+def _normalize_match_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _candidate_retrieval_score(
+    candidate: VectorChunkRecord,
+    *,
+    filters: VectorRetrievalFilters,
+) -> float:
+    base_score = float(candidate.similarity_score or 0.0)
+    if not filters.boost_terms:
+        return base_score
+
+    title_text = _normalize_match_text(candidate.document_title)
+    source_text = _normalize_match_text(candidate.source_key)
+    section_text = _normalize_match_text(f"{candidate.section_title} {candidate.section_path}")
+    topic_text = _normalize_match_text(" ".join(candidate.topics))
+    metadata_text = _normalize_match_text(json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True))
+    body_text = _normalize_match_text(candidate.text_content[:1200])
+
+    boost = 0.0
+    for term in filters.boost_terms:
+        normalized_term = _normalize_match_text(term)
+        if not normalized_term:
+            continue
+        if normalized_term in title_text:
+            boost += 0.24
+        if normalized_term in source_text:
+            boost += 0.18
+        if normalized_term in section_text:
+            boost += 0.20
+        if normalized_term in topic_text:
+            boost += 0.16
+        if normalized_term in metadata_text:
+            boost += 0.08
+        if normalized_term in body_text:
+            boost += 0.04
+    return base_score + min(boost, 0.85)
+
+
+def _apply_document_diversity(
+    candidates: List[VectorChunkRecord],
+    *,
+    top_k: int,
+    filters: VectorRetrievalFilters,
+) -> List[VectorChunkRecord]:
+    if len(candidates) < top_k or top_k <= 1:
+        return candidates[:top_k]
+
+    distinct_docs = {candidate.document_id for candidate in candidates}
+    if len(distinct_docs) <= 1:
+        return candidates[:top_k]
+
+    max_per_document = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT)
+    candidate_scores = {
+        candidate.id: _candidate_retrieval_score(candidate, filters=filters)
+        for candidate in candidates
+    }
+    best_score = max(candidate_scores.values())
+    diversity_floor = max(
+        VECTOR_KNOWLEDGE_MIN_SIMILARITY,
+        best_score - max(0.0, VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE),
+    )
+
+    competitive: List[VectorChunkRecord] = [
+        candidate
+        for candidate in candidates
+        if candidate_scores[candidate.id] >= diversity_floor
+    ]
+
+    if len({candidate.document_id for candidate in competitive}) <= 1:
+        dominant_doc_id = competitive[0].document_id if competitive else candidates[0].document_id
+        dominant_candidates = [
+            candidate for candidate in candidates if candidate.document_id == dominant_doc_id
+        ]
+        return dominant_candidates[:top_k]
+
+    selected: List[VectorChunkRecord] = []
+    selected_ids: set[str] = set()
+    per_document_counts: dict[str, int] = {}
+
+    for candidate in competitive:
+        doc_id = candidate.document_id
+        if per_document_counts.get(doc_id, 0) >= max_per_document:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate.id)
+        per_document_counts[doc_id] = per_document_counts.get(doc_id, 0) + 1
+        if len(selected) >= top_k:
+            return selected
+
+    for candidate in candidates:
+        if candidate.id in selected_ids:
+            continue
+        selected.append(candidate)
+        if len(selected) >= top_k:
+            break
+    return selected[:top_k]
 
 
 class KnowledgeVectorStore:
@@ -262,14 +368,14 @@ class KnowledgeVectorStore:
         with _resolve_engine().begin() as conn:
             rows = conn.execute(sql, params).mappings().all()
 
-        results: List[VectorChunkRecord] = []
+        candidates: List[VectorChunkRecord] = []
         for row in rows:
             score = float(row.get("similarity_score") or 0.0)
             if score < float(min_similarity):
                 continue
             topics = row.get("topics") or []
             metadata = row.get("metadata") or {}
-            results.append(
+            candidates.append(
                 VectorChunkRecord(
                     id=str(row["id"]),
                     document_id=str(row["document_id"]),
@@ -290,6 +396,12 @@ class KnowledgeVectorStore:
                     similarity_score=score,
                 )
             )
-            if len(results) >= top_k:
-                break
-        return results
+        candidates.sort(
+            key=lambda candidate: (
+                _candidate_retrieval_score(candidate, filters=filters),
+                float(candidate.similarity_score or 0.0),
+                -int(candidate.chunk_index or 0),
+            ),
+            reverse=True,
+        )
+        return _apply_document_diversity(candidates, top_k=top_k, filters=filters)
