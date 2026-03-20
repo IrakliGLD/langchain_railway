@@ -255,46 +255,95 @@ Current ingestion classes:
 
 The database is not filled directly by SQL inserts of raw vectors by hand. The intended path is Python ingestion through `VectorKnowledgeIngestor`.
 
-### Step A: Prepare extracted text
+Important:
 
-For each document, prepare clean text in `.md` or `.txt` form.
+- this ingestion flow runs as a **local Python script**
+- it is **not** part of the app UI
+- it is **not** Jupyter-specific
+- if you run it locally, the required env vars must also exist **locally**
+- the script can still write into the same remote Supabase database used by Railway
 
-Examples:
+## Step-By-Step: Ingest One Document Locally
 
-- text extracted from regulation PDF
-- report converted to markdown
-- cleaned OCR text
+This is the most practical first workflow for `10-20` documents.
 
-You should have:
+### Step 0: Open terminal in the project folder
 
-- document title
-- document type
-- issuer
-- language
-- dates if relevant
-- source URL or storage path if available
-- extracted text content
+Use PowerShell and go to the repo root:
 
-### Step B: Build document metadata
+```powershell
+cd D:\Enaiapp\langchain_railway
+```
 
-The ingestion contract uses `DocumentRegistration`.
+### Step 1: Prepare one extracted document as `.md` or `.txt`
 
-Important fields:
+Current ingestion expects plain text, markdown, or very clean extracted text.
 
-- `source_key`
-  - stable unique id for the document
-- `title`
-- `document_type`
-  - examples: `regulation`, `law`, `report`, `order`, `methodology`
-- `issuer`
-- `language`
-- `source_url` or `storage_path`
-- `effective_date`, `published_date`, `version_label`
-- optional `metadata`
+Example folder:
 
-### Step C: Run ingestion
+```text
+D:\Enaiapp\langchain_railway\docs_to_ingest\
+  gnerc_regulation_2024.md
+```
 
-Example ingestion script:
+If your original document is a Word file like:
+
+```text
+gnerc_regulation_2024.docx
+```
+
+then first convert or copy its contents into:
+
+```text
+gnerc_regulation_2024.md
+```
+
+For the first run, keep it simple:
+
+- one document only
+- clean text only
+- avoid scanned PDFs and messy OCR
+
+### Step 2: Set local environment variables in PowerShell
+
+These are local placeholders. Replace the values with your real secrets and connection string.
+
+If using Gemini embeddings locally:
+
+```powershell
+$env:SUPABASE_DB_URL = "postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:5432/postgres"
+$env:GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+```
+
+If using OpenAI embeddings locally:
+
+```powershell
+$env:SUPABASE_DB_URL = "postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:5432/postgres"
+$env:OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "openai"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "text-embedding-3-small"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+```
+
+Notes:
+
+- `SUPABASE_DB_URL` should point to the same Supabase Postgres database where you already applied `knowledge_vector.sql`
+- these env vars are needed **locally** because the script runs locally
+- `source_url` is optional; if you only have a local file, you can leave it empty
+- `storage_path` is optional; it matters only if you keep originals in Supabase Storage or another bucket
+
+### Step 3: Create a temporary Python ingestion script
+
+Create a file in the repo root, for example:
+
+```text
+D:\Enaiapp\langchain_railway\ingest_one_document.py
+```
+
+Put this code inside:
 
 ```python
 from pathlib import Path
@@ -302,63 +351,108 @@ from pathlib import Path
 from contracts.vector_knowledge import DocumentRegistration
 from knowledge.vector_ingestion import VectorKnowledgeIngestor
 
-text_path = Path("docs_to_ingest/electricity_market_rules.md")
-text_content = text_path.read_text(encoding="utf-8")
 
-document = DocumentRegistration(
-    source_key="electricity-market-rules-2024",
-    title="Electricity Market Rules",
-    document_type="regulation",
-    issuer="GNERC",
-    language="en",
-    source_url="https://example.com/electricity-market-rules",
-    published_date="2024-07-01",
-    version_label="2024-07",
-    metadata={"country": "georgia"},
-)
+def main() -> None:
+    text_path = Path(r"D:\Enaiapp\langchain_railway\docs_to_ingest\gnerc_regulation_2024.md")
+    text_content = text_path.read_text(encoding="utf-8")
 
-ingestor = VectorKnowledgeIngestor()
-result = ingestor.ingest_text_document(
-    document=document,
-    text_content=text_content,
-    topics=["market_structure", "balancing_price"],
-)
+    document = DocumentRegistration(
+        source_key="gnerc-regulation-2024",
+        title="GNERC Regulation 2024",
+        document_type="regulation",
+        issuer="GNERC",
+        language="ka",
+        source_url=None,
+        storage_path=None,
+        published_date="2024-07-01",
+        effective_date=None,
+        version_label="2024-07",
+        metadata={
+            "country": "georgia",
+            "notes": "first pilot ingestion",
+        },
+    )
 
-print(result.model_dump())
+    ingestor = VectorKnowledgeIngestor()
+    result = ingestor.ingest_text_document(
+        document=document,
+        text_content=text_content,
+        topics=["market_structure", "balancing_price"],
+    )
+
+    print("Ingestion result:")
+    print(result.model_dump())
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-Gemini-specific environment example before running ingestion:
+What you should replace in that file:
+
+- `text_path`
+  - path to your `.md` or `.txt` file
+- `source_key`
+  - stable unique id for the document
+- `title`
+- `document_type`
+  - such as `regulation`, `law`, `report`, `order`
+- `issuer`
+- `language`
+  - `ka`, `en`, `ru`, etc.
+- `published_date`, `effective_date`, `version_label` if known
+- `topics`
+  - the most relevant topic tags for retrieval
+
+### Step 4: Run the script
+
+From PowerShell, in the repo root:
 
 ```powershell
-$env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
-$env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
-$env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+python ingest_one_document.py
 ```
 
-Gemini-specific note:
+If `python` does not work on your machine, try:
 
-- `GOOGLE_API_KEY` must already be present in the environment
-- if Gemini returns a dimension different from `VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION`, ingestion will fail fast
-- if Gemini returns a dimension different from the SQL column definition, storage will fail
+```powershell
+py ingest_one_document.py
+```
 
-So before bulk ingestion with Gemini, first test one document and confirm:
+### Step 5: Understand what the script does
 
-1. the embedding call works
-2. the returned dimension matches the env var
-3. the env var matches the SQL schema
+When you run it, the code does this:
 
-What this does:
+1. reads your local `.md` file
+2. creates a `DocumentRegistration` object
+3. normalizes the document type
+4. inserts or updates one row in `knowledge.documents`
+5. splits the text into chunks
+6. creates embeddings for those chunks
+7. inserts chunk rows into `knowledge.document_chunks`
 
-- normalizes the document type
-- inserts or updates one row in `knowledge.documents`
-- chunks the text
-- creates one embedding per chunk
-- replaces existing chunks for that document id
-- inserts chunk rows into `knowledge.document_chunks`
+### Step 6: Check the printed result
 
-### Step D: Verify data landed in the database
+If the script succeeds, it should print something like:
 
-After ingestion, verify both document-level and chunk-level rows:
+```text
+Ingestion result:
+{'document_id': '...', 'chunk_count': 12, 'embedding_dimension': 1536, 'source_key': 'gnerc-regulation-2024'}
+```
+
+What this means:
+
+- `document_id`
+  - database id of the document row
+- `chunk_count`
+  - how many chunks were created from the text
+- `embedding_dimension`
+  - should match your env var and SQL schema
+- `source_key`
+  - your document identifier
+
+### Step 7: Verify data in Supabase
+
+Run these SQL queries in Supabase:
 
 ```sql
 select id, source_key, title, document_type, issuer, language
@@ -374,15 +468,17 @@ order by created_at desc
 limit 50;
 ```
 
-To check one specific document:
+To inspect just your document:
 
 ```sql
 select d.source_key, d.title, c.chunk_index, c.section_title, left(c.text_content, 200)
 from knowledge.document_chunks c
 join knowledge.documents d on d.id = c.document_id
-where d.source_key = 'electricity-market-rules-2024'
+where d.source_key = 'gnerc-regulation-2024'
 order by c.chunk_index;
 ```
+
+If you see rows there, ingestion worked.
 
 ## Recommended First Ingestion Workflow
 
@@ -394,6 +490,42 @@ order by c.chunk_index;
 6. only then enable shadow mode
 
 This is better than bulk-loading everything first, because errors are easier to see and fix.
+
+## Common Beginner Questions
+
+### Do I need Jupyter?
+
+No.
+
+Use a normal Python file and run it from PowerShell.
+
+### Do I need to put the `.md` file inside `knowledge/`?
+
+No.
+
+Keep source documents in a separate folder such as:
+
+```text
+docs_to_ingest/
+```
+
+The `knowledge/` folder is for curated app knowledge, not raw ingestion input.
+
+### Do I need `source_url`?
+
+No.
+
+It is optional.
+
+Use it only if you want to remember the official source URL for the document.
+
+### Do I need Railway env vars for local ingestion?
+
+No.
+
+If the script runs locally, the env vars must be set locally.
+
+Railway env vars matter only when the deployed app itself performs retrieval or ingestion.
 
 ## What To Observe After Ingestion
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class VectorKnowledgeMode(str, Enum):
@@ -36,10 +36,24 @@ class VectorDocumentRecord(BaseModel):
     language: str = ""
     source_url: Optional[str] = None
     storage_path: Optional[str] = None
+    logical_key: str = ""
     effective_date: Optional[str] = None
+    effective_end_date: Optional[str] = None
     published_date: Optional[str] = None
     version_label: Optional[str] = None
+    is_latest: bool = True
+    is_active: bool = True
+    abolished: bool = False
+    supersedes_document_id: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _normalize_lifecycle(self) -> "VectorDocumentRecord":
+        if not self.logical_key.strip():
+            self.logical_key = self.source_key
+        if self.abolished and self.is_active:
+            raise ValueError("abolished documents cannot be active")
+        return self
 
 
 class VectorChunkRecord(BaseModel):
@@ -112,10 +126,24 @@ class DocumentRegistration(BaseModel):
     language: str = "en"
     source_url: Optional[str] = None
     storage_path: Optional[str] = None
+    logical_key: str = ""
     effective_date: Optional[str] = None
+    effective_end_date: Optional[str] = None
     published_date: Optional[str] = None
     version_label: Optional[str] = None
+    is_latest: bool = True
+    is_active: bool = True
+    abolished: bool = False
+    supersedes_document_id: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _normalize_lifecycle(self) -> "DocumentRegistration":
+        if not self.logical_key.strip():
+            self.logical_key = self.source_key
+        if self.abolished and self.is_active:
+            raise ValueError("abolished documents cannot be active")
+        return self
 
 
 class ChunkIngestRecord(BaseModel):

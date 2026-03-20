@@ -45,10 +45,14 @@ class KnowledgeVectorStore:
             f"""
             insert into {self.schema}.documents (
                 source_key, title, document_type, issuer, language, source_url,
-                storage_path, effective_date, published_date, version_label, metadata
+                storage_path, logical_key, effective_date, effective_end_date,
+                published_date, version_label, is_latest, is_active, abolished,
+                supersedes_document_id, metadata
             ) values (
                 :source_key, :title, :document_type, :issuer, :language, :source_url,
-                :storage_path, :effective_date, :published_date, :version_label, cast(:metadata as jsonb)
+                :storage_path, :logical_key, :effective_date, :effective_end_date,
+                :published_date, :version_label, :is_latest, :is_active, :abolished,
+                :supersedes_document_id, cast(:metadata as jsonb)
             )
             on conflict (source_key) do update set
                 title = excluded.title,
@@ -57,9 +61,15 @@ class KnowledgeVectorStore:
                 language = excluded.language,
                 source_url = excluded.source_url,
                 storage_path = excluded.storage_path,
+                logical_key = excluded.logical_key,
                 effective_date = excluded.effective_date,
+                effective_end_date = excluded.effective_end_date,
                 published_date = excluded.published_date,
                 version_label = excluded.version_label,
+                is_latest = excluded.is_latest,
+                is_active = excluded.is_active,
+                abolished = excluded.abolished,
+                supersedes_document_id = excluded.supersedes_document_id,
                 metadata = excluded.metadata,
                 updated_at = now()
             returning id::text
