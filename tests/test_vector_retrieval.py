@@ -116,8 +116,46 @@ def test_build_vector_filters_extracts_specific_boost_terms():
         query_text="What regulations and procedures are required for electricity export?",
     )
 
+    assert "electricity_export" in filters.preferred_topics
+    assert "cross_border_trade" in filters.preferred_topics
+    assert "market_structure" in filters.preferred_topics
     assert "export" in filters.boost_terms
     assert "registration" not in filters.boost_terms
+
+
+def test_build_vector_filters_bridges_transitory_trade_eligibility_topics():
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "Who is eligible to trade on the electricity exchange during the electricity market transitory model?",
+            "canonical_query_en": "Who is eligible to trade on the electricity exchange during the electricity market transitory model?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.95)]
+            ),
+            "classification": ClassificationInfo(
+                query_type=QueryType.CONCEPTUAL_DEFINITION,
+                analysis_mode=AnalysisMode.LIGHT,
+                intent="transitory_exchange_eligibility",
+                needs_clarification=False,
+                confidence=1.0,
+            ),
+            "routing": RoutingInfo(
+                preferred_path=PreferredPath.KNOWLEDGE,
+                needs_sql=False,
+                needs_knowledge=True,
+                prefer_tool=False,
+            ),
+        }
+    )
+
+    filters = build_vector_filters(
+        analysis,
+        query_text="Who is eligible to trade on the electricity exchange during the electricity market transitory model?",
+    )
+
+    assert "electricity_market_transitory_model" in filters.preferred_topics
+    assert "eligible_participants" in filters.preferred_topics
+    assert "exchange_participation" in filters.preferred_topics
+    assert "whoesale_market_participants" in filters.preferred_topics
 
 
 def test_retrieve_vector_knowledge_returns_bundle():
@@ -281,3 +319,68 @@ def test_retrieve_vector_knowledge_expands_candidate_window_when_boost_terms_exi
 
     assert bundle.chunk_count == 0
     assert captured["candidate_k"] == [24, 24]
+
+
+def test_retrieve_vector_knowledge_relaxes_similarity_for_sparse_corpus():
+    calls = []
+
+    class SparseCorpusStore:
+        def count_active_documents(self):
+            return 1
+
+        def search_chunks(self, **kwargs):
+            calls.append(kwargs["min_similarity"])
+            if kwargs["min_similarity"] >= 0.2:
+                return []
+            return [
+                VectorChunkRecord(
+                    id="chunk-export-1",
+                    document_id="doc-export-1",
+                    document_title="Electricity (Capacity) Market Rules",
+                    source_key="transitory-capacity-rules",
+                    section_title="Import and export conditions",
+                    text_content="Import and export transactions are governed by the market rules.",
+                    topics=["electricity_export", "cross_border_trade"],
+                    language="ka",
+                    similarity_score=0.14,
+                )
+            ]
+
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What regulations and procedures are required for electricity export?",
+            "canonical_query_en": "What regulations and procedures are required for electricity export?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[TopicCandidate(name=KnowledgeTopicName.GENERAL_DEFINITIONS, score=0.95)]
+            ),
+            "classification": ClassificationInfo(
+                query_type=QueryType.CONCEPTUAL_DEFINITION,
+                analysis_mode=AnalysisMode.LIGHT,
+                intent="export_rules",
+                needs_clarification=False,
+                confidence=1.0,
+            ),
+            "routing": RoutingInfo(
+                preferred_path=PreferredPath.KNOWLEDGE,
+                needs_sql=False,
+                needs_knowledge=True,
+                prefer_tool=False,
+            ),
+            "language": LanguageInfo(
+                input_language=LanguageCode.KA,
+                answer_language=LanguageCode.KA,
+            ),
+        }
+    )
+
+    bundle = retrieve_vector_knowledge(
+        "What regulations and procedures are required for electricity export?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=analysis,
+        store=SparseCorpusStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.chunk_count == 1
+    assert "electricity_export" in bundle.filters.preferred_topics
+    assert calls == [0.2, 0.2, 0.12]

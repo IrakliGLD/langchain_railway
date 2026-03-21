@@ -97,7 +97,9 @@ def _validate_embedding_length(values: List[float], *, label: str) -> None:
 
 
 def _normalize_match_text(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+    normalized = str(value or "").strip().lower()
+    normalized = re.sub(r"[_/\-]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized)
 
 
 def _candidate_retrieval_score(
@@ -201,6 +203,11 @@ class KnowledgeVectorStore:
 
     def __init__(self, schema: str = VECTOR_KNOWLEDGE_SCHEMA) -> None:
         self.schema = schema
+
+    def count_active_documents(self) -> int:
+        sql = text(f"select count(*) from {self.schema}.documents where is_active = true")
+        with _resolve_engine().begin() as conn:
+            return int(conn.execute(sql).scalar_one())
 
     def upsert_document(self, document: DocumentRegistration) -> str:
         sql = text(
