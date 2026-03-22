@@ -123,6 +123,15 @@ def _extract_bridge_topics(
     if _has_any("seller", "sellers", "supplier", "suppliers"):
         _add("balancing_electricity_sellers")
 
+    # Compound: "exchange" + "registration" → specific exchange registration topics.
+    # Must fire before the individual "registration" and "exchange" checks so that
+    # exchange-specific topics appear first in the priority list.
+    if _has_any("exchange") and _has_any("registration", "register"):
+        _add("participant_registration")
+        _add("exchange_registration")
+        _add("exchange_participation")
+        _add("exchange_rules")
+
     if _has_any(
         "eligible",
         "eligibility",
@@ -189,6 +198,15 @@ def _extract_boost_terms(
         ):
             return
         boost_terms.append(normalized_term)
+
+    # Compound: "exchange" + "registration" → specific boost terms that match
+    # the Day-Ahead/Intraday exchange document's topic_text and content.
+    if (
+        any(_normalized_text(t) in normalized for t in ("exchange",))
+        and any(_normalized_text(t) in normalized for t in ("registration", "register"))
+    ):
+        for term in ["exchange registration", "participant registration", "exchange participation"]:
+            _add(term)
 
     phrase_rules = [
         (

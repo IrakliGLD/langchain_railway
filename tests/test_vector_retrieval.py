@@ -471,3 +471,75 @@ def test_topic_overlap_boost_in_scoring():
     assert boost_match > 0.0
     assert boost_no_match == 0.0
     assert boost_match >= 0.15  # 2 topic matches → at least 0.20
+
+
+def test_build_vector_filters_compound_exchange_registration():
+    """When both 'exchange' and 'registration' appear, specific exchange
+    registration topics must be generated — not just the broad individual ones."""
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What is the registration process for the power exchange?",
+            "canonical_query_en": "What is the registration process for the power exchange?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[
+                    TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9),
+                ]
+            ),
+            "classification": ClassificationInfo(
+                query_type=QueryType.CONCEPTUAL_DEFINITION,
+                analysis_mode=AnalysisMode.LIGHT,
+                intent="exchange_registration_process",
+                needs_clarification=False,
+                confidence=1.0,
+            ),
+            "routing": RoutingInfo(
+                preferred_path=PreferredPath.KNOWLEDGE,
+                needs_sql=False,
+                needs_knowledge=True,
+                prefer_tool=False,
+            ),
+        }
+    )
+
+    filters = build_vector_filters(
+        analysis,
+        query_text="What is the registration process for the power exchange?",
+    )
+
+    # Compound topics must appear (specific to exchange registration)
+    assert "participant_registration" in filters.preferred_topics
+    assert "exchange_registration" in filters.preferred_topics
+    # Broad topics still present but ranked lower
+    assert "eligible_participants" in filters.preferred_topics
+    assert "exchange_rules" in filters.preferred_topics
+    # Compound boost terms
+    assert "exchange registration" in filters.boost_terms
+    assert "participant registration" in filters.boost_terms
+
+
+def test_build_vector_filters_plain_registration_no_compound_topics():
+    """When only 'registration' appears without 'exchange', compound
+    exchange topics should NOT be generated."""
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What is the wholesale registration process?",
+            "canonical_query_en": "What is the wholesale registration process?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[
+                    TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9),
+                ]
+            ),
+        }
+    )
+
+    filters = build_vector_filters(
+        analysis,
+        query_text="What is the wholesale registration process?",
+    )
+
+    # No compound exchange topics
+    assert "participant_registration" not in filters.preferred_topics
+    assert "exchange_registration" not in filters.preferred_topics
+    # Broad registration topics present
+    assert "eligible_participants" in filters.preferred_topics
+    assert "wholesale_market_participants" in filters.preferred_topics

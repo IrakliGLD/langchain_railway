@@ -288,6 +288,10 @@ def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
 
     monkeypatch.setattr(main_module, "process_query", fake_process_query)
     monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    # Override the already-captured config constants so the test is deterministic
+    # regardless of shell env or module import ordering.
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
 
     client = TestClient(main_module.app)
 
@@ -308,7 +312,9 @@ def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
     assert unauthorized.status_code == 401
 
 
-def test_evaluate_rejects_gateway_secret():
+def test_evaluate_rejects_gateway_secret(monkeypatch):
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
     client = TestClient(main_module.app)
     response = client.get("/evaluate", headers={"X-App-Key": "test-gateway-key"})
     assert response.status_code == 401
