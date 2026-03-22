@@ -83,47 +83,6 @@ def detect_analysis_mode(user_query: str) -> str:
     return "light"
 
 
-def llm_analyze_with_domain_knowledge(user_query: str, lang_instruction: str) -> str:
-    """First LLM call: Pure reasoning using domain knowledge.
-    Forces the model to think like an energy analyst BEFORE writing SQL.
-    """
-    cache_input = f"domain_reasoning|{user_query}|{lang_instruction}"
-    cached_response = llm_cache.get(cache_input)
-    if cached_response:
-        log.info("Domain Reasoning: (cached)")
-        return cached_response
-
-    system = (
-        "You are a senior energy market analyst for Georgia. "
-        "Interpret the user's question using ONLY the domain knowledge. "
-        "Do not write SQL. Do not mention tables. "
-        "Answer in 3 parts: "
-        "1. Intent: What is the user asking? (e.g., price trend, share, driver) "
-        "2. Key Concepts: List domain concepts involved "
-        "3. Reasoning: Explain using domain knowledge "
-        f"{lang_instruction}"
-    )
-    domain_json = get_relevant_domain_knowledge(user_query, use_cache=False)
-    prompt = f"""
-User question: {user_query}
-
-Domain Knowledge:
-{domain_json}
-
-Respond in structured text only.
-"""
-    try:
-        llm = make_gemini()
-        response = llm.invoke([("system", system), ("user", prompt)]).content.strip()
-        log.info(f"Domain Reasoning:\n{response}")
-        llm_cache.set(cache_input, response)
-        return response
-    except Exception as e:
-        log.warning(f"Domain reasoning failed: {e}. Using fallback.")
-        fallback = "Intent: general\nKey Concepts: balancing price\nReasoning: Use xrate and entity shares from trade_derived_entities."
-        llm_cache.set(cache_input, fallback)
-        return fallback
-
 
 def _extract_plan_and_sql(combined_output: str) -> tuple[dict, str]:
     separator = "---SQL---"
