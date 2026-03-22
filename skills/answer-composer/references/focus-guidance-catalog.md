@@ -102,3 +102,18 @@ When analyzing energy security:
 - Correct: "Winter import dependence includes direct electricity imports AND thermal generation using imported gas"
 - Wrong: "Georgia is self-sufficient when using thermal plants"
 - Use `tech_quantity_view` for analysis: sum thermal + import as import-dependent; sum hydro + wind + solar as local; calculate local_share = local / (local + import_dependent)
+
+## Focus: Regulation
+
+**Trigger**: vector-retrieved chunks have document_type in {regulation, law, order}
+
+- Treat EXTERNAL_SOURCE_PASSAGES as the authoritative primary source
+- Structure the answer following the source document's own structure:
+  - For procedures/registration: numbered steps or sequential requirements
+  - For eligibility rules: list ALL conditions; preserve "all of" vs "any of" distinctions
+  - For definitions: preserve exact legal terminology, then explain in plain language
+- Cite article/section numbers (მუხლი, პუნქტი, etc.) when present in source
+- Preserve regulatory language from source — do not paraphrase legal terms loosely
+- If source passages are incomplete for the requested detail, say so explicitly rather than filling gaps from general knowledge
+- Use DOMAIN_KNOWLEDGE as background context only — do not let it override regulatory details from source passages
+- Length: adapt to content complexity (100-600 words); regulatory procedures may need more space than definitions

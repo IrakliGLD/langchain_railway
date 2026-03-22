@@ -378,6 +378,8 @@ def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], 
     total_chars = len(parts[0])
     for idx, chunk in enumerate(bundle.chunks, start=1):
         header = f"[{idx}] {chunk.document_title or chunk.source_key}"
+        if chunk.document_type:
+            header += f" | type: {chunk.document_type}"
         if chunk.section_title:
             header += f" | section: {chunk.section_title}"
         if chunk.page_start is not None:

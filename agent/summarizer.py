@@ -582,6 +582,8 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             conversation_history=ctx.conversation_history,
             domain_knowledge=domain_knowledge_for_summary,
             vector_knowledge=vector_knowledge,
+            question_analysis=ctx.question_analysis,
+            vector_knowledge_bundle=ctx.vector_knowledge,
         )
         ctx.summary = envelope.answer
         ctx.summary_source = "structured_conceptual_summary"
@@ -661,6 +663,8 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 conversation_history=ctx.conversation_history,
                 domain_knowledge=domain_knowledge,
                 vector_knowledge=vector_knowledge,
+                question_analysis=ctx.question_analysis,
+                vector_knowledge_bundle=ctx.vector_knowledge,
             )
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True
@@ -675,6 +679,8 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                     strict_grounding=True,
                     domain_knowledge=domain_knowledge,
                     vector_knowledge=vector_knowledge,
+                    question_analysis=ctx.question_analysis,
+                    vector_knowledge_bundle=ctx.vector_knowledge,
                 )
                 if not _is_summary_grounded(envelope, ctx):
                     metrics.log_summary_grounding_failure()

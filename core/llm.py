@@ -13,8 +13,11 @@ import json
 import hashlib
 import logging
 import time
-from typing import Optional, List
+from typing import TYPE_CHECKING, Optional, List
 import re
+
+if TYPE_CHECKING:
+    from contracts.vector_knowledge import VectorKnowledgeBundle
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -1814,6 +1817,8 @@ def llm_summarize_structured(
     strict_grounding: bool = False,
     domain_knowledge: str = "",
     vector_knowledge: str = "",
+    question_analysis: Optional["QuestionAnalysis"] = None,
+    vector_knowledge_bundle: Optional["VectorKnowledgeBundle"] = None,
 ) -> SummaryEnvelope:
     """Generate strict JSON summary for guardrail validation."""
     history_str = ""
@@ -1828,10 +1833,16 @@ def llm_summarize_structured(
         history_str = "\n\n".join(parts)
     domain_knowledge = str(domain_knowledge or "")
     vector_knowledge = str(vector_knowledge or "")
+    qa_type = question_analysis.classification.query_type.value if question_analysis else "none"
+    vk_doc_types = (
+        ",".join(sorted({c.document_type for c in vector_knowledge_bundle.chunks if c.document_type}))
+        if vector_knowledge_bundle and vector_knowledge_bundle.chunks
+        else "none"
+    )
     cache_input = (
         f"summary_structured_v5|{user_query}|{data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
-        f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}"
+        f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|vk={vk_doc_types}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -1855,8 +1866,19 @@ def llm_summarize_structured(
 
     # --- Skill-enriched prompt (Phase 3) ---
     if ENABLE_SKILL_PROMPTS_SUMMARIZER:
-        query_type = classify_query_type(user_query)
+        # Template selection: prefer LLM classification, fall back to heuristic
+        if question_analysis is not None:
+            query_type = question_analysis.classification.query_type.value
+        else:
+            query_type = classify_query_type(user_query)
+
+        # Focus selection: prefer vector-chunk document_type, fall back to heuristic
         query_focus = get_query_focus(user_query)
+        if query_focus == "general" and vector_knowledge_bundle and vector_knowledge_bundle.chunks:
+            doc_types = {c.document_type for c in vector_knowledge_bundle.chunks if c.document_type}
+            if doc_types & {"regulation", "law", "order"}:
+                query_focus = "regulation"
+
         query_lower = user_query.lower()
 
         # Build enriched system prompt

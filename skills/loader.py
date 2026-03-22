@@ -58,14 +58,26 @@ def load_reference(skill_name: str, ref_name: str) -> str:
 # Answer template selection
 # ---------------------------------------------------------------------------
 
-# Maps classify_query_type() return values → section headers in answer-templates.md
+# Maps query-type strings → section headers in answer-templates.md.
+# Keys include both heuristic classify_query_type() values and LLM
+# QuestionAnalysis.classification.query_type enum values so the same
+# lookup works regardless of the classification source.
 _QUERY_TYPE_TO_TEMPLATE_SECTION: dict[str, str] = {
+    # Heuristic classify_query_type() values (fallback)
     "single_value": "## Template: factual_lookup / single_value",
     "list": "## Template: data_retrieval / list",
     "comparison": "## Template: comparison",
     "trend": "## Template: data_explanation / driver analysis",
     "table": "## Template: data_retrieval / list",
     "unknown": "## Template: data_explanation / driver analysis",
+    # LLM QueryType enum values (primary when QuestionAnalysis available)
+    "conceptual_definition": "## Template: conceptual_definition",
+    "factual_lookup": "## Template: factual_lookup / single_value",
+    "data_retrieval": "## Template: data_retrieval / list",
+    "data_explanation": "## Template: data_explanation / driver analysis",
+    "forecast": "## Template: forecast",
+    # "comparison" already mapped above; "ambiguous"/"unsupported" intentionally
+    # omitted so they fall through to the full template file.
 }
 
 
@@ -73,8 +85,11 @@ def get_answer_template(query_type: str) -> str:
     """Extract the answer template section for a query type.
 
     Args:
-        query_type: Return value from classify_query_type()
-            (single_value, list, comparison, trend, table, unknown)
+        query_type: Either a heuristic classify_query_type() value
+            (single_value, list, comparison, trend, table, unknown) or an
+            LLM QuestionAnalysis.classification.query_type enum value
+            (conceptual_definition, factual_lookup, data_retrieval,
+            data_explanation, comparison, forecast, ambiguous, unsupported).
 
     Returns:
         The matching template section text, or the full file if no match.
@@ -94,13 +109,16 @@ def get_answer_template(query_type: str) -> str:
 # Focus-specific guidance
 # ---------------------------------------------------------------------------
 
-# Maps get_query_focus() return values → section headers in focus-guidance-catalog.md
+# Maps query-focus strings → section headers in focus-guidance-catalog.md.
+# Values come from heuristic get_query_focus() or from vector-chunk
+# document_type metadata (e.g. "regulation").
 _FOCUS_TO_CATALOG_SECTION: dict[str, str] = {
     "balancing": "## Focus: Balancing",
     "tariff": "## Focus: Tariff",
     "cpi": "## Focus: CPI / Inflation",
     "generation": "## Focus: Generation",
     "trade": "## Focus: Generation",  # trade uses generation guidance
+    "regulation": "## Focus: Regulation",
     "general": "",  # no focus-specific section; always-rules still apply
 }
 
