@@ -1899,10 +1899,16 @@ def llm_summarize_structured(
         if focus_guidance:
             guidance_parts.append(focus_guidance)
 
-        # Answer template for this query type
-        answer_template = get_answer_template(query_type)
-        if answer_template:
-            guidance_parts.append(f"ANSWER STRUCTURE FOR THIS QUERY:\n{answer_template}")
+        # Answer template for this query type.
+        # Skip the generic template when a focus-specific section already
+        # provides complete structural guidance (e.g. regulation focus has
+        # its own length/structure rules that would conflict with the
+        # generic conceptual_definition "100-300 words / 2-3 sentences").
+        _FOCUS_WITH_OWN_STRUCTURE = {"regulation"}
+        if query_focus not in _FOCUS_WITH_OWN_STRUCTURE:
+            answer_template = get_answer_template(query_type)
+            if answer_template:
+                guidance_parts.append(f"ANSWER STRUCTURE FOR THIS QUERY:\n{answer_template}")
 
         # Balancing-specific: full analysis template
         if query_focus == "balancing" or any(k in query_lower for k in ["balancing", "p_bal", "საბალანსო", "баланс"]):
