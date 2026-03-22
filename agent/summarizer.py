@@ -102,7 +102,7 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
 
     matched = sum(1 for t in answer_tokens if t in source_tokens)
     match_ratio = matched / max(1, len(answer_tokens))
-    return match_ratio >= 0.7
+    return match_ratio >= 0.9
 
 
 def _serialize_scalar(value: Any) -> Any:
@@ -697,29 +697,14 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True
                 metrics.log_summary_grounding_failure()
-                log.warning("Summary grounding check failed; retrying with strict grounding.")
-                envelope = llm_summarize_structured(
-                    ctx.query,
-                    ctx.preview,
-                    ctx.stats_hint,
-                    ctx.lang_instruction,
-                    conversation_history=ctx.conversation_history,
-                    strict_grounding=True,
-                    domain_knowledge=domain_knowledge,
-                    vector_knowledge=vector_knowledge,
-                    question_analysis=ctx.question_analysis,
-                    vector_knowledge_bundle=ctx.vector_knowledge,
+                log.warning("Summary grounding check failed; using conservative fallback answer.")
+                envelope = SummaryEnvelope(
+                    answer="I could not fully ground a detailed narrative from the provided data preview. "
+                    "Please refine the query or narrow the period for a more precise grounded answer.",
+                    claims=[],
+                    citations=["guardrail_grounding_fallback"],
+                    confidence=0.2,
                 )
-                if not _is_summary_grounded(envelope, ctx):
-                    metrics.log_summary_grounding_failure()
-                    log.warning("Strict grounding retry still failed; using conservative fallback answer.")
-                    envelope = SummaryEnvelope(
-                        answer="I could not fully ground a detailed narrative from the provided data preview. "
-                        "Please refine the query or narrow the period for a more precise grounded answer.",
-                        claims=[],
-                        citations=["guardrail_grounding_fallback"],
-                        confidence=0.2,
-                    )
 
             ctx.summary = envelope.answer
             ctx.summary_source = (

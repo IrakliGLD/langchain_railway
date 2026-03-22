@@ -1010,6 +1010,13 @@ def enrich(ctx: QueryContext) -> QueryContext:
         except Exception as _e:
             log.warning(f"'Why' reasoning context build failed: {_e}")
 
+    # --- Analyst-mode derived metrics (MoM/YoY without full causal context) ---
+    elif not ctx.df.empty and _needs_standalone_analysis(ctx):
+        try:
+            _build_standalone_analysis_evidence(ctx)
+        except Exception as _e:
+            log.warning(f"Standalone analysis evidence build failed: {_e}")
+
     # --- Trendline detection ---
     trend_keywords = [
         "trend", "ტრენდი", "тренд", "trending", "forecast", "პროგნოზი", "прогноз",
@@ -1046,6 +1053,97 @@ def enrich(ctx: QueryContext) -> QueryContext:
         trendline_extend_to=ctx.trendline_extend_to or "",
     )
     return ctx
+
+
+def _prepare_timeseries_rows(
+    ctx: QueryContext,
+) -> Optional[Tuple[pd.DataFrame, str, Optional[pd.Timestamp], pd.DataFrame, Optional[pd.Timestamp], pd.DataFrame]]:
+    """Extract current/previous rows from a time-series DataFrame.
+
+    Returns ``(df, time_col, current_ts, current_row, previous_ts, previous_row)``
+    or ``None`` if the data lacks a usable time column or rows.
+    """
+    t_series_col = next(
+        (c for c in ctx.df.columns if any(k in c.lower() for k in ["date", "year", "month"])),
+        None,
+    )
+    if not t_series_col:
+        return None
+
+    df = ctx.df.copy()
+    df[t_series_col] = pd.to_datetime(df[t_series_col], errors="coerce")
+    df = df.dropna(subset=[t_series_col]).sort_values(t_series_col)
+    if df.empty:
+        return None
+
+    # Resolve target period from the query text.
+    years = [int(y) for y in re.findall(r"(20\d{2})", ctx.query)]
+    mon = _month_from_text(ctx.query.lower())
+    if mon is None and ctx.question_analysis is not None:
+        canonical = getattr(ctx.question_analysis, "canonical_query_en", "") or ""
+        if canonical.strip():
+            mon = _month_from_text(canonical.lower())
+    target_period = pd.Timestamp(years[0], mon or 1, 1) if years else df[t_series_col].iloc[-1]
+
+    cur_row = df.loc[df[t_series_col] == target_period]
+    if cur_row.empty:
+        cur_row = df[df[t_series_col] <= target_period].tail(1)
+    if cur_row.empty:
+        return None
+
+    current_ts = pd.to_datetime(cur_row[t_series_col].iloc[0], errors="coerce")
+    prev_row = df[df[t_series_col] < cur_row[t_series_col].iloc[0]].tail(1)
+    previous_ts = pd.to_datetime(prev_row[t_series_col].iloc[0], errors="coerce") if not prev_row.empty else None
+
+    return df, t_series_col, current_ts, cur_row, previous_ts, prev_row
+
+
+def _needs_standalone_analysis(ctx: QueryContext) -> bool:
+    """Return True when derived metrics should be computed outside why-mode."""
+    qa = ctx.question_analysis
+    if qa is None:
+        return False
+    if qa.analysis_requirements.derived_metrics:
+        return True
+    if qa.classification.analysis_mode.value == "analyst":
+        return True
+    return False
+
+
+def _build_standalone_analysis_evidence(ctx: QueryContext) -> None:
+    """Compute derived metrics (MoM/YoY) for non-why analyst-mode queries.
+
+    Populates ``ctx.analysis_evidence`` and appends the evidence block to
+    ``ctx.stats_hint`` so that computed values enter the grounding corpus.
+    """
+    setup = _prepare_timeseries_rows(ctx)
+    if setup is None:
+        return
+    df, time_col, current_ts, current_row, previous_ts, previous_row = setup
+    evidence_df = _build_requested_analysis_evidence(
+        ctx, df, time_col, current_ts, current_row,
+        previous_ts, previous_row,
+        cur_shares={}, prev_shares={},
+    )
+    if evidence_df.empty:
+        return
+    ctx.analysis_evidence = evidence_df.to_dict(orient="records")
+    ctx.stats_hint += (
+        "\n\n--- DERIVED ANALYSIS EVIDENCE (TOP 12) ---\n"
+        + json.dumps(ctx.analysis_evidence[:12], default=str, indent=2)
+    )
+    # Stamp provenance so the grounding corpus includes derived values.
+    stamp_provenance(
+        ctx,
+        list(evidence_df.columns),
+        [tuple(r) for r in evidence_df.itertuples(index=False, name=None)],
+        source=str(ctx.provenance_source or "sql"),
+        query_hash=sql_query_hash(f"{ctx.query}|analysis_evidence"),
+    )
+    log.info(
+        "Standalone analysis evidence (%d records) attached to stats_hint.",
+        len(ctx.analysis_evidence),
+    )
 
 
 def _build_why_context(ctx: QueryContext) -> None:

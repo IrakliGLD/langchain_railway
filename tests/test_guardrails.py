@@ -175,24 +175,16 @@ def test_sql_executor_hard_relevance_block_skips_execution(monkeypatch):
     assert out.cols == []
 
 
-def test_summarizer_retries_with_strict_grounding(monkeypatch):
+def test_summarizer_falls_back_when_grounding_fails(monkeypatch):
     calls = {"count": 0}
 
     def _fake_structured(*_args, **kwargs):
         calls["count"] += 1
-        strict = bool(kwargs.get("strict_grounding", False))
-        if not strict:
-            return SummaryEnvelope(
-                answer="Balancing price reached 9999 GEL/MWh.",
-                claims=["9999 GEL/MWh in latest month"],
-                citations=["data_preview"],
-                confidence=0.9,
-            )
         return SummaryEnvelope(
-            answer="Balancing price reached 10.0 GEL/MWh.",
-            claims=["10.0 GEL/MWh in latest month"],
+            answer="Balancing price reached 9999 GEL/MWh.",
+            claims=["9999 GEL/MWh in latest month"],
             citations=["data_preview"],
-            confidence=0.8,
+            confidence=0.9,
         )
 
     monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
@@ -205,9 +197,10 @@ def test_summarizer_retries_with_strict_grounding(monkeypatch):
     )
     out = summarizer.summarize_data(ctx)
 
-    assert "10.0" in out.summary
-    assert calls["count"] == 2
-    assert out.summary_confidence == pytest.approx(0.8, rel=1e-6)
+    # Grounding fails (9999 not in source) → direct fallback, no strict retry
+    assert calls["count"] == 1
+    assert "guardrail_grounding_fallback" in out.summary_citations
+    assert out.summary_confidence == pytest.approx(0.2, rel=1e-6)
 
 
 def test_grounding_token_normalization_handles_large_and_decimal_values():
@@ -891,6 +884,114 @@ def test_derived_analysis_evidence_supports_alias_columns_and_llm_numeric_claims
     assert any(0.2972 in [value for value in row if isinstance(value, float)] for row in enriched.provenance_rows)
     assert out.summary_provenance_gate_passed is True
     assert "citation-grade grounding" not in out.summary
+
+
+def test_standalone_analysis_evidence_for_analyst_mode(monkeypatch):
+    """Analyst-mode queries without 'why' keywords still get derived metrics."""
+
+    class _Conn:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": "Calculate monthly market compensation",
+            "canonical_query_en": "Calculate monthly market compensation",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "data_retrieval",
+                "analysis_mode": "analyst",
+                "intent": "calculate_compensation",
+                "needs_clarification": False,
+                "confidence": 0.9,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "tool",
+                "needs_sql": False,
+                "needs_knowledge": False,
+                "prefer_tool": True,
+            },
+            "knowledge": {"candidate_topics": []},
+            "tooling": {"candidate_tools": [{"name": "get_prices", "score": 0.95}]},
+            "sql_hints": {
+                "metric": "p_bal_gel",
+                "entities": [],
+                "aggregation": "monthly",
+                "dimensions": ["price"],
+                "period": {
+                    "kind": "range",
+                    "start_date": "2024-08-01",
+                    "end_date": "2024-09-30",
+                    "granularity": "month",
+                    "raw_text": "Aug 2024 to Sep 2024",
+                },
+            },
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.5,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_trend_context": False,
+                "needs_correlation_context": False,
+                "derived_metrics": [
+                    {"metric_name": "mom_absolute_change", "metric": "p_bal_gel"},
+                    {"metric_name": "mom_percent_change", "metric": "p_bal_gel"},
+                ],
+            },
+        }
+    )
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(analyzer, "_is_balancing_price_query", lambda *_args, **_kwargs: False)
+
+    ctx = QueryContext(
+        query="Calculate monthly market compensation",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        plan={"intent": "general"},
+        df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-08-01"), pd.Timestamp("2024-09-01")],
+                "p_bal_gel": [140.0, 150.0],
+            }
+        ),
+        cols=["date", "p_bal_gel"],
+        rows=[
+            (pd.Timestamp("2024-08-01"), 140.0),
+            (pd.Timestamp("2024-09-01"), 150.0),
+        ],
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[
+            (pd.Timestamp("2024-08-01"), 140.0),
+            (pd.Timestamp("2024-09-01"), 150.0),
+        ],
+        provenance_query_hash="calc-test-123",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+
+    # Derived evidence should be populated by standalone path (not why-mode)
+    assert enriched.analysis_evidence
+    assert any(
+        item["derived_metric_name"] == "mom_absolute_change"
+        and item["metric"] == "p_bal_gel"
+        and item["absolute_change"] == pytest.approx(10.0, rel=1e-6)
+        for item in enriched.analysis_evidence
+    )
+    assert "DERIVED ANALYSIS EVIDENCE" in enriched.stats_hint
 
 
 def test_why_context_includes_yoy_signals(monkeypatch):
