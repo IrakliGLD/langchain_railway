@@ -704,10 +704,20 @@ def _extract_forecast_horizon(query: str) -> int:
 
 
 def _month_from_text(s: str) -> Optional[int]:
-    months = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-              "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+    months = {
+        # English
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        # Georgian (prefix-matched)
+        "იანვ": 1, "თებ": 2, "მარტ": 3, "აპრ": 4, "მაის": 5, "ივნ": 6,
+        "ივლ": 7, "აგვ": 8, "სექტ": 9, "ოქტ": 10, "ნოემ": 11, "დეკ": 12,
+        # Russian (prefix-matched)
+        "янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "май": 5, "июн": 6,
+        "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+    }
+    s_lower = s.lower()
     for k, v in months.items():
-        if k in s:
+        if k in s_lower:
             return v
     return None
 
@@ -1052,6 +1062,11 @@ def _build_why_context(ctx: QueryContext) -> None:
 
     years = [int(y) for y in re.findall(r"(20\d{2})", ctx.query)]
     mon = _month_from_text(ctx.query.lower())
+    # Fallback: try English canonical query from analyzer
+    if mon is None and ctx.question_analysis is not None:
+        canonical = getattr(ctx.question_analysis, "canonical_query_en", "") or ""
+        if canonical.strip():
+            mon = _month_from_text(canonical.lower())
     target_period = pd.Timestamp(years[0], mon or 1, 1) if years else df[t_series_col].iloc[-1]
 
     cur_row = df.loc[df[t_series_col] == target_period]
