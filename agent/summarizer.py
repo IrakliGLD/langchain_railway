@@ -445,6 +445,28 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
     )
 
 
+def _extract_preferred_topics(ctx: QueryContext) -> Optional[List[str]]:
+    """Extract preferred topic names from question analysis if active.
+
+    Returns the top 3 topics with score >= 0.25, or None if the analyzer
+    is not active.  Used by both answer_conceptual() and summarize_data()
+    to drive domain-knowledge selection via the analyzer instead of the
+    keyword-based TOPIC_MAP.
+    """
+    if (
+        ctx.question_analysis is not None
+        and ctx.question_analysis_source == "llm_active"
+    ):
+        ranked = sorted(
+            ctx.question_analysis.knowledge.candidate_topics,
+            key=lambda c: c.score,
+            reverse=True,
+        )
+        topics = [c.name.value for c in ranked if c.score >= 0.25][:3]
+        return topics or None
+    return None
+
+
 def answer_conceptual(ctx: QueryContext) -> QueryContext:
     """Generate an answer for conceptual/definitional questions (no SQL).
 
@@ -457,18 +479,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         if analyzer_active and ctx.question_analysis is not None
         else ctx.query
     )
-    preferred_topics = None
-    if analyzer_active and ctx.question_analysis is not None:
-        ranked_topics = sorted(
-            ctx.question_analysis.knowledge.candidate_topics,
-            key=lambda candidate: candidate.score,
-            reverse=True,
-        )
-        preferred_topics = [
-            candidate.name.value
-            for candidate in ranked_topics
-            if candidate.score >= 0.25
-        ][:3]
+    preferred_topics = _extract_preferred_topics(ctx)
     vector_evidence_active = bool(
         ctx.vector_knowledge is not None
         and ctx.vector_knowledge_source == "vector_active"
@@ -577,6 +588,9 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
 
     vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active else ""
     domain_knowledge_for_summary = domain_knowledge
+    if vector_evidence_active and len(domain_knowledge_for_summary) > 4000:
+        domain_knowledge_for_summary = domain_knowledge_for_summary[:4000]
+        log.info("Capped domain_knowledge to 4000 chars (vector evidence is primary)")
     try:
         envelope = llm_summarize_structured(
             ctx.query,
@@ -651,7 +665,12 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         query_type = classify_query_type(ctx.query)
         domain_knowledge = ""
         if query_type not in ("single_value", "list"):
-            domain_knowledge = get_relevant_domain_knowledge(ctx.query, use_cache=False)
+            preferred_topics = _extract_preferred_topics(ctx)
+            domain_knowledge = get_relevant_domain_knowledge(
+                ctx.query, use_cache=False, preferred_topics=preferred_topics,
+            )
+            if preferred_topics:
+                log.info("Using analyzer topics for data summary domain knowledge: %s", preferred_topics)
         vector_knowledge = (
             ctx.vector_knowledge_prompt
             if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"

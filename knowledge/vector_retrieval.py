@@ -6,6 +6,7 @@ import os
 import re
 from typing import TYPE_CHECKING, Optional
 
+from config import ANALYZER_TOPIC_MIN_SCORE
 from contracts.question_analysis import QuestionAnalysis
 from contracts.vector_knowledge import (
     RetrievalStrategy,
@@ -230,7 +231,7 @@ def build_vector_filters(
             key=lambda candidate: candidate.score,
             reverse=True,
         )
-        if candidate.score >= 0.2
+        if candidate.score >= ANALYZER_TOPIC_MIN_SCORE
     ][:4]
     bridge_topics = _extract_bridge_topics(query_text, question_analysis)
     topics: list[str] = []

@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -92,7 +93,7 @@ def get_answer_template(query_type: str) -> str:
             data_explanation, comparison, forecast, ambiguous, unsupported).
 
     Returns:
-        The matching template section text, or the full file if no match.
+        The matching template section text, or a safe default if no match.
     """
     full_text = load_reference("answer-composer", "answer-templates.md")
     if not full_text:
@@ -100,7 +101,7 @@ def get_answer_template(query_type: str) -> str:
 
     section_header = _QUERY_TYPE_TO_TEMPLATE_SECTION.get(query_type, "")
     if not section_header:
-        return full_text
+        return "Answer the question clearly and concisely. Use structured formatting where appropriate."
 
     return _extract_section(full_text, section_header)
 
@@ -247,6 +248,36 @@ def warmup_cache() -> None:
     for skill, ref in _EXPECTED_FILES:
         load_reference(skill, ref)
     log.info("Skill reference cache warmed: %d files loaded.", len(_cache))
+
+
+# ---------------------------------------------------------------------------
+# Content hash for cache-busting
+# ---------------------------------------------------------------------------
+
+_content_hash: str = ""
+
+
+def get_skills_content_hash() -> str:
+    """Return a short hash of all cached skill file contents.
+
+    Useful for including in LLM cache keys so that editing a skill
+    reference file automatically invalidates stale cached responses.
+    The hash is computed once (after warmup or on first call) and
+    then memoised for the process lifetime.
+    """
+    global _content_hash
+    if _content_hash:
+        return _content_hash
+
+    # Ensure files are loaded
+    if not _cache:
+        warmup_cache()
+
+    h = hashlib.sha256()
+    for key in sorted(_cache):
+        h.update(_cache[key].encode("utf-8"))
+    _content_hash = h.hexdigest()[:12]
+    return _content_hash
 
 
 # ---------------------------------------------------------------------------

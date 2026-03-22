@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 _TZ_GEORGIA = ZoneInfo("Asia/Tbilisi")
 
 from agent.tools.types import ToolInvocation
-from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_MIN_SCORE
+from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_GAP_THRESHOLD, ROUTER_SEMANTIC_MIN_SCORE
 
 # Populated by _semantic_match_tool on each call so pipeline.py can
 # include scores in the miss-detail trace event.
@@ -180,7 +180,7 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date: 
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
     if top_score < ROUTER_SEMANTIC_MIN_SCORE:
         return None
-    if (top_score - second_score) < 0.08:
+    if (top_score - second_score) < ROUTER_SEMANTIC_GAP_THRESHOLD:
         return None
     return _build_semantic_invocation(top_tool, query_lower, start_date, end_date, top_score)
 

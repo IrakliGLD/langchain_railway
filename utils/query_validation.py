@@ -11,6 +11,8 @@ import logging
 import re
 from typing import Tuple, Set, Optional
 
+from config import TOOL_RELEVANCE_OVERLAP_THRESHOLD
+
 log = logging.getLogger("Enai")
 
 
@@ -225,7 +227,7 @@ def validate_sql_relevance(
     query: str,
     sql: str,
     plan: dict,
-    min_overlap: float = 0.3
+    min_overlap: float = TOOL_RELEVANCE_OVERLAP_THRESHOLD
 ) -> Tuple[bool, str, bool]:
     """
     Validate if SQL query is relevant to user's question.
@@ -349,7 +351,7 @@ def should_skip_sql_execution(
     return False, "Data query - SQL needed"
 
 
-def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = 0.3) -> Tuple[bool, str]:
+def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = TOOL_RELEVANCE_OVERLAP_THRESHOLD) -> Tuple[bool, str]:
     """Validate if selected typed tool is relevant to the query topics."""
     query_topics = extract_query_topics(query)
     if not query_topics:

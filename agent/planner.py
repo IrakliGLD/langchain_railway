@@ -362,7 +362,7 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
 # -----------------------------------------------------------------------
 
 # Minimum score on the top tool candidate for the analyzer to drive routing.
-_ANALYZER_TOOL_MIN_SCORE = 0.55
+from config import ANALYZER_TOOL_MIN_SCORE as _ANALYZER_TOOL_MIN_SCORE
 
 
 def build_tool_invocation_from_analysis(

@@ -18,6 +18,7 @@ import time
 import pandas as pd
 
 from config import (
+    ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
     ENABLE_AGENT_LOOP,
     ENABLE_TYPED_TOOLS,
     ENABLE_QUESTION_ANALYZER_HINTS,
@@ -194,7 +195,7 @@ def process_query(
             if ENABLE_QUESTION_ANALYZER_HINTS:
                 if analyzer_conceptual:
                     ctx.is_conceptual = True
-                elif qa_conf >= 0.8 and (
+                elif qa_conf >= ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD and (
                     qa_path in ("tool", "sql")
                     or qa_type in _DATA_QUERY_TYPES
                 ):
@@ -245,7 +246,7 @@ def process_query(
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
         ctx.vector_knowledge_error = bundle.error
-        ctx.vector_knowledge_prompt = format_vector_knowledge_for_prompt(bundle)
+        ctx.vector_knowledge_prompt = format_vector_knowledge_for_prompt(bundle) if not bundle.error else ""
         top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
         top_sections = [
             f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"

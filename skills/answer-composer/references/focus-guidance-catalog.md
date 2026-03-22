@@ -13,11 +13,6 @@ Declarative guidance blocks keyed by query focus area for the summarizer stage. 
 6. Only discuss balancing price if explicitly asked or if query contains balancing price keywords
 7. For analytical queries: provide DETAILED, STRUCTURED answers. For simple lookups: 1-2 sentences is sufficient
 
-### Column name prohibition
-NEVER use raw database column names in your answer.
-- Wrong: "share_hydro increased", "p_bal_gel rose", "tariff_gel changed"
-- Correct: "hydro generation share increased", "balancing price in GEL rose", "tariff in GEL changed"
-
 ### Seasonal-adjusted trend analysis (when stats_hint contains "SEASONAL-ADJUSTED TREND ANALYSIS")
 
 These pre-calculated statistics are AUTHORITATIVE — use them directly instead of raw data patterns.
