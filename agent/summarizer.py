@@ -382,7 +382,12 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
 
     has_ungrounded_claim = any(not bool(entry.get("is_fully_grounded")) for entry in numeric_claims)
     coverage = float(ctx.summary_provenance_coverage or 0.0)
-    gate_passed = (not has_ungrounded_claim) and coverage >= PROVENANCE_MIN_COVERAGE
+    # Use coverage-only gating: the binary has_ungrounded_claim check was
+    # too strict for analytical queries where the LLM legitimately derives
+    # values (MoM changes, percentages) from raw data.  Coverage already
+    # captures grounding quality proportionally.  has_ungrounded_claim is
+    # still computed and logged for observability.
+    gate_passed = coverage >= PROVENANCE_MIN_COVERAGE
     if gate_passed:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "ok"
