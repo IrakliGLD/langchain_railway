@@ -904,7 +904,19 @@ def ask_post(
         nonlocal request_llm_telemetry
         if request_llm_telemetry is None:
             request_llm_telemetry = metrics.finalize_request_telemetry()
-        response.headers["X-LLM-Total-Tokens"] = str(request_llm_telemetry.get("total_tokens", 0))
+        total = request_llm_telemetry.get("total_tokens", 0)
+        if total > 0:
+            log.info(
+                "LLM usage: calls=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cost_usd=%.6f models=%s trace_id=%s",
+                request_llm_telemetry.get("llm_calls", 0),
+                request_llm_telemetry.get("prompt_tokens", 0),
+                request_llm_telemetry.get("completion_tokens", 0),
+                total,
+                request_llm_telemetry.get("estimated_cost_usd", 0.0),
+                ",".join(request_llm_telemetry.get("models", {}).keys()),
+                request_llm_telemetry.get("trace_id", ""),
+            )
+        response.headers["X-LLM-Total-Tokens"] = str(total)
         response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
         return request_llm_telemetry
 
