@@ -117,7 +117,8 @@ def test_search_chunks_pushes_filters_into_sql(monkeypatch):
     )
 
     sql = captured["sql"].lower()
-    assert "jsonb_array_elements_text" in sql
+    # preferred_topics are now a soft scoring boost, NOT a hard SQL filter
+    assert "jsonb_array_elements_text" not in sql
     assert "c.language in" in sql
     assert "d.document_type in" in sql
     assert "d.issuer in" in sql

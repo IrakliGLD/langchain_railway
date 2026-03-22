@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import TYPE_CHECKING, Optional
+
+log = logging.getLogger("Enai")
 
 from config import ANALYZER_TOPIC_MIN_SCORE
 from contracts.question_analysis import QuestionAnalysis
@@ -148,6 +151,25 @@ def _extract_bridge_topics(
     if _has_any("intraday", "intra day", "intra-day"):
         _add("intraday_market")
 
+    if _has_any("deregulation", "deregulate", "liberalization", "liberalisation"):
+        _add("deregulation_plan")
+        _add("market_transition")
+        _add("market_design")
+
+    if _has_any("market model", "market concept", "market design", "market architecture"):
+        _add("market_design")
+        _add("electricity_market_transitory_model")
+        _add("electricity_market_target_model")
+        _add("market_transition")
+
+    if _has_any("target model", "target market"):
+        _add("electricity_market_target_model")
+        _add("market_design")
+
+    if _has_any("balancing market", "balancing energy"):
+        _add("balancing_market")
+        _add("balancing_electricity")
+
     return bridge_topics[:12]
 
 
@@ -196,6 +218,14 @@ def _extract_boost_terms(
         (
             ("transitory", "transition", "transitional", "transition model"),
             ["transitory", "transition", "transitional", "market transition", "electricity market transitory model"],
+        ),
+        (
+            ("deregulation", "deregulate", "liberalization", "liberalisation"),
+            ["deregulation", "deregulation plan", "market transition"],
+        ),
+        (
+            ("market model", "market concept", "market design", "market architecture"),
+            ["market model", "market concept", "market design", "transitory model", "target model"],
         ),
     ]
     for triggers, terms in phrase_rules:
@@ -326,6 +356,20 @@ def retrieve_vector_knowledge(
         )
         if not chunks and filters.languages:
             relaxed_filters = filters.model_copy(update={"languages": []})
+            chunks = store.search_chunks(
+                query_embedding=query_embedding,
+                filters=relaxed_filters,
+                top_k=top_k,
+                candidate_k=candidate_k,
+                min_similarity=min_similarity,
+            )
+            filters = relaxed_filters
+        if not chunks and filters.preferred_topics:
+            log.info(
+                "vector_retrieval: topic relaxation – clearing preferred_topics=%s",
+                filters.preferred_topics,
+            )
+            relaxed_filters = filters.model_copy(update={"preferred_topics": []})
             chunks = store.search_chunks(
                 query_embedding=query_embedding,
                 filters=relaxed_filters,

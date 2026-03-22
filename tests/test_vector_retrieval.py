@@ -318,7 +318,7 @@ def test_retrieve_vector_knowledge_expands_candidate_window_when_boost_terms_exi
     )
 
     assert bundle.chunk_count == 0
-    assert captured["candidate_k"] == [24, 24]
+    assert captured["candidate_k"] == [24, 24, 24]
 
 
 def test_retrieve_vector_knowledge_relaxes_similarity_for_sparse_corpus():
@@ -382,5 +382,92 @@ def test_retrieve_vector_knowledge_relaxes_similarity_for_sparse_corpus():
     )
 
     assert bundle.chunk_count == 1
-    assert "electricity_export" in bundle.filters.preferred_topics
-    assert calls == [0.2, 0.2, 0.12]
+    # After topic relaxation fires (call 3), preferred_topics is cleared;
+    # similarity relaxation (call 4) finds the chunk with the relaxed threshold.
+    assert bundle.filters.preferred_topics == []
+    assert calls == [0.2, 0.2, 0.2, 0.12]
+
+
+def test_build_vector_filters_bridges_deregulation_topics():
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What is the deregulation plan for electricity power plants?",
+            "canonical_query_en": "What is the deregulation plan for electricity power plants?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[
+                    TopicCandidate(name=KnowledgeTopicName.GENERAL_DEFINITIONS, score=0.8),
+                    TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.7),
+                ]
+            ),
+        }
+    )
+
+    filters = build_vector_filters(
+        analysis,
+        query_text="What is the deregulation plan for electricity power plants?",
+    )
+
+    assert "deregulation_plan" in filters.preferred_topics
+    assert "market_design" in filters.preferred_topics
+    assert "market_transition" in filters.preferred_topics
+
+
+def test_build_vector_filters_bridges_market_concept_topics():
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "What is the electricity market model concept?",
+            "canonical_query_en": "What is the electricity market model concept?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[
+                    TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9),
+                ]
+            ),
+        }
+    )
+
+    filters = build_vector_filters(
+        analysis,
+        query_text="What is the electricity market model concept?",
+    )
+
+    assert "market_design" in filters.preferred_topics
+    assert "electricity_market_transitory_model" in filters.preferred_topics
+    assert "electricity_market_target_model" in filters.preferred_topics
+
+
+def test_topic_overlap_boost_in_scoring():
+    from knowledge.vector_store import _topic_overlap_boost
+
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    chunk_with_match = VectorChunkRecord(
+        id="c1",
+        document_id="d1",
+        document_title="Doc",
+        source_key="src",
+        section_title="Sec",
+        text_content="Text",
+        topics=["deregulation_plan", "market_design"],
+        language="ka",
+        similarity_score=0.5,
+    )
+    chunk_without_match = VectorChunkRecord(
+        id="c2",
+        document_id="d2",
+        document_title="Doc2",
+        source_key="src2",
+        section_title="Sec2",
+        text_content="Text2",
+        topics=["unrelated_topic"],
+        language="ka",
+        similarity_score=0.5,
+    )
+
+    preferred = ["deregulation_plan", "market_design", "market_transition"]
+
+    boost_match = _topic_overlap_boost(chunk_with_match, preferred)
+    boost_no_match = _topic_overlap_boost(chunk_without_match, preferred)
+
+    assert boost_match > 0.0
+    assert boost_no_match == 0.0
+    assert boost_match >= 0.15  # 2 topic matches → at least 0.20

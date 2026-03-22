@@ -102,14 +102,31 @@ def _normalize_match_text(value: object) -> str:
     return re.sub(r"\s+", " ", normalized)
 
 
+def _topic_overlap_boost(
+    candidate: VectorChunkRecord,
+    preferred_topics: list[str],
+) -> float:
+    """Score boost for chunks whose topics overlap with preferred_topics."""
+    if not preferred_topics:
+        return 0.0
+    chunk_topics = set(candidate.topics or [])
+    matched = chunk_topics & set(preferred_topics)
+    if not matched:
+        return 0.0
+    # Scale: 1 match → 0.15, 2 → 0.20, 3+ → 0.25 (capped)
+    return min(0.25, 0.10 + 0.05 * len(matched))
+
+
 def _candidate_retrieval_score(
     candidate: VectorChunkRecord,
     *,
     filters: VectorRetrievalFilters,
 ) -> float:
     base_score = float(candidate.similarity_score or 0.0)
+    topic_boost = _topic_overlap_boost(candidate, filters.preferred_topics)
+
     if not filters.boost_terms:
-        return base_score
+        return base_score + topic_boost
 
     title_text = _normalize_match_text(candidate.document_title)
     source_text = _normalize_match_text(candidate.source_key)
@@ -135,7 +152,7 @@ def _candidate_retrieval_score(
             boost += 0.08
         if normalized_term in body_text:
             boost += 0.04
-    return base_score + min(boost, 0.85)
+    return base_score + topic_boost + min(boost, 0.85)
 
 
 def _apply_document_diversity(
@@ -318,18 +335,11 @@ class KnowledgeVectorStore:
         document_types = [doc_type for doc_type in filters.document_types if str(doc_type or "").strip()]
         issuers = [issuer for issuer in filters.issuers if str(issuer or "").strip()]
 
-        if preferred_topics:
-            clauses.append(
-                """
-                exists (
-                    select 1
-                    from jsonb_array_elements_text(c.topics) as topic(value)
-                    where topic.value in :preferred_topics
-                )
-                """
-            )
-            params["preferred_topics"] = preferred_topics
-            bind_params.append(bindparam("preferred_topics", expanding=True))
+        # preferred_topics are used as a soft scoring boost in
+        # _candidate_retrieval_score(), NOT as a hard SQL filter.
+        # This allows semantically similar chunks from all documents
+        # to enter the candidate pool, with topic-matching chunks
+        # ranked higher during Python-side reranking.
         if languages:
             clauses.append("c.language in :languages")
             params["languages"] = languages
