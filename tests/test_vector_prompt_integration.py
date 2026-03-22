@@ -153,16 +153,18 @@ def test_conceptual_summary_passes_active_vector_prompt(monkeypatch):
 
 def test_conceptual_summary_uses_vector_as_primary_evidence(monkeypatch):
     captured = {}
-    monkeypatch.setattr(
-        summarizer,
-        "get_relevant_domain_knowledge",
-        lambda *args, **kwargs: json.dumps(
+
+    def _fake_domain_knowledge(_query, use_cache=True, preferred_topics=None):
+        captured["preferred_topics"] = preferred_topics
+        return json.dumps(
             {
+                "eligible_participants": "Eligible participants are listed in the market rules.",
+                "exchange_participation": "Registration is required before participation.",
                 "general_definitions": "General background definition.",
-                "market_structure": "Broad market background that should be demoted.",
             }
-        ),
-    )
+        )
+
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", _fake_domain_knowledge)
     monkeypatch.setattr(
         summarizer,
         "llm_summarize_structured",
@@ -190,6 +192,7 @@ def test_conceptual_summary_uses_vector_as_primary_evidence(monkeypatch):
                 text_content="Export is allowed subject to the listed procedure.",
             )
         ],
+        filters={"preferred_topics": ["eligible_participants", "exchange_participation"]},
     )
     ctx.vector_knowledge_source = "vector_active"
     ctx.vector_knowledge_prompt = (
@@ -201,8 +204,11 @@ def test_conceptual_summary_uses_vector_as_primary_evidence(monkeypatch):
 
     assert out.summary == "Export answer"
     assert "PRIMARY EVIDENCE RULES" in captured["stats_hint"]
+    assert captured["preferred_topics"] == ["eligible_participants", "exchange_participation"]
     assert json.loads(captured["domain_knowledge"]) == {
-        "general_definitions": "General background definition."
+        "eligible_participants": "Eligible participants are listed in the market rules.",
+        "exchange_participation": "Registration is required before participation.",
+        "general_definitions": "General background definition.",
     }
     assert "EXTERNAL_SOURCE_PASSAGES" in captured["vector_knowledge"]
 

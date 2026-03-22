@@ -122,24 +122,17 @@ def _serialize_scalar(value: Any) -> Any:
     return str(value)
 
 
-def _secondary_background_domain_knowledge(domain_knowledge: str) -> str:
-    """Keep only lightweight background knowledge when vector evidence is active."""
-
-    try:
-        payload = json.loads(domain_knowledge) if domain_knowledge else {}
-    except json.JSONDecodeError:
-        return ""
-
-    if not isinstance(payload, dict):
-        return ""
-
-    background_payload: Dict[str, Any] = {}
-    if "general_definitions" in payload:
-        background_payload["general_definitions"] = payload["general_definitions"]
-
-    if not background_payload:
-        return ""
-    return json.dumps(background_payload, ensure_ascii=False)
+def _merge_topic_preferences(*topic_lists: Optional[List[str]]) -> Optional[List[str]]:
+    merged: List[str] = []
+    seen: Set[str] = set()
+    for topic_list in topic_lists:
+        for topic in topic_list or []:
+            normalized = str(topic or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            merged.append(normalized)
+            seen.add(normalized)
+    return merged or None
 
 
 def _tokenize_cell_value(value: Any) -> Set[str]:
@@ -476,14 +469,27 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             for candidate in ranked_topics
             if candidate.score >= 0.25
         ][:3]
+    vector_evidence_active = bool(
+        ctx.vector_knowledge is not None
+        and ctx.vector_knowledge_source == "vector_active"
+        and ctx.vector_knowledge.chunk_count > 0
+    )
+    vector_preferred_topics = (
+        list(ctx.vector_knowledge.filters.preferred_topics)
+        if vector_evidence_active and ctx.vector_knowledge is not None
+        else []
+    )
+    domain_background_topics = _merge_topic_preferences(vector_preferred_topics, preferred_topics)
     query_lower = routing_query.lower()
     domain_knowledge = get_relevant_domain_knowledge(
         routing_query,
         use_cache=False,
-        preferred_topics=preferred_topics,
+        preferred_topics=domain_background_topics if vector_evidence_active else preferred_topics,
     )
     if analyzer_active and preferred_topics:
         log.info("Using active question-analyzer topics for conceptual answer: %s", preferred_topics)
+    if vector_evidence_active and vector_preferred_topics:
+        log.info("Using vector-aware background topics for conceptual answer: %s", domain_background_topics)
     try:
         knowledge_payload = json.loads(domain_knowledge) if domain_knowledge else {}
     except json.JSONDecodeError:
@@ -491,11 +497,6 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     matched_topics = list(knowledge_payload.keys()) if isinstance(knowledge_payload, dict) else []
     has_filtered_knowledge = bool(matched_topics)
     has_domain_specific_knowledge = any(topic != "general_definitions" for topic in matched_topics)
-    vector_evidence_active = bool(
-        ctx.vector_knowledge is not None
-        and ctx.vector_knowledge_source == "vector_active"
-        and ctx.vector_knowledge.chunk_count > 0
-    )
 
     # General energy terms
     general_terms = [
@@ -562,20 +563,16 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         conceptual_hint += (
             "\n\nPRIMARY EVIDENCE RULES:\n"
             "- Treat EXTERNAL_SOURCE_PASSAGES as the primary evidence for this answer.\n"
-            "- Use DOMAIN_KNOWLEDGE only as secondary background for brief definitions or Georgia context.\n"
+            "- Use DOMAIN_KNOWLEDGE as secondary background to clarify terms, connect related rules, and provide concise Georgia-specific context.\n"
             "- If EXTERNAL_SOURCE_PASSAGES do not contain a procedural or regulatory detail, say that directly instead of filling the gap from background knowledge.\n"
-            "- For eligibility, registration, compliance, and process questions, prefer the wording and constraints from EXTERNAL_SOURCE_PASSAGES."
+            "- For eligibility, registration, compliance, and process questions, prefer the wording and constraints from EXTERNAL_SOURCE_PASSAGES, then use DOMAIN_KNOWLEDGE to synthesize the answer clearly."
         )
         log.info(
-            "Active vector evidence present for conceptual answer; domain knowledge reduced to secondary background"
+            "Active vector evidence present for conceptual answer; preserving topic-filtered domain knowledge as secondary background"
         )
 
     vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active else ""
-    domain_knowledge_for_summary = (
-        _secondary_background_domain_knowledge(domain_knowledge)
-        if vector_evidence_active
-        else domain_knowledge
-    )
+    domain_knowledge_for_summary = domain_knowledge
     try:
         envelope = llm_summarize_structured(
             ctx.query,
