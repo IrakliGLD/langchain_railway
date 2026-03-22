@@ -247,6 +247,10 @@ def process_query(
         ctx.vector_knowledge_error = bundle.error
         ctx.vector_knowledge_prompt = format_vector_knowledge_for_prompt(bundle)
         top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
+        top_sections = [
+            f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
+            for chunk in bundle.chunks[:3]
+        ]
         trace_detail(
             log,
             ctx,
@@ -257,6 +261,7 @@ def process_query(
             strategy=bundle.strategy.value,
             preferred_topics=bundle.filters.preferred_topics,
             top_sources=top_sources,
+            top_sections=top_sections,
             error=bundle.error,
         )
         _trace_stage(

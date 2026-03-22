@@ -122,6 +122,26 @@ def _serialize_scalar(value: Any) -> Any:
     return str(value)
 
 
+def _secondary_background_domain_knowledge(domain_knowledge: str) -> str:
+    """Keep only lightweight background knowledge when vector evidence is active."""
+
+    try:
+        payload = json.loads(domain_knowledge) if domain_knowledge else {}
+    except json.JSONDecodeError:
+        return ""
+
+    if not isinstance(payload, dict):
+        return ""
+
+    background_payload: Dict[str, Any] = {}
+    if "general_definitions" in payload:
+        background_payload["general_definitions"] = payload["general_definitions"]
+
+    if not background_payload:
+        return ""
+    return json.dumps(background_payload, ensure_ascii=False)
+
+
 def _tokenize_cell_value(value: Any) -> Set[str]:
     tokens = _extract_number_tokens(str(value))
     if value is None or isinstance(value, bool):
@@ -471,6 +491,11 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     matched_topics = list(knowledge_payload.keys()) if isinstance(knowledge_payload, dict) else []
     has_filtered_knowledge = bool(matched_topics)
     has_domain_specific_knowledge = any(topic != "general_definitions" for topic in matched_topics)
+    vector_evidence_active = bool(
+        ctx.vector_knowledge is not None
+        and ctx.vector_knowledge_source == "vector_active"
+        and ctx.vector_knowledge.chunk_count > 0
+    )
 
     # General energy terms
     general_terms = [
@@ -533,10 +558,23 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         )
         log.info("❓ Conceptual question - topic may be outside domain scope")
 
-    vector_knowledge = (
-        ctx.vector_knowledge_prompt
-        if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
-        else ""
+    if vector_evidence_active:
+        conceptual_hint += (
+            "\n\nPRIMARY EVIDENCE RULES:\n"
+            "- Treat EXTERNAL_SOURCE_PASSAGES as the primary evidence for this answer.\n"
+            "- Use DOMAIN_KNOWLEDGE only as secondary background for brief definitions or Georgia context.\n"
+            "- If EXTERNAL_SOURCE_PASSAGES do not contain a procedural or regulatory detail, say that directly instead of filling the gap from background knowledge.\n"
+            "- For eligibility, registration, compliance, and process questions, prefer the wording and constraints from EXTERNAL_SOURCE_PASSAGES."
+        )
+        log.info(
+            "Active vector evidence present for conceptual answer; domain knowledge reduced to secondary background"
+        )
+
+    vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active else ""
+    domain_knowledge_for_summary = (
+        _secondary_background_domain_knowledge(domain_knowledge)
+        if vector_evidence_active
+        else domain_knowledge
     )
     try:
         envelope = llm_summarize_structured(
@@ -545,7 +583,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             stats_hint=conceptual_hint,
             lang_instruction=ctx.lang_instruction,
             conversation_history=ctx.conversation_history,
-            domain_knowledge=domain_knowledge,
+            domain_knowledge=domain_knowledge_for_summary,
             vector_knowledge=vector_knowledge,
         )
         ctx.summary = envelope.answer

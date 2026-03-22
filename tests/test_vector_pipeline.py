@@ -77,3 +77,60 @@ def test_pipeline_collects_vector_knowledge_in_shadow_mode(monkeypatch):
     assert out.vector_knowledge.chunk_count == 1
     assert out.vector_knowledge_source == "vector_shadow"
     assert out.stage_timings_ms["stage_0_3_vector_knowledge"] >= 0.0
+
+
+def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
+    captured = {}
+    bundle = VectorKnowledgeBundle(
+        query="How can electricity be exported?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=4,
+        chunk_count=2,
+        chunks=[
+            VectorChunkRecord(
+                id="chunk-1",
+                document_id="doc-1",
+                document_title="Electricity (Capacity) Market Rules",
+                source_key="capacity_rules",
+                section_title="Export conditions",
+                text_content="Export rules text.",
+            ),
+            VectorChunkRecord(
+                id="chunk-2",
+                document_id="doc-1",
+                document_title="Electricity (Capacity) Market Rules",
+                source_key="capacity_rules",
+                section_path="Part II > Registration",
+                text_content="Registration rules text.",
+            ),
+        ],
+    )
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: setattr(ctx, "is_conceptual", True) or ctx)
+    monkeypatch.setattr(pipeline, "retrieve_vector_knowledge", lambda *args, **kwargs: bundle)
+    monkeypatch.setattr(
+        pipeline,
+        "format_vector_knowledge_for_prompt",
+        lambda _bundle: "EXTERNAL_SOURCE_PASSAGES:\n[1] Capacity rules",
+    )
+    monkeypatch.setattr(pipeline, "trace_detail", lambda *_args, **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "Conceptual answer") or ctx,
+    )
+
+    pipeline.process_query("how can electricity be exported?", trace_id="trace-sections", session_id="session-sections")
+
+    assert captured["top_sources"] == [
+        "Electricity (Capacity) Market Rules",
+        "Electricity (Capacity) Market Rules",
+    ]
+    assert captured["top_sections"] == [
+        "Electricity (Capacity) Market Rules | Export conditions",
+        "Electricity (Capacity) Market Rules | Part II > Registration",
+    ]

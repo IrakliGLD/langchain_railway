@@ -1,3 +1,4 @@
+import json
 import os
 
 import sqlalchemy
@@ -38,7 +39,13 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 from agent import planner, summarizer  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
-from contracts.vector_knowledge import RetrievalStrategy, VectorKnowledgeBundle, VectorKnowledgeMode  # noqa: E402
+from contracts.vector_knowledge import (  # noqa: E402
+    RetrievalStrategy,
+    VectorChunkRecord,
+    VectorKnowledgeBundle,
+    VectorKnowledgeMode,
+)
+import core.llm as llm_core  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 from models import QueryContext  # noqa: E402
 
@@ -142,3 +149,98 @@ def test_conceptual_summary_passes_active_vector_prompt(monkeypatch):
 
     assert out.summary == "GENEX answer"
     assert "EXTERNAL_SOURCE_PASSAGES" in captured["vector_knowledge"]
+
+
+def test_conceptual_summary_uses_vector_as_primary_evidence(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *args, **kwargs: json.dumps(
+            {
+                "general_definitions": "General background definition.",
+                "market_structure": "Broad market background that should be demoted.",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *args, **kwargs: captured.update(kwargs) or SummaryEnvelope(
+            answer="Export answer",
+            claims=[],
+            citations=["external_source_passages"],
+            confidence=0.9,
+        ),
+    )
+    ctx = QueryContext(query="How can electricity be exported?", lang_instruction="Respond in English.")
+    ctx.vector_knowledge = VectorKnowledgeBundle(
+        query="How can electricity be exported?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=4,
+        chunk_count=1,
+        chunks=[
+            VectorChunkRecord(
+                id="chunk-1",
+                document_id="doc-1",
+                document_title="Electricity (Capacity) Market Rules",
+                source_key="capacity_rules",
+                section_title="Export conditions",
+                text_content="Export is allowed subject to the listed procedure.",
+            )
+        ],
+    )
+    ctx.vector_knowledge_source = "vector_active"
+    ctx.vector_knowledge_prompt = (
+        "EXTERNAL_SOURCE_PASSAGES:\n"
+        "[1] Electricity (Capacity) Market Rules | section: Export conditions"
+    )
+
+    out = summarizer.answer_conceptual(ctx)
+
+    assert out.summary == "Export answer"
+    assert "PRIMARY EVIDENCE RULES" in captured["stats_hint"]
+    assert json.loads(captured["domain_knowledge"]) == {
+        "general_definitions": "General background definition."
+    }
+    assert "EXTERNAL_SOURCE_PASSAGES" in captured["vector_knowledge"]
+
+
+def test_structured_summary_prompt_prioritizes_external_source_passages(monkeypatch):
+    captured = {}
+
+    class _DummyCache:
+        def get(self, _key):
+            return None
+
+        def set(self, _key, _value):
+            return None
+
+    class _DummyMessage:
+        content = '{"answer":"ok","claims":[],"citations":["external_source_passages"],"confidence":0.9}'
+        response_metadata = {}
+
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    def _capture_invoke(_llm, messages, _model_name):
+        captured["system"] = messages[0][1]
+        captured["prompt"] = messages[1][1]
+        return _DummyMessage()
+
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+
+    llm_core.llm_summarize_structured(
+        user_query="How can electricity be exported?",
+        data_preview="",
+        stats_hint="conceptual",
+        lang_instruction="Respond in English.",
+        domain_knowledge='{"general_definitions":"background"}',
+        vector_knowledge="EXTERNAL_SOURCE_PASSAGES:\n[1] Capacity rules | section: Export conditions",
+    )
+
+    assert "primary evidence" in captured["system"].lower()
+    assert 'prefer citing "external_source_passages"' in captured["prompt"].lower()
