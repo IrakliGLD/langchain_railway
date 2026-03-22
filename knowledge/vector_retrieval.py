@@ -373,7 +373,7 @@ def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], 
 
     if bundle is None or not bundle.chunks:
         return ""
-    max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 3500)
+    max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 7000)
     parts = ["EXTERNAL_SOURCE_PASSAGES:"]
     total_chars = len(parts[0])
     for idx, chunk in enumerate(bundle.chunks, start=1):

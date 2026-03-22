@@ -560,12 +560,16 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         log.info("❓ Conceptual question - topic may be outside domain scope")
 
     if vector_evidence_active:
-        conceptual_hint += (
-            "\n\nPRIMARY EVIDENCE RULES:\n"
-            "- Treat EXTERNAL_SOURCE_PASSAGES as the primary evidence for this answer.\n"
-            "- Use DOMAIN_KNOWLEDGE as secondary background to clarify terms, connect related rules, and provide concise Georgia-specific context.\n"
+        conceptual_hint = (
+            "NOTE: This question is answered from OFFICIAL REGULATORY SOURCE PASSAGES. "
+            "No database query was executed. "
+            "EXTERNAL_SOURCE_PASSAGES contain the primary evidence retrieved from official regulations.\n\n"
+            "PRIMARY EVIDENCE RULES (MANDATORY):\n"
+            "- Build the answer PRIMARILY from EXTERNAL_SOURCE_PASSAGES content.\n"
+            "- Use DOMAIN_KNOWLEDGE only as secondary background to clarify terms or provide brief Georgia-specific context.\n"
             "- If EXTERNAL_SOURCE_PASSAGES do not contain a procedural or regulatory detail, say that directly instead of filling the gap from background knowledge.\n"
-            "- For eligibility, registration, compliance, and process questions, prefer the wording and constraints from EXTERNAL_SOURCE_PASSAGES, then use DOMAIN_KNOWLEDGE to synthesize the answer clearly."
+            "- For eligibility, registration, compliance, and process questions, extract the wording and constraints from EXTERNAL_SOURCE_PASSAGES, then use DOMAIN_KNOWLEDGE only to synthesize the answer clearly.\n"
+            "- DO NOT give a generic answer when specific regulatory content is available in EXTERNAL_SOURCE_PASSAGES."
         )
         log.info(
             "Active vector evidence present for conceptual answer; preserving topic-filtered domain knowledge as secondary background"
