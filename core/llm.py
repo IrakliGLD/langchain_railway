@@ -1974,11 +1974,11 @@ UNTRUSTED_STATISTICS:
 UNTRUSTED_DATA_PREVIEW:
 <<<{data_preview}>>>
 
-UNTRUSTED_DOMAIN_KNOWLEDGE:
-<<<{domain_knowledge}>>>
-
 UNTRUSTED_EXTERNAL_SOURCE_PASSAGES:
 <<<{vector_knowledge}>>>
+
+UNTRUSTED_DOMAIN_KNOWLEDGE:
+<<<{domain_knowledge}>>>
 
 UNTRUSTED_CONVERSATION_HISTORY:
 <<<{history_str}>>>

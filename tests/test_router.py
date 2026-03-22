@@ -65,9 +65,9 @@ def test_explanation_mode_expands_month_range():
     assert inv_normal.params["start_date"] == "2022-11-01"
     assert inv_normal.params["end_date"] == "2022-11-01"
     
-    # Explanation matching expands back 1 year + 1 month for YoY/MoM enrichment
+    # Explanation matching expands back 5 years + 1 month for YoY/MoM enrichment
     inv_exp = match_tool("why did balancing price change in november 2022?", is_explanation=True)
-    assert inv_exp.params["start_date"] == "2021-10-01"
+    assert inv_exp.params["start_date"] == "2017-10-01"
     assert inv_exp.params["end_date"] == "2022-11-01"
 
 
@@ -77,9 +77,9 @@ def test_explanation_mode_expands_year_range():
     assert inv_normal.params["start_date"] == "2024-01-01"
     assert inv_normal.params["end_date"] == "2024-12-31"
 
-    # Explanation matching expands to start of previous year
+    # Explanation matching expands to 5 years before the mentioned year
     inv_exp = match_tool("explain the generation mix change in 2024", is_explanation=True)
-    assert inv_exp.params["start_date"] == "2023-01-01"
+    assert inv_exp.params["start_date"] == "2019-01-01"
     assert inv_exp.params["end_date"] == "2024-12-31"
 
 
