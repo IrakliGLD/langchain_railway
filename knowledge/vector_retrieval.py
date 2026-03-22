@@ -350,7 +350,7 @@ def retrieve_vector_knowledge(
     """Fetch top vector chunks for a user query."""
 
     filters = build_vector_filters(question_analysis, query_text=query_text)
-    top_k = _int_env("VECTOR_KNOWLEDGE_TOP_K", 4)
+    top_k = _int_env("VECTOR_KNOWLEDGE_TOP_K", 6)
     candidate_k = top_k * _int_env("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", 3)
     if filters.boost_terms:
         candidate_k = max(candidate_k, top_k * 6)
@@ -436,7 +436,7 @@ def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], 
 
     if bundle is None or not bundle.chunks:
         return ""
-    max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 7000)
+    max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 9000)
     parts = ["EXTERNAL_SOURCE_PASSAGES:"]
     total_chars = len(parts[0])
     for idx, chunk in enumerate(bundle.chunks, start=1):

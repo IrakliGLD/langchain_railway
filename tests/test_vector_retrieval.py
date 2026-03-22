@@ -318,7 +318,7 @@ def test_retrieve_vector_knowledge_expands_candidate_window_when_boost_terms_exi
     )
 
     assert bundle.chunk_count == 0
-    assert captured["candidate_k"] == [24, 24, 24]
+    assert captured["candidate_k"] == [36, 36, 36]
 
 
 def test_retrieve_vector_knowledge_relaxes_similarity_for_sparse_corpus():
