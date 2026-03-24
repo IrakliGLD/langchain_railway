@@ -118,7 +118,7 @@ _FOCUS_TO_CATALOG_SECTION: dict[str, str] = {
     "tariff": "## Focus: Tariff",
     "cpi": "## Focus: CPI / Inflation",
     "generation": "## Focus: Generation",
-    "trade": "## Focus: Generation",  # trade uses generation guidance
+    "trade": "",  # no trade-specific section; always-rules still apply
     "regulation": "## Focus: Regulation",
     "general": "",  # no focus-specific section; always-rules still apply
 }

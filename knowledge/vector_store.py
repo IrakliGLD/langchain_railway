@@ -385,10 +385,16 @@ class KnowledgeVectorStore:
         with _resolve_engine().begin() as conn:
             rows = conn.execute(sql, params).mappings().all()
 
+        # Use a relaxed floor for the candidate pool so that chunks with
+        # low raw similarity but high topic/keyword boost can still enter
+        # the reranking stage.  The real min_similarity gate is applied
+        # *after* _candidate_retrieval_score() below.
+        _floor_delta = _env_float("VECTOR_KNOWLEDGE_CANDIDATE_FLOOR_DELTA", 0.10)
+        candidate_floor = max(0.0, float(min_similarity) - _floor_delta)
         candidates: List[VectorChunkRecord] = []
         for row in rows:
             score = float(row.get("similarity_score") or 0.0)
-            if score < float(min_similarity):
+            if score < candidate_floor:
                 continue
             topics = row.get("topics") or []
             metadata = row.get("metadata") or {}
@@ -421,4 +427,10 @@ class KnowledgeVectorStore:
             ),
             reverse=True,
         )
+        # Apply the real min_similarity threshold on the *boosted* score so
+        # that topic/keyword boosts can rescue weak-but-relevant matches.
+        candidates = [
+            c for c in candidates
+            if _candidate_retrieval_score(c, filters=filters) >= float(min_similarity)
+        ]
         return _apply_document_diversity(candidates, top_k=top_k, filters=filters)

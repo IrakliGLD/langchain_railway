@@ -438,6 +438,7 @@ def get_query_focus(user_query: str) -> str:
         - "cpi": Consumer Price Index queries
         - "tariff": Tariff-focused queries
         - "generation": Electricity generation queries
+        - "regulation": Registration, eligibility, procedure queries
         - "balancing": Balancing market/price queries
         - "trade": Import/export/trade queries
         - "general": Cannot determine or multiple focuses
@@ -457,6 +458,21 @@ def get_query_focus(user_query: str) -> str:
     if any(k in query_lower for k in ["generation", "generated", "produce", "გენერაცია", "генерация", "производство"]) and \
        not any(k in query_lower for k in ["price", "ფასი", "цена"]):
         return "generation"
+
+    # Regulation / procedure focus (check before trade — registration queries
+    # about exchange participation, eligibility, etc. should get regulation
+    # guidance, not trade guidance).  Exclude data-intent queries that happen
+    # to mention generic tokens like "participant" or "license".
+    _data_intent = any(k in query_lower for k in [
+        "how many", "count", "total", "number of", "breakdown", "statistics",
+        "რამდენი", "სულ", "сколько", "количество",
+    ])
+    if not _data_intent and any(k in query_lower for k in [
+        "register", "registration", "eligible", "eligibility",
+        "procedure", "requirement", "participant", "license", "licence",
+        "რეგისტრაცია", "მონაწილე", "регистрация", "участник",
+    ]):
+        return "regulation"
 
     # Trade focus
     if any(k in query_lower for k in ["import", "export", "trade", "იმპორტი", "ექსპორტი", "импорт", "экспорт"]) and \
@@ -1985,17 +2001,17 @@ def llm_summarize_structured(
 UNTRUSTED_USER_QUESTION:
 <<<{user_query}>>>
 
-UNTRUSTED_STATISTICS:
-<<<{stats_hint}>>>
-
-UNTRUSTED_DATA_PREVIEW:
-<<<{data_preview}>>>
-
 UNTRUSTED_EXTERNAL_SOURCE_PASSAGES:
 <<<{vector_knowledge}>>>
 
 UNTRUSTED_DOMAIN_KNOWLEDGE:
 <<<{domain_knowledge}>>>
+
+UNTRUSTED_STATISTICS:
+<<<{stats_hint}>>>
+
+UNTRUSTED_DATA_PREVIEW:
+<<<{data_preview}>>>
 
 UNTRUSTED_CONVERSATION_HISTORY:
 <<<{history_str}>>>
@@ -2051,11 +2067,12 @@ def _truncate_text(text: str, max_chars: int) -> str:
 
 
 # Sections truncated first → last when prompt exceeds budget.
-# Sections NOT listed here (user_question, external_source_passages) are protected.
+# Sections NOT listed here (user_question) are fully protected.
 _TRUNCATION_PRIORITY = [
     "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_DOMAIN_KNOWLEDGE",
     "UNTRUSTED_DATA_PREVIEW",
+    "UNTRUSTED_DOMAIN_KNOWLEDGE",
+    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
     "UNTRUSTED_STATISTICS",
 ]
 
@@ -2068,9 +2085,9 @@ def _enforce_prompt_budget(prompt: str, label: str) -> str:
     """Hard cap prompt size to control latency/cost blowups.
 
     Uses section-aware truncation: truncates lower-priority sections first
-    (conversation_history → domain_knowledge → data_preview → stats_hint)
-    while preserving user_question, vector_knowledge, and system guidance.
-    Falls back to head+tail split if section parsing fails.
+    (conversation_history → data_preview → external_source_passages →
+    domain_knowledge → statistics) while preserving user_question and
+    system guidance.  Falls back to head+tail split if section parsing fails.
     """
     budget = max(1500, int(PROMPT_BUDGET_MAX_CHARS))
     if len(prompt) <= budget:
