@@ -4,14 +4,16 @@ Basic tests for main.py functionality.
 To run tests: pytest tests/
 """
 import os
+import time
 from types import SimpleNamespace
 from typing import Any
 
+import jwt
 import pytest
 import pandas as pd
 import numpy as np
 import sqlalchemy
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -70,6 +72,76 @@ from analysis.stats import quick_stats, rows_to_preview
 from agent.tools import composition_tools
 from agent.tools import common as tool_common
 from core.sql_generator import sanitize_sql
+from utils import auth as auth_module
+
+
+TEST_SUPABASE_JWT_SECRET = "test-supabase-jwt-secret"
+TEST_BEARER_SUBJECT = "00000000-0000-0000-0000-000000000123"
+
+
+def _fake_query_context():
+    return SimpleNamespace(
+        summary="ok",
+        chart_data=None,
+        chart_type=None,
+        chart_meta={},
+        stage_timings_ms={},
+        summary_claims=[],
+        summary_citations=[],
+        summary_confidence=1.0,
+        summary_provenance_coverage=1.0,
+        summary_claim_provenance=[],
+        summary_provenance_gate_passed=True,
+        summary_provenance_gate_reason="ok",
+        provenance_query_hash="",
+        provenance_source="tool",
+    )
+
+
+def _install_successful_ask_mocks(monkeypatch):
+    monkeypatch.setattr(main_module, "process_query", lambda **_kwargs: _fake_query_context())
+    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+
+
+def _make_bearer_token(
+    *,
+    secret: str = TEST_SUPABASE_JWT_SECRET,
+    sub: str = TEST_BEARER_SUBJECT,
+    exp_offset_seconds: int = 3600,
+) -> str:
+    payload = {
+        "sub": sub,
+        "aud": "authenticated",
+        "exp": int(time.time()) + exp_offset_seconds,
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def _make_request(headers: dict[str, str], client_host: str = "127.0.0.1") -> Request:
+    raw_headers = [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers.items()]
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/ask",
+        "raw_path": b"/ask",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": (client_host, 12345),
+        "server": ("testserver", 80),
+    }
+    return Request(scope)
+
+
+def _set_public_bearer_auth(monkeypatch, enabled: bool) -> None:
+    monkeypatch.setattr(auth_module, "ENABLE_PUBLIC_BEARER_AUTH", enabled)
+    monkeypatch.setattr(
+        auth_module,
+        "ENAI_AUTH_MODE",
+        "gateway_and_bearer" if enabled else "gateway_only",
+    )
+    monkeypatch.setattr(main_module, "ENABLE_PUBLIC_BEARER_AUTH", enabled)
 
 
 class TestQuickStats:
@@ -268,29 +340,11 @@ class TestTypedToolRowContract:
 
 
 def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
-    def fake_process_query(**_kwargs):
-        return SimpleNamespace(
-            summary="ok",
-            chart_data=None,
-            chart_type=None,
-            chart_meta={},
-            stage_timings_ms={},
-            summary_claims=[],
-            summary_citations=[],
-            summary_confidence=1.0,
-            summary_provenance_coverage=1.0,
-            summary_claim_provenance=[],
-            summary_provenance_gate_passed=True,
-            summary_provenance_gate_reason="ok",
-            provenance_query_hash="",
-            provenance_source="tool",
-        )
-
-    monkeypatch.setattr(main_module, "process_query", fake_process_query)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    _install_successful_ask_mocks(monkeypatch)
     # Override the already-captured config constants so the test is deterministic
     # regardless of shell env or module import ordering.
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
     monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
 
     client = TestClient(main_module.app)
@@ -312,6 +366,87 @@ def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
     assert unauthorized.status_code == 401
 
 
+def test_ask_accepts_valid_public_bearer(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _set_public_bearer_auth(monkeypatch, True)
+    monkeypatch.setattr(auth_module, "SUPABASE_JWT_SECRET", TEST_SUPABASE_JWT_SECRET)
+    main_module._user_rate_buckets.clear()
+
+    token = _make_bearer_token()
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "ok"
+    assert response.headers.get("X-Session-Token")
+    assert response.headers.get("X-LLM-Total-Tokens") is None
+    assert response.headers.get("X-LLM-Estimated-Cost-USD") is None
+    main_module._user_rate_buckets.clear()
+
+
+def test_public_bearer_rate_limit_returns_429(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _set_public_bearer_auth(monkeypatch, True)
+    monkeypatch.setattr(auth_module, "SUPABASE_JWT_SECRET", TEST_SUPABASE_JWT_SECRET)
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PUBLIC_PER_MINUTE", 1)
+    main_module._user_rate_buckets.clear()
+
+    token = _make_bearer_token()
+    client = TestClient(main_module.app)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers=headers,
+    )
+    second = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["detail"] == "Rate limit exceeded"
+    main_module._user_rate_buckets.clear()
+
+
+def test_gateway_rate_limit_key_prefers_session_token_hash(monkeypatch):
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    request = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": "session-abc",
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+
+    key = main_module._rate_limit_key(request)
+
+    assert key.startswith("gateway_session:")
+
+
+def test_bearer_auth_rejected_when_gateway_only_mode(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _set_public_bearer_auth(monkeypatch, False)
+    monkeypatch.setattr(auth_module, "SUPABASE_JWT_SECRET", TEST_SUPABASE_JWT_SECRET)
+
+    token = _make_bearer_token()
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_evaluate_rejects_gateway_secret(monkeypatch):
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
     monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
@@ -319,6 +454,27 @@ def test_evaluate_rejects_gateway_secret(monkeypatch):
     client = TestClient(main_module.app)
     response = client.get("/evaluate", headers={"X-App-Key": "test-gateway-key"})
     assert response.status_code == 401
+
+
+def test_metrics_disabled_and_auth_behavior(monkeypatch):
+    monkeypatch.setattr(main_module, "ENABLE_METRICS_ENDPOINT", False)
+    client = TestClient(main_module.app)
+
+    disabled = client.get("/metrics")
+    assert disabled.status_code == 404
+
+    monkeypatch.setattr(main_module, "ENABLE_METRICS_ENDPOINT", True)
+    monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
+
+    unauthorized = client.get("/metrics")
+    assert unauthorized.status_code == 401
+
+    wrong_secret = client.get("/metrics", headers={"X-App-Key": "wrong"})
+    assert wrong_secret.status_code == 401
+
+    authorized = client.get("/metrics", headers={"X-App-Key": "test-evaluate-key"})
+    assert authorized.status_code == 200
+    assert authorized.json()["status"] == "healthy"
 
 
 class TestTradeSharePivot:

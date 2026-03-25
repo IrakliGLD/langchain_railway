@@ -64,6 +64,56 @@ pytest -q
 pytest -q tests/test_router.py tests/test_tool_adapter.py tests/test_pipeline_agent_mode.py
 ```
 
+## Deployment Modes
+
+Runtime auth is now explicit. Do not rely on implicit defaults when deploying.
+
+- `ENAI_AUTH_MODE=gateway_only`
+  - Intended for trusted proxy or edge-function callers that send `X-App-Key`.
+  - `SUPABASE_JWT_SECRET` is optional and bearer auth stays disabled.
+- `ENAI_AUTH_MODE=gateway_and_bearer`
+  - Intended when direct `Authorization: Bearer <token>` calls are part of the boundary.
+  - `SUPABASE_JWT_SECRET` is mandatory.
+
+Use an explicit deployment environment value:
+
+- `ENAI_DEPLOYMENT_ENV=development`
+- `ENAI_DEPLOYMENT_ENV=staging`
+- `ENAI_DEPLOYMENT_ENV=production`
+
+When `ENAI_DEPLOYMENT_ENV=production`, `/evaluate` must stay disabled.
+
+## Production Env Baseline
+
+Gateway-only production baseline:
+
+```bash
+ENAI_DEPLOYMENT_ENV=production
+ENAI_AUTH_MODE=gateway_only
+ENAI_GATEWAY_SECRET=...
+ENAI_SESSION_SIGNING_SECRET=...
+ENAI_EVALUATE_SECRET=...
+ENABLE_METRICS_ENDPOINT=false
+ENABLE_EVALUATE_ENDPOINT=false
+ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
+ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
+```
+
+Hybrid gateway + bearer production baseline:
+
+```bash
+ENAI_DEPLOYMENT_ENV=production
+ENAI_AUTH_MODE=gateway_and_bearer
+SUPABASE_JWT_SECRET=...
+ENAI_GATEWAY_SECRET=...
+ENAI_SESSION_SIGNING_SECRET=...
+ENAI_EVALUATE_SECRET=...
+ENABLE_METRICS_ENDPOINT=false
+ENABLE_EVALUATE_ENDPOINT=false
+ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
+ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
+```
+
 ## Documentation Policy
 
 - Keep active docs in `docs/active/`.

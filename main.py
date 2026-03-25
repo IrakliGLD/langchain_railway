@@ -125,8 +125,18 @@ log = logging.getLogger("Enai")
 # Load knowledge files from knowledge/ directory at startup
 knowledge_module.load_knowledge()
 
-if not SUPABASE_JWT_SECRET:
-    log.warning("SUPABASE_JWT_SECRET not set — public bearer auth is disabled")
+if ENABLE_PUBLIC_BEARER_AUTH:
+    log.info("Auth mode enabled: gateway_and_bearer")
+else:
+    log.info("Auth mode enabled: gateway_only")
+
+if ENABLE_METRICS_ENDPOINT:
+    log.warning("/metrics endpoint enabled; keep it admin-only and network-restricted")
+if ENABLE_EVALUATE_ENDPOINT:
+    log.warning("/evaluate endpoint enabled; keep it disabled in production or isolate it to an admin worker")
+
+if not ENABLE_PUBLIC_BEARER_AUTH and SUPABASE_JWT_SECRET:
+    log.info("SUPABASE_JWT_SECRET loaded but bearer auth is disabled by ENAI_AUTH_MODE")
 
 # Request ID tracking for observability
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
@@ -262,7 +272,18 @@ def _rate_limit_key(request: Request) -> str:
     """
     app_key = request.headers.get("x-app-key") or ""
     if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
-        return "gateway:internal"
+        session_token = (request.headers.get("x-session-token") or "").strip()
+        if session_token:
+            token_hash = hashlib.sha256(session_token.encode("utf-8")).hexdigest()[:16]
+            return f"gateway_session:{token_hash}"
+
+        forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+        if forwarded_for:
+            client_ip = forwarded_for.split(",", 1)[0].strip()
+            if client_ip:
+                return f"gateway_ip:{client_ip}"
+
+        return f"gateway_ip:{get_remote_address(request)}"
     return f"ip:{get_remote_address(request)}"
 
 
@@ -282,7 +303,7 @@ def _check_user_rate_limit(subject_id: str) -> bool:
         # Prune expired entries
         timestamps = [t for t in timestamps if now - t < window]
         if not timestamps:
-            _user_rate_buckets.pop(subject_id, None)
+            _user_rate_buckets[subject_id] = [now]
             return True
         if len(timestamps) >= max_requests:
             _user_rate_buckets[subject_id] = timestamps
@@ -369,8 +390,13 @@ def on_startup() -> None:
 
 @app.get("/ask")
 def ask_get():
+    auth_hint = (
+        "Authorization: Bearer <token> or X-App-Key"
+        if ENABLE_PUBLIC_BEARER_AUTH
+        else "X-App-Key"
+    )
     return {
-        "message": "POST /ask with JSON: {'query': '...'} and a valid Authorization header."
+        "message": f"POST /ask with JSON: {{'query': '...'}} and a valid {auth_hint} header."
     }
 
 @app.get("/healthz")

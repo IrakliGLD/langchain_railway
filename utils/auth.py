@@ -1,4 +1,4 @@
-"""Dual-mode authentication: gateway shared secret OR Supabase bearer token."""
+"""Gateway auth with optional public bearer-token support."""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ import jwt
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from config import GATEWAY_SHARED_SECRET, SUPABASE_JWT_SECRET
+from config import (
+    ENABLE_PUBLIC_BEARER_AUTH,
+    ENAI_AUTH_MODE,
+    GATEWAY_SHARED_SECRET,
+    SUPABASE_JWT_SECRET,
+)
 
 log = logging.getLogger("Enai")
 
@@ -68,7 +73,7 @@ def authenticate_request(
             )
 
     # 2. Bearer token
-    if authorization:
+    if ENABLE_PUBLIC_BEARER_AUTH and authorization:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() == "bearer" and token.strip():
             user_id = _verify_supabase_token(token.strip())
@@ -77,5 +82,7 @@ def authenticate_request(
                     auth_mode="public_bearer",
                     subject_id=f"user:{user_id}",
                 )
+    elif authorization:
+        log.debug("Bearer auth ignored because ENAI_AUTH_MODE=%s", ENAI_AUTH_MODE)
 
     raise HTTPException(status_code=401, detail="Unauthorized")

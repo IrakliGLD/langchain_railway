@@ -43,10 +43,14 @@ def _read_secret_env(*names: str):
 GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
 SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSION_SIGNING_SECRET")
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
+ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
+ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
 # Supabase JWT secret for local bearer-token verification.
 # When set, public callers can authenticate with Authorization: Bearer <token>.
-# When unset, only gateway-secret auth is available.
+# When unset, only gateway-secret auth is available. Bearer auth is only enabled
+# when ENAI_AUTH_MODE=gateway_and_bearer.
 SUPABASE_JWT_SECRET = _read_secret_env("SUPABASE_JWT_SECRET")
+ENABLE_PUBLIC_BEARER_AUTH = ENAI_AUTH_MODE == "gateway_and_bearer"
 
 # LLM Configuration
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
@@ -143,16 +147,58 @@ MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
 # Validation
 # ===================================================================
 
-if not SUPABASE_DB_URL:
-    raise RuntimeError("Missing SUPABASE_DB_URL")
-if not GATEWAY_SHARED_SECRET:
-    raise RuntimeError("Missing ENAI_GATEWAY_SECRET (or legacy GATEWAY_SHARED_SECRET)")
-if not SESSION_SIGNING_SECRET:
-    raise RuntimeError("Missing ENAI_SESSION_SIGNING_SECRET (or legacy SESSION_SIGNING_SECRET)")
-if not EVALUATE_ADMIN_SECRET:
-    raise RuntimeError("Missing ENAI_EVALUATE_SECRET (or legacy EVALUATE_ADMIN_SECRET)")
-if MODEL_TYPE == "gemini" and not GOOGLE_API_KEY:
-    raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
+def validate_runtime_settings(
+    *,
+    supabase_db_url: str | None,
+    gateway_shared_secret: str | None,
+    session_signing_secret: str | None,
+    evaluate_admin_secret: str | None,
+    auth_mode: str,
+    deployment_env: str,
+    supabase_jwt_secret: str | None,
+    enable_evaluate_endpoint: bool,
+    model_type: str,
+    google_api_key: str | None,
+) -> None:
+    valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
+    valid_deployment_envs = {"development", "staging", "production", "test"}
+
+    if auth_mode not in valid_auth_modes:
+        raise RuntimeError(
+            "Invalid ENAI_AUTH_MODE. Expected one of: gateway_only, gateway_and_bearer"
+        )
+    if deployment_env not in valid_deployment_envs:
+        raise RuntimeError(
+            "Invalid ENAI_DEPLOYMENT_ENV. Expected one of: development, staging, production, test"
+        )
+    if not supabase_db_url:
+        raise RuntimeError("Missing SUPABASE_DB_URL")
+    if not gateway_shared_secret:
+        raise RuntimeError("Missing ENAI_GATEWAY_SECRET (or legacy GATEWAY_SHARED_SECRET)")
+    if not session_signing_secret:
+        raise RuntimeError("Missing ENAI_SESSION_SIGNING_SECRET (or legacy SESSION_SIGNING_SECRET)")
+    if not evaluate_admin_secret:
+        raise RuntimeError("Missing ENAI_EVALUATE_SECRET (or legacy EVALUATE_ADMIN_SECRET)")
+    if auth_mode == "gateway_and_bearer" and not supabase_jwt_secret:
+        raise RuntimeError("ENAI_AUTH_MODE=gateway_and_bearer requires SUPABASE_JWT_SECRET")
+    if deployment_env == "production" and enable_evaluate_endpoint:
+        raise RuntimeError("ENABLE_EVALUATE_ENDPOINT must remain false when ENAI_DEPLOYMENT_ENV=production")
+    if model_type == "gemini" and not google_api_key:
+        raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
+
+
+validate_runtime_settings(
+    supabase_db_url=SUPABASE_DB_URL,
+    gateway_shared_secret=GATEWAY_SHARED_SECRET,
+    session_signing_secret=SESSION_SIGNING_SECRET,
+    evaluate_admin_secret=EVALUATE_ADMIN_SECRET,
+    auth_mode=ENAI_AUTH_MODE,
+    deployment_env=ENAI_DEPLOYMENT_ENV,
+    supabase_jwt_secret=SUPABASE_JWT_SECRET,
+    enable_evaluate_endpoint=ENABLE_EVALUATE_ENDPOINT,
+    model_type=MODEL_TYPE,
+    google_api_key=GOOGLE_API_KEY,
+)
 
 # ===================================================================
 # Database Configuration
