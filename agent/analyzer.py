@@ -1101,11 +1101,14 @@ def _prepare_timeseries_rows(
 def _needs_standalone_analysis(ctx: QueryContext) -> bool:
     """Return True when derived metrics should be computed outside why-mode."""
     qa = ctx.question_analysis
-    if qa is None:
-        return False
-    if qa.analysis_requirements.derived_metrics:
-        return True
-    if qa.classification.analysis_mode.value == "analyst":
+    if qa is not None:
+        if qa.analysis_requirements.derived_metrics:
+            return True
+        if qa.classification.analysis_mode.value == "analyst":
+            return True
+    # Fallback: heuristic mode detection still triggers analysis
+    # even when question_analysis failed validation.
+    if ctx.mode == "analyst":
         return True
     return False
 

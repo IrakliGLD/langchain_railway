@@ -134,7 +134,7 @@ class ClassificationInfo(BaseModel):
 
     query_type: QueryType
     analysis_mode: AnalysisMode
-    intent: str = Field(min_length=1, max_length=128)
+    intent: str = Field(min_length=1, max_length=512)
     needs_clarification: bool
     confidence: float = Field(ge=0.0, le=1.0)
     ambiguities: List[str] = Field(default_factory=list, max_length=25)

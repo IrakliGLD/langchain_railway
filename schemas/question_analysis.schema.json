@@ -59,7 +59,7 @@
           "$ref": "#/$defs/AnalysisMode"
         },
         "intent": {
-          "maxLength": 128,
+          "maxLength": 512,
           "minLength": 1,
           "title": "Intent",
           "type": "string"

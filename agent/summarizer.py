@@ -83,7 +83,11 @@ def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
     if ctx.df is None or ctx.df.empty:
         return
     qa = ctx.question_analysis
-    if qa is None or qa.classification.analysis_mode.value != "analyst":
+    is_analyst = (
+        (qa is not None and qa.classification.analysis_mode.value == "analyst")
+        or ctx.mode == "analyst"
+    )
+    if not is_analyst:
         return
     for col in ctx.df.select_dtypes(include="number").columns:
         series = ctx.df[col].dropna()
