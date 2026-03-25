@@ -43,6 +43,10 @@ def _read_secret_env(*names: str):
 GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
 SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSION_SIGNING_SECRET")
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
+# Supabase JWT secret for local bearer-token verification.
+# When set, public callers can authenticate with Authorization: Bearer <token>.
+# When unset, only gateway-secret auth is available.
+SUPABASE_JWT_SECRET = _read_secret_env("SUPABASE_JWT_SECRET")
 
 # LLM Configuration
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
@@ -74,6 +78,8 @@ ENABLE_TRACE_DEBUG_ARTIFACTS = os.getenv("ENABLE_TRACE_DEBUG_ARTIFACTS", "false"
 ENABLE_SKILL_PROMPTS_SUMMARIZER = os.getenv("ENABLE_SKILL_PROMPTS_SUMMARIZER", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_SKILL_PROMPTS_PLANNER = os.getenv("ENABLE_SKILL_PROMPTS_PLANNER", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_VECTOR_KNOWLEDGE_SHADOW = os.getenv("ENABLE_VECTOR_KNOWLEDGE_SHADOW", "false").lower() in ("1", "true", "yes", "on")
+ENABLE_METRICS_ENDPOINT = os.getenv("ENABLE_METRICS_ENDPOINT", "false").lower() in ("1", "true", "yes", "on")
+ENABLE_EVALUATE_ENDPOINT = os.getenv("ENABLE_EVALUATE_ENDPOINT", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_VECTOR_KNOWLEDGE_HINTS = os.getenv("ENABLE_VECTOR_KNOWLEDGE_HINTS", "true").lower() in ("1", "true", "yes", "on")
 TRACE_TEXT_MAX_CHARS = max(120, int(os.getenv("TRACE_TEXT_MAX_CHARS", "800")))
 TRACE_MAX_LIST_ITEMS = max(1, int(os.getenv("TRACE_MAX_LIST_ITEMS", "8")))
@@ -92,6 +98,8 @@ SESSION_HISTORY_MAX_TURNS = max(1, int(os.getenv("SESSION_HISTORY_MAX_TURNS", "3
 SESSION_IDLE_TTL_SECONDS = max(60, int(os.getenv("SESSION_IDLE_TTL_SECONDS", "3600")))
 ASK_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("ASK_MAX_CONCURRENT_REQUESTS", "8")))
 ASK_BACKPRESSURE_TIMEOUT_SECONDS = max(0.0, float(os.getenv("ASK_BACKPRESSURE_TIMEOUT_SECONDS", "0.0")))
+ASK_RATE_LIMIT_PUBLIC_PER_MINUTE = max(1, int(os.getenv("ASK_RATE_LIMIT_PUBLIC_PER_MINUTE", "10")))
+ASK_RATE_LIMIT_GATEWAY_PER_MINUTE = max(1, int(os.getenv("ASK_RATE_LIMIT_GATEWAY_PER_MINUTE", "30")))
 VECTOR_KNOWLEDGE_TOP_K = max(1, int(os.getenv("VECTOR_KNOWLEDGE_TOP_K", "6")))
 VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER = max(1, int(os.getenv("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", "3")))
 VECTOR_KNOWLEDGE_MAX_CHARS = max(500, int(os.getenv("VECTOR_KNOWLEDGE_MAX_CHARS", "9000")))

@@ -315,6 +315,7 @@ def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
 def test_evaluate_rejects_gateway_secret(monkeypatch):
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
     monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
+    monkeypatch.setattr(main_module, "ENABLE_EVALUATE_ENDPOINT", True)
     client = TestClient(main_module.app)
     response = client.get("/evaluate", headers={"X-App-Key": "test-gateway-key"})
     assert response.status_code == 401

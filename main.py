@@ -23,6 +23,8 @@
 #
 # All function calls in ask_post() and other endpoints now use imported modules.
 
+import hashlib
+import hmac
 import os
 import re
 import time
@@ -68,6 +70,7 @@ from agent.pipeline import process_query
 # Phase 2: Core modules
 from utils.metrics import metrics
 from utils.session_memory import get_or_issue_session, get_history, append_exchange, seed_history
+from utils.auth import authenticate_request, CallerContext
 from utils.resilience import request_backpressure_gate, get_resilience_snapshot
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import (
@@ -121,6 +124,9 @@ log = logging.getLogger("Enai")
 
 # Load knowledge files from knowledge/ directory at startup
 knowledge_module.load_knowledge()
+
+if not SUPABASE_JWT_SECRET:
+    log.warning("SUPABASE_JWT_SECRET not set — public bearer auth is disabled")
 
 # Request ID tracking for observability
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
@@ -244,8 +250,49 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
     metrics.log_security_event(event_type)
     security_log.warning(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
-# Phase 1D Security: Configure rate limiter (5 requests/minute per IP)
-limiter = Limiter(key_func=get_remote_address)
+# Caller-aware rate limiting: key by authenticated identity when available,
+# fall back to IP for unauthenticated/rejected traffic.
+def _rate_limit_key(request: Request) -> str:
+    """Derive rate-limit key from auth headers (pre-authentication peek).
+
+    Only the gateway secret is cheap enough to verify here (constant-time
+    string compare).  Bearer tokens are NOT verified — using a token hash
+    as the key would let attackers forge unlimited buckets with random
+    strings.  All non-gateway traffic is keyed by IP address.
+    """
+    app_key = request.headers.get("x-app-key") or ""
+    if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
+        return "gateway:internal"
+    return f"ip:{get_remote_address(request)}"
+
+
+# Post-auth per-user rate limiter for bearer callers.
+# Simple sliding-window counter in process memory.
+_user_rate_buckets: Dict[str, List[float]] = {}
+_user_rate_lock = __import__("threading").Lock()
+
+
+def _check_user_rate_limit(subject_id: str) -> bool:
+    """Return True if the user is within their per-minute rate limit."""
+    now = time.time()
+    window = 60.0
+    max_requests = ASK_RATE_LIMIT_PUBLIC_PER_MINUTE
+    with _user_rate_lock:
+        timestamps = _user_rate_buckets.get(subject_id, [])
+        # Prune expired entries
+        timestamps = [t for t in timestamps if now - t < window]
+        if not timestamps:
+            _user_rate_buckets.pop(subject_id, None)
+            return True
+        if len(timestamps) >= max_requests:
+            _user_rate_buckets[subject_id] = timestamps
+            return False
+        timestamps.append(now)
+        _user_rate_buckets[subject_id] = timestamps
+        return True
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -323,7 +370,7 @@ def on_startup() -> None:
 @app.get("/ask")
 def ask_get():
     return {
-        "message": "✅ /ask is active. Send POST with JSON: {'query': 'What was the average balancing price in 2023?'} and header X-App-Key using the gateway secret."
+        "message": "POST /ask with JSON: {'query': '...'} and a valid Authorization header."
     }
 
 @app.get("/healthz")
@@ -348,8 +395,12 @@ def readyz():
 
 
 @app.get("/metrics")
-def get_metrics():
-    """Return application metrics for observability."""
+def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
+    """Return application metrics for observability. Disabled by default in production."""
+    if not ENABLE_METRICS_ENDPOINT:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not x_app_key or not EVALUATE_ADMIN_SECRET or not hmac.compare_digest(x_app_key, EVALUATE_ADMIN_SECRET):
+        raise HTTPException(status_code=401, detail="Unauthorized")
     pool = getattr(ENGINE, "pool", None)
     pool_size = None
     checked_out = None
@@ -400,7 +451,9 @@ def evaluate(
 
     Authentication: Requires X-App-Key header using the evaluate admin secret
     """
-    if x_app_key != EVALUATE_ADMIN_SECRET:
+    if not ENABLE_EVALUATE_ENDPOINT:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not x_app_key or not EVALUATE_ADMIN_SECRET or not hmac.compare_digest(x_app_key, EVALUATE_ADMIN_SECRET):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
@@ -648,13 +701,14 @@ def generate_html_report(summary: Dict[str, Any], results: List[Dict[str, Any]],
 
 
 @app.post('/ask', response_model=APIResponse)
-@limiter.limit('5/minute')  # Phase 1D Security: Rate limiting (5 requests/minute per IP)
+@limiter.limit(f"{ASK_RATE_LIMIT_GATEWAY_PER_MINUTE}/minute")
 def ask_post(
     request: Request,
     response: Response,
     q: Question,
-    x_app_key: str = Header(..., alias='X-App-Key'),
+    x_app_key: Optional[str] = Header(None, alias='X-App-Key'),
     x_session_token: Optional[str] = Header(None, alias='X-Session-Token'),
+    authorization: Optional[str] = Header(None, alias='Authorization'),
 ):
     t0 = time.time()
     trace_id = request_id_var.get() or str(uuid.uuid4())
@@ -668,8 +722,9 @@ def ask_post(
             request_llm_telemetry = metrics.finalize_request_telemetry()
         total = request_llm_telemetry.get("total_tokens", 0)
         if total > 0:
+            _caller = getattr(request.state, "caller", None)
             log.info(
-                "LLM usage: calls=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cost_usd=%.6f models=%s trace_id=%s",
+                "LLM usage: calls=%d prompt_tokens=%d completion_tokens=%d total_tokens=%d cost_usd=%.6f models=%s trace_id=%s auth_mode=%s subject_id=%s",
                 request_llm_telemetry.get("llm_calls", 0),
                 request_llm_telemetry.get("prompt_tokens", 0),
                 request_llm_telemetry.get("completion_tokens", 0),
@@ -677,19 +732,40 @@ def ask_post(
                 request_llm_telemetry.get("estimated_cost_usd", 0.0),
                 ",".join(request_llm_telemetry.get("models", {}).keys()),
                 request_llm_telemetry.get("trace_id", ""),
+                _caller.auth_mode if _caller else "unknown",
+                _caller.subject_id if _caller else "unknown",
             )
-        response.headers["X-LLM-Total-Tokens"] = str(total)
-        response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
+        # Only expose LLM usage headers to gateway callers (internal).
+        _caller = getattr(request.state, "caller", None)
+        if _caller is None or _caller.auth_mode == "gateway":
+            response.headers["X-LLM-Total-Tokens"] = str(total)
+            response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
         return request_llm_telemetry
 
-    if x_app_key != GATEWAY_SHARED_SECRET:
+    try:
+        caller: CallerContext = authenticate_request(
+            x_app_key=x_app_key,
+            authorization=authorization,
+        )
+    except HTTPException:
         _finalize_request_telemetry()
         log_security_event(
-            "unauthorized_app_key",
+            "unauthorized_request",
             request=request,
-            provided_key=bool(x_app_key),
+            provided_app_key=bool(x_app_key),
+            provided_bearer=bool(authorization),
         )
-        raise HTTPException(status_code=401, detail='Unauthorized')
+        raise
+    request.state.caller = caller
+
+    # Per-user rate limit for public bearer callers (post-auth).
+    # The decorator-level limiter uses IP keys and can't differentiate
+    # by authenticated identity.  This enforces per-user limits after
+    # the token has been verified.
+    if caller.auth_mode == "public_bearer":
+        if not _check_user_rate_limit(caller.subject_id):
+            _finalize_request_telemetry()
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     # Referer validation
     referer = request.headers.get('referer') or request.headers.get('Referer')
@@ -831,6 +907,9 @@ def ask_post(
                 request=request,
                 error=str(e),
             )
+            _caller = getattr(request.state, "caller", None)
+            if _caller and _caller.auth_mode == "public_bearer":
+                raise HTTPException(status_code=500, detail="Query processing failed")
             raise HTTPException(status_code=500, detail=f'Query processing failed: {e}')
 
         append_exchange(session_id, query_text, ctx.summary)
