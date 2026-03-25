@@ -41,6 +41,7 @@ from config import (
     SUMMARIZER_MODEL,
     ENABLE_SKILL_PROMPTS_SUMMARIZER,
     ENABLE_SKILL_PROMPTS_PLANNER,
+    SESSION_HISTORY_MAX_TURNS,
 )
 from context import DB_SCHEMA_DOC
 from knowledge.sql_example_selector import get_relevant_examples
@@ -1639,7 +1640,7 @@ FOR ANALYTICAL QUERIES (drivers, correlations, trends, price analysis):
     conversation_context = ""
     if conversation_history:
         conversation_context = "Recent conversation history (for context):\n"
-        for i, qa_pair in enumerate(conversation_history[-3:], 1):  # Limit to last 3 Q&A pairs
+        for i, qa_pair in enumerate(conversation_history[-SESSION_HISTORY_MAX_TURNS:], 1):
             question = qa_pair.get("question", "")
             answer = qa_pair.get("answer", "")
             if question and answer:
@@ -1824,7 +1825,6 @@ Important rules:
     return result
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
 def llm_summarize_structured(
     user_query: str,
     data_preview: str,
@@ -1841,7 +1841,7 @@ def llm_summarize_structured(
     history_str = ""
     if conversation_history:
         parts = []
-        for i, qa_pair in enumerate(conversation_history[-3:], 1):
+        for i, qa_pair in enumerate(conversation_history[-SESSION_HISTORY_MAX_TURNS:], 1):
             question = qa_pair.get("question", "")
             answer = qa_pair.get("answer", "")
             if question and answer:
@@ -2027,18 +2027,47 @@ Citation format rules:
 
 {lang_instruction}
 """
+    prompt_original = prompt  # Save for potential re-truncation on timeout retry
     prompt = _enforce_prompt_budget(prompt, label="summarize_structured")
 
+    _RETRY_BUDGET_FRACTION = 0.75  # On timeout retry, use 75% of configured budget
+    max_attempts = 2
+    last_exc = None
+    raw_output = ""
     llm_start = time.time()
-    try:
-        llm = get_llm_for_stage(SUMMARIZER_MODEL)
-        primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
-        message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
-        raw_output = message.content.strip()
-        _log_usage_for_message(message, model_name=primary_model_name)
-        metrics.log_llm_call(time.time() - llm_start)
-    except Exception as exc:
-        log.warning("Structured summarize failed with primary model, fallback: %s", exc)
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            reduced = int(PROMPT_BUDGET_MAX_CHARS * _RETRY_BUDGET_FRACTION)
+            prompt = _enforce_prompt_budget(
+                prompt_original, label="summarize_structured_retry",
+                budget_override=reduced,
+            )
+            log.warning(
+                "Retrying summarizer with reduced budget: attempt=%d budget=%d chars=%d",
+                attempt + 1, reduced, len(prompt),
+            )
+            llm_start = time.time()
+
+        try:
+            llm = get_llm_for_stage(SUMMARIZER_MODEL)
+            primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
+            raw_output = message.content.strip()
+            _log_usage_for_message(message, model_name=primary_model_name)
+            metrics.log_llm_call(time.time() - llm_start)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            exc_str = str(exc).lower()
+            is_timeout = any(kw in exc_str for kw in ("deadline", "timeout", "504", "timed out"))
+            if is_timeout and attempt < max_attempts - 1:
+                log.warning("Gemini timeout attempt %d, will retry with reduced budget: %s", attempt + 1, exc)
+                continue
+            break  # Non-timeout error → fall through to OpenAI fallback
+
+    if last_exc is not None:
+        log.warning("Structured summarize failed with primary model, fallback: %s", last_exc)
         if MODEL_TYPE != "openai":
             llm = make_openai()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
@@ -2047,7 +2076,7 @@ Citation format rules:
             metrics.log_llm_call(time.time() - llm_start)
         else:
             metrics.log_error()
-            raise
+            raise last_exc
 
     payload = _extract_json_payload(raw_output)
     try:
@@ -2081,15 +2110,19 @@ _SECTION_CONTENT_RE = re.compile(
 )
 
 
-def _enforce_prompt_budget(prompt: str, label: str) -> str:
+def _enforce_prompt_budget(prompt: str, label: str, *, budget_override: int | None = None) -> str:
     """Hard cap prompt size to control latency/cost blowups.
 
     Uses section-aware truncation: truncates lower-priority sections first
     (conversation_history → data_preview → external_source_passages →
     domain_knowledge → statistics) while preserving user_question and
     system guidance.  Falls back to head+tail split if section parsing fails.
+
+    A 10% headroom margin is applied so truncated prompts land well below
+    the ceiling, reducing Gemini timeout risk on near-capacity prompts.
     """
-    budget = max(1500, int(PROMPT_BUDGET_MAX_CHARS))
+    _raw = max(1500, int(budget_override if budget_override is not None else PROMPT_BUDGET_MAX_CHARS))
+    budget = int(_raw * 0.90)  # 10% headroom for processing safety
     if len(prompt) <= budget:
         return prompt
 
