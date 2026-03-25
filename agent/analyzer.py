@@ -899,6 +899,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
     cols_labeled = [_all_labels.get(c, c) for c in ctx.cols]
     ctx.preview = rows_to_preview(ctx.rows, cols_labeled)
     ctx.stats_hint = quick_stats(ctx.rows, cols_labeled)
+    _append_column_aggregates(ctx)
 
     # --- Seasonal stats ---
     timeseries_info = detect_monthly_timeseries(ctx.df)
@@ -1096,6 +1097,40 @@ def _prepare_timeseries_rows(
     previous_ts = pd.to_datetime(prev_row[t_series_col].iloc[0], errors="coerce") if not prev_row.empty else None
 
     return df, t_series_col, current_ts, cur_row, previous_ts, prev_row
+
+
+def _append_column_aggregates(ctx: QueryContext) -> None:
+    """Append numeric column aggregates to stats_hint.
+
+    Uses ctx.df directly (original column names, not labels) so we bypass
+    the quick_stats labeling issue where "date" → "Period (Year-Month-Day)"
+    causes date-column detection to fail.
+
+    Gives the LLM pre-computed sums/means/ranges so it can reference them
+    instead of doing row-by-row arithmetic — reducing both response time
+    and grounding false positives (aggregates enter the grounding corpus
+    via stats_hint).
+    """
+    if ctx.df is None or ctx.df.empty:
+        return
+    numeric_cols = ctx.df.select_dtypes(include="number").columns.tolist()
+    if not numeric_cols:
+        return
+
+    from context import COLUMN_LABELS
+    lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
+    for col in numeric_cols:
+        series = ctx.df[col].dropna()
+        if series.empty:
+            continue
+        label = COLUMN_LABELS.get(col, col)
+        lines.append(
+            f"{label}: sum={series.sum():.4f}, mean={series.mean():.4f}, "
+            f"min={series.min():.4f}, max={series.max():.4f}, count={len(series)}"
+        )
+    if len(lines) > 1:
+        ctx.stats_hint += "\n".join(lines)
+        log.info("Added column aggregates to stats_hint for %d numeric columns", len(numeric_cols))
 
 
 def _needs_standalone_analysis(ctx: QueryContext) -> bool:

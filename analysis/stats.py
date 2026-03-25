@@ -95,7 +95,8 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     out = [f"Rows: {len(df)}"]
 
     # 1. Detect date/year column
-    date_cols = [c for c in df.columns if "date" in c.lower() or "year" in c.lower() or "month" in c.lower()]
+    _time_kws = ("date", "year", "month", "period")
+    date_cols = [c for c in df.columns if any(kw in c.lower() for kw in _time_kws)]
     if not date_cols or numeric.empty:
         # Fallback to simple stats if no date or numeric data
         return "\n".join(out)

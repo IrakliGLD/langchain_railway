@@ -313,9 +313,10 @@ def get_llm_for_stage(
     the cap never leaks to other callers of the same model.
 
     When *max_retries* is provided a dedicated instance with that retry limit
-    is cached separately.  Use ``max_retries=0`` for the summarizer so that
+    is cached separately.  Use ``max_retries=1`` for the summarizer so that
     504 DeadlineExceeded errors reach our application-level retry loop
-    immediately instead of being consumed by langchain's internal retries.
+    after one attempt instead of being consumed by langchain's internal retries.
+    (``max_retries=0`` is treated as "use defaults" by the Google SDK.)
 
     Falls back to ``make_openai()`` when Gemini is unavailable.
     """
@@ -1692,7 +1693,7 @@ SYSTEM_GUIDANCE (authoritative rules):
 
     llm_start = time.time()
     try:
-        llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=0)
+        llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
         primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
         message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
         out = message.content.strip()
@@ -2066,7 +2067,7 @@ Citation format rules:
             llm_start = time.time()
 
         try:
-            llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=0)
+            llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
             primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             raw_output = message.content.strip()
