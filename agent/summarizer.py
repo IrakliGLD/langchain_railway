@@ -71,6 +71,28 @@ def _build_grounding_corpus(ctx: QueryContext) -> str:
     return "\n".join(parts)
 
 
+def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
+    """Add column-level aggregates to grounding tokens for analyst-mode queries.
+
+    CfD and similar calculations produce derived values (strike * volume, etc.)
+    that don't exist in raw data rows.  By adding sum/mean/min/max/count of
+    each numeric column, we give the grounding check legitimate computed values
+    to match against — preventing false-positive failures while keeping the 90%
+    threshold intact for non-analyst queries.
+    """
+    if ctx.df is None or ctx.df.empty:
+        return
+    qa = ctx.question_analysis
+    if qa is None or qa.classification.analysis_mode.value != "analyst":
+        return
+    for col in ctx.df.select_dtypes(include="number").columns:
+        series = ctx.df[col].dropna()
+        if series.empty:
+            continue
+        for val in [series.sum(), series.mean(), series.min(), series.max(), len(series)]:
+            tokens.update(_tokenize_cell_value(val))
+
+
 def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
     tokens = _extract_number_tokens(_build_grounding_corpus(ctx))
     # Expand text-extracted numbers with cell-level tokenization so that
@@ -87,6 +109,7 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
         for row in ctx.rows[:200]:
             for value in row:
                 tokens.update(_tokenize_cell_value(value))
+    _add_aggregate_tokens(tokens, ctx)
     return tokens
 
 

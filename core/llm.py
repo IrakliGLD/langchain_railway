@@ -299,6 +299,7 @@ def get_llm_for_stage(
     stage_model: Optional[str] = None,
     *,
     thinking_budget: Optional[int] = None,
+    max_retries: Optional[int] = None,
 ):
     """Return an LLM instance for a pipeline stage.
 
@@ -311,10 +312,17 @@ def get_llm_for_stage(
     silently ignore the parameter).  A separate cached instance is created so
     the cap never leaks to other callers of the same model.
 
+    When *max_retries* is provided a dedicated instance with that retry limit
+    is cached separately.  Use ``max_retries=0`` for the summarizer so that
+    504 DeadlineExceeded errors reach our application-level retry loop
+    immediately instead of being consumed by langchain's internal retries.
+
     Falls back to ``make_openai()`` when Gemini is unavailable.
     """
-    # No thinking-budget override — fast path unchanged
-    if thinking_budget is None:
+    needs_dedicated = thinking_budget is not None or max_retries is not None
+
+    # No overrides — fast path unchanged
+    if not needs_dedicated:
         if not stage_model or stage_model == GEMINI_MODEL:
             return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
 
@@ -338,26 +346,35 @@ def get_llm_for_stage(
             log.info("Stage-specific LLM cached: model=%s", stage_model)
         return _stage_model_cache[stage_model]
 
-    # Thinking-budget requested — create a dedicated cached instance.
+    # Dedicated instance with overrides (thinking_budget and/or max_retries).
     effective_model = stage_model or GEMINI_MODEL
     if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
         return make_openai()
 
-    cache_key = f"{effective_model}|tb={thinking_budget}"
+    parts = [effective_model]
+    if thinking_budget is not None:
+        parts.append(f"tb={thinking_budget}")
+    if max_retries is not None:
+        parts.append(f"mr={max_retries}")
+    cache_key = "|".join(parts)
+
     if cache_key not in _stage_model_cache:
-        _stage_model_cache[cache_key] = ChatGoogleGenerativeAI(
+        kwargs = dict(
             model=effective_model,
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
             convert_system_message_to_human=True,
-            max_retries=2,
+            max_retries=max_retries if max_retries is not None else 2,
             timeout=120,
-            thinking_budget=thinking_budget,
         )
+        if thinking_budget is not None:
+            kwargs["thinking_budget"] = thinking_budget
+        _stage_model_cache[cache_key] = ChatGoogleGenerativeAI(**kwargs)
         log.info(
-            "Stage-specific LLM cached: model=%s thinking_budget=%s",
+            "Stage-specific LLM cached: model=%s thinking_budget=%s max_retries=%s",
             effective_model,
             thinking_budget,
+            max_retries,
         )
     return _stage_model_cache[cache_key]
 
@@ -1675,7 +1692,7 @@ SYSTEM_GUIDANCE (authoritative rules):
 
     llm_start = time.time()
     try:
-        llm = get_llm_for_stage(SUMMARIZER_MODEL)
+        llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=0)
         primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
         message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
         out = message.content.strip()
@@ -2049,7 +2066,7 @@ Citation format rules:
             llm_start = time.time()
 
         try:
-            llm = get_llm_for_stage(SUMMARIZER_MODEL)
+            llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=0)
             primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             raw_output = message.content.strip()
