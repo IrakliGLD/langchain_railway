@@ -66,22 +66,31 @@ pytest -q tests/test_router.py tests/test_tool_adapter.py tests/test_pipeline_ag
 
 ## Deployment Modes
 
-Runtime auth is now explicit. Do not rely on implicit defaults when deploying.
+Runtime auth and admin-surface enablement should be explicit in deployed environments.
 
 - `ENAI_AUTH_MODE=gateway_only`
   - Intended for trusted proxy or edge-function callers that send `X-App-Key`.
-  - `SUPABASE_JWT_SECRET` is optional and bearer auth stays disabled.
+  - `SUPABASE_JWT_SECRET` may be present, but bearer auth stays disabled.
 - `ENAI_AUTH_MODE=gateway_and_bearer`
   - Intended when direct `Authorization: Bearer <token>` calls are part of the boundary.
   - `SUPABASE_JWT_SECRET` is mandatory.
+- `ENAI_AUTH_MODE=auto`
+  - Temporary compatibility mode during rollout.
+  - Bearer auth turns on only when `SUPABASE_JWT_SECRET` is present.
+  - Migrate to an explicit auth mode instead of leaving production on `auto`.
 
 Use an explicit deployment environment value:
 
 - `ENAI_DEPLOYMENT_ENV=development`
 - `ENAI_DEPLOYMENT_ENV=staging`
 - `ENAI_DEPLOYMENT_ENV=production`
+- `ENAI_DEPLOYMENT_ENV=test`
 
-When `ENAI_DEPLOYMENT_ENV=production`, `/evaluate` must stay disabled.
+`/evaluate` is fail-safe by default:
+
+- It is only allowed when `ENAI_DEPLOYMENT_ENV` is `development` or `test`.
+- It also requires `ALLOW_EVALUATE_ENDPOINT=true`.
+- Keep it disabled in `staging` and `production`.
 
 ## Production Env Baseline
 
@@ -95,8 +104,10 @@ ENAI_SESSION_SIGNING_SECRET=...
 ENAI_EVALUATE_SECRET=...
 ENABLE_METRICS_ENDPOINT=false
 ENABLE_EVALUATE_ENDPOINT=false
+ALLOW_EVALUATE_ENDPOINT=false
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
+ASK_RATE_LIMIT_PREAUTH_PER_MINUTE=300
 ```
 
 Hybrid gateway + bearer production baseline:
@@ -110,8 +121,10 @@ ENAI_SESSION_SIGNING_SECRET=...
 ENAI_EVALUATE_SECRET=...
 ENABLE_METRICS_ENDPOINT=false
 ENABLE_EVALUATE_ENDPOINT=false
+ALLOW_EVALUATE_ENDPOINT=false
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
+ASK_RATE_LIMIT_PREAUTH_PER_MINUTE=300
 ```
 
 ## Documentation Policy

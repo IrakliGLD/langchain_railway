@@ -71,8 +71,10 @@ ENAI_DEPLOYMENT_ENV=development
 ENAI_AUTH_MODE=gateway_only
 ENABLE_METRICS_ENDPOINT=false
 ENABLE_EVALUATE_ENDPOINT=false
+ALLOW_EVALUATE_ENDPOINT=false
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
+ASK_RATE_LIMIT_PREAUTH_PER_MINUTE=300
 ```
 
 If you test hybrid bearer mode, also set:
@@ -84,7 +86,7 @@ SUPABASE_JWT_SECRET=<supabase-jwt-secret>
 
 `/metrics` is disabled by default. If you enable it locally, it requires `X-App-Key: <ENAI_EVALUATE_SECRET>`.
 
-`/evaluate` should stay disabled in production. If you test it locally, use `X-App-Key: <ENAI_EVALUATE_SECRET>` instead of the gateway secret.
+`/evaluate` should stay disabled in staging and production. If you test it locally, set `ENABLE_EVALUATE_ENDPOINT=true` and `ALLOW_EVALUATE_ENDPOINT=true`, then use `X-App-Key: <ENAI_EVALUATE_SECRET>` instead of the gateway secret.
 
 ## Debugging Order
 

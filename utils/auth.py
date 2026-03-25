@@ -83,6 +83,6 @@ def authenticate_request(
                     subject_id=f"user:{user_id}",
                 )
     elif authorization:
-        log.debug("Bearer auth ignored because ENAI_AUTH_MODE=%s", ENAI_AUTH_MODE)
+        log.debug("Bearer auth ignored because it is not enabled (ENAI_AUTH_MODE=%s)", ENAI_AUTH_MODE)
 
     raise HTTPException(status_code=401, detail="Unauthorized")

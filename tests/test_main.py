@@ -73,6 +73,7 @@ from agent.tools import composition_tools
 from agent.tools import common as tool_common
 from core.sql_generator import sanitize_sql
 from utils import auth as auth_module
+from utils.session_memory import issue_session_token
 
 
 TEST_SUPABASE_JWT_SECRET = "test-supabase-jwt-secret"
@@ -142,6 +143,12 @@ def _set_public_bearer_auth(monkeypatch, enabled: bool) -> None:
         "gateway_and_bearer" if enabled else "gateway_only",
     )
     monkeypatch.setattr(main_module, "ENABLE_PUBLIC_BEARER_AUTH", enabled)
+
+
+def _clear_rate_limit_buckets() -> None:
+    main_module._preauth_rate_buckets.clear()
+    main_module._gateway_rate_buckets.clear()
+    main_module._user_rate_buckets.clear()
 
 
 class TestQuickStats:
@@ -370,7 +377,8 @@ def test_ask_accepts_valid_public_bearer(monkeypatch):
     _install_successful_ask_mocks(monkeypatch)
     _set_public_bearer_auth(monkeypatch, True)
     monkeypatch.setattr(auth_module, "SUPABASE_JWT_SECRET", TEST_SUPABASE_JWT_SECRET)
-    main_module._user_rate_buckets.clear()
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PREAUTH_PER_MINUTE", 100)
+    _clear_rate_limit_buckets()
 
     token = _make_bearer_token()
     client = TestClient(main_module.app)
@@ -385,7 +393,7 @@ def test_ask_accepts_valid_public_bearer(monkeypatch):
     assert response.headers.get("X-Session-Token")
     assert response.headers.get("X-LLM-Total-Tokens") is None
     assert response.headers.get("X-LLM-Estimated-Cost-USD") is None
-    main_module._user_rate_buckets.clear()
+    _clear_rate_limit_buckets()
 
 
 def test_public_bearer_rate_limit_returns_429(monkeypatch):
@@ -393,7 +401,8 @@ def test_public_bearer_rate_limit_returns_429(monkeypatch):
     _set_public_bearer_auth(monkeypatch, True)
     monkeypatch.setattr(auth_module, "SUPABASE_JWT_SECRET", TEST_SUPABASE_JWT_SECRET)
     monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PUBLIC_PER_MINUTE", 1)
-    main_module._user_rate_buckets.clear()
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PREAUTH_PER_MINUTE", 100)
+    _clear_rate_limit_buckets()
 
     token = _make_bearer_token()
     client = TestClient(main_module.app)
@@ -413,15 +422,33 @@ def test_public_bearer_rate_limit_returns_429(monkeypatch):
     assert first.status_code == 200
     assert second.status_code == 429
     assert second.json()["detail"] == "Rate limit exceeded"
-    main_module._user_rate_buckets.clear()
+    _clear_rate_limit_buckets()
 
 
-def test_gateway_rate_limit_key_prefers_session_token_hash(monkeypatch):
+def test_gateway_rate_limit_key_ignores_forged_session_token(monkeypatch):
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(main_module, "SESSION_SIGNING_SECRET", "test-session-key")
     request = _make_request(
         {
             "X-App-Key": "test-gateway-key",
-            "X-Session-Token": "session-abc",
+            "X-Session-Token": "forged-token",
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+
+    key = main_module._rate_limit_key(request)
+
+    assert key == "gateway_ip:198.51.100.10"
+
+
+def test_gateway_rate_limit_key_uses_verified_session_token(monkeypatch):
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(main_module, "SESSION_SIGNING_SECRET", "test-session-key")
+    _, session_token = issue_session_token("test-session-key")
+    request = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": session_token,
             "X-Forwarded-For": "198.51.100.10",
         }
     )
@@ -429,6 +456,102 @@ def test_gateway_rate_limit_key_prefers_session_token_hash(monkeypatch):
     key = main_module._rate_limit_key(request)
 
     assert key.startswith("gateway_session:")
+
+
+def test_gateway_rate_limit_is_per_verified_session(monkeypatch):
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(main_module, "SESSION_SIGNING_SECRET", "test-session-key")
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_GATEWAY_PER_MINUTE", 1)
+    _clear_rate_limit_buckets()
+
+    _, session_token_one = issue_session_token("test-session-key")
+    _, session_token_two = issue_session_token("test-session-key")
+    request_one = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": session_token_one,
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+    request_two = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": session_token_two,
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+    request_one_again = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": session_token_one,
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+
+    assert main_module._check_gateway_rate_limit(request_one) is True
+    assert main_module._check_gateway_rate_limit(request_two) is True
+    assert main_module._check_gateway_rate_limit(request_one_again) is False
+    _clear_rate_limit_buckets()
+
+
+def test_gateway_rate_limit_invalid_session_token_falls_back_to_ip(monkeypatch):
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(main_module, "SESSION_SIGNING_SECRET", "test-session-key")
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_GATEWAY_PER_MINUTE", 1)
+    _clear_rate_limit_buckets()
+
+    first = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": "forged-token-one",
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+    second = _make_request(
+        {
+            "X-App-Key": "test-gateway-key",
+            "X-Session-Token": "forged-token-two",
+            "X-Forwarded-For": "198.51.100.10",
+        }
+    )
+
+    assert main_module._check_gateway_rate_limit(first) is True
+    assert main_module._check_gateway_rate_limit(second) is False
+    _clear_rate_limit_buckets()
+
+
+def test_public_bearer_rate_limit_is_per_user_not_per_ip(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _set_public_bearer_auth(monkeypatch, True)
+    monkeypatch.setattr(auth_module, "SUPABASE_JWT_SECRET", TEST_SUPABASE_JWT_SECRET)
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PUBLIC_PER_MINUTE", 1)
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PREAUTH_PER_MINUTE", 100)
+    _clear_rate_limit_buckets()
+
+    client = TestClient(main_module.app)
+    token_one = _make_bearer_token(sub="00000000-0000-0000-0000-000000000001")
+    token_two = _make_bearer_token(sub="00000000-0000-0000-0000-000000000002")
+
+    first_user = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"Authorization": f"Bearer {token_one}"},
+    )
+    second_user = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"Authorization": f"Bearer {token_two}"},
+    )
+    first_user_again = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"Authorization": f"Bearer {token_one}"},
+    )
+
+    assert first_user.status_code == 200
+    assert second_user.status_code == 200
+    assert first_user_again.status_code == 429
+    _clear_rate_limit_buckets()
 
 
 def test_bearer_auth_rejected_when_gateway_only_mode(monkeypatch):

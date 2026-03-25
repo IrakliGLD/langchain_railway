@@ -29,6 +29,7 @@ import os
 import re
 import time
 import logging
+import threading
 import uuid
 import json
 from urllib.parse import urlparse
@@ -41,9 +42,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 # Phase 1D Security: Rate limiting
-from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, DatabaseError, SQLAlchemyError
@@ -69,7 +68,13 @@ from agent.pipeline import process_query
 
 # Phase 2: Core modules
 from utils.metrics import metrics
-from utils.session_memory import get_or_issue_session, get_history, append_exchange, seed_history
+from utils.session_memory import (
+    get_or_issue_session,
+    get_history,
+    append_exchange,
+    seed_history,
+    resolve_session_token,
+)
 from utils.auth import authenticate_request, CallerContext
 from utils.resilience import request_backpressure_gate, get_resilience_snapshot
 from utils.language import detect_language, get_language_instruction
@@ -125,17 +130,24 @@ log = logging.getLogger("Enai")
 # Load knowledge files from knowledge/ directory at startup
 knowledge_module.load_knowledge()
 
-if ENABLE_PUBLIC_BEARER_AUTH:
-    log.info("Auth mode enabled: gateway_and_bearer")
+resolved_auth_mode = "gateway_and_bearer" if ENABLE_PUBLIC_BEARER_AUTH else "gateway_only"
+if ENAI_AUTH_MODE == "auto":
+    if ENABLE_PUBLIC_BEARER_AUTH:
+        log.warning(
+            "ENAI_AUTH_MODE=auto resolved to %s because SUPABASE_JWT_SECRET is set; set ENAI_AUTH_MODE explicitly",
+            resolved_auth_mode,
+        )
+    else:
+        log.info("ENAI_AUTH_MODE=auto resolved to %s", resolved_auth_mode)
 else:
-    log.info("Auth mode enabled: gateway_only")
+    log.info("Auth mode enabled: %s", resolved_auth_mode)
 
 if ENABLE_METRICS_ENDPOINT:
     log.warning("/metrics endpoint enabled; keep it admin-only and network-restricted")
 if ENABLE_EVALUATE_ENDPOINT:
     log.warning("/evaluate endpoint enabled; keep it disabled in production or isolate it to an admin worker")
 
-if not ENABLE_PUBLIC_BEARER_AUTH and SUPABASE_JWT_SECRET:
+if not ENABLE_PUBLIC_BEARER_AUTH and SUPABASE_JWT_SECRET and ENAI_AUTH_MODE == "gateway_only":
     log.info("SUPABASE_JWT_SECRET loaded but bearer auth is disabled by ENAI_AUTH_MODE")
 
 # Request ID tracking for observability
@@ -274,8 +286,10 @@ def _rate_limit_key(request: Request) -> str:
     if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
         session_token = (request.headers.get("x-session-token") or "").strip()
         if session_token:
-            token_hash = hashlib.sha256(session_token.encode("utf-8")).hexdigest()[:16]
-            return f"gateway_session:{token_hash}"
+            session_id = resolve_session_token(session_token, SESSION_SIGNING_SECRET)
+            if session_id:
+                session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+                return f"gateway_session:{session_hash}"
 
         forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
         if forwarded_for:
@@ -287,35 +301,64 @@ def _rate_limit_key(request: Request) -> str:
     return f"ip:{get_remote_address(request)}"
 
 
-# Post-auth per-user rate limiter for bearer callers.
-# Simple sliding-window counter in process memory.
+# Post-auth and pre-auth rate limiters. Simple sliding-window counters in
+# process memory.
+_preauth_rate_buckets: Dict[str, List[float]] = {}
+_preauth_rate_lock = threading.Lock()
+_gateway_rate_buckets: Dict[str, List[float]] = {}
+_gateway_rate_lock = threading.Lock()
 _user_rate_buckets: Dict[str, List[float]] = {}
-_user_rate_lock = __import__("threading").Lock()
+_user_rate_lock = threading.Lock()
+
+
+def _check_sliding_window_rate_limit(
+    *,
+    subject_id: str,
+    buckets: Dict[str, List[float]],
+    bucket_lock: threading.Lock,
+    max_requests: int,
+    window_seconds: float = 60.0,
+) -> bool:
+    """Return True when the subject stays within the sliding-window budget."""
+    now = time.time()
+    with bucket_lock:
+        timestamps = [t for t in buckets.get(subject_id, []) if now - t < window_seconds]
+        if len(timestamps) >= max_requests:
+            buckets[subject_id] = timestamps
+            return False
+        timestamps.append(now)
+        buckets[subject_id] = timestamps
+        return True
+
+
+def _check_preauth_rate_limit(request: Request) -> bool:
+    """Apply a coarse remote-IP guard before auth to dampen abusive bursts."""
+    return _check_sliding_window_rate_limit(
+        subject_id=f"ip:{get_remote_address(request)}",
+        buckets=_preauth_rate_buckets,
+        bucket_lock=_preauth_rate_lock,
+        max_requests=ASK_RATE_LIMIT_PREAUTH_PER_MINUTE,
+    )
+
+
+def _check_gateway_rate_limit(request: Request) -> bool:
+    """Apply the gateway limiter using a verified session-aware key."""
+    return _check_sliding_window_rate_limit(
+        subject_id=_rate_limit_key(request),
+        buckets=_gateway_rate_buckets,
+        bucket_lock=_gateway_rate_lock,
+        max_requests=ASK_RATE_LIMIT_GATEWAY_PER_MINUTE,
+    )
 
 
 def _check_user_rate_limit(subject_id: str) -> bool:
     """Return True if the user is within their per-minute rate limit."""
-    now = time.time()
-    window = 60.0
-    max_requests = ASK_RATE_LIMIT_PUBLIC_PER_MINUTE
-    with _user_rate_lock:
-        timestamps = _user_rate_buckets.get(subject_id, [])
-        # Prune expired entries
-        timestamps = [t for t in timestamps if now - t < window]
-        if not timestamps:
-            _user_rate_buckets[subject_id] = [now]
-            return True
-        if len(timestamps) >= max_requests:
-            _user_rate_buckets[subject_id] = timestamps
-            return False
-        timestamps.append(now)
-        _user_rate_buckets[subject_id] = timestamps
-        return True
-
-
-limiter = Limiter(key_func=_rate_limit_key)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    return _check_sliding_window_rate_limit(
+        subject_id=subject_id,
+        buckets=_user_rate_buckets,
+        bucket_lock=_user_rate_lock,
+        max_requests=ASK_RATE_LIMIT_PUBLIC_PER_MINUTE,
+    )
 
 # Request ID middleware for observability and debugging
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -727,7 +770,6 @@ def generate_html_report(summary: Dict[str, Any], results: List[Dict[str, Any]],
 
 
 @app.post('/ask', response_model=APIResponse)
-@limiter.limit(f"{ASK_RATE_LIMIT_GATEWAY_PER_MINUTE}/minute")
 def ask_post(
     request: Request,
     response: Response,
@@ -768,6 +810,11 @@ def ask_post(
             response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
         return request_llm_telemetry
 
+    if not _check_preauth_rate_limit(request):
+        _finalize_request_telemetry()
+        log_security_event("preauth_rate_limit_exceeded", request=request)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
     try:
         caller: CallerContext = authenticate_request(
             x_app_key=x_app_key,
@@ -784,13 +831,23 @@ def ask_post(
         raise
     request.state.caller = caller
 
-    # Per-user rate limit for public bearer callers (post-auth).
-    # The decorator-level limiter uses IP keys and can't differentiate
-    # by authenticated identity.  This enforces per-user limits after
-    # the token has been verified.
-    if caller.auth_mode == "public_bearer":
+    if caller.auth_mode == "gateway":
+        if not _check_gateway_rate_limit(request):
+            _finalize_request_telemetry()
+            log_security_event(
+                "gateway_rate_limit_exceeded",
+                request=request,
+                rate_limit_key=_rate_limit_key(request),
+            )
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    else:
         if not _check_user_rate_limit(caller.subject_id):
             _finalize_request_telemetry()
+            log_security_event(
+                "public_bearer_rate_limit_exceeded",
+                request=request,
+                subject_id=caller.subject_id,
+            )
             raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     # Referer validation

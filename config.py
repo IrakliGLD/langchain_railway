@@ -43,14 +43,18 @@ def _read_secret_env(*names: str):
 GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
 SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSION_SIGNING_SECRET")
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
-ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
+ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "auto").strip().lower() or "auto")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
 # Supabase JWT secret for local bearer-token verification.
-# When set, public callers can authenticate with Authorization: Bearer <token>.
-# When unset, only gateway-secret auth is available. Bearer auth is only enabled
-# when ENAI_AUTH_MODE=gateway_and_bearer.
+# Explicit bearer mode requires ENAI_AUTH_MODE=gateway_and_bearer.
+# Compatibility mode ENAI_AUTH_MODE=auto keeps bearer auth enabled when
+# SUPABASE_JWT_SECRET is present, but operators should migrate to an explicit
+# auth mode.
 SUPABASE_JWT_SECRET = _read_secret_env("SUPABASE_JWT_SECRET")
-ENABLE_PUBLIC_BEARER_AUTH = ENAI_AUTH_MODE == "gateway_and_bearer"
+ALLOW_EVALUATE_ENDPOINT = os.getenv("ALLOW_EVALUATE_ENDPOINT", "false").lower() in ("1", "true", "yes", "on")
+ENABLE_PUBLIC_BEARER_AUTH = ENAI_AUTH_MODE == "gateway_and_bearer" or (
+    ENAI_AUTH_MODE == "auto" and bool(SUPABASE_JWT_SECRET)
+)
 
 # LLM Configuration
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
@@ -104,6 +108,7 @@ ASK_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("ASK_MAX_CONCURRENT_REQUESTS"
 ASK_BACKPRESSURE_TIMEOUT_SECONDS = max(0.0, float(os.getenv("ASK_BACKPRESSURE_TIMEOUT_SECONDS", "0.0")))
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE = max(1, int(os.getenv("ASK_RATE_LIMIT_PUBLIC_PER_MINUTE", "10")))
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE = max(1, int(os.getenv("ASK_RATE_LIMIT_GATEWAY_PER_MINUTE", "30")))
+ASK_RATE_LIMIT_PREAUTH_PER_MINUTE = max(1, int(os.getenv("ASK_RATE_LIMIT_PREAUTH_PER_MINUTE", "300")))
 VECTOR_KNOWLEDGE_TOP_K = max(1, int(os.getenv("VECTOR_KNOWLEDGE_TOP_K", "6")))
 VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER = max(1, int(os.getenv("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", "3")))
 VECTOR_KNOWLEDGE_MAX_CHARS = max(500, int(os.getenv("VECTOR_KNOWLEDGE_MAX_CHARS", "9000")))
@@ -157,15 +162,16 @@ def validate_runtime_settings(
     deployment_env: str,
     supabase_jwt_secret: str | None,
     enable_evaluate_endpoint: bool,
+    allow_evaluate_endpoint: bool,
     model_type: str,
     google_api_key: str | None,
 ) -> None:
-    valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
+    valid_auth_modes = {"auto", "gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
 
     if auth_mode not in valid_auth_modes:
         raise RuntimeError(
-            "Invalid ENAI_AUTH_MODE. Expected one of: gateway_only, gateway_and_bearer"
+            "Invalid ENAI_AUTH_MODE. Expected one of: auto, gateway_only, gateway_and_bearer"
         )
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
@@ -181,8 +187,15 @@ def validate_runtime_settings(
         raise RuntimeError("Missing ENAI_EVALUATE_SECRET (or legacy EVALUATE_ADMIN_SECRET)")
     if auth_mode == "gateway_and_bearer" and not supabase_jwt_secret:
         raise RuntimeError("ENAI_AUTH_MODE=gateway_and_bearer requires SUPABASE_JWT_SECRET")
-    if deployment_env == "production" and enable_evaluate_endpoint:
-        raise RuntimeError("ENABLE_EVALUATE_ENDPOINT must remain false when ENAI_DEPLOYMENT_ENV=production")
+    if enable_evaluate_endpoint:
+        if deployment_env not in {"development", "test"}:
+            raise RuntimeError(
+                "ENABLE_EVALUATE_ENDPOINT is only allowed when ENAI_DEPLOYMENT_ENV is development or test"
+            )
+        if not allow_evaluate_endpoint:
+            raise RuntimeError(
+                "ENABLE_EVALUATE_ENDPOINT=true requires ALLOW_EVALUATE_ENDPOINT=true"
+            )
     if model_type == "gemini" and not google_api_key:
         raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
 
@@ -196,6 +209,7 @@ validate_runtime_settings(
     deployment_env=ENAI_DEPLOYMENT_ENV,
     supabase_jwt_secret=SUPABASE_JWT_SECRET,
     enable_evaluate_endpoint=ENABLE_EVALUATE_ENDPOINT,
+    allow_evaluate_endpoint=ALLOW_EVALUATE_ENDPOINT,
     model_type=MODEL_TYPE,
     google_api_key=GOOGLE_API_KEY,
 )

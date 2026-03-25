@@ -1,272 +1,260 @@
 # Comprehensive Systems Audit - Current Repo State
-**Date:** 2026-03-24  
-**Auditor Role:** AI Systems Auditor (application architecture, prompt/runtime quality, retrieval quality, and production-readiness review)  
+**Date:** 2026-03-25  
+**Auditor Role:** AI Systems Auditor (application architecture, prompt/runtime quality, retrieval quality, security boundaries, and production-readiness review)  
 **Repo Audited:** `d:\Enaiapp\langchain_railway`  
-**HEAD commit:** `f262a9d`
+**HEAD commit:** `3d23631` (local working tree includes uncommitted post-audit fixes)
 
 ## Scope And Method
 - This refresh is code-first and repo-evidenced.
-- It supersedes the older 2026-03-16 audit for the current repository state because the March 20-24 vector, prompt, and summarizer changes materially changed behavior.
-- This refresh did **not** re-audit the external `D:\export_enai` repo or live Railway/Supabase deployments.
-- The current worktree has one unrelated local modification in `ingest_one_document.py`; it was treated as operator tooling, not as a production-path code change.
+- It supersedes both the earlier pre-implementation audit and the first post-`3d23631` refresh because the local working tree now includes additional auth / deployment fixes after an independent re-audit.
+- This refresh did not re-audit external repos or live Railway/Supabase deployments.
+- The current worktree still has one unrelated local modification in `ingest_one_document.py`; it was treated as operator tooling, not as a production-path code change.
 
 Verification performed for this refresh:
-- `pytest -q` -> **265 passed, 0 failed**
-- `pytest tests/test_vector_pipeline.py tests/test_vector_prompt_integration.py tests/test_vector_store.py tests/test_vector_retrieval.py tests/test_guardrails.py -q` -> **122 passed, 0 failed**
-- `pytest --collect-only -q` -> **265 collected**
+- `pytest -q` -> **280 passed, 0 failed, 5 warnings**
+- `pytest --collect-only -q` -> **280 collected**
 
 Observed local warnings during verification:
-- FastAPI `@app.on_event("startup")` deprecation (`main.py:314`)
-- Python 3.14 compatibility warnings from dependency stack
+- FastAPI `@app.on_event("startup")` deprecation (`main.py:425`)
+- Python 3.14 compatibility warnings from `langchain_core` / `google.genai`
 - local pytest cache warning on `.pytest_cache`
 
 ## 1) Executive Summary
-- **Overall Score:** **8.9/10**
+- **Overall Score:** **9.1/10**
 - **SQL-First Analytical Fit:** **9.3/10**
 - **Regulatory / Vector Knowledge Fit:** **8.8/10**
-- **Prompting / Grounding Fit:** **8.9/10**
+- **Prompting / Grounding Fit:** **9.2/10**
+- **Security / Boundary Control:** **9.2/10**
 - **Testing & QA:** **9.6/10**
-- **Deployment & Ops Readiness:** **7.7/10**
+- **Deployment & Ops Readiness:** **9.1/10**
 
 Recommendation:
-- The current codebase is strong for a **controlled production rollout** behind an authenticated gateway.
-- The March 20-24 work materially improved the regulatory/vector retrieval path: query embedding, cross-language retrieval, bridge topics, reranking, prompt grounding, and traceability are now all substantially better than the March 16 baseline.
-- It is still **not ready for direct public exposure as-is** because Railway-side trust is still shared-secret based, `/metrics` is unauthenticated, `/evaluate` is a privileged in-process workload, and some retrieval/prompt behaviors still need refinement.
+- The repo is materially stronger than both the pre-`3d23631` state and the first post-`3d23631` refresh. The public bearer rate-limit bug is fixed, gateway session bucketing now requires a verified signed session token, bearer callers no longer share the old decorator-level IP throttle, auth rollout now has a compatibility path, and `/evaluate` now requires both a non-production env and an explicit second opt-in.
+- The remaining concerns are no longer primarily auth-boundary bugs. They are now concentrated in:
+  - answer quality for procedural / trade questions
+  - retrieval prompt-efficiency
+  - operational isolation if `/evaluate` is ever enabled outside local/admin use
+- For a controlled deployment behind a trusted gateway or an explicitly configured hybrid bearer boundary, the current local codebase is in good production shape.
 
 Top current blockers:
-- Railway request auth still depends on a shared `X-App-Key`, not a principal-aware identity boundary (`main.py:650-692`).
-- `/metrics` is unauthenticated and exposes internal operational state (`main.py:350-378`).
-- `/evaluate` is a privileged synchronous workload inside the serving process (`main.py:381-460`).
-- Regulatory procedure questions are still classified by focus more accurately than by query type; there is no dedicated procedural query type in `classify_query_type()` (`core/llm.py:376-430`, `core/llm.py:433-486`).
-- Vector retrieval still enforces document diversity only; it does not enforce section diversity, so repeated chunks from the same article can still crowd the prompt (`knowledge/vector_store.py:158-215`).
+- Regulatory procedure questions still lack a dedicated query-type path, so they route by focus more cleanly than by explicit answer mode (`core/llm.py:394-504`).
+- Trade answers still have no trade-specific answer-composer guidance section (`skills/loader.py:116-124`).
+- Vector retrieval still enforces document diversity but not section diversity, so repeated chunks from one section can still crowd prompt space (`knowledge/vector_store.py:158-215`).
+- `/evaluate` remains an in-process privileged workload when explicitly enabled (`main.py:501-558`).
 
-## 2) Major Closures Since The 2026-03-16 Audit
+## 2) Major Closures Since `3d23631`
 
 ### Closed Or Materially Improved
-1. **Prompt budget handling is now section-aware instead of naive head-tail trimming.**
-   - `core/llm.py:2000-2145`
-   - This is a major quality improvement. The prompt now preserves section boundaries and truncates lower-priority sections first instead of blindly cutting the middle.
+1. **Public bearer rate limiting now works as intended.**
+   - `main.py:354-360`
+   - `_check_user_rate_limit()` now records the first request when a subject bucket is created instead of returning early with no state update.
 
-2. **Structured-summary cache keys now include skill content hash.**
-   - `core/llm.py:1859-1863`
-   - `skills/loader.py:260-280`
-   - This closes the earlier stale-cache issue where skill edits could leave the summarizer serving outdated guidance.
+2. **The gateway limiter now only uses a session bucket when the session token is valid.**
+   - `main.py:277-301`
+   - `tests/test_main.py:428-520`
+   - Invalid or forged `X-Session-Token` values fall back to forwarded IP / remote IP rather than creating attacker-controlled buckets.
 
-3. **`get_answer_template()` no longer falls back to the entire template file.**
-   - `skills/loader.py:85-106`
-   - Unknown or unmapped query types now receive a safe fallback string instead of the full `answer-templates.md` file.
+3. **Gateway and bearer callers now use separate post-auth limits.**
+   - `main.py:304-360`
+   - `main.py:813-851`
+   - `tests/test_main.py:399-554`
+   - The old shared decorator-level limiter is gone. Requests now pass through:
+     - a coarse remote-IP pre-auth guard
+     - a post-auth gateway limiter keyed by verified session/IP
+     - a post-auth per-user bearer limiter
 
-4. **Provenance coverage is now practical for derived analytical claims.**
-   - `config.py:106-109`
-   - `agent/summarizer.py:390-411`
-   - Default `PROVENANCE_MIN_COVERAGE` is now `0.8`, which is materially safer than the earlier `1.0` setting for real analytical narratives.
+4. **Auth mode is explicit, but rollout compatibility no longer silently disables existing bearer deployments.**
+   - `config.py:46-57`
+   - `main.py:133-151`
+   - `tests/test_config.py:69-82`
+   - `ENAI_AUTH_MODE=auto` now preserves the old "JWT secret present -> bearer enabled" behavior while warning operators to move to an explicit mode.
 
-5. **Vector retrieval moved from hard topic filtering toward soft scoring and richer reranking.**
-   - `knowledge/vector_store.py:333-436`
-   - `knowledge/vector_retrieval.py:87-259`
-   - The current stack now uses:
-     - bridge topics
-     - keyword/title/section/topic boosts
-     - boosted-score gating
-     - language fallback
-     - sparse-corpus similarity relaxation
+5. **Bearer mode still requires `SUPABASE_JWT_SECRET` when explicitly enabled.**
+   - `config.py:155-199`
+   - `tests/test_config.py:19-33`
+   - `ENAI_AUTH_MODE=gateway_and_bearer` still hard-fails at startup if `SUPABASE_JWT_SECRET` is absent.
 
-6. **Vector traces now log section-level evidence, not just document titles.**
-   - `agent/pipeline.py:230-275`
-   - This made recent debugging materially easier because logs now show the actual retrieved article/section.
+6. **`/evaluate` enablement is now fail-safe instead of relying only on production detection.**
+   - `config.py:190-198`
+   - `tests/test_config.py:36-50`
+   - `tests/test_config.py:85-115`
+   - `ENABLE_EVALUATE_ENDPOINT=true` is now only valid when:
+     - `ENAI_DEPLOYMENT_ENV` is `development` or `test`
+     - `ALLOW_EVALUATE_ENDPOINT=true`
 
-7. **Conceptual answers now use hybrid grounding instead of pure generic background.**
-   - `agent/summarizer.py:487-610`
-   - `core/llm.py:1882-2029`
-   - Retrieved passages are primary evidence when active vector evidence exists, while domain knowledge remains as secondary, topic-filtered background.
+7. **Endpoint auth / abuse-control coverage is materially stronger.**
+   - `tests/test_main.py:376-554`
+   - The suite now covers:
+     - bearer-token success
+     - bearer-token rate-limit failure
+     - forged-session fallback
+     - verified-session gateway bucketing
+     - gateway per-session isolation
+     - bearer per-user isolation behind one IP
+     - bearer rejection in `gateway_only` mode
+     - `/metrics` disabled/auth behavior
+
+8. **Deployment docs now include the current auth-mode, evaluate-opt-in, and rate-limit contract.**
+   - `docs/active/DEVELOPER_GUIDE.md`
+   - `docs/active/TESTING_GUIDE.md`
+   - This closes the earlier documentation drift where the code and operator guidance no longer matched after the re-audit fixes.
 
 ## 3) Current Strengths
 
 ### A) Pipeline Architecture
-- The five-stage structure remains clean and readable:
-  - Stage 0: cheap prep
-  - Stage 0.2: LLM question analysis
-  - Stage 0.3: vector knowledge retrieval
-  - Stage 0.5: deterministic tool routing
-  - Stage 0.7: LLM-assisted tool routing fallback
-- Conceptual questions still short-circuit early instead of paying SQL/tool costs unnecessarily.
+- The staged pipeline remains clean and production-usable:
+  - cheap prep
+  - LLM question analysis
+  - vector knowledge retrieval
+  - deterministic routing
+  - LLM-assisted fallback routing
+- The guardrail, typed-tool, and agent-loop boundaries are still cleaner than typical single-file FastAPI + LLM stacks.
 
-### B) Retrieval / Regulatory Knowledge
-- The vector stack is now meaningfully stronger than it was on 2026-03-16:
-  - cross-language retrieval support
-  - bridge-topic extraction for export, import, registration, capacity, transitory model, etc.
-  - soft topic scoring instead of hard SQL topic filtering
-  - document title / section title / metadata reranking
-  - top-section trace logging
-- The code now reflects the March 20-24 operational learnings rather than the earlier baseline assumptions.
+### B) Security / Abuse Control
+- The request boundary is now materially stronger than the previous audit state:
+  - explicit auth modes
+  - compatibility-safe auth rollout via `ENAI_AUTH_MODE=auto`
+  - mandatory JWT secret for bearer mode
+  - working public per-user rate limits
+  - verified-session gateway limiter bucketing
+  - separate gateway and bearer post-auth throttles
+  - coarse pre-auth IP guard ahead of auth
+  - `/metrics` and `/evaluate` disabled by default
+  - fail-safe startup validation for `/evaluate`
 
 ### C) Prompting / Grounding
-- The structured summarizer prompt now distinguishes:
-  - user question
-  - external source passages
-  - domain knowledge
-  - statistics
-  - data preview
-  - conversation history
-- The system message now clearly allows markdown inside the JSON `answer` field (`core/llm.py:1924`, `core/llm.py:1981`), fixing the earlier JSON-vs-markdown wording conflict.
+- The structured summarizer prompt remains more resilient under large contexts because prompt budgeting applies headroom and timeout-aware retry behavior (`core/llm.py:2047-2143`).
+- The provenance gate still uses coverage-based grounding rather than brittle all-or-nothing numeric claim rejection (`agent/summarizer.py:406-435`).
 
 ### D) Testing
-- Local test coverage is materially stronger than before:
-  - **265 collected / 265 passed**
-- The newest coverage includes:
-  - vector prompt threading
-  - vector-aware conceptual summarization
-  - section-title logging
-  - bridge-topic extraction
-  - sparse-corpus retrieval fallback
-  - reranking and document-diversity behavior
+- Local test health is stronger than before:
+  - **280 collected / 280 passed**
+- Coverage now includes the previously missing auth and endpoint regression cases in addition to the existing routing, vector, provenance, and pipeline coverage.
 
 ## 4) Current Open Issues
 
 ### P0 / High Severity
-
-#### 1. Shared-secret gateway trust remains the main auth boundary inside Railway
-- Evidence:
-  - `main.py:650-692`
-  - `config.py:28-37`
-- `POST /ask` still authorizes via `X-App-Key == GATEWAY_SHARED_SECRET`.
-- This is acceptable for a trusted proxy architecture, but it is not principal-aware and should still be treated as a hard production boundary concern.
-
-#### 2. `/metrics` is still unauthenticated
-- Evidence:
-  - `main.py:350-378`
-- The endpoint exposes:
-  - metrics counters
-  - cache stats
-  - model info
-  - DB pool state
-  - resilience snapshot
-- This remains a direct operational exposure.
-
-#### 3. `/evaluate` is still a privileged in-process workload
-- Evidence:
-  - `main.py:381-460`
-- Even though it uses a separate admin secret, it still runs evaluation loops synchronously in the web process and calls `process_query()` directly.
-- This remains a reliability and operational-isolation concern.
+- **No currently open P0 implementation bugs were identified in the current local code path.**
 
 ### P1 / Medium Severity
 
-#### 4. Procedure/regulation questions still lack a dedicated query-type path
+#### 1. `/evaluate` still runs privileged synchronous work inside the API process when enabled
 - Evidence:
-  - `core/llm.py:376-430`
-  - `core/llm.py:433-486`
-- `get_query_focus()` now recognizes `regulation`, but `classify_query_type()` still only returns:
+  - `main.py:501-558`
+- The production enablement path is now blocked by config validation, which is good.
+- But if an operator enables it in non-production, it still runs evaluation loops in-process and competes with serving capacity.
+
+#### 2. Procedure / regulation questions still lack a dedicated query-type path
+- Evidence:
+  - `core/llm.py:394-448`
+  - `core/llm.py:451-504`
+- `get_query_focus()` can recognize `regulation`, but `classify_query_type()` still only returns:
   - `single_value`
   - `list`
   - `comparison`
   - `trend`
   - `table`
   - `unknown`
-- So registration / eligibility / compliance questions often get a good **focus** but a weak **query type**.
-- Result: prompt routing is better than before, but still not fully explicit for regulatory procedures.
+- Registration / eligibility / compliance questions therefore still route by focus more cleanly than by explicit answer type.
 
-#### 5. There is still no trade-specific answer-composer guidance section
+#### 3. There is still no trade-specific answer-composer guidance section
 - Evidence:
   - `skills/loader.py:116-124`
-  - `core/llm.py:477-480`
-- `get_query_focus()` can return `trade`, but `skills/loader.py` maps `"trade"` to an empty section.
-- Import/export answers therefore depend on:
-  - always-rules
-  - retrieved passages
-  - or regulation focus fallback by document type
-- This is workable, but still weaker than balancing / tariff / regulation paths.
+- `trade` focus still maps to an empty section.
+- Import/export answers therefore rely on always-rules plus retrieval evidence rather than domain-specific guidance comparable to regulation, tariff, or balancing.
 
-#### 6. Retrieval enforces document diversity but not section diversity
+#### 4. Retrieval still enforces document diversity but not section diversity
 - Evidence:
   - `knowledge/vector_store.py:158-215`
-  - `agent/pipeline.py:250-265`
-- The code prevents one document from monopolizing all slots when competitors are strong, but it does **not** prevent repeated chunks from the same article or section within one document.
-- This is a real prompt-efficiency issue for regulation-heavy documents.
+- The current logic caps chunks per document, but it does not prevent repeated chunks from the same article/section from crowding prompt space.
 
-#### 7. Feature-flag defaults are still rollout-aggressive
+#### 5. Gateway and pre-auth fallbacks are still proxy-shaped when no valid session token is present
 - Evidence:
-  - `config.py:71-77`
+  - `main.py:277-350`
+  - `main.py:813-851`
+- The spoofable-bucket bug is closed and bearer users no longer share the old decorator IP bucket.
+- But requests without a valid signed gateway session still fall back to forwarded IP or remote IP, and the coarse pre-auth guard is still remote-IP based.
+- That is now a residual operational tradeoff, not the earlier implementation bug.
+
+#### 6. Feature-flag defaults are still rollout-aggressive
+- Evidence:
+  - `config.py:79-87`
 - Both:
   - `ENABLE_QUESTION_ANALYZER_HINTS`
   - `ENABLE_VECTOR_KNOWLEDGE_HINTS`
   default to `true`.
-- That undermines conservative rollout semantics for new deployments that forget to pin explicit env values.
+- That remains a weak default for cautious rollouts.
 
-#### 8. Topic and knowledge routing are still partly hardcoded
+#### 7. Topic and knowledge routing are still partly hardcoded
 - Evidence:
-  - `knowledge/__init__.py:50-179`
-  - `knowledge/__init__.py:266-310`
-- `TOPIC_MAP` is still code-defined, which means:
-  - adding or tuning keyword-to-topic mappings requires code change
-  - knowledge routing remains partly dependent on static code, not only curated content
-
-#### 9. Skill-cache invalidation is still process-lifetime only
-- Evidence:
-  - `skills/loader.py:246-280`
-- The cache-key hash now exists, which is good, but the hash itself is memoized for the process lifetime.
-- That is acceptable in production deployments with restart-on-deploy, but still imperfect during long-running local dev sessions.
+  - `knowledge/__init__.py:50-197`
+  - `knowledge/__init__.py:244-310`
+- `TOPIC_MAP` is still embedded in code rather than being content-managed.
 
 ### P2 / Low Severity
 
-#### 10. Startup lifecycle still uses deprecated FastAPI startup hooks
+#### 8. Skill-cache invalidation is still process-lifetime only
 - Evidence:
-  - `main.py:314-320`
-- This is not a correctness issue today, but it remains technical debt and shows up in local test warnings.
+  - `skills/loader.py:260-280`
+- The content hash exists, but it is still memoized for the process lifetime.
 
-#### 11. Typo compatibility is still intentionally preserved in vector topics
+#### 9. Startup lifecycle still uses deprecated FastAPI startup hooks
+- Evidence:
+  - `main.py:425-431`
+- This is not a correctness issue today, but it remains visible technical debt and produces test warnings.
+
+#### 10. Typo compatibility is still intentionally preserved in vector topics
 - Evidence:
   - `knowledge/vector_retrieval.py:147-151`
 - The code still emits both:
   - `wholesale_market_participants`
   - `whoesale_market_participants`
-- This is reasonable for backward compatibility with already-ingested data, but it confirms that topic hygiene in ingested metadata still needs cleanup.
+- This is acceptable for backward compatibility, but it confirms metadata hygiene still needs cleanup after re-ingestion.
 
-## 5) Findings That Are No Longer Open
-- The old prompt-budget middle-cut problem is closed by section-aware truncation.
-- The old full-template fallback in `get_answer_template()` is closed.
-- The old summarizer cache-staleness problem is materially reduced by `skill_hash` in the cache key.
-- The old `PROVENANCE_MIN_COVERAGE = 1.0` strictness problem is closed in current defaults.
-- The old vector debug visibility problem is closed by `top_sections` logging.
-- The old hard failure of English-to-Georgian retrieval was addressed by language fallback and soft retrieval scoring.
+## 5) Findings That Are Closed Or Re-Scoped
+- The earlier public bearer rate-limit bug is closed in current code (`main.py:354-360`).
+- The earlier spoofable gateway-session limiter bug is closed by verified session-token resolution before bucketing (`main.py:277-301`).
+- The earlier bearer NAT-collision risk from the shared decorator limiter is closed by the post-auth gateway/public limiter split (`main.py:813-851`).
+- The earlier bearer rollout regression is re-scoped: explicit modes are still preferred, but `ENAI_AUTH_MODE=auto` now provides a compatibility bridge instead of silently disabling bearer auth (`config.py:46-57`, `main.py:133-151`).
+- The earlier `/evaluate` exposure concern is now re-scoped to operational isolation only; enablement now requires both a safe env and an explicit second opt-in (`config.py:190-198`).
+- The earlier auth regression coverage gap is materially reduced by the expanded endpoint and config tests (`tests/test_main.py:376-554`, `tests/test_config.py:19-115`).
+- The earlier lack of explicit production env guidance is closed in the active docs (`docs/active/DEVELOPER_GUIDE.md:67-126`, `docs/active/TESTING_GUIDE.md:67-89`).
 
 ## 6) Updated Scorecard
 | Category | Current Score | Notes |
 |---|---:|---|
-| SQL-first analytical retrieval | 9.3 | Strong guarded SQL and typed-tool path; no major regression found |
-| Vector / regulatory retrieval | 8.8 | Much stronger than March 16; still lacks section diversity and trade-specific guidance |
-| Prompting / grounding | 8.9 | Major improvements landed; remaining issue is procedure-type specificity |
-| Reliability / failure handling | 8.7 | Good resilience patterns; `/evaluate` still competes with serving path |
-| Security / privacy / boundary control | 8.0 | Still limited by shared-secret gateway auth and open `/metrics` |
-| Testing / QA | 9.6 | 265 passing tests, including new vector and prompt integration coverage |
-| Deployment / ops readiness | 7.7 | Still needs metrics protection, better rollout defaults, and ops/runbook hardening |
+| SQL-first analytical retrieval | 9.3 | Strong typed-tool and guarded SQL path; no fresh regression found |
+| Vector / regulatory retrieval | 8.8 | Strong retrieval stack, but still lacks section-diversity control and trade-specific guidance |
+| Prompting / grounding | 9.2 | Timeout resilience and analyst grounding remain materially improved |
+| Reliability / failure handling | 8.9 | Better auth / config contract; `/evaluate` still competes with serving path when enabled |
+| Security / privacy / boundary control | 9.2 | Verified gateway bucketing, per-user bearer limits, and fail-safe `/evaluate` gating materially strengthen the boundary |
+| Testing / QA | 9.6 | 280 passing tests with the auth, limiter, and deployment contract regressions now covered |
+| Deployment / ops readiness | 9.1 | Explicit auth/deployment modes, compatibility-safe rollout, and fail-safe evaluate gating are now in place |
 
 ## 7) Recommended Fix Order
 
-### Phase 1: Production Boundary / Ops
-1. Protect or remove `/metrics` from public exposure.
-2. Move `/evaluate` out of the serving process or isolate it operationally.
-3. Replace or strengthen the shared-secret Railway trust boundary if the service is exposed beyond a tightly controlled proxy.
+### Completed In `3d23631` And The Current Local Fix Set
+1. Fix `_check_user_rate_limit()` so the current request is recorded when a bucket is first created.
+2. Add endpoint tests for bearer success, bearer rate-limit failure, and `/metrics` disabled/auth behavior.
+3. Revisit the gateway limiter model so one proxy path does not collapse into a single global bucket.
+4. Require verified signed session tokens before creating session-specific gateway buckets.
+5. Split gateway and bearer post-auth throttles so bearer callers are no longer constrained by the shared decorator IP bucket.
+6. Treat `SUPABASE_JWT_SECRET` as mandatory when bearer auth is explicitly part of the boundary, while preserving `auto` compatibility during rollout.
+7. Keep `/evaluate` disabled by default and require both a safe env and explicit opt-in when testing it locally.
+8. Document explicit production env values for auth mode, evaluate gating, and rate limits.
 
-### Phase 2: Answer Quality
-4. Introduce a dedicated procedural/regulatory query type or equivalent summarizer path for registration / eligibility / compliance questions.
-5. Add a trade-specific answer-composer guidance section instead of relying on empty trade focus.
-6. Add section-diversity logic on top of the existing document-diversity logic in vector retrieval.
+### Next Phase: Answer Quality
+7. Add a dedicated procedural/regulatory query type or equivalent summarizer path.
+8. Add a real trade-focus guidance section to the answer-composer skill.
+9. Add section-diversity logic on top of the current document-diversity retrieval control.
 
-### Phase 3: Maintainability
-7. Externalize more thresholds and retrieval tuning values from code into config.
-8. Move hardcoded `TOPIC_MAP` logic closer to content metadata/frontmatter or another content-managed registry.
-9. Clean up typo-compatibility tags after re-ingestion normalizes topic names.
-
-### Phase 4: Technical Debt
-10. Replace deprecated FastAPI startup hooks with lifespan handlers.
-11. Tighten cache invalidation semantics for long-running local dev sessions if that workflow matters.
+### Next Phase: Maintainability / Ops
+10. Externalize more topic/reranking configuration from code into content-managed metadata.
+11. Replace deprecated FastAPI startup hooks with lifespan handlers.
+12. Decide whether `/evaluate` should remain in-process for non-production use or move to a separate admin/worker path entirely.
+13. Tighten cache invalidation semantics for long-running local development if that workflow matters.
 
 ## 8) Bottom Line
-- The current repo is materially better than the March 16 baseline in the areas that changed most: vector retrieval, prompt assembly, summarizer grounding, and test coverage.
-- The current code does **not** show a fresh critical implementation bug in the March 20-24 commit range; the main remaining concerns are now:
-  - production boundary / ops exposure
-  - lack of a dedicated procedure query type
-  - missing trade-specific guidance
-  - section-level retrieval repetition
-- For controlled deployment behind a trusted gateway, the code is in good shape.
-- For wider exposure, the auth/metrics/evaluate issues should still be treated as real blockers.
+- The auth and deployment concerns that dominated the earlier audit are now mostly closed in current code.
+- The repo's remaining highest-value work is no longer Phase 1 / Phase 2 hardening; it is answer quality for procedure/trade queries, prompt-efficiency improvements in vector retrieval, and operational cleanup around `/evaluate` and startup lifecycle.
+- For controlled deployment behind a trusted proxy or an explicitly configured hybrid bearer boundary, the current code is in solid production shape.
