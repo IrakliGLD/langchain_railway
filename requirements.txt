@@ -27,6 +27,9 @@ numpy==1.26.4
 statsmodels==0.14.1
 scipy==1.11.4  # For trendline calculations (linear regression)
 
+# Authentication
+PyJWT==2.9.0
+
 # Utilities
 tenacity==8.2.3
 python-dotenv==1.0.1
