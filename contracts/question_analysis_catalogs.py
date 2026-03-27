@@ -186,4 +186,19 @@ QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Long-term trend slope for a metric over time.",
         "examples": ["p_bal_gel", "xrate"],
     },
+    {
+        "name": "scenario_scale",
+        "use_for": "Hypothetical scaling: 'What if prices were X% higher/lower?' Set scenario_factor to the multiplier (e.g. 1.34 for 34% higher, 0.8 for 20% lower).",
+        "examples": ["p_bal_gel * 1.34", "xrate * 0.9"],
+    },
+    {
+        "name": "scenario_offset",
+        "use_for": "Hypothetical offset: 'What if prices were X units higher?' Set scenario_factor to the addend (positive or negative).",
+        "examples": ["p_bal_usd + 10", "tariff_gel + 5"],
+    },
+    {
+        "name": "scenario_payoff",
+        "use_for": "CfD / PPA payoff calculation: '(strike - market_price) * volume per period'. Set scenario_factor to strike price, scenario_volume to MW capacity (default 1.0).",
+        "examples": ["(60 - p_bal_usd) * 1.0", "(50 - p_bal_gel) * 2.5"],
+    },
 ]

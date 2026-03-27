@@ -43,7 +43,8 @@ log = logging.getLogger("Enai")
 ANALYTICAL_KEYWORDS = {
     "trend", "change", "growth", "increase", "decrease", "compare", "impact",
     "volatility", "pattern", "season", "relationship", "correlation", "evolution",
-    "driver", "cause", "effect", "factor", "reason", "influence", "depend", "why", "behind"
+    "driver", "cause", "effect", "factor", "reason", "influence", "depend", "why", "behind",
+    "payoff", "hypothetical", "scenario",
 }
 
 
@@ -65,12 +66,19 @@ def detect_analysis_mode(user_query: str) -> str:
         "trend over time", "correlation", "driver", "impact on",
         "relationship between", "explain the dynamics", "analyze",
         "what drives", "what causes", "why does", "why did",
+        # Scenario / what-if
+        "what if", "hypothetical", "calculate payoff", "calculate income",
+        "if price were", "if prices were", "contract for difference",
+        "strike price of", "strike price sensitivity", "with strike",
+        "cfd payoff", "cfd income", "cfd calculation",
         # Georgian
         "რამ გამოიწვია", "ტენდენცია", "კორელაცია", "დინამიკა", "ანალიზი",
         "რატომ", "რა იწვევს",
+        "რა იქნებოდა თუ", "სცენარი",
         # Russian
         "что вызвало", "тренд", "корреляция", "динамика", "анализ",
         "почему", "что влияет",
+        "что если", "сценарий", "рассчитать доход",
     ]
     if any(k in query_lower for k in analyst_keywords):
         return "analyst"

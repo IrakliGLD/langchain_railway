@@ -2673,3 +2673,178 @@ def test_structured_history_limits_to_3_pairs():
     assert "Question 2" in prompt
     assert "Question 3" in prompt
     assert "Question 4" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Scenario analysis tests
+# ---------------------------------------------------------------------------
+
+
+def _scenario_df():
+    """4-row synthetic df for scenario computation tests."""
+    return pd.DataFrame({
+        "period": ["2024-01", "2024-02", "2024-03", "2024-04"],
+        "p_bal_usd": [40.0, 50.0, 30.0, 60.0],
+    })
+
+
+def _run_scenario(metric_name, factor, volume=None, agg="sum"):
+    """Run _build_requested_analysis_evidence with a single scenario request."""
+    import agent.analyzer as az
+    original = az.DERIVED_METRIC_DEFAULTS
+    req = {
+        "metric_name": metric_name,
+        "metric": "p_bal_usd",
+        "scenario_factor": factor,
+        "scenario_aggregation": agg,
+    }
+    if volume is not None:
+        req["scenario_volume"] = volume
+    az.DERIVED_METRIC_DEFAULTS = [req]
+    try:
+        ctx = QueryContext(query="test scenario")
+        result = az._build_requested_analysis_evidence(
+            ctx, _scenario_df(), "period",
+            None, pd.DataFrame(), None, pd.DataFrame(), {}, {},
+        )
+    finally:
+        az.DERIVED_METRIC_DEFAULTS = original
+    assert not result.empty, f"No result for {metric_name}"
+    return result.iloc[0].to_dict()
+
+
+def test_scenario_scale_computation():
+    # [40, 50, 30, 60] * 1.5 = [60, 75, 45, 90] -> sum=270
+    row = _run_scenario("scenario_scale", factor=1.5)
+    assert row["aggregate_result"] == 270.0
+    assert row["baseline_aggregate"] == 180.0
+    assert row["delta_aggregate"] == 90.0
+    assert row["delta_percent"] == 50.0
+    assert row["record_type"] == "scenario"
+    assert row["row_count"] == 4
+
+
+def test_scenario_offset_computation():
+    # [40, 50, 30, 60] + 10 = [50, 60, 40, 70] -> sum=220
+    row = _run_scenario("scenario_offset", factor=10.0)
+    assert row["aggregate_result"] == 220.0
+    assert row["baseline_aggregate"] == 180.0
+    assert row["delta_aggregate"] == 40.0
+
+
+def test_scenario_payoff_computation():
+    # (60 - [40, 50, 30, 60]) * 2.0 = [40, 20, 60, 0] -> sum=120
+    row = _run_scenario("scenario_payoff", factor=60.0, volume=2.0)
+    assert row["aggregate_result"] == 120.0
+    # Payoff baseline/delta are None — different dimensions (payoff vs raw price)
+    assert row["baseline_aggregate"] is None
+    assert row["delta_aggregate"] is None
+    assert row["delta_percent"] is None
+    assert row["min_period_value"] == 0.0
+    assert row["max_period_value"] == 60.0
+    assert row["mean_period_value"] == 30.0
+
+
+def test_scenario_grounding_tokens():
+    """Scenario aggregate values must appear in grounding tokens."""
+    row = _run_scenario("scenario_payoff", factor=60.0, volume=1.0)
+    # Build a ctx with scenario evidence in stats_hint
+    import json
+    stats_hint = json.dumps(row)
+    ctx = QueryContext(
+        query="CfD payoff test",
+        preview="period p_bal_usd\n2024-01 40.0",
+        stats_hint=stats_hint,
+    )
+    tokens = summarizer._build_grounding_tokens(ctx)
+    # The aggregate_result (60.0) must be in the grounding token set
+    assert "60" in tokens or "60.0" in tokens
+
+
+def test_scenario_via_question_analysis_payload():
+    """End-to-end: QuestionAnalysis with scenario_payoff flows through _active_analysis_requests."""
+    from contracts.question_analysis import QuestionAnalysis
+
+    # Minimal valid QA payload with a scenario_payoff request
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Calculate CfD payoff with strike 55",
+        "canonical_query_en": "Calculate CfD payoff with strike price 55 USD",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "analyst",
+            "intent": "cfd_payoff_calculation",
+            "needs_clarification": False,
+            "confidence": 0.9,
+            "ambiguities": [],
+        },
+        "routing": {"preferred_path": "sql", "needs_sql": True, "needs_knowledge": False, "prefer_tool": False},
+        "knowledge": {"candidate_topics": []},
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {"metric": "p_bal_usd", "entities": [], "dimensions": ["price"]},
+        "visualization": {"chart_requested_by_user": False, "chart_recommended": False, "chart_confidence": 0.5},
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [
+                {
+                    "metric_name": "scenario_payoff",
+                    "metric": "p_bal_usd",
+                    "scenario_factor": 55.0,
+                    "scenario_volume": 1.0,
+                    "scenario_aggregation": "sum",
+                },
+            ],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(query="Calculate CfD payoff with strike 55")
+    ctx.question_analysis = qa
+    ctx.question_analysis_source = "llm_active"
+
+    requests = analyzer._active_analysis_requests(ctx)
+    assert len(requests) == 1
+    assert requests[0]["metric_name"] == "scenario_payoff"
+    assert requests[0]["scenario_factor"] == 55.0
+    assert requests[0]["scenario_volume"] == 1.0
+
+    # Run computation
+    df = _scenario_df()  # p_bal_usd = [40, 50, 30, 60]
+    result = analyzer._build_requested_analysis_evidence(
+        ctx, df, "period", None, pd.DataFrame(), None, pd.DataFrame(), {}, {},
+    )
+    assert not result.empty
+    row = result.iloc[0].to_dict()
+    # (55 - [40, 50, 30, 60]) * 1.0 = [15, 5, 25, -5] -> sum=40
+    assert row["aggregate_result"] == 40.0
+    assert row["record_type"] == "scenario"
+    assert row["baseline_aggregate"] is None  # payoff has no baseline
+
+
+def test_scenario_fallback_extracts_scale_from_query():
+    """When question_analysis is None, fallback extracts scenario from query text."""
+    ctx = QueryContext(query="What if prices were 34% higher?")
+    requests = analyzer._active_analysis_requests(ctx)
+    assert len(requests) == 1
+    assert requests[0]["metric_name"] == "scenario_scale"
+    assert abs(requests[0]["scenario_factor"] - 1.34) < 1e-6
+
+
+def test_scenario_fallback_extracts_payoff_from_query():
+    """Fallback extracts strike from 'strike 60' pattern."""
+    ctx = QueryContext(query="Calculate payoff with strike 60")
+    requests = analyzer._active_analysis_requests(ctx)
+    assert len(requests) == 1
+    assert requests[0]["metric_name"] == "scenario_payoff"
+    assert requests[0]["scenario_factor"] == 60.0
+    assert requests[0]["scenario_volume"] == 1.0
+
+
+def test_scenario_fallback_returns_defaults_for_non_scenario():
+    """Non-scenario queries still get DERIVED_METRIC_DEFAULTS."""
+    ctx = QueryContext(query="Show me balancing price trend")
+    requests = analyzer._active_analysis_requests(ctx)
+    assert any(r["metric_name"] == "mom_absolute_change" for r in requests)

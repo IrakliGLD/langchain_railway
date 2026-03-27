@@ -321,3 +321,36 @@ def test_llm_generate_plan_and_sql_uses_canonical_query_for_retrieval(monkeypatc
     assert captured["example_calls"][0][0] == "Why did balancing electricity price change in November 2021?"
     assert "QUESTION_ANALYZER_HINTS" in prompts[0]
     assert "balancing_price_why" in prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# Scenario keyword tests
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_keywords_trigger_analyst_mode():
+    """Scenario/what-if keywords in detect_analysis_mode must produce 'analyst'."""
+    scenario_queries = [
+        "What if prices were 34% higher?",
+        "Calculate CfD payoff with strike 60",
+        "hypothetical scenario for balancing price",
+        "if prices were 10 USD higher",
+        "strike price sensitivity analysis",
+    ]
+    for query in scenario_queries:
+        result = planner.detect_analysis_mode(query)
+        assert result == "analyst", f"Expected analyst for: {query!r}, got: {result!r}"
+
+
+def test_non_scenario_queries_remain_light():
+    """Ensure basic factual queries are not promoted to analyst by scenario keywords."""
+    light_queries = [
+        "What is the current balancing price?",
+        "List all entities",
+        "Show me tariffs for Enguri",
+        "What is CfD?",
+        "What is strike price?",
+    ]
+    for query in light_queries:
+        result = planner.detect_analysis_mode(query)
+        assert result == "light", f"Expected light for: {query!r}, got: {result!r}"

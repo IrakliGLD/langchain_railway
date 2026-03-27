@@ -101,7 +101,10 @@
         "yoy_percent_change",
         "share_delta_mom",
         "correlation_to_target",
-        "trend_slope"
+        "trend_slope",
+        "scenario_scale",
+        "scenario_offset",
+        "scenario_payoff"
       ],
       "title": "DerivedMetricName",
       "type": "string"
@@ -144,6 +147,45 @@
           ],
           "default": null,
           "title": "Rank Limit"
+        },
+        "scenario_factor": {
+          "anyOf": [
+            {
+              "maximum": 1000000000.0,
+              "minimum": -1000000000.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scenario Factor"
+        },
+        "scenario_volume": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scenario Volume"
+        },
+        "scenario_aggregation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioAggregation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -347,6 +389,16 @@
       ],
       "title": "RoutingInfo",
       "type": "object"
+    },
+    "ScenarioAggregation": {
+      "enum": [
+        "sum",
+        "mean",
+        "min",
+        "max"
+      ],
+      "title": "ScenarioAggregation",
+      "type": "string"
     },
     "SqlAggregation": {
       "enum": [

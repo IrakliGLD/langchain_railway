@@ -1817,6 +1817,14 @@ Important rules:
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
+- For "what if", "hypothetical", "calculate payoff", or "if price were X" queries:
+  - Set `analysis_mode` to `analyst`.
+  - Add a scenario-type derived_metric request from the catalog:
+    - `scenario_scale`: "X% higher/lower" → `scenario_factor` = multiplier (1.34 for 34% higher, 0.8 for 20% lower).
+    - `scenario_offset`: "X units more/less" → `scenario_factor` = the addend.
+    - `scenario_payoff`: CfD/PPA payoff → `scenario_factor` = strike price, `scenario_volume` = MW capacity (default 1.0).
+  - `scenario_aggregation` defaults to `sum` unless the user asks for average/min/max.
+  - Extract numeric parameters directly from the query text.
 - Dates must use YYYY-MM-DD.
 - `chart_requested_by_user` and `chart_recommended` must be booleans.
 """
@@ -1987,6 +1995,22 @@ def llm_summarize_structured(
             forecast_guidance = get_forecast_caveats()
             if forecast_guidance:
                 guidance_parts.append(forecast_guidance)
+
+        # Scenario citation instruction (conditional on scenario evidence in stats)
+        if stats_hint and '"record_type": "scenario"' in stats_hint:
+            guidance_parts.append(
+                "SCENARIO RESULTS:\n"
+                "The UNTRUSTED_STATISTICS section contains pre-computed scenario results "
+                "(aggregate_result, and for scale/offset: baseline_aggregate, delta_aggregate, delta_percent; "
+                "plus min/max/mean_period_value). These were computed deterministically from the data.\n"
+                "- Cite aggregate_result as the primary answer.\n"
+                "- For scenario_scale and scenario_offset: compare to baseline_aggregate and cite delta_percent.\n"
+                "- For scenario_payoff: baseline/delta fields are null (different dimensions); "
+                "explain the total payoff, per-period range (min/max), and what negative periods mean.\n"
+                "- Mention period_range and row_count for context.\n"
+                "- Do NOT recalculate from raw data rows — use only these pre-computed values.\n"
+                "- Explain what the scenario means in plain language."
+            )
 
         # Energy-analyst domain knowledge (conditional on energy-domain focus)
         _ENERGY_DOMAIN_FOCUSES = {"balancing", "generation", "trade", "energy_security"}

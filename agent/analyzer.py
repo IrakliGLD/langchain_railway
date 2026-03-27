@@ -182,6 +182,68 @@ def _metric_aliases(metric: str) -> list[str]:
     return METRIC_VALUE_ALIASES.get(metric_name, [metric_name])
 
 
+_SCENARIO_FALLBACK_PATTERNS: list[tuple[str, str, str]] = [
+    # (regex, metric_name, factor_group_meaning)
+    # "X% higher/lower" → scenario_scale
+    (r"(\d+(?:\.\d+)?)\s*%\s*(?:higher|more|increase)", "scenario_scale", "pct_higher"),
+    (r"(\d+(?:\.\d+)?)\s*%\s*(?:lower|less|decrease)", "scenario_scale", "pct_lower"),
+    # "double/twice" → scenario_scale factor=2.0
+    (r"\b(?:double|twice)\b", "scenario_scale", "double"),
+    (r"\b(?:half)\b", "scenario_scale", "half"),
+    # "strike X" or "strike price X" → scenario_payoff
+    (r"strike\s*(?:price)?\s*(\d+(?:\.\d+)?)", "scenario_payoff", "strike"),
+    # "X USD/GEL higher/more" → scenario_offset
+    (r"(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)\s*(?:higher|more)", "scenario_offset", "offset"),
+]
+
+_DEFAULT_SCENARIO_METRIC = "p_bal_usd"
+
+
+def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
+    """Try to extract a scenario request from the raw query text.
+
+    This is a best-effort heuristic for when the LLM question-analyzer
+    fails to produce a QuestionAnalysis with scenario-type derived metrics.
+    Returns an empty list if no scenario pattern is found.
+    """
+    q = query.lower()
+    for pattern, metric_name, meaning in _SCENARIO_FALLBACK_PATTERNS:
+        m = re.search(pattern, q)
+        if not m:
+            continue
+
+        req: dict[str, Any] = {
+            "metric_name": metric_name,
+            "metric": _DEFAULT_SCENARIO_METRIC,
+            "scenario_aggregation": "sum",
+        }
+
+        if meaning == "pct_higher":
+            req["scenario_factor"] = 1.0 + float(m.group(1)) / 100.0
+        elif meaning == "pct_lower":
+            req["scenario_factor"] = 1.0 - float(m.group(1)) / 100.0
+        elif meaning == "double":
+            req["scenario_factor"] = 2.0
+        elif meaning == "half":
+            req["scenario_factor"] = 0.5
+        elif meaning == "strike":
+            req["scenario_factor"] = float(m.group(1))
+            req["scenario_volume"] = 1.0
+        elif meaning == "offset":
+            req["scenario_factor"] = float(m.group(1))
+        else:
+            continue
+
+        # Try to detect GEL metric from query
+        if "gel" in q and "usd" not in q:
+            req["metric"] = "p_bal_gel"
+
+        log.info("Scenario fallback: extracted %s from query (factor=%.2f)", metric_name, req["scenario_factor"])
+        return [req]
+
+    return []
+
+
 def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
     if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
         requests = [
@@ -190,6 +252,13 @@ def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
         ]
         if requests:
             return requests
+
+    # When the LLM question-analyzer didn't produce scenario requests,
+    # try heuristic extraction from the raw query text.
+    scenario_reqs = _scenario_fallback_requests(ctx.query)
+    if scenario_reqs:
+        return scenario_reqs
+
     return [dict(item) for item in DERIVED_METRIC_DEFAULTS]
 
 
@@ -321,6 +390,16 @@ def _build_historical_month_context(
             }
 
     return result
+
+
+def _scenario_formula(metric_name: str, metric: str, factor: float, volume: float, agg: str, n: int) -> str:
+    """Build a human-readable formula string for scenario evidence records."""
+    if metric_name == "scenario_scale":
+        return f"{metric} * {factor}, {agg} over {n} periods"
+    elif metric_name == "scenario_offset":
+        return f"{metric} + {factor}, {agg} over {n} periods"
+    else:
+        return f"({factor} - {metric}) * {volume}, {agg} over {n} periods"
 
 
 def _build_requested_analysis_evidence(
@@ -471,6 +550,65 @@ def _build_requested_analysis_evidence(
                 {
                     "trend_slope": round(float(slope), 6),
                     "formula": f"linear_slope({metric}) over ordered observations",
+                }
+            )
+        elif metric_name in ("scenario_scale", "scenario_offset", "scenario_payoff"):
+            candidates = _metric_aliases(metric)
+            value_col = next((c for c in candidates if c in df.columns), None)
+            if value_col is None:
+                continue
+            raw = pd.to_numeric(df[value_col], errors="coerce")
+            valid_mask = raw.notna()
+            if valid_mask.sum() == 0:
+                continue
+            series = raw[valid_mask]
+
+            factor = float(request.get("scenario_factor", 0) or 0)
+            volume = float(request.get("scenario_volume", 1) or 1)
+            agg_name = str(request.get("scenario_aggregation", "sum") or "sum")
+
+            if metric_name == "scenario_scale":
+                scenario_series = series * factor
+            elif metric_name == "scenario_offset":
+                scenario_series = series + factor
+            else:  # scenario_payoff
+                scenario_series = (factor - series) * volume
+
+            agg_result = float(getattr(scenario_series, agg_name)())
+
+            # Baseline/delta only meaningful for scale and offset (same dimension).
+            # For payoff, aggregate_result and raw metric are different quantities.
+            if metric_name in ("scenario_scale", "scenario_offset"):
+                baseline_result = float(getattr(series, agg_name)())
+                delta = agg_result - baseline_result
+                delta_pct = (delta / baseline_result * 100) if abs(baseline_result) > 1e-12 else None
+            else:
+                baseline_result = None
+                delta = None
+                delta_pct = None
+
+            period_range = ""
+            if time_col in df.columns:
+                time_vals = df.loc[valid_mask[valid_mask].index, time_col]
+                if not time_vals.empty:
+                    period_range = f"{time_vals.iloc[0]} to {time_vals.iloc[-1]}"
+
+            record.update(
+                {
+                    "record_type": "scenario",
+                    "scenario_factor": factor,
+                    "scenario_volume": volume if metric_name == "scenario_payoff" else None,
+                    "scenario_aggregation": agg_name,
+                    "aggregate_result": round(agg_result, 2),
+                    "baseline_aggregate": round(baseline_result, 2) if baseline_result is not None else None,
+                    "delta_aggregate": round(delta, 2) if delta is not None else None,
+                    "delta_percent": round(delta_pct, 2) if delta_pct is not None else None,
+                    "row_count": int(valid_mask.sum()),
+                    "period_range": period_range,
+                    "formula": _scenario_formula(metric_name, metric, factor, volume, agg_name, int(valid_mask.sum())),
+                    "min_period_value": round(float(scenario_series.min()), 2),
+                    "max_period_value": round(float(scenario_series.max()), 2),
+                    "mean_period_value": round(float(scenario_series.mean()), 2),
                 }
             )
         else:

@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from contracts.question_analysis import QuestionAnalysis
+from contracts.question_analysis import (
+    DerivedMetricName,
+    DerivedMetricRequest,
+    QuestionAnalysis,
+    ScenarioAggregation,
+)
 
 
 def _valid_payload() -> dict:
@@ -145,3 +150,64 @@ def test_schema_snapshot_matches_runtime_model():
     snapshot = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert snapshot == QuestionAnalysis.model_json_schema()
+
+
+# ---------------------------------------------------------------------------
+# Scenario contract tests
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_scale_valid():
+    req = DerivedMetricRequest(
+        metric_name="scenario_scale",
+        metric="p_bal_gel",
+        scenario_factor=1.34,
+    )
+    assert req.scenario_factor == 1.34
+    assert req.scenario_volume is None
+    assert req.scenario_aggregation is None
+
+
+def test_scenario_payoff_volume_defaults_to_1():
+    req = DerivedMetricRequest(
+        metric_name="scenario_payoff",
+        metric="p_bal_usd",
+        scenario_factor=60.0,
+    )
+    assert req.scenario_volume == 1.0
+
+
+def test_scenario_factor_required_for_scenario_metrics():
+    with pytest.raises(ValidationError, match="scenario_factor"):
+        DerivedMetricRequest(
+            metric_name="scenario_scale",
+            metric="p_bal_gel",
+        )
+
+
+def test_scenario_fields_forbidden_on_non_scenario():
+    with pytest.raises(ValidationError, match="scenario fields must be None"):
+        DerivedMetricRequest(
+            metric_name="mom_absolute_change",
+            metric="p_bal_gel",
+            scenario_factor=1.5,
+        )
+
+
+def test_scenario_aggregation_enum_values():
+    for agg in ("sum", "mean", "min", "max"):
+        req = DerivedMetricRequest(
+            metric_name="scenario_offset",
+            metric="p_bal_usd",
+            scenario_factor=10.0,
+            scenario_aggregation=agg,
+        )
+        assert req.scenario_aggregation == ScenarioAggregation(agg)
+
+    with pytest.raises(ValidationError):
+        DerivedMetricRequest(
+            metric_name="scenario_offset",
+            metric="p_bal_usd",
+            scenario_factor=10.0,
+            scenario_aggregation="median",
+        )
