@@ -7,12 +7,14 @@ description: Use when generating the final user-facing answer from query results
 
 Use this skill when producing the final analytical answer from data results and statistics. This skill enriches the structured summarizer (`llm_summarize_structured`) with the analytical depth previously only available in the legacy fallback (`llm_summarize`).
 
-Read [references/answer-templates.md](references/answer-templates.md) for answer structure templates by query type.
-Read [references/formatting-rules.md](references/formatting-rules.md) for number formatting, units, and column name translation.
-Read [references/balancing-analysis-template.md](references/balancing-analysis-template.md) for the detailed balancing price analysis format.
-Read [references/focus-guidance-catalog.md](references/focus-guidance-catalog.md) for focus-specific summarizer guidance.
-Read [references/forecast-caveats.md](references/forecast-caveats.md) for R²-based forecast caveat templates.
-Read [references/grounding-contract.md](references/grounding-contract.md) for the JSON output schema and grounding rules.
+At runtime, the loader selects references conditionally based on query type and focus:
+
+- [references/formatting-rules.md](references/formatting-rules.md) — always loaded for number formatting and column name translation.
+- [references/focus-guidance-catalog.md](references/focus-guidance-catalog.md) — the Always section plus focus-specific section are extracted per query.
+- [references/answer-templates.md](references/answer-templates.md) — loaded when query type matches a template (comparison, trend, etc.).
+- [references/balancing-analysis-template.md](references/balancing-analysis-template.md) — loaded for balancing-keyword queries.
+- [references/forecast-caveats.md](references/forecast-caveats.md) — loaded when forecast keywords are detected.
+- [references/grounding-contract.md](references/grounding-contract.md) — reference documentation only; grounding is enforced programmatically in `agent/summarizer.py`.
 
 ## Non-negotiable rules
 

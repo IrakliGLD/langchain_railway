@@ -5,13 +5,16 @@ description: Use when the system must reason about Georgian energy market concep
 
 # Energy Analyst
 
-Use this skill when interpreting Georgian energy market data, generating analytical reasoning, or deciding which domain concepts are relevant to a user query. This skill is consumed by both the sql-planner (Stage 1) and the answer-composer (Stage 4).
+Use this skill when interpreting Georgian energy market data, generating analytical reasoning, or deciding which domain concepts are relevant to a user query.
 
-Read [references/entity-taxonomy.md](references/entity-taxonomy.md) for the 7 balancing entity categories and their pricing.
-Read [references/driver-framework.md](references/driver-framework.md) for the driver priority hierarchy.
-Read [references/seasonal-rules.md](references/seasonal-rules.md) for seasonal analysis rules and CAGR citation.
-Read [references/confidentiality-rules.md](references/confidentiality-rules.md) for disclosure boundaries.
-Read [references/domain-focus-index.md](references/domain-focus-index.md) to map query focus areas to applicable rules.
+At runtime, `seasonal-rules.md` and `entity-taxonomy.md` are injected into the structured summarizer for energy-domain queries (balancing, generation, trade, energy_security). The remaining references are authoring aids and background context.
+
+Read references conditionally:
+- [references/entity-taxonomy.md](references/entity-taxonomy.md) — when the query involves entity categories, pricing sources, or balancing composition.
+- [references/seasonal-rules.md](references/seasonal-rules.md) — when the query spans more than 6 months or involves seasonal patterns.
+- [references/driver-framework.md](references/driver-framework.md) — when analyzing price drivers or causal factors.
+- [references/confidentiality-rules.md](references/confidentiality-rules.md) — when the response might touch PPA or import pricing.
+- [references/domain-focus-index.md](references/domain-focus-index.md) — when mapping a query to applicable domain rules.
 
 ## Non-negotiable rules
 

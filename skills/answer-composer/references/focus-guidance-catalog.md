@@ -85,6 +85,17 @@ Full balancing analysis guidance is in [balancing-analysis-template.md](balancin
 - Summer vs Winter comparison relevant for hydro vs thermal generation
 - Only discuss prices if user explicitly asks about price-generation relationships
 
+## Focus: Trade
+
+**Trigger**: query_focus == "trade" OR keywords: import, export, trade, იმპორტი, ექსპორტი
+
+- Focus on electricity import/export volumes and cross-border flows
+- Georgia imports primarily from Russia and Azerbaijan; exports to Turkey and Armenia
+- Import volumes are seasonal — higher in winter when hydro generation drops
+- Thermal generation using imported gas is NOT the same as direct electricity import; distinguish clearly
+- Use `tech_quantity_view` for import/export quantities when available
+- Only discuss prices if user explicitly asks about import/export pricing
+
 ## Focus: Energy Security
 
 **Trigger**: keywords: energy security, უსაფრთხოება, independence, dependence

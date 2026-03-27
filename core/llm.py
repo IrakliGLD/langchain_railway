@@ -458,6 +458,7 @@ def get_query_focus(user_query: str) -> str:
         - "tariff": Tariff-focused queries
         - "generation": Electricity generation queries
         - "regulation": Registration, eligibility, procedure queries
+        - "energy_security": Energy security, import dependence queries
         - "balancing": Balancing market/price queries
         - "trade": Import/export/trade queries
         - "general": Cannot determine or multiple focuses
@@ -492,6 +493,14 @@ def get_query_focus(user_query: str) -> str:
         "რეგისტრაცია", "მონაწილე", "регистрация", "участник",
     ]):
         return "regulation"
+
+    # Energy security focus (check before trade — "import dependence" is security, not trade)
+    if any(k in query_lower for k in [
+        "energy security", "უსაფრთხოება", "энергобезопасность",
+        "import dependence", "import reliance", "self-sufficient",
+        "იმპორტზე დამოკიდებულება",
+    ]):
+        return "energy_security"
 
     # Trade focus
     if any(k in query_lower for k in ["import", "export", "trade", "იმპორტი", "ექსპორტი", "импорт", "экспорт"]) and \
@@ -1978,6 +1987,16 @@ def llm_summarize_structured(
             forecast_guidance = get_forecast_caveats()
             if forecast_guidance:
                 guidance_parts.append(forecast_guidance)
+
+        # Energy-analyst domain knowledge (conditional on energy-domain focus)
+        _ENERGY_DOMAIN_FOCUSES = {"balancing", "generation", "trade", "energy_security"}
+        if query_focus in _ENERGY_DOMAIN_FOCUSES:
+            _ea_seasonal = load_reference("energy-analyst", "seasonal-rules.md")
+            if _ea_seasonal:
+                guidance_parts.append(f"SEASONAL DOMAIN RULES:\n{_ea_seasonal}")
+            _ea_taxonomy = load_reference("energy-analyst", "entity-taxonomy.md")
+            if _ea_taxonomy:
+                guidance_parts.append(f"ENTITY TAXONOMY:\n{_ea_taxonomy}")
 
         # Formatting rules (always)
         formatting_rules = load_reference("answer-composer", "formatting-rules.md")

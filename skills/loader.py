@@ -118,7 +118,8 @@ _FOCUS_TO_CATALOG_SECTION: dict[str, str] = {
     "tariff": "## Focus: Tariff",
     "cpi": "## Focus: CPI / Inflation",
     "generation": "## Focus: Generation",
-    "trade": "",  # no trade-specific section; always-rules still apply
+    "trade": "## Focus: Trade",
+    "energy_security": "## Focus: Energy Security",
     "regulation": "## Focus: Regulation",
     "general": "",  # no focus-specific section; always-rules still apply
 }
@@ -129,7 +130,7 @@ def get_focus_guidance(focus: str, skill: str = "answer-composer") -> str:
 
     Args:
         focus: Return value from get_query_focus()
-            (balancing, tariff, cpi, generation, trade, general)
+            (balancing, tariff, cpi, generation, trade, energy_security, regulation, general)
         skill: Which skill's catalog to use
             ("answer-composer" for summarizer, "sql-planner" for planner)
 
@@ -213,7 +214,6 @@ _EXPECTED_FILES: list[tuple[str, str]] = [
     ("answer-composer", "balancing-analysis-template.md"),
     ("answer-composer", "focus-guidance-catalog.md"),
     ("answer-composer", "forecast-caveats.md"),
-    ("answer-composer", "grounding-contract.md"),
 ]
 
 
