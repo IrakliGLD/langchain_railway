@@ -41,6 +41,29 @@ from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
+_EXPLANATION_ROUTING_SIGNALS = (
+    "why",
+    "explain",
+    "reason",
+    "cause",
+    "because",
+    "driver",
+    "drivers",
+    "factor",
+    "factors",
+    "what does this mean",
+    "what does that mean",
+    "რატომ",
+    "ახსენი",
+    "почему",
+    "объясни",
+)
+_SCENARIO_DERIVED_METRICS = {
+    "scenario_payoff",
+    "scenario_scale",
+    "scenario_offset",
+}
+
 
 def _enrich_prices_with_composition(
     ctx: QueryContext,
@@ -126,6 +149,35 @@ def _enrich_prices_with_composition(
             error=str(enrich_err),
         )
     return ctx
+
+
+def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
+    """Return True when tool routing should use explanation-style handling."""
+    query_lower = (ctx.query or "").strip().lower()
+    explanation_signal_hit = any(signal in query_lower for signal in _EXPLANATION_ROUTING_SIGNALS)
+
+    if ctx.question_analysis:
+        qa_type = ctx.question_analysis.classification.query_type.value
+        if qa_type == "conceptual_definition":
+            return True
+        if qa_type != "data_explanation":
+            return False
+
+        intent_text = str(ctx.question_analysis.classification.intent or "").strip().lower()
+        intent_signal_hit = any(
+            signal in intent_text
+            for signal in ("why", "explain", "reason", "cause", "driver", "factor")
+        )
+        derived_metrics = list(ctx.question_analysis.analysis_requirements.derived_metrics or [])
+        has_scenario_metric = any(
+            getattr(metric.metric_name, "value", str(metric.metric_name)) in _SCENARIO_DERIVED_METRICS
+            for metric in derived_metrics
+        )
+        if has_scenario_metric and not explanation_signal_hit and not intent_signal_hit:
+            return False
+        return True
+
+    return explanation_signal_hit
 
 
 def process_query(
@@ -293,6 +345,7 @@ def process_query(
         elif any(w in ctx.query.lower() for w in ["why", "explain", "reason", "რატომ", "ახსენი", "почему", "объясни"]):
             is_exp = True
             
+        is_exp = _should_route_tool_as_explanation(ctx)
         invocation = match_tool(ctx.query, is_explanation=is_exp)
         _trace_stage("stage_0_5_router_match", t_stage, matched=bool(invocation))
         if invocation:

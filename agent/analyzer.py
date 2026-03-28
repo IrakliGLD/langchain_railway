@@ -612,11 +612,15 @@ def _build_requested_analysis_evidence(
                 negative_sum = round(float(scenario_series[_neg_mask].sum()), 2) if _neg_mask.any() else 0.0
                 positive_count = int(_pos_mask.sum())
                 negative_count = int(_neg_mask.sum())
+                market_component_result = float(getattr(series * volume, agg_name)())
+                combined_total_result = float(getattr((series * volume) + scenario_series, agg_name)())
             else:
                 positive_sum = None
                 negative_sum = None
                 positive_count = None
                 negative_count = None
+                market_component_result = None
+                combined_total_result = None
 
             # Baseline/delta only meaningful for scale and offset (same dimension).
             # For payoff, aggregate_result and raw metric are different quantities.
@@ -655,6 +659,12 @@ def _build_requested_analysis_evidence(
                     "negative_sum": negative_sum,
                     "positive_count": positive_count,
                     "negative_count": negative_count,
+                    "market_component_aggregate": (
+                        round(market_component_result, 2) if market_component_result is not None else None
+                    ),
+                    "combined_total_aggregate": (
+                        round(combined_total_result, 2) if combined_total_result is not None else None
+                    ),
                 }
             )
         else:

@@ -2793,6 +2793,8 @@ def test_scenario_payoff_computation():
     assert row["min_period_value"] == 0.0
     assert row["max_period_value"] == 60.0
     assert row["mean_period_value"] == 30.0
+    assert row["market_component_aggregate"] == 360.0
+    assert row["combined_total_aggregate"] == 480.0
 
 
 def test_scenario_grounding_tokens():
@@ -3094,6 +3096,79 @@ def test_summarize_data_uses_deterministic_scenario_direct_without_llm(monkeypat
     assert out.summary_provenance_gate_reason == "no_claims"
     assert "Net total payoff" in out.summary
     assert metrics.deterministic_summary_skip_count == baseline_skips + 1
+
+
+def test_summarize_data_deterministic_scenario_direct_includes_total_income_components(monkeypatch):
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    payload = _make_analyzer_payload("data_explanation", "sql", confidence=0.95)
+    payload["classification"]["intent"] = "cfd_total_income"
+    qa = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("llm_summarize_structured should not be called for deterministic-direct")
+        ),
+    )
+
+    ctx = QueryContext(
+        query="Calculate the total income from balancing market sales and CfD financial compensation with strike 55",
+        analysis_evidence=[row],
+        stats_hint=json.dumps([row], default=str),
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "deterministic_scenario_direct"
+    assert "Balancing Electricity market sales income" in out.summary
+    assert "180.0 USD" in out.summary
+    assert "CfD financial compensation" in out.summary
+    assert "40.0 USD" in out.summary
+    assert "Total combined income" in out.summary
+    assert "220.0 USD" in out.summary
+
+
+def test_scenario_data_explanation_tool_route_not_treated_as_explanation():
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["classification"]["intent"] = "cfd_total_income"
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {
+            "metric_name": "scenario_payoff",
+            "metric": "p_bal_usd",
+            "target_metric": None,
+            "rank_limit": None,
+            "scenario_factor": 55.0,
+            "scenario_volume": 1.0,
+            "scenario_aggregation": "sum",
+        }
+    ]
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="Calculate total income from balancing market sales and CfD compensation",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+
+    assert pipeline._should_route_tool_as_explanation(ctx) is False
+
+
+def test_why_data_explanation_tool_route_still_treated_as_explanation():
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["classification"]["intent"] = "balancing_price_why"
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="Why did balancing electricity price change in November 2021?",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+
+    assert pipeline._should_route_tool_as_explanation(ctx) is True
 
 
 def test_scenario_fallback_returns_defaults_for_non_scenario():

@@ -56,6 +56,23 @@ _EXPLANATION_QUERY_SIGNALS = (
     "comparison",
     "versus",
 )
+_TOTAL_INCOME_QUERY_SIGNALS = (
+    "total income",
+    "total revenue",
+    "combined income",
+    "combined revenue",
+    "overall income",
+    "overall revenue",
+    "market sale",
+    "market sales",
+    "sell",
+    "sales",
+)
+_CFD_COMPONENT_QUERY_SIGNALS = (
+    "cfd",
+    "compensation",
+    "payoff",
+)
 
 
 def _normalize_number_token(raw_token: str) -> Optional[str]:
@@ -710,6 +727,7 @@ def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
     if not scenario_records:
         return None
     rec = scenario_records[0]
+    query_lower = (ctx.query or "").strip().lower()
 
     metric_name = rec.get("derived_metric_name", "")
     factor = rec.get("scenario_factor")
@@ -732,15 +750,36 @@ def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
         negative_sum = rec.get("negative_sum", 0.0)
         positive_count = rec.get("positive_count", 0)
         negative_count = rec.get("negative_count", 0)
+        market_component = rec.get("market_component_aggregate")
+        combined_total = rec.get("combined_total_aggregate")
+        metric_key = str(rec.get("metric") or "").strip()
+        market_label = (
+            "Balancing market sales income"
+            if metric_key in {"p_bal_usd", "p_bal_gel"}
+            else "Market sales income at observed prices"
+        )
+        include_income_breakdown = (
+            market_component is not None
+            and combined_total is not None
+            and (
+                any(signal in query_lower for signal in _TOTAL_INCOME_QUERY_SIGNALS)
+                and any(signal in query_lower for signal in _CFD_COMPONENT_QUERY_SIGNALS)
+            )
+        )
 
         parts.append(
-            f"**CfD Payoff Analysis** (strike: {factor} USD/MWh"
+            f"**{'CfD Payoff and Income Analysis' if include_income_breakdown else 'CfD Payoff Analysis'}** "
+            f"(strike: {factor} USD/MWh"
             + (f", volume: {volume} MW" if volume is not None else "")
             + ")"
         )
         if period_range:
             parts.append(f"**Period:** {period_range} ({row_count} months)")
         parts.append(f"**Formula:** {formula}")
+        if include_income_breakdown:
+            parts.append(f"**{market_label}:** {market_component} USD")
+            parts.append(f"**CfD financial compensation:** {agg_result} USD")
+            parts.append(f"**Total combined income:** {combined_total} USD")
         parts.append(f"**Net total payoff:** {agg_result} USD")
         if positive_sum and positive_sum != 0:
             parts.append(
