@@ -586,6 +586,13 @@ def _build_requested_analysis_evidence(
             volume = float(request.get("scenario_volume", 1) or 1)
             agg_name = str(request.get("scenario_aggregation", "sum") or "sum")
 
+            # Skip identity transforms — they produce the same values as
+            # the raw metric and add noise without useful information.
+            if metric_name == "scenario_scale" and abs(factor - 1.0) < 1e-9:
+                continue
+            if metric_name == "scenario_offset" and abs(factor) < 1e-9:
+                continue
+
             if metric_name == "scenario_scale":
                 scenario_series = series * factor
             elif metric_name == "scenario_offset":

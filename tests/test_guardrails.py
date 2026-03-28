@@ -2871,6 +2871,44 @@ def test_scenario_payoff_positive_negative_breakdown():
     assert row["negative_count"] == 1
 
 
+def test_scenario_scale_identity_skipped():
+    """scenario_scale with factor=1.0 is a no-op and should produce no evidence."""
+    import agent.analyzer as az
+    original = az.DERIVED_METRIC_DEFAULTS
+    az.DERIVED_METRIC_DEFAULTS = [
+        {"metric_name": "scenario_scale", "metric": "p_bal_usd",
+         "scenario_factor": 1.0, "scenario_aggregation": "sum"},
+    ]
+    try:
+        ctx = QueryContext(query="test identity")
+        result = az._build_requested_analysis_evidence(
+            ctx, _scenario_df(), "period",
+            None, pd.DataFrame(), None, pd.DataFrame(), {}, {},
+        )
+    finally:
+        az.DERIVED_METRIC_DEFAULTS = original
+    assert result.empty, f"Expected no evidence for identity scale, got {len(result)} rows"
+
+
+def test_scenario_offset_identity_skipped():
+    """scenario_offset with factor=0.0 is a no-op and should produce no evidence."""
+    import agent.analyzer as az
+    original = az.DERIVED_METRIC_DEFAULTS
+    az.DERIVED_METRIC_DEFAULTS = [
+        {"metric_name": "scenario_offset", "metric": "p_bal_usd",
+         "scenario_factor": 0.0, "scenario_aggregation": "sum"},
+    ]
+    try:
+        ctx = QueryContext(query="test identity")
+        result = az._build_requested_analysis_evidence(
+            ctx, _scenario_df(), "period",
+            None, pd.DataFrame(), None, pd.DataFrame(), {}, {},
+        )
+    finally:
+        az.DERIVED_METRIC_DEFAULTS = original
+    assert result.empty, f"Expected no evidence for identity offset, got {len(result)} rows"
+
+
 def test_scenario_payoff_all_positive():
     """When strike > all prices, negative_sum should be 0."""
     # p_bal_usd = [40, 50, 30, 60], factor=100, volume=1
