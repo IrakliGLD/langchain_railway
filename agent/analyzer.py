@@ -94,6 +94,31 @@ MONTH_NAME_TO_NUMBER = {
     "december": 12, "dec": 12,
 }
 
+_SCENARIO_TOTAL_INCOME_QUERY_SIGNALS = (
+    "total income",
+    "total revenue",
+    "combined income",
+    "combined revenue",
+    "overall income",
+    "overall revenue",
+    "market sale",
+    "market sales",
+    "sell",
+    "sales",
+)
+_SCENARIO_COMPONENT_QUERY_SIGNALS = (
+    "cfd",
+    "compensation",
+    "payoff",
+)
+_SCENARIO_REFERENCE_QUERY_SIGNALS = (
+    "strike",
+    "reference",
+    "benchmark",
+    "threshold",
+    "cap",
+)
+
 
 # ---------------------------------------------------------------------------
 # Share summary helpers (moved from main.py)
@@ -758,33 +783,72 @@ def _scenario_chart_request(
 ) -> Optional[Tuple[ChartIntent, list[SemanticRole], dict[str, Any], dict[str, Any]]]:
     """Return the single supported scenario request/evidence pair for chart overrides."""
     qa = ctx.question_analysis
-    if qa is None:
-        return None
-
-    vis = qa.visualization
-    if vis.chart_intent is None or len(vis.target_series) < 2:
-        return None
-
-    scenario_requests = [
-        req.model_dump(mode="json")
-        for req in qa.analysis_requirements.derived_metrics
-        if str(req.metric_name.value) in {"scenario_scale", "scenario_offset", "scenario_payoff"}
-    ]
-    if len(scenario_requests) != 1:
-        return None
-
-    request = scenario_requests[0]
     scenario_rows = [
         row
         for row in (ctx.analysis_evidence or [])
         if row.get("record_type") == "scenario"
-        and row.get("derived_metric_name") == request.get("metric_name")
-        and row.get("metric") == request.get("metric")
     ]
     if len(scenario_rows) != 1:
         return None
+    scenario_row = scenario_rows[0]
 
-    return vis.chart_intent, list(vis.target_series), request, scenario_rows[0]
+    request = {
+        "metric_name": scenario_row.get("derived_metric_name"),
+        "metric": scenario_row.get("metric"),
+        "scenario_factor": scenario_row.get("scenario_factor"),
+        "scenario_volume": scenario_row.get("scenario_volume"),
+        "scenario_aggregation": scenario_row.get("scenario_aggregation"),
+    }
+
+    chart_intent: Optional[ChartIntent] = None
+    target_roles: list[SemanticRole] = []
+    if qa is not None:
+        vis = qa.visualization
+        if vis.chart_intent is not None and len(vis.target_series) >= 2:
+            chart_intent = vis.chart_intent
+            target_roles = list(vis.target_series)
+
+    if chart_intent is None:
+        chart_intent, target_roles = _default_scenario_chart_hint(ctx, request, scenario_row)
+        if chart_intent is None or len(target_roles) < 2:
+            return None
+
+    return chart_intent, target_roles, request, scenario_row
+
+
+def _default_scenario_chart_hint(
+    ctx: QueryContext,
+    request: dict[str, Any],
+    scenario_row: dict[str, Any],
+) -> Tuple[Optional[ChartIntent], list[SemanticRole]]:
+    """Infer a deterministic default chart hint for supported scenario queries."""
+    metric_name = str(request.get("metric_name", "")).strip()
+    query_lower = (ctx.query or "").lower()
+
+    if metric_name in {"scenario_scale", "scenario_offset"}:
+        return ChartIntent.TREND_COMPARE, [SemanticRole.OBSERVED, SemanticRole.DERIVED]
+
+    if metric_name != "scenario_payoff":
+        return None, []
+
+    has_total_income_signals = any(signal in query_lower for signal in _SCENARIO_TOTAL_INCOME_QUERY_SIGNALS)
+    has_component_signals = any(signal in query_lower for signal in _SCENARIO_COMPONENT_QUERY_SIGNALS)
+    has_reference_signals = any(signal in query_lower for signal in _SCENARIO_REFERENCE_QUERY_SIGNALS)
+    has_components = (
+        scenario_row.get("market_component_aggregate") is not None
+        and scenario_row.get("combined_total_aggregate") is not None
+    )
+
+    if has_components and has_total_income_signals and has_component_signals:
+        return ChartIntent.DECOMPOSITION, [
+            SemanticRole.COMPONENT_PRIMARY,
+            SemanticRole.COMPONENT_SECONDARY,
+        ]
+
+    if has_reference_signals:
+        return ChartIntent.TREND_COMPARE, [SemanticRole.OBSERVED, SemanticRole.REFERENCE]
+
+    return ChartIntent.TREND_COMPARE, [SemanticRole.OBSERVED, SemanticRole.REFERENCE]
 
 
 def _resolve_chart_roles(ctx: QueryContext) -> Optional[Dict[str, Any]]:

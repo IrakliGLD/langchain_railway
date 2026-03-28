@@ -2891,6 +2891,133 @@ def test_materialize_chart_override_builds_decomposition_stackedbar():
     }
 
 
+def test_materialize_chart_override_falls_back_to_decomposition_without_chart_hints():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    payload = _make_analyzer_payload("data_retrieval", "tool", confidence=0.95)
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {
+            "metric_name": "scenario_payoff",
+            "metric": "p_bal_usd",
+            "target_metric": None,
+            "rank_limit": None,
+            "scenario_factor": 55.0,
+            "scenario_volume": 1.0,
+            "scenario_aggregation": "sum",
+        }
+    ]
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="Calculate the total income from balancing market sales and CfD financial compensation with strike 55",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "stackedbar"
+    assert ctx.chart_override_meta is not None
+    assert ctx.chart_override_meta["labels"] == [
+        "Balancing Market Sales Income",
+        "CfD Financial Compensation",
+    ]
+    assert ctx.chart_override_data is not None
+    assert ctx.chart_override_data[0]["category"] == "Balancing Market Sales Income"
+    assert ctx.chart_override_data[1]["category"] == "CfD Financial Compensation"
+
+
+def test_materialize_chart_override_falls_back_to_trend_compare_for_scale_without_chart_hints():
+    row = _run_scenario("scenario_scale", factor=1.5)
+    payload = _make_analyzer_payload("data_retrieval", "tool", confidence=0.95)
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {
+            "metric_name": "scenario_scale",
+            "metric": "p_bal_usd",
+            "target_metric": None,
+            "rank_limit": None,
+            "scenario_factor": 1.5,
+            "scenario_aggregation": "sum",
+        }
+    ]
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="What if balancing prices were 50 percent higher?",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_meta is not None
+    assert ctx.chart_override_meta["labels"] == [
+        "Balancing Electricity Price (USD/MWh)",
+        "Scaled Balancing Electricity Price (USD/MWh)",
+    ]
+    assert ctx.chart_override_data is not None
+    assert ctx.chart_override_data[0]["Balancing Electricity Price (USD/MWh)"] == 40.0
+    assert ctx.chart_override_data[0]["Scaled Balancing Electricity Price (USD/MWh)"] == 60.0
+
+
+def test_materialize_chart_override_payoff_without_total_income_signals_stays_trend_compare():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    payload = _make_analyzer_payload("data_retrieval", "tool", confidence=0.95)
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {
+            "metric_name": "scenario_payoff",
+            "metric": "p_bal_usd",
+            "target_metric": None,
+            "rank_limit": None,
+            "scenario_factor": 55.0,
+            "scenario_volume": 1.0,
+            "scenario_aggregation": "sum",
+        }
+    ]
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="Calculate CfD payoff with strike 55",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_meta is not None
+    assert ctx.chart_override_meta["labels"] == [
+        "Balancing Electricity Price (USD/MWh)",
+        "Strike Price",
+    ]
+
+
+def test_materialize_chart_override_uses_scenario_evidence_instead_of_non_active_question_analysis_request():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_scale",
+        "trend_compare",
+        ["observed", "reference"],
+        factor=1.5,
+    )
+    ctx = QueryContext(
+        query="Show the balancing price against the strike price",
+        question_analysis=qa,
+        question_analysis_source="shadow",
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_data is not None
+    assert ctx.chart_override_data[0]["Strike Price"] == 55.0
+
+
 def test_materialize_chart_override_skips_unresolved_reference_role():
     row = _run_scenario("scenario_scale", factor=1.2)
     qa = _make_chart_hint_question_analysis(
