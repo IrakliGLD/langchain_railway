@@ -336,6 +336,8 @@ def test_scenario_keywords_trigger_analyst_mode():
         "hypothetical scenario for balancing price",
         "if prices were 10 USD higher",
         "strike price sensitivity analysis",
+        # Real production query
+        "if balancing price is considered as a strike price and i have a cfd contract of 1 mw for 60 usd/mwh, what would be my income?",
     ]
     for query in scenario_queries:
         result = planner.detect_analysis_mode(query)

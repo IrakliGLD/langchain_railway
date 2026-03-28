@@ -70,7 +70,8 @@ def detect_analysis_mode(user_query: str) -> str:
         "what if", "hypothetical", "calculate payoff", "calculate income",
         "if price were", "if prices were", "contract for difference",
         "strike price of", "strike price sensitivity", "with strike",
-        "cfd payoff", "cfd income", "cfd calculation",
+        "cfd payoff", "cfd income", "cfd calculation", "cfd contract",
+        "ppa contract", "what would be my income", "what would be my payoff",
         # Georgian
         "რამ გამოიწვია", "ტენდენცია", "კორელაცია", "დინამიკა", "ანალიზი",
         "რატომ", "რა იწვევს",
@@ -186,6 +187,10 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             candidate_topics=[topic.name.value for topic in ctx.question_analysis.knowledge.candidate_topics],
             candidate_tools=[tool.name.value for tool in ctx.question_analysis.tooling.candidate_tools],
             canonical_query_en=ctx.question_analysis.canonical_query_en,
+            derived_metrics=[
+                m.model_dump(mode="json")
+                for m in ctx.question_analysis.analysis_requirements.derived_metrics
+            ],
         )
         trace_detail(
             log,

@@ -1817,12 +1817,15 @@ Important rules:
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
-- For "what if", "hypothetical", "calculate payoff", or "if price were X" queries:
-  - Set `analysis_mode` to `analyst`.
-  - Add a scenario-type derived_metric request from the catalog:
-    - `scenario_scale`: "X% higher/lower" → `scenario_factor` = multiplier (1.34 for 34% higher, 0.8 for 20% lower).
-    - `scenario_offset`: "X units more/less" → `scenario_factor` = the addend.
-    - `scenario_payoff`: CfD/PPA payoff → `scenario_factor` = strike price, `scenario_volume` = MW capacity (default 1.0).
+- For scenario/hypothetical queries, set `analysis_mode` to `analyst` and add a scenario-type derived_metric:
+  - Trigger phrases: "what if", "hypothetical", "calculate payoff/income", "if price were X",
+    "CfD contract", "PPA contract", "what would be my income/payoff", "financial compensation",
+    or any query that specifies a strike price and volume/capacity.
+  - `scenario_scale`: "X% higher/lower" → `scenario_factor` = multiplier (1.34 for 34% higher, 0.8 for 20% lower).
+  - `scenario_offset`: "X units more/less" → `scenario_factor` = the addend.
+  - `scenario_payoff`: CfD/PPA payoff → `scenario_factor` = strike price, `scenario_volume` = MW capacity (default 1.0).
+    When the query mentions a CfD/PPA contract with a price (e.g. "60 usd/mwh") and a capacity (e.g. "1 mw"),
+    use scenario_payoff with that price as scenario_factor and capacity as scenario_volume.
   - `scenario_aggregation` defaults to `sum` unless the user asks for average/min/max.
   - Extract numeric parameters directly from the query text.
 - Dates must use YYYY-MM-DD.

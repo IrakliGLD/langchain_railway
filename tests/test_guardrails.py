@@ -2843,6 +2843,21 @@ def test_scenario_fallback_extracts_payoff_from_query():
     assert requests[0]["scenario_volume"] == 1.0
 
 
+def test_scenario_fallback_extracts_payoff_from_real_cfd_query():
+    """Real production CfD query with strike and volume separated by many words."""
+    real_query = (
+        "if balancing price is considered as a strike price and i, as a power producer, "
+        "have a cfd contract of 1 mw/month for 60 usd/mwh, what would be my income from "
+        "the balancing market sell and financial cfd compensation from jan 2024 to sep 2025 period?"
+    )
+    ctx = QueryContext(query=real_query)
+    requests = analyzer._active_analysis_requests(ctx)
+    assert len(requests) == 1, f"Expected 1 scenario request, got {len(requests)}: {requests}"
+    assert requests[0]["metric_name"] == "scenario_payoff"
+    assert requests[0]["scenario_factor"] == 60.0
+    assert requests[0]["scenario_volume"] == 1.0
+
+
 def test_scenario_fallback_returns_defaults_for_non_scenario():
     """Non-scenario queries still get DERIVED_METRIC_DEFAULTS."""
     ctx = QueryContext(query="Show me balancing price trend")

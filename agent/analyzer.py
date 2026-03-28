@@ -190,13 +190,18 @@ _SCENARIO_FALLBACK_PATTERNS: list[tuple[str, str, str]] = [
     # "double/twice" → scenario_scale factor=2.0
     (r"\b(?:double|twice)\b", "scenario_scale", "double"),
     (r"\b(?:half)\b", "scenario_scale", "half"),
-    # "strike X" or "strike price X" → scenario_payoff
+    # "strike X" or "strike price X" (adjacent) → scenario_payoff
     (r"strike\s*(?:price)?\s*(\d+(?:\.\d+)?)", "scenario_payoff", "strike"),
+    # CfD/PPA contract with a price in USD/GEL/EUR (may be far from "strike")
+    (r"(?:cfd|ppa|contract for difference).{0,120}?(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)(?:/mwh)?", "scenario_payoff", "strike"),
+    # "strike" anywhere ... number with currency unit later
+    (r"strike.{0,120}?(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)(?:/mwh)?", "scenario_payoff", "strike"),
     # "X USD/GEL higher/more" → scenario_offset
     (r"(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)\s*(?:higher|more)", "scenario_offset", "offset"),
 ]
 
 _DEFAULT_SCENARIO_METRIC = "p_bal_usd"
+_VOLUME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*mw(?:\b|/)", re.IGNORECASE)
 
 
 def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
@@ -238,6 +243,11 @@ def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
         if "gel" in q and "usd" not in q:
             req["metric"] = "p_bal_gel"
 
+        # Extract volume from "X mw" or "X mw/month" if present
+        vol_match = _VOLUME_RE.search(q)
+        if vol_match and metric_name == "scenario_payoff":
+            req["scenario_volume"] = float(vol_match.group(1))
+
         log.info("Scenario fallback: extracted %s from query (factor=%.2f)", metric_name, req["scenario_factor"])
         return [req]
 
@@ -252,6 +262,10 @@ def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
         ]
         if requests:
             return requests
+        log.info(
+            "QA derived_metrics empty, trying scenario fallback for: %.80s",
+            ctx.query,
+        )
 
     # When the LLM question-analyzer didn't produce scenario requests,
     # try heuristic extraction from the raw query text.
@@ -259,6 +273,11 @@ def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
     if scenario_reqs:
         return scenario_reqs
 
+    if ctx.question_analysis is not None:
+        log.info(
+            "Scenario fallback also empty, using defaults for: %.80s",
+            ctx.query,
+        )
     return [dict(item) for item in DERIVED_METRIC_DEFAULTS]
 
 
