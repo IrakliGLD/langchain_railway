@@ -10,6 +10,7 @@ from contracts.question_analysis import (
     DerivedMetricName,
     DerivedMetricRequest,
     QuestionAnalysis,
+    QueryType,
     ScenarioAggregation,
 )
 
@@ -150,6 +151,13 @@ def test_schema_snapshot_matches_runtime_model():
     snapshot = json.loads(schema_path.read_text(encoding="utf-8"))
 
     assert snapshot == QuestionAnalysis.model_json_schema()
+
+
+def test_regulatory_procedure_query_type_is_supported():
+    payload = _valid_payload()
+    payload["classification"]["query_type"] = "regulatory_procedure"
+    model = QuestionAnalysis.model_validate(payload)
+    assert model.classification.query_type == QueryType.REGULATORY_PROCEDURE
 
 
 # ---------------------------------------------------------------------------

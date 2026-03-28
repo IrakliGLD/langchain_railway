@@ -57,3 +57,19 @@ Expected shape:
 - `canonical_query_en` should preserve the balancing-price meaning
 - `classification.query_type = data_explanation`
 - `routing.preferred_path = sql`
+
+## Example 5
+
+Input:
+
+`who is eligible to participate in the electricity exchange?`
+
+Expected shape:
+
+- `version = question_analysis_v1`
+- `classification.query_type = regulatory_procedure`
+- `classification.analysis_mode = light`
+- `routing.preferred_path = knowledge`
+- `routing.needs_sql = false`
+- `knowledge.candidate_topics` should prioritize `market_structure`
+- `classification.intent` should reflect eligibility or participation requirements, not a generic term definition

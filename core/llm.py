@@ -405,6 +405,17 @@ def classify_query_type(user_query: str) -> str:
         - "unknown": Cannot determine type
     """
     query_lower = user_query.lower()
+    regulation_procedure_patterns = [
+        "who is eligible", "who can participate", "who may participate",
+        "who can register", "who may register", "what documents are required",
+        "what documents do i need", "what are the requirements",
+        "requirements for registration", "registration process",
+        "how to register", "how can i register", "what is the procedure",
+        "licensing procedure", "participation conditions", "deadline for registration",
+    ]
+    regulation_data_patterns = [
+        "how many", "count", "total", "number of", "statistics", "breakdown",
+    ]
 
     # Single value indicators (highest priority)
     if any(p in query_lower for p in [
@@ -415,6 +426,12 @@ def classify_query_type(user_query: str) -> str:
         "იუნის", "წელს", "в июне", "в 2024"
     ]):
         return "single_value"
+
+    # Regulatory procedure indicators should win over the broad
+    # "what are the" list fallback.
+    if any(p in query_lower for p in regulation_procedure_patterns):
+        if not any(p in query_lower for p in regulation_data_patterns):
+            return "regulatory_procedure"
 
     # List indicators
     if any(p in query_lower for p in [
@@ -1813,7 +1830,7 @@ Respond with JSON exactly matching this schema:
 Important rules:
 - `canonical_query_en` must preserve the meaning, not answer the question.
 - `preferred_path` must be one of the allowed enum values.
-- `preferred_path` routing: use `knowledge` for `conceptual_definition`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, `comparison`, `forecast`, and `factual_lookup`.
+- `preferred_path` routing: use `knowledge` for `conceptual_definition`, `regulatory_procedure`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, `comparison`, `forecast`, and `factual_lookup`.
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
@@ -1917,7 +1934,7 @@ def llm_summarize_structured(
     else:
         query_type = classify_query_type(user_query)
 
-    _CONCEPTUAL_QUERY_TYPES = {"conceptual_definition", "unknown", "ambiguous", "unsupported"}
+    _CONCEPTUAL_QUERY_TYPES = {"conceptual_definition", "regulatory_procedure", "unknown", "ambiguous", "unsupported"}
     is_conceptual_context = query_type in _CONCEPTUAL_QUERY_TYPES
     if is_conceptual_context and vector_knowledge.strip():
         conceptual_evidence_rule = (

@@ -84,6 +84,18 @@ def is_conceptual_question(query: str) -> bool:
             if not re.search(r"(\d{4}|entity|specific)", query_lower):
                 return True
 
+    regulation_patterns = [
+        r"\bwho is eligible\b", r"\bwho can\b", r"\bwhat documents\b",
+        r"\bwhat are the requirements\b", r"\brequirements for\b",
+        r"\bhow to register\b", r"\bregistration process\b",
+        r"\bვინ არის უფლებამოსილი\b", r"\bსაჭირო დოკუმენტები\b",
+        r"\bкто может\b", r"\bкакие документы\b",
+    ]
+    for pattern in regulation_patterns:
+        if re.search(pattern, query_lower):
+            if not re.search(r"(how many|count|total)", query_lower):
+                return True
+
     # Conceptual comparison (e.g., "What's the difference between CfD and PPA?")
     if re.search(r"(difference between|განსხვავება|различие между)", query_lower):
         # If comparing concepts (not data points)

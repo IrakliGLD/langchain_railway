@@ -323,6 +323,27 @@ def test_llm_generate_plan_and_sql_uses_canonical_query_for_retrieval(monkeypatc
     assert "balancing_price_why" in prompts[0]
 
 
+def test_llm_analyze_question_prompt_mentions_regulatory_procedure(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    captured = {}
+
+    def _capture_invoke(_llm, messages, _model_name):
+        captured["prompt"] = messages[1][1]
+        return _DummyMessage(json.dumps(_conceptual_payload().model_dump(mode="json")))
+
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+
+    llm_core.llm_analyze_question("Who is eligible to participate in the electricity exchange?")
+
+    prompt = captured["prompt"]
+    assert "regulatory_procedure" in prompt
+    assert "use `knowledge` for `conceptual_definition`, `regulatory_procedure`" in prompt
+
+
 # ---------------------------------------------------------------------------
 # Scenario keyword tests
 # ---------------------------------------------------------------------------

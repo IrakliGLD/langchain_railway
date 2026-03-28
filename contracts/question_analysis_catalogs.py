@@ -11,6 +11,10 @@ QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
         "use_for": "Definition or meaning questions about terms, entities, or market concepts.",
     },
     {
+        "name": "regulatory_procedure",
+        "use_for": "Questions about regulatory processes, registration steps, eligibility rules, required documents, participation conditions, or deadlines. Not for simple term definitions.",
+    },
+    {
         "name": "factual_lookup",
         "use_for": "Single fact or direct value lookup for a known entity, metric, or period.",
     },

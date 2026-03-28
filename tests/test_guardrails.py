@@ -2469,6 +2469,54 @@ def test_analysis_mode_what_is_with_reason():
     assert detect_analysis_mode("What is the reason for price increase?") == "analyst"
 
 
+def test_get_answer_template_supports_regulatory_procedure():
+    from skills.loader import get_answer_template
+
+    template = get_answer_template("regulatory_procedure")
+    assert "numbered steps" in template.lower()
+
+
+def test_get_focus_guidance_supports_trade():
+    from skills.loader import get_focus_guidance
+
+    guidance = get_focus_guidance("trade")
+    normalized = guidance.lower()
+
+    assert guidance.strip()
+    assert "import" in normalized
+    assert "export" in normalized
+
+
+def test_is_conceptual_question_detects_regulation_procedure_queries():
+    from utils.query_validation import is_conceptual_question
+
+    assert is_conceptual_question("Who is eligible to export electricity?") is True
+    assert is_conceptual_question("What documents are required for market participation?") is True
+    assert is_conceptual_question("What are the requirements in 2025?") is True
+    assert is_conceptual_question("What documents are required for registration in 2026?") is True
+
+
+def test_is_conceptual_question_keeps_regulation_counts_as_data_queries():
+    from utils.query_validation import is_conceptual_question
+
+    assert is_conceptual_question("How many eligible participants were there in 2024?") is False
+    assert is_conceptual_question("How many eligible participants were there in 2025?") is False
+    assert is_conceptual_question("Count export license holders by year") is False
+
+
+def test_classify_query_type_returns_regulatory_procedure_for_fallback_queries():
+    from core.llm import classify_query_type
+
+    assert classify_query_type("Who is eligible to participate in the electricity exchange?") == "regulatory_procedure"
+    assert classify_query_type("What documents are required for market participation?") == "regulatory_procedure"
+    assert classify_query_type("What are the requirements for registration?") == "regulatory_procedure"
+    assert classify_query_type("What are the requirements in 2025?") == "regulatory_procedure"
+    assert classify_query_type("What documents are required for registration in 2026?") == "regulatory_procedure"
+    assert classify_query_type("How many eligible participants were there in 2024?") != "regulatory_procedure"
+    assert classify_query_type("How many eligible participants were there in 2025?") != "regulatory_procedure"
+    assert classify_query_type("What are the licensed entities?") == "list"
+
+
 # ---------------------------------------------------------------------------
 # Single-row / edge-case tests for analyzer stats
 # ---------------------------------------------------------------------------

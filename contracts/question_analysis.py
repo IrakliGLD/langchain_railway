@@ -22,6 +22,7 @@ class LanguageCode(str, Enum):
 
 class QueryType(str, Enum):
     CONCEPTUAL_DEFINITION = "conceptual_definition"
+    REGULATORY_PROCEDURE = "regulatory_procedure"
     FACTUAL_LOOKUP = "factual_lookup"
     DATA_RETRIEVAL = "data_retrieval"
     DATA_EXPLANATION = "data_explanation"

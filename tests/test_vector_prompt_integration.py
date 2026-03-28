@@ -105,6 +105,19 @@ def _analysis_payload():
     }
 
 
+def _regulatory_payload():
+    payload = _analysis_payload()
+    payload["raw_query"] = "Who is eligible to participate in the electricity exchange?"
+    payload["canonical_query_en"] = "Who is eligible to participate in the electricity exchange?"
+    payload["classification"]["query_type"] = "regulatory_procedure"
+    payload["classification"]["intent"] = "exchange_participation_eligibility"
+    payload["routing"]["preferred_path"] = "knowledge"
+    payload["routing"]["needs_sql"] = False
+    payload["routing"]["needs_knowledge"] = True
+    payload["knowledge"]["candidate_topics"] = [{"name": "market_structure", "score": 0.98}]
+    return payload
+
+
 def test_planner_passes_active_vector_prompt(monkeypatch):
     captured = {}
 
@@ -250,3 +263,43 @@ def test_structured_summary_prompt_prioritizes_external_source_passages(monkeypa
 
     assert "primary evidence" in captured["system"].lower()
     assert 'prefer citing "external_source_passages"' in captured["prompt"].lower()
+
+
+def test_structured_summary_prompt_treats_regulatory_procedure_as_conceptual(monkeypatch):
+    captured = {}
+
+    class _DummyCache:
+        def get(self, _key):
+            return None
+
+        def set(self, _key, _value):
+            return None
+
+    class _DummyMessage:
+        content = '{"answer":"ok","claims":[],"citations":["external_source_passages"],"confidence":0.9}'
+        response_metadata = {}
+
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    def _capture_invoke(_llm, messages, _model_name):
+        captured["system"] = messages[0][1]
+        captured["prompt"] = messages[1][1]
+        return _DummyMessage()
+
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+
+    llm_core.llm_summarize_structured(
+        user_query="Who is eligible to participate in the electricity exchange?",
+        data_preview="",
+        stats_hint="regulation",
+        lang_instruction="Respond in English.",
+        domain_knowledge='{"market_structure":"background"}',
+        vector_knowledge="EXTERNAL_SOURCE_PASSAGES:\n[1] Market Rules | section: Participant registration",
+        question_analysis=QuestionAnalysis.model_validate(_regulatory_payload()),
+    )
+
+    assert "primary evidence" in captured["system"].lower()
+    assert 'prefer external_source_passages' in captured["system"].lower()

@@ -38,6 +38,7 @@ VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = _env_int("VECTOR_KNOWLEDGE_EMBEDDING_DIME
 VECTOR_KNOWLEDGE_MIN_SIMILARITY = _env_float("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
 VECTOR_KNOWLEDGE_SCHEMA = os.getenv("VECTOR_KNOWLEDGE_SCHEMA", "knowledge").strip() or "knowledge"
 VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT = _env_int("VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT", 3)
+VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION = _env_int("VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION", 1)
 VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE = _env_float(
     "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE",
     0.08,
@@ -155,6 +156,15 @@ def _candidate_retrieval_score(
     return base_score + topic_boost + min(boost, 0.85)
 
 
+def _section_key(candidate: VectorChunkRecord) -> str:
+    """Stable section identity scoped to a single document."""
+    if candidate.section_path.strip():
+        return f"{candidate.document_id}:{candidate.section_path.strip()}"
+    if candidate.section_title.strip():
+        return f"{candidate.document_id}:{candidate.section_title.strip()}"
+    return f"{candidate.document_id}:chunk_{candidate.chunk_index}"
+
+
 def _apply_document_diversity(
     candidates: List[VectorChunkRecord],
     *,
@@ -164,11 +174,8 @@ def _apply_document_diversity(
     if len(candidates) < top_k or top_k <= 1:
         return candidates[:top_k]
 
-    distinct_docs = {candidate.document_id for candidate in candidates}
-    if len(distinct_docs) <= 1:
-        return candidates[:top_k]
-
     max_per_document = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT)
+    max_per_section = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION)
     candidate_scores = {
         candidate.id: _candidate_retrieval_score(candidate, filters=filters)
         for candidate in candidates
@@ -185,28 +192,52 @@ def _apply_document_diversity(
         if candidate_scores[candidate.id] >= diversity_floor
     ]
 
-    if len({candidate.document_id for candidate in competitive}) <= 1:
+    competitive_docs = {candidate.document_id for candidate in competitive}
+    selection_pool = competitive
+    selection_max_per_document = max_per_document
+
+    if len(competitive_docs) <= 1:
         dominant_doc_id = competitive[0].document_id if competitive else candidates[0].document_id
-        dominant_candidates = [
+        selection_pool = [
             candidate for candidate in candidates if candidate.document_id == dominant_doc_id
         ]
-        return dominant_candidates[:top_k]
+        selection_max_per_document = top_k
 
     selected: List[VectorChunkRecord] = []
     selected_ids: set[str] = set()
     per_document_counts: dict[str, int] = {}
+    per_section_counts: dict[str, int] = {}
 
-    for candidate in competitive:
+    for candidate in selection_pool:
         doc_id = candidate.document_id
-        if per_document_counts.get(doc_id, 0) >= max_per_document:
+        section_id = _section_key(candidate)
+        if per_document_counts.get(doc_id, 0) >= selection_max_per_document:
+            continue
+        if per_section_counts.get(section_id, 0) >= max_per_section:
             continue
         selected.append(candidate)
         selected_ids.add(candidate.id)
         per_document_counts[doc_id] = per_document_counts.get(doc_id, 0) + 1
+        per_section_counts[section_id] = per_section_counts.get(section_id, 0) + 1
         if len(selected) >= top_k:
             return selected
 
-    for candidate in candidates:
+    backfill_pool = selection_pool if len(competitive_docs) <= 1 else candidates
+    seen_sections = {_section_key(candidate) for candidate in selected}
+
+    for candidate in backfill_pool:
+        if candidate.id in selected_ids:
+            continue
+        section_id = _section_key(candidate)
+        if section_id in seen_sections:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate.id)
+        seen_sections.add(section_id)
+        if len(selected) >= top_k:
+            return selected[:top_k]
+
+    for candidate in backfill_pool:
         if candidate.id in selected_ids:
             continue
         selected.append(candidate)

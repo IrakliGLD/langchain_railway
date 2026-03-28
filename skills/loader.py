@@ -73,6 +73,7 @@ _QUERY_TYPE_TO_TEMPLATE_SECTION: dict[str, str] = {
     "unknown": "## Template: data_explanation / driver analysis",
     # LLM QueryType enum values (primary when QuestionAnalysis available)
     "conceptual_definition": "## Template: conceptual_definition",
+    "regulatory_procedure": "## Template: regulatory_procedure",
     "factual_lookup": "## Template: factual_lookup / single_value",
     "data_retrieval": "## Template: data_retrieval / list",
     "data_explanation": "## Template: data_explanation / driver analysis",

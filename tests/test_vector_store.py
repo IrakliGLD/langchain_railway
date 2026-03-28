@@ -78,6 +78,36 @@ class _FakeEngine:
         return _FakeConnection(rows=self._rows, captured=self._captured)
 
 
+def _chunk(
+    chunk_id: str,
+    document_id: str,
+    section_path: str,
+    *,
+    similarity: float,
+    chunk_index: int = 0,
+    section_title: str = "",
+):
+    return vector_store.VectorChunkRecord(
+        id=chunk_id,
+        document_id=document_id,
+        document_title=f"Doc {document_id}",
+        document_type="regulation",
+        document_issuer=f"Issuer {document_id}",
+        source_key=document_id,
+        chunk_index=chunk_index,
+        section_title=section_title,
+        section_path=section_path,
+        page_start=1,
+        page_end=1,
+        text_content=chunk_id,
+        token_count=10,
+        language="ka",
+        topics=["market_structure"],
+        metadata={},
+        similarity_score=similarity,
+    )
+
+
 def test_search_chunks_pushes_filters_into_sql(monkeypatch):
     captured = {}
     rows = [
@@ -336,6 +366,90 @@ def test_search_chunks_keeps_single_document_when_other_candidates_are_weak(monk
     )
 
     assert [result.document_id for result in results] == ["doc-a", "doc-a", "doc-a"]
+
+
+def test_apply_document_diversity_caps_same_section_in_competitive_selection(monkeypatch):
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT", 3)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION", 1)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE", 0.08)
+
+    candidates = [
+        _chunk("chunk-1", "doc-a", "Section A", similarity=0.95, chunk_index=0, section_title="Section A"),
+        _chunk("chunk-2", "doc-a", "Section A", similarity=0.94, chunk_index=1, section_title="Section A"),
+        _chunk("chunk-3", "doc-a", "Section B", similarity=0.93, chunk_index=2, section_title="Section B"),
+        _chunk("chunk-4", "doc-b", "Section C", similarity=0.92, chunk_index=0, section_title="Section C"),
+    ]
+
+    results = vector_store._apply_document_diversity(
+        candidates,
+        top_k=4,
+        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+    )
+
+    assert [result.id for result in results[:3]] == ["chunk-1", "chunk-3", "chunk-4"]
+    assert results[3].id == "chunk-2"
+
+
+def test_apply_document_diversity_allows_multiple_sections_in_dominant_document(monkeypatch):
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT", 2)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION", 1)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE", 0.08)
+
+    candidates = [
+        _chunk("chunk-1", "doc-a", "Section A", similarity=0.95, chunk_index=0, section_title="Section A"),
+        _chunk("chunk-2", "doc-a", "Section B", similarity=0.94, chunk_index=1, section_title="Section B"),
+        _chunk("chunk-3", "doc-a", "Section C", similarity=0.93, chunk_index=2, section_title="Section C"),
+        _chunk("chunk-4", "doc-b", "Section D", similarity=0.30, chunk_index=0, section_title="Section D"),
+    ]
+
+    results = vector_store._apply_document_diversity(
+        candidates,
+        top_k=4,
+        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+    )
+
+    assert [result.id for result in results] == ["chunk-1", "chunk-2", "chunk-3"]
+
+
+def test_apply_document_diversity_missing_section_metadata_uses_unique_chunk_key(monkeypatch):
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT", 3)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION", 1)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE", 0.08)
+
+    candidates = [
+        _chunk("chunk-1", "doc-a", "", similarity=0.95, chunk_index=0),
+        _chunk("chunk-2", "doc-a", "", similarity=0.94, chunk_index=1),
+        _chunk("chunk-3", "doc-a", "", similarity=0.93, chunk_index=2),
+    ]
+
+    results = vector_store._apply_document_diversity(
+        candidates,
+        top_k=3,
+        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+    )
+
+    assert [result.id for result in results] == ["chunk-1", "chunk-2", "chunk-3"]
+
+
+def test_apply_document_diversity_backfill_prefers_unseen_sections_before_repeats(monkeypatch):
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT", 3)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION", 1)
+    monkeypatch.setattr(vector_store, "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE", 0.08)
+
+    candidates = [
+        _chunk("chunk-1", "doc-a", "Section A", similarity=0.95, chunk_index=0, section_title="Section A"),
+        _chunk("chunk-2", "doc-a", "Section A", similarity=0.94, chunk_index=1, section_title="Section A"),
+        _chunk("chunk-3", "doc-b", "Section B", similarity=0.93, chunk_index=0, section_title="Section B"),
+        _chunk("chunk-4", "doc-a", "Section C", similarity=0.70, chunk_index=2, section_title="Section C"),
+    ]
+
+    results = vector_store._apply_document_diversity(
+        candidates,
+        top_k=4,
+        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+    )
+
+    assert [result.id for result in results] == ["chunk-1", "chunk-3", "chunk-4", "chunk-2"]
 
 
 def test_search_chunks_reranks_capacity_market_title_match(monkeypatch):

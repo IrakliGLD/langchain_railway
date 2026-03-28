@@ -351,6 +351,7 @@
     "QueryType": {
       "enum": [
         "conceptual_definition",
+        "regulatory_procedure",
         "factual_lookup",
         "data_retrieval",
         "data_explanation",
