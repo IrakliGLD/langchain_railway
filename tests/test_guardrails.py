@@ -54,6 +54,7 @@ from agent.provenance import sql_query_hash  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 import core.llm as llm_core  # noqa: E402
+from utils.metrics import metrics  # noqa: E402
 
 
 def test_tool_registry_imports_without_syntax_error():
@@ -3008,6 +3009,91 @@ def test_scenario_fallback_returns_none_for_non_scenario():
     """No scenario evidence -> fallback returns None."""
     ctx = QueryContext(query="Show me prices", analysis_evidence=[])
     assert summarizer._build_scenario_fallback_answer(ctx) is None
+
+
+def test_deterministic_scenario_eligible_for_single_supported_record():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    ctx = QueryContext(query="Calculate CfD payoff with strike 55", analysis_evidence=[row])
+    assert summarizer._is_deterministic_scenario_eligible(ctx) is True
+
+
+def test_deterministic_scenario_eligible_for_data_explanation_question_analysis():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    payload = _make_analyzer_payload("data_explanation", "sql", confidence=0.95)
+    payload["classification"]["intent"] = "cfd_payoff_result"
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="What would be my CfD payoff with strike 55?",
+        analysis_evidence=[row],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    assert summarizer._is_deterministic_scenario_eligible(ctx) is True
+
+
+def test_deterministic_scenario_not_eligible_for_knowledge_only_query_type():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="What is a CfD payoff?",
+        analysis_evidence=[row],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    assert summarizer._is_deterministic_scenario_eligible(ctx) is False
+
+
+def test_deterministic_scenario_not_eligible_for_explanation_query():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    ctx = QueryContext(query="Why is the CfD payoff so low?", analysis_evidence=[row])
+    assert summarizer._is_deterministic_scenario_eligible(ctx) is False
+
+
+def test_deterministic_scenario_not_eligible_for_multiple_records():
+    row1 = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    row2 = _run_scenario("scenario_scale", factor=1.5)
+    ctx = QueryContext(query="Calculate payoff and scaled income", analysis_evidence=[row1, row2])
+    assert summarizer._is_deterministic_scenario_eligible(ctx) is False
+
+
+def test_summarize_data_uses_deterministic_scenario_direct_without_llm(monkeypatch):
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    baseline_skips = metrics.deterministic_summary_skip_count
+    payload = _make_analyzer_payload("data_explanation", "sql", confidence=0.95)
+    payload["classification"]["intent"] = "cfd_payoff_result"
+    qa = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("llm_summarize_structured should not be called for deterministic-direct")
+        ),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("domain knowledge should not be loaded for deterministic-direct")
+        ),
+    )
+
+    ctx = QueryContext(
+        query="Calculate CfD payoff with strike 55",
+        analysis_evidence=[row],
+        stats_hint=json.dumps([row], default=str),
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "deterministic_scenario_direct"
+    assert out.summary_claims == []
+    assert out.summary_provenance_gate_passed is True
+    assert out.summary_provenance_gate_reason == "no_claims"
+    assert "Net total payoff" in out.summary
+    assert metrics.deterministic_summary_skip_count == baseline_skips + 1
 
 
 def test_scenario_fallback_returns_defaults_for_non_scenario():

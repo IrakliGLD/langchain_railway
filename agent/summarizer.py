@@ -32,6 +32,30 @@ _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "seg
 _MAX_REFS_PER_TOKEN = 4
 _MAX_REFS_PER_CLAIM = 12
 _MAX_PROVENANCE_CITATIONS = 30
+_SUPPORTED_DETERMINISTIC_SCENARIOS = {
+    "scenario_payoff",
+    "scenario_scale",
+    "scenario_offset",
+}
+_SUPPORTED_DETERMINISTIC_QUERY_TYPES = {
+    "data_retrieval",
+    "data_explanation",
+}
+_EXPLANATION_QUERY_SIGNALS = (
+    "why",
+    "explain",
+    "interpret",
+    "reason",
+    "cause",
+    "what does this mean",
+    "what does that mean",
+    "meaning",
+    "implication",
+    "imply",
+    "compare",
+    "comparison",
+    "versus",
+)
 
 
 def _normalize_number_token(raw_token: str) -> Optional[str]:
@@ -757,6 +781,32 @@ def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
     return "\n\n".join(parts)
 
 
+def _is_deterministic_scenario_eligible(ctx: QueryContext) -> bool:
+    """Return True when scenario evidence is complete enough to skip Stage 4 LLM."""
+    evidence = ctx.analysis_evidence or []
+    scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
+    if len(scenario_records) != 1:
+        return False
+
+    rec = scenario_records[0]
+    metric_name = str(rec.get("derived_metric_name") or "").strip()
+    if metric_name not in _SUPPORTED_DETERMINISTIC_SCENARIOS:
+        return False
+    if rec.get("aggregate_result") is None:
+        return False
+
+    if ctx.question_analysis is not None:
+        query_type = getattr(ctx.question_analysis.classification.query_type, "value", "")
+        if query_type and query_type not in _SUPPORTED_DETERMINISTIC_QUERY_TYPES:
+            return False
+
+    query_lower = (ctx.query or "").strip().lower()
+    if any(signal in query_lower for signal in _EXPLANATION_QUERY_SIGNALS):
+        return False
+
+    return _build_scenario_fallback_answer(ctx) is not None
+
+
 def summarize_data(ctx: QueryContext) -> QueryContext:
     """Generate an answer from SQL query results.
 
@@ -773,6 +823,14 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
         ctx.summary_citations = ["deterministic_share_summary"]
         ctx.summary_confidence = 1.0
+    elif _is_deterministic_scenario_eligible(ctx):
+        ctx.summary = _build_scenario_fallback_answer(ctx) or ""
+        ctx.summary_source = "deterministic_scenario_direct"
+        ctx.summary_claims = []
+        ctx.summary_citations = ["deterministic_scenario_direct"]
+        ctx.summary_confidence = 0.95
+        metrics.log_deterministic_skip(ctx.summary_source)
+        log.info("Deterministic scenario answer eligible; skipping Stage 4 LLM.")
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.

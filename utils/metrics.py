@@ -38,6 +38,8 @@ class Metrics:
         self.summary_schema_failure_count = 0
         self.summary_grounding_failure_count = 0
         self.provenance_gate_failure_count = 0
+        self.deterministic_summary_skip_count = 0
+        self.deterministic_summary_skips_by_source = {}
         self.relevance_block_count = 0
         self.load_shed_count = 0
         self.circuit_open_events = {}
@@ -244,6 +246,14 @@ class Metrics:
         """Track citation-grade provenance gate failures."""
         self.provenance_gate_failure_count += 1
 
+    def log_deterministic_skip(self, source: str):
+        """Track deterministic answer paths that skip Stage 4 LLM."""
+        key = (source or "unknown").strip().lower() or "unknown"
+        self.deterministic_summary_skip_count += 1
+        self.deterministic_summary_skips_by_source[key] = (
+            self.deterministic_summary_skips_by_source.get(key, 0) + 1
+        )
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -324,6 +334,8 @@ class Metrics:
             "summary_schema_failures": self.summary_schema_failure_count,
             "summary_grounding_failures": self.summary_grounding_failure_count,
             "provenance_gate_failures": self.provenance_gate_failure_count,
+            "deterministic_summary_skips": self.deterministic_summary_skip_count,
+            "deterministic_summary_skips_by_source": dict(self.deterministic_summary_skips_by_source),
             "router_deterministic_matches": self.router_deterministic_match_count,
             "router_semantic_matches": self.router_semantic_match_count,
             "router_misses": self.router_miss_count,
