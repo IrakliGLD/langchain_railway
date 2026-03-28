@@ -595,6 +595,22 @@ def _build_requested_analysis_evidence(
 
             agg_result = float(getattr(scenario_series, agg_name)())
 
+            # Positive/negative decomposition for payoff queries.
+            # Positive = income from favorable periods (market < strike).
+            # Negative = compensation cost from unfavorable periods (market > strike).
+            if metric_name == "scenario_payoff":
+                _pos_mask = scenario_series > 0
+                _neg_mask = scenario_series < 0
+                positive_sum = round(float(scenario_series[_pos_mask].sum()), 2) if _pos_mask.any() else 0.0
+                negative_sum = round(float(scenario_series[_neg_mask].sum()), 2) if _neg_mask.any() else 0.0
+                positive_count = int(_pos_mask.sum())
+                negative_count = int(_neg_mask.sum())
+            else:
+                positive_sum = None
+                negative_sum = None
+                positive_count = None
+                negative_count = None
+
             # Baseline/delta only meaningful for scale and offset (same dimension).
             # For payoff, aggregate_result and raw metric are different quantities.
             if metric_name in ("scenario_scale", "scenario_offset"):
@@ -628,6 +644,10 @@ def _build_requested_analysis_evidence(
                     "min_period_value": round(float(scenario_series.min()), 2),
                     "max_period_value": round(float(scenario_series.max()), 2),
                     "mean_period_value": round(float(scenario_series.mean()), 2),
+                    "positive_sum": positive_sum,
+                    "negative_sum": negative_sum,
+                    "positive_count": positive_count,
+                    "negative_count": negative_count,
                 }
             )
         else:

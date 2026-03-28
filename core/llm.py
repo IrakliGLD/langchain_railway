@@ -2008,10 +2008,15 @@ def llm_summarize_structured(
                 "plus min/max/mean_period_value). These were computed deterministically from the data.\n"
                 "- Cite aggregate_result as the primary answer.\n"
                 "- For scenario_scale and scenario_offset: compare to baseline_aggregate and cite delta_percent.\n"
-                "- For scenario_payoff: baseline/delta fields are null (different dimensions); "
-                "explain the total payoff, per-period range (min/max), and what negative periods mean.\n"
+                "- For scenario_payoff: baseline/delta fields are null (different dimensions).\n"
+                "  Use positive_sum for total income from favorable periods (market price < strike).\n"
+                "  Use negative_sum for total compensation cost from unfavorable periods (market price > strike).\n"
+                "  Use positive_count and negative_count for how many periods were favorable vs unfavorable.\n"
+                "  aggregate_result = positive_sum + negative_sum (net total payoff).\n"
+                "  Explain what negative periods mean: the producer pays the CfD counterparty.\n"
                 "- Mention period_range and row_count for context.\n"
-                "- Do NOT recalculate from raw data rows — use only these pre-computed values.\n"
+                "- Do NOT recalculate or derive values from raw data rows — cite ONLY pre-computed values.\n"
+                "- Do NOT list per-period payoff values. Only cite values from the evidence record.\n"
                 "- Explain what the scenario means in plain language."
             )
 

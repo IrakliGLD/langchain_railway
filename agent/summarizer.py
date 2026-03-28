@@ -675,6 +675,88 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
+    """Build a deterministic answer from scenario evidence when LLM grounding fails.
+
+    Returns None if no scenario evidence is available, allowing the caller
+    to fall back to the generic grounding failure message.
+    """
+    evidence = ctx.analysis_evidence or []
+    scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
+    if not scenario_records:
+        return None
+    rec = scenario_records[0]
+
+    metric_name = rec.get("derived_metric_name", "")
+    factor = rec.get("scenario_factor")
+    volume = rec.get("scenario_volume")
+    agg_result = rec.get("aggregate_result")
+    if agg_result is None:
+        return None
+
+    row_count = rec.get("row_count")
+    period_range = rec.get("period_range", "")
+    min_val = rec.get("min_period_value")
+    max_val = rec.get("max_period_value")
+    mean_val = rec.get("mean_period_value")
+    formula = rec.get("formula", "")
+
+    parts: list[str] = []
+
+    if metric_name == "scenario_payoff":
+        positive_sum = rec.get("positive_sum", 0.0)
+        negative_sum = rec.get("negative_sum", 0.0)
+        positive_count = rec.get("positive_count", 0)
+        negative_count = rec.get("negative_count", 0)
+
+        parts.append(
+            f"**CfD Payoff Analysis** (strike: {factor} USD/MWh"
+            + (f", volume: {volume} MW" if volume is not None else "")
+            + ")"
+        )
+        if period_range:
+            parts.append(f"**Period:** {period_range} ({row_count} months)")
+        parts.append(f"**Formula:** {formula}")
+        parts.append(f"**Net total payoff:** {agg_result} USD")
+        if positive_sum and positive_sum != 0:
+            parts.append(
+                f"**Income from favorable periods** (market price below strike): "
+                f"{positive_sum} USD across {positive_count} months"
+            )
+        if negative_sum and negative_sum != 0:
+            parts.append(
+                f"**Compensation cost in unfavorable periods** (market price above strike): "
+                f"{negative_sum} USD across {negative_count} months"
+            )
+        parts.append(
+            f"**Per-period range:** min {min_val} to max {max_val} USD "
+            f"(average {mean_val} USD/month)"
+        )
+
+    elif metric_name in ("scenario_scale", "scenario_offset"):
+        baseline = rec.get("baseline_aggregate")
+        delta = rec.get("delta_aggregate")
+        delta_pct = rec.get("delta_percent")
+        op = "\u00d7" if metric_name == "scenario_scale" else "+"
+        parts.append(f"**Scenario Analysis** ({op} {factor})")
+        if period_range:
+            parts.append(f"**Period:** {period_range} ({row_count} periods)")
+        parts.append(f"**Result:** {agg_result}")
+        if baseline is not None:
+            parts.append(f"**Baseline:** {baseline}")
+        if delta is not None:
+            parts.append(
+                f"**Change:** {delta}"
+                + (f" ({delta_pct}%)" if delta_pct is not None else "")
+            )
+        parts.append(f"**Range:** {min_val} to {max_val} (mean {mean_val})")
+
+    else:
+        return None
+
+    return "\n\n".join(parts)
+
+
 def summarize_data(ctx: QueryContext) -> QueryContext:
     """Generate an answer from SQL query results.
 
@@ -724,21 +806,34 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True
                 metrics.log_summary_grounding_failure()
-                log.warning("Summary grounding check failed; using conservative fallback answer.")
-                envelope = SummaryEnvelope(
-                    answer="I could not fully ground a detailed narrative from the provided data preview. "
-                    "Please refine the query or narrow the period for a more precise grounded answer.",
-                    claims=[],
-                    citations=["guardrail_grounding_fallback"],
-                    confidence=0.2,
-                )
+                # Try deterministic scenario fallback before generic message.
+                scenario_answer = _build_scenario_fallback_answer(ctx)
+                if scenario_answer is not None:
+                    log.info("Summary grounding failed; using deterministic scenario fallback.")
+                    envelope = SummaryEnvelope(
+                        answer=scenario_answer,
+                        claims=[],
+                        citations=["deterministic_scenario_fallback"],
+                        confidence=0.95,
+                    )
+                else:
+                    log.warning("Summary grounding check failed; using conservative fallback answer.")
+                    envelope = SummaryEnvelope(
+                        answer="I could not fully ground a detailed narrative from the provided data preview. "
+                        "Please refine the query or narrow the period for a more precise grounded answer.",
+                        claims=[],
+                        citations=["guardrail_grounding_fallback"],
+                        confidence=0.2,
+                    )
 
             ctx.summary = envelope.answer
-            ctx.summary_source = (
-                "structured_summary_grounding_fallback"
-                if "guardrail_grounding_fallback" in list(envelope.citations or [])
-                else "structured_summary"
-            )
+            _fallback_citations = set(envelope.citations or [])
+            if "guardrail_grounding_fallback" in _fallback_citations:
+                ctx.summary_source = "structured_summary_grounding_fallback"
+            elif "deterministic_scenario_fallback" in _fallback_citations:
+                ctx.summary_source = "deterministic_scenario_fallback"
+            else:
+                ctx.summary_source = "structured_summary"
             ctx.summary_claims = list(envelope.claims)
             ctx.summary_citations = list(envelope.citations)
             ctx.summary_confidence = float(envelope.confidence)

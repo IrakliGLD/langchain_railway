@@ -2,6 +2,7 @@
 Tests for Stage-0 firewall and prompt/guardrail enforcement paths.
 """
 import importlib
+import json
 import os
 
 import pandas as pd
@@ -2856,6 +2857,71 @@ def test_scenario_fallback_extracts_payoff_from_real_cfd_query():
     assert requests[0]["metric_name"] == "scenario_payoff"
     assert requests[0]["scenario_factor"] == 60.0
     assert requests[0]["scenario_volume"] == 1.0
+
+
+def test_scenario_payoff_positive_negative_breakdown():
+    """Payoff evidence includes positive_sum, negative_sum, positive_count, negative_count."""
+    # p_bal_usd = [40, 50, 30, 60], factor=55, volume=1
+    # payoffs = (55-40)*1, (55-50)*1, (55-30)*1, (55-60)*1 = [15, 5, 25, -5]
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    assert row["aggregate_result"] == 40.0
+    assert row["positive_sum"] == 45.0   # 15 + 5 + 25
+    assert row["negative_sum"] == -5.0
+    assert row["positive_count"] == 3
+    assert row["negative_count"] == 1
+
+
+def test_scenario_payoff_all_positive():
+    """When strike > all prices, negative_sum should be 0."""
+    # p_bal_usd = [40, 50, 30, 60], factor=100, volume=1
+    # payoffs = [60, 50, 70, 40] — all positive
+    row = _run_scenario("scenario_payoff", factor=100.0, volume=1.0)
+    assert row["positive_sum"] == 220.0
+    assert row["negative_sum"] == 0.0
+    assert row["positive_count"] == 4
+    assert row["negative_count"] == 0
+
+
+def test_scenario_scale_has_no_breakdown_fields():
+    """Scale scenarios should have None for positive/negative breakdown."""
+    row = _run_scenario("scenario_scale", factor=1.5)
+    assert row["positive_sum"] is None
+    assert row["negative_sum"] is None
+    assert row["positive_count"] is None
+    assert row["negative_count"] is None
+
+
+def test_scenario_deterministic_fallback_is_grounded():
+    """When LLM grounding fails, the scenario fallback answer must be fully grounded."""
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    stats_hint = (
+        "\n\n--- DERIVED ANALYSIS EVIDENCE (TOP 12) ---\n"
+        + json.dumps([row], default=str, indent=2)
+    )
+    ctx = QueryContext(
+        query="CfD payoff with strike 55",
+        preview="period p_bal_usd\n2024-01 40.0",
+        stats_hint=stats_hint,
+        analysis_evidence=[row],
+    )
+    fallback = summarizer._build_scenario_fallback_answer(ctx)
+    assert fallback is not None
+    assert "40.0" in fallback   # aggregate_result
+    assert "45.0" in fallback   # positive_sum
+    assert "-5.0" in fallback   # negative_sum
+    # Verify grounding would pass: every number in fallback exists in source tokens
+    answer_tokens = summarizer._extract_number_tokens(fallback)
+    source_tokens = summarizer._build_grounding_tokens(ctx)
+    if answer_tokens:
+        matched = sum(1 for t in answer_tokens if t in source_tokens)
+        ratio = matched / max(1, len(answer_tokens))
+        assert ratio >= 0.9, f"Fallback grounding ratio {ratio:.2f} < 0.9; unmatched: {answer_tokens - source_tokens}"
+
+
+def test_scenario_fallback_returns_none_for_non_scenario():
+    """No scenario evidence -> fallback returns None."""
+    ctx = QueryContext(query="Show me prices", analysis_evidence=[])
+    assert summarizer._build_scenario_fallback_answer(ctx) is None
 
 
 def test_scenario_fallback_returns_defaults_for_non_scenario():
