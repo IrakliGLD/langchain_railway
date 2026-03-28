@@ -124,6 +124,17 @@ def build_chart(ctx: QueryContext) -> QueryContext:
            ctx.skip_chart_due_to_relevance, ctx.add_trendlines, ctx.trendline_extend_to
     Writes: ctx.chart_data, ctx.chart_type, ctx.chart_meta
     """
+    if ctx.chart_override_data:
+        log.info(
+            "📊 Using derived chart override (type=%s, rows=%d)",
+            ctx.chart_override_type,
+            len(ctx.chart_override_data),
+        )
+        ctx.chart_data = ctx.chart_override_data
+        ctx.chart_type = ctx.chart_override_type
+        ctx.chart_meta = ctx.chart_override_meta
+        return ctx
+
     if not ctx.rows or not ctx.cols:
         return ctx
 

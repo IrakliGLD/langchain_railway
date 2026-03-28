@@ -49,6 +49,14 @@
       "title": "ChartFamily",
       "type": "string"
     },
+    "ChartIntent": {
+      "enum": [
+        "trend_compare",
+        "decomposition"
+      ],
+      "title": "ChartIntent",
+      "type": "string"
+    },
     "ClassificationInfo": {
       "additionalProperties": false,
       "properties": {
@@ -401,6 +409,17 @@
       "title": "ScenarioAggregation",
       "type": "string"
     },
+    "SemanticRole": {
+      "enum": [
+        "observed",
+        "reference",
+        "derived",
+        "component_primary",
+        "component_secondary"
+      ],
+      "title": "SemanticRole",
+      "type": "string"
+    },
     "SqlAggregation": {
       "enum": [
         "none",
@@ -687,6 +706,25 @@
             }
           ],
           "default": null
+        },
+        "chart_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChartIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_series": {
+          "items": {
+            "$ref": "#/$defs/SemanticRole"
+          },
+          "maxItems": 5,
+          "title": "Target Series",
+          "type": "array"
         }
       },
       "required": [

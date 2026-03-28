@@ -48,7 +48,12 @@ from knowledge.sql_example_selector import get_relevant_examples
 from utils.metrics import metrics
 from utils.resilience import get_llm_breaker
 import knowledge as knowledge_module
-from contracts.question_analysis import QuestionAnalysis
+from contracts.question_analysis import (
+    ChartIntent,
+    QuestionAnalysis,
+    SemanticRole,
+    _VALID_ROLES_BY_INTENT,
+)
 from skills.loader import (
     get_answer_template,
     get_focus_guidance,
@@ -1772,6 +1777,60 @@ def _compact_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _sanitize_chart_hints(payload: dict) -> dict:
+    """Best-effort cleanup for optional semantic chart hints before model validation."""
+    if not isinstance(payload, dict):
+        return payload
+
+    vis = payload.get("visualization")
+    if not isinstance(vis, dict):
+        return payload
+
+    chart_requested = bool(vis.get("chart_requested_by_user"))
+    chart_recommended = bool(vis.get("chart_recommended"))
+    if not chart_requested and not chart_recommended:
+        vis.pop("chart_intent", None)
+        vis.pop("target_series", None)
+        return payload
+
+    chart_intent = None
+    raw_intent = vis.get("chart_intent")
+    if isinstance(raw_intent, str):
+        try:
+            chart_intent = ChartIntent(raw_intent)
+            vis["chart_intent"] = chart_intent.value
+        except ValueError:
+            vis.pop("chart_intent", None)
+
+    raw_roles = vis.get("target_series")
+    sanitized_roles: list[str] = []
+    if isinstance(raw_roles, list):
+        for role in raw_roles:
+            if not isinstance(role, str):
+                continue
+            try:
+                sanitized_roles.append(SemanticRole(role).value)
+            except ValueError:
+                continue
+
+    if sanitized_roles:
+        vis["target_series"] = sanitized_roles
+    else:
+        vis.pop("target_series", None)
+
+    if chart_intent is not None:
+        allowed_roles = _VALID_ROLES_BY_INTENT.get(chart_intent, frozenset())
+        if not vis.get("target_series") or any(
+            SemanticRole(role) not in allowed_roles for role in vis["target_series"]
+        ):
+            vis.pop("chart_intent", None)
+            vis.pop("target_series", None)
+    else:
+        vis.pop("target_series", None)
+
+    return payload
+
+
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
 def llm_analyze_question(
     user_query: str,
@@ -1790,7 +1849,7 @@ def llm_analyze_question(
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
-        payload = _extract_json_payload(cached_response)
+        payload = _sanitize_chart_hints(_extract_json_payload(cached_response))
         return QuestionAnalysis.model_validate(payload)
 
     system = (
@@ -1847,6 +1906,15 @@ Important rules:
   - Extract numeric parameters directly from the query text.
 - Dates must use YYYY-MM-DD.
 - `chart_requested_by_user` and `chart_recommended` must be booleans.
+- `chart_intent` and `target_series` are optional semantic hints; emit them only when a chart is requested or clearly recommended.
+- Valid `chart_intent` values:
+  - `trend_compare`
+  - `decomposition`
+- Valid `target_series` roles:
+  - `observed`, `reference`, `derived`, `component_primary`, `component_secondary`
+- `reference` means a constant or external benchmark per period, such as a strike price or threshold.
+- `derived` means a transformation of the observed series, such as scaled or offset values.
+- Never emit raw DB column names in `target_series`; use semantic roles only.
 """
     prompt = _enforce_prompt_budget(prompt, label="question_analysis")
 
@@ -1870,7 +1938,7 @@ Important rules:
             metrics.log_error()
             raise
 
-    payload = _extract_json_payload(raw_output)
+    payload = _sanitize_chart_hints(_extract_json_payload(raw_output))
     try:
         result = QuestionAnalysis.model_validate(payload)
     except ValidationError as exc:

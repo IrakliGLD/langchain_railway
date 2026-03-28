@@ -342,6 +342,68 @@ def test_llm_analyze_question_prompt_mentions_regulatory_procedure(monkeypatch):
     prompt = captured["prompt"]
     assert "regulatory_procedure" in prompt
     assert "use `knowledge` for `conceptual_definition`, `regulatory_procedure`" in prompt
+    assert "chart_intent" in prompt
+    assert "target_series" in prompt
+    assert "observed`, `reference`, `derived`, `component_primary`, `component_secondary`" in prompt
+
+
+def test_llm_analyze_question_sanitizes_invalid_chart_hints(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["visualization"]["chart_recommended"] = True
+    payload["visualization"]["chart_intent"] = "not_real"
+    payload["visualization"]["target_series"] = ["observed", "wrong_role"]
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question("compare price against a benchmark")
+
+    assert result.visualization.chart_intent is None
+    assert result.visualization.target_series == []
+
+
+def test_llm_analyze_question_preserves_valid_chart_hints(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["visualization"]["chart_recommended"] = True
+    payload["visualization"]["chart_intent"] = "trend_compare"
+    payload["visualization"]["target_series"] = ["observed", "derived"]
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question("what if balancing price were 20 percent higher")
+
+    assert result.visualization.chart_intent.value == "trend_compare"
+    assert [role.value for role in result.visualization.target_series] == ["observed", "derived"]
+
+
+def test_sanitize_chart_hints_clears_semantic_hints_when_chart_not_requested():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["visualization"]["chart_requested_by_user"] = False
+    payload["visualization"]["chart_recommended"] = False
+    payload["visualization"]["chart_intent"] = "trend_compare"
+    payload["visualization"]["target_series"] = ["observed", "reference"]
+
+    sanitized = llm_core._sanitize_chart_hints(payload)
+
+    assert "chart_intent" not in sanitized["visualization"]
+    assert "target_series" not in sanitized["visualization"]
 
 
 # ---------------------------------------------------------------------------

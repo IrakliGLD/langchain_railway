@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
+from contracts.question_analysis import ChartIntent, SemanticRole
 from models import QueryContext
 from core.query_executor import ENGINE
 from analysis.stats import quick_stats, rows_to_preview
@@ -675,6 +676,330 @@ def _build_requested_analysis_evidence(
     return pd.DataFrame(evidence_rows)
 
 
+def _find_chart_time_column(df: pd.DataFrame) -> Optional[str]:
+    """Return the most likely time column for semantic chart overrides."""
+    if df.empty:
+        return None
+    return next(
+        (
+            col
+            for col in df.columns
+            if any(
+                hint in col.lower()
+                for hint in ["date", "year", "month", "period", "თვე", "წელი", "თარიღი"]
+            )
+        ),
+        None,
+    )
+
+
+def _format_chart_time_values(values: pd.Series) -> list[str]:
+    """Format time values consistently with Stage 5 chart output."""
+    if values.empty:
+        return []
+
+    raw_values = values.reset_index(drop=True)
+    first_val = raw_values.iloc[0]
+    dt_values: pd.Series
+    try:
+        if isinstance(first_val, (int, float)) or str(type(first_val).__name__) == "Decimal":
+            first_num = float(first_val)
+            if 1900 <= first_num <= 2100:
+                dt_values = pd.to_datetime(raw_values.astype(int), format="%Y", errors="coerce")
+            else:
+                dt_values = pd.to_datetime(raw_values, errors="coerce")
+        else:
+            dt_values = pd.to_datetime(raw_values, errors="coerce")
+    except Exception:
+        return raw_values.astype(str).tolist()
+
+    if dt_values.isna().all():
+        return raw_values.astype(str).tolist()
+
+    all_first_of_month = dt_values.dt.day.eq(1).all()
+    all_january = all_first_of_month and dt_values.dt.month.eq(1).all()
+    if all_january and len(dt_values) > 1:
+        return dt_values.dt.strftime("%Y").tolist()
+    if all_first_of_month:
+        return dt_values.dt.strftime("%Y-%m").tolist()
+    return dt_values.dt.strftime("%Y-%m-%d").tolist()
+
+
+def _price_unit_for_metric(metric: str) -> str:
+    metric_lower = metric.lower()
+    if "_usd" in metric_lower:
+        return "USD/MWh"
+    if "_gel" in metric_lower:
+        return "GEL/MWh"
+    if metric_lower == "xrate":
+        return "GEL per USD"
+    if metric_lower.startswith("share_"):
+        return "Share (0-1)"
+    return "Value"
+
+
+def _amount_unit_for_metric(metric: str) -> str:
+    metric_lower = metric.lower()
+    if "_usd" in metric_lower:
+        return "USD"
+    if "_gel" in metric_lower:
+        return "GEL"
+    return "Value"
+
+
+def _metric_label(metric: str) -> str:
+    from context import COLUMN_LABELS
+
+    return COLUMN_LABELS.get(metric, metric.replace("_", " ").title())
+
+
+def _scenario_chart_request(
+    ctx: QueryContext,
+) -> Optional[Tuple[ChartIntent, list[SemanticRole], dict[str, Any], dict[str, Any]]]:
+    """Return the single supported scenario request/evidence pair for chart overrides."""
+    qa = ctx.question_analysis
+    if qa is None:
+        return None
+
+    vis = qa.visualization
+    if vis.chart_intent is None or len(vis.target_series) < 2:
+        return None
+
+    scenario_requests = [
+        req.model_dump(mode="json")
+        for req in qa.analysis_requirements.derived_metrics
+        if str(req.metric_name.value) in {"scenario_scale", "scenario_offset", "scenario_payoff"}
+    ]
+    if len(scenario_requests) != 1:
+        return None
+
+    request = scenario_requests[0]
+    scenario_rows = [
+        row
+        for row in (ctx.analysis_evidence or [])
+        if row.get("record_type") == "scenario"
+        and row.get("derived_metric_name") == request.get("metric_name")
+        and row.get("metric") == request.get("metric")
+    ]
+    if len(scenario_rows) != 1:
+        return None
+
+    return vis.chart_intent, list(vis.target_series), request, scenario_rows[0]
+
+
+def _resolve_chart_roles(ctx: QueryContext) -> Optional[Dict[str, Any]]:
+    """Resolve semantic chart roles into chart-ready deterministic series."""
+    resolved_request = _scenario_chart_request(ctx)
+    if resolved_request is None or ctx.df.empty:
+        return None
+
+    chart_intent, target_roles, request, evidence_row = resolved_request
+    time_col = _find_chart_time_column(ctx.df)
+    if not time_col or time_col not in ctx.df.columns:
+        return None
+
+    metric = str(request.get("metric", "")).strip()
+    value_col = next((alias for alias in _metric_aliases(metric) if alias in ctx.df.columns), None)
+    if value_col is None:
+        return None
+
+    raw = pd.to_numeric(ctx.df[value_col], errors="coerce")
+    valid_mask = raw.notna()
+    if valid_mask.sum() == 0:
+        return None
+
+    base_series = raw[valid_mask].astype(float).reset_index(drop=True)
+    time_values = _format_chart_time_values(ctx.df.loc[valid_mask, time_col])
+    if not time_values or len(time_values) != len(base_series):
+        return None
+
+    metric_name = str(request.get("metric_name", "")).strip()
+    factor = float(request.get("scenario_factor") or evidence_row.get("scenario_factor") or 0.0)
+    volume = float(request.get("scenario_volume") or evidence_row.get("scenario_volume") or 1.0)
+    base_label = _metric_label(value_col)
+
+    if chart_intent == ChartIntent.TREND_COMPARE:
+        resolved_series: list[dict[str, Any]] = []
+        units: list[str] = []
+
+        for role in target_roles:
+            if role == SemanticRole.OBSERVED:
+                resolved_series.append(
+                    {
+                        "role": role.value,
+                        "label": base_label,
+                        "values": base_series.round(6).tolist(),
+                        "unit": _price_unit_for_metric(value_col),
+                    }
+                )
+                units.append(_price_unit_for_metric(value_col))
+            elif role == SemanticRole.REFERENCE:
+                if metric_name != "scenario_payoff":
+                    return None
+                resolved_series.append(
+                    {
+                        "role": role.value,
+                        "label": "Strike Price",
+                        "values": [round(factor, 6)] * len(base_series),
+                        "unit": _price_unit_for_metric(value_col),
+                    }
+                )
+                units.append(_price_unit_for_metric(value_col))
+            elif role == SemanticRole.DERIVED:
+                if metric_name == "scenario_scale":
+                    values = (base_series * factor).round(6).tolist()
+                    label = f"Scaled {base_label}"
+                    unit = _price_unit_for_metric(value_col)
+                elif metric_name == "scenario_offset":
+                    values = (base_series + factor).round(6).tolist()
+                    label = f"Adjusted {base_label}"
+                    unit = _price_unit_for_metric(value_col)
+                elif metric_name == "scenario_payoff":
+                    values = ((factor - base_series) * volume).round(6).tolist()
+                    label = "CfD Financial Compensation"
+                    unit = _amount_unit_for_metric(value_col)
+                else:
+                    return None
+                resolved_series.append(
+                    {
+                        "role": role.value,
+                        "label": label,
+                        "values": values,
+                        "unit": unit,
+                    }
+                )
+                units.append(unit)
+            else:
+                return None
+
+        if not resolved_series or len(set(units)) != 1:
+            return None
+
+        return {
+            "intent": chart_intent.value,
+            "time_field": "date",
+            "x_axis_title": time_col,
+            "time_values": time_values,
+            "series": resolved_series,
+            "unit": units[0],
+        }
+
+    if chart_intent == ChartIntent.DECOMPOSITION:
+        if metric_name != "scenario_payoff":
+            return None
+
+        component_map = {
+            SemanticRole.COMPONENT_PRIMARY: {
+                "label": "Balancing Market Sales Income",
+                "values": (base_series * volume).round(6).tolist(),
+            },
+            SemanticRole.COMPONENT_SECONDARY: {
+                "label": "CfD Financial Compensation",
+                "values": ((factor - base_series) * volume).round(6).tolist(),
+            },
+        }
+
+        resolved_series = []
+        for role in target_roles:
+            component = component_map.get(role)
+            if component is None:
+                return None
+            resolved_series.append(
+                {
+                    "role": role.value,
+                    "label": component["label"],
+                    "values": component["values"],
+                    "unit": _amount_unit_for_metric(value_col),
+                }
+            )
+
+        return {
+            "intent": chart_intent.value,
+            "time_field": "date",
+            "x_axis_title": "date",
+            "time_values": time_values,
+            "series": resolved_series,
+            "unit": _amount_unit_for_metric(value_col),
+        }
+
+    return None
+
+
+def _build_chart_override(ctx: QueryContext, resolved_roles: Dict[str, Any]) -> Optional[Tuple[list[dict[str, Any]], str, dict[str, Any]]]:
+    """Build chart override payloads from resolved semantic roles."""
+    time_field = resolved_roles["time_field"]
+    time_values = resolved_roles["time_values"]
+    series = resolved_roles["series"]
+    labels = [item["label"] for item in series]
+
+    if resolved_roles["intent"] == ChartIntent.TREND_COMPARE.value:
+        chart_rows: list[dict[str, Any]] = []
+        for idx, time_value in enumerate(time_values):
+            row: dict[str, Any] = {time_field: time_value}
+            for item in series:
+                row[item["label"]] = item["values"][idx]
+            chart_rows.append(row)
+
+        title = " vs ".join(labels) if len(labels) <= 2 else f"Trend Comparison: {' vs '.join(labels)}"
+        meta = {
+            "xAxisTitle": resolved_roles["x_axis_title"],
+            "yAxisTitle": resolved_roles["unit"],
+            "title": title,
+            "axisMode": "single",
+            "labels": labels,
+        }
+        return chart_rows, "line", meta
+
+    if resolved_roles["intent"] == ChartIntent.DECOMPOSITION.value:
+        chart_rows = []
+        for idx, time_value in enumerate(time_values):
+            for item in series:
+                chart_rows.append(
+                    {
+                        "date": time_value,
+                        "category": item["label"],
+                        "value": item["values"][idx],
+                    }
+                )
+
+        meta = {
+            "xAxisTitle": resolved_roles["x_axis_title"],
+            "yAxisTitle": resolved_roles["unit"],
+            "title": "Derived Component Breakdown",
+            "axisMode": "single",
+            "labels": labels,
+        }
+        return chart_rows, "stackedbar", meta
+
+    return None
+
+
+def _materialize_chart_override(ctx: QueryContext) -> None:
+    """Build a deterministic chart override when semantic chart hints are fully satisfiable."""
+    ctx.chart_override_data = None
+    ctx.chart_override_type = None
+    ctx.chart_override_meta = None
+
+    resolved_roles = _resolve_chart_roles(ctx)
+    if resolved_roles is None:
+        return
+
+    override = _build_chart_override(ctx, resolved_roles)
+    if override is None:
+        return
+
+    chart_data, chart_type, chart_meta = override
+    ctx.chart_override_data = chart_data
+    ctx.chart_override_type = chart_type
+    ctx.chart_override_meta = chart_meta
+    log.info(
+        "📊 Derived chart override prepared (intent=%s, type=%s, rows=%d)",
+        resolved_roles["intent"],
+        chart_type,
+        len(chart_data),
+    )
+
+
 def _build_why_provenance_snapshot(
     current_ts: Optional[pd.Timestamp],
     previous_ts: Optional[pd.Timestamp],
@@ -1211,6 +1536,13 @@ def enrich(ctx: QueryContext) -> QueryContext:
             _build_standalone_analysis_evidence(ctx)
         except Exception as _e:
             log.warning(f"Standalone analysis evidence build failed: {_e}")
+
+    # --- Semantic chart override materialization ---
+    if not ctx.df.empty:
+        try:
+            _materialize_chart_override(ctx)
+        except Exception as _e:
+            log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
     trend_keywords = [

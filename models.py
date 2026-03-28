@@ -91,6 +91,9 @@ class QueryContext:
     summary_provenance_gate_reason: str = ""
 
     # --- chart_pipeline outputs ---
+    chart_override_data: Optional[List[Dict[str, Any]]] = None
+    chart_override_type: Optional[str] = None
+    chart_override_meta: Optional[Dict[str, Any]] = None
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None
     chart_meta: Optional[Dict[str, Any]] = None

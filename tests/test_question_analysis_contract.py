@@ -7,10 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from contracts.question_analysis import (
+    ChartIntent,
     DerivedMetricName,
     DerivedMetricRequest,
     QuestionAnalysis,
     QueryType,
+    SemanticRole,
     ScenarioAggregation,
 )
 
@@ -158,6 +160,44 @@ def test_regulatory_procedure_query_type_is_supported():
     payload["classification"]["query_type"] = "regulatory_procedure"
     model = QuestionAnalysis.model_validate(payload)
     assert model.classification.query_type == QueryType.REGULATORY_PROCEDURE
+
+
+def test_chart_hints_cleared_when_charts_not_requested_or_recommended():
+    payload = _valid_payload()
+    payload["visualization"]["chart_intent"] = "trend_compare"
+    payload["visualization"]["target_series"] = ["observed", "reference"]
+
+    model = QuestionAnalysis.model_validate(payload)
+
+    assert model.visualization.chart_intent is None
+    assert model.visualization.target_series == []
+
+
+def test_chart_target_series_order_preserved_for_valid_payload():
+    payload = _valid_payload()
+    payload["visualization"]["chart_recommended"] = True
+    payload["visualization"]["chart_intent"] = "trend_compare"
+    payload["visualization"]["target_series"] = ["derived", "observed"]
+
+    model = QuestionAnalysis.model_validate(payload)
+
+    assert model.visualization.chart_intent == ChartIntent.TREND_COMPARE
+    assert model.visualization.target_series == [
+        SemanticRole.DERIVED,
+        SemanticRole.OBSERVED,
+    ]
+
+
+def test_invalid_roles_for_chart_intent_are_cleared():
+    payload = _valid_payload()
+    payload["visualization"]["chart_recommended"] = True
+    payload["visualization"]["chart_intent"] = "decomposition"
+    payload["visualization"]["target_series"] = ["observed", "component_primary"]
+
+    model = QuestionAnalysis.model_validate(payload)
+
+    assert model.visualization.chart_intent is None
+    assert model.visualization.target_series == []
 
 
 # ---------------------------------------------------------------------------

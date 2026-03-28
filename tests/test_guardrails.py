@@ -2763,6 +2763,251 @@ def _run_scenario(metric_name, factor, volume=None, agg="sum"):
     return result.iloc[0].to_dict()
 
 
+def _make_chart_hint_question_analysis(
+    metric_name: str,
+    chart_intent: str,
+    target_series: list[str],
+    *,
+    factor: float,
+    volume: float | None = None,
+):
+    payload = _make_analyzer_payload("data_retrieval", "tool", confidence=0.95)
+    payload["visualization"].update(
+        {
+            "chart_requested_by_user": True,
+            "chart_recommended": True,
+            "chart_confidence": 0.95,
+            "chart_intent": chart_intent,
+            "target_series": target_series,
+        }
+    )
+    request = {
+        "metric_name": metric_name,
+        "metric": "p_bal_usd",
+        "target_metric": None,
+        "rank_limit": None,
+        "scenario_factor": factor,
+        "scenario_aggregation": "sum",
+    }
+    if volume is not None:
+        request["scenario_volume"] = volume
+    payload["analysis_requirements"]["derived_metrics"] = [request]
+    return QuestionAnalysis.model_validate(payload)
+
+
+def test_materialize_chart_override_builds_trend_compare_line():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_payoff",
+        "trend_compare",
+        ["observed", "reference"],
+        factor=55.0,
+        volume=1.0,
+    )
+    ctx = QueryContext(
+        query="Show the balancing price against the strike price",
+        question_analysis=qa,
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_meta is not None
+    assert ctx.chart_override_meta["yAxisTitle"] == "USD/MWh"
+    assert ctx.chart_override_meta["labels"] == [
+        "Balancing Electricity Price (USD/MWh)",
+        "Strike Price",
+    ]
+    assert ctx.chart_override_data is not None
+    assert ctx.chart_override_data[0]["date"] == "2024-01"
+    assert ctx.chart_override_data[0]["Balancing Electricity Price (USD/MWh)"] == 40.0
+    assert ctx.chart_override_data[0]["Strike Price"] == 55.0
+
+
+def test_materialize_chart_override_preserves_requested_role_order():
+    row = _run_scenario("scenario_scale", factor=1.5)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_scale",
+        "trend_compare",
+        ["derived", "observed"],
+        factor=1.5,
+    )
+    ctx = QueryContext(
+        query="Compare scenario prices with observed prices",
+        question_analysis=qa,
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_meta is not None
+    assert ctx.chart_override_meta["labels"] == [
+        "Scaled Balancing Electricity Price (USD/MWh)",
+        "Balancing Electricity Price (USD/MWh)",
+    ]
+    assert ctx.chart_override_data is not None
+    assert ctx.chart_override_data[0]["Scaled Balancing Electricity Price (USD/MWh)"] == 60.0
+    assert ctx.chart_override_data[0]["Balancing Electricity Price (USD/MWh)"] == 40.0
+
+
+def test_materialize_chart_override_builds_decomposition_stackedbar():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_payoff",
+        "decomposition",
+        ["component_primary", "component_secondary"],
+        factor=55.0,
+        volume=1.0,
+    )
+    ctx = QueryContext(
+        query="Break down market income and CfD compensation by month",
+        question_analysis=qa,
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "stackedbar"
+    assert ctx.chart_override_meta is not None
+    assert ctx.chart_override_meta["yAxisTitle"] == "USD"
+    assert ctx.chart_override_meta["labels"] == [
+        "Balancing Market Sales Income",
+        "CfD Financial Compensation",
+    ]
+    assert ctx.chart_override_data is not None
+    assert ctx.chart_override_data[0] == {
+        "date": "2024-01",
+        "category": "Balancing Market Sales Income",
+        "value": 40.0,
+    }
+    assert ctx.chart_override_data[1] == {
+        "date": "2024-01",
+        "category": "CfD Financial Compensation",
+        "value": 15.0,
+    }
+
+
+def test_materialize_chart_override_skips_unresolved_reference_role():
+    row = _run_scenario("scenario_scale", factor=1.2)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_scale",
+        "trend_compare",
+        ["observed", "reference"],
+        factor=1.2,
+    )
+    ctx = QueryContext(
+        query="Show observed prices and the reference",
+        question_analysis=qa,
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_data is None
+    assert ctx.chart_override_type is None
+    assert ctx.chart_override_meta is None
+
+
+def test_materialize_chart_override_skips_incompatible_units():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_payoff",
+        "trend_compare",
+        ["observed", "derived"],
+        factor=55.0,
+        volume=1.0,
+    )
+    ctx = QueryContext(
+        query="Compare observed price and derived payoff",
+        question_analysis=qa,
+        analysis_evidence=[row],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_data is None
+    assert ctx.chart_override_type is None
+
+
+def test_materialize_chart_override_skips_without_time_column():
+    row = _run_scenario("scenario_payoff", factor=55.0, volume=1.0)
+    qa = _make_chart_hint_question_analysis(
+        "scenario_payoff",
+        "trend_compare",
+        ["observed", "reference"],
+        factor=55.0,
+        volume=1.0,
+    )
+    ctx = QueryContext(
+        query="Show the balancing price against the strike price",
+        question_analysis=qa,
+        analysis_evidence=[row],
+    )
+    ctx.df = pd.DataFrame({"p_bal_usd": [40.0, 50.0, 30.0, 60.0]})
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_data is None
+    assert ctx.chart_override_type is None
+
+
+def test_build_chart_prefers_override_without_raw_rows():
+    from agent.chart_pipeline import build_chart
+
+    ctx = QueryContext(query="Show observed price against strike")
+    ctx.chart_override_data = [
+        {
+            "date": "2024-01",
+            "Balancing Electricity Price (USD/MWh)": 40.0,
+            "Strike Price": 55.0,
+        }
+    ]
+    ctx.chart_override_type = "line"
+    ctx.chart_override_meta = {
+        "xAxisTitle": "period",
+        "yAxisTitle": "USD/MWh",
+        "title": "Balancing Electricity Price (USD/MWh) vs Strike Price",
+        "axisMode": "single",
+        "labels": ["Balancing Electricity Price (USD/MWh)", "Strike Price"],
+    }
+
+    out = build_chart(ctx)
+
+    assert out.chart_data == ctx.chart_override_data
+    assert out.chart_type == "line"
+    assert out.chart_meta == ctx.chart_override_meta
+
+
+def test_build_chart_prefers_override_over_raw_heuristics():
+    from agent.chart_pipeline import build_chart
+
+    ctx = _make_chart_ctx(_scenario_df(), query="price trend")
+    ctx.chart_override_data = [
+        {"date": "2024-01", "category": "Balancing Market Sales Income", "value": 40.0},
+        {"date": "2024-01", "category": "CfD Financial Compensation", "value": 15.0},
+    ]
+    ctx.chart_override_type = "stackedbar"
+    ctx.chart_override_meta = {
+        "xAxisTitle": "date",
+        "yAxisTitle": "USD",
+        "title": "Derived Component Breakdown",
+        "axisMode": "single",
+        "labels": ["Balancing Market Sales Income", "CfD Financial Compensation"],
+    }
+
+    out = build_chart(ctx)
+
+    assert out.chart_type == "stackedbar"
+    assert out.chart_data == ctx.chart_override_data
+    assert out.chart_meta == ctx.chart_override_meta
+
+
 def test_scenario_scale_computation():
     # [40, 50, 30, 60] * 1.5 = [60, 75, 45, 90] -> sum=270
     row = _run_scenario("scenario_scale", factor=1.5)

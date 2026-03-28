@@ -113,6 +113,19 @@ class ChartFamily(str, Enum):
     DUALAXIS = "dualaxis"
 
 
+class ChartIntent(str, Enum):
+    TREND_COMPARE = "trend_compare"
+    DECOMPOSITION = "decomposition"
+
+
+class SemanticRole(str, Enum):
+    OBSERVED = "observed"
+    REFERENCE = "reference"
+    DERIVED = "derived"
+    COMPONENT_PRIMARY = "component_primary"
+    COMPONENT_SECONDARY = "component_secondary"
+
+
 class ScenarioAggregation(str, Enum):
     SUM = "sum"
     MEAN = "mean"
@@ -244,6 +257,25 @@ class VisualizationInfo(BaseModel):
     chart_recommended: bool
     chart_confidence: float = Field(ge=0.0, le=1.0)
     preferred_chart_family: Optional[ChartFamily] = None
+    chart_intent: Optional[ChartIntent] = None
+    target_series: List[SemanticRole] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="after")
+    def _validate_semantic_chart_hints(self) -> "VisualizationInfo":
+        if not self.chart_requested_by_user and not self.chart_recommended:
+            self.chart_intent = None
+            self.target_series = []
+            return self
+
+        if self.chart_intent is None:
+            self.target_series = []
+            return self
+
+        allowed_roles = _VALID_ROLES_BY_INTENT.get(self.chart_intent, frozenset())
+        if not self.target_series or any(role not in allowed_roles for role in self.target_series):
+            self.chart_intent = None
+            self.target_series = []
+        return self
 
 
 _SCENARIO_METRIC_NAMES = frozenset({
@@ -251,6 +283,18 @@ _SCENARIO_METRIC_NAMES = frozenset({
     DerivedMetricName.SCENARIO_OFFSET,
     DerivedMetricName.SCENARIO_PAYOFF,
 })
+
+_VALID_ROLES_BY_INTENT = {
+    ChartIntent.TREND_COMPARE: frozenset({
+        SemanticRole.OBSERVED,
+        SemanticRole.REFERENCE,
+        SemanticRole.DERIVED,
+    }),
+    ChartIntent.DECOMPOSITION: frozenset({
+        SemanticRole.COMPONENT_PRIMARY,
+        SemanticRole.COMPONENT_SECONDARY,
+    }),
+}
 
 
 class DerivedMetricRequest(BaseModel):
