@@ -1889,7 +1889,7 @@ Respond with JSON exactly matching this schema:
 Important rules:
 - `canonical_query_en` must preserve the meaning, not answer the question.
 - `preferred_path` must be one of the allowed enum values.
-- `preferred_path` routing: use `knowledge` for `conceptual_definition`, `regulatory_procedure`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, `comparison`, `forecast`, and `factual_lookup`.
+- `preferred_path` routing: use `knowledge` for `conceptual_definition`, `regulatory_procedure`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, and `factual_lookup`; for `comparison` and `forecast`, use `knowledge` when the question is about concepts, policy, or market design, and `tool` or `sql` when the question is about specific numeric data or time-series.
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
@@ -1959,6 +1959,7 @@ def llm_summarize_structured(
     vector_knowledge: str = "",
     question_analysis: Optional["QuestionAnalysis"] = None,
     vector_knowledge_bundle: Optional["VectorKnowledgeBundle"] = None,
+    response_mode: str = "",
 ) -> SummaryEnvelope:
     """Generate strict JSON summary for guardrail validation."""
     history_str = ""
@@ -1981,9 +1982,10 @@ def llm_summarize_structured(
     )
     skill_hash = get_skills_content_hash() if ENABLE_SKILL_PROMPTS_SUMMARIZER else "off"
     cache_input = (
-        f"summary_structured_v6|{user_query}|{data_preview}|{stats_hint}|"
+        f"summary_structured_v7|{user_query}|{data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
-        f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|vk={vk_doc_types}|sh={skill_hash}"
+        f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|vk={vk_doc_types}|sh={skill_hash}|"
+        f"rm={response_mode}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -2003,7 +2005,12 @@ def llm_summarize_structured(
         query_type = classify_query_type(user_query)
 
     _CONCEPTUAL_QUERY_TYPES = {"conceptual_definition", "regulatory_procedure", "unknown", "ambiguous", "unsupported"}
-    is_conceptual_context = query_type in _CONCEPTUAL_QUERY_TYPES
+    # Prefer response_mode as the authoritative signal; fall back to query_type set.
+    is_conceptual_context = (
+        response_mode == "knowledge_primary"
+        if response_mode
+        else query_type in _CONCEPTUAL_QUERY_TYPES
+    )
     if is_conceptual_context and vector_knowledge.strip():
         conceptual_evidence_rule = (
             "When EXTERNAL_SOURCE_PASSAGES are present, treat them as the primary evidence. "
@@ -2182,7 +2189,15 @@ Citation format rules:
 {lang_instruction}
 """
     prompt_original = prompt  # Save for potential re-truncation on timeout retry
-    prompt = _enforce_prompt_budget(prompt, label="summarize_structured")
+    _trunc_priority = (
+        _TRUNCATION_PRIORITY_KNOWLEDGE
+        if response_mode == "knowledge_primary"
+        else _TRUNCATION_PRIORITY_DATA
+    )
+    prompt = _enforce_prompt_budget(
+        prompt, label="summarize_structured",
+        truncation_priority=_trunc_priority,
+    )
 
     _RETRY_BUDGET_FRACTION = 0.75  # On timeout retry, use 75% of configured budget
     max_attempts = 2
@@ -2195,6 +2210,7 @@ Citation format rules:
             prompt = _enforce_prompt_budget(
                 prompt_original, label="summarize_structured_retry",
                 budget_override=reduced,
+                truncation_priority=_trunc_priority,
             )
             log.warning(
                 "Retrying summarizer with reduced budget: attempt=%d budget=%d chars=%d",
@@ -2251,6 +2267,24 @@ def _truncate_text(text: str, max_chars: int) -> str:
 
 # Sections truncated first → last when prompt exceeds budget.
 # Sections NOT listed here (user_question) are fully protected.
+# Data-primary: sacrifice knowledge before data.
+_TRUNCATION_PRIORITY_DATA = [
+    "UNTRUSTED_CONVERSATION_HISTORY",
+    "UNTRUSTED_DOMAIN_KNOWLEDGE",
+    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
+    "UNTRUSTED_DATA_PREVIEW",
+    "UNTRUSTED_STATISTICS",
+]
+# Knowledge-primary: sacrifice data before knowledge.
+_TRUNCATION_PRIORITY_KNOWLEDGE = [
+    "UNTRUSTED_CONVERSATION_HISTORY",
+    "UNTRUSTED_DATA_PREVIEW",
+    "UNTRUSTED_STATISTICS",
+    "UNTRUSTED_DOMAIN_KNOWLEDGE",
+    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
+]
+# Default (backward-compatible) — preserves original ordering for callers
+# that don't pass an explicit truncation_priority (e.g. llm_summarize legacy path).
 _TRUNCATION_PRIORITY = [
     "UNTRUSTED_CONVERSATION_HISTORY",
     "UNTRUSTED_DATA_PREVIEW",
@@ -2264,13 +2298,20 @@ _SECTION_CONTENT_RE = re.compile(
 )
 
 
-def _enforce_prompt_budget(prompt: str, label: str, *, budget_override: int | None = None) -> str:
+def _enforce_prompt_budget(
+    prompt: str,
+    label: str,
+    *,
+    budget_override: int | None = None,
+    truncation_priority: list[str] | None = None,
+) -> str:
     """Hard cap prompt size to control latency/cost blowups.
 
     Uses section-aware truncation: truncates lower-priority sections first
-    (conversation_history → data_preview → external_source_passages →
-    domain_knowledge → statistics) while preserving user_question and
-    system guidance.  Falls back to head+tail split if section parsing fails.
+    while preserving user_question and system guidance.  The truncation
+    order is determined by *truncation_priority* (defaults to
+    ``_TRUNCATION_PRIORITY``).  Falls back to head+tail split if section
+    parsing fails.
 
     A 10% headroom margin is applied so truncated prompts land well below
     the ceiling, reducing Gemini timeout risk on near-capacity prompts.
@@ -2280,8 +2321,9 @@ def _enforce_prompt_budget(prompt: str, label: str, *, budget_override: int | No
     if len(prompt) <= budget:
         return prompt
 
+    priority = truncation_priority or _TRUNCATION_PRIORITY
     try:
-        return _section_aware_truncate(prompt, budget, label)
+        return _section_aware_truncate(prompt, budget, label, priority)
     except Exception:
         log.warning(
             "Section-aware truncation failed for label=%s, falling back to head+tail",
@@ -2303,7 +2345,12 @@ def _head_tail_truncate(prompt: str, budget: int, label: str) -> str:
     return trimmed
 
 
-def _section_aware_truncate(prompt: str, budget: int, label: str) -> str:
+def _section_aware_truncate(
+    prompt: str,
+    budget: int,
+    label: str,
+    priority: list[str] | None = None,
+) -> str:
     """Parse prompt into UNTRUSTED_* sections and truncate low-priority ones first."""
     # Collect section name, content-start pos, content-end pos, original content
     section_spans: list[tuple[str, int, int, str]] = []
@@ -2316,7 +2363,7 @@ def _section_aware_truncate(prompt: str, budget: int, label: str) -> str:
 
     excess = len(prompt) - budget
 
-    for section_name in _TRUNCATION_PRIORITY:
+    for section_name in (priority or _TRUNCATION_PRIORITY):
         if excess <= 0:
             break
         # Find this section's content

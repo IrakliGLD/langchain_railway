@@ -675,6 +675,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             vector_knowledge=vector_knowledge,
             question_analysis=ctx.question_analysis,
             vector_knowledge_bundle=ctx.vector_knowledge,
+            response_mode=ctx.response_mode,
         )
         ctx.summary = envelope.answer
         ctx.summary_source = "structured_conceptual_summary"
@@ -873,7 +874,12 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.
-        query_type = classify_query_type(ctx.query)
+        # Prefer analyzer query_type; fall back to heuristic only when unavailable.
+        # Only use active analyzer output — shadow must not influence behavior.
+        if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+            query_type = ctx.question_analysis.classification.query_type.value
+        else:
+            query_type = classify_query_type(ctx.query)
         domain_knowledge = ""
         if query_type not in ("single_value", "list"):
             preferred_topics = _extract_preferred_topics(ctx)
@@ -899,6 +905,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 vector_knowledge=vector_knowledge,
                 question_analysis=ctx.question_analysis,
                 vector_knowledge_bundle=ctx.vector_knowledge,
+                response_mode=ctx.response_mode,
             )
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True

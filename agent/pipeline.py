@@ -26,7 +26,7 @@ from config import (
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
 )
-from models import QueryContext
+from models import QueryContext, ResponseMode
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
 from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator
@@ -63,6 +63,41 @@ _SCENARIO_DERIVED_METRICS = {
     "scenario_scale",
     "scenario_offset",
 }
+
+# --- Response-mode derivation constants ---
+# Types where the answer mode is unambiguous regardless of preferred_path.
+_ALWAYS_KNOWLEDGE_TYPES = {"conceptual_definition", "regulatory_procedure"}
+_ALWAYS_DATA_TYPES = {"data_retrieval", "data_explanation", "factual_lookup"}
+
+
+def _derive_response_mode(ctx: QueryContext) -> str:
+    """Derive response_mode once from question-analysis or heuristic fallback.
+
+    Rules:
+    - _ALWAYS_KNOWLEDGE_TYPES → knowledge_primary regardless of preferred_path
+    - _ALWAYS_DATA_TYPES → data_primary regardless of preferred_path
+    - For ambiguous types (comparison, forecast, ambiguous, unsupported):
+      preferred_path is the tie-breaker.  knowledge → knowledge_primary,
+      anything else → data_primary.
+    - When no analyzer is available, fall back to is_conceptual_question()
+      which was already computed in prepare_context().
+    """
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        qa_type = ctx.question_analysis.classification.query_type.value
+        qa_path = ctx.question_analysis.routing.preferred_path.value
+        if qa_type in _ALWAYS_KNOWLEDGE_TYPES:
+            return ResponseMode.KNOWLEDGE_PRIMARY
+        if qa_type in _ALWAYS_DATA_TYPES:
+            return ResponseMode.DATA_PRIMARY
+        # Ambiguous types: comparison, forecast, ambiguous, unsupported
+        if qa_path == "knowledge":
+            return ResponseMode.KNOWLEDGE_PRIMARY
+        return ResponseMode.DATA_PRIMARY
+    # No analyzer — use the heuristic already computed in prepare_context()
+    return (
+        ResponseMode.KNOWLEDGE_PRIMARY if ctx.is_conceptual
+        else ResponseMode.DATA_PRIMARY
+    )
 
 
 def _enrich_prices_with_composition(
@@ -232,33 +267,13 @@ def process_query(
             qa_path = ctx.question_analysis.routing.preferred_path.value
             qa_conf = ctx.question_analysis.classification.confidence
             
-            # Data-oriented query types should never be treated as conceptual,
-            # even when preferred_path is "knowledge" (LLM routing mismatch).
-            _DATA_QUERY_TYPES = {
-                "data_explanation", "data_retrieval", "comparison",
-                "forecast", "factual_lookup",
-            }
+            # Compute analyzer_conceptual for tracing only — the authoritative
+            # response_mode derivation happens after Stage 0.3 via
+            # _derive_response_mode() which uses a stricter rule set.
             analyzer_conceptual = (
-                qa_type == "conceptual_definition"
-                or (qa_path == "knowledge" and qa_type not in _DATA_QUERY_TYPES)
+                qa_type in _ALWAYS_KNOWLEDGE_TYPES
+                or (qa_path == "knowledge" and qa_type not in _ALWAYS_DATA_TYPES)
             )
-
-            # Override heuristic based on analyzer output (active mode only)
-            if ENABLE_QUESTION_ANALYZER_HINTS:
-                if analyzer_conceptual:
-                    ctx.is_conceptual = True
-                elif qa_conf >= ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD and (
-                    qa_path in ("tool", "sql")
-                    or qa_type in _DATA_QUERY_TYPES
-                ):
-                    # Analyzer confidently identifies data intent — override heuristic
-                    if ctx.is_conceptual:
-                        log.info(
-                            "Analyzer override: heuristic said conceptual, "
-                            "but analyzer says %s/%s (conf=%.2f)",
-                            qa_type, qa_path, qa_conf,
-                        )
-                    ctx.is_conceptual = False
 
             conceptual_disagree = analyzer_conceptual != bool(ctx.is_conceptual)
             mode_disagree = ctx.question_analysis.classification.analysis_mode.value != str(ctx.mode)
@@ -326,8 +341,32 @@ def process_query(
             strategy=bundle.strategy.value,
         )
 
+    # --- Derive response_mode (single source of truth for answer mode) ---
+    ctx.response_mode = _derive_response_mode(ctx)
+    # Keep is_conceptual in sync for backward compatibility with stages that
+    # still read it, but no stage should ever re-derive this independently.
+    ctx.is_conceptual = ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY
+    log.info("Response mode derived: %s", ctx.response_mode)
+
+    # Set policy-blocked flags for observability before the short-circuit return.
+    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY:
+        if ENABLE_TYPED_TOOLS:
+            ctx.tool_blocked_by_policy = True
+        if ENABLE_AGENT_LOOP:
+            ctx.agent_loop_blocked_by_policy = True
+
+    trace_detail(
+        log, ctx, "response_mode_derivation", "result",
+        response_mode=ctx.response_mode,
+        is_conceptual=ctx.is_conceptual,
+        tool_blocked_by_policy=ctx.tool_blocked_by_policy,
+        agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
+        analyzer_available=ctx.question_analysis is not None,
+        analyzer_source=ctx.question_analysis_source,
+    )
+
     # Conceptual short-circuit
-    if ctx.is_conceptual:
+    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY:
         t_stage = time.time()
         ctx = summarizer.answer_conceptual(ctx)
         _trace_stage("stage_4_conceptual_summary", t_stage)
@@ -336,7 +375,7 @@ def process_query(
     # Stage 0.5: pre-LLM typed tool routing
     if ENABLE_TYPED_TOOLS:
         t_stage = time.time()
-        
+
         is_exp = False
         if ctx.question_analysis:
             qa_type = ctx.question_analysis.classification.query_type.value

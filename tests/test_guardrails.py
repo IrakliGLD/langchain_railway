@@ -1409,7 +1409,7 @@ def test_analyzer_overrides_heuristic_conceptual_for_data_query(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline.planner, "analyze_question_active",
-        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
     )
 
     # Need to mock the remaining pipeline stages to prevent actual execution
@@ -1511,7 +1511,7 @@ def test_data_explanation_with_knowledge_path_not_conceptual(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline.planner, "analyze_question_active",
-        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
     )
     monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "trend"}) or ctx)
     monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
@@ -1545,7 +1545,7 @@ def test_conceptual_definition_with_knowledge_path_stays_conceptual(monkeypatch)
     )
     monkeypatch.setattr(
         pipeline.planner, "analyze_question_active",
-        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
     )
     monkeypatch.setattr(
         pipeline.summarizer, "answer_conceptual",
@@ -1578,7 +1578,7 @@ def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline.planner, "analyze_question_active",
-        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
     )
     monkeypatch.setattr(
         pipeline.summarizer, "answer_conceptual",
@@ -1592,8 +1592,8 @@ def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
     )
 
 
-def test_comparison_with_knowledge_path_not_conceptual(monkeypatch):
-    """comparison query_type must override knowledge preferred_path."""
+def test_comparison_with_knowledge_path_is_knowledge_primary(monkeypatch):
+    """comparison + knowledge preferred_path → knowledge_primary response mode."""
     from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
 
@@ -1610,19 +1610,272 @@ def test_comparison_with_knowledge_path_not_conceptual(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline.planner, "analyze_question_active",
-        lambda ctx: setattr(ctx, "question_analysis", expected) or ctx,
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "comparison answer") or ctx,
+    )
+
+    out = pipeline.process_query("Compare Enguri and Gardabani tariffs")
+
+    assert out.is_conceptual is True, (
+        "comparison + knowledge path must be knowledge_primary"
+    )
+    assert out.response_mode == "knowledge_primary", (
+        "comparison + knowledge must derive knowledge_primary response mode"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Response-mode policy tests (Phase 8)
+# ---------------------------------------------------------------------------
+
+
+def test_response_mode_regulatory_procedure_knowledge_primary(monkeypatch):
+    """regulatory_procedure → knowledge_primary regardless of preferred_path."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("regulatory_procedure", "knowledge", confidence=0.92)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "regulatory answer") or ctx,
+    )
+
+    out = pipeline.process_query("Who is eligible to participate in the market?")
+
+    assert out.response_mode == "knowledge_primary"
+    assert out.is_conceptual is True
+
+
+def test_response_mode_data_retrieval_data_primary(monkeypatch):
+    """data_retrieval + tool → data_primary."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("data_retrieval", "tool", confidence=0.95)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "data"}) or ctx)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "data answer") or ctx)
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("Show balancing price 2020-2024")
+
+    assert out.response_mode == "data_primary"
+    assert out.is_conceptual is False
+
+
+def test_response_mode_comparison_with_tool_path_data_primary(monkeypatch):
+    """comparison + tool → data_primary (numeric comparison)."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("comparison", "tool", confidence=0.9)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
     )
     monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "compare"}) or ctx)
     monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
     monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
-    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "comparison answer") or ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "compare answer") or ctx)
     monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
 
-    out = pipeline.process_query("Compare Enguri and Gardabani tariffs")
+    out = pipeline.process_query("Compare Enguri and Gardabani tariffs 2020-2024")
 
-    assert out.is_conceptual is False, (
-        "comparison + knowledge path should NOT be treated as conceptual"
+    assert out.response_mode == "data_primary"
+    assert out.is_conceptual is False
+
+
+def test_tool_routing_skipped_for_knowledge_primary(monkeypatch):
+    """tool_blocked_by_policy must be True when response_mode is knowledge_primary."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
     )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "concept answer") or ctx,
+    )
+
+    out = pipeline.process_query("What is the balancing market?")
+
+    assert out.response_mode == "knowledge_primary"
+    assert out.tool_blocked_by_policy is True, (
+        "tool_blocked_by_policy must be set before conceptual short-circuit"
+    )
+    assert out.agent_loop_blocked_by_policy is True, (
+        "agent_loop_blocked_by_policy must be set before conceptual short-circuit"
+    )
+    assert out.used_tool is False
+
+
+def test_chart_suppressed_for_knowledge_primary():
+    """should_generate_chart returns False for knowledge_primary unless explicit chart request."""
+    from visualization.chart_selector import should_generate_chart
+
+    assert should_generate_chart(
+        "What is the balancing market?", 10, response_mode="knowledge_primary",
+    ) is False
+
+    # Explicit chart request should still work
+    assert should_generate_chart(
+        "Show me a chart of the market model", 10, response_mode="knowledge_primary",
+    ) is True
+
+
+def test_response_mode_fallback_heuristic_conceptual(monkeypatch):
+    """When no analyzer, is_conceptual_question() drives response_mode."""
+    from agent import pipeline
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "heuristic conceptual") or ctx,
+    )
+
+    out = pipeline.process_query("What is the electricity market model?")
+
+    assert out.response_mode == "knowledge_primary"
+    assert out.is_conceptual is True
+
+
+def test_response_mode_fallback_heuristic_data(monkeypatch):
+    """When no analyzer and not conceptual, response_mode is data_primary."""
+    from agent import pipeline
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "data"}) or ctx)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "data") or ctx)
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("Show balancing price for January 2024")
+
+    assert out.response_mode == "data_primary"
+    assert out.is_conceptual is False
+
+
+def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
+    """Shadow analyzer must never influence routing — response_mode must use heuristic fallback."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    # Shadow analyzer says conceptual_definition + knowledge → would be knowledge_primary
+    # if trusted, but heuristic says not conceptual → must stay data_primary.
+    payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", True)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_shadow",
+        lambda ctx: setattr(ctx, "question_analysis", expected)
+        or setattr(ctx, "question_analysis_source", "llm_shadow")
+        or ctx,
+    )
+    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "data"}) or ctx)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "data answer") or ctx)
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("Tell me about market design")
+
+    assert out.response_mode == "data_primary", (
+        "Shadow analyzer must not influence response_mode — should use heuristic fallback"
+    )
+    assert out.is_conceptual is False
+
+
+def test_truncation_priority_knowledge_protects_knowledge_sections():
+    """Knowledge-primary truncation should sacrifice data before knowledge."""
+    from core.llm import _TRUNCATION_PRIORITY_KNOWLEDGE, _TRUNCATION_PRIORITY_DATA
+
+    # Knowledge-primary: data_preview truncated before domain_knowledge
+    dk_idx = _TRUNCATION_PRIORITY_KNOWLEDGE.index("UNTRUSTED_DOMAIN_KNOWLEDGE")
+    dp_idx = _TRUNCATION_PRIORITY_KNOWLEDGE.index("UNTRUSTED_DATA_PREVIEW")
+    assert dp_idx < dk_idx, "data_preview must be truncated before domain_knowledge for knowledge_primary"
+
+    # Data-primary: domain_knowledge truncated before data_preview
+    dk_idx = _TRUNCATION_PRIORITY_DATA.index("UNTRUSTED_DOMAIN_KNOWLEDGE")
+    dp_idx = _TRUNCATION_PRIORITY_DATA.index("UNTRUSTED_DATA_PREVIEW")
+    assert dk_idx < dp_idx, "domain_knowledge must be truncated before data_preview for data_primary"
 
 
 def test_planner_expands_single_point_dates_for_comparison_query():

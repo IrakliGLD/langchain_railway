@@ -4,12 +4,22 @@ Pydantic models for API requests and responses.
 Extracted from monolithic main.py for better organization.
 """
 from dataclasses import dataclass, field as dc_field
+from enum import Enum
 from typing import Optional, List, Dict, Any
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 from contracts.question_analysis import QuestionAnalysis
 from contracts.vector_knowledge import VectorKnowledgeBundle
+
+
+class ResponseMode(str, Enum):
+    """Single authoritative answer-mode policy set once after Stage 0.2.
+
+    Every downstream stage must respect this rather than re-deriving intent.
+    """
+    KNOWLEDGE_PRIMARY = "knowledge_primary"
+    DATA_PRIMARY = "data_primary"
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +48,11 @@ class QueryContext:
     vector_knowledge_error: str = ""
     vector_knowledge_source: str = ""
     vector_knowledge_prompt: str = ""
+
+    # --- response policy (set once after Stage 0.2, authoritative for all later stages) ---
+    response_mode: str = ""                       # ResponseMode value or "" before derivation
+    tool_blocked_by_policy: bool = False
+    agent_loop_blocked_by_policy: bool = False
 
     # --- planner outputs ---
     plan: Dict[str, Any] = dc_field(default_factory=dict)

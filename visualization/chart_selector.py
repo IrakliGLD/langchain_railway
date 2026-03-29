@@ -16,7 +16,13 @@ from core.llm import classify_query_type
 log = logging.getLogger("Enai")
 
 
-def should_generate_chart(user_query: str, row_count: int) -> bool:
+def should_generate_chart(
+    user_query: str,
+    row_count: int,
+    *,
+    response_mode: str = "",
+    question_analysis=None,
+) -> bool:
     """
     Determine if a chart would be helpful for answering the query.
 
@@ -27,6 +33,9 @@ def should_generate_chart(user_query: str, row_count: int) -> bool:
     Args:
         user_query: User's natural language query
         row_count: Number of rows in query results
+        response_mode: Pipeline response mode (knowledge_primary suppresses charts
+            unless the user explicitly requested one)
+        question_analysis: Structured question analysis from Stage 0.2 (optional)
 
     Returns:
         True if chart should be generated, False otherwise
@@ -42,7 +51,22 @@ def should_generate_chart(user_query: str, row_count: int) -> bool:
         False  # List query
     """
     query_lower = user_query.lower()
-    query_type = classify_query_type(user_query)
+
+    # Suppress charts for knowledge-primary queries unless explicitly requested.
+    _EXPLICIT_CHART_KEYWORDS = (
+        "chart", "graph", "plot", "visualize", "show chart", "draw",
+        "დიაგრამა", "გრაფიკი", "график", "визуализ",
+    )
+    if response_mode == "knowledge_primary":
+        if not any(k in query_lower for k in _EXPLICIT_CHART_KEYWORDS):
+            log.info("Skipping chart: response_mode=knowledge_primary")
+            return False
+
+    # Prefer analyzer query_type; fall back to heuristic only when unavailable.
+    if question_analysis is not None:
+        query_type = question_analysis.classification.query_type.value
+    else:
+        query_type = classify_query_type(user_query)
 
     # NEVER generate chart for these query types
     if query_type in ["single_value", "list"]:

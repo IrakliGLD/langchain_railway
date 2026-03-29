@@ -205,7 +205,14 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     ]
 
     # --- Decide whether to generate chart ---
-    generate_chart = should_generate_chart(ctx.query, len(df))
+    # Only pass active analyzer output — shadow must not influence chart decisions.
+    qa_for_chart = ctx.question_analysis if ctx.question_analysis_source == "llm_active" else None
+    generate_chart = should_generate_chart(
+        ctx.query,
+        len(df),
+        response_mode=ctx.response_mode,
+        question_analysis=qa_for_chart,
+    )
 
     intent = str(ctx.plan.get("intent", "")).lower()
     query_text = ctx.query.lower()
