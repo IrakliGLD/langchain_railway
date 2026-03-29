@@ -4,6 +4,7 @@ Tests for Stage-0 firewall and prompt/guardrail enforcement paths.
 import importlib
 import json
 import os
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -1863,6 +1864,106 @@ def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
     assert out.is_conceptual is False
 
 
+def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypatch):
+    """preferred_path=clarify must short-circuit before tool routing."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("forecast", "clarify", confidence=0.7)
+    payload["tooling"]["candidate_tools"] = [{"name": "get_prices", "score": 0.9}]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_clarify",
+        lambda ctx: setattr(ctx, "summary", "clarify answer") or setattr(ctx, "summary_source", "clarification_request") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline, "match_tool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("match_tool must not run for clarify policy")),
+    )
+    monkeypatch.setattr(
+        pipeline.orchestrator, "run_agent_loop",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run for clarify policy")),
+    )
+
+    out = pipeline.process_query("How will electricity prices change according to the target model?")
+
+    assert out.resolution_policy == "clarify"
+    assert out.summary == "clarify answer"
+    assert out.summary_source == "clarification_request"
+    assert out.tool_blocked_by_policy is True
+    assert out.agent_loop_blocked_by_policy is True
+    assert out.used_tool is False
+
+
+def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
+    """Missing requested analytical evidence should downgrade Stage 4 to clarify."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("forecast", "tool", confidence=0.9)
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {"metric_name": "trend_slope", "metric": "p_bal_gel"},
+    ]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "generate_plan",
+        lambda ctx, **_kw: setattr(ctx, "plan", {"intent": "trend"}) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.sql_executor, "validate_and_execute",
+        lambda ctx: setattr(ctx, "df", pd.DataFrame({"date": ["2024-01-01"], "p_bal_gel": [50.0]}))
+        or setattr(ctx, "cols", ["date", "p_bal_gel"])
+        or setattr(ctx, "rows", [("2024-01-01", 50.0)])
+        or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.analyzer, "enrich",
+        lambda ctx: setattr(ctx, "analysis_evidence", []) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "answer_clarify",
+        lambda ctx: setattr(ctx, "summary", "need clarification") or setattr(ctx, "summary_source", "clarification_request") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("summarize_data must be blocked when evidence is missing")),
+    )
+
+    out = pipeline.process_query("Forecast balancing prices next year")
+
+    assert out.resolution_policy == "clarify"
+    assert out.clarify_reason == "missing_requested_analysis_evidence"
+    assert out.missing_evidence_for_metrics == ["trend_slope"]
+    assert out.data_summary_blocked_reason.startswith("missing_derived_evidence:")
+    assert out.summary == "need clarification"
+
+
 def test_truncation_priority_knowledge_protects_knowledge_sections():
     """Knowledge-primary truncation should sacrifice data before knowledge."""
     from core.llm import _TRUNCATION_PRIORITY_KNOWLEDGE, _TRUNCATION_PRIORITY_DATA
@@ -2875,6 +2976,161 @@ def test_summarize_data_skips_domain_knowledge_for_single_value(monkeypatch):
     summarizer.summarize_data(ctx)
 
     assert len(dk_called) == 0, "get_relevant_domain_knowledge should not be called for single_value"
+
+
+def test_summarize_data_merges_vector_topics_and_canonical_query(monkeypatch):
+    """summarize_data should merge vector topics into local knowledge selection."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+    from contracts.question_analysis import QuestionAnalysis
+
+    captured = {}
+    payload = _make_analyzer_payload("forecast", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "How will electricity prices in Georgia change according to the target model?"
+    payload["knowledge"]["candidate_topics"] = [
+        {"name": "balancing_price", "score": 0.8},
+        {"name": "currency_influence", "score": 0.6},
+    ]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    def _fake_dk(query, **kwargs):
+        captured["query"] = query
+        captured["preferred_topics"] = kwargs.get("preferred_topics")
+        return '{"market_design": "target model context"}'
+
+    def _fake_structured(*args, **kwargs):
+        captured["structured_kwargs"] = kwargs
+        return SummaryEnvelope(
+            answer="Target-model context and recent price data suggest a more market-based pricing structure.",
+            claims=[],
+            citations=["external_source_passages", "domain_knowledge"],
+            confidence=0.8,
+        )
+
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", _fake_dk)
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+
+    ctx = QueryContext(
+        query="How will electricity prices in Georgia change according to the target model?",
+        trace_id="trace-merge-topics",
+        session_id="session-merge-topics",
+        preview="date,p_bal_gel\n2024-01-01,50.0",
+        stats_hint="trend context",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        vector_knowledge=SimpleNamespace(
+            filters=SimpleNamespace(
+                preferred_topics=["electricity_market_target_model", "market_design"]
+            ),
+            chunks=[],
+        ),
+        vector_knowledge_source="vector_active",
+        vector_knowledge_prompt="retrieved target model passages",
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2024-01-01", 50.0)],
+        response_mode="data_primary",
+    )
+
+    summarizer.summarize_data(ctx)
+
+    assert captured["query"] == payload["canonical_query_en"]
+    assert "electricity_market_target_model" in captured["preferred_topics"]
+    assert "market_design" in captured["preferred_topics"]
+    assert "balancing_price" in captured["preferred_topics"]
+
+
+def test_evidence_aware_grounding_allows_mixed_forecast_with_knowledge_citations():
+    """Mixed forecast answers should pass only when their numbers exist in supporting evidence."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+
+    envelope = SummaryEnvelope(
+        answer="Under the target model, price formation may become more market-based, with the recent observed reference around 50 and a reform horizon around 2027.",
+        claims=[],
+        citations=["external_source_passages", "data_preview"],
+        confidence=0.7,
+    )
+    ctx = QueryContext(
+        query="How will electricity prices change according to the target model?",
+        preview="date,p_bal_gel\n2024-01-01,50.0",
+        stats_hint="recent observed reference: 50.0",
+        summary_domain_knowledge="The target market model transition is expected to continue through 2027.",
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2024-01-01", 50.0)],
+        grounding_policy="evidence_aware",
+    )
+
+    assert summarizer._is_summary_grounded(envelope, ctx) is True
+
+
+def test_evidence_aware_grounding_rejects_unsupported_numbers_even_with_citations():
+    """Evidence-aware grounding must still reject numbers absent from all supporting evidence."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+
+    envelope = SummaryEnvelope(
+        answer="The target model will settle prices around 88 in 2027.",
+        claims=[],
+        citations=["external_source_passages", "domain_knowledge"],
+        confidence=0.6,
+    )
+    ctx = QueryContext(
+        query="How will electricity prices change according to the target model?",
+        preview="date,p_bal_gel\n2024-01-01,50.0",
+        stats_hint="recent observed reference: 50.0",
+        summary_domain_knowledge="The target market model transition is expected to continue through 2027.",
+        grounding_policy="evidence_aware",
+    )
+
+    assert summarizer._is_summary_grounded(envelope, ctx) is False
+
+
+def test_evidence_aware_policy_requires_non_tabular_need(monkeypatch):
+    """Plain numeric forecasts should remain strict_numeric even if stats are present."""
+    from agent import summarizer
+    from models import QueryContext
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = _make_analyzer_payload("forecast", "tool", confidence=0.9)
+    payload["routing"]["needs_knowledge"] = False
+    payload["analysis_requirements"]["needs_driver_analysis"] = False
+    expected = QuestionAnalysis.model_validate(payload)
+
+    ctx = QueryContext(
+        query="Forecast balancing prices next year",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        vector_knowledge_prompt="official source passage with no numeric forecast",
+        response_mode="data_primary",
+        resolution_policy="answer",
+        stats_hint="trend slope available",
+    )
+
+    assert summarizer._derive_data_summary_grounding_policy(ctx, "forecast") == "strict_numeric"
+
+
+def test_claim_provenance_indexes_domain_and_vector_numeric_tokens():
+    """Provenance coverage should include domain/vector numeric evidence for evidence-aware summaries."""
+    from agent import summarizer
+
+    claims, coverage, anchors = summarizer._build_claim_provenance(
+        claims=["The target model transition continues through 2027."],
+        cols=["date", "p_bal_gel"],
+        rows=[("2024-01-01", 50.0)],
+        query_hash="q1",
+        source="tool",
+        stats_hint="",
+        domain_knowledge="The target market model transition is expected to continue through 2027.",
+        external_source_passages="Article 20 references the year 2027.",
+    )
+
+    assert coverage == 1.0
+    assert claims[0]["is_fully_grounded"] is True
+    assert any(ref["source"] == "domain_knowledge" for ref in claims[0]["cell_refs"])
+    assert anchors
 
 
 # ---------------------------------------------------------------------------

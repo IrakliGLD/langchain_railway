@@ -22,6 +22,21 @@ class ResponseMode(str, Enum):
     DATA_PRIMARY = "data_primary"
 
 
+class ResolutionPolicy(str, Enum):
+    """Whether the pipeline should answer directly or ask for clarification."""
+
+    ANSWER = "answer"
+    CLARIFY = "clarify"
+
+
+class GroundingPolicy(str, Enum):
+    """Guardrail policy used by Stage 4 grounding validation."""
+
+    STRICT_NUMERIC = "strict_numeric"
+    EVIDENCE_AWARE = "evidence_aware"
+    NOT_APPLICABLE = "not_applicable"
+
+
 # ---------------------------------------------------------------------------
 # QueryContext: mutable state object that flows through the pipeline stages
 # ---------------------------------------------------------------------------
@@ -51,8 +66,15 @@ class QueryContext:
 
     # --- response policy (set once after Stage 0.2, authoritative for all later stages) ---
     response_mode: str = ""                       # ResponseMode value or "" before derivation
+    resolution_policy: str = ""                  # ResolutionPolicy value or "" before derivation
     tool_blocked_by_policy: bool = False
     agent_loop_blocked_by_policy: bool = False
+    clarify_reason: str = ""
+    requested_derived_metrics: List[str] = dc_field(default_factory=list)
+    missing_evidence_for_metrics: List[str] = dc_field(default_factory=list)
+    grounding_policy: str = ""
+    data_summary_blocked_reason: str = ""
+    summary_domain_knowledge: str = ""
 
     # --- planner outputs ---
     plan: Dict[str, Any] = dc_field(default_factory=dict)

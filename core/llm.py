@@ -1960,8 +1960,11 @@ def llm_summarize_structured(
     question_analysis: Optional["QuestionAnalysis"] = None,
     vector_knowledge_bundle: Optional["VectorKnowledgeBundle"] = None,
     response_mode: str = "",
+    resolution_policy: str = "",
+    grounding_policy: str = "",
 ) -> SummaryEnvelope:
     """Generate strict JSON summary for guardrail validation."""
+    effective_data_preview = "" if resolution_policy == "clarify" else data_preview
     history_str = ""
     if conversation_history:
         parts = []
@@ -1982,10 +1985,10 @@ def llm_summarize_structured(
     )
     skill_hash = get_skills_content_hash() if ENABLE_SKILL_PROMPTS_SUMMARIZER else "off"
     cache_input = (
-        f"summary_structured_v7|{user_query}|{data_preview}|{stats_hint}|"
+        f"summary_structured_v8|{user_query}|{effective_data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|vk={vk_doc_types}|sh={skill_hash}|"
-        f"rm={response_mode}"
+        f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -1998,6 +2001,12 @@ def llm_summarize_structured(
         if strict_grounding
         else "Ground claims in provided DATA_PREVIEW and STATISTICS."
     )
+    if grounding_policy == "evidence_aware":
+        grounding_rule = (
+            "EVIDENCE-AWARE GROUNDING: Ground explanatory or forward-looking claims in "
+            "EXTERNAL_SOURCE_PASSAGES, DOMAIN_KNOWLEDGE, and explicit STATISTICS. "
+            "Do not invent unsupported numbers; only cite numeric values when they are present in the evidence."
+        )
     # Resolve query_type early so it can gate the conceptual evidence rule.
     if question_analysis is not None:
         query_type = question_analysis.classification.query_type.value
@@ -2172,7 +2181,7 @@ UNTRUSTED_STATISTICS:
 <<<{stats_hint}>>>
 
 UNTRUSTED_DATA_PREVIEW:
-<<<{data_preview}>>>
+<<<{effective_data_preview}>>>
 
 UNTRUSTED_CONVERSATION_HISTORY:
 <<<{history_str}>>>
@@ -2191,7 +2200,7 @@ Citation format rules:
     prompt_original = prompt  # Save for potential re-truncation on timeout retry
     _trunc_priority = (
         _TRUNCATION_PRIORITY_KNOWLEDGE
-        if response_mode == "knowledge_primary"
+        if response_mode == "knowledge_primary" or resolution_policy == "clarify"
         else _TRUNCATION_PRIORITY_DATA
     )
     prompt = _enforce_prompt_budget(

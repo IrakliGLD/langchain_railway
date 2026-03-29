@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Set
 
-from models import QueryContext
+from models import QueryContext, ResolutionPolicy, GroundingPolicy
 from core.llm import (
     llm_summarize,
     llm_summarize_structured,
@@ -73,6 +73,7 @@ _CFD_COMPONENT_QUERY_SIGNALS = (
     "compensation",
     "payoff",
 )
+_MIXED_EVIDENCE_QUERY_TYPES = {"forecast", "comparison"}
 
 
 def _normalize_number_token(raw_token: str) -> Optional[str]:
@@ -104,6 +105,9 @@ def _extract_number_tokens(text: str) -> Set[str]:
 
 def _build_grounding_corpus(ctx: QueryContext) -> str:
     parts = [ctx.preview or "", ctx.stats_hint or ""]
+    if str(ctx.grounding_policy or "") == GroundingPolicy.EVIDENCE_AWARE:
+        parts.append(ctx.summary_domain_knowledge or "")
+        parts.append(ctx.vector_knowledge_prompt or "")
     if ctx.df is not None and not ctx.df.empty:
         try:
             parts.append(ctx.df.head(200).to_string(index=False))
@@ -159,6 +163,10 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
 
 
 def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
+    grounding_policy = str(ctx.grounding_policy or GroundingPolicy.STRICT_NUMERIC)
+    if grounding_policy == GroundingPolicy.NOT_APPLICABLE:
+        return True
+
     claim_text = "\n".join(envelope.claims or [])
     answer_tokens = _extract_number_tokens((envelope.answer or "") + "\n" + claim_text)
     if not answer_tokens:
@@ -284,9 +292,36 @@ def _build_claim_provenance(
     query_hash: str = "",
     source: str = "",
     stats_hint: str = "",
+    domain_knowledge: str = "",
+    external_source_passages: str = "",
 ) -> tuple[List[Dict[str, Any]], float, List[str]]:
     token_index: Dict[str, List[Dict[str, Any]]] = {}
-    
+    source_priority = {
+        "sql": 0,
+        "tool": 0,
+        "derived_analysis": 1,
+        "external_source_passages": 2,
+        "domain_knowledge": 3,
+        "unknown": 4,
+    }
+
+    def _index_text_source(text: str, *, source_name: str, column_label: str, coordinate: str) -> None:
+        if not text:
+            return
+        for token in _extract_number_tokens(text):
+            refs = token_index.setdefault(token, [])
+            refs.append({
+                "source": source_name,
+                "row_number": 0,
+                "row_index": -1,
+                "column": column_label,
+                "value": token,
+                "cell_id": f"{source_name}:{hashlib.md5(token.encode()).hexdigest()[:8]}",
+                "row_context": {"Type": column_label},
+                "coordinate": coordinate,
+                "query_hash": query_hash,
+            })
+
     # --- Index statistics and derived analysis ---
     if stats_hint:
         for token in _extract_number_tokens(stats_hint):
@@ -302,6 +337,18 @@ def _build_claim_provenance(
                 "coordinate": "stats_hint",
                 "query_hash": query_hash,
             })
+    _index_text_source(
+        domain_knowledge,
+        source_name="domain_knowledge",
+        column_label="Domain Knowledge",
+        coordinate="domain_knowledge",
+    )
+    _index_text_source(
+        external_source_passages,
+        source_name="external_source_passages",
+        column_label="External Source Passages",
+        coordinate="external_source_passages",
+    )
     for row_idx, row in enumerate(rows):
         row_context = _build_row_context(cols, row)
         for col_idx, col_name in enumerate(cols):
@@ -343,7 +390,13 @@ def _build_claim_provenance(
         seen_refs = set()
 
         for token in claim_tokens:
-            refs = token_index.get(token, [])
+            refs = sorted(
+                token_index.get(token, []),
+                key=lambda ref: (
+                    source_priority.get(str(ref.get("source") or "unknown"), 4),
+                    int(ref.get("row_index", -1)),
+                ),
+            )
             if not refs:
                 unmatched_tokens.append(token)
                 continue
@@ -408,6 +461,8 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         query_hash=ctx.provenance_query_hash or "unknown",
         source=ctx.provenance_source or "unknown",
         stats_hint=ctx.stats_hint or "",
+        domain_knowledge=ctx.summary_domain_knowledge or "",
+        external_source_passages=ctx.vector_knowledge_prompt or "",
     )
     ctx.summary_claim_provenance = claim_prov
     ctx.summary_provenance_coverage = round(float(coverage), 4)
@@ -540,6 +595,111 @@ def _extract_preferred_topics(ctx: QueryContext) -> Optional[List[str]]:
     return None
 
 
+def _extract_vector_preferred_topics(ctx: QueryContext) -> Optional[List[str]]:
+    """Extract preferred topics from active vector retrieval results."""
+
+    if ctx.vector_knowledge is None or ctx.vector_knowledge_source != "vector_active":
+        return None
+    preferred = list(ctx.vector_knowledge.filters.preferred_topics or [])
+    return preferred[:5] or None
+
+
+def _build_data_summary_topic_preferences(ctx: QueryContext) -> Optional[List[str]]:
+    """Merge analyzer and vector topic preferences for data summaries."""
+
+    return _merge_topic_preferences(
+        _extract_vector_preferred_topics(ctx),
+        _extract_preferred_topics(ctx),
+    )
+
+
+def _derive_data_summary_grounding_policy(ctx: QueryContext, query_type: str) -> str:
+    """Choose the appropriate grounding policy for Stage 4 summaries."""
+
+    if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
+        return GroundingPolicy.NOT_APPLICABLE
+    if ctx.response_mode == "knowledge_primary":
+        return GroundingPolicy.NOT_APPLICABLE
+    analyzer_active = (
+        ctx.question_analysis is not None
+        and ctx.question_analysis_source == "llm_active"
+    )
+    needs_knowledge = bool(
+        analyzer_active
+        and getattr(ctx.question_analysis.routing, "needs_knowledge", False)
+    )
+    needs_driver_analysis = bool(
+        analyzer_active
+        and getattr(ctx.question_analysis.analysis_requirements, "needs_driver_analysis", False)
+    )
+    has_non_tabular_evidence = bool(
+        ctx.vector_knowledge_prompt
+        and ctx.vector_knowledge_source == "vector_active"
+    )
+    if (
+        query_type in _MIXED_EVIDENCE_QUERY_TYPES
+        and has_non_tabular_evidence
+        and (needs_knowledge or needs_driver_analysis)
+    ):
+        return GroundingPolicy.EVIDENCE_AWARE
+    return GroundingPolicy.STRICT_NUMERIC
+
+
+def _build_clarification_options(ctx: QueryContext) -> List[str]:
+    """Build a concise set of clarification options for ambiguous queries."""
+
+    query_lower = (ctx.query or "").strip().lower()
+    options: List[str] = []
+
+    def _add(option: str) -> None:
+        if option not in options:
+            options.append(option)
+
+    if any(signal in query_lower for signal in ("trend", "history", "historical", "past", "change")):
+        _add("Summarize the historical trend in observed electricity prices in Georgia.")
+    if any(signal in query_lower for signal in ("target model", "market model", "reform", "liberalization")):
+        _add("Explain how price formation is expected to work under the target market model.")
+    if any(signal in query_lower for signal in ("factor", "factors", "influencing", "driver", "drivers", "cause", "why")):
+        _add("Explain the main factors that have influenced price changes in the historical data.")
+
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        query_type = ctx.question_analysis.classification.query_type.value
+        if query_type == "forecast":
+            _add("Give a cautious forward-looking view based on the available regulatory context and recent data.")
+        elif query_type == "comparison":
+            _add("Compare the current market model with the target model rather than summarizing historical prices.")
+
+    _add("Answer with the closest grounded interpretation the current evidence supports.")
+    return options[:3]
+
+
+def answer_clarify(ctx: QueryContext) -> QueryContext:
+    """Ask the user to pick the intended interpretation instead of guessing."""
+
+    options = _build_clarification_options(ctx)
+    option_lines = [f"{idx}. {option}" for idx, option in enumerate(options, 1)]
+    clarify_reason = str(ctx.clarify_reason or "the request can be interpreted in more than one valid way")
+    ctx.summary = (
+        "I can answer this, but I want to make sure we take the right interpretation first.\n\n"
+        f"Reason: {clarify_reason.replace('_', ' ')}.\n\n"
+        "Please choose one of these directions:\n"
+        f"{chr(10).join(option_lines)}\n\n"
+        "Reply with the option number, or restate the question in the direction you want."
+    )
+    ctx.summary_source = "clarification_request"
+    ctx.summary_claims = []
+    ctx.summary_citations = ["clarification_request"]
+    ctx.summary_confidence = 0.85
+    ctx.summary_claim_provenance = []
+    ctx.summary_provenance_coverage = 0.0
+    ctx.summary_provenance_gate_passed = True
+    ctx.summary_provenance_gate_reason = "not_applicable_clarify"
+    ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
+    ctx.summary_domain_knowledge = ""
+    ctx.summary = scrub_schema_mentions(ctx.summary)
+    return ctx
+
+
 def answer_conceptual(ctx: QueryContext) -> QueryContext:
     """Generate an answer for conceptual/definitional questions (no SQL).
 
@@ -547,6 +707,8 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     Writes: ctx.summary
     """
     analyzer_active = ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+    ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
+    ctx.summary_domain_knowledge = ""
     routing_query = (
         ctx.question_analysis.canonical_query_en
         if analyzer_active and ctx.question_analysis is not None
@@ -856,6 +1018,8 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     """
     strict_grounding_retry = False
     ctx.summary_source = ""
+    ctx.grounding_policy = ""
+    ctx.summary_domain_knowledge = ""
 
     if ctx.share_summary_override:
         ctx.summary = ctx.share_summary_override
@@ -878,16 +1042,20 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         # Only use active analyzer output — shadow must not influence behavior.
         if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
             query_type = ctx.question_analysis.classification.query_type.value
+            routing_query = ctx.question_analysis.canonical_query_en or ctx.query
         else:
             query_type = classify_query_type(ctx.query)
+            routing_query = ctx.query
+        ctx.grounding_policy = _derive_data_summary_grounding_policy(ctx, query_type)
         domain_knowledge = ""
         if query_type not in ("single_value", "list"):
-            preferred_topics = _extract_preferred_topics(ctx)
+            preferred_topics = _build_data_summary_topic_preferences(ctx)
             domain_knowledge = get_relevant_domain_knowledge(
-                ctx.query, use_cache=False, preferred_topics=preferred_topics,
+                routing_query, use_cache=False, preferred_topics=preferred_topics,
             )
             if preferred_topics:
-                log.info("Using analyzer topics for data summary domain knowledge: %s", preferred_topics)
+                log.info("Using merged topics for data summary domain knowledge: %s", preferred_topics)
+        ctx.summary_domain_knowledge = domain_knowledge
         vector_knowledge = (
             ctx.vector_knowledge_prompt
             if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
@@ -906,6 +1074,8 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 question_analysis=ctx.question_analysis,
                 vector_knowledge_bundle=ctx.vector_knowledge,
                 response_mode=ctx.response_mode,
+                resolution_policy=ctx.resolution_policy,
+                grounding_policy=ctx.grounding_policy,
             )
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True
@@ -980,6 +1150,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         "pre_gate",
         summary_source=ctx.summary_source,
         strict_grounding_retry=strict_grounding_retry,
+        grounding_policy=ctx.grounding_policy,
         claims_count=len(ctx.summary_claims or []),
         citations=list(ctx.summary_citations or []),
         confidence=ctx.summary_confidence,

@@ -26,7 +26,7 @@ from config import (
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
 )
-from models import QueryContext, ResponseMode
+from models import QueryContext, ResponseMode, ResolutionPolicy
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
 from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator
@@ -98,6 +98,61 @@ def _derive_response_mode(ctx: QueryContext) -> str:
         ResponseMode.KNOWLEDGE_PRIMARY if ctx.is_conceptual
         else ResponseMode.DATA_PRIMARY
     )
+
+
+def _derive_resolution_policy(ctx: QueryContext) -> str:
+    """Derive whether the pipeline should answer or request clarification."""
+
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        if ctx.question_analysis.routing.preferred_path == PreferredPath.CLARIFY:
+            return ResolutionPolicy.CLARIFY
+    return ResolutionPolicy.ANSWER
+
+
+def _requested_derived_metric_names(ctx: QueryContext) -> list[str]:
+    """Return active analyzer requested derived metrics in stable order."""
+
+    if ctx.question_analysis is None or ctx.question_analysis_source != "llm_active":
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for metric in ctx.question_analysis.analysis_requirements.derived_metrics or []:
+        name = getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
+        if not name or name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+    return names
+
+
+def _missing_requested_evidence(ctx: QueryContext) -> list[str]:
+    """Return requested derived metrics that Stage 3 did not materialize."""
+
+    requested = list(ctx.requested_derived_metrics or [])
+    if not requested:
+        return []
+
+    evidence_names = {
+        str(record.get("derived_metric_name") or "").strip()
+        for record in (ctx.analysis_evidence or [])
+        if str(record.get("derived_metric_name") or "").strip()
+    }
+    return [name for name in requested if name not in evidence_names]
+
+
+def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
+    """Return True when missing analytical evidence should stop Stage 4."""
+
+    if not ctx.missing_evidence_for_metrics:
+        return False
+    if ctx.question_analysis is None or ctx.question_analysis_source != "llm_active":
+        return False
+
+    query_type = ctx.question_analysis.classification.query_type.value
+    if ctx.question_analysis.routing.preferred_path == PreferredPath.CLARIFY:
+        return True
+    return query_type in {"forecast", "comparison"}
 
 
 def _enrich_prices_with_composition(
@@ -343,13 +398,19 @@ def process_query(
 
     # --- Derive response_mode (single source of truth for answer mode) ---
     ctx.response_mode = _derive_response_mode(ctx)
+    ctx.resolution_policy = _derive_resolution_policy(ctx)
+    ctx.requested_derived_metrics = _requested_derived_metric_names(ctx)
     # Keep is_conceptual in sync for backward compatibility with stages that
     # still read it, but no stage should ever re-derive this independently.
     ctx.is_conceptual = ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY
-    log.info("Response mode derived: %s", ctx.response_mode)
+    log.info(
+        "Response mode derived: %s | resolution_policy=%s",
+        ctx.response_mode,
+        ctx.resolution_policy,
+    )
 
     # Set policy-blocked flags for observability before the short-circuit return.
-    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY:
+    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY or ctx.resolution_policy == ResolutionPolicy.CLARIFY:
         if ENABLE_TYPED_TOOLS:
             ctx.tool_blocked_by_policy = True
         if ENABLE_AGENT_LOOP:
@@ -358,12 +419,23 @@ def process_query(
     trace_detail(
         log, ctx, "response_mode_derivation", "result",
         response_mode=ctx.response_mode,
+        resolution_policy=ctx.resolution_policy,
         is_conceptual=ctx.is_conceptual,
         tool_blocked_by_policy=ctx.tool_blocked_by_policy,
         agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
+        clarify_reason=ctx.clarify_reason,
+        requested_derived_metrics=list(ctx.requested_derived_metrics or []),
         analyzer_available=ctx.question_analysis is not None,
         analyzer_source=ctx.question_analysis_source,
     )
+
+    if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
+        if not ctx.clarify_reason:
+            ctx.clarify_reason = "analyzer_preferred_path_clarify"
+        t_stage = time.time()
+        ctx = summarizer.answer_clarify(ctx)
+        _trace_stage("stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
+        return ctx
 
     # Conceptual short-circuit
     if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY:
@@ -632,6 +704,38 @@ def process_query(
         correlation_keys=list(ctx.correlation_results.keys()),
     )
     log.info("Stage 3 complete | analysis enrichment done")
+
+    ctx.missing_evidence_for_metrics = _missing_requested_evidence(ctx)
+    trace_detail(
+        log,
+        ctx,
+        "stage_3_analyzer_enrich",
+        "evidence_readiness",
+        requested_derived_metrics=list(ctx.requested_derived_metrics or []),
+        missing_evidence_for_metrics=list(ctx.missing_evidence_for_metrics or []),
+    )
+
+    if _should_block_data_summary_for_missing_evidence(ctx):
+        ctx.resolution_policy = ResolutionPolicy.CLARIFY
+        ctx.clarify_reason = "missing_requested_analysis_evidence"
+        ctx.data_summary_blocked_reason = (
+            "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+        )
+        ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
+        ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
+        log.info(
+            "Blocking data summarization due to missing derived evidence: %s",
+            ctx.missing_evidence_for_metrics,
+        )
+        t_stage = time.time()
+        ctx = summarizer.answer_clarify(ctx)
+        _trace_stage(
+            "stage_4_clarify_summary",
+            t_stage,
+            reason=ctx.clarify_reason,
+            missing_evidence=",".join(ctx.missing_evidence_for_metrics),
+        )
+        return ctx
 
     # Stage 4: summarize
     t_stage = time.time()
