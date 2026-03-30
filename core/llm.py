@@ -2222,6 +2222,9 @@ Citation format rules:
 - cite source anchors like \"data_preview\", \"statistics\", \"domain_knowledge\", \"external_source_passages\", or \"conversation_history\"
 - when using retrieved regulation or procedure details, prefer citing \"external_source_passages\"
 - use \"domain_knowledge\" citations mainly for background definitions or secondary context
+- write generated section headers and labels in the response language; do not reuse source headings in another language unless directly quoting them as source text
+- when referencing a regulation, procedure, article, clause, or section from EXTERNAL_SOURCE_PASSAGES, include the regulation/document title together with the article/section identifier when available
+- if only a section heading or locator is available, include the regulation/document title with that section heading or locator; do not say \"Article 14\" or \"Section 8\" alone
 - if confidence is low, set confidence below 0.5
 
 {lang_instruction}

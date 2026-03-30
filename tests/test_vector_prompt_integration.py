@@ -263,6 +263,8 @@ def test_structured_summary_prompt_prioritizes_external_source_passages(monkeypa
 
     assert "primary evidence" in captured["system"].lower()
     assert 'prefer citing "external_source_passages"' in captured["prompt"].lower()
+    assert "headers and labels in the response language" in captured["prompt"].lower()
+    assert "include the regulation/document title together with the article/section identifier" in captured["prompt"].lower()
 
 
 def test_structured_summary_prompt_treats_regulatory_procedure_as_conceptual(monkeypatch):

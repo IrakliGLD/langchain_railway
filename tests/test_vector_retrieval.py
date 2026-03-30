@@ -1,3 +1,12 @@
+import os
+
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+
 from contracts.question_analysis import (
     AnalysisMode,
     ClassificationInfo,
@@ -14,7 +23,12 @@ from contracts.question_analysis import (
     VisualizationInfo,
     LanguageCode,
 )
-from contracts.vector_knowledge import VectorChunkRecord, VectorKnowledgeMode
+from contracts.vector_knowledge import (
+    RetrievalStrategy,
+    VectorChunkRecord,
+    VectorKnowledgeBundle,
+    VectorKnowledgeMode,
+)
 from knowledge.vector_retrieval import (
     build_vector_filters,
     format_vector_knowledge_for_prompt,
@@ -182,6 +196,32 @@ def test_format_vector_knowledge_for_prompt_includes_source_headers():
     assert "EXTERNAL_SOURCE_PASSAGES:" in prompt
     assert "Electricity Market Rules" in prompt
     assert "Specific balancing settlement rule." in prompt
+
+
+def test_format_vector_knowledge_for_prompt_includes_section_locator_when_available():
+    bundle = VectorKnowledgeBundle(
+        query="What does Article 14 say?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=1,
+        chunk_count=1,
+        chunks=[
+            VectorChunkRecord(
+                id="chunk-1",
+                document_id="doc-1",
+                document_title="Electricity (Capacity) Market Rules",
+                source_key="capacity-rules",
+                section_title="Price formation",
+                section_path="Article 14 > Price formation",
+                text_content="Balancing price is formed under the stated conditions.",
+            )
+        ],
+    )
+
+    prompt = format_vector_knowledge_for_prompt(bundle, max_chars=1000)
+
+    assert "section: Price formation" in prompt
+    assert "locator: Article 14 > Price formation" in prompt
 
 
 def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):

@@ -443,8 +443,11 @@ def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], 
         header = f"[{idx}] {chunk.document_title or chunk.source_key}"
         if chunk.document_type:
             header += f" | type: {chunk.document_type}"
-        if chunk.section_title:
-            header += f" | section: {chunk.section_title}"
+        section_label = chunk.section_title or chunk.section_path
+        if section_label:
+            header += f" | section: {section_label}"
+        if chunk.section_path and _normalized_text(chunk.section_path) != _normalized_text(section_label):
+            header += f" | locator: {chunk.section_path}"
         if chunk.page_start is not None:
             header += f" | page: {chunk.page_start}"
         body = chunk.text_content.strip()
