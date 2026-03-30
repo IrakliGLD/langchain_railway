@@ -2532,6 +2532,287 @@ def test_analyzer_get_prices_hint_prefers_alias_implied_currency_on_conflict():
     assert inv.params["currency"] == "usd"
 
 
+def test_analyzer_get_prices_hint_normalizes_month_granularity():
+    """Analyzer period granularity 'month' should map to typed-tool 'monthly'."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show balancing price in february 2022",
+        "canonical_query_en": "Show balancing price in February 2022",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "balancing_price_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "balancing",
+                    "currency": "gel",
+                    "granularity": "month",
+                    "start_date": "2022-02-01",
+                    "end_date": "2022-02-01",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["price"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.name == "get_prices"
+    assert inv.params["granularity"] == "monthly"
+
+
+def test_analyzer_get_generation_mix_hint_normalizes_year_granularity():
+    """Shared analyzer granularity hints should normalize for generation tools too."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show hydro generation in 2022",
+        "canonical_query_en": "Show hydro generation in 2022",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "generation_mix_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_generation_mix",
+                "score": 0.98,
+                "reason": "Generation mix retrieval",
+                "params_hint": {
+                    "metric": None,
+                    "currency": None,
+                    "granularity": "year",
+                    "start_date": "2022-01-01",
+                    "end_date": "2022-12-31",
+                    "entities": [],
+                    "types": ["hydro"],
+                    "mode": "quantity",
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": None,
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["generation"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["granularity"] == "yearly"
+
+
+def test_analyzer_get_prices_hint_range_granularity_uses_safe_default():
+    """Range/relative period hints should not be treated as unsupported tool aggregation."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show balancing price from january to february 2022",
+        "canonical_query_en": "Show balancing price from January to February 2022",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "balancing_price_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "balancing",
+                    "currency": "gel",
+                    "granularity": "range",
+                    "start_date": "2022-01-01",
+                    "end_date": "2022-02-01",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["price"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.name == "get_prices"
+    assert inv.params["granularity"] == "monthly"
+
+
+def test_analyzer_get_prices_hint_unsupported_day_granularity_fails_closed():
+    """Unsupported explicit tool aggregation hints must not silently downgrade to monthly."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show daily balancing price in february 2022",
+        "canonical_query_en": "Show daily balancing price in February 2022",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "balancing_price_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "balancing",
+                    "currency": "gel",
+                    "granularity": "day",
+                    "start_date": "2022-02-01",
+                    "end_date": "2022-02-28",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["price"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    with pytest.raises(ValueError, match="unsupported_tool_granularity_hint:day"):
+        build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+
 def test_pydantic_entity_limit_accepts_15_entities():
     """ToolParamsHint should accept 15 entities (above old limit of 10)."""
     from contracts.question_analysis import ToolParamsHint
@@ -3526,7 +3807,104 @@ def test_summarize_data_merges_vector_topics_and_canonical_query(monkeypatch):
     assert captured["query"] == payload["canonical_query_en"]
     assert "electricity_market_target_model" in captured["preferred_topics"]
     assert "market_design" in captured["preferred_topics"]
-    assert "balancing_price" in captured["preferred_topics"]
+
+
+def test_summarize_data_passes_comparison_focus_for_mom_yoy_explanations(monkeypatch):
+    """Comparison-shaped explanations should nudge Stage 4 to answer period-vs-period first."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+    from contracts.question_analysis import QuestionAnalysis
+
+    captured = {}
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "Explain the change in balancing price from January 2022 to February 2022."
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {"metric_name": "mom_absolute_change", "metric": "balancing", "target_metric": None, "rank_limit": None},
+        {"metric_name": "mom_percent_change", "metric": "balancing", "target_metric": None, "rank_limit": None},
+    ]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    def _fake_dk(*_args, **_kwargs):
+        return '{"balancing_price": "test knowledge"}'
+
+    def _fake_structured(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return SummaryEnvelope(
+            answer="Compared with January 2022, the balancing price increased in February 2022.",
+            claims=[],
+            citations=["data_preview", "statistics"],
+            confidence=0.85,
+        )
+
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", _fake_dk)
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+
+    ctx = QueryContext(
+        query="Why did balancing price increase in February 2022?",
+        trace_id="trace-comparison-focus",
+        session_id="session-comparison-focus",
+        preview="date,p_bal_gel\n2022-01-01,183.8\n2022-02-01,195.8",
+        stats_hint="Month-over-month change available.",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        requested_derived_metrics=["mom_absolute_change", "mom_percent_change"],
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2022-01-01", 183.8), ("2022-02-01", 195.8)],
+        response_mode="data_primary",
+        resolution_policy="answer",
+    )
+
+    summarizer.summarize_data(ctx)
+
+    assert captured["kwargs"]["comparison_focus"] is True
+
+
+def test_summarize_data_uses_canonical_query_for_structured_summary(monkeypatch):
+    """Stage 4 should send the analyzer-resolved query to the LLM, not the raw follow-up wording."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+    from contracts.question_analysis import QuestionAnalysis
+
+    captured = {}
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "Compare balancing price in January 2022 and February 2022 and explain the increase."
+    expected = QuestionAnalysis.model_validate(payload)
+
+    def _fake_dk(*_args, **_kwargs):
+        return '{"balancing_price": "test knowledge"}'
+
+    def _fake_structured(user_query, *args, **kwargs):
+        captured["user_query"] = user_query
+        captured["kwargs"] = kwargs
+        return SummaryEnvelope(
+            answer="Compared with January 2022, the balancing price increased in February 2022.",
+            claims=[],
+            citations=["data_preview", "statistics"],
+            confidence=0.85,
+        )
+
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", _fake_dk)
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+
+    ctx = QueryContext(
+        query="why such a dramatic increase?",
+        trace_id="trace-canonical-stage4",
+        session_id="session-canonical-stage4",
+        preview="date,p_bal_gel\n2022-01-01,183.8\n2022-02-01,195.8",
+        stats_hint="Month-over-month change available.",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2022-01-01", 183.8), ("2022-02-01", 195.8)],
+        response_mode="data_primary",
+        resolution_policy="answer",
+    )
+
+    summarizer.summarize_data(ctx)
+
+    assert captured["user_query"] == payload["canonical_query_en"]
 
 
 def test_evidence_aware_grounding_allows_mixed_forecast_with_knowledge_citations():
@@ -3721,6 +4099,35 @@ def test_structured_history_limits_to_3_pairs():
     assert "Question 2" in prompt
     assert "Question 3" in prompt
     assert "Question 4" in prompt
+
+
+def test_structured_summary_adds_comparison_first_guidance():
+    """comparison_focus should inject comparison-first instructions into the prompt."""
+    from core.llm import llm_summarize_structured
+    import core.llm as llm_mod
+
+    captured = {}
+
+    def _capture_invoke(llm, messages, model_name):
+        captured["prompt"] = messages[1][1]
+        class FakeMsg:
+            content = '{"answer":"test","claims":[],"citations":[],"confidence":0.5}'
+            response_metadata = {}
+        return FakeMsg()
+
+    import unittest.mock
+    with unittest.mock.patch.object(llm_mod, "_invoke_with_resilience", _capture_invoke), \
+         unittest.mock.patch.object(llm_mod, "_log_usage_for_message", lambda *a, **kw: None):
+        llm_summarize_structured(
+            "Why did balancing price change in February 2022?",
+            "date,p_bal_gel\n2022-01-01,183.8\n2022-02-01,195.8",
+            "Month-over-month change available.",
+            comparison_focus=True,
+        )
+
+    prompt = captured["prompt"]
+    assert "COMPARISON-FIRST RULES" in prompt
+    assert "Do not collapse the answer into a single-period narrative" in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -1973,6 +1973,7 @@ def llm_summarize_structured(
     response_mode: str = "",
     resolution_policy: str = "",
     grounding_policy: str = "",
+    comparison_focus: bool = False,
 ) -> SummaryEnvelope:
     """Generate strict JSON summary for guardrail validation."""
     effective_data_preview = "" if resolution_policy == "clarify" else data_preview
@@ -1999,7 +2000,7 @@ def llm_summarize_structured(
         f"summary_structured_v8|{user_query}|{effective_data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|vk={vk_doc_types}|sh={skill_hash}|"
-        f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}"
+        f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -2111,6 +2112,16 @@ def llm_summarize_structured(
             if forecast_guidance:
                 guidance_parts.append(forecast_guidance)
 
+        if comparison_focus:
+            guidance_parts.append(
+                "COMPARISON-FIRST RULES:\n"
+                "- This is a comparison-shaped explanation backed by month-over-month or year-over-year evidence.\n"
+                "- Start by explicitly comparing the focal period to the reference or prior period before explaining drivers.\n"
+                "- Do not collapse the answer into a single-period narrative.\n"
+                "- Use the closest grounded prior/reference period available in UNTRUSTED_STATISTICS or UNTRUSTED_DATA_PREVIEW.\n"
+                "- If the evidence supports Jan-vs-Feb or prior-vs-current wording, make that comparison explicit in the first paragraph."
+            )
+
         # Scenario citation instruction (conditional on scenario evidence in stats)
         if stats_hint and '"record_type": "scenario"' in stats_hint:
             guidance_parts.append(
@@ -2171,6 +2182,13 @@ def llm_summarize_structured(
             "- Do not hedge when data is available; state findings directly.\n"
             "- Answer ONLY what the user asked; do not discuss unrelated topics.\n"
         )
+        if comparison_focus:
+            skill_guidance += (
+                "COMPARISON-FIRST RULES:\n"
+                "- Start by comparing the focal period with the prior/reference period.\n"
+                "- Do not answer as a single-period narrative when month-over-month or year-over-year evidence is provided.\n"
+                "- Use only comparison values grounded in UNTRUSTED_STATISTICS or UNTRUSTED_DATA_PREVIEW.\n"
+            )
 
     schema_hint = {
         "answer": "string",

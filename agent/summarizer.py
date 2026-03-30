@@ -645,6 +645,23 @@ def _derive_data_summary_grounding_policy(ctx: QueryContext, query_type: str) ->
     return GroundingPolicy.STRICT_NUMERIC
 
 
+def _should_use_comparison_first_guidance(ctx: QueryContext, query_type: str) -> bool:
+    """Return True when Stage 4 should frame the answer as a period comparison first."""
+
+    if query_type != "data_explanation":
+        return False
+
+    requested = list(ctx.requested_derived_metrics or [])
+    if not requested and ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        requested = [
+            getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
+            for metric in (ctx.question_analysis.analysis_requirements.derived_metrics or [])
+            if getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
+        ]
+
+    return any(name.startswith(("mom_", "yoy_")) for name in requested)
+
+
 def _build_clarification_options(ctx: QueryContext) -> List[str]:
     """Build a concise set of clarification options for ambiguous queries."""
 
@@ -1047,6 +1064,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             query_type = classify_query_type(ctx.query)
             routing_query = ctx.query
         ctx.grounding_policy = _derive_data_summary_grounding_policy(ctx, query_type)
+        comparison_focus = _should_use_comparison_first_guidance(ctx, query_type)
         domain_knowledge = ""
         if query_type not in ("single_value", "list"):
             preferred_topics = _build_data_summary_topic_preferences(ctx)
@@ -1064,7 +1082,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
 
         try:
             envelope = llm_summarize_structured(
-                ctx.query,
+                routing_query,
                 ctx.preview,
                 ctx.stats_hint,
                 ctx.lang_instruction,
@@ -1076,6 +1094,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 response_mode=ctx.response_mode,
                 resolution_policy=ctx.resolution_policy,
                 grounding_policy=ctx.grounding_policy,
+                comparison_focus=comparison_focus,
             )
             if not _is_summary_grounded(envelope, ctx):
                 strict_grounding_retry = True

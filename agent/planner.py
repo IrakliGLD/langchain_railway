@@ -157,6 +157,35 @@ def normalize_price_metric_hint(raw_metric: str | None) -> tuple[str | None, str
     return _PRICE_METRIC_HINT_MAP.get(key, (None, None))
 
 
+_TOOL_GRANULARITY_HINT_MAP: dict[str, str | None] = {
+    "month": "monthly",
+    "monthly": "monthly",
+    "year": "yearly",
+    "yearly": "yearly",
+    # These values describe period shape, not typed-tool aggregation.
+    # Treat them as "no explicit aggregation hint" and let the tool default apply.
+    "range": None,
+    "relative": None,
+}
+
+
+def normalize_tool_granularity_hint(raw_granularity: str | None) -> str | None:
+    """Map analyzer period-granularity hints to typed-tool enum values.
+
+    The question-analysis contract uses period words such as ``month`` and
+    ``year`` while typed tools expect ``monthly`` / ``yearly``.
+    Unsupported explicit aggregations (for example ``day`` or ``quarter``)
+    must fail closed instead of silently downgrading to ``monthly``.
+    """
+    if not raw_granularity:
+        return None
+
+    key = str(raw_granularity).strip().lower().replace(" ", "_")
+    if key not in _TOOL_GRANULARITY_HINT_MAP:
+        raise ValueError(f"unsupported_tool_granularity_hint:{raw_granularity}")
+    return _TOOL_GRANULARITY_HINT_MAP.get(key)
+
+
 # ---------------------------------------------------------------------------
 # Constants (moved from main.py)
 # ---------------------------------------------------------------------------
@@ -553,7 +582,7 @@ def build_tool_invocation_from_analysis(
                 implied_currency,
             )
         currency = implied_currency or hint_currency or extract_currency(effective_query)
-        granularity = (hint.granularity if hint and hint.granularity else None) or "monthly"
+        granularity = normalize_tool_granularity_hint(hint.granularity if hint else None) or "monthly"
         params.update({"metric": metric, "currency": currency, "granularity": granularity})
 
     elif tool_name == ToolName.GET_TARIFFS.value:
@@ -566,7 +595,7 @@ def build_tool_invocation_from_analysis(
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and hint.types else []) or extract_generation_types(effective_query)
         mode = (hint.mode if hint and hint.mode else None) or "quantity"
-        granularity = (hint.granularity if hint and hint.granularity else None) or "monthly"
+        granularity = normalize_tool_granularity_hint(hint.granularity if hint else None) or "monthly"
         if types:
             params["types"] = types
         params.update({"mode": mode, "granularity": granularity})
