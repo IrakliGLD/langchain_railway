@@ -2249,6 +2249,289 @@ def test_planner_expands_single_point_dates_for_comparison_query():
     )
 
 
+def test_analyzer_get_prices_hint_normalizes_raw_metric_to_tool_enum():
+    """Analyzer get_prices hints may use DB aliases; planner must map them to tool enums."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show balancing price in february 2022",
+        "canonical_query_en": "Show balancing price in February 2022",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "balancing_price_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "p_bal_gel",
+                    "currency": None,
+                    "granularity": "monthly",
+                    "start_date": "2022-02-01",
+                    "end_date": "2022-02-01",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["price"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.name == "get_prices"
+    assert inv.params["metric"] == "balancing"
+    assert inv.params["currency"] == "gel"
+
+
+def test_analyzer_get_prices_hint_unknown_metric_falls_back_to_query_extraction():
+    """Unknown analyzer hint metrics should not be passed through to get_prices."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show exchange rate in 2024",
+        "canonical_query_en": "Show exchange rate in 2024",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "exchange_rate_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "mystery_metric_alias",
+                    "currency": None,
+                    "granularity": "monthly",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-12-31",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": None,
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["xrate"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.params["metric"] == "exchange_rate"
+
+
+def test_analyzer_get_prices_hint_normalizes_xrate_alias():
+    """Analyzer xrate aliases should map to the strict exchange_rate tool metric."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show exchange rate in 2024",
+        "canonical_query_en": "Show exchange rate in 2024",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "exchange_rate_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "xrate",
+                    "currency": None,
+                    "granularity": "monthly",
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-12-31",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": None,
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["xrate"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.params["metric"] == "exchange_rate"
+
+
+def test_analyzer_get_prices_hint_prefers_alias_implied_currency_on_conflict():
+    """Raw metric aliases like p_bal_usd must override contradictory explicit currency hints."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "show balancing price in USD in february 2022",
+        "canonical_query_en": "Show balancing price in USD in February 2022",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "balancing_price_lookup",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 0.98,
+                "reason": "Price retrieval",
+                "params_hint": {
+                    "metric": "p_bal_usd",
+                    "currency": "gel",
+                    "granularity": "monthly",
+                    "start_date": "2022-02-01",
+                    "end_date": "2022-02-01",
+                    "entities": [],
+                    "types": [],
+                    "mode": None,
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "p_bal_usd",
+            "entities": [],
+            "aggregation": None,
+            "dimensions": ["price"],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.params["metric"] == "balancing"
+    assert inv.params["currency"] == "usd"
+
+
 def test_pydantic_entity_limit_accepts_15_entities():
     """ToolParamsHint should accept 15 entities (above old limit of 10)."""
     from contracts.question_analysis import ToolParamsHint
@@ -2790,6 +3073,16 @@ def test_sql_function_whitelist_allows_make_date():
 
     simple_table_whitelist_check(
         "SELECT * FROM price_with_usd WHERE date >= make_date(2024, 1, 1)"
+    )
+
+
+def test_sql_function_whitelist_allows_replace_for_balancing_segment_normalization():
+    """replace is an approved string function used by canonical balancing SQL."""
+    from core.sql_generator import simple_table_whitelist_check
+
+    simple_table_whitelist_check(
+        "SELECT * FROM trade_derived_entities "
+        "WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'"
     )
 
 

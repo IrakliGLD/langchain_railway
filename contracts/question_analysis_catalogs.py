@@ -109,6 +109,13 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Price or exchange-rate retrieval over time or for a stated period.",
         "avoid_for": "Conceptual definitions, tariff questions, and share-only composition queries.",
         "main_params": ["metric", "currency", "granularity", "start_date", "end_date"],
+        "metric_values": ["balancing", "deregulated", "guaranteed_capacity", "exchange_rate"],
+        "metric_hint_rules": [
+            "Use tool enums, not DB columns or chart aliases.",
+            "balancing price in GEL/USD -> metric=balancing with currency=gel/usd",
+            "exchange rate or xrate -> metric=exchange_rate",
+            "Never emit p_bal_gel, p_bal_usd, p_dereg_gel, p_gcap_gel, or balancing_price_gel as metric values",
+        ],
     },
     {
         "name": "get_tariffs",

@@ -345,6 +345,10 @@ def test_llm_analyze_question_prompt_mentions_regulatory_procedure(monkeypatch):
     assert "chart_intent" in prompt
     assert "target_series" in prompt
     assert "observed`, `reference`, `derived`, `component_primary`, `component_secondary`" in prompt
+    assert "For `get_prices`, valid `params_hint.metric` values are only:" in prompt
+    assert "`balancing`" in prompt
+    assert "`exchange_rate`" in prompt
+    assert "never emit raw DB column names" in prompt
 
 
 def test_llm_analyze_question_sanitizes_invalid_chart_hints(monkeypatch):

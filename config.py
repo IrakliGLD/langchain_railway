@@ -248,6 +248,7 @@ ALLOWED_PG_FUNCTIONS = {
     # pg_stat_file, pg_advisory_lock, pg_reload_conf, query_to_xml,
     # inet_server_addr, inet_client_addr, current_setting.
     "make_date", "age",
+    "replace",
     "clock_timestamp", "statement_timestamp",
     "regexp_matches", "regexp_split_to_table",
     "json_build_object", "jsonb_build_object",

@@ -119,6 +119,44 @@ def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
     return out
 
 
+_PRICE_METRIC_HINT_MAP: dict[str, tuple[str, str | None]] = {
+    "balancing": ("balancing", None),
+    "balancing_price": ("balancing", None),
+    "balancing_price_gel": ("balancing", "gel"),
+    "balancing_price_usd": ("balancing", "usd"),
+    "p_bal_gel": ("balancing", "gel"),
+    "p_bal_usd": ("balancing", "usd"),
+    "deregulated": ("deregulated", None),
+    "deregulated_price": ("deregulated", None),
+    "deregulated_price_gel": ("deregulated", "gel"),
+    "deregulated_price_usd": ("deregulated", "usd"),
+    "p_dereg_gel": ("deregulated", "gel"),
+    "p_dereg_usd": ("deregulated", "usd"),
+    "guaranteed_capacity": ("guaranteed_capacity", None),
+    "guaranteed_capacity_price": ("guaranteed_capacity", None),
+    "guaranteed_capacity_price_gel": ("guaranteed_capacity", "gel"),
+    "guaranteed_capacity_price_usd": ("guaranteed_capacity", "usd"),
+    "p_gcap_gel": ("guaranteed_capacity", "gel"),
+    "p_gcap_usd": ("guaranteed_capacity", "usd"),
+    "exchange_rate": ("exchange_rate", None),
+    "xrate": ("exchange_rate", None),
+}
+
+
+def normalize_price_metric_hint(raw_metric: str | None) -> tuple[str | None, str | None]:
+    """Map analyzer metric hints to strict get_prices enums.
+
+    The analyzer may emit semantic names or raw DB/alias names such as
+    ``p_bal_gel`` or ``balancing_price_gel``. ``get_prices`` accepts only the
+    strict tool enums, so planner must repair these hints deterministically.
+    """
+    if not raw_metric:
+        return None, None
+
+    key = str(raw_metric).strip().lower().replace(" ", "_")
+    return _PRICE_METRIC_HINT_MAP.get(key, (None, None))
+
+
 # ---------------------------------------------------------------------------
 # Constants (moved from main.py)
 # ---------------------------------------------------------------------------
@@ -502,8 +540,19 @@ def build_tool_invocation_from_analysis(
 
     # --- Tool-specific parameter resolution ---
     if tool_name == ToolName.GET_PRICES.value:
-        metric = (hint.metric if hint and hint.metric else None) or extract_price_metric(effective_query)
-        currency = (hint.currency if hint and hint.currency else None) or extract_currency(effective_query)
+        hint_metric = hint.metric if hint and hint.metric else None
+        normalized_metric, implied_currency = normalize_price_metric_hint(hint_metric)
+        metric = normalized_metric or extract_price_metric(effective_query)
+        hint_currency = str(hint.currency).strip().lower() if hint and hint.currency else None
+        if implied_currency and hint_currency and hint_currency != implied_currency:
+            log.warning(
+                "Analyzer get_prices hint had contradictory metric/currency pair; "
+                "using alias-implied currency. metric=%r hint_currency=%r implied_currency=%r",
+                hint_metric,
+                hint_currency,
+                implied_currency,
+            )
+        currency = implied_currency or hint_currency or extract_currency(effective_query)
         granularity = (hint.granularity if hint and hint.granularity else None) or "monthly"
         params.update({"metric": metric, "currency": currency, "granularity": granularity})
 
