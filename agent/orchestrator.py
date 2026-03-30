@@ -304,9 +304,30 @@ def run_agent_loop(ctx: QueryContext, llm: Any = None) -> QueryContext:
         except Exception as exc:
             return _set_fallback(ctx, f"agent_model_init_failed: {exc}")
 
+    # Build context-enriched user message so the agent sees resolved intent,
+    # prior conversation, and what was already attempted.
+    user_content = ctx.query
+    _is_followup = ctx.resolved_query and ctx.resolved_query != ctx.query
+    if _is_followup:
+        user_content = (
+            f"[Resolved query: {ctx.resolved_query}]\n\n"
+            f"Original user message: {ctx.query}"
+        )
+    # Only inject conversation history when the query looks like a follow-up,
+    # to avoid dragging prior-topic context into unrelated fallback queries.
+    if _is_followup and ctx.conversation_history:
+        recent = ctx.conversation_history[-3:]
+        history_lines = "\n".join(
+            f"Q: {turn.get('question', '')}\nA: {turn.get('answer', '')}"
+            for turn in recent
+        )
+        user_content = f"Previous conversation:\n{history_lines}\n\n{user_content}"
+    if ctx.tool_fallback_reason:
+        user_content += f"\n\n[Note: A previous tool attempt failed: {ctx.tool_fallback_reason}]"
+
     messages: List[Any] = [
         SystemMessage(content=_agent_system_prompt(ctx.lang_instruction)),
-        HumanMessage(content=ctx.query),
+        HumanMessage(content=user_content),
     ]
     datasets: Dict[str, ToolExecutionResult] = {}
 

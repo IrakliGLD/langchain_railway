@@ -1862,6 +1862,202 @@ def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
         "Shadow analyzer must not influence response_mode — should use heuristic fallback"
     )
     assert out.is_conceptual is False
+    assert out.resolved_query == "Tell me about market design"
+    assert out.resolved_query_source == "raw_query"
+
+
+def test_unresolved_analyzer_entities_skip_agent_loop_and_use_planner_path(monkeypatch):
+    """Unresolved analyzer entities must fail closed and fall through to planner/SQL, not agent loop."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "Explain balancing composition for the mystery bucket in January 2024"
+    payload["tooling"]["candidate_tools"] = [{
+        "name": "get_balancing_composition",
+        "score": 0.99,
+        "params_hint": {"entities": ["mystery bucket"]},
+    }]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(pipeline, "match_tool", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pipeline.orchestrator, "run_agent_loop",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run after analyzer tool build failure")),
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "generate_plan",
+        lambda ctx, **_kw: setattr(ctx, "plan", {"intent": "data"}) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.sql_executor, "validate_and_execute",
+        lambda ctx: setattr(ctx, "df", pd.DataFrame({"date": ["2024-01-01"], "p_bal_gel": [50.0]}))
+        or setattr(ctx, "cols", ["date", "p_bal_gel"])
+        or setattr(ctx, "rows", [("2024-01-01", 50.0)])
+        or ctx,
+    )
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "data answer via planner fallback") or ctx,
+    )
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("why did it increase?")
+
+    assert out.summary == "data answer via planner fallback"
+    assert out.tool_fallback_reason.startswith("analyzer_tool_build_error:unresolved_balancing_entities:")
+    assert out.used_tool is False
+
+
+def test_analyzer_build_failure_can_recover_via_resolved_query_match(monkeypatch):
+    """Analyzer build errors should try one resolved-query recovery before planner/SQL fallback."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+    from agent.tools.types import ToolInvocation
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "Explain the reasons for the increase in balancing electricity price in February 2022"
+    payload["tooling"]["candidate_tools"] = [{
+        "name": "get_balancing_composition",
+        "score": 0.99,
+        "params_hint": {"entities": ["mystery bucket"]},
+    }]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    def _match_tool(query, **_kwargs):
+        if "balancing electricity price" not in query.lower():
+            return None
+        return ToolInvocation(
+            name="get_prices",
+            params={"start_date": "2021-01-01", "end_date": "2022-02-01", "metric": "balancing", "currency": "gel", "granularity": "monthly"},
+            confidence=0.88,
+            reason=f"resolved_query_match:{query}",
+        )
+
+    monkeypatch.setattr(pipeline, "match_tool", _match_tool)
+    monkeypatch.setattr(
+        pipeline, "execute_tool",
+        lambda invocation: (
+            pd.DataFrame({"date": ["2022-02-01"], "p_bal_gel": [195.8]}),
+            ["date", "p_bal_gel"],
+            [("2022-02-01", 195.8)],
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.orchestrator, "run_agent_loop",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run when resolved-query recovery succeeds")),
+    )
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "data answer via resolved-query recovery") or ctx,
+    )
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("why did it increase?")
+
+    assert out.used_tool is True
+    assert out.tool_name == "get_prices"
+    assert out.summary == "data answer via resolved-query recovery"
+
+
+def test_resolved_query_recovery_validates_relevance_against_canonical_query(monkeypatch):
+    """Recovered tool candidates must be checked against the resolved follow-up meaning."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+    from agent.tools.types import ToolInvocation
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "Explain the reasons for the increase in balancing electricity price in February 2022"
+    payload["tooling"]["candidate_tools"] = [{
+        "name": "get_balancing_composition",
+        "score": 0.99,
+        "params_hint": {"entities": ["mystery bucket"]},
+    }]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+
+    def _match_tool(query, **_kwargs):
+        if "balancing electricity price" not in query.lower():
+            return None
+        return ToolInvocation(
+            name="get_prices",
+            params={"start_date": "2021-01-01", "end_date": "2022-02-01", "metric": "balancing", "currency": "gel", "granularity": "monthly"},
+            confidence=0.88,
+            reason=f"resolved_query_match:{query}",
+        )
+
+    relevance_queries = []
+
+    def _validate_tool_relevance(query, tool_name, *args, **kwargs):
+        relevance_queries.append((query, tool_name))
+        return True, "Tool relevance validated"
+
+    monkeypatch.setattr(pipeline, "match_tool", _match_tool)
+    monkeypatch.setattr(pipeline, "validate_tool_relevance", _validate_tool_relevance)
+    monkeypatch.setattr(
+        pipeline, "execute_tool",
+        lambda invocation: (
+            pd.DataFrame({"date": ["2022-02-01"], "p_bal_gel": [195.8]}),
+            ["date", "p_bal_gel"],
+            [("2022-02-01", 195.8)],
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.orchestrator, "run_agent_loop",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run when resolved-query recovery succeeds")),
+    )
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "data answer via resolved-query recovery") or ctx,
+    )
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("why did it increase?")
+
+    assert out.used_tool is True
+    assert out.tool_name == "get_prices"
+    assert relevance_queries == [
+        ("Explain the reasons for the increase in balancing electricity price in February 2022", "get_prices")
+    ]
 
 
 def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypatch):

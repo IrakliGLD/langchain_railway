@@ -270,6 +270,150 @@ def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
     return explanation_signal_hit
 
 
+def _derive_resolved_query(ctx: QueryContext) -> tuple[str, str]:
+    """Return the downstream resolved query and its authority source.
+
+    Only active analyzer output may influence runtime behavior. Shadow-mode
+    canonicalization remains useful for observability but must not change
+    routing or fallback prompts.
+    """
+    if (
+        ctx.question_analysis is not None
+        and ctx.question_analysis_source == "llm_active"
+        and ctx.question_analysis.canonical_query_en.strip()
+    ):
+        return ctx.question_analysis.canonical_query_en, "llm_active_canonical"
+    return ctx.query, "raw_query"
+
+
+def _apply_tool_result(
+    ctx: QueryContext,
+    invocation: ToolInvocation,
+    df: pd.DataFrame,
+    cols: list,
+    rows: list,
+    *,
+    is_explanation: bool,
+    relevance_query: str | None = None,
+) -> QueryContext:
+    """Attach a successful tool result to ctx and run shared post-processing."""
+    ctx.df = df
+    ctx.cols = list(cols)
+    ctx.rows = [tuple(r) for r in rows]
+    ctx.used_tool = True
+    ctx.tool_name = invocation.name
+    ctx.tool_params = dict(invocation.params)
+    ctx.tool_match_reason = invocation.reason
+    ctx.tool_confidence = invocation.confidence
+    ctx.tool_fallback_reason = ""
+    stamp_provenance(
+        ctx,
+        ctx.cols,
+        ctx.rows,
+        source="tool",
+        query_hash=tool_invocation_hash(invocation.name, invocation.params),
+    )
+    ctx.plan.setdefault("intent", "tool_query")
+    ctx.plan.setdefault("target", invocation.name)
+
+    tool_relevant, tool_reason = validate_tool_relevance(
+        (relevance_query or ctx.query),
+        invocation.name,
+    )
+    if not tool_relevant:
+        metrics.log_relevance_block()
+        ctx.used_tool = False
+        ctx.tool_fallback_reason = f"tool_relevance_blocked:{tool_reason}"
+        ctx.df = ctx.df.iloc[0:0]
+        ctx.cols = []
+        ctx.rows = []
+        clear_provenance(ctx)
+        log.warning("Recovered tool path blocked by relevance policy. reason=%s", tool_reason)
+        return ctx
+
+    log.info("Recovered tool relevance validated. reason=%s", tool_reason)
+    return _enrich_prices_with_composition(ctx, invocation, is_explanation)
+
+
+def _attempt_analyzer_tool_recovery(
+    ctx: QueryContext,
+    *,
+    failed_invocation: ToolInvocation | None,
+    is_explanation: bool,
+) -> tuple[QueryContext, bool]:
+    """Try broader but still deterministic recovery before agent fallback.
+
+    Scope intentionally stays narrow:
+    - first try the known safe why-query recovery from composition -> prices
+    - then try one deterministic route using the active resolved query
+    - if none succeed, let the normal planner/SQL path take over
+    """
+
+    candidates: list[ToolInvocation] = []
+    if failed_invocation is not None and failed_invocation.name == "get_balancing_composition" and is_explanation:
+        candidates.append(
+            ToolInvocation(
+                name="get_prices",
+                params={
+                    "start_date": failed_invocation.params.get("start_date"),
+                    "end_date": failed_invocation.params.get("end_date"),
+                    "metric": "balancing",
+                    "currency": "gel",
+                    "granularity": "monthly",
+                },
+                confidence=failed_invocation.confidence * 0.9,
+                reason=f"composition_fallback_from:{failed_invocation.reason}",
+            )
+        )
+
+    recovered_query = (ctx.resolved_query or ctx.query).strip()
+    if recovered_query:
+        generic_invocation = match_tool(recovered_query, is_explanation=is_explanation)
+        if generic_invocation:
+            same_as_failed = (
+                failed_invocation is not None
+                and generic_invocation.name == failed_invocation.name
+                and generic_invocation.params == failed_invocation.params
+            )
+            unsafe_broad_composition = (
+                generic_invocation.name == "get_balancing_composition"
+                and not generic_invocation.params.get("entities")
+            )
+            if not same_as_failed and not unsafe_broad_composition:
+                candidates.append(generic_invocation)
+
+    seen: set[tuple[str, str]] = set()
+    for invocation in candidates:
+        dedupe_key = (invocation.name, json.dumps(invocation.params, sort_keys=True))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        try:
+            t_tool = time.time()
+            df, cols, rows = execute_tool(invocation)
+            metrics.log_tool_call(time.time() - t_tool)
+            ctx = _apply_tool_result(
+                ctx,
+                invocation,
+                df,
+                cols,
+                rows,
+                is_explanation=is_explanation,
+                relevance_query=recovered_query,
+            )
+            if ctx.used_tool:
+                log.info(
+                    "Analyzer tool recovery succeeded. recovered_tool=%s rows=%d",
+                    invocation.name,
+                    len(ctx.rows),
+                )
+                return ctx, True
+        except Exception as exc:
+            log.warning("Analyzer tool recovery candidate failed. tool=%s err=%s", invocation.name, exc)
+
+    return ctx, False
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -349,13 +493,14 @@ def process_query(
             mode_disagree=mode_disagree,
         )
 
+    routing_query, routing_query_source = _derive_resolved_query(ctx)
+    ctx.resolved_query = routing_query
+    ctx.resolved_query_source = routing_query_source
+
     # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
     if ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS:
         t_stage = time.time()
         retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
-        routing_query = ctx.query
-        if ctx.question_analysis is not None and ctx.question_analysis.canonical_query_en.strip():
-            routing_query = ctx.question_analysis.canonical_query_en
         bundle = retrieve_vector_knowledge(
             routing_query,
             retrieval_mode=(
@@ -535,12 +680,15 @@ def process_query(
             # shadow mode must never influence routing decisions.
             t_stage = time.time()
             analyzer_invocation = None
+            analyzer_build_error = ""
             if ctx.question_analysis and ENABLE_QUESTION_ANALYZER_HINTS:
                 try:
                     analyzer_invocation = planner.build_tool_invocation_from_analysis(
                         ctx.question_analysis, ctx.query,
                     )
                 except Exception as exc:
+                    analyzer_build_error = str(exc)
+                    ctx.tool_fallback_reason = f"analyzer_tool_build_error:{exc}"
                     log.warning("Analyzer tool invocation build failed: %s", exc)
 
             # Trace the analyzer routing decision regardless of outcome
@@ -552,6 +700,7 @@ def process_query(
                 prefer_tool=qa.routing.prefer_tool if qa else False,
                 top_tool=analyzer_invocation.name if analyzer_invocation else None,
                 top_score=analyzer_invocation.confidence if analyzer_invocation else None,
+                build_error=analyzer_build_error,
                 analyzer_available=bool(qa),
                 hints_enabled=ENABLE_QUESTION_ANALYZER_HINTS,
             )
@@ -605,20 +754,47 @@ def process_query(
                         )
                         ctx = _enrich_prices_with_composition(ctx, analyzer_invocation, is_exp)
                 except Exception as exc:
-                    metrics.log_tool_error()
-                    ctx.used_tool = False
-                    ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
-                    metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_execution_error")
-                    clear_provenance(ctx)
-                    log.warning(
-                        "Analyzer tool failed; falling back. tool=%s err=%s",
-                        analyzer_invocation.name, exc,
+                    # --- Fallback: composition failure on why-query → try get_prices + enrichment ---
+                    ctx, recovered = _attempt_analyzer_tool_recovery(
+                        ctx,
+                        failed_invocation=analyzer_invocation,
+                        is_explanation=is_exp,
                     )
+
+                    if not recovered:
+                        metrics.log_tool_error()
+                        ctx.used_tool = False
+                        ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
+                        metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_execution_error")
+                        clear_provenance(ctx)
+                        log.warning(
+                            "Analyzer tool failed; falling back. tool=%s err=%s",
+                            analyzer_invocation.name, exc,
+                        )
             else:
-                metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
+                if analyzer_build_error:
+                    ctx, recovered = _attempt_analyzer_tool_recovery(
+                        ctx,
+                        failed_invocation=None,
+                        is_explanation=is_exp,
+                    )
+                    if recovered:
+                        log.info("Analyzer tool build failure recovered via resolved-query fallback.")
+                    else:
+                        metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_build_error")
+                else:
+                    metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
 
     # Stage 1/2: fallback SQL path when no tool route was used
-    if not ctx.used_tool and ENABLE_AGENT_LOOP:
+    # When the analyzer understood the query but its tool invocation failed,
+    # prefer the planner+SQL path (which consumes question_analysis) over the
+    # context-blind agent loop.  The agent loop remains the last resort.
+    _analyzer_tool_failed = (
+        not ctx.used_tool
+        and ctx.tool_fallback_reason
+        and ctx.tool_fallback_reason.startswith("analyzer_tool_")
+    )
+    if not ctx.used_tool and ENABLE_AGENT_LOOP and not _analyzer_tool_failed:
         t_stage = time.time()
         ctx = orchestrator.run_agent_loop(ctx)
         _trace_stage("stage_agent_loop", t_stage, outcome=ctx.agent_outcome, rounds=ctx.agent_rounds)

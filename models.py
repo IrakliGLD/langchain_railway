@@ -56,6 +56,8 @@ class QueryContext:
     conversation_history: Optional[List[Dict[str, str]]] = None
     trace_id: str = ""
     session_id: str = ""
+    resolved_query: str = ""                      # canonical_query_en or original query; set after Stage 0.2
+    resolved_query_source: str = ""              # "llm_active_canonical" | "raw_query"
     question_analysis: Optional[QuestionAnalysis] = None
     question_analysis_error: str = ""
     question_analysis_source: str = ""

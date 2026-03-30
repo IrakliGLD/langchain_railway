@@ -32,8 +32,91 @@ from agent.router import (
     extract_tariff_entities,
     extract_generation_types,
 )
+from agent.analyzer import BALANCING_SHARE_METADATA
+from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
 
 log = logging.getLogger("Enai")
+
+
+# ---------------------------------------------------------------------------
+# Balancing entity normalization
+# ---------------------------------------------------------------------------
+
+# Build inverted indexes from BALANCING_SHARE_METADATA (e.g. analyzer.py:37-47).
+# _COST_TO_ENTITIES: {"cheap": ["regulated_hpp", "deregulated_hydro"], ...}
+# _LABEL_TO_ENTITY: {"regulated hpp": "regulated_hpp", "deregulated hydro": "deregulated_hydro", ...}
+_ALLOWED_LOWER = {e.lower() for e in ALLOWED_BALANCING_ENTITIES}
+
+_COST_TO_ENTITIES: dict[str, list[str]] = {}
+_LABEL_TO_ENTITY: dict[str, str] = {}
+for _share_key, _meta in BALANCING_SHARE_METADATA.items():
+    _entity = _share_key.removeprefix("share_")
+    if _entity.lower() in _ALLOWED_LOWER:
+        _COST_TO_ENTITIES.setdefault(_meta["cost"], []).append(_entity)
+        _LABEL_TO_ENTITY[_meta["label"].lower()] = _entity
+
+
+def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
+    """Expand semantic/cost-based entity names to valid tool identifiers.
+
+    Returns:
+        - A deduplicated list in ``ALLOWED_BALANCING_ENTITIES`` order when
+          all requested entities resolve.
+        - An empty list when *input* is empty (caller did not specify
+          entities; tool should use its default = all).
+        - ``None`` when input had entities but one or more could not be
+          resolved, signalling *unresolved_concept*: the caller should not
+          invoke the tool with a partial or implicit "all" fallback.
+    """
+    if not raw_entities:
+        return []
+
+    resolved: list[str] = []
+    unresolved_seen = False
+    for raw in raw_entities:
+        val = raw.strip().lower()
+        # 1. Already a valid entity?
+        if val in _ALLOWED_LOWER:
+            resolved.append(val)
+            continue
+        # 2. Underscore-normalized form?
+        val_under = val.replace(" ", "_")
+        if val_under in _ALLOWED_LOWER:
+            resolved.append(val_under)
+            continue
+        # 3. Cost-tier expansion ("cheap energy", "expensive sources", …)
+        matched_cost = False
+        for cost_key, entities in _COST_TO_ENTITIES.items():
+            if cost_key in val:
+                resolved.extend(entities)
+                matched_cost = True
+                break
+        if matched_cost:
+            continue
+        # 4. Label substring match ("hydro" -> deregulated_hydro, etc.)
+        matched_label = False
+        for label, entity in _LABEL_TO_ENTITY.items():
+            if val in label or label in val:
+                resolved.append(entity)
+                matched_label = True
+        if matched_label:
+            continue
+        # 5. Unresolvable — log for observability
+        log.warning("normalize_balancing_entities: dropping unresolvable entity %r", raw)
+        unresolved_seen = True
+
+    # Deduplicate while preserving ALLOWED order
+    seen = set(resolved)
+    out = [e for e in ALLOWED_BALANCING_ENTITIES if e.lower() in seen]
+    if unresolved_seen or not out:
+        # Input had entities but one or more did not resolve -> fail closed
+        log.warning(
+            "normalize_balancing_entities: unresolved entities detected, returning None. input=%r resolved=%r",
+            raw_entities,
+            out,
+        )
+        return None
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -440,9 +523,18 @@ def build_tool_invocation_from_analysis(
         params.update({"mode": mode, "granularity": granularity})
 
     elif tool_name == ToolName.GET_BALANCING_COMPOSITION.value:
-        entities = (hint.entities if hint and hint.entities else []) or extract_balancing_entities(effective_query)
+        raw_entities = (hint.entities if hint and hint.entities else []) or extract_balancing_entities(effective_query)
+        entities = normalize_balancing_entities(raw_entities)
+        if entities is None:
+            # Entities were specified but none resolved → unresolved_concept.
+            # Abort rather than silently broadening to "all entities".
+            raise ValueError(
+                "unresolved_balancing_entities:"
+                + (",".join(str(entity).strip() for entity in raw_entities if str(entity).strip()) or "unknown")
+            )
         if entities:
             params["entities"] = entities
+        # empty list (no entities specified) → tool fetches all (safe default)
 
     else:
         log.warning("Unknown tool from analyzer: %s", tool_name)
