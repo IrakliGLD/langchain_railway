@@ -152,7 +152,13 @@ def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
     query_type = ctx.question_analysis.classification.query_type.value
     if ctx.question_analysis.routing.preferred_path == PreferredPath.CLARIFY:
         return True
-    return query_type in {"forecast", "comparison"}
+    if query_type in {"forecast", "comparison"}:
+        return True
+    # Comparison-shaped data_explanation (e.g., "compare Jan vs Feb prices") also
+    # needs its derived metrics to produce a meaningful answer.
+    if query_type == "data_explanation" and ctx.question_analysis.analysis_requirements.derived_metrics:
+        return True
+    return False
 
 
 def _enrich_prices_with_composition(
@@ -496,6 +502,8 @@ def process_query(
     routing_query, routing_query_source = _derive_resolved_query(ctx)
     ctx.resolved_query = routing_query
     ctx.resolved_query_source = routing_query_source
+    if routing_query_source == "llm_active_canonical":
+        ctx.semantic_locked = True
 
     # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
     if ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS:
@@ -572,6 +580,7 @@ def process_query(
         requested_derived_metrics=list(ctx.requested_derived_metrics or []),
         analyzer_available=ctx.question_analysis is not None,
         analyzer_source=ctx.question_analysis_source,
+        semantic_locked=ctx.semantic_locked,
     )
 
     if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
@@ -633,7 +642,8 @@ def process_query(
                 )
                 ctx.plan.setdefault("intent", "tool_query")
                 ctx.plan.setdefault("target", invocation.name)
-                tool_relevant, tool_reason = validate_tool_relevance(ctx.query, invocation.name)
+                _relevance_q = ctx.resolved_query or ctx.query
+                tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, invocation.name)
                 if not tool_relevant:
                     metrics.log_relevance_block()
                     ctx.used_tool = False
@@ -735,7 +745,8 @@ def process_query(
                     )
                     ctx.plan.setdefault("intent", "tool_query")
                     ctx.plan.setdefault("target", analyzer_invocation.name)
-                    tool_relevant, tool_reason = validate_tool_relevance(ctx.query, analyzer_invocation.name)
+                    _relevance_q = ctx.resolved_query or ctx.query
+                    tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, analyzer_invocation.name)
                     if not tool_relevant:
                         metrics.log_relevance_block()
                         ctx.used_tool = False
@@ -802,7 +813,8 @@ def process_query(
             log.info("Agent conceptual exit | rounds=%s", ctx.agent_rounds)
             return ctx
         if ctx.agent_outcome == "data_exit":
-            tool_relevant, tool_reason = validate_tool_relevance(ctx.query, ctx.tool_name or "")
+            _relevance_q = ctx.resolved_query or ctx.query
+            tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, ctx.tool_name or "")
             if not tool_relevant:
                 metrics.log_relevance_block()
                 ctx.used_tool = False
@@ -892,26 +904,39 @@ def process_query(
     )
 
     if _should_block_data_summary_for_missing_evidence(ctx):
-        ctx.resolution_policy = ResolutionPolicy.CLARIFY
-        ctx.clarify_reason = "missing_requested_analysis_evidence"
-        ctx.data_summary_blocked_reason = (
-            "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
-        )
-        ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
-        ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
-        log.info(
-            "Blocking data summarization due to missing derived evidence: %s",
-            ctx.missing_evidence_for_metrics,
-        )
-        t_stage = time.time()
-        ctx = summarizer.answer_clarify(ctx)
-        _trace_stage(
-            "stage_4_clarify_summary",
-            t_stage,
-            reason=ctx.clarify_reason,
-            missing_evidence=",".join(ctx.missing_evidence_for_metrics),
-        )
-        return ctx
+        # If some evidence was materialized, allow Stage 4 with partial data
+        # rather than forcing a clarification that discards all available context.
+        if ctx.analysis_evidence:
+            log.info(
+                "Partial evidence available (%d records); proceeding to Stage 4 "
+                "despite missing: %s",
+                len(ctx.analysis_evidence), ctx.missing_evidence_for_metrics,
+            )
+            ctx.data_summary_blocked_reason = (
+                "partial_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+            )
+            # Fall through to Stage 4 summarize_data below
+        else:
+            ctx.resolution_policy = ResolutionPolicy.CLARIFY
+            ctx.clarify_reason = "missing_requested_analysis_evidence"
+            ctx.data_summary_blocked_reason = (
+                "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+            )
+            ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
+            ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
+            log.info(
+                "Blocking data summarization due to missing derived evidence: %s",
+                ctx.missing_evidence_for_metrics,
+            )
+            t_stage = time.time()
+            ctx = summarizer.answer_clarify(ctx)
+            _trace_stage(
+                "stage_4_clarify_summary",
+                t_stage,
+                reason=ctx.clarify_reason,
+                missing_evidence=",".join(ctx.missing_evidence_for_metrics),
+            )
+            return ctx
 
     # Stage 4: summarize
     t_stage = time.time()

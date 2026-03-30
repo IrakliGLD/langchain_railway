@@ -1450,7 +1450,17 @@ def enrich(ctx: QueryContext) -> QueryContext:
     """
     # --- Share resolution ---
     share_intent = str(ctx.plan.get("intent", "")).lower()
-    share_query_detected = share_intent in {"calculate_share", "share"} or "share" in ctx.query.lower()
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        # When the semantic contract is available, trust only structured analyzer
+        # signals for share/composition intent. Free-form intent text is not
+        # authoritative enough for downstream execution.
+        analyzer_share_signal = ctx.analyzer_indicates_share_intent
+        share_query_detected = (
+            share_intent in {"calculate_share", "share"} or analyzer_share_signal
+        )
+    else:
+        # No analyzer available: fall back to keyword matching (legacy behavior)
+        share_query_detected = share_intent in {"calculate_share", "share"} or "share" in ctx.query.lower()
     share_df_for_summary = ctx.df
 
     if share_query_detected:
@@ -1497,6 +1507,23 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"⚠️ Seasonal stats calculation failed: {e}")
 
     # --- Share summary override ---
+    # Evidence precedence: do not generate share override if a non-share tool result
+    # already exists. A get_prices result aligned with a price-comparison semantic
+    # target should not be displaced by a share override.
+    if share_query_detected and ctx.semantic_locked:
+        has_non_share_result = (
+            not ctx.df.empty
+            and ctx.used_tool
+            and ctx.tool_name != "get_balancing_composition"
+        )
+        if has_non_share_result:
+            log.info(
+                "Skipping share_summary_override: non-share tool %s result "
+                "already exists (semantic_locked)",
+                ctx.tool_name,
+            )
+            share_query_detected = False
+
     if share_query_detected:
         try:
             ctx.share_summary_override = generate_share_summary(share_df_for_summary, ctx.plan, ctx.query)
@@ -1506,28 +1533,37 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Share summary override failed: {share_err}")
 
     # --- Correlation analysis ---
-    user_text = ctx.query.lower().strip()
-    intent_text = str(ctx.plan.get("intent", "")).lower()
-    combined_text = f"{intent_text} {user_text}"
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        # Use structured analyzer signals for correlation detection
+        qa_reqs = ctx.question_analysis.analysis_requirements
+        if qa_reqs.needs_driver_analysis or qa_reqs.needs_correlation_context:
+            log.info("🧮 Semantic intent → correlation (analyzer: needs_driver=%s needs_correlation=%s).",
+                     qa_reqs.needs_driver_analysis, qa_reqs.needs_correlation_context)
+            ctx.plan["intent"] = "correlation"
+    else:
+        # Legacy keyword-based correlation detection (no analyzer available)
+        user_text = ctx.query.lower().strip()
+        intent_text = str(ctx.plan.get("intent", "")).lower()
+        combined_text = f"{intent_text} {user_text}"
 
-    driver_keywords = [
-        "driver", "cause", "effect", "factor", "reason", "impact", "influence",
-        "relationship", "correlation", "depend", "why", "behind", "due to",
-        "explain", "determinant", "driven by", "lead to", "affect", "because",
-        "based on", "results in", "responsible for"
-    ]
-    causal_patterns = [
-        r"what.*cause", r"what.*affect", r"why.*change", r"why.*increase",
-        r"factors?.*behind", r"factors?.*influenc", r"reason.*for",
-        r"cause.*of", r"impact.*on", r"driv.*price", r"lead.*to"
-    ]
+        driver_keywords = [
+            "driver", "cause", "effect", "factor", "reason", "impact", "influence",
+            "relationship", "correlation", "depend", "why", "behind", "due to",
+            "explain", "determinant", "driven by", "lead to", "affect", "because",
+            "based on", "results in", "responsible for"
+        ]
+        causal_patterns = [
+            r"what.*cause", r"what.*affect", r"why.*change", r"why.*increase",
+            r"factors?.*behind", r"factors?.*influenc", r"reason.*for",
+            r"cause.*of", r"impact.*on", r"driv.*price", r"lead.*to"
+        ]
 
-    text_hit = any(k in combined_text for k in driver_keywords)
-    pattern_hit = any(re.search(p, combined_text) for p in causal_patterns)
+        text_hit = any(k in combined_text for k in driver_keywords)
+        pattern_hit = any(re.search(p, combined_text) for p in causal_patterns)
 
-    if text_hit or pattern_hit:
-        log.info("🧮 Semantic intent → correlation (detected cause/effect phrasing).")
-        ctx.plan["intent"] = "correlation"
+        if text_hit or pattern_hit:
+            log.info("🧮 Semantic intent → correlation (detected cause/effect phrasing).")
+            ctx.plan["intent"] = "correlation"
 
     if ctx.plan.get("intent") == "correlation":
         log.info("🔍 Building comprehensive balancing-price correlation analysis")
@@ -1579,7 +1615,12 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"⚠️ Correlation analysis failed: {e}")
 
     # --- Forecast mode (CAGR) ---
-    if _detect_forecast_mode(ctx.query) and not ctx.df.empty:
+    _forecast_detected = (
+        ctx.question_analysis.classification.query_type.value == "forecast"
+        if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+        else _detect_forecast_mode(ctx.query)
+    )
+    if _forecast_detected and not ctx.df.empty:
         try:
             ctx.df, _forecast_note = _generate_cagr_forecast(ctx.df, ctx.query)
             ctx.stats_hint += f"\n\n--- FORECAST NOTE ---\n{_forecast_note}"
@@ -1588,7 +1629,16 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Forecast generation failed: {_e}")
 
     # --- Why mode (causal reasoning) ---
-    if _detect_why_mode(ctx.query) and not ctx.df.empty:
+    _why_detected = False
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        qa_reqs = ctx.question_analysis.analysis_requirements
+        _why_detected = (
+            qa_reqs.needs_driver_analysis
+            or ctx.question_analysis.classification.query_type.value == "data_explanation"
+        )
+    else:
+        _why_detected = _detect_why_mode(ctx.query)
+    if _why_detected and not ctx.df.empty:
         try:
             _build_why_context(ctx)
         except Exception as _e:
@@ -1609,11 +1659,14 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
-    trend_keywords = [
-        "trend", "ტრენდი", "тренд", "trending", "forecast", "პროგნოზი", "прогноз",
-        "projection", "predict", "future", "მომავალი", "continue", "extrapolate"
-    ]
-    ctx.add_trendlines = any(keyword in ctx.query.lower() for keyword in trend_keywords)
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        ctx.add_trendlines = ctx.question_analysis.classification.query_type.value == "forecast"
+    else:
+        trend_keywords = [
+            "trend", "ტრენდი", "тренд", "trending", "forecast", "პროგნოზი", "прогноз",
+            "projection", "predict", "future", "მომავალი", "continue", "extrapolate"
+        ]
+        ctx.add_trendlines = any(keyword in ctx.query.lower() for keyword in trend_keywords)
 
     if ctx.add_trendlines:
         year_matches = re.findall(r'\b(20[2-9][0-9])\b', ctx.query)
@@ -1642,6 +1695,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
         correlation_keys=list(ctx.correlation_results.keys()),
         add_trendlines=bool(ctx.add_trendlines),
         trendline_extend_to=ctx.trendline_extend_to or "",
+        semantic_locked=ctx.semantic_locked,
     )
     return ctx
 

@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
-from contracts.question_analysis import QuestionAnalysis
+from contracts.question_analysis import QuestionAnalysis, ToolName
 from contracts.vector_knowledge import VectorKnowledgeBundle
 
 
@@ -69,6 +69,7 @@ class QueryContext:
     # --- response policy (set once after Stage 0.2, authoritative for all later stages) ---
     response_mode: str = ""                       # ResponseMode value or "" before derivation
     resolution_policy: str = ""                  # ResolutionPolicy value or "" before derivation
+    semantic_locked: bool = False                    # True after Stage 0.2 succeeds; downstream must prefer question_analysis
     tool_blocked_by_policy: bool = False
     agent_loop_blocked_by_policy: bool = False
     clarify_reason: str = ""
@@ -140,6 +141,30 @@ class QueryContext:
     # --- timing ---
     exec_time: float = 0.0
     stage_timings_ms: Dict[str, float] = dc_field(default_factory=dict)
+
+    @property
+    def effective_query(self) -> str:
+        """Best available query: resolved_query when locked, raw query otherwise."""
+        if self.semantic_locked and self.resolved_query:
+            return self.resolved_query
+        return self.query
+
+    @property
+    def analyzer_indicates_share_intent(self) -> bool:
+        """Return True when active analyzer output structurally indicates share intent.
+
+        This intentionally ignores the free-form ``classification.intent`` string
+        and also ignores secondary/supporting metadata such as dimensions or chart
+        hints. For the balancing share override path, only a primary composition-
+        led analyzer routing signal is authoritative enough.
+        """
+        qa = self.question_analysis
+        if qa is None or self.question_analysis_source != "llm_active":
+            return False
+
+        candidate_tools = qa.tooling.candidate_tools or []
+        top_tool = candidate_tools[0].name if candidate_tools else None
+        return top_tool == ToolName.GET_BALANCING_COMPOSITION
 
 
 class Question(BaseModel):

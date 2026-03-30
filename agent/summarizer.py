@@ -845,7 +845,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         log.info("Capped domain_knowledge to 4000 chars (vector evidence is primary)")
     try:
         envelope = llm_summarize_structured(
-            ctx.query,
+            ctx.effective_query,
             data_preview="",
             stats_hint=conceptual_hint,
             lang_instruction=ctx.lang_instruction,
@@ -875,7 +875,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             type(exc).__name__, exc,
         )
         ctx.summary = llm_summarize(
-            ctx.query,
+            ctx.effective_query,
             data_preview="",
             stats_hint=conceptual_hint,
             lang_instruction=ctx.lang_instruction,
@@ -1038,6 +1038,16 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     ctx.grounding_policy = ""
     ctx.summary_domain_knowledge = ""
 
+    # Evidence precedence: discard share override if semantic intent is not share/composition.
+    # Trust only structured analyzer signals, not the free-form intent string.
+    if ctx.share_summary_override and ctx.semantic_locked:
+        if not ctx.analyzer_indicates_share_intent:
+            log.warning(
+                "Discarding share_summary_override: structured analyzer signals "
+                "do not indicate share/composition",
+            )
+            ctx.share_summary_override = None
+
     if ctx.share_summary_override:
         ctx.summary = ctx.share_summary_override
         ctx.summary_source = "deterministic_share_summary"
@@ -1148,7 +1158,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 type(e).__name__, e,
             )
             ctx.summary = llm_summarize(
-                ctx.query,
+                routing_query,
                 ctx.preview,
                 ctx.stats_hint,
                 ctx.lang_instruction,

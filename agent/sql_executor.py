@@ -206,8 +206,12 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
     else:
         log.info(f"✅ SQL validation passed: {validation_reason}")
 
-    # Force pivot injection for balancing share queries
-    if should_inject_balancing_pivot(ctx.query, safe_sql):
+    semantic_query = ctx.effective_query
+
+    # Force pivot injection for balancing share queries. When Stage 0.2 locked
+    # semantics, use the resolved query so raw follow-up wording cannot hijack
+    # the fallback SQL path.
+    if should_inject_balancing_pivot(semantic_query, safe_sql):
         log.info("🔄 Force-injecting balancing share pivot based on query intent")
         safe_sql = build_trade_share_cte(safe_sql)
 
@@ -250,7 +254,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
 
     # Validate SQL relevance
     ctx.sql_is_relevant, relevance_reason, ctx.skip_chart_due_to_relevance = validate_sql_relevance(
-        ctx.query, safe_sql, ctx.plan
+        semantic_query, safe_sql, ctx.plan
     )
     if not ctx.sql_is_relevant:
         log.warning(f"⚠️ SQL relevance issue: {relevance_reason}")
