@@ -343,6 +343,10 @@ def _apply_tool_result(
         return ctx
 
     log.info("Recovered tool relevance validated. reason=%s", tool_reason)
+    if ENABLE_EVIDENCE_PLANNER:
+        # Composition enrichment is handled by the evidence loop
+        # (Stage 0.8 via COMPOSITION_CONTEXT role); skip inline enrichment.
+        return ctx
     return _enrich_prices_with_composition(ctx, invocation, is_explanation)
 
 
@@ -618,19 +622,37 @@ def process_query(
     if ENABLE_TYPED_TOOLS:
         t_stage = time.time()
 
-        is_exp = False
-        if ctx.question_analysis:
-            qa_type = ctx.question_analysis.classification.query_type.value
-            if qa_type in ("data_explanation", "conceptual_definition"):
-                is_exp = True
-        elif any(w in ctx.query.lower() for w in ["why", "explain", "reason", "რატომ", "ახსენი", "почему", "объясни"]):
-            is_exp = True
-            
         is_exp = _should_route_tool_as_explanation(ctx)
-        invocation = match_tool(ctx.query, is_explanation=is_exp)
-        _trace_stage("stage_0_5_router_match", t_stage, matched=bool(invocation))
+
+        # Plan-driven invocation: when evidence plan exists, execute the
+        # first unsatisfied step instead of keyword-matching.  Keyword
+        # routing remains as fallback when the plan is empty.
+        _plan_step_used = None
+        if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
+            _plan_step = evidence_planner.next_unsatisfied_step(ctx.evidence_plan)
+            if _plan_step:
+                invocation = ToolInvocation(
+                    name=_plan_step["tool_name"],
+                    params=_plan_step["params"],
+                    confidence=0.85,
+                    reason=f"evidence_plan:{_plan_step['role']}",
+                )
+                _plan_step_used = _plan_step
+                _trace_stage(
+                    "stage_0_5_plan_driven", t_stage,
+                    plan_tool=_plan_step["tool_name"],
+                    plan_role=_plan_step["role"],
+                )
+            else:
+                # All plan steps already satisfied (e.g. by earlier stages)
+                invocation = None
+        else:
+            invocation = match_tool(ctx.query, is_explanation=is_exp)
+        _trace_stage("stage_0_5_router_match", t_stage, matched=bool(invocation), plan_driven=bool(_plan_step_used))
         if invocation:
-            if "semantic fallback" in (invocation.reason or "").lower():
+            if _plan_step_used:
+                metrics.log_router_match("plan_driven")
+            elif "semantic fallback" in (invocation.reason or "").lower():
                 metrics.log_router_match("semantic")
             else:
                 metrics.log_router_match("deterministic")
@@ -675,9 +697,11 @@ def process_query(
                     if not ENABLE_EVIDENCE_PLANNER:
                         ctx = _enrich_prices_with_composition(ctx, invocation, is_exp)
 
-                    # Multi-evidence: store result under the matching plan step
-                    if ENABLE_EVIDENCE_PLANNER and len(ctx.evidence_plan) > 1:
-                        _matched_step = next(
+                    # Multi-evidence: store result under the matching plan step.
+                    # When plan-driven, _plan_step_used is the exact step;
+                    # otherwise fall back to name-based matching.
+                    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
+                        _matched_step = _plan_step_used or next(
                             (s for s in ctx.evidence_plan if s["tool_name"] == invocation.name and not s.get("satisfied")),
                             None,
                         )
@@ -712,6 +736,10 @@ def process_query(
                 ctx.tool_fallback_reason = str(exc)
                 metrics.log_tool_fallback_intent(ctx.query, "tool_execution_error")
                 clear_provenance(ctx)
+                # Mark the plan step as failed so Stage 0.8 skips it
+                # instead of retrying the same deterministic failure.
+                if _plan_step_used:
+                    _plan_step_used["error"] = f"stage_0_5:{exc}"
                 log.warning(
                     "Typed tool failed; falling back to SQL path. tool=%s err=%s",
                     invocation.name,
@@ -726,8 +754,12 @@ def process_query(
             )
 
             # --- Stage 0.7: LLM analyzer-driven tool routing (fallback) ---
-            # When the keyword router misses, check whether the question
-            # analyzer (which sees conversation history) identified a tool.
+            # Fires when Stage 0.5 keyword/plan-driven routing misses.
+            # When ENABLE_EVIDENCE_PLANNER is on, this is a second chance
+            # to satisfy the primary plan step; secondary steps are handled
+            # by Stage 0.8's evidence loop.  Legacy recovery via
+            # _attempt_analyzer_tool_recovery() only fires when the planner
+            # has no actionable steps remaining (all satisfied or errored).
             # Only use analyzer output when running in active/hints mode —
             # shadow mode must never influence routing decisions.
             t_stage = time.time()
@@ -809,7 +841,7 @@ def process_query(
                             ctx = _enrich_prices_with_composition(ctx, analyzer_invocation, is_exp)
 
                         # Multi-evidence: store result under matching plan step
-                        if ENABLE_EVIDENCE_PLANNER and len(ctx.evidence_plan) > 1:
+                        if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
                             _matched_step = next(
                                 (s for s in ctx.evidence_plan
                                  if s["tool_name"] == analyzer_invocation.name and not s.get("satisfied")),
@@ -824,34 +856,57 @@ def process_query(
                                 }
                                 _matched_step["satisfied"] = True
                 except Exception as exc:
-                    # --- Fallback: composition failure on why-query → try get_prices + enrichment ---
-                    ctx, recovered = _attempt_analyzer_tool_recovery(
-                        ctx,
-                        failed_invocation=analyzer_invocation,
-                        is_explanation=is_exp,
-                    )
-
-                    if not recovered:
-                        metrics.log_tool_error()
-                        ctx.used_tool = False
-                        ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
-                        metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_execution_error")
-                        clear_provenance(ctx)
-                        log.warning(
-                            "Analyzer tool failed; falling back. tool=%s err=%s",
+                    # --- Fallback: when evidence planner is on, Stage 0.8
+                    # handles remaining steps; skip ad-hoc recovery.  When
+                    # off, fall back to the composition→prices recovery. ---
+                    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan and evidence_planner.has_unsatisfied_steps(ctx.evidence_plan):
+                        # Mark the matching plan step as failed so Stage 0.8
+                        # advances past it instead of retrying.
+                        _failed_step = next(
+                            (s for s in ctx.evidence_plan
+                             if s["tool_name"] == analyzer_invocation.name and not s.get("satisfied")),
+                            None,
+                        )
+                        if _failed_step:
+                            _failed_step["error"] = f"stage_0_7:{exc}"
+                        log.info(
+                            "Analyzer tool failed; evidence plan has remaining steps. tool=%s err=%s",
                             analyzer_invocation.name, exc,
                         )
+                        ctx.used_tool = False
+                        ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
+                        clear_provenance(ctx)
+                    else:
+                        ctx, recovered = _attempt_analyzer_tool_recovery(
+                            ctx,
+                            failed_invocation=analyzer_invocation,
+                            is_explanation=is_exp,
+                        )
+
+                        if not recovered:
+                            metrics.log_tool_error()
+                            ctx.used_tool = False
+                            ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
+                            metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_execution_error")
+                            clear_provenance(ctx)
+                            log.warning(
+                                "Analyzer tool failed; falling back. tool=%s err=%s",
+                                analyzer_invocation.name, exc,
+                            )
             else:
                 if analyzer_build_error:
-                    ctx, recovered = _attempt_analyzer_tool_recovery(
-                        ctx,
-                        failed_invocation=None,
-                        is_explanation=is_exp,
-                    )
-                    if recovered:
-                        log.info("Analyzer tool build failure recovered via resolved-query fallback.")
+                    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan and evidence_planner.has_unsatisfied_steps(ctx.evidence_plan):
+                        log.info("Analyzer tool build failed; evidence plan has remaining steps.")
                     else:
-                        metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_build_error")
+                        ctx, recovered = _attempt_analyzer_tool_recovery(
+                            ctx,
+                            failed_invocation=None,
+                            is_explanation=is_exp,
+                        )
+                        if recovered:
+                            log.info("Analyzer tool build failure recovered via resolved-query fallback.")
+                        else:
+                            metrics.log_tool_fallback_intent(ctx.query, "analyzer_tool_build_error")
                 else:
                     metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
 

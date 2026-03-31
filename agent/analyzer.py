@@ -31,59 +31,17 @@ log = logging.getLogger("Enai")
 
 
 # ---------------------------------------------------------------------------
-# Constants (moved from main.py)
+# Constants — canonical definitions live in config.metric_config;
+# re-exported here for backward compatibility with existing imports.
 # ---------------------------------------------------------------------------
 
-BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
-    "share_regulated_hpp": {"label": "regulated HPP", "cost": "cheap", "usd_linked": False},
-    "share_deregulated_hydro": {"label": "deregulated hydro", "cost": "cheap", "usd_linked": False},
-    "share_renewable_ppa": {"label": "renewable PPA", "cost": "moderate", "usd_linked": True},
-    "share_thermal_ppa": {"label": "thermal PPA", "cost": "expensive", "usd_linked": True},
-    "share_import": {"label": "imports", "cost": "expensive", "usd_linked": True},
-    "share_regulated_new_tpp": {"label": "new regulated TPP", "cost": "expensive", "usd_linked": True},
-    "share_regulated_old_tpp": {"label": "old regulated TPP", "cost": "moderate", "usd_linked": True},
-    "share_all_ppa": {"label": "all PPAs", "cost": "expensive", "usd_linked": True},
-    "share_all_renewables": {"label": "all renewables", "cost": "mixed", "usd_linked": True},
-}
-
-METRIC_VALUE_ALIASES: dict[str, list[str]] = {
-    # Balancing prices
-    "p_bal_gel": ["p_bal_gel", "balancing_price_gel"],
-    "p_bal_usd": ["p_bal_usd", "balancing_price_usd"],
-    # Deregulated prices
-    "p_dereg_gel": ["p_dereg_gel", "deregulated_price_gel"],
-    "p_dereg_usd": ["p_dereg_usd", "deregulated_price_usd"],
-    # Guaranteed capacity
-    "p_gcap_gel": ["p_gcap_gel", "guaranteed_capacity_gel"],
-    "p_gcap_usd": ["p_gcap_usd", "guaranteed_capacity_usd"],
-    # Exchange rate
-    "xrate": ["xrate", "exchange_rate"],
-    # Tariffs
-    "tariff_gel": ["tariff_gel", "regulated_tariff_gel"],
-    "tariff_usd": ["tariff_usd", "regulated_tariff_usd"],
-    # Generation
-    "quantity_tech": ["quantity_tech", "generation_quantity"],
-    # CPI
-    "cpi": ["cpi", "consumer_price_index"],
-}
-
-DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
-    # MoM
-    {"metric_name": "mom_absolute_change", "metric": "p_bal_gel"},
-    {"metric_name": "mom_percent_change", "metric": "p_bal_gel"},
-    {"metric_name": "mom_absolute_change", "metric": "xrate"},
-    {"metric_name": "mom_percent_change", "metric": "xrate"},
-    {"metric_name": "share_delta_mom", "metric": "share_import"},
-    {"metric_name": "share_delta_mom", "metric": "share_thermal_ppa"},
-    {"metric_name": "share_delta_mom", "metric": "share_renewable_ppa"},
-    # YoY — seasonal context for balancing price analysis
-    {"metric_name": "yoy_absolute_change", "metric": "p_bal_gel"},
-    {"metric_name": "yoy_percent_change", "metric": "p_bal_gel"},
-    {"metric_name": "yoy_absolute_change", "metric": "p_bal_usd"},
-    {"metric_name": "yoy_percent_change", "metric": "p_bal_usd"},
-    {"metric_name": "yoy_absolute_change", "metric": "xrate"},
-    {"metric_name": "yoy_percent_change", "metric": "xrate"},
-]
+from config_metrics.metric_config import (
+    BALANCING_SHARE_METADATA,
+    METRIC_VALUE_ALIASES,
+    DERIVED_METRIC_DEFAULTS,
+    SUMMER_MONTHS,
+)
+from agent.metric_registry import MetricContext, dispatch_metric
 
 MONTH_NAME_TO_NUMBER = {
     "january": 1, "jan": 1, "february": 2, "feb": 2,
@@ -437,16 +395,6 @@ def _build_historical_month_context(
     return result
 
 
-def _scenario_formula(metric_name: str, metric: str, factor: float, volume: float, agg: str, n: int) -> str:
-    """Build a human-readable formula string for scenario evidence records."""
-    if metric_name == "scenario_scale":
-        return f"{metric} * {factor}, {agg} over {n} periods"
-    elif metric_name == "scenario_offset":
-        return f"{metric} + {factor}, {agg} over {n} periods"
-    else:
-        return f"({factor} - {metric}) * {volume}, {agg} over {n} periods"
-
-
 def _build_requested_analysis_evidence(
     ctx: QueryContext,
     df: pd.DataFrame,
@@ -474,24 +422,20 @@ def _build_requested_analysis_evidence(
                 except (ValueError, TypeError):
                     pass
 
-    def _row_value(frame: pd.DataFrame, metric_name: str) -> Optional[float]:
-        if frame is None or frame.empty:
-            return None
-        for candidate in _metric_aliases(metric_name):
-            if candidate not in frame.columns:
-                continue
-            value = frame[candidate].iloc[0]
-            if value is None or pd.isna(value):
-                continue
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                continue
-        return None
-
-    def _share_value(snapshot: dict[str, float], metric_name: str) -> Optional[float]:
-        value = snapshot.get(metric_name)
-        return None if value is None else float(value)
+    mctx = MetricContext(
+        df=df,
+        time_col=time_col,
+        current_ts=current_ts,
+        current_row=current_row,
+        previous_ts=previous_ts,
+        previous_row=previous_row,
+        cur_shares=cur_shares,
+        prev_shares=prev_shares,
+        yoy_row=yoy_row,
+        yoy_ts=yoy_ts,
+        yoy_shares=yoy_shares,
+        correlation_results=ctx.correlation_results,
+    )
 
     evidence_rows: list[dict[str, Any]] = []
     for request in requests:
@@ -517,186 +461,9 @@ def _build_requested_analysis_evidence(
             "formula": "",
         }
 
-        if metric_name in {"mom_absolute_change", "mom_percent_change"}:
-            cur_val = _share_value(cur_shares, metric) if metric.startswith("share_") else _row_value(current_row, metric)
-            prev_val = _share_value(prev_shares, metric) if metric.startswith("share_") else _row_value(previous_row, metric)
-            if cur_val is None or prev_val is None:
-                continue
-            delta = cur_val - prev_val
-            pct = None if abs(prev_val) < 1e-12 else (delta / prev_val) * 100.0
-            record.update(
-                {
-                    "comparison_period": str(previous_ts) if previous_ts is not None and not pd.isna(previous_ts) else None,
-                    "current_value": round(cur_val, 6),
-                    "previous_value": round(prev_val, 6),
-                    "absolute_change": round(delta, 6),
-                    "percent_change": None if pct is None else round(pct, 4),
-                    "formula": "current_value - previous_value",
-                }
-            )
-        elif metric_name in {"yoy_absolute_change", "yoy_percent_change"}:
-            cur_val = _share_value(cur_shares, metric) if metric.startswith("share_") else _row_value(current_row, metric)
-            yoy_val = _share_value(yoy_shares, metric) if metric.startswith("share_") else _row_value(yoy_row, metric)
-            if cur_val is None or yoy_val is None:
-                continue
-            delta = cur_val - yoy_val
-            pct = None if abs(yoy_val) < 1e-12 else (delta / yoy_val) * 100.0
-            record.update(
-                {
-                    "comparison_period": str(yoy_ts) if yoy_ts is not None and not pd.isna(yoy_ts) else None,
-                    "current_value": round(cur_val, 6),
-                    "previous_value": round(yoy_val, 6),
-                    "absolute_change": round(delta, 6),
-                    "percent_change": None if pct is None else round(pct, 4),
-                    "formula": "current_value - previous_value_same_period_last_year",
-                }
-            )
-        elif metric_name == "share_delta_mom":
-            cur_val = _share_value(cur_shares, metric)
-            prev_val = _share_value(prev_shares, metric)
-            if cur_val is None or prev_val is None:
-                continue
-            delta = cur_val - prev_val
-            record.update(
-                {
-                    "comparison_period": str(previous_ts) if previous_ts is not None and not pd.isna(previous_ts) else None,
-                    "current_value": round(cur_val, 6),
-                    "previous_value": round(prev_val, 6),
-                    "absolute_change": round(delta, 6),
-                    "formula": "current_share - previous_share",
-                }
-            )
-        elif metric_name == "correlation_to_target":
-            corr_target = target_metric or "p_bal_gel"
-            corr_map = ctx.correlation_results.get(corr_target, {})
-            corr_value = corr_map.get(metric)
-            if corr_value is None:
-                continue
-            record.update(
-                {
-                    "target_metric": corr_target,
-                    "correlation_value": round(float(corr_value), 6),
-                    "formula": f"corr({metric}, {corr_target}) over available series",
-                }
-            )
-        elif metric_name == "trend_slope":
-            candidates = _metric_aliases(metric)
-            value_col = next((candidate for candidate in candidates if candidate in df.columns), None)
-            if value_col is None or len(df) < 2:
-                continue
-            numeric_series = pd.to_numeric(df[value_col], errors="coerce")
-            valid = numeric_series.notna()
-            if valid.sum() < 2:
-                continue
-            x = np.arange(valid.sum(), dtype=float)
-            y = numeric_series[valid].astype(float).to_numpy()
-            slope = np.polyfit(x, y, deg=1)[0]
-            record.update(
-                {
-                    "trend_slope": round(float(slope), 6),
-                    "formula": f"linear_slope({metric}) over ordered observations",
-                }
-            )
-        elif metric_name in ("scenario_scale", "scenario_offset", "scenario_payoff"):
-            candidates = _metric_aliases(metric)
-            value_col = next((c for c in candidates if c in df.columns), None)
-            if value_col is None:
-                continue
-            raw = pd.to_numeric(df[value_col], errors="coerce")
-            valid_mask = raw.notna()
-            if valid_mask.sum() == 0:
-                continue
-            series = raw[valid_mask]
-
-            factor = float(request.get("scenario_factor", 0) or 0)
-            volume = float(request.get("scenario_volume", 1) or 1)
-            agg_name = str(request.get("scenario_aggregation", "sum") or "sum")
-
-            # Skip identity transforms — they produce the same values as
-            # the raw metric and add noise without useful information.
-            if metric_name == "scenario_scale" and abs(factor - 1.0) < 1e-9:
-                continue
-            if metric_name == "scenario_offset" and abs(factor) < 1e-9:
-                continue
-
-            if metric_name == "scenario_scale":
-                scenario_series = series * factor
-            elif metric_name == "scenario_offset":
-                scenario_series = series + factor
-            else:  # scenario_payoff
-                scenario_series = (factor - series) * volume
-
-            agg_result = float(getattr(scenario_series, agg_name)())
-
-            # Positive/negative decomposition for payoff queries.
-            # Positive = income from favorable periods (market < strike).
-            # Negative = compensation cost from unfavorable periods (market > strike).
-            if metric_name == "scenario_payoff":
-                _pos_mask = scenario_series > 0
-                _neg_mask = scenario_series < 0
-                positive_sum = round(float(scenario_series[_pos_mask].sum()), 2) if _pos_mask.any() else 0.0
-                negative_sum = round(float(scenario_series[_neg_mask].sum()), 2) if _neg_mask.any() else 0.0
-                positive_count = int(_pos_mask.sum())
-                negative_count = int(_neg_mask.sum())
-                market_component_result = float(getattr(series * volume, agg_name)())
-                combined_total_result = float(getattr((series * volume) + scenario_series, agg_name)())
-            else:
-                positive_sum = None
-                negative_sum = None
-                positive_count = None
-                negative_count = None
-                market_component_result = None
-                combined_total_result = None
-
-            # Baseline/delta only meaningful for scale and offset (same dimension).
-            # For payoff, aggregate_result and raw metric are different quantities.
-            if metric_name in ("scenario_scale", "scenario_offset"):
-                baseline_result = float(getattr(series, agg_name)())
-                delta = agg_result - baseline_result
-                delta_pct = (delta / baseline_result * 100) if abs(baseline_result) > 1e-12 else None
-            else:
-                baseline_result = None
-                delta = None
-                delta_pct = None
-
-            period_range = ""
-            if time_col in df.columns:
-                time_vals = df.loc[valid_mask[valid_mask].index, time_col]
-                if not time_vals.empty:
-                    period_range = f"{time_vals.iloc[0]} to {time_vals.iloc[-1]}"
-
-            record.update(
-                {
-                    "record_type": "scenario",
-                    "scenario_factor": factor,
-                    "scenario_volume": volume if metric_name == "scenario_payoff" else None,
-                    "scenario_aggregation": agg_name,
-                    "aggregate_result": round(agg_result, 2),
-                    "baseline_aggregate": round(baseline_result, 2) if baseline_result is not None else None,
-                    "delta_aggregate": round(delta, 2) if delta is not None else None,
-                    "delta_percent": round(delta_pct, 2) if delta_pct is not None else None,
-                    "row_count": int(valid_mask.sum()),
-                    "period_range": period_range,
-                    "formula": _scenario_formula(metric_name, metric, factor, volume, agg_name, int(valid_mask.sum())),
-                    "min_period_value": round(float(scenario_series.min()), 2),
-                    "max_period_value": round(float(scenario_series.max()), 2),
-                    "mean_period_value": round(float(scenario_series.mean()), 2),
-                    "positive_sum": positive_sum,
-                    "negative_sum": negative_sum,
-                    "positive_count": positive_count,
-                    "negative_count": negative_count,
-                    "market_component_aggregate": (
-                        round(market_component_result, 2) if market_component_result is not None else None
-                    ),
-                    "combined_total_aggregate": (
-                        round(combined_total_result, 2) if combined_total_result is not None else None
-                    ),
-                }
-            )
-        else:
-            continue
-
-        evidence_rows.append(record)
+        result = dispatch_metric(request, record, mctx)
+        if result is not None:
+            evidence_rows.append(result)
 
     return pd.DataFrame(evidence_rows)
 
@@ -1379,7 +1146,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
     elif data_type == "price":
         df["year"] = df[time_col].dt.year
         df["month"] = df[time_col].dt.month
-        df["season"] = np.where(df["month"].isin([4, 5, 6, 7]), "summer", "winter")
+        df["season"] = np.where(df["month"].isin(SUMMER_MONTHS), "summer", "winter")
 
         df_y = df.groupby("year")[value_col].mean().reset_index()
         first, last = df_y.iloc[0], df_y.iloc[-1]
@@ -1594,8 +1361,8 @@ def enrich(ctx: QueryContext) -> QueryContext:
             if "date" in corr_df.columns:
                 corr_df["date"] = pd.to_datetime(corr_df["date"], errors="coerce")
                 corr_df["month"] = corr_df["date"].dt.month
-                summer_df = corr_df[corr_df["month"].isin([4, 5, 6, 7])].drop(columns=["date", "month"], errors="ignore")
-                winter_df = corr_df[~corr_df["month"].isin([4, 5, 6, 7])].drop(columns=["date", "month"], errors="ignore")
+                summer_df = corr_df[corr_df["month"].isin(SUMMER_MONTHS)].drop(columns=["date", "month"], errors="ignore")
+                winter_df = corr_df[~corr_df["month"].isin(SUMMER_MONTHS)].drop(columns=["date", "month"], errors="ignore")
 
                 for label, seasonal_df in {"summer": summer_df, "winter": winter_df}.items():
                     seasonal_numeric = seasonal_df.apply(pd.to_numeric, errors="coerce")

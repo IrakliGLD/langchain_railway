@@ -18,7 +18,14 @@ import pandas as pd
 
 from contracts.question_analysis import QuestionAnalysis
 from models import QueryContext
-from agent.evidence_planner import build_evidence_plan, execute_remaining_evidence, merge_evidence_into_context
+from agent.evidence_planner import (
+    build_evidence_plan,
+    execute_remaining_evidence,
+    has_unsatisfied_steps,
+    merge_evidence_into_context,
+    next_unsatisfied_step,
+)
+from agent.summarizer import _add_evidence_record_tokens, _tokenize_cell_value
 
 
 # ---------------------------------------------------------------------------
@@ -454,3 +461,281 @@ class TestMergeEvidenceIntoContext:
         ctx = merge_evidence_into_context(ctx)
 
         assert ctx.df.empty
+
+
+# ---------------------------------------------------------------------------
+# Plan-driven helpers
+# ---------------------------------------------------------------------------
+
+class TestPlanDrivenHelpers:
+    def test_next_unsatisfied_step_returns_first(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": True},
+            {"role": "composition_context", "tool_name": "get_balancing_composition", "satisfied": False},
+            {"role": "tariff_context", "tool_name": "get_tariffs", "satisfied": False},
+        ]
+        step = next_unsatisfied_step(plan)
+        assert step is not None
+        assert step["role"] == "composition_context"
+
+    def test_next_unsatisfied_step_all_satisfied(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": True},
+        ]
+        assert next_unsatisfied_step(plan) is None
+
+    def test_next_unsatisfied_step_empty_plan(self):
+        assert next_unsatisfied_step([]) is None
+
+    def test_has_unsatisfied_steps_true(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": True},
+            {"role": "composition_context", "tool_name": "get_balancing_composition", "satisfied": False},
+        ]
+        assert has_unsatisfied_steps(plan) is True
+
+    def test_has_unsatisfied_steps_false(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": True},
+        ]
+        assert has_unsatisfied_steps(plan) is False
+
+    def test_has_unsatisfied_steps_empty(self):
+        assert has_unsatisfied_steps([]) is False
+
+    def test_plan_driven_invocation_uses_first_step(self):
+        """When evidence plan is non-empty, the first unsatisfied step
+        should be used for invocation, not keyword routing."""
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "params": {"start_date": "2023-01-01"}, "satisfied": False},
+            {"role": "composition_context", "tool_name": "get_balancing_composition", "params": {}, "satisfied": False},
+        ]
+        step = next_unsatisfied_step(plan)
+        assert step["tool_name"] == "get_prices"
+        assert step["params"]["start_date"] == "2023-01-01"
+
+        # After marking first satisfied, next should be composition
+        step["satisfied"] = True
+        step2 = next_unsatisfied_step(plan)
+        assert step2["tool_name"] == "get_balancing_composition"
+
+
+# ---------------------------------------------------------------------------
+# Join provenance
+# ---------------------------------------------------------------------------
+
+class TestJoinProvenance:
+    def test_merge_records_join_provenance(self):
+        ctx = QueryContext(query="test")
+        ctx.tool_name = "get_prices"
+        ctx.df = pd.DataFrame({
+            "date": ["2023-01-01", "2023-02-01"],
+            "p_bal_gel": [50.0, 55.0],
+        })
+        ctx.evidence_plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "params": {}, "satisfied": True},
+        ]
+        ctx.evidence_collected = {
+            "composition_context": {
+                "tool": "get_balancing_composition",
+                "df": pd.DataFrame({
+                    "date": ["2023-01-01", "2023-02-01"],
+                    "share_import": [0.3, 0.25],
+                }),
+                "cols": ["date", "share_import"],
+                "rows": [],
+            },
+        }
+
+        ctx = merge_evidence_into_context(ctx)
+
+        assert len(ctx.join_provenance) == 1
+        prov = ctx.join_provenance[0]
+        assert prov["primary_tool"] == "get_prices"
+        assert prov["secondary_tool"] == "get_balancing_composition"
+        assert prov["role"] == "composition_context"
+        assert prov["join_key"] == "date"
+        assert "share_import" in prov["columns_added"]
+
+    def test_no_provenance_when_no_evidence(self):
+        ctx = QueryContext(query="test")
+        ctx.df = pd.DataFrame({"date": ["2023-01-01"], "p_bal_gel": [50.0]})
+        ctx.evidence_collected = {}
+
+        ctx = merge_evidence_into_context(ctx)
+
+        assert ctx.join_provenance == []
+
+
+# ---------------------------------------------------------------------------
+# Evidence record grounding tokens
+# ---------------------------------------------------------------------------
+
+class TestEvidenceRecordTokens:
+    def test_derived_metric_values_become_grounding_tokens(self):
+        ctx = QueryContext(query="test")
+        ctx.analysis_evidence = [
+            {
+                "record_type": "derived",
+                "derived_metric_name": "mom_absolute_change",
+                "current_value": 55.0,
+                "previous_value": 43.0,
+                "absolute_change": 12.0,
+                "percent_change": 27.907,
+                "source_cells": [
+                    {"column": "p_bal_gel", "period": "2024-01", "value": 55.0, "role": "current"},
+                    {"column": "p_bal_gel", "period": "2023-12", "value": 43.0, "role": "previous"},
+                ],
+            },
+        ]
+
+        tokens: set = set()
+        _add_evidence_record_tokens(tokens, ctx)
+
+        # Computed values should be present
+        assert "12" in tokens or "12.0" in tokens
+        assert "55" in tokens or "55.0" in tokens
+        assert "43" in tokens or "43.0" in tokens
+
+    def test_scenario_values_become_grounding_tokens(self):
+        ctx = QueryContext(query="test")
+        ctx.analysis_evidence = [
+            {
+                "record_type": "scenario",
+                "aggregate_result": 1500.0,
+                "baseline_aggregate": 1000.0,
+                "delta_aggregate": 500.0,
+                "delta_percent": 50.0,
+                "min_period_value": 100.0,
+                "max_period_value": 200.0,
+            },
+        ]
+
+        tokens: set = set()
+        _add_evidence_record_tokens(tokens, ctx)
+
+        assert "1500" in tokens or "1500.0" in tokens
+        assert "500" in tokens or "500.0" in tokens
+
+    def test_empty_evidence_produces_no_tokens(self):
+        ctx = QueryContext(query="test")
+        ctx.analysis_evidence = []
+
+        tokens: set = set()
+        _add_evidence_record_tokens(tokens, ctx)
+
+        assert len(tokens) == 0
+
+    def test_source_cells_min_max_become_grounding_tokens(self):
+        """source_cells with min_value/max_value (trend, scenario) should
+        be tokenized for grounding."""
+        ctx = QueryContext(query="test")
+        ctx.analysis_evidence = [
+            {
+                "record_type": "derived",
+                "derived_metric_name": "trend_slope",
+                "trend_slope": 5.0,
+                "source_cells": [
+                    {"column": "p_bal_gel", "role": "trend_series",
+                     "row_count": 12, "min_value": 42.5, "max_value": 97.3},
+                ],
+            },
+        ]
+        tokens: set = set()
+        _add_evidence_record_tokens(tokens, ctx)
+
+        assert "42.5" in tokens or "42" in tokens
+        assert "97.3" in tokens or "97" in tokens
+
+
+# ---------------------------------------------------------------------------
+# Error-skip behavior: failed steps should be skipped, not retried
+# ---------------------------------------------------------------------------
+
+class TestErrorSkipBehavior:
+    def test_next_unsatisfied_step_skips_errored(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": False, "error": "stage_0_5:timeout"},
+            {"role": "composition_context", "tool_name": "get_balancing_composition", "satisfied": False},
+        ]
+        step = next_unsatisfied_step(plan)
+        assert step is not None
+        assert step["tool_name"] == "get_balancing_composition"
+
+    def test_next_unsatisfied_step_all_errored(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": False, "error": "failed"},
+        ]
+        assert next_unsatisfied_step(plan) is None
+
+    def test_has_unsatisfied_steps_ignores_errored(self):
+        plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "satisfied": True},
+            {"role": "composition_context", "tool_name": "get_balancing_composition", "satisfied": False, "error": "timeout"},
+        ]
+        assert has_unsatisfied_steps(plan) is False
+
+    def test_evidence_loop_skips_errored_steps(self, monkeypatch):
+        """Stage 0.8 should not retry a step that already has an error from
+        Stage 0.5 or 0.7."""
+        calls = []
+
+        def _mock(invocation):
+            calls.append(invocation.name)
+            df = pd.DataFrame({"date": ["2023-01-01"], "share_import": [0.3]})
+            return df, list(df.columns), [tuple(r) for r in df.itertuples(index=False)]
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", _mock)
+
+        ctx = QueryContext(query="test")
+        ctx.tool_name = "get_prices"
+        ctx.df = pd.DataFrame({"date": ["2023-01-01"], "p_bal_gel": [50.0]})
+        ctx.cols = list(ctx.df.columns)
+        ctx.rows = [tuple(r) for r in ctx.df.itertuples(index=False)]
+        ctx.evidence_plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "params": {}, "satisfied": True},
+            # This step failed in Stage 0.5 — should NOT be retried
+            {"role": "composition_context", "tool_name": "get_balancing_composition", "params": {}, "satisfied": False, "error": "stage_0_5:connection refused"},
+            # This step should still execute
+            {"role": "tariff_context", "tool_name": "get_tariffs", "params": {}, "satisfied": False},
+        ]
+
+        ctx = execute_remaining_evidence(ctx)
+
+        # Only get_tariffs should have been called (composition was skipped)
+        assert calls == ["get_tariffs"]
+        # Plan completeness: primary satisfied, composition errored (not retried), tariffs succeeded
+        assert ctx.evidence_plan[1].get("error") == "stage_0_5:connection refused"
+        assert ctx.evidence_plan[2].get("satisfied") is True
+
+
+# ---------------------------------------------------------------------------
+# Join provenance grounding tokens
+# ---------------------------------------------------------------------------
+
+class TestJoinProvenanceGrounding:
+    def test_join_provenance_tokens_added(self):
+        from agent.summarizer import _add_join_provenance_tokens, _tokenize_cell_value
+
+        ctx = QueryContext(query="test")
+        ctx.join_provenance = [
+            {
+                "primary_tool": "get_prices",
+                "secondary_tool": "get_balancing_composition",
+                "primary_rows": 24,
+                "merged_rows": 24,
+            },
+        ]
+        tokens: set = set()
+        _add_join_provenance_tokens(tokens, ctx)
+
+        assert "24" in tokens or "24.0" in tokens
+
+    def test_empty_provenance_adds_nothing(self):
+        from agent.summarizer import _add_join_provenance_tokens
+
+        ctx = QueryContext(query="test")
+        ctx.join_provenance = []
+        tokens: set = set()
+        _add_join_provenance_tokens(tokens, ctx)
+        assert len(tokens) == 0

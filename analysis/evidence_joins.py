@@ -8,7 +8,7 @@ names the columns it selects and the join key it uses.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -66,6 +66,51 @@ def join_evidence(
     except Exception as exc:
         log.warning("evidence_join: merge failed: %s", exc)
         return primary_df
+
+
+def join_evidence_with_provenance(
+    primary_df: pd.DataFrame,
+    secondary_df: pd.DataFrame,
+    primary_tool: str,
+    secondary_tool: str,
+) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    """Like ``join_evidence`` but also returns join provenance metadata.
+
+    Returns ``(merged_df, provenance_dict)`` where *provenance_dict* is
+    ``None`` when no merge was performed (empty inputs, missing date cols,
+    or merge failure).
+    """
+    if primary_df.empty or secondary_df.empty:
+        return primary_df, None
+
+    date_primary = _find_date_column(primary_df)
+    date_secondary = _find_date_column(secondary_df)
+    if not date_primary or not date_secondary:
+        return primary_df, None
+
+    select_cols = _select_columns(secondary_df, secondary_tool, primary_tool)
+    if not select_cols:
+        return primary_df, None
+
+    try:
+        merged = _merge_on_date(
+            primary_df, secondary_df,
+            date_primary, date_secondary,
+            select_cols,
+        )
+        provenance: Dict[str, Any] = {
+            "primary_tool": primary_tool,
+            "secondary_tool": secondary_tool,
+            "join_key": date_primary,
+            "join_type": "left",
+            "columns_added": select_cols,
+            "primary_rows": len(primary_df),
+            "merged_rows": len(merged),
+        }
+        return merged, provenance
+    except Exception as exc:
+        log.warning("evidence_join: merge failed: %s", exc)
+        return primary_df, None
 
 
 # ---------------------------------------------------------------------------

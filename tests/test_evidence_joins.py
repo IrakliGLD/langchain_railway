@@ -14,7 +14,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import pandas as pd
 import pytest
 
-from analysis.evidence_joins import join_evidence
+from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
 
 
 class TestJoinEvidence:
@@ -135,3 +135,54 @@ class TestJoinEvidence:
 
         assert "p_bal_gel" in result.columns
         assert "hydro" in result.columns
+
+
+class TestJoinEvidenceWithProvenance:
+    def test_provenance_returned_on_successful_join(self):
+        prices = pd.DataFrame({
+            "date": ["2023-01-01", "2023-02-01"],
+            "p_bal_gel": [50.0, 55.0],
+        })
+        comp = pd.DataFrame({
+            "date": ["2023-01-01", "2023-02-01"],
+            "share_import": [0.3, 0.25],
+        })
+
+        result, prov = join_evidence_with_provenance(
+            prices, comp, "get_prices", "get_balancing_composition",
+        )
+
+        assert "share_import" in result.columns
+        assert prov is not None
+        assert prov["primary_tool"] == "get_prices"
+        assert prov["secondary_tool"] == "get_balancing_composition"
+        assert prov["join_key"] == "date"
+        assert prov["join_type"] == "left"
+        assert "share_import" in prov["columns_added"]
+        assert prov["primary_rows"] == 2
+        assert prov["merged_rows"] == 2
+
+    def test_provenance_none_for_empty_secondary(self):
+        prices = pd.DataFrame({
+            "date": ["2023-01-01"],
+            "p_bal_gel": [50.0],
+        })
+        empty = pd.DataFrame()
+
+        result, prov = join_evidence_with_provenance(
+            prices, empty, "get_prices", "get_balancing_composition",
+        )
+
+        assert result.equals(prices)
+        assert prov is None
+
+    def test_provenance_none_for_empty_primary(self):
+        empty = pd.DataFrame()
+        comp = pd.DataFrame({"date": ["2023-01-01"], "share_import": [0.3]})
+
+        result, prov = join_evidence_with_provenance(
+            empty, comp, "get_prices", "get_balancing_composition",
+        )
+
+        assert result.empty
+        assert prov is None

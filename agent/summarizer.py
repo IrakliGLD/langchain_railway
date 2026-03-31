@@ -142,6 +142,61 @@ def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
             tokens.update(_tokenize_cell_value(val))
 
 
+def _add_evidence_record_tokens(tokens: Set[str], ctx: QueryContext) -> None:
+    """Add computed values from structured evidence records to grounding tokens.
+
+    Derived metrics (MoM deltas, scenario results, etc.) produce values that
+    may not exist in raw data rows.  By tokenizing the computed fields from
+    ``ctx.analysis_evidence``, we let the grounding check recognise these
+    values as legitimate — preventing false-positive failures on analytical
+    answers.
+    """
+    if not ctx.analysis_evidence:
+        return
+
+    _NUMERIC_KEYS = (
+        "current_value", "previous_value", "absolute_change", "percent_change",
+        "correlation_value", "trend_slope",
+        "aggregate_result", "baseline_aggregate", "delta_aggregate", "delta_percent",
+        "min_period_value", "max_period_value", "mean_period_value",
+        "positive_sum", "negative_sum", "positive_count", "negative_count",
+        "market_component_aggregate", "combined_total_aggregate",
+        "scenario_factor", "scenario_volume",
+    )
+    for record in ctx.analysis_evidence:
+        if not isinstance(record, dict):
+            continue
+        for key in _NUMERIC_KEYS:
+            val = record.get(key)
+            if val is not None:
+                tokens.update(_tokenize_cell_value(val))
+        # Also tokenize source cell values so the grounding check can
+        # trace computations back to their inputs.
+        for cell in record.get("source_cells", []):
+            if not isinstance(cell, dict):
+                continue
+            for cell_key in ("value", "min_value", "max_value"):
+                cell_val = cell.get(cell_key)
+                if cell_val is not None:
+                    tokens.update(_tokenize_cell_value(cell_val))
+
+
+def _add_join_provenance_tokens(tokens: Set[str], ctx: QueryContext) -> None:
+    """Tokenize numeric metadata from join provenance records.
+
+    ``ctx.join_provenance`` carries row counts and column info for each
+    cross-dataset merge.  Row counts may appear in analytical summaries
+    (e.g. "merged 24 rows"), so we register them as valid grounding tokens.
+    """
+    for prov in getattr(ctx, "join_provenance", []):
+        if not isinstance(prov, dict):
+            continue
+        for key in ("primary_rows", "merged_rows"):
+            val = prov.get(key)
+            if val is not None:
+                tokens.update(_tokenize_cell_value(val))
+
+
 def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
     tokens = _extract_number_tokens(_build_grounding_corpus(ctx))
     # Expand text-extracted numbers with cell-level tokenization so that
@@ -159,6 +214,8 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
             for value in row:
                 tokens.update(_tokenize_cell_value(value))
     _add_aggregate_tokens(tokens, ctx)
+    _add_evidence_record_tokens(tokens, ctx)
+    _add_join_provenance_tokens(tokens, ctx)
     return tokens
 
 

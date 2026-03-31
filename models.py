@@ -84,6 +84,7 @@ class QueryContext:
     evidence_plan_source: str = ""                # "deterministic" | "analyzer" | ""
     evidence_collected: Dict[str, Any] = dc_field(default_factory=dict)  # role -> {tool, df, cols, rows}
     evidence_plan_complete: bool = False
+    join_provenance: List[Dict[str, Any]] = dc_field(default_factory=list)  # join metadata per merge
 
     # --- planner outputs ---
     plan: Dict[str, Any] = dc_field(default_factory=dict)

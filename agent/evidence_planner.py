@@ -23,7 +23,7 @@ from models import QueryContext
 from agent.planner import resolve_tool_params
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
-from analysis.evidence_joins import join_evidence
+from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
 
 log = logging.getLogger("Enai")
 
@@ -333,6 +333,22 @@ def _resolve_secondary_params(
     return params
 
 
+def next_unsatisfied_step(plan: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return the first unsatisfied step that hasn't already failed, or None."""
+    for step in plan:
+        if not step.get("satisfied") and not step.get("error"):
+            return step
+    return None
+
+
+def has_unsatisfied_steps(plan: List[Dict[str, Any]]) -> bool:
+    """Return True when the evidence plan has actionable work remaining.
+
+    Steps that already failed (have an ``error`` key) are not actionable.
+    """
+    return any(not s.get("satisfied") and not s.get("error") for s in plan)
+
+
 # ---------------------------------------------------------------------------
 # Stage 0.8: Execute remaining evidence steps
 # ---------------------------------------------------------------------------
@@ -350,7 +366,7 @@ def execute_remaining_evidence(ctx: QueryContext) -> QueryContext:
     Max iterations: ``min(len(remaining), 3)``.
     Failed steps are logged and skipped, not retried.
     """
-    remaining = [s for s in ctx.evidence_plan if not s.get("satisfied")]
+    remaining = [s for s in ctx.evidence_plan if not s.get("satisfied") and not s.get("error")]
     cap = min(len(remaining), _EVIDENCE_LOOP_MAX_STEPS)
 
     for step in remaining[:cap]:
@@ -432,7 +448,12 @@ def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:
             continue
         secondary_tool = evidence.get("tool", "")
 
-        ctx.df = join_evidence(ctx.df, secondary_df, primary_tool, secondary_tool)
+        ctx.df, provenance = join_evidence_with_provenance(
+            ctx.df, secondary_df, primary_tool, secondary_tool,
+        )
+        if provenance is not None:
+            provenance["role"] = role
+            ctx.join_provenance.append(provenance)
 
     # Refresh cols/rows after merge
     ctx.cols = list(ctx.df.columns)
