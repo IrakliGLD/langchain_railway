@@ -79,6 +79,12 @@ class QueryContext:
     data_summary_blocked_reason: str = ""
     summary_domain_knowledge: str = ""
 
+    # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
+    evidence_plan: List[Dict[str, Any]] = dc_field(default_factory=list)
+    evidence_plan_source: str = ""                # "deterministic" | "analyzer" | ""
+    evidence_collected: Dict[str, Any] = dc_field(default_factory=dict)  # role -> {tool, df, cols, rows}
+    evidence_plan_complete: bool = False
+
     # --- planner outputs ---
     plan: Dict[str, Any] = dc_field(default_factory=dict)
     raw_sql: Optional[str] = None

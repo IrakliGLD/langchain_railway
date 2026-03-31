@@ -7,24 +7,23 @@ from knowledge.vector_ingestion import VectorKnowledgeIngestor
 def main() -> None:
     # Replace this with your local .md or .txt file path.
     text_path = Path(
-        r"D:\Enaiapp\langchain_railway\docs_to_ingest\market_concept_design.md"
+        r"D:\Enaiapp\langchain_railway\docs_to_ingest\gnerc_electricity_market_rules_excerpt_ka.md"
     )
     text_content = text_path.read_text(encoding="utf-8")
 
     document = DocumentRegistration(
-        # Replace these values before running.
-        source_key="electricity_market_concept_jun2025",
-        title="Electricity Market Model Concept",
+        source_key="electricity_day_ahead_intraday_rules_aug2020",
+        title="Electricity Day-Ahead and Intraday Market Rules",
         document_type="regulation",
-        issuer="Government of Georgia",
+        issuer="GNERC",
         language="ka",
         source_url=None,
         storage_path=None,
-        logical_key="market_concept_jun25",
-        published_date="2020-04-16",
-        effective_date="2020-04-16",
+        logical_key="day_ahead_intraday_market_rules",
+        published_date="2020-08-11",
+        effective_date="2020-08-11",
         effective_end_date=None,
-        version_label="2025-06-26",
+        version_label="2020-08-11",
         is_latest=True,
         is_active=True,
         abolished=False,
@@ -32,14 +31,23 @@ def main() -> None:
         metadata={
             "country": "georgia",
             "city": "tbilisi",
-            "resolution_number": "246",
+            "resolution_number": "46",
             "annex_number": "1",
-            "notes": "Pilot ingestion for market concept design",
+            "notes": "Excerpt focused on electricity day-ahead and intraday exchange rules",
         },
     )
 
-    # Replace these topic tags with the best matching retrieval topics.
-    topics = ["market_design", "electricity_market_transitory_model", "electricity_market_target_model", "day_ahead_market", "intraday_market", "balancing_market", "deregulation_plan"]
+    topics = [
+        "day_ahead_market",
+        "intraday_market",
+        "exchange_rules",
+        "exchange_participation",
+        "exchange_registration",
+        "exchange_price_formation",
+        "financial_clearing",
+        "market_operator_procedures",
+        "exchange_fee",
+    ]
 
     ingestor = VectorKnowledgeIngestor()
     result = ingestor.ingest_text_document(

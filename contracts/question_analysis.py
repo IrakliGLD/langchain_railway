@@ -64,6 +64,15 @@ class ToolName(str, Enum):
     GET_BALANCING_COMPOSITION = "get_balancing_composition"
 
 
+class EvidenceRole(str, Enum):
+    """Semantic role of a dataset in a multi-evidence execution plan."""
+
+    PRIMARY_DATA = "primary_data"
+    COMPOSITION_CONTEXT = "composition_context"
+    TARIFF_CONTEXT = "tariff_context"
+    CORRELATION_DRIVER = "correlation_driver"
+
+
 class PeriodKind(str, Enum):
     DAY = "day"
     MONTH = "month"
@@ -171,6 +180,8 @@ class RoutingInfo(BaseModel):
     needs_sql: bool
     needs_knowledge: bool
     prefer_tool: bool
+    needs_multi_tool: bool = False
+    evidence_roles: List[EvidenceRole] = Field(default_factory=list, max_length=4)
 
 
 class TopicCandidate(BaseModel):

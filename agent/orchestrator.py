@@ -325,6 +325,25 @@ def run_agent_loop(ctx: QueryContext, llm: Any = None) -> QueryContext:
     if ctx.tool_fallback_reason:
         user_content += f"\n\n[Note: A previous tool attempt failed: {ctx.tool_fallback_reason}]"
 
+    # Inject evidence plan context so the agent knows what was already collected
+    if ctx.evidence_collected:
+        collected_parts = []
+        for role, ev in ctx.evidence_collected.items():
+            collected_parts.append(f"  - {role}: {ev.get('tool', 'unknown')} ({len(ev.get('rows', []))} rows)")
+        user_content += (
+            "\n\n[Already collected evidence:\n"
+            + "\n".join(collected_parts)
+            + "\nFocus on filling remaining gaps, do not re-fetch these datasets.]"
+        )
+    if ctx.evidence_plan:
+        missing = [s for s in ctx.evidence_plan if not s.get("satisfied")]
+        if missing:
+            user_content += (
+                "\n[Still needed: "
+                + ", ".join(f"{s['role']} via {s['tool_name']}" for s in missing)
+                + "]"
+            )
+
     messages: List[Any] = [
         SystemMessage(content=_agent_system_prompt(ctx.lang_instruction)),
         HumanMessage(content=user_content),

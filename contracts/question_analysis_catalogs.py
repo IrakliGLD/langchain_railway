@@ -116,6 +116,10 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
             "exchange rate or xrate -> metric=exchange_rate",
             "Never emit p_bal_gel, p_bal_usd, p_dereg_gel, p_gcap_gel, or balancing_price_gel as metric values",
         ],
+        "combined_with": [
+            {"tool": "get_balancing_composition", "when": "explaining price drivers or composition effects on price"},
+            {"tool": "get_tariffs", "when": "analyzing regulated cost impact on balancing price"},
+        ],
     },
     {
         "name": "get_tariffs",
@@ -123,6 +127,9 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Tariff lookups and tariff comparisons.",
         "avoid_for": "Balancing price questions, conceptual definitions, and generation mix questions.",
         "main_params": ["entities", "currency", "start_date", "end_date"],
+        "combined_with": [
+            {"tool": "get_prices", "when": "comparing tariffs against market prices"},
+        ],
     },
     {
         "name": "get_generation_mix",
@@ -130,6 +137,9 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Generation mix or quantity by technology or type.",
         "avoid_for": "Tariffs, balancing price, and conceptual definitions.",
         "main_params": ["types", "mode", "granularity", "start_date", "end_date"],
+        "combined_with": [
+            {"tool": "get_prices", "when": "correlating generation patterns with price movements"},
+        ],
     },
     {
         "name": "get_balancing_composition",
@@ -137,6 +147,9 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Balancing market composition and share questions.",
         "avoid_for": "Price-only questions, conceptual definitions, and tariffs.",
         "main_params": ["entities", "start_date", "end_date"],
+        "combined_with": [
+            {"tool": "get_prices", "when": "understanding how composition shifts affect prices"},
+        ],
     },
 ]
 

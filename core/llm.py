@@ -1841,7 +1841,7 @@ def llm_analyze_question(
     history_str = str(conversation_history) if conversation_history else ""
     schema_hint = QuestionAnalysis.model_json_schema()
     cache_input = (
-        f"question_analysis_v3|{user_query}|{history_str}|"
+        f"question_analysis_v4|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOPIC_CATALOG)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOOL_CATALOG)}|"
@@ -1891,6 +1891,8 @@ Important rules:
 - `preferred_path` must be one of the allowed enum values.
 - `preferred_path` routing: use `knowledge` for `conceptual_definition`, `regulatory_procedure`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, and `factual_lookup`; for `comparison` and `forecast`, use `knowledge` when the question is about concepts, policy, or market design, and `tool` or `sql` when the question is about specific numeric data or time-series.
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
+- `routing.needs_multi_tool`: set to true when answering the question properly requires data from two or more tools. Common patterns: explaining price changes needs prices AND composition shares; comparing tariffs against market prices needs tariffs AND prices; correlating generation with prices needs generation_mix AND prices. Check each tool's `combined_with` field in TOOL_CATALOG.
+- `routing.evidence_roles`: when `needs_multi_tool` is true, list the required evidence roles. Valid values: `primary_data` (the main dataset), `composition_context` (share/mix breakdown for driver analysis), `tariff_context` (regulated tariff series), `correlation_driver` (secondary series for correlation). Always include `primary_data`. Only list roles that are actually needed.
 - For tool parameter hints, use the exact downstream vocabulary expected by the tool API.
 - For `get_prices`, valid `params_hint.metric` values are only:
   - `balancing`

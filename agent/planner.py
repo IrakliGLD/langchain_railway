@@ -526,7 +526,38 @@ def build_tool_invocation_from_analysis(
         return None
 
     tool_name = top.name.value
-    hint = top.params_hint
+    # Let ValueError propagate — the pipeline catches it and sets
+    # _analyzer_tool_failed to prevent the agent loop from running.
+    params = resolve_tool_params(qa, tool_name, raw_query, hint=top.params_hint)
+
+    if params is None:
+        return None
+
+    reason = f"analyzer:{top.reason or top.name.value} (score={top.score:.2f})"
+    return ToolInvocation(
+        name=tool_name,
+        params=params,
+        confidence=top.score,
+        reason=reason,
+    )
+
+
+def resolve_tool_params(
+    qa: QuestionAnalysis,
+    tool_name: str,
+    raw_query: str,
+    *,
+    hint: "Optional[object]" = None,
+) -> Optional[dict]:
+    """Resolve concrete tool parameters from analyzer output and regex extractors.
+
+    Shared by ``build_tool_invocation_from_analysis`` and
+    ``evidence_planner.build_evidence_plan`` so that parameter resolution is
+    identical regardless of the call site.
+
+    Returns ``None`` only for unknown tools.  Raises ``ValueError`` for
+    unresolvable entity references so the caller can decide on fallback.
+    """
     # Use the canonical English query for parameter extraction so that
     # keyword extractors work reliably even for non-English input.
     effective_query = (qa.canonical_query_en or raw_query).lower()
@@ -535,9 +566,9 @@ def build_tool_invocation_from_analysis(
     # Prefer the analyzer's structured period; fall back to regex extraction.
     start_date = None
     end_date = None
-    if hint and hint.start_date:
+    if hint and getattr(hint, "start_date", None):
         start_date = hint.start_date
-    if hint and hint.end_date:
+    if hint and getattr(hint, "end_date", None):
         end_date = hint.end_date
     if (not start_date or not end_date) and qa.sql_hints.period:
         start_date = start_date or qa.sql_hints.period.start_date
@@ -569,10 +600,10 @@ def build_tool_invocation_from_analysis(
 
     # --- Tool-specific parameter resolution ---
     if tool_name == ToolName.GET_PRICES.value:
-        hint_metric = hint.metric if hint and hint.metric else None
+        hint_metric = hint.metric if hint and getattr(hint, "metric", None) else None
         normalized_metric, implied_currency = normalize_price_metric_hint(hint_metric)
         metric = normalized_metric or extract_price_metric(effective_query)
-        hint_currency = str(hint.currency).strip().lower() if hint and hint.currency else None
+        hint_currency = str(hint.currency).strip().lower() if hint and getattr(hint, "currency", None) else None
         if implied_currency and hint_currency and hint_currency != implied_currency:
             log.warning(
                 "Analyzer get_prices hint had contradictory metric/currency pair; "
@@ -582,26 +613,26 @@ def build_tool_invocation_from_analysis(
                 implied_currency,
             )
         currency = implied_currency or hint_currency or extract_currency(effective_query)
-        granularity = normalize_tool_granularity_hint(hint.granularity if hint else None) or "monthly"
+        granularity = normalize_tool_granularity_hint(getattr(hint, "granularity", None) if hint else None) or "monthly"
         params.update({"metric": metric, "currency": currency, "granularity": granularity})
 
     elif tool_name == ToolName.GET_TARIFFS.value:
-        entities = (hint.entities if hint and hint.entities else []) or extract_tariff_entities(effective_query)
-        currency = (hint.currency if hint and hint.currency else None) or extract_currency(effective_query)
+        entities = (hint.entities if hint and getattr(hint, "entities", None) else []) or extract_tariff_entities(effective_query)
+        currency = (hint.currency if hint and getattr(hint, "currency", None) else None) or extract_currency(effective_query)
         if entities:
             params["entities"] = entities
         params["currency"] = currency
 
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
-        types = (hint.types if hint and hint.types else []) or extract_generation_types(effective_query)
-        mode = (hint.mode if hint and hint.mode else None) or "quantity"
-        granularity = normalize_tool_granularity_hint(hint.granularity if hint else None) or "monthly"
+        types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)
+        mode = (getattr(hint, "mode", None) if hint else None) or "quantity"
+        granularity = normalize_tool_granularity_hint(getattr(hint, "granularity", None) if hint else None) or "monthly"
         if types:
             params["types"] = types
         params.update({"mode": mode, "granularity": granularity})
 
     elif tool_name == ToolName.GET_BALANCING_COMPOSITION.value:
-        raw_entities = (hint.entities if hint and hint.entities else []) or extract_balancing_entities(effective_query)
+        raw_entities = (hint.entities if hint and getattr(hint, "entities", None) else []) or extract_balancing_entities(effective_query)
         entities = normalize_balancing_entities(raw_entities)
         if entities is None:
             # Entities were specified but none resolved → unresolved_concept.
@@ -618,10 +649,4 @@ def build_tool_invocation_from_analysis(
         log.warning("Unknown tool from analyzer: %s", tool_name)
         return None
 
-    reason = f"analyzer:{top.reason or top.name.value} (score={top.score:.2f})"
-    return ToolInvocation(
-        name=tool_name,
-        params=params,
-        confidence=top.score,
-        reason=reason,
-    )
+    return params

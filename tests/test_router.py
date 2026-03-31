@@ -1,7 +1,16 @@
 """
 Tests for fast pre-LLM typed tool routing.
 """
-from agent.router import match_tool
+import os
+
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+
+from agent.router import match_tool  # noqa: E402
 
 
 def test_match_tariff_tool():

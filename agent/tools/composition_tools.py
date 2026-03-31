@@ -24,14 +24,15 @@ def _validate_entities(entities: Optional[Iterable[str]]) -> List[str]:
     if not entities:
         return list(ALLOWED_BALANCING_ENTITIES)
     normalized = []
-    allowed = set(ALLOWED_BALANCING_ENTITIES)
+    allowed_lower = {e.lower(): e for e in ALLOWED_BALANCING_ENTITIES}
     for e in entities:
         value = str(e).strip().lower()
-        if value not in allowed:
+        if value not in allowed_lower:
             raise ValueError(f"Unsupported balancing entity: {value}")
-        normalized.append(value)
+        normalized.append(allowed_lower[value])
     # Keep deterministic output order
-    return [e for e in ALLOWED_BALANCING_ENTITIES if e in set(normalized)]
+    seen = set(normalized)
+    return [e for e in ALLOWED_BALANCING_ENTITIES if e in seen]
 
 
 def get_balancing_composition(

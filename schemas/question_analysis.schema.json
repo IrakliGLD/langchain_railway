@@ -221,6 +221,17 @@
       "title": "DimensionName",
       "type": "string"
     },
+    "EvidenceRole": {
+      "description": "Semantic role of a dataset in a multi-evidence execution plan.",
+      "enum": [
+        "primary_data",
+        "composition_context",
+        "tariff_context",
+        "correlation_driver"
+      ],
+      "title": "EvidenceRole",
+      "type": "string"
+    },
     "KnowledgeInfo": {
       "additionalProperties": false,
       "properties": {
@@ -388,6 +399,19 @@
         "prefer_tool": {
           "title": "Prefer Tool",
           "type": "boolean"
+        },
+        "needs_multi_tool": {
+          "default": false,
+          "title": "Needs Multi Tool",
+          "type": "boolean"
+        },
+        "evidence_roles": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRole"
+          },
+          "maxItems": 4,
+          "title": "Evidence Roles",
+          "type": "array"
         }
       },
       "required": [

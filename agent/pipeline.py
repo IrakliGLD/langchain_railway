@@ -20,6 +20,7 @@ import pandas as pd
 from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
     ENABLE_AGENT_LOOP,
+    ENABLE_EVIDENCE_PLANNER,
     ENABLE_TYPED_TOOLS,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
@@ -29,7 +30,7 @@ from config import (
 from models import QueryContext, ResponseMode, ResolutionPolicy
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
-from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator
+from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator, evidence_planner
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
 from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores
 from agent.tools import execute_tool
@@ -258,6 +259,10 @@ def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
             return True
         if qa_type != "data_explanation":
             return False
+
+        # Authoritative signal: analyzer explicitly requests driver analysis
+        if ctx.question_analysis.analysis_requirements.needs_driver_analysis:
+            return True
 
         intent_text = str(ctx.question_analysis.classification.intent or "").strip().lower()
         intent_signal_hit = any(
@@ -598,6 +603,17 @@ def process_query(
         _trace_stage("stage_4_conceptual_summary", t_stage)
         return ctx
 
+    # Stage 0.4: Evidence planning (multi-tool expansion)
+    if ENABLE_EVIDENCE_PLANNER:
+        t_stage = time.time()
+        ctx = evidence_planner.build_evidence_plan(ctx)
+        _trace_stage(
+            "stage_0_4_evidence_plan", t_stage,
+            steps=len(ctx.evidence_plan),
+            source=ctx.evidence_plan_source,
+            tools=[s["tool_name"] for s in ctx.evidence_plan],
+        )
+
     # Stage 0.5: pre-LLM typed tool routing
     if ENABLE_TYPED_TOOLS:
         t_stage = time.time()
@@ -656,7 +672,33 @@ def process_query(
                     log.warning("Typed tool relevance blocked. reason=%s", tool_reason)
                 else:
                     log.info("Typed tool relevance validated. reason=%s", tool_reason)
-                    ctx = _enrich_prices_with_composition(ctx, invocation, is_exp)
+                    if not ENABLE_EVIDENCE_PLANNER:
+                        ctx = _enrich_prices_with_composition(ctx, invocation, is_exp)
+
+                    # Multi-evidence: store result under the matching plan step
+                    if ENABLE_EVIDENCE_PLANNER and len(ctx.evidence_plan) > 1:
+                        _matched_step = next(
+                            (s for s in ctx.evidence_plan if s["tool_name"] == invocation.name and not s.get("satisfied")),
+                            None,
+                        )
+                        if _matched_step:
+                            ctx.evidence_collected[_matched_step["role"]] = {
+                                "tool": invocation.name,
+                                "df": ctx.df.copy(),
+                                "cols": list(ctx.cols),
+                                "rows": list(ctx.rows),
+                            }
+                            _matched_step["satisfied"] = True
+                            log.info(
+                                "Evidence plan: stored Stage 0.5 result as %s, %d steps remaining",
+                                _matched_step["role"],
+                                sum(1 for s in ctx.evidence_plan if not s.get("satisfied")),
+                            )
+                        else:
+                            log.info(
+                                "Evidence plan: Stage 0.5 tool %s not in plan; result stored on ctx.df only",
+                                invocation.name,
+                            )
 
                 log.info(
                     "Typed tool route hit: tool=%s confidence=%.2f reason=%s",
@@ -763,7 +805,24 @@ def process_query(
                             analyzer_invocation.confidence,
                             analyzer_invocation.reason,
                         )
-                        ctx = _enrich_prices_with_composition(ctx, analyzer_invocation, is_exp)
+                        if not ENABLE_EVIDENCE_PLANNER:
+                            ctx = _enrich_prices_with_composition(ctx, analyzer_invocation, is_exp)
+
+                        # Multi-evidence: store result under matching plan step
+                        if ENABLE_EVIDENCE_PLANNER and len(ctx.evidence_plan) > 1:
+                            _matched_step = next(
+                                (s for s in ctx.evidence_plan
+                                 if s["tool_name"] == analyzer_invocation.name and not s.get("satisfied")),
+                                None,
+                            )
+                            if _matched_step:
+                                ctx.evidence_collected[_matched_step["role"]] = {
+                                    "tool": analyzer_invocation.name,
+                                    "df": ctx.df.copy(),
+                                    "cols": list(ctx.cols),
+                                    "rows": list(ctx.rows),
+                                }
+                                _matched_step["satisfied"] = True
                 except Exception as exc:
                     # --- Fallback: composition failure on why-query → try get_prices + enrichment ---
                     ctx, recovered = _attempt_analyzer_tool_recovery(
@@ -796,6 +855,19 @@ def process_query(
                 else:
                     metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
 
+    # Stage 0.8: Evidence completeness loop
+    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan and not all(
+        s.get("satisfied") for s in ctx.evidence_plan
+    ):
+        t_stage = time.time()
+        ctx = evidence_planner.execute_remaining_evidence(ctx)
+        _trace_stage(
+            "stage_0_8_evidence_loop", t_stage,
+            complete=ctx.evidence_plan_complete,
+            collected=len(ctx.evidence_collected),
+            satisfied=[s["tool_name"] for s in ctx.evidence_plan if s.get("satisfied")],
+        )
+
     # Stage 1/2: fallback SQL path when no tool route was used
     # When the analyzer understood the query but its tool invocation failed,
     # prefer the planner+SQL path (which consumes question_analysis) over the
@@ -805,7 +877,12 @@ def process_query(
         and ctx.tool_fallback_reason
         and ctx.tool_fallback_reason.startswith("analyzer_tool_")
     )
-    if not ctx.used_tool and ENABLE_AGENT_LOOP and not _analyzer_tool_failed:
+    _evidence_plan_satisfied = (
+        ENABLE_EVIDENCE_PLANNER
+        and ctx.evidence_plan
+        and ctx.evidence_plan_complete
+    )
+    if not ctx.used_tool and not _evidence_plan_satisfied and ENABLE_AGENT_LOOP and not _analyzer_tool_failed:
         t_stage = time.time()
         ctx = orchestrator.run_agent_loop(ctx)
         _trace_stage("stage_agent_loop", t_stage, outcome=ctx.agent_outcome, rounds=ctx.agent_rounds)
@@ -937,6 +1014,23 @@ def process_query(
                 missing_evidence=",".join(ctx.missing_evidence_for_metrics),
             )
             return ctx
+
+    # Append structured evidence summary when evidence planner contributed data
+    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_collected:
+        evidence_summary_parts = []
+        for role, evidence in ctx.evidence_collected.items():
+            tool = evidence.get("tool", "unknown")
+            row_count = len(evidence.get("rows", []))
+            col_names = evidence.get("cols", [])
+            evidence_summary_parts.append(
+                f"  {role}: {tool} ({row_count} rows, columns: {', '.join(col_names[:8])})"
+            )
+        if evidence_summary_parts:
+            ctx.stats_hint = (
+                (ctx.stats_hint or "")
+                + "\n\nEVIDENCE SOURCES:\n"
+                + "\n".join(evidence_summary_parts)
+            )
 
     # Stage 4: summarize
     t_stage = time.time()
