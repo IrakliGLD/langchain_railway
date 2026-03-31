@@ -13,6 +13,7 @@ Coordinates request handling with optional fast tool path:
 """
 import json
 import logging
+import re
 import time
 
 import pandas as pd
@@ -110,6 +111,34 @@ def _derive_resolution_policy(ctx: QueryContext) -> str:
     return ResolutionPolicy.ANSWER
 
 
+def _detect_clarify_selection(query: str, conversation_history) -> str | None:
+    """If the query is a single digit or 'option N' and the last assistant
+    message was a clarification, return the selected option text. Otherwise None."""
+    if not conversation_history:
+        return None
+    q = query.strip()
+    m = re.match(r'^(?:option\s+)?(\d)$', q, re.IGNORECASE)
+    if not m:
+        return None
+    option_num = int(m.group(1))
+
+    # Find the last assistant answer
+    last_answer = None
+    for turn in reversed(conversation_history):
+        if turn.get("answer"):
+            last_answer = turn["answer"]
+            break
+    if not last_answer or "Please choose one of these directions:" not in last_answer:
+        return None
+
+    # Extract option text
+    for line in last_answer.splitlines():
+        line = line.strip()
+        if line.startswith(f"{option_num}."):
+            return line[len(f"{option_num}."):].strip()
+    return None
+
+
 def _requested_derived_metric_names(ctx: QueryContext) -> list[str]:
     """Return active analyzer requested derived metrics in stable order."""
 
@@ -145,6 +174,8 @@ def _missing_requested_evidence(ctx: QueryContext) -> list[str]:
 def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
     """Return True when missing analytical evidence should stop Stage 4."""
 
+    if ctx.clarify_selection_override:
+        return False
     if not ctx.missing_evidence_for_metrics:
         return False
     if ctx.question_analysis is None or ctx.question_analysis_source != "llm_active":
@@ -436,11 +467,18 @@ def process_query(
     session_id: str = "",
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
+    # Detect clarification-selection replies (e.g. "1", "option 2")
+    selected = _detect_clarify_selection(query, conversation_history)
+    if selected:
+        query = selected
+        log.info("Clarification selection detected; rewriting query to: %s", selected)
+
     ctx = QueryContext(
         query=query,
         conversation_history=conversation_history,
         trace_id=trace_id,
         session_id=session_id,
+        clarify_selection_override=selected is not None,
     )
 
     def _trace_stage(stage_name: str, started_at: float, **extra):

@@ -73,6 +73,7 @@ class QueryContext:
     tool_blocked_by_policy: bool = False
     agent_loop_blocked_by_policy: bool = False
     clarify_reason: str = ""
+    clarify_selection_override: bool = False
     requested_derived_metrics: List[str] = dc_field(default_factory=list)
     missing_evidence_for_metrics: List[str] = dc_field(default_factory=list)
     grounding_policy: str = ""

@@ -135,6 +135,12 @@ class SemanticRole(str, Enum):
     COMPONENT_SECONDARY = "component_secondary"
 
 
+class Season(str, Enum):
+    SUMMER = "summer"
+    WINTER = "winter"
+    FULL = "full"
+
+
 class ScenarioAggregation(str, Enum):
     SUM = "sum"
     MEAN = "mean"
@@ -318,6 +324,7 @@ class DerivedMetricRequest(BaseModel):
     scenario_factor: Optional[float] = Field(default=None, ge=-1e9, le=1e9)
     scenario_volume: Optional[float] = Field(default=None, gt=0, le=1e6)
     scenario_aggregation: Optional[ScenarioAggregation] = Field(default=None)
+    season: Optional[Season] = Field(default=None)
 
     @field_validator("metric", "target_metric")
     @classmethod

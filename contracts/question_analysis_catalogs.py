@@ -178,22 +178,23 @@ QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "mom_absolute_change",
         "use_for": "Month-over-month absolute change for a metric when the question asks why a monthly value changed.",
-        "examples": ["p_bal_gel", "xrate"],
+        "examples": ["balancing", "exchange_rate"],
+        "metric_note": "Use tool-vocabulary names (balancing, deregulated, exchange_rate) for price metrics. Use column names (share_import, share_thermal_ppa) for share metrics.",
     },
     {
         "name": "mom_percent_change",
         "use_for": "Month-over-month percentage change for a metric when relative movement matters.",
-        "examples": ["p_bal_gel", "xrate"],
+        "examples": ["balancing", "exchange_rate"],
     },
     {
         "name": "yoy_absolute_change",
         "use_for": "Year-over-year absolute change for the same month or period.",
-        "examples": ["p_bal_gel", "xrate"],
+        "examples": ["balancing", "exchange_rate"],
     },
     {
         "name": "yoy_percent_change",
         "use_for": "Year-over-year percent change for the same month or period.",
-        "examples": ["p_bal_gel", "xrate"],
+        "examples": ["balancing", "exchange_rate"],
     },
     {
         "name": "share_delta_mom",
@@ -203,26 +204,26 @@ QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "correlation_to_target",
         "use_for": "Longer-term correlation between a driver and a target metric.",
-        "examples": ["xrate -> p_bal_gel", "share_import -> p_bal_gel"],
+        "examples": ["exchange_rate -> balancing", "share_import -> balancing"],
     },
     {
         "name": "trend_slope",
-        "use_for": "Long-term trend slope for a metric over time.",
-        "examples": ["p_bal_gel", "xrate"],
+        "use_for": "Long-term trend slope for a metric over time. For seasonal comparisons, emit two requests with season='summer' and season='winter'.",
+        "examples": ["balancing", "exchange_rate"],
     },
     {
         "name": "scenario_scale",
         "use_for": "Hypothetical scaling: 'What if prices were X% higher/lower?' Set scenario_factor to the multiplier (e.g. 1.34 for 34% higher, 0.8 for 20% lower).",
-        "examples": ["p_bal_gel * 1.34", "xrate * 0.9"],
+        "examples": ["balancing * 1.34", "exchange_rate * 0.9"],
     },
     {
         "name": "scenario_offset",
         "use_for": "Hypothetical offset: 'What if prices were X units higher?' Set scenario_factor to the addend (positive or negative).",
-        "examples": ["p_bal_usd + 10", "tariff_gel + 5"],
+        "examples": ["balancing + 10", "tariff_gel + 5"],
     },
     {
         "name": "scenario_payoff",
         "use_for": "CfD / PPA payoff calculation: '(strike - market_price) * volume per period'. Set scenario_factor to strike price, scenario_volume to MW capacity (default 1.0).",
-        "examples": ["(60 - p_bal_usd) * 1.0", "(50 - p_bal_gel) * 2.5"],
+        "examples": ["(60 - balancing) * 1.0", "(50 - balancing) * 2.5"],
     },
 ]

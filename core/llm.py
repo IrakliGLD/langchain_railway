@@ -1905,6 +1905,12 @@ Important rules:
   - `xrate`
 - Express GEL/USD choice through `currency`, not by changing the metric name.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
+- In `derived_metrics[].metric`, use the same vocabulary as tool params_hint.metric:
+  `balancing`, `deregulated`, `guaranteed_capacity`, `exchange_rate` for price metrics.
+  Exception: share-based metrics use column names: `share_import`, `share_thermal_ppa`, etc.
+- `derived_metrics[].season`: optional, one of "summer", "winter", "full" (or omit for full series).
+  Use when the question compares seasonal patterns (e.g., "summer vs winter trend").
+  Emit separate derived_metric entries for each season being compared.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
 - For scenario/hypothetical queries, set `analysis_mode` to `analyst` and add a scenario-type derived_metric:
   - Trigger phrases: "what if", "hypothetical", "calculate payoff/income", "if price were X",

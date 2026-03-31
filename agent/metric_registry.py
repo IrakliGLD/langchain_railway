@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from config_metrics.metric_config import METRIC_VALUE_ALIASES
+from config_metrics.metric_config import METRIC_VALUE_ALIASES, SEMANTIC_TO_COLUMNS, SUMMER_MONTHS
 
 log = logging.getLogger("Enai")
 
@@ -49,7 +49,14 @@ def _metric_aliases(metric: str) -> list[str]:
     metric_name = str(metric or "").strip()
     if not metric_name:
         return []
-    return METRIC_VALUE_ALIASES.get(metric_name, [metric_name])
+    # 1. Exact column-level alias (e.g. "p_bal_gel" → ["p_bal_gel", "balancing_price_gel"])
+    if metric_name in METRIC_VALUE_ALIASES:
+        return METRIC_VALUE_ALIASES[metric_name]
+    # 2. Semantic tool name (e.g. "balancing" → ["p_bal_gel", "p_bal_usd"])
+    if metric_name in SEMANTIC_TO_COLUMNS:
+        return SEMANTIC_TO_COLUMNS[metric_name]
+    # 3. Fallback: treat as literal column name
+    return [metric_name]
 
 
 def row_value(frame: pd.DataFrame, metric_name: str) -> Optional[float]:
@@ -90,6 +97,20 @@ def _scenario_formula(metric_name: str, metric: str, factor: float, volume: floa
         return f"{metric} + {factor}, {agg} over {n} periods"
     else:
         return f"({factor} - {metric}) * {volume}, {agg} over {n} periods"
+
+
+def _apply_season_filter(df: pd.DataFrame, time_col: str, season: Optional[str]) -> pd.DataFrame:
+    """Filter a DataFrame to summer or winter months only."""
+    if not season or season == "full":
+        return df
+    if time_col not in df.columns:
+        return df
+    dt = pd.to_datetime(df[time_col], errors="coerce")
+    if season == "summer":
+        return df[dt.dt.month.isin(SUMMER_MONTHS)]
+    elif season == "winter":
+        return df[~dt.dt.month.isin(SUMMER_MONTHS)]
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -229,19 +250,23 @@ def compute_trend_slope(
     """Linear trend slope over ordered observations."""
     metric = record["metric"]
     candidates = _metric_aliases(metric)
-    value_col = next((c for c in candidates if c in mctx.df.columns), None)
-    if value_col is None or len(mctx.df) < 2:
+    season = request.get("season")
+    df = _apply_season_filter(mctx.df, mctx.time_col, season)
+    value_col = next((c for c in candidates if c in df.columns), None)
+    if value_col is None or len(df) < 2:
         return None
-    numeric_series = pd.to_numeric(mctx.df[value_col], errors="coerce")
+    numeric_series = pd.to_numeric(df[value_col], errors="coerce")
     valid = numeric_series.notna()
     if valid.sum() < 2:
         return None
     x = np.arange(valid.sum(), dtype=float)
     y = numeric_series[valid].astype(float).to_numpy()
     slope = np.polyfit(x, y, deg=1)[0]
+    season_label = f" ({season})" if season and season != "full" else ""
     record.update({
         "trend_slope": round(float(slope), 6),
-        "formula": f"linear_slope({metric}) over ordered observations",
+        "season": season if season and season != "full" else None,
+        "formula": f"linear_slope({metric}){season_label} over ordered observations",
         "source_column": value_col,
         "source_row_count": int(valid.sum()),
         "source_cells": [
@@ -266,10 +291,12 @@ def compute_scenario(
     metric = record["metric"]
     metric_name = record["derived_metric_name"]
     candidates = _metric_aliases(metric)
-    value_col = next((c for c in candidates if c in mctx.df.columns), None)
+    season = request.get("season")
+    df = _apply_season_filter(mctx.df, mctx.time_col, season)
+    value_col = next((c for c in candidates if c in df.columns), None)
     if value_col is None:
         return None
-    raw = pd.to_numeric(mctx.df[value_col], errors="coerce")
+    raw = pd.to_numeric(df[value_col], errors="coerce")
     valid_mask = raw.notna()
     if valid_mask.sum() == 0:
         return None
@@ -323,8 +350,8 @@ def compute_scenario(
         delta_pct = None
 
     period_range = ""
-    if mctx.time_col in mctx.df.columns:
-        time_vals = mctx.df.loc[valid_mask[valid_mask].index, mctx.time_col]
+    if mctx.time_col in df.columns:
+        time_vals = df.loc[valid_mask[valid_mask].index, mctx.time_col]
         if not time_vals.empty:
             period_range = f"{time_vals.iloc[0]} to {time_vals.iloc[-1]}"
 

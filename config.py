@@ -79,7 +79,7 @@ ROUTER_THINKING_BUDGET: int | None = int(_raw_tb) if _raw_tb else None
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
-ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "false").lower() in ("1", "true", "yes", "on")
+ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")

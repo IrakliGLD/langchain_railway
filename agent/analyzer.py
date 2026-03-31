@@ -39,6 +39,7 @@ from config_metrics.metric_config import (
     BALANCING_SHARE_METADATA,
     METRIC_VALUE_ALIASES,
     DERIVED_METRIC_DEFAULTS,
+    SEMANTIC_TO_COLUMNS,
     SUMMER_MONTHS,
 )
 from agent.metric_registry import MetricContext, dispatch_metric
@@ -163,7 +164,11 @@ def _metric_aliases(metric: str) -> list[str]:
     metric_name = str(metric or "").strip()
     if not metric_name:
         return []
-    return METRIC_VALUE_ALIASES.get(metric_name, [metric_name])
+    if metric_name in METRIC_VALUE_ALIASES:
+        return METRIC_VALUE_ALIASES[metric_name]
+    if metric_name in SEMANTIC_TO_COLUMNS:
+        return SEMANTIC_TO_COLUMNS[metric_name]
+    return [metric_name]
 
 
 _SCENARIO_FALLBACK_PATTERNS: list[tuple[str, str, str]] = [

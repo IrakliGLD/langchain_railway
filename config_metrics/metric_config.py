@@ -80,3 +80,21 @@ DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
 
 SUMMER_MONTHS = (4, 5, 6, 7)
 WINTER_MONTHS = (1, 2, 3, 10, 11, 12)
+
+
+# ---------------------------------------------------------------------------
+# Semantic tool names → DataFrame column candidates
+# ---------------------------------------------------------------------------
+# The analyzer LLM emits tool-vocabulary metric names (e.g. "balancing")
+# in DerivedMetricRequest.metric, but DataFrames use column names
+# (e.g. "p_bal_gel").  This map bridges the two vocabularies so the
+# metric registry can resolve either form.
+#
+# Mirrors the mapping in agent/tools/price_tools.py:_resolve_columns().
+
+SEMANTIC_TO_COLUMNS: dict[str, list[str]] = {
+    "balancing": ["p_bal_gel", "p_bal_usd"],
+    "deregulated": ["p_dereg_gel", "p_dereg_usd"],
+    "guaranteed_capacity": ["p_gcap_gel", "p_gcap_usd"],
+    "exchange_rate": ["xrate"],
+}
