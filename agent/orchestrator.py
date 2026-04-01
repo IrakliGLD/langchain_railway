@@ -258,9 +258,8 @@ def _attach_dataset(ctx: QueryContext, dataset_id: str, result: ToolExecutionRes
         source="tool",
         query_hash=tool_invocation_hash(result.name, result.params),
     )
-    if not ctx.has_authoritative_question_analysis:
-        ctx.plan.setdefault("intent", "agent_tool_query")
-        ctx.plan.setdefault("target", result.name)
+    ctx.plan.setdefault("intent", "agent_tool_query")
+    ctx.plan.setdefault("target", result.name)
     return ctx
 
 

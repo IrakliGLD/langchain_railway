@@ -84,7 +84,7 @@ def _derive_response_mode(ctx: QueryContext) -> str:
     - When no analyzer is available, fall back to is_conceptual_question()
       which was already computed in prepare_context().
     """
-    if ctx.has_authoritative_question_analysis:
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
         qa_type = ctx.question_analysis.classification.query_type.value
         qa_path = ctx.question_analysis.routing.preferred_path.value
         if qa_type in _ALWAYS_KNOWLEDGE_TYPES:
@@ -105,7 +105,7 @@ def _derive_response_mode(ctx: QueryContext) -> str:
 def _derive_resolution_policy(ctx: QueryContext) -> str:
     """Derive whether the pipeline should answer or request clarification."""
 
-    if ctx.has_authoritative_question_analysis:
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
         if ctx.question_analysis.routing.preferred_path == PreferredPath.CLARIFY:
             return ResolutionPolicy.CLARIFY
     return ResolutionPolicy.ANSWER
@@ -142,7 +142,7 @@ def _detect_clarify_selection(query: str, conversation_history) -> str | None:
 def _requested_derived_metric_names(ctx: QueryContext) -> list[str]:
     """Return active analyzer requested derived metrics in stable order."""
 
-    if not ctx.has_authoritative_question_analysis:
+    if ctx.question_analysis is None or ctx.question_analysis_source != "llm_active":
         return []
 
     names: list[str] = []
@@ -178,7 +178,7 @@ def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
         return False
     if not ctx.missing_evidence_for_metrics:
         return False
-    if not ctx.has_authoritative_question_analysis:
+    if ctx.question_analysis is None or ctx.question_analysis_source != "llm_active":
         return False
 
     query_type = ctx.question_analysis.classification.query_type.value
@@ -284,7 +284,7 @@ def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
     query_lower = (ctx.query or "").strip().lower()
     explanation_signal_hit = any(signal in query_lower for signal in _EXPLANATION_ROUTING_SIGNALS)
 
-    if ctx.has_authoritative_question_analysis:
+    if ctx.question_analysis:
         qa_type = ctx.question_analysis.classification.query_type.value
         if qa_type == "conceptual_definition":
             return True
@@ -319,7 +319,11 @@ def _derive_resolved_query(ctx: QueryContext) -> tuple[str, str]:
     canonicalization remains useful for observability but must not change
     routing or fallback prompts.
     """
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.canonical_query_en.strip():
+    if (
+        ctx.question_analysis is not None
+        and ctx.question_analysis_source == "llm_active"
+        and ctx.question_analysis.canonical_query_en.strip()
+    ):
         return ctx.question_analysis.canonical_query_en, "llm_active_canonical"
     return ctx.query, "raw_query"
 
@@ -351,9 +355,8 @@ def _apply_tool_result(
         source="tool",
         query_hash=tool_invocation_hash(invocation.name, invocation.params),
     )
-    if not ctx.has_authoritative_question_analysis:
-        ctx.plan.setdefault("intent", "tool_query")
-        ctx.plan.setdefault("target", invocation.name)
+    ctx.plan.setdefault("intent", "tool_query")
+    ctx.plan.setdefault("target", invocation.name)
 
     tool_relevant, tool_reason = validate_tool_relevance(
         (relevance_query or ctx.query),
@@ -660,8 +663,8 @@ def process_query(
         is_exp = _should_route_tool_as_explanation(ctx)
 
         # Plan-driven invocation: when evidence plan exists, execute the
-        # first unsatisfied step instead of keyword-matching. Raw-query
-        # routing remains fallback-only when Stage 0.2 is absent/failed.
+        # first unsatisfied step instead of keyword-matching.  Keyword
+        # routing remains as fallback when the plan is empty.
         _plan_step_used = None
         if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
             _plan_step = evidence_planner.next_unsatisfied_step(ctx.evidence_plan)
@@ -682,11 +685,7 @@ def process_query(
                 # All plan steps already satisfied (e.g. by earlier stages)
                 invocation = None
         else:
-            invocation = (
-                None
-                if ctx.has_authoritative_question_analysis
-                else match_tool(ctx.query, is_explanation=is_exp)
-            )
+            invocation = match_tool(ctx.query, is_explanation=is_exp)
         _trace_stage("stage_0_5_router_match", t_stage, matched=bool(invocation), plan_driven=bool(_plan_step_used))
         if invocation:
             if _plan_step_used:
@@ -717,9 +716,8 @@ def process_query(
                     source="tool",
                     query_hash=tool_invocation_hash(invocation.name, invocation.params),
                 )
-                if not ctx.has_authoritative_question_analysis:
-                    ctx.plan.setdefault("intent", "tool_query")
-                    ctx.plan.setdefault("target", invocation.name)
+                ctx.plan.setdefault("intent", "tool_query")
+                ctx.plan.setdefault("target", invocation.name)
                 _relevance_q = ctx.resolved_query or ctx.query
                 tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, invocation.name)
                 if not tool_relevant:
@@ -805,7 +803,7 @@ def process_query(
             t_stage = time.time()
             analyzer_invocation = None
             analyzer_build_error = ""
-            if ctx.has_authoritative_question_analysis and ENABLE_QUESTION_ANALYZER_HINTS:
+            if ctx.question_analysis and ENABLE_QUESTION_ANALYZER_HINTS:
                 try:
                     analyzer_invocation = planner.build_tool_invocation_from_analysis(
                         ctx.question_analysis, ctx.query,
@@ -816,7 +814,7 @@ def process_query(
                     log.warning("Analyzer tool invocation build failed: %s", exc)
 
             # Trace the analyzer routing decision regardless of outcome
-            qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
+            qa = ctx.question_analysis
             trace_detail(
                 log, ctx, "stage_0_7_analyzer_route", "decision",
                 invocation_built=bool(analyzer_invocation),
@@ -857,9 +855,8 @@ def process_query(
                         ctx, ctx.cols, ctx.rows, source="tool",
                         query_hash=tool_invocation_hash(analyzer_invocation.name, analyzer_invocation.params),
                     )
-                    if not ctx.has_authoritative_question_analysis:
-                        ctx.plan.setdefault("intent", "tool_query")
-                        ctx.plan.setdefault("target", analyzer_invocation.name)
+                    ctx.plan.setdefault("intent", "tool_query")
+                    ctx.plan.setdefault("target", analyzer_invocation.name)
                     _relevance_q = ctx.resolved_query or ctx.query
                     tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, analyzer_invocation.name)
                     if not tool_relevant:
@@ -964,10 +961,10 @@ def process_query(
             satisfied=[s["tool_name"] for s in ctx.evidence_plan if s.get("satisfied")],
         )
 
-    # Stage 1/2: fallback SQL path when no tool route was used.
-    # When Stage 0.2 is authoritative, it owns route selection, so the
-    # context-blind agent loop must not run ahead of planner/SQL fallback.
-    # Without authoritative Stage 0.2, the agent loop remains the last resort.
+    # Stage 1/2: fallback SQL path when no tool route was used
+    # When the analyzer understood the query but its tool invocation failed,
+    # prefer the planner+SQL path (which consumes question_analysis) over the
+    # context-blind agent loop.  The agent loop remains the last resort.
     _analyzer_tool_failed = (
         not ctx.used_tool
         and ctx.tool_fallback_reason
@@ -978,13 +975,7 @@ def process_query(
         and ctx.evidence_plan
         and ctx.evidence_plan_complete
     )
-    if (
-        not ctx.used_tool
-        and not _evidence_plan_satisfied
-        and ENABLE_AGENT_LOOP
-        and not _analyzer_tool_failed
-        and not ctx.has_authoritative_question_analysis
-    ):
+    if not ctx.used_tool and not _evidence_plan_satisfied and ENABLE_AGENT_LOOP and not _analyzer_tool_failed:
         t_stage = time.time()
         ctx = orchestrator.run_agent_loop(ctx)
         _trace_stage("stage_agent_loop", t_stage, outcome=ctx.agent_outcome, rounds=ctx.agent_rounds)
