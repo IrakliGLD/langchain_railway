@@ -1986,6 +1986,140 @@ def test_analyzer_build_failure_can_recover_via_resolved_query_match(monkeypatch
     assert out.summary == "data answer via resolved-query recovery"
 
 
+def test_authoritative_question_analysis_skips_raw_router_match(monkeypatch):
+    """When Stage 0.2 is authoritative, Stage 0.5 must not raw-match the user query."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+    from agent.tools.types import ToolInvocation
+
+    payload = _make_analyzer_payload("comparison", "tool", confidence=0.95)
+    payload["canonical_query_en"] = "Compare balancing electricity prices in 2024"
+    payload["tooling"]["candidate_tools"] = [{
+        "name": "get_prices",
+        "score": 0.98,
+        "reason": "Primary price comparison",
+        "params_hint": {
+            "metric": "balancing",
+            "currency": "gel",
+            "granularity": "monthly",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "entities": [],
+            "types": [],
+            "mode": None,
+        },
+    }]
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_EVIDENCE_PLANNER", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "match_tool",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("raw match_tool must not run when Stage 0.2 is authoritative")),
+    )
+    monkeypatch.setattr(
+        pipeline.planner,
+        "build_tool_invocation_from_analysis",
+        lambda *_args, **_kwargs: ToolInvocation(
+            name="get_prices",
+            params={
+                "start_date": "2024-01-01",
+                "end_date": "2024-12-31",
+                "metric": "balancing",
+                "currency": "gel",
+                "granularity": "monthly",
+            },
+            confidence=0.95,
+            reason="analyzer:test",
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "execute_tool",
+        lambda invocation: (
+            pd.DataFrame({"date": ["2024-01-01"], "p_bal_gel": [50.0]}),
+            ["date", "p_bal_gel"],
+            [("2024-01-01", 50.0)],
+        ),
+    )
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "data answer via analyzer route") or ctx,
+    )
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("compare prices")
+
+    assert out.used_tool is True
+    assert out.tool_name == "get_prices"
+    assert out.summary == "data answer via analyzer route"
+
+
+def test_authoritative_question_analysis_skips_agent_loop_and_uses_planner_sql(monkeypatch):
+    """SQL-shaped authoritative Stage 0.2 requests must not detour into the agent loop."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("data_explanation", "sql", confidence=0.95)
+    payload["canonical_query_en"] = "Explain why balancing electricity price changed in November 2021"
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.orchestrator, "run_agent_loop",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run when Stage 0.2 is authoritative")),
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "generate_plan",
+        lambda ctx, **_kw: setattr(ctx, "plan", {"intent": expected.classification.intent, "target": "p_bal_gel", "period": ""})
+        or setattr(ctx, "raw_sql", "SELECT 1")
+        or setattr(ctx, "skip_sql", False)
+        or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.sql_executor, "validate_and_execute",
+        lambda ctx: setattr(ctx, "df", pd.DataFrame({"date": ["2021-11-01"], "p_bal_gel": [120.0]}))
+        or setattr(ctx, "cols", ["date", "p_bal_gel"])
+        or setattr(ctx, "rows", [("2021-11-01", 120.0)])
+        or ctx,
+    )
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "data answer via planner sql fallback") or ctx,
+    )
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("why did it change?")
+
+    assert out.used_tool is False
+    assert out.summary == "data answer via planner sql fallback"
+
+
 def test_resolved_query_recovery_validates_relevance_against_canonical_query(monkeypatch):
     """Recovered tool candidates must be checked against the resolved follow-up meaning."""
     from contracts.question_analysis import QuestionAnalysis

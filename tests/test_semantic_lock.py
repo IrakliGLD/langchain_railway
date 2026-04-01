@@ -369,6 +369,83 @@ class TestShareDetectionRespectsAnalyzer:
 
 
 # ---------------------------------------------------------------------------
+# Tests: analyzer does not mutate authoritative intent
+# ---------------------------------------------------------------------------
+
+class TestAnalyzerDoesNotMutateAuthoritativePlan:
+
+    def test_correlation_enrichment_keeps_authoritative_intent(self, monkeypatch):
+        from agent import analyzer
+
+        qa = _make_qa(
+            query_type=QueryType.DATA_EXPLANATION,
+            intent="balancing_price_why",
+            candidate_tools=[
+                ToolCandidate(name=ToolName.GET_PRICES, score=0.9, reason="price why"),
+            ],
+            needs_driver_analysis=True,
+            needs_correlation_context=True,
+            canonical_query="Why did balancing electricity price change in November 2021?",
+        )
+
+        corr_df = pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01"), pd.Timestamp("2021-12-01")],
+                "p_bal_gel": [100.0, 120.0, 110.0],
+                "p_bal_usd": [32.0, 38.0, 35.0],
+                "xrate": [3.1, 3.2, 3.15],
+                "share_import": [0.20, 0.25, 0.22],
+                "share_deregulated_hydro": [0.30, 0.28, 0.31],
+                "share_regulated_hpp": [0.10, 0.09, 0.11],
+                "share_renewable_ppa": [0.20, 0.19, 0.18],
+                "enguri_tariff_gel": [10.0, 10.0, 10.0],
+                "gardabani_tpp_tariff_gel": [20.0, 20.0, 20.0],
+                "grouped_old_tpp_tariff_gel": [18.0, 18.0, 18.0],
+            }
+        )
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, *_args, **_kwargs):
+                return None
+
+        class _Engine:
+            def connect(self):
+                return _Conn()
+
+        monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+        monkeypatch.setattr(analyzer, "build_balancing_correlation_df", lambda *_args, **_kwargs: corr_df)
+        monkeypatch.setattr(analyzer, "_build_why_context", lambda *_args, **_kwargs: None)
+
+        ctx = _make_ctx(
+            query="why did balancing electricity price change?",
+            qa=qa,
+            semantic_locked=True,
+            df=pd.DataFrame(
+                {
+                    "date": [pd.Timestamp("2021-10-01"), pd.Timestamp("2021-11-01")],
+                    "p_bal_gel": [100.0, 120.0],
+                }
+            ),
+        )
+        ctx.plan = {
+            "intent": "balancing_price_why",
+            "target": "p_bal_gel",
+            "period": "November 2021",
+        }
+
+        out = analyzer.enrich(ctx)
+
+        assert out.plan["intent"] == "balancing_price_why"
+        assert "p_bal_gel" in out.correlation_results
+
+
+# ---------------------------------------------------------------------------
 # Tests: evidence precedence
 # ---------------------------------------------------------------------------
 

@@ -244,7 +244,7 @@ def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
 
 
 def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
-    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+    if ctx.has_authoritative_question_analysis:
         requests = [
             req.model_dump(mode="json")
             for req in ctx.question_analysis.analysis_requirements.derived_metrics
@@ -1222,14 +1222,11 @@ def enrich(ctx: QueryContext) -> QueryContext:
     """
     # --- Share resolution ---
     share_intent = str(ctx.plan.get("intent", "")).lower()
-    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+    if ctx.has_authoritative_question_analysis:
         # When the semantic contract is available, trust only structured analyzer
         # signals for share/composition intent. Free-form intent text is not
         # authoritative enough for downstream execution.
-        analyzer_share_signal = ctx.analyzer_indicates_share_intent
-        share_query_detected = (
-            share_intent in {"calculate_share", "share"} or analyzer_share_signal
-        )
+        share_query_detected = ctx.analyzer_indicates_share_intent
     else:
         # No analyzer available: fall back to keyword matching (legacy behavior)
         share_query_detected = share_intent in {"calculate_share", "share"} or "share" in ctx.query.lower()
@@ -1305,13 +1302,14 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Share summary override failed: {share_err}")
 
     # --- Correlation analysis ---
-    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+    needs_correlation_analysis = False
+    if ctx.has_authoritative_question_analysis:
         # Use structured analyzer signals for correlation detection
         qa_reqs = ctx.question_analysis.analysis_requirements
         if qa_reqs.needs_driver_analysis or qa_reqs.needs_correlation_context:
             log.info("🧮 Semantic intent → correlation (analyzer: needs_driver=%s needs_correlation=%s).",
                      qa_reqs.needs_driver_analysis, qa_reqs.needs_correlation_context)
-            ctx.plan["intent"] = "correlation"
+            needs_correlation_analysis = True
     else:
         # Legacy keyword-based correlation detection (no analyzer available)
         user_text = ctx.query.lower().strip()
@@ -1335,9 +1333,9 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
         if text_hit or pattern_hit:
             log.info("🧮 Semantic intent → correlation (detected cause/effect phrasing).")
-            ctx.plan["intent"] = "correlation"
+            needs_correlation_analysis = True
 
-    if ctx.plan.get("intent") == "correlation":
+    if needs_correlation_analysis:
         log.info("🔍 Building comprehensive balancing-price correlation analysis")
         try:
             with ENGINE.connect() as conn:
@@ -1389,7 +1387,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
     # --- Forecast mode (CAGR) ---
     _forecast_detected = (
         ctx.question_analysis.classification.query_type.value == "forecast"
-        if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active"
+        if ctx.has_authoritative_question_analysis
         else _detect_forecast_mode(ctx.query)
     )
     if _forecast_detected and not ctx.df.empty:
@@ -1402,7 +1400,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     # --- Why mode (causal reasoning) ---
     _why_detected = False
-    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+    if ctx.has_authoritative_question_analysis:
         qa_reqs = ctx.question_analysis.analysis_requirements
         _why_detected = (
             qa_reqs.needs_driver_analysis
@@ -1431,7 +1429,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
-    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+    if ctx.has_authoritative_question_analysis:
         ctx.add_trendlines = ctx.question_analysis.classification.query_type.value == "forecast"
     else:
         trend_keywords = [
@@ -1551,7 +1549,7 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
 
 def _needs_standalone_analysis(ctx: QueryContext) -> bool:
     """Return True when derived metrics should be computed outside why-mode."""
-    qa = ctx.question_analysis
+    qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
     if qa is not None:
         if qa.analysis_requirements.derived_metrics:
             return True

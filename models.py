@@ -158,6 +158,14 @@ class QueryContext:
         return self.query
 
     @property
+    def has_authoritative_question_analysis(self) -> bool:
+        """Return True when Stage 0.2 active analysis is authoritative."""
+        return (
+            self.question_analysis is not None
+            and self.question_analysis_source == "llm_active"
+        )
+
+    @property
     def analyzer_indicates_share_intent(self) -> bool:
         """Return True when active analyzer output structurally indicates share intent.
 
@@ -167,7 +175,7 @@ class QueryContext:
         led analyzer routing signal is authoritative enough.
         """
         qa = self.question_analysis
-        if qa is None or self.question_analysis_source != "llm_active":
+        if qa is None or not self.has_authoritative_question_analysis:
             return False
 
         candidate_tools = qa.tooling.candidate_tools or []
