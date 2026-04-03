@@ -356,7 +356,11 @@ def _resolve_secondary_params(
         params["start_date"] = primary_params["start_date"]
     if "end_date" not in params and "end_date" in primary_params:
         params["end_date"] = primary_params["end_date"]
-    if primary_params.get("currency") and not params.get("currency"):
+    if (
+        tool_name in {ToolName.GET_PRICES.value, ToolName.GET_TARIFFS.value}
+        and primary_params.get("currency")
+        and not params.get("currency")
+    ):
         params["currency"] = primary_params["currency"]
 
     # Balancing-price auto-enrichment should default to category-level tariff

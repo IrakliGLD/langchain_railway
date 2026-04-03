@@ -49,3 +49,5 @@ def test_balancing_focus_loads_full_balancing_template(monkeypatch):
     assert "Source Price / Tariff Layer" in prompt
     assert "price_deregulated_hydro_gel" in prompt
     assert "residual_contribution_ppa_import_*" in prompt
+    assert "below balancing price" in prompt
+    assert "share change and the component price change" in prompt

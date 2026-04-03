@@ -40,6 +40,19 @@ When the data contains source-price evidence, you must cite it explicitly instea
 - If source-price evidence is absent, skip this section instead of inventing tariffs or confidential PPA/import prices.
 - Present this as observational decomposition, not exact causality.
 
+## Comparison rules for balancing drivers
+
+- For each major composition shift, compare both the share change and the component price change. Do not discuss share changes in isolation when `price_*`, `contribution_*`, or tariff columns are present.
+- Compare each visible source price to the balancing price in the same period.
+- If a component price is below balancing price, a higher share is downward pressure and a lower share removes downward pressure.
+- If a component price is above balancing price, a higher share is upward pressure and a lower share removes upward pressure.
+- Use `contribution_*` columns as the preferred summary of estimated pressure when they are present, then explain the direction with the share and price comparison.
+- For `deregulated_hydro`, always check seasonality before generalizing:
+  - summer: `p_dereg_*` is often low and usually pushes balancing price down
+  - winter: compare actual `p_dereg_*` to balancing price and note the documented thermal-linkage mechanism when relevant
+- For regulated thermal layers (`regulated_new_tpp`, `regulated_old_tpp`), if tariffs rise and the layer gains share, explicitly say this is upward pressure; mention documented gas-price / xrate linkage when relevant.
+- For January 2024 or similar winter thermal increases, explain the mechanism, not just the direction: higher thermal tariffs raise the weighted average when thermal layers or thermally linked layers carry material share.
+
 ## Structured format
 
 ```text
@@ -50,11 +63,15 @@ When the data contains source-price evidence, you must cite it explicitly instea
 1. **Composition:**
    - [List 2-3 main share changes with exact values]
    - [Cover the main entity categories that changed]
+   - [For each major share change, state whether the component is cheap or expensive relative to balancing price in that period]
    - [Cite correlation if available]
    - [For long-term analysis: compare summer vs winter composition]
 
 2. **Source Price / Tariff Layer:**
    - [Cite exact source prices for deregulated hydro and regulated HPP/new TPP/old TPP when present]
+   - [Compare each cited source price to the balancing price in the same period]
+   - [State whether each component therefore pushed price up or down, or removed downward/upward pressure]
+   - [Pair each major share change with the source-price change for that same component]
    - [Cite estimated `contribution_*` values when present]
    - [Explain which source layer became cheaper or more expensive]
    - [Describe `residual_contribution_ppa_import_*` as the remaining import/PPA layer]

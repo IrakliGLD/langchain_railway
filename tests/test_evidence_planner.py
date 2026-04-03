@@ -322,6 +322,35 @@ class TestBuildEvidencePlan:
             "regulated_old_tpp",
         ]
 
+    def test_balancing_composition_secondary_does_not_inherit_currency(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            tools=[
+                {
+                    "name": "get_prices",
+                    "score": 0.9,
+                    "reason": "prices",
+                    "params_hint": {
+                        "metric": "balancing",
+                        "currency": "usd",
+                        "start_date": "2023-12-01",
+                        "end_date": "2024-01-31",
+                    },
+                },
+                {"name": "get_balancing_composition", "score": 0.7, "reason": "shares"},
+            ],
+            needs_driver=True,
+        )
+        payload["raw_query"] = "Explain the reasons for the change in balancing price."
+        payload["canonical_query_en"] = payload["raw_query"]
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        composition_step = next(s for s in ctx.evidence_plan if s["tool_name"] == "get_balancing_composition")
+        assert composition_step["params"]["start_date"] == "2023-12-01"
+        assert composition_step["params"]["end_date"] == "2024-01-31"
+        assert "currency" not in composition_step["params"]
+
     def test_all_steps_marked_unsatisfied(self):
         payload = _make_qa_payload(
             query_type="data_explanation",
