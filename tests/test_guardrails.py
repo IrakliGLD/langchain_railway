@@ -1290,6 +1290,66 @@ def test_why_yoy_zero_delta_says_unchanged(monkeypatch):
     assert "lower" not in yoy_notes[0], f"Should NOT say 'lower' when delta=0: {yoy_notes[0]}"
 
 
+def test_why_context_adds_component_pressure_summary_block(monkeypatch):
+    monkeypatch.setattr(analyzer, "stamp_provenance", lambda *_args, **_kwargs: None)
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2023-12-01", "2024-01-01"]),
+            "p_bal_gel": [146.6, 155.2],
+            "p_bal_usd": [54.4981, 57.9104],
+            "xrate": [2.69, 2.68],
+            "share_deregulated_hydro": [0.0024, 0.0015],
+            "share_regulated_hpp": [0.0010, 0.0],
+            "share_regulated_old_tpp": [0.0, 0.2397],
+            "share_ppa_import_total": [0.9966, 0.7587],
+            "price_deregulated_hydro_gel": [45.0, 40.0],
+            "price_regulated_hpp_gel": [33.0, 32.0],
+            "price_regulated_old_tpp_gel": [None, 185.8],
+            "contribution_deregulated_hydro_gel": [0.11, 0.06],
+            "contribution_regulated_hpp_gel": [0.03, 0.0],
+            "contribution_regulated_old_tpp_gel": [0.0, 44.5],
+            "residual_contribution_ppa_import_gel": [146.28, 120.2],
+        }
+    )
+    ctx = QueryContext(
+        query="Explain the reasons for the change in balancing price in January 2024.",
+        mode="analyst",
+        trace_id="component-pressure-1",
+        session_id="component-pressure-1",
+        df=df,
+        cols=list(df.columns),
+        rows=[tuple(r) for r in df.itertuples(index=False, name=None)],
+    )
+
+    analyzer._build_why_context(ctx)
+
+    hint = ctx.stats_hint
+    assert "COMPONENT PRESSURE SUMMARY" in hint
+    json_start = hint.index("[", hint.index("COMPONENT PRESSURE SUMMARY"))
+    bracket_depth = 0
+    json_end = json_start
+    for i, ch in enumerate(hint[json_start:], start=json_start):
+        if ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth -= 1
+            if bracket_depth == 0:
+                json_end = i + 1
+                break
+
+    summary = json.loads(hint[json_start:json_end])
+    old_tpp = next(item for item in summary if item["component"] == "regulated_old_tpp")
+    assert old_tpp["share_delta_pp"] == pytest.approx(23.97, abs=0.01)
+    assert old_tpp["price_cur_gel"] == pytest.approx(185.8)
+    assert old_tpp["price_vs_balancing_cur_gel"] == pytest.approx(30.6, abs=0.01)
+    assert old_tpp["observed_pressure_gel"] == "upward_pressure"
+
+    residual = next(item for item in summary if item["component"] == "residual_ppa_import")
+    assert residual["contribution_prev_gel"] == pytest.approx(146.28)
+    assert residual["contribution_cur_gel"] == pytest.approx(120.2)
+    assert residual["observed_pressure_gel"] == "lower_residual_contribution"
+
+
 # ---------------------------------------------------------------------------
 # Reliability fix tests
 # ---------------------------------------------------------------------------

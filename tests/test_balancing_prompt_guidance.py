@@ -51,3 +51,5 @@ def test_balancing_focus_loads_full_balancing_template(monkeypatch):
     assert "residual_contribution_ppa_import_*" in prompt
     assert "below balancing price" in prompt
     assert "share change and the component price change" in prompt
+    assert "COMPONENT PRESSURE SUMMARY" in prompt
+    assert "Do not invent blended source averages" in prompt

@@ -6,6 +6,7 @@ and generates the LLM plan + raw SQL.
 """
 import json
 import logging
+import re
 from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -49,11 +50,31 @@ _ALLOWED_LOWER = {e.lower() for e in ALLOWED_BALANCING_ENTITIES}
 
 _COST_TO_ENTITIES: dict[str, list[str]] = {}
 _LABEL_TO_ENTITY: dict[str, str] = {}
+
+
+def _normalize_balancing_entity_text(value: str) -> str:
+    normalized = value.strip().lower()
+    normalized = re.sub(r"[_/\\-]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+_ENTITY_ALIAS_TO_ENTITY: dict[str, str] = {
+    "thermal generation ppa": "thermal_ppa",
+    "thermal generation ppas": "thermal_ppa",
+    "thermal ppa": "thermal_ppa",
+    "thermal ppas": "thermal_ppa",
+    "renewable ppas": "renewable_ppa",
+    "old regulated tpps": "regulated_old_tpp",
+    "new regulated tpps": "regulated_new_tpp",
+    "regulated hpps": "regulated_hpp",
+}
+
 for _share_key, _meta in BALANCING_SHARE_METADATA.items():
     _entity = _share_key.removeprefix("share_")
     if _entity.lower() in _ALLOWED_LOWER:
         _COST_TO_ENTITIES.setdefault(_meta["cost"], []).append(_entity)
-        _LABEL_TO_ENTITY[_meta["label"].lower()] = _entity
+        _LABEL_TO_ENTITY[_normalize_balancing_entity_text(_meta["label"])] = _entity
 
 
 def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
@@ -74,10 +95,14 @@ def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
     resolved: list[str] = []
     unresolved_seen = False
     for raw in raw_entities:
-        val = raw.strip().lower()
+        val = _normalize_balancing_entity_text(raw)
         # 1. Already a valid entity?
         if val in _ALLOWED_LOWER:
             resolved.append(val)
+            continue
+        alias_entity = _ENTITY_ALIAS_TO_ENTITY.get(val)
+        if alias_entity:
+            resolved.append(alias_entity)
             continue
         # 2. Underscore-normalized form?
         val_under = val.replace(" ", "_")

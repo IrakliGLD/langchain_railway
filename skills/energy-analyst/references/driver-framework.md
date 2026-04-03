@@ -38,5 +38,7 @@ For price driver queries, structure the answer as:
 - Use `observed`, `associated with`, `consistent with`, and `likely pressure` for observational data.
 - Use stronger causal wording only when both a correlation coefficient and a documented mechanism are available.
 - Source-price and contribution layers are analytical evidence, not a perfect decomposition of balancing price.
+- Use numeric values only from `data preview`, `CAUSAL CONTEXT`, `COMPONENT PRESSURE SUMMARY`, `DERIVED ANALYSIS EVIDENCE`, or explicit tariff/source-price columns.
+- Do not invent blended source averages, hidden import/PPA prices, or implied component prices unless those exact numbers are present in the evidence.
 - For `deregulated_hydro`, always check season before generalizing: summer often lowers price, winter must be judged from actual `p_dereg_*` versus balancing price and the documented thermal-linkage mechanism.
 - For regulated thermal layers, mention documented gas-price / xrate linkage when tariffs rise materially and those layers carry meaningful share.

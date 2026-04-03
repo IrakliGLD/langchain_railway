@@ -128,6 +128,14 @@ def test_normalize_preserves_allowed_order():
     assert result == allowed_list
 
 
+def test_normalize_generation_aliases_from_analyzer_labels():
+    """Analyzer-facing plural labels should normalize to tool entities."""
+    result = normalize_balancing_entities(
+        ["old regulated TPPs", "imports", "renewable PPAs", "Thermal Generation PPAs"]
+    )
+    assert result == ["import", "regulated_old_tpp", "renewable_ppa", "thermal_ppa"]
+
+
 # ---------------------------------------------------------------------------
 # Phase 4: agent loop context enrichment
 # ---------------------------------------------------------------------------

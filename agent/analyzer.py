@@ -7,7 +7,7 @@ Handles share resolution, correlation analysis, forecast mode (CAGR),
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -141,6 +141,208 @@ def build_share_shift_notes(
         notes.append(f"USD-denominated sellers {direction} by {abs(usd_delta)*100:.1f}pp — xrate sensitivity {'increased' if usd_delta > 0 else 'decreased'}.")
 
     return notes
+
+
+_COMPONENT_PRESSURE_SPECS = (
+    {
+        "component": "deregulated_hydro",
+        "share_col": "share_deregulated_hydro",
+        "label": "deregulated hydro",
+        "price_cols": {
+            "gel": "price_deregulated_hydro_gel",
+            "usd": "price_deregulated_hydro_usd",
+        },
+        "contribution_cols": {
+            "gel": "contribution_deregulated_hydro_gel",
+            "usd": "contribution_deregulated_hydro_usd",
+        },
+        "mechanism_note": "seasonal hydro layer; summer is often below balancing price, winter must use observed price.",
+    },
+    {
+        "component": "regulated_hpp",
+        "share_col": "share_regulated_hpp",
+        "label": "regulated HPP",
+        "price_cols": {
+            "gel": "price_regulated_hpp_gel",
+            "usd": "price_regulated_hpp_usd",
+        },
+        "contribution_cols": {
+            "gel": "contribution_regulated_hpp_gel",
+            "usd": "contribution_regulated_hpp_usd",
+        },
+        "mechanism_note": "regulated hydro tariff layer; usually below balancing price when its share is material.",
+    },
+    {
+        "component": "regulated_new_tpp",
+        "share_col": "share_regulated_new_tpp",
+        "label": "regulated new TPP",
+        "price_cols": {
+            "gel": "price_regulated_new_tpp_gel",
+            "usd": "price_regulated_new_tpp_usd",
+        },
+        "contribution_cols": {
+            "gel": "contribution_regulated_new_tpp_gel",
+            "usd": "contribution_regulated_new_tpp_usd",
+        },
+        "mechanism_note": "regulated thermal tariff layer; gas-price and xrate linkage can matter.",
+    },
+    {
+        "component": "regulated_old_tpp",
+        "share_col": "share_regulated_old_tpp",
+        "label": "regulated old TPP",
+        "price_cols": {
+            "gel": "price_regulated_old_tpp_gel",
+            "usd": "price_regulated_old_tpp_usd",
+        },
+        "contribution_cols": {
+            "gel": "contribution_regulated_old_tpp_gel",
+            "usd": "contribution_regulated_old_tpp_usd",
+        },
+        "mechanism_note": "regulated thermal tariff layer; gas-price and xrate linkage can matter.",
+    },
+    {
+        "component": "residual_ppa_import",
+        "share_col": "share_ppa_import_total",
+        "label": "residual PPA/import layer",
+        "price_cols": {},
+        "contribution_cols": {
+            "gel": "residual_contribution_ppa_import_gel",
+            "usd": "residual_contribution_ppa_import_usd",
+        },
+        "mechanism_note": "residual import/PPA layer; contribution is observed, but a direct source price is not exposed.",
+    },
+)
+
+
+def _round_or_none(value: float | None, digits: int = 2) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    return round(float(value), digits)
+
+
+def _relative_price_position(price_value: float | None, balancing_value: float | None) -> str | None:
+    if price_value is None or balancing_value is None:
+        return None
+    delta = float(price_value) - float(balancing_value)
+    if abs(delta) <= 0.05:
+        return "near_balancing"
+    return "above_balancing" if delta > 0 else "below_balancing"
+
+
+def _pressure_from_share_shift(relative_position: str | None, share_delta: float | None) -> str | None:
+    if relative_position is None or share_delta is None:
+        return None
+    if abs(share_delta) < 0.0005:
+        return "share_stable"
+    if relative_position == "above_balancing":
+        return "upward_pressure" if share_delta > 0 else "removed_upward_pressure"
+    if relative_position == "below_balancing":
+        return "downward_pressure" if share_delta > 0 else "removed_downward_pressure"
+    return "neutral_pressure"
+
+
+def _residual_pressure_from_contribution(contribution_delta: float | None) -> str | None:
+    if contribution_delta is None:
+        return None
+    if abs(contribution_delta) < 0.05:
+        return "contribution_stable"
+    return "higher_residual_contribution" if contribution_delta > 0 else "lower_residual_contribution"
+
+
+def _build_component_pressure_summary(
+    cur_row: pd.DataFrame,
+    prev_row: pd.DataFrame,
+    *,
+    cur_gel: float | None,
+    prev_gel: float | None,
+    cur_usd: float | None,
+    prev_usd: float | None,
+    value_getter: Callable[[pd.DataFrame, list[str] | tuple[str, ...]], float | None],
+) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+
+    for spec in _COMPONENT_PRESSURE_SPECS:
+        share_col = spec["share_col"]
+        share_cur = value_getter(cur_row, [share_col])
+        share_prev = value_getter(prev_row, [share_col]) if not prev_row.empty else None
+        share_delta = None
+        if share_cur is not None or share_prev is not None:
+            share_delta = (share_cur or 0.0) - (share_prev or 0.0)
+
+        contrib_prev_gel = value_getter(prev_row, [spec["contribution_cols"].get("gel", "")]) if not prev_row.empty else None
+        contrib_cur_gel = value_getter(cur_row, [spec["contribution_cols"].get("gel", "")])
+        contrib_prev_usd = value_getter(prev_row, [spec["contribution_cols"].get("usd", "")]) if not prev_row.empty else None
+        contrib_cur_usd = value_getter(cur_row, [spec["contribution_cols"].get("usd", "")])
+
+        material_share = any(v is not None and abs(v) >= 0.0005 for v in (share_prev, share_cur))
+        material_contribution = any(
+            v is not None and abs(v) >= 0.05
+            for v in (contrib_prev_gel, contrib_cur_gel, contrib_prev_usd, contrib_cur_usd)
+        )
+        if not (material_share or material_contribution):
+            continue
+
+        record: dict[str, Any] = {
+            "component": spec["component"],
+            "label": spec["label"],
+            "share_prev": _round_or_none(share_prev, 4),
+            "share_cur": _round_or_none(share_cur, 4),
+            "share_delta_pp": _round_or_none((share_delta * 100.0) if share_delta is not None else None, 2),
+            "mechanism_note": spec["mechanism_note"],
+        }
+
+        for currency, balancing_prev, balancing_cur in (
+            ("gel", prev_gel, cur_gel),
+            ("usd", prev_usd, cur_usd),
+        ):
+            price_col = spec["price_cols"].get(currency)
+            contribution_col = spec["contribution_cols"].get(currency)
+            price_prev = value_getter(prev_row, [price_col]) if price_col and not prev_row.empty else None
+            price_cur = value_getter(cur_row, [price_col]) if price_col else None
+            contrib_prev = value_getter(prev_row, [contribution_col]) if contribution_col and not prev_row.empty else None
+            contrib_cur = value_getter(cur_row, [contribution_col]) if contribution_col else None
+
+            record[f"price_prev_{currency}"] = _round_or_none(price_prev, 2)
+            record[f"price_cur_{currency}"] = _round_or_none(price_cur, 2)
+            record[f"price_delta_{currency}"] = _round_or_none(
+                (price_cur - price_prev) if price_cur is not None and price_prev is not None else None,
+                2,
+            )
+            record[f"price_vs_balancing_prev_{currency}"] = _round_or_none(
+                (price_prev - balancing_prev)
+                if price_prev is not None and balancing_prev is not None
+                else None,
+                2,
+            )
+            record[f"price_vs_balancing_cur_{currency}"] = _round_or_none(
+                (price_cur - balancing_cur)
+                if price_cur is not None and balancing_cur is not None
+                else None,
+                2,
+            )
+            record[f"relative_price_prev_{currency}"] = _relative_price_position(price_prev, balancing_prev)
+            record[f"relative_price_cur_{currency}"] = _relative_price_position(price_cur, balancing_cur)
+            record[f"contribution_prev_{currency}"] = _round_or_none(contrib_prev, 2)
+            record[f"contribution_cur_{currency}"] = _round_or_none(contrib_cur, 2)
+            contribution_delta = (
+                (contrib_cur - contrib_prev)
+                if contrib_cur is not None and contrib_prev is not None
+                else None
+            )
+            record[f"contribution_delta_{currency}"] = _round_or_none(contribution_delta, 2)
+            observed_pressure = _pressure_from_share_shift(record[f"relative_price_cur_{currency}"], share_delta)
+            if observed_pressure is None and spec["component"] == "residual_ppa_import":
+                observed_pressure = _residual_pressure_from_contribution(contribution_delta)
+            record[f"observed_pressure_{currency}"] = observed_pressure
+
+        summary.append({k: v for k, v in record.items() if v is not None})
+
+    return summary
 
 
 
@@ -1852,6 +2054,18 @@ def _build_why_context(ctx: QueryContext) -> None:
     )
     if ctx.analysis_evidence:
         why_ctx["derived_evidence"] = ctx.analysis_evidence
+    component_pressure_summary = _build_component_pressure_summary(
+        cur_row,
+        prev_row,
+        cur_gel=cur_gel,
+        prev_gel=prev_gel,
+        cur_usd=cur_usd,
+        prev_usd=prev_usd,
+        value_getter=_get_val,
+    )
+    component_pressure_df = (
+        pd.DataFrame(component_pressure_summary) if component_pressure_summary else pd.DataFrame()
+    )
 
     why_prov_df = _build_why_provenance_snapshot(
         target_ts,
@@ -1882,6 +2096,8 @@ def _build_why_context(ctx: QueryContext) -> None:
         )
     if not analysis_evidence_df.empty:
         combined_prov_df = pd.concat([combined_prov_df, analysis_evidence_df], ignore_index=True, sort=False)
+    if not component_pressure_df.empty:
+        combined_prov_df = pd.concat([combined_prov_df, component_pressure_df], ignore_index=True, sort=False)
     # Add share-delta values as a provenance row so the provenance gate can
     # ground LLM claims like "6.66 pp" via _tokenize_cell_value(0.0666) → 6.66.
     if cur_shares and prev_shares:
@@ -1921,6 +2137,7 @@ def _build_why_context(ctx: QueryContext) -> None:
         "why_context",
         why_override=False,
         analysis_evidence_count=len(ctx.analysis_evidence or []),
+        component_pressure_count=len(component_pressure_summary),
         signals=why_ctx.get("signals", {}),
     )
     trace_detail(
@@ -1930,6 +2147,7 @@ def _build_why_context(ctx: QueryContext) -> None:
         "artifact",
         debug=True,
         why_context=why_ctx,
+        component_pressure_summary=component_pressure_summary,
         analysis_evidence=ctx.analysis_evidence,
     )
 
@@ -1937,7 +2155,14 @@ def _build_why_context(ctx: QueryContext) -> None:
     # Put this first so it survives prompt truncation.
     ctx.stats_hint += "\n\n--- CAUSAL CONTEXT ---\n" + json.dumps(why_ctx, default=str, indent=2)
 
-    # PRIORITY 2: Detailed Evidence (Lower value, large size)
+    # PRIORITY 2: Deterministic component pressure summary (High value, compact)
+    if component_pressure_summary:
+        ctx.stats_hint += (
+            "\n\n--- COMPONENT PRESSURE SUMMARY ---\n"
+            + json.dumps(component_pressure_summary, default=str, indent=2)
+        )
+
+    # PRIORITY 3: Detailed Evidence (Lower value, large size)
     # Prune to top 12 to reduce prompt bloat and truncation risk.
     if ctx.analysis_evidence:
         evidence_subset = ctx.analysis_evidence[:12]

@@ -40,6 +40,12 @@ When the data contains source-price evidence, you must cite it explicitly instea
 - If source-price evidence is absent, skip this section instead of inventing tariffs or confidential PPA/import prices.
 - Present this as observational decomposition, not exact causality.
 
+## Grounding rule: no invented numeric bridges
+
+- Use numeric values only from `data preview`, `CAUSAL CONTEXT`, `COMPONENT PRESSURE SUMMARY`, `DERIVED ANALYSIS EVIDENCE`, or explicit tariff/source-price columns.
+- Do not invent blended source averages, hidden import/PPA prices, or implied component prices unless those exact numbers are present in the evidence.
+- If the evidence does not expose a component price directly, describe direction qualitatively and cite the available share or contribution numbers instead.
+
 ## Comparison rules for balancing drivers
 
 - For each major composition shift, compare both the share change and the component price change. Do not discuss share changes in isolation when `price_*`, `contribution_*`, or tariff columns are present.
