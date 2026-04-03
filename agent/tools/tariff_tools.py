@@ -12,13 +12,21 @@ TARIFF_ENTITY_ALIASES = {
     "enguri": ['ltd "engurhesi"1'],
     "gardabani_tpp": ['ltd "gardabni thermal power plant"'],
     "old_tpp_group": ['ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)'],
+    "regulated_hpp": [
+        'ltd "engurhesi"1',
+        'jsc "energo-pro georgia generation"',
+        'ltd "vardnilihesi"',
+    ],
+    "regulated_new_tpp": ['ltd "gardabni thermal power plant"'],
+    "regulated_old_tpp": ['ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)'],
 }
+DEFAULT_TARIFF_ENTITY_ALIASES = ["enguri", "gardabani_tpp", "old_tpp_group"]
 ALLOWED_CURRENCIES = {"gel", "usd"}
 
 
 def _validate_entities(entities: Optional[Iterable[str]]) -> List[str]:
     if not entities:
-        return list(TARIFF_ENTITY_ALIASES.keys())
+        return list(DEFAULT_TARIFF_ENTITY_ALIASES)
     normalized: List[str] = []
     for raw in entities:
         value = str(raw).strip().lower()
@@ -36,7 +44,7 @@ def get_tariffs(
     limit: int = MAX_ROWS,
 ) -> ToolResult:
     """Fetch key tariff series in pivot-style columns by date."""
-    currency = str(currency).lower()
+    currency = str(currency or "gel").lower()
     if currency not in ALLOWED_CURRENCIES:
         raise ValueError(f"Unsupported tariff currency: {currency}")
 
@@ -78,6 +86,29 @@ def get_tariffs(
      FROM tariff_with_usd t
      WHERE t.date = d.date
        AND t.entity IN (:old_tpp_1, :old_tpp_2, :old_tpp_3)) AS grouped_old_tpp_tariff_{currency}"""
+        )
+    if "regulated_hpp" in selected:
+        select_parts.append(
+            f"""(SELECT AVG(t.{tariff_col})
+     FROM tariff_with_usd t
+     WHERE t.date = d.date
+       AND (t.entity ILIKE '%engurhesi%'
+            OR t.entity ILIKE '%energo-pro%'
+            OR t.entity ILIKE '%vardnili%')) AS regulated_hpp_tariff_{currency}"""
+        )
+    if "regulated_new_tpp" in selected:
+        select_parts.append(
+            f"""(SELECT t.{tariff_col}
+     FROM tariff_with_usd t
+     WHERE t.date = d.date AND t.entity = :gardabani_entity
+     LIMIT 1) AS regulated_new_tpp_tariff_{currency}"""
+        )
+    if "regulated_old_tpp" in selected:
+        select_parts.append(
+            f"""(SELECT AVG(t.{tariff_col})
+     FROM tariff_with_usd t
+     WHERE t.date = d.date
+       AND t.entity IN (:old_tpp_1, :old_tpp_2, :old_tpp_3)) AS regulated_old_tpp_tariff_{currency}"""
         )
 
     if not select_parts:

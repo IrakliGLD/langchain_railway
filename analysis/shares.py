@@ -8,7 +8,7 @@ Handles:
 - Weighted balancing price contributions by month
 """
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 from sqlalchemy import text
@@ -169,7 +169,11 @@ def compute_weighted_balancing_price(conn: Any) -> pd.DataFrame:
     return df
 
 
-def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
+def compute_entity_price_contributions(
+    conn: Any,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Decompose balancing price into entity-level contributions.
 
@@ -201,9 +205,32 @@ def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
         >>> with engine.connect() as conn:
         ...     df = compute_entity_price_contributions(conn)
         ...     print(df[['date', 'balancing_price_gel', 'share_import',
-        ...              'contribution_deregulated_hydro']].head())
+        ...              'contribution_deregulated_hydro_gel']].head())
     """
-    sql = """
+    share_filters = []
+    price_filters = []
+    params = {}
+    if start_date:
+        share_filters.append("t.date >= :start_date")
+        price_filters.append("p.date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        share_filters.append("t.date <= :end_date")
+        price_filters.append("p.date <= :end_date")
+        params["end_date"] = end_date
+
+    share_where = " AND ".join(
+        ["LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'"] + share_filters,
+    )
+    price_where = (
+        "WHERE " + " AND ".join(price_filters)
+        if price_filters
+        else "WHERE p.date >= '2015-01-01'"
+    )
+    if price_filters:
+        price_where += " AND p.date >= '2015-01-01'"
+
+    sql = f"""
     WITH shares AS (
       SELECT
         t.date,
@@ -216,47 +243,68 @@ def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
         SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
       FROM trade_derived_entities t
-      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
+      WHERE {share_where}
       GROUP BY t.date
     ),
     entity_prices AS (
       SELECT
-        d.date,
+        p.date,
         -- Reference prices from available sources
-        p.p_dereg_gel AS price_deregulated_hydro,
+        p.p_dereg_gel AS price_deregulated_hydro_gel,
+        p.p_dereg_usd AS price_deregulated_hydro_usd,
 
         -- Regulated HPP: use weighted average of main HPPs or Enguri as proxy
         -- Using ILIKE for case-insensitive matching (PostgreSQL extension)
         (SELECT AVG(t1.tariff_gel)
          FROM tariff_with_usd t1
-         WHERE t1.date = d.date
+         WHERE t1.date = p.date
            AND (t1.entity ILIKE '%engurhesi%'
                 OR t1.entity ILIKE '%energo-pro%'
                 OR t1.entity ILIKE '%vardnili%')
-        ) AS price_regulated_hpp,
+        ) AS price_regulated_hpp_gel,
+        (SELECT AVG(t1.tariff_usd)
+         FROM tariff_with_usd t1
+         WHERE t1.date = p.date
+           AND (t1.entity ILIKE '%engurhesi%'
+                OR t1.entity ILIKE '%energo-pro%'
+                OR t1.entity ILIKE '%vardnili%')
+        ) AS price_regulated_hpp_usd,
 
         -- Regulated new TPP: Gardabani
         (SELECT t2.tariff_gel
          FROM tariff_with_usd t2
-         WHERE t2.date = d.date
+         WHERE t2.date = p.date
            AND t2.entity = 'ltd "gardabni thermal power plant"'
          LIMIT 1
-        ) AS price_regulated_new_tpp,
+        ) AS price_regulated_new_tpp_gel,
+        (SELECT t2.tariff_usd
+         FROM tariff_with_usd t2
+         WHERE t2.date = p.date
+           AND t2.entity = 'ltd "gardabni thermal power plant"'
+         LIMIT 1
+        ) AS price_regulated_new_tpp_usd,
 
         -- Regulated old TPPs: average of old thermal plants
         (SELECT AVG(t3.tariff_gel)
          FROM tariff_with_usd t3
-         WHERE t3.date = d.date
+         WHERE t3.date = p.date
            AND t3.entity IN ('ltd "mtkvari energy"',
-                            'ltd "iec" (tbilresi)',
-                            'ltd "g power" (capital turbines)')
-        ) AS price_regulated_old_tpp
+                             'ltd "iec" (tbilresi)',
+                             'ltd "g power" (capital turbines)')
+        ) AS price_regulated_old_tpp_gel,
+        (SELECT AVG(t3.tariff_usd)
+         FROM tariff_with_usd t3
+         WHERE t3.date = p.date
+           AND t3.entity IN ('ltd "mtkvari energy"',
+                             'ltd "iec" (tbilresi)',
+                             'ltd "g power" (capital turbines)')
+        ) AS price_regulated_old_tpp_usd
 
         -- Note: PPA and import prices are NOT available in database
         -- These would need to be estimated or obtained from confidential data
 
-      FROM price_with_usd d
-      LEFT JOIN price_with_usd p ON p.date = d.date
+      FROM price_with_usd p
+      {price_where}
     )
     SELECT
       p.date,
@@ -274,51 +322,77 @@ def compute_entity_price_contributions(conn: Any) -> pd.DataFrame:
       (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
 
       -- Reference prices (where available)
-      ep.price_deregulated_hydro,
-      ep.price_regulated_hpp,
-      ep.price_regulated_new_tpp,
-      ep.price_regulated_old_tpp,
+      ep.price_deregulated_hydro_gel,
+      ep.price_deregulated_hydro_usd,
+      ep.price_regulated_hpp_gel,
+      ep.price_regulated_hpp_usd,
+      ep.price_regulated_new_tpp_gel,
+      ep.price_regulated_new_tpp_usd,
+      ep.price_regulated_old_tpp_gel,
+      ep.price_regulated_old_tpp_usd,
 
       -- Estimated contributions to balancing price
-      -- (share × reference_price) = estimated contribution in GEL/MWh
-      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_hydro, 0)
-        AS contribution_deregulated_hydro,
-      (s.qty_reg_hpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_hpp, 0)
-        AS contribution_regulated_hpp,
-      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_new_tpp, 0)
-        AS contribution_regulated_new_tpp,
-      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_old_tpp, 0)
-        AS contribution_regulated_old_tpp,
+      -- (share × reference_price) = estimated contribution in GEL/MWh or USD/MWh
+      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_hydro_gel, 0)
+        AS contribution_deregulated_hydro_gel,
+      (s.qty_reg_hpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_hpp_gel, 0)
+        AS contribution_regulated_hpp_gel,
+      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_new_tpp_gel, 0)
+        AS contribution_regulated_new_tpp_gel,
+      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_old_tpp_gel, 0)
+        AS contribution_regulated_old_tpp_gel,
+      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_hydro_usd, 0)
+        AS contribution_deregulated_hydro_usd,
+      (s.qty_reg_hpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_hpp_usd, 0)
+        AS contribution_regulated_hpp_usd,
+      (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_new_tpp_usd, 0)
+        AS contribution_regulated_new_tpp_usd,
+      (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_old_tpp_usd, 0)
+        AS contribution_regulated_old_tpp_usd,
 
       -- Sum of known contributions
-      COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro, 0) +
-      COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp, 0) +
-      COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp, 0) +
-      COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp, 0)
-        AS total_known_contributions,
+      COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_gel, 0) +
+      COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_gel, 0) +
+      COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_gel, 0) +
+      COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_gel, 0)
+        AS total_known_contributions_gel,
+      COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_usd, 0) +
+      COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_usd, 0) +
+      COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_usd, 0) +
+      COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_usd, 0)
+        AS total_known_contributions_usd,
 
       -- Residual (PPA + import contribution, not directly observable)
       p.p_bal_gel - (
-        COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro, 0) +
-        COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp, 0) +
-        COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp, 0) +
-        COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp, 0)
-      ) AS residual_contribution_ppa_import,
+        COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_gel, 0) +
+        COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_gel, 0) +
+        COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_gel, 0) +
+        COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_gel, 0)
+      ) AS residual_contribution_ppa_import_gel,
+      p.p_bal_usd - (
+        COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_usd, 0) +
+        COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_usd, 0) +
+        COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_usd, 0) +
+        COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_usd, 0)
+      ) AS residual_contribution_ppa_import_usd,
 
       -- Shares of PPA and import (for context on residual)
       (s.qty_ren_ppa / NULLIF(s.total_qty,0)) +
       (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) +
       (s.qty_import / NULLIF(s.total_qty,0)) AS share_ppa_import_total
 
-    FROM price_with_usd p
+    FROM (
+      SELECT *
+      FROM price_with_usd p
+      {price_where}
+    ) p
     LEFT JOIN shares s ON s.date = p.date
     LEFT JOIN entity_prices ep ON ep.date = p.date
-    WHERE p.date >= '2015-01-01'
     ORDER BY p.date
     """
     # Add LIMIT using configured MAX_ROWS
     sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
-    res = conn.execute(text(sql_with_limit))
+    res = conn.execute(text(sql_with_limit), params)
     df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
     check_dataframe_memory(df)
     return df

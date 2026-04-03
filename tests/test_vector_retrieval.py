@@ -32,6 +32,7 @@ from contracts.vector_knowledge import (
 from knowledge.vector_retrieval import (
     build_vector_filters,
     format_vector_knowledge_for_prompt,
+    pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
 )
 
@@ -475,6 +476,34 @@ def test_build_vector_filters_bridges_market_concept_topics():
     assert "electricity_market_target_model" in filters.preferred_topics
 
 
+def test_build_vector_filters_preserves_raw_query_market_concept_hint():
+    analysis = _analysis().model_copy(
+        update={
+            "raw_query": "Who can trade on the exchange in the market concept?",
+            "canonical_query_en": "Who is eligible to trade on the exchange in the transitory market model?",
+            "knowledge": KnowledgeInfo(
+                candidate_topics=[
+                    TopicCandidate(name=KnowledgeTopicName.MARKET_STRUCTURE, score=0.9),
+                ]
+            ),
+            "classification": ClassificationInfo(
+                query_type=QueryType.REGULATORY_PROCEDURE,
+                analysis_mode=AnalysisMode.LIGHT,
+                intent="transitory_exchange_eligibility",
+                needs_clarification=False,
+                confidence=1.0,
+            ),
+        }
+    )
+
+    filters = build_vector_filters(
+        analysis,
+        query_text="Who is eligible to trade on the exchange in the transitory market model?",
+    )
+
+    assert "market_design" in filters.preferred_topics
+
+
 def test_topic_overlap_boost_in_scoring():
     from knowledge.vector_store import _topic_overlap_boost
 
@@ -511,6 +540,42 @@ def test_topic_overlap_boost_in_scoring():
     assert boost_match > 0.0
     assert boost_no_match == 0.0
     assert boost_match >= 0.15  # 2 topic matches → at least 0.20
+
+
+def test_pack_vector_knowledge_for_prompt_reports_packed_headers():
+    bundle = VectorKnowledgeBundle(
+        query="Who is eligible to trade?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=2,
+        chunk_count=2,
+        chunks=[
+            VectorChunkRecord(
+                id="chunk-1",
+                document_id="doc-1",
+                document_title="Electricity (Capacity) Market Rules",
+                source_key="capacity-rules",
+                section_title="Participant registration",
+                text_content="Short registration rule.",
+            ),
+            VectorChunkRecord(
+                id="chunk-2",
+                document_id="doc-2",
+                document_title="Electricity Market Model Concept",
+                source_key="market-concept",
+                section_title="Wholesale market subjects",
+                text_content="X" * 300,
+            ),
+        ],
+    )
+
+    packed = pack_vector_knowledge_for_prompt(bundle, max_chars=140)
+
+    assert packed.headers == [
+        "[1] Electricity (Capacity) Market Rules | section: Participant registration"
+    ]
+    assert packed.truncated is True
+    assert "Electricity (Capacity) Market Rules" in packed.prompt
 
 
 def test_build_vector_filters_compound_exchange_registration():

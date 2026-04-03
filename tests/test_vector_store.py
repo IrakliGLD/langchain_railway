@@ -624,3 +624,61 @@ def test_search_chunks_reranks_balancing_buyers_match(monkeypatch):
     )
 
     assert results[0].document_id == "doc-capacity"
+
+
+def test_search_chunks_reranks_market_concept_reference_for_market_design_queries(monkeypatch):
+    captured = {}
+    rows = [
+        {
+            "id": "chunk-1",
+            "document_id": "doc-transitory",
+            "document_title": "General Market Rules",
+            "document_type": "regulation",
+            "document_issuer": "GNERC",
+            "source_key": "general-market-rules",
+            "chunk_index": 0,
+            "section_title": "General market operation",
+            "section_path": "General market operation",
+            "page_start": 1,
+            "page_end": 1,
+            "text_content": "General market rules.",
+            "token_count": 10,
+            "language": "ka",
+            "topics": ["market_structure"],
+            "metadata": {},
+            "similarity_score": 0.87,
+        },
+        {
+            "id": "chunk-2",
+            "document_id": "doc-rules",
+            "document_title": "Electricity (Capacity) Market Rules",
+            "document_type": "regulation",
+            "document_issuer": "GNERC",
+            "source_key": "capacity-market-rules",
+            "chunk_index": 0,
+            "section_title": "Scope of regulation",
+            "section_path": "Scope of regulation",
+            "page_start": 1,
+            "page_end": 1,
+            "text_content": "Trading is regulated by the approved market model concept.",
+            "token_count": 10,
+            "language": "ka",
+            "topics": ["market_structure"],
+            "metadata": {},
+            "similarity_score": 0.81,
+        },
+    ]
+    monkeypatch.setattr(vector_store, "ENGINE", _FakeEngine(rows=rows, captured=captured))
+    store = vector_store.KnowledgeVectorStore()
+
+    results = store.search_chunks(
+        query_embedding=[0.1] * 1536,
+        filters=VectorRetrievalFilters(
+            preferred_topics=["market_design", "electricity_market_transitory_model"],
+            boost_terms=["transitory"],
+        ),
+        top_k=2,
+        candidate_k=4,
+    )
+
+    assert results[0].document_id == "doc-rules"

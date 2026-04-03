@@ -118,6 +118,48 @@ def _topic_overlap_boost(
     return min(0.25, 0.10 + 0.05 * len(matched))
 
 
+def _market_concept_reference_boost(
+    *,
+    filters: VectorRetrievalFilters,
+    title_text: str,
+    source_text: str,
+    section_text: str,
+    metadata_text: str,
+    body_text: str,
+) -> float:
+    """Boost concept-oriented chunks for market-design queries."""
+
+    market_design_topics = {
+        "market_design",
+        "market_transition",
+        "electricity_market_transitory_model",
+        "electricity_market_target_model",
+    }
+    if not market_design_topics.intersection(set(filters.preferred_topics or [])):
+        return 0.0
+
+    concept_reference_terms = (
+        "market model concept",
+        "market concept",
+        "market design concept",
+        "ბაზრის მოდელის კონცეფცი",
+        "კონცეფციით",
+    )
+
+    reference_boost = 0.0
+    if any(term in title_text for term in concept_reference_terms):
+        reference_boost += 0.18
+    if any(term in source_text for term in concept_reference_terms):
+        reference_boost += 0.14
+    if any(term in section_text for term in concept_reference_terms):
+        reference_boost += 0.10
+    if any(term in metadata_text for term in concept_reference_terms):
+        reference_boost += 0.06
+    if any(term in body_text for term in concept_reference_terms):
+        reference_boost += 0.12
+    return min(reference_boost, 0.32)
+
+
 def _candidate_retrieval_score(
     candidate: VectorChunkRecord,
     *,
@@ -136,7 +178,14 @@ def _candidate_retrieval_score(
     metadata_text = _normalize_match_text(json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True))
     body_text = _normalize_match_text(candidate.text_content[:1200])
 
-    boost = 0.0
+    boost = _market_concept_reference_boost(
+        filters=filters,
+        title_text=title_text,
+        source_text=source_text,
+        section_text=section_text,
+        metadata_text=metadata_text,
+        body_text=body_text,
+    )
     for term in filters.boost_terms:
         normalized_term = _normalize_match_text(term)
         if not normalized_term:

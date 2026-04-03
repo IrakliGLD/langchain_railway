@@ -17,6 +17,7 @@ import re
 import time
 
 import pandas as pd
+from sqlalchemy import text
 
 from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
@@ -28,6 +29,8 @@ from config import (
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
 )
+from analysis.shares import compute_entity_price_contributions
+from core.query_executor import ENGINE
 from models import QueryContext, ResponseMode, ResolutionPolicy
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
@@ -38,7 +41,10 @@ from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from contracts.question_analysis import PreferredPath
 from contracts.vector_knowledge import VectorKnowledgeMode
-from knowledge.vector_retrieval import format_vector_knowledge_for_prompt, retrieve_vector_knowledge
+from knowledge.vector_retrieval import (
+    pack_vector_knowledge_for_prompt,
+    retrieve_vector_knowledge,
+)
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -279,6 +285,219 @@ def _enrich_prices_with_composition(
     return ctx
 
 
+def _has_comparison_signal(query: str) -> bool:
+    query_lower = (query or "").strip().lower()
+    return any(
+        signal in query_lower
+        for signal in (
+            "compare",
+            "comparison",
+            "versus",
+            " vs ",
+            "year over year",
+            "month over month",
+            "difference between",
+            "შედარ",
+            "сравн",
+        )
+    )
+
+
+def _should_enrich_balancing_driver_context(
+    ctx: QueryContext,
+    invocation: ToolInvocation,
+    is_explanation: bool,
+) -> bool:
+    """Return True when balancing price results need source-price context."""
+    if invocation.name != "get_prices" or ctx.df.empty:
+        return False
+
+    metric = str(invocation.params.get("metric") or "").strip().lower()
+    if metric != "balancing":
+        return False
+
+    if any(
+        col in ctx.df.columns
+        for col in (
+            "price_deregulated_hydro_gel",
+            "price_regulated_hpp_gel",
+            "contribution_regulated_hpp_gel",
+        )
+    ):
+        return False
+
+    if is_explanation:
+        return True
+
+    if ctx.has_authoritative_question_analysis:
+        qa_type = ctx.question_analysis.classification.query_type.value
+        reqs = ctx.question_analysis.analysis_requirements
+        return (
+            qa_type == "comparison"
+            or reqs.needs_driver_analysis
+            or reqs.needs_correlation_context
+        )
+
+    return _has_comparison_signal(ctx.query)
+
+
+def _merge_frame_into_context_by_date(
+    ctx: QueryContext,
+    secondary_df: pd.DataFrame,
+    *,
+    allowed_columns: set[str] | None = None,
+    secondary_tool: str = "",
+    secondary_role: str = "",
+) -> tuple[int, list[str]]:
+    """Merge selected columns from secondary_df into ctx.df using the date column."""
+    if ctx.df.empty or secondary_df.empty:
+        return 0, []
+
+    date_col_primary = next(
+        (c for c in ctx.df.columns if "date" in c.lower()),
+        None,
+    )
+    date_col_secondary = next(
+        (c for c in secondary_df.columns if "date" in c.lower()),
+        None,
+    )
+    if not date_col_primary or not date_col_secondary:
+        return 0, []
+
+    candidate_cols = []
+    for col in secondary_df.columns:
+        if col == date_col_secondary:
+            continue
+        if col in ctx.df.columns:
+            continue
+        if allowed_columns is not None and col not in allowed_columns:
+            continue
+        candidate_cols.append(col)
+
+    if not candidate_cols:
+        return 0, []
+
+    primary_df = ctx.df.copy()
+    merge_df = secondary_df.copy()
+    primary_df[date_col_primary] = pd.to_datetime(
+        primary_df[date_col_primary], errors="coerce",
+    )
+    merge_df[date_col_secondary] = pd.to_datetime(
+        merge_df[date_col_secondary], errors="coerce",
+    )
+
+    merged = primary_df.merge(
+        merge_df[[date_col_secondary] + candidate_cols].rename(
+            columns={date_col_secondary: date_col_primary},
+        ),
+        on=date_col_primary,
+        how="left",
+    )
+    ctx.df = merged
+    ctx.cols = list(merged.columns)
+    ctx.rows = [tuple(r) for r in merged.itertuples(index=False, name=None)]
+    ctx.join_provenance.append(
+        {
+            "primary_tool": ctx.tool_name or "",
+            "secondary_tool": secondary_tool,
+            "role": secondary_role,
+            "join_type": "left",
+            "join_keys": [date_col_primary],
+            "primary_rows": len(primary_df),
+            "secondary_rows": len(merge_df),
+            "merged_rows": len(merged),
+            "columns_added": list(candidate_cols),
+        }
+    )
+    return len(candidate_cols), candidate_cols
+
+
+def _enrich_prices_with_balancing_driver_context(
+    ctx: QueryContext,
+    invocation: ToolInvocation,
+    is_explanation: bool,
+) -> QueryContext:
+    """Attach source-price and contribution context for balancing price analysis.
+
+    Falls back to composition-only enrichment when the richer contribution panel
+    is unavailable. This keeps existing explanation behavior safe while giving
+    balancing price comparisons and driver analyses better evidence.
+    """
+    should_add_driver_context = _should_enrich_balancing_driver_context(
+        ctx, invocation, is_explanation,
+    )
+    if not should_add_driver_context:
+        return _enrich_prices_with_composition(ctx, invocation, is_explanation)
+
+    try:
+        with ENGINE.connect() as conn:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+            driver_df = compute_entity_price_contributions(
+                conn,
+                start_date=invocation.params.get("start_date"),
+                end_date=invocation.params.get("end_date"),
+            )
+        cols_added, added_columns = _merge_frame_into_context_by_date(
+            ctx,
+            driver_df,
+            secondary_tool="compute_entity_price_contributions",
+            secondary_role="balancing_driver_context",
+        )
+        if cols_added > 0:
+            ctx.evidence_collected["balancing_driver_context"] = {
+                "tool": "compute_entity_price_contributions",
+                "params": {
+                    "start_date": invocation.params.get("start_date"),
+                    "end_date": invocation.params.get("end_date"),
+                    "currency": invocation.params.get("currency"),
+                },
+                "df": driver_df,
+                "cols": list(driver_df.columns),
+                "rows": [tuple(r) for r in driver_df.itertuples(index=False, name=None)],
+            }
+            log.info(
+                "Enriched balancing price data with %d driver-context columns",
+                cols_added,
+            )
+            trace_detail(
+                log, ctx, "balancing_driver_enrichment", "result",
+                attempted=True,
+                success=True,
+                columns_added=cols_added,
+                column_names=added_columns,
+                start_date=invocation.params.get("start_date"),
+                end_date=invocation.params.get("end_date"),
+            )
+            return ctx
+
+        trace_detail(
+            log, ctx, "balancing_driver_enrichment", "result",
+            attempted=True,
+            success=False,
+            columns_added=0,
+            reason="no_new_columns",
+        )
+    except Exception as enrich_err:
+        log.warning(
+            "Balancing driver enrichment failed: %s",
+            enrich_err,
+        )
+        trace_detail(
+            log, ctx, "balancing_driver_enrichment", "result",
+            attempted=True,
+            success=False,
+            columns_added=0,
+            error=str(enrich_err),
+        )
+
+    fallback_is_explanation = is_explanation or _has_comparison_signal(ctx.query)
+    return _enrich_prices_with_composition(
+        ctx,
+        invocation,
+        fallback_is_explanation,
+    )
+
+
 def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
     """Return True when tool routing should use explanation-style handling."""
     query_lower = (ctx.query or "").strip().lower()
@@ -375,7 +594,9 @@ def _apply_tool_result(
         # Composition enrichment is handled by the evidence loop
         # (Stage 0.8 via COMPOSITION_CONTEXT role); skip inline enrichment.
         return ctx
-    return _enrich_prices_with_composition(ctx, invocation, is_explanation)
+    return _enrich_prices_with_balancing_driver_context(
+        ctx, invocation, is_explanation,
+    )
 
 
 def _attempt_analyzer_tool_recovery(
@@ -565,7 +786,16 @@ def process_query(
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
         ctx.vector_knowledge_error = bundle.error
-        ctx.vector_knowledge_prompt = format_vector_knowledge_for_prompt(bundle) if not bundle.error else ""
+        packed_vector_knowledge = (
+            pack_vector_knowledge_for_prompt(bundle)
+            if not bundle.error
+            else None
+        )
+        ctx.vector_knowledge_prompt = (
+            packed_vector_knowledge.prompt
+            if packed_vector_knowledge is not None
+            else ""
+        )
         top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
         top_sections = [
             f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
@@ -582,6 +812,9 @@ def process_query(
             preferred_topics=bundle.filters.preferred_topics,
             top_sources=top_sources,
             top_sections=top_sections,
+            packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
+            packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
+            packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
             error=bundle.error,
         )
         _trace_stage(
@@ -735,7 +968,9 @@ def process_query(
                 else:
                     log.info("Typed tool relevance validated. reason=%s", tool_reason)
                     if not ENABLE_EVIDENCE_PLANNER:
-                        ctx = _enrich_prices_with_composition(ctx, invocation, is_exp)
+                        ctx = _enrich_prices_with_balancing_driver_context(
+                            ctx, invocation, is_exp,
+                        )
 
                     # Multi-evidence: store result under the matching plan step.
                     # When plan-driven, _plan_step_used is the exact step;
@@ -748,6 +983,7 @@ def process_query(
                         if _matched_step:
                             ctx.evidence_collected[_matched_step["role"]] = {
                                 "tool": invocation.name,
+                                "params": dict(invocation.params),
                                 "df": ctx.df.copy(),
                                 "cols": list(ctx.cols),
                                 "rows": list(ctx.rows),
@@ -879,7 +1115,9 @@ def process_query(
                             analyzer_invocation.reason,
                         )
                         if not ENABLE_EVIDENCE_PLANNER:
-                            ctx = _enrich_prices_with_composition(ctx, analyzer_invocation, is_exp)
+                            ctx = _enrich_prices_with_balancing_driver_context(
+                                ctx, analyzer_invocation, is_exp,
+                            )
 
                         # Multi-evidence: store result under matching plan step
                         if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
@@ -891,6 +1129,7 @@ def process_query(
                             if _matched_step:
                                 ctx.evidence_collected[_matched_step["role"]] = {
                                     "tool": analyzer_invocation.name,
+                                    "params": dict(analyzer_invocation.params),
                                     "df": ctx.df.copy(),
                                     "cols": list(ctx.cols),
                                     "rows": list(ctx.rows),
@@ -962,6 +1201,19 @@ def process_query(
             complete=ctx.evidence_plan_complete,
             collected=len(ctx.evidence_collected),
             satisfied=[s["tool_name"] for s in ctx.evidence_plan if s.get("satisfied")],
+        )
+
+    if ENABLE_EVIDENCE_PLANNER and ctx.used_tool and ctx.tool_name:
+        post_plan_invocation = ToolInvocation(
+            name=ctx.tool_name,
+            params=dict(ctx.tool_params),
+            confidence=ctx.tool_confidence,
+            reason=ctx.tool_match_reason,
+        )
+        ctx = _enrich_prices_with_balancing_driver_context(
+            ctx,
+            post_plan_invocation,
+            _should_route_tool_as_explanation(ctx),
         )
 
     # Stage 1/2: fallback SQL path when no tool route was used.

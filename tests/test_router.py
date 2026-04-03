@@ -24,6 +24,17 @@ def test_match_tariff_tool():
     assert "gardabani_tpp" in (inv.params.get("entities") or [])
 
 
+def test_match_tariff_tool_with_category_aliases():
+    inv = match_tool("Compare regulated HPP and new TPP tariffs in USD in 2024")
+    assert inv is not None
+    assert inv.name == "get_tariffs"
+    assert inv.params["currency"] == "usd"
+    assert inv.params["start_date"] == "2024-01-01"
+    assert inv.params["end_date"] == "2024-12-31"
+    assert "regulated_hpp" in (inv.params.get("entities") or [])
+    assert "regulated_new_tpp" in (inv.params.get("entities") or [])
+
+
 def test_match_balancing_composition_tool():
     inv = match_tool("What was share of import in balancing electricity between 2022 and 2024?")
     assert inv is not None

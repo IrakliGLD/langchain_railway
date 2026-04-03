@@ -52,10 +52,11 @@ Example:
 
 Full balancing analysis guidance is in [balancing-analysis-template.md](balancing-analysis-template.md). Apply the full structured format with:
 - Step-by-step data citation with exact numbers
-- Composition (Factor 1) + Exchange Rate (Factor 2) + Seasonal (if applicable)
+- Composition (Factor 1) + Source Price / Tariff Layer (Factor 2 when present) + Exchange Rate + Seasonal (if applicable)
 - Correlation citations from stats_hint
 - Confidentiality: DO NOT disclose specific PPA/import price estimates
 - For entity pricing details, see domain knowledge topics: `balancing_price`, `currency_influence`
+- When `price_*`, `contribution_*`, or tariff columns are present, cite those exact values instead of giving a composition-only explanation
 
 ## Focus: Tariff
 

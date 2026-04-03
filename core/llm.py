@@ -2108,6 +2108,11 @@ def llm_summarize_structured(
             if balancing_template:
                 guidance_parts.append(balancing_template)
 
+        if query_focus == "balancing":
+            balancing_template = get_balancing_template()
+            if balancing_template:
+                guidance_parts.append(balancing_template)
+
         # Seasonal-adjusted trend rules (conditional on stats content)
         if "SEASONAL-ADJUSTED TREND ANALYSIS" in stats_hint:
             seasonal_guidance = get_seasonal_trend_guidance()

@@ -63,7 +63,6 @@ def test_pipeline_collects_vector_knowledge_in_shadow_mode(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
     monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: setattr(ctx, "is_conceptual", True) or ctx)
     monkeypatch.setattr(pipeline, "retrieve_vector_knowledge", lambda *args, **kwargs: bundle)
-    monkeypatch.setattr(pipeline, "format_vector_knowledge_for_prompt", lambda _bundle: "EXTERNAL_SOURCE_PASSAGES:\n[1] Market Rules")
     monkeypatch.setattr(
         pipeline.summarizer,
         "answer_conceptual",
@@ -112,11 +111,6 @@ def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
     monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: setattr(ctx, "is_conceptual", True) or ctx)
     monkeypatch.setattr(pipeline, "retrieve_vector_knowledge", lambda *args, **kwargs: bundle)
-    monkeypatch.setattr(
-        pipeline,
-        "format_vector_knowledge_for_prompt",
-        lambda _bundle: "EXTERNAL_SOURCE_PASSAGES:\n[1] Capacity rules",
-    )
     monkeypatch.setattr(pipeline, "trace_detail", lambda *_args, **kwargs: captured.update(kwargs))
     monkeypatch.setattr(
         pipeline.summarizer,
@@ -134,3 +128,9 @@ def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
         "Electricity (Capacity) Market Rules | Export conditions",
         "Electricity (Capacity) Market Rules | Part II > Registration",
     ]
+    assert captured["packed_chunk_count"] == 2
+    assert captured["packed_sections"] == [
+        "[1] Electricity (Capacity) Market Rules | section: Export conditions",
+        "[2] Electricity (Capacity) Market Rules | section: Part II > Registration",
+    ]
+    assert captured["packed_truncated"] is False

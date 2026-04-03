@@ -171,6 +171,10 @@ def _add_steps_from_rules(
     primary_params: dict,
 ) -> None:
     """Add steps based on deterministic rules: primary tool + analysis flags."""
+    is_balancing_prices_primary = (
+        primary_tool == ToolName.GET_PRICES.value
+        and str(primary_params.get("metric") or "").strip().lower() == "balancing"
+    )
 
     # get_prices + driver analysis → add composition
     if primary_tool == ToolName.GET_PRICES.value and needs_driver:
@@ -188,6 +192,26 @@ def _add_steps_from_rules(
                 })
                 added_tools.add(ToolName.GET_BALANCING_COMPOSITION.value)
 
+    # Balancing price driver/comparison analysis also needs tariff context so
+    # answers can cite regulated source-price layers, not just composition.
+    if (
+        is_balancing_prices_primary
+        and (needs_driver or needs_correlation or query_type == QueryType.COMPARISON)
+        and ToolName.GET_TARIFFS.value not in added_tools
+    ):
+        params = _resolve_secondary_params(
+            qa, ToolName.GET_TARIFFS.value, raw_query, candidates, primary_params,
+        )
+        if params is not None:
+            steps.append({
+                "role": EvidenceRole.TARIFF_CONTEXT.value,
+                "tool_name": ToolName.GET_TARIFFS.value,
+                "params": params,
+                "satisfied": False,
+                "source": "planner_rule",
+            })
+            added_tools.add(ToolName.GET_TARIFFS.value)
+
     # get_prices + correlation context → add composition + tariffs
     if primary_tool == ToolName.GET_PRICES.value and needs_correlation:
         if ToolName.GET_BALANCING_COMPOSITION.value not in added_tools:
@@ -203,7 +227,10 @@ def _add_steps_from_rules(
                     "source": "planner_rule",
                 })
                 added_tools.add(ToolName.GET_BALANCING_COMPOSITION.value)
-        if ToolName.GET_TARIFFS.value not in added_tools:
+        if (
+            not is_balancing_prices_primary
+            and ToolName.GET_TARIFFS.value not in added_tools
+        ):
             params = _resolve_secondary_params(
                 qa, ToolName.GET_TARIFFS.value, raw_query, candidates, primary_params,
             )
@@ -329,6 +356,23 @@ def _resolve_secondary_params(
         params["start_date"] = primary_params["start_date"]
     if "end_date" not in params and "end_date" in primary_params:
         params["end_date"] = primary_params["end_date"]
+    if primary_params.get("currency") and not params.get("currency"):
+        params["currency"] = primary_params["currency"]
+
+    # Balancing-price auto-enrichment should default to category-level tariff
+    # series so the fallback evidence shape matches the balancing templates.
+    if (
+        tool_name == ToolName.GET_TARIFFS.value
+        and primary_params.get("metric") == "balancing"
+    ):
+        if primary_params.get("currency"):
+            params["currency"] = primary_params["currency"]
+        if not params.get("entities"):
+            params["entities"] = [
+                "regulated_hpp",
+                "regulated_new_tpp",
+                "regulated_old_tpp",
+            ]
 
     return params
 
@@ -380,6 +424,7 @@ def execute_remaining_evidence(ctx: QueryContext) -> QueryContext:
             df, cols, rows = execute_tool(invocation)
             ctx.evidence_collected[step["role"]] = {
                 "tool": invocation.name,
+                "params": dict(invocation.params),
                 "df": df,
                 "cols": list(cols),
                 "rows": [tuple(r) for r in rows],
@@ -428,6 +473,11 @@ def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:
     if primary_evidence and primary_evidence.get("tool") == primary_tool:
         primary_df = primary_evidence.get("df")
         if primary_df is not None and not primary_df.empty:
+            primary_params = dict(
+                primary_evidence.get("params")
+                or (primary_step.get("params") if primary_step else {})
+                or {},
+            )
             if ctx.tool_name != primary_tool:
                 log.info(
                     "Evidence merge: promoting %s from evidence_collected to ctx.df "
@@ -436,6 +486,10 @@ def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:
                 )
                 ctx.df = primary_df
                 ctx.tool_name = primary_tool
+            ctx.used_tool = True
+            ctx.tool_params = primary_params
+            if not ctx.tool_match_reason:
+                ctx.tool_match_reason = "evidence_plan:primary_data"
 
     if ctx.df.empty:
         return ctx

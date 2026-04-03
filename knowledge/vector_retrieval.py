@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import os
 import re
@@ -74,14 +75,22 @@ def _combined_query_text(
     query_text: str,
     question_analysis: Optional[QuestionAnalysis],
 ) -> str:
-    return " ".join(
-        part
-        for part in [
-            str(query_text or "").strip(),
-            (question_analysis.canonical_query_en.strip() if question_analysis else ""),
-        ]
-        if part
-    )
+    combined: list[str] = []
+    for part in [
+        str(query_text or "").strip(),
+        (question_analysis.raw_query.strip() if question_analysis else ""),
+        (question_analysis.canonical_query_en.strip() if question_analysis else ""),
+    ]:
+        if part and part not in combined:
+            combined.append(part)
+    return " ".join(combined)
+
+
+@dataclass(frozen=True)
+class PackedVectorPrompt:
+    prompt: str
+    headers: list[str]
+    truncated: bool
 
 
 def _extract_bridge_topics(
@@ -431,14 +440,20 @@ def retrieve_vector_knowledge(
         )
 
 
-def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], *, max_chars: int | None = None) -> str:
-    """Format retrieved chunks as prompt-safe context."""
+def pack_vector_knowledge_for_prompt(
+    bundle: Optional[VectorKnowledgeBundle],
+    *,
+    max_chars: int | None = None,
+) -> PackedVectorPrompt:
+    """Pack retrieved chunks as prompt-safe context and expose included headers."""
 
     if bundle is None or not bundle.chunks:
-        return ""
+        return PackedVectorPrompt(prompt="", headers=[], truncated=False)
     max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 9000)
     parts = ["EXTERNAL_SOURCE_PASSAGES:"]
     total_chars = len(parts[0])
+    headers: list[str] = []
+    truncated = False
     for idx, chunk in enumerate(bundle.chunks, start=1):
         header = f"[{idx}] {chunk.document_title or chunk.source_key}"
         if chunk.document_type:
@@ -453,7 +468,19 @@ def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], 
         body = chunk.text_content.strip()
         entry = f"{header}\n{body}"
         if total_chars + len(entry) + 2 > max_chars:
+            truncated = True
             break
         parts.append(entry)
+        headers.append(header)
         total_chars += len(entry) + 2
-    return "\n\n".join(parts)
+    return PackedVectorPrompt(
+        prompt="\n\n".join(parts),
+        headers=headers,
+        truncated=truncated,
+    )
+
+
+def format_vector_knowledge_for_prompt(bundle: Optional[VectorKnowledgeBundle], *, max_chars: int | None = None) -> str:
+    """Format retrieved chunks as prompt-safe context."""
+
+    return pack_vector_knowledge_for_prompt(bundle, max_chars=max_chars).prompt

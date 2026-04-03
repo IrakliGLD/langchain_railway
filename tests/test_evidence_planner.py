@@ -121,23 +121,28 @@ class TestBuildEvidencePlan:
         assert ctx.evidence_plan[0]["satisfied"] is False
         assert ctx.evidence_plan_source == "deterministic"
 
-    def test_prices_with_driver_analysis_adds_composition(self):
+    def test_balancing_prices_with_driver_analysis_adds_composition_and_tariffs(self):
         payload = _make_qa_payload(
             query_type="data_explanation",
             tools=[
                 {"name": "get_prices", "score": 0.9, "reason": "price data"},
                 {"name": "get_balancing_composition", "score": 0.7, "reason": "shares"},
+                {"name": "get_tariffs", "score": 0.6, "reason": "tariffs"},
             ],
             needs_driver=True,
         )
+        payload["raw_query"] = "Why did balancing electricity price change in 2023?"
+        payload["canonical_query_en"] = payload["raw_query"]
         ctx = _ctx_with_qa(payload)
         ctx = build_evidence_plan(ctx)
 
-        assert len(ctx.evidence_plan) == 2
+        assert len(ctx.evidence_plan) == 3
         assert ctx.evidence_plan[0]["tool_name"] == "get_prices"
         assert ctx.evidence_plan[0]["role"] == "primary_data"
         assert ctx.evidence_plan[1]["tool_name"] == "get_balancing_composition"
         assert ctx.evidence_plan[1]["role"] == "composition_context"
+        assert ctx.evidence_plan[2]["tool_name"] == "get_tariffs"
+        assert ctx.evidence_plan[2]["role"] == "tariff_context"
 
     def test_prices_with_correlation_adds_composition_and_tariffs(self):
         payload = _make_qa_payload(
@@ -149,6 +154,8 @@ class TestBuildEvidencePlan:
             ],
             needs_correlation=True,
         )
+        payload["raw_query"] = "How are balancing electricity prices correlated with source costs?"
+        payload["canonical_query_en"] = payload["raw_query"]
         ctx = _ctx_with_qa(payload)
         ctx = build_evidence_plan(ctx)
 
@@ -229,10 +236,17 @@ class TestBuildEvidencePlan:
         payload = _make_qa_payload(
             query_type="comparison",
             tools=[
-                {"name": "get_prices", "score": 0.85, "reason": "prices"},
+                {
+                    "name": "get_prices",
+                    "score": 0.85,
+                    "reason": "prices",
+                    "params_hint": {"metric": "exchange_rate"},
+                },
                 {"name": "get_tariffs", "score": 0.30, "reason": "tariffs"},
             ],
         )
+        payload["raw_query"] = "Compare exchange rate in 2023 and 2024"
+        payload["canonical_query_en"] = payload["raw_query"]
         ctx = _ctx_with_qa(payload)
         ctx = build_evidence_plan(ctx)
 
@@ -261,16 +275,52 @@ class TestBuildEvidencePlan:
                     },
                 },
                 {"name": "get_balancing_composition", "score": 0.7, "reason": "shares"},
+                {"name": "get_tariffs", "score": 0.6, "reason": "tariffs"},
             ],
             needs_driver=True,
         )
+        payload["raw_query"] = "Why did balancing price change in 2023?"
+        payload["canonical_query_en"] = payload["raw_query"]
         ctx = _ctx_with_qa(payload)
         ctx = build_evidence_plan(ctx)
 
-        assert len(ctx.evidence_plan) == 2
-        secondary = ctx.evidence_plan[1]
-        assert secondary["params"]["start_date"] == "2023-01-01"
-        assert secondary["params"]["end_date"] == "2023-12-31"
+        assert len(ctx.evidence_plan) == 3
+        for secondary in ctx.evidence_plan[1:]:
+            assert secondary["params"]["start_date"] == "2023-01-01"
+            assert secondary["params"]["end_date"] == "2023-12-31"
+
+    def test_balancing_tariff_secondary_inherits_currency_and_category_entities(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            tools=[
+                {
+                    "name": "get_prices",
+                    "score": 0.9,
+                    "reason": "prices",
+                    "params_hint": {
+                        "metric": "balancing",
+                        "currency": "usd",
+                        "start_date": "2023-01-01",
+                        "end_date": "2023-12-31",
+                    },
+                },
+                {"name": "get_balancing_composition", "score": 0.7, "reason": "shares"},
+                {"name": "get_tariffs", "score": 0.6, "reason": "tariffs"},
+            ],
+            needs_driver=True,
+        )
+        payload["raw_query"] = "Why did balancing price change in 2023?"
+        payload["canonical_query_en"] = payload["raw_query"]
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        tariff_step = next(s for s in ctx.evidence_plan if s["tool_name"] == "get_tariffs")
+        assert tariff_step["params"]["currency"] == "usd"
+        assert tariff_step["params"]["entities"] == [
+            "regulated_hpp",
+            "regulated_new_tpp",
+            "regulated_old_tpp",
+        ]
 
     def test_all_steps_marked_unsatisfied(self):
         payload = _make_qa_payload(
@@ -295,22 +345,25 @@ class TestBuildEvidencePlan:
             tools=[
                 {"name": "get_prices", "score": 0.9, "reason": "prices"},
                 {"name": "get_balancing_composition", "score": 0.7, "reason": "shares"},
+                {"name": "get_tariffs", "score": 0.6, "reason": "tariffs"},
             ],
             needs_driver=True,
         )
+        payload["raw_query"] = "Why did balancing electricity price change?"
+        payload["canonical_query_en"] = payload["raw_query"]
         ctx = _ctx_with_qa(payload)
         ctx = build_evidence_plan(ctx)
 
-        assert len(ctx.evidence_plan) == 2
+        assert len(ctx.evidence_plan) == 3
         assert ctx.evidence_plan[0]["tool_name"] == "get_prices"
 
-        # Simulate Stage 0.5 matching get_tariffs (not in the plan)
+        # Simulate Stage 0.5 matching get_generation_mix (not in the plan)
         # The plan should NOT have any step marked satisfied
         mismatched_step = next(
-            (s for s in ctx.evidence_plan if s["tool_name"] == "get_tariffs" and not s.get("satisfied")),
+            (s for s in ctx.evidence_plan if s["tool_name"] == "get_generation_mix" and not s.get("satisfied")),
             None,
         )
-        assert mismatched_step is None  # no plan step for get_tariffs
+        assert mismatched_step is None  # no plan step for get_generation_mix
 
         # Simulate Stage 0.5 matching get_balancing_composition (in plan but not primary)
         matched_step = next(
@@ -461,6 +514,55 @@ class TestMergeEvidenceIntoContext:
         ctx = merge_evidence_into_context(ctx)
 
         assert ctx.df.empty
+
+    def test_primary_promotion_updates_tool_params_for_post_plan_enrichment(self):
+        ctx = QueryContext(query="test")
+        ctx.used_tool = False
+        ctx.tool_name = "get_balancing_composition"
+        ctx.tool_params = {"entities": ["import"]}
+        ctx.df = pd.DataFrame({
+            "date": ["2023-01-01", "2023-02-01"],
+            "share_import": [0.3, 0.25],
+        })
+        ctx.evidence_plan = [
+            {
+                "role": "primary_data",
+                "tool_name": "get_prices",
+                "params": {
+                    "metric": "balancing",
+                    "currency": "usd",
+                    "start_date": "2023-01-01",
+                    "end_date": "2023-02-01",
+                },
+                "satisfied": True,
+            },
+        ]
+        primary_df = pd.DataFrame({
+            "date": ["2023-01-01", "2023-02-01"],
+            "p_bal_usd": [18.0, 19.0],
+        })
+        ctx.evidence_collected = {
+            "primary_data": {
+                "tool": "get_prices",
+                "params": {
+                    "metric": "balancing",
+                    "currency": "usd",
+                    "start_date": "2023-01-01",
+                    "end_date": "2023-02-01",
+                },
+                "df": primary_df,
+                "cols": list(primary_df.columns),
+                "rows": [tuple(r) for r in primary_df.itertuples(index=False, name=None)],
+            },
+        }
+
+        ctx = merge_evidence_into_context(ctx)
+
+        assert ctx.used_tool is True
+        assert ctx.tool_name == "get_prices"
+        assert ctx.tool_params["metric"] == "balancing"
+        assert ctx.tool_params["currency"] == "usd"
+        assert "p_bal_usd" in ctx.cols
 
 
 # ---------------------------------------------------------------------------

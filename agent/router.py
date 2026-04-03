@@ -25,7 +25,14 @@ ALLOWED_BALANCING_ENTITIES = {
     "renewable_ppa",
     "thermal_ppa",
 }
-ALLOWED_TARIFF_ENTITY_ALIASES = {"enguri", "gardabani_tpp", "old_tpp_group"}
+ALLOWED_TARIFF_ENTITY_ALIASES = {
+    "enguri",
+    "gardabani_tpp",
+    "old_tpp_group",
+    "regulated_hpp",
+    "regulated_new_tpp",
+    "regulated_old_tpp",
+}
 
 
 MONTH_MAP = {
@@ -317,8 +324,13 @@ def extract_tariff_entities(query_lower: str) -> List[str]:
         hits.append("enguri")
     if any(t in query_lower for t in ["gardabani", "გარდაბ", "гардаб"]):
         hits.append("gardabani_tpp")
+    if any(t in query_lower for t in ["regulated hpp", "regulated_hpp"]):
+        hits.append("regulated_hpp")
+    if any(t in query_lower for t in ["new tpp", "regulated_new_tpp"]):
+        hits.append("regulated_new_tpp")
     if any(t in query_lower for t in ["old tpp", "old thermal", "ძველი თეს", "стар"]):
         hits.append("old_tpp_group")
+        hits.append("regulated_old_tpp")
     return [h for h in hits if h in ALLOWED_TARIFF_ENTITY_ALIASES]
 
 
