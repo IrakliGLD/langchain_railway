@@ -7,6 +7,7 @@ and generates the LLM plan + raw SQL.
 import json
 import logging
 import re
+from datetime import date
 from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -37,6 +38,62 @@ from agent.analyzer import BALANCING_SHARE_METADATA
 from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
 
 log = logging.getLogger("Enai")
+
+
+def _parse_iso_date(value: Optional[str]) -> Optional[date]:
+    """Parse an ISO date string safely."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _expand_single_month_explanation_window(
+    qa: QuestionAnalysis,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Widen single-month explanation queries so derived metrics can be computed.
+
+    For questions such as "Explain the change in balancing price in May 2024",
+    the analyzer often requests MoM/YoY metrics plus historical same-month
+    context.  A single-month fetch cannot satisfy those requests, so expand the
+    start date to five years before the target month while preserving the same
+    end date.
+    """
+    period = getattr(qa.sql_hints, "period", None)
+    derived_metrics = list(getattr(qa.analysis_requirements, "derived_metrics", []) or [])
+    if (
+        qa.classification.query_type != QueryType.DATA_EXPLANATION
+        or not derived_metrics
+        or period is None
+        or getattr(period, "kind", None) != "month"
+    ):
+        return start_date, end_date
+
+    start_dt = _parse_iso_date(start_date)
+    end_dt = _parse_iso_date(end_date)
+    if start_dt is None or end_dt is None:
+        return start_date, end_date
+    if (start_dt.year, start_dt.month) != (end_dt.year, end_dt.month):
+        return start_date, end_date
+    if start_dt.day != 1:
+        return start_date, end_date
+
+    expanded_start = date(start_dt.year - 5, start_dt.month, 1).isoformat()
+    if expanded_start == start_date:
+        return start_date, end_date
+
+    log.info(
+        "Expanding single-month data explanation window for derived metrics: %s–%s -> %s–%s",
+        start_date,
+        end_date,
+        expanded_start,
+        end_date,
+    )
+    return expanded_start, end_date
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +750,10 @@ def resolve_tool_params(
                 regex_start, regex_end,
             )
             start_date, end_date = regex_start, regex_end
+
+    start_date, end_date = _expand_single_month_explanation_window(
+        qa, start_date, end_date,
+    )
 
     params: dict = {}
     if start_date:

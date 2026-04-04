@@ -25,6 +25,7 @@ from agent.evidence_planner import (
     merge_evidence_into_context,
     next_unsatisfied_step,
 )
+from agent.planner import resolve_tool_params
 from agent.summarizer import _add_evidence_record_tokens, _tokenize_cell_value
 
 
@@ -40,6 +41,8 @@ def _make_qa_payload(
     needs_correlation: bool = False,
     needs_multi_tool: bool = False,
     evidence_roles: list | None = None,
+    derived_metrics: list | None = None,
+    period: dict | None = None,
 ) -> dict:
     """Build a minimal valid QuestionAnalysis payload for testing."""
     if tools is None:
@@ -67,7 +70,7 @@ def _make_qa_payload(
         },
         "knowledge": {},
         "tooling": {"candidate_tools": tools},
-        "sql_hints": {},
+        "sql_hints": {"period": period} if period else {},
         "visualization": {
             "chart_requested_by_user": False,
             "chart_recommended": False,
@@ -76,6 +79,7 @@ def _make_qa_payload(
         "analysis_requirements": {
             "needs_driver_analysis": needs_driver,
             "needs_correlation_context": needs_correlation,
+            "derived_metrics": derived_metrics or [],
         },
     }
 
@@ -120,6 +124,57 @@ class TestBuildEvidencePlan:
         assert ctx.evidence_plan[0]["role"] == "primary_data"
         assert ctx.evidence_plan[0]["satisfied"] is False
         assert ctx.evidence_plan_source == "deterministic"
+
+
+class TestResolveToolParams:
+    def test_expands_single_month_explanation_window_for_derived_metrics(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            needs_driver=True,
+            derived_metrics=[
+                {"metric_name": "mom_absolute_change", "metric": "balancing"},
+                {"metric_name": "mom_percent_change", "metric": "balancing"},
+            ],
+            period={
+                "kind": "month",
+                "start_date": "2024-05-01",
+                "end_date": "2024-05-31",
+                "granularity": "month",
+                "raw_text": "May 2024",
+            },
+        )
+        payload["raw_query"] = "Why did balancing price change in May 2024?"
+        payload["canonical_query_en"] = "Explain the reasons for the change in balancing electricity price in May 2024."
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["start_date"] == "2019-05-01"
+        assert params["end_date"] == "2024-05-31"
+
+    def test_keeps_single_month_window_without_derived_metrics(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            needs_driver=True,
+            derived_metrics=[],
+            period={
+                "kind": "month",
+                "start_date": "2024-05-01",
+                "end_date": "2024-05-31",
+                "granularity": "month",
+                "raw_text": "May 2024",
+            },
+        )
+        payload["raw_query"] = "Show balancing price in May 2024."
+        payload["canonical_query_en"] = "Show balancing price in May 2024."
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["start_date"] == "2024-05-01"
+        assert params["end_date"] == "2024-05-31"
 
     def test_balancing_prices_with_driver_analysis_adds_composition_and_tariffs(self):
         payload = _make_qa_payload(
