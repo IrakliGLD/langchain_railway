@@ -129,6 +129,35 @@ _BALANCING_PRICE_PRICE_TOKENS = (
     "цен",
 )
 
+_BALANCING_PRICE_FORECAST_TOKENS = (
+    "forecast",
+    "forecasting",
+    "predict",
+    "prediction",
+    "projection",
+    "projected",
+    "outlook",
+    "extrapolat",
+)
+
+_BALANCING_PRICE_FORECAST_CONCEPTUAL_TOKENS = (
+    "why",
+    "how ",
+    "how?",
+    "difficult",
+    "difficulty",
+    "reliable",
+    "reliability",
+    "uncertain",
+    "uncertainty",
+    "caveat",
+    "caveats",
+    "assumption",
+    "assumptions",
+    "method",
+    "methodology",
+)
+
 _NUMERIC_CALCULATION_TOKENS = (
     "calculate",
     "weighted average",
@@ -389,6 +418,140 @@ def _apply_balancing_month_explanation_guardrail(
         merged_metrics.append(item)
     payload["analysis_requirements"]["needs_driver_analysis"] = True
     payload["analysis_requirements"]["needs_correlation_context"] = False
+    payload["analysis_requirements"]["derived_metrics"] = merged_metrics
+
+    return QuestionAnalysis.model_validate(payload), True
+
+
+def _is_simple_balancing_price_forecast_query(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> bool:
+    """Return True when a plain balancing-price forecast should use tools."""
+
+    if qa.routing.preferred_path != PreferredPath.KNOWLEDGE:
+        return False
+    if qa.classification.query_type not in (
+        QueryType.AMBIGUOUS,
+        QueryType.UNSUPPORTED,
+        QueryType.FORECAST,
+    ):
+        return False
+
+    query_lower = str(raw_query or "").lower()
+    if not query_lower:
+        return False
+    if not any(token in query_lower for token in _BALANCING_PRICE_FORECAST_TOKENS):
+        return False
+    if not any(token in query_lower for token in _BALANCING_PRICE_BALANCING_TOKENS):
+        return False
+    if not any(token in query_lower for token in _BALANCING_PRICE_PRICE_TOKENS):
+        return False
+    if any(token in query_lower for token in _BALANCING_PRICE_FORECAST_CONCEPTUAL_TOKENS):
+        return False
+
+    tool_names = {
+        getattr(tool.name, "value", str(tool.name or ""))
+        for tool in (qa.tooling.candidate_tools or [])
+    }
+    if tool_names and ToolName.GET_PRICES.value not in tool_names:
+        return False
+
+    topic_names = {
+        getattr(topic.name, "value", str(topic.name or ""))
+        for topic in (qa.knowledge.candidate_topics or [])
+    }
+    if topic_names and "balancing_price" not in topic_names:
+        return False
+
+    return True
+
+
+def _apply_balancing_price_forecast_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> tuple[QuestionAnalysis, bool]:
+    """Coerce obvious balancing-price forecasts to tool mode."""
+
+    if not _is_simple_balancing_price_forecast_query(qa, raw_query):
+        return qa, False
+
+    payload = qa.model_dump(mode="json")
+    payload["classification"]["query_type"] = QueryType.FORECAST.value
+    payload["classification"]["analysis_mode"] = "analyst"
+    payload["classification"]["needs_clarification"] = False
+    payload["classification"]["ambiguities"] = []
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.85,
+    )
+
+    payload["routing"].update({
+        "preferred_path": PreferredPath.TOOL.value,
+        "needs_sql": False,
+        "needs_knowledge": False,
+        "prefer_tool": True,
+        "needs_multi_tool": False,
+        "evidence_roles": ["primary_data"],
+    })
+
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": ToolName.GET_PRICES.value,
+            "score": 1.0,
+            "reason": "historical balancing prices needed for forecast extrapolation",
+            "params_hint": {
+                "metric": "balancing",
+                "currency": "both",
+                "granularity": "monthly",
+                "start_date": None,
+                "end_date": None,
+                "entities": [],
+                "types": [],
+            },
+        }
+    ]
+
+    payload.setdefault("sql_hints", {})
+    if not payload["sql_hints"].get("metric"):
+        payload["sql_hints"]["metric"] = "balancing"
+
+    payload.setdefault("knowledge", {})
+    topic_rows = [
+        topic
+        for topic in payload["knowledge"].get("candidate_topics", [])
+        if isinstance(topic, dict) and topic.get("name")
+    ]
+    topic_names = {topic.get("name") for topic in topic_rows}
+    for name, score in (
+        ("balancing_price", 1.0),
+        ("seasonal_patterns", 0.7),
+    ):
+        if name not in topic_names:
+            topic_rows.append({
+                "name": name,
+                "score": score,
+            })
+    topic_rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    payload["knowledge"]["candidate_topics"] = topic_rows[:5]
+
+    forecast_metric = {"metric_name": "trend_slope", "metric": "balancing"}
+    existing_metrics = payload["analysis_requirements"].get("derived_metrics", []) or []
+    merged_metrics = []
+    seen_metric_keys: set[tuple[str, str | None]] = set()
+    for item in list(existing_metrics) + [forecast_metric]:
+        if not isinstance(item, dict):
+            continue
+        metric_name = str(item.get("metric_name") or "").strip()
+        metric = str(item.get("metric") or "").strip() or None
+        if not metric_name:
+            continue
+        key = (metric_name, metric)
+        if key in seen_metric_keys:
+            continue
+        seen_metric_keys.add(key)
+        merged_metrics.append(item)
+    payload["analysis_requirements"]["needs_trend_context"] = True
     payload["analysis_requirements"]["derived_metrics"] = merged_metrics
 
     return QuestionAnalysis.model_validate(payload), True
@@ -970,9 +1133,14 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             analyzed,
             ctx.query,
         )
+        forecast_guardrail_applied = False
         clarify_guardrail_applied = False
         history_resolution_applied = False
         if ctx.question_analysis is not None:
+            ctx.question_analysis, forecast_guardrail_applied = _apply_balancing_price_forecast_guardrail(
+                ctx.question_analysis,
+                ctx.query,
+            )
             ctx.question_analysis, clarify_guardrail_applied = _apply_underdefined_numeric_clarify_guardrail(
                 ctx.question_analysis,
                 ctx.query,
@@ -987,6 +1155,11 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
         if guardrail_applied:
             log.info(
                 "Applied balancing month explanation guardrail: coerced analyzer output to data_explanation/tool for query=%r",
+                ctx.query,
+            )
+        if forecast_guardrail_applied:
+            log.info(
+                "Applied balancing price forecast guardrail: coerced analyzer output to forecast/tool for query=%r",
                 ctx.query,
             )
         if clarify_guardrail_applied:

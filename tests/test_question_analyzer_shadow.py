@@ -320,6 +320,119 @@ def test_active_planner_coerces_russian_month_specific_balancing_why_query(monke
     assert out.question_analysis.sql_hints.period.end_date == "2024-11-30"
 
 
+def test_active_planner_coerces_simple_balancing_price_forecast_query(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Forecast balancing electricity price for 2030.",
+        "canonical_query_en": "Forecast the balancing electricity price for the year 2030.",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "ambiguous",
+            "analysis_mode": "light",
+            "intent": "balancing_price_forecast",
+            "needs_clarification": False,
+            "confidence": 0.8,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [{"name": "balancing_price", "score": 0.9}],
+        },
+        "tooling": {
+            "candidate_tools": [{"name": "get_prices", "score": 0.92}],
+        },
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query="Forecast balancing electricity price for 2030.")
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "forecast"
+    assert out.question_analysis.classification.analysis_mode.value == "analyst"
+    assert out.question_analysis.routing.preferred_path.value == "tool"
+    assert out.question_analysis.routing.needs_multi_tool is False
+    assert [tool.name.value for tool in out.question_analysis.tooling.candidate_tools] == [
+        "get_prices",
+    ]
+    assert out.question_analysis.sql_hints.metric == "balancing"
+    metric_names = {metric.metric_name.value for metric in out.question_analysis.analysis_requirements.derived_metrics}
+    assert "trend_slope" in metric_names
+
+
+def test_active_planner_does_not_coerce_forecast_methodology_question(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Why is forecasting balancing electricity price difficult?",
+        "canonical_query_en": "Explain why forecasting balancing electricity price is difficult.",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "ambiguous",
+            "analysis_mode": "light",
+            "intent": "forecasting_methodology",
+            "needs_clarification": False,
+            "confidence": 0.85,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [{"name": "balancing_price", "score": 0.9}],
+        },
+        "tooling": {
+            "candidate_tools": [{"name": "get_prices", "score": 0.92}],
+        },
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query="Why is forecasting balancing electricity price difficult?")
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "ambiguous"
+    assert out.question_analysis.routing.preferred_path.value == "knowledge"
+
+
 def test_active_planner_coerces_underdefined_numeric_computation_to_clarify(monkeypatch):
     payload = {
         "version": "question_analysis_v1",
