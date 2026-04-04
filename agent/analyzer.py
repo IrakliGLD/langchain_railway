@@ -1143,6 +1143,129 @@ def _select_share_column(share_cols: list[str], target_text: str) -> Optional[st
     return share_cols[0] if share_cols else None
 
 
+def _share_label_from_column(col_name: str) -> str:
+    meta = BALANCING_SHARE_METADATA.get(col_name, {})
+    return meta.get("label", col_name.replace("share_", "").replace("_", " "))
+
+
+def _extract_combined_share_components(target_text: str, share_cols: list[str]) -> list[str]:
+    """Resolve explicit multi-component share requests into component columns."""
+    target_lower = str(target_text or "").lower()
+    if not target_lower:
+        return []
+
+    # Only treat this as an aggregate when the query explicitly asks for a total/
+    # combined/summed share or enumerates multiple components via commas/and.
+    explicit_combine = any(
+        token in target_lower
+        for token in ("total share", "combined share", "sum of", ",", " and ")
+    )
+    if not explicit_combine:
+        return []
+
+    components: list[str] = []
+
+    def _add(col_name: str) -> None:
+        if col_name in share_cols and col_name not in components:
+            components.append(col_name)
+
+    if any(token in target_lower for token in ("renewable ppa", "renewable_ppa")):
+        _add("share_renewable_ppa")
+    if any(token in target_lower for token in ("regulated hydro", "regulated hpp", "regulated hydropower")):
+        _add("share_regulated_hpp")
+    if any(token in target_lower for token in ("regulated thermal", "regulated thermals", "regulated tpp", "regulated tpps")):
+        _add("share_regulated_old_tpp")
+        _add("share_regulated_new_tpp")
+    if any(token in target_lower for token in ("regulated old tpp", "old regulated tpp")):
+        _add("share_regulated_old_tpp")
+    if any(token in target_lower for token in ("regulated new tpp", "new regulated tpp")):
+        _add("share_regulated_new_tpp")
+
+    return components if len(components) > 1 else []
+
+
+def _build_combined_share_label(target_text: str, components: list[str]) -> str:
+    target_lower = str(target_text or "").lower()
+    if (
+        "renewable ppa" in target_lower
+        and any(token in target_lower for token in ("regulated hydro", "regulated hpp", "regulated hydropower"))
+        and any(token in target_lower for token in ("regulated thermal", "regulated thermals", "regulated tpp", "regulated tpps"))
+    ):
+        return "renewable PPA + regulated hydro + regulated thermals"
+
+    labels = [_share_label_from_column(col_name) for col_name in components]
+    return " + ".join(labels)
+
+
+def _resolve_share_target(
+    df: pd.DataFrame,
+    share_cols: list[str],
+    target_text: str,
+) -> tuple[pd.DataFrame, Optional[str], Optional[str], list[str]]:
+    """Return dataframe + selected share target, supporting explicit combinations."""
+    combined_components = _extract_combined_share_components(target_text, share_cols)
+    if combined_components:
+        working = df.copy()
+        synthetic_col = "share_combined_target"
+        running = pd.Series(0.0, index=working.index, dtype="float64")
+        for col_name in combined_components:
+            running = running.add(pd.to_numeric(working[col_name], errors="coerce").fillna(0.0), fill_value=0.0)
+        working[synthetic_col] = running
+        return working, synthetic_col, _build_combined_share_label(target_text, combined_components), combined_components
+
+    selected_col = _select_share_column(share_cols, target_text)
+    if not selected_col:
+        return df, None, None, []
+    return df, selected_col, _share_label_from_column(selected_col), [selected_col]
+
+
+def _build_share_summary_grounding_hint(
+    matched: pd.DataFrame,
+    *,
+    date_col: str,
+    selected_col: str,
+    label: str,
+    threshold_pct: Optional[float] = None,
+    component_cols: Optional[list[str]] = None,
+    gel_col: Optional[str] = None,
+    usd_col: Optional[str] = None,
+) -> str:
+    """Emit deterministic numeric evidence so provenance can ground computed share answers."""
+    component_cols = component_cols or []
+    lines = ["DETERMINISTIC SHARE SUMMARY EVIDENCE:"]
+    if threshold_pct is not None:
+        lines.append(f"requested_threshold_pct={threshold_pct:.1f}")
+    if len(component_cols) > 1:
+        lines.append(f"combined_components={','.join(component_cols)}")
+
+    evidence_rows = matched.copy()
+    evidence_rows[date_col] = pd.to_datetime(evidence_rows[date_col], errors="coerce")
+    evidence_rows[selected_col] = pd.to_numeric(evidence_rows[selected_col], errors="coerce")
+    evidence_rows = evidence_rows.dropna(subset=[date_col, selected_col]).sort_values(date_col)
+
+    for _, row in evidence_rows.iterrows():
+        share_value = float(row[selected_col])
+        share_pct = share_value * 100 if share_value < 1 else share_value
+        period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
+        line = f"{period_str}: {label}={share_pct:.1f}%"
+        if len(component_cols) > 1:
+            component_bits = []
+            for component_col in component_cols:
+                component_val = pd.to_numeric(pd.Series([row.get(component_col)]), errors="coerce").iloc[0]
+                if pd.notna(component_val):
+                    component_pct = float(component_val) * 100 if float(component_val) < 1 else float(component_val)
+                    component_bits.append(f"{_share_label_from_column(component_col)}={component_pct:.1f}%")
+            if component_bits:
+                line += f"; components: {', '.join(component_bits)}"
+        if gel_col and pd.notna(row.get(gel_col)):
+            line += f"; balancing_price_gel={float(row[gel_col]):.1f}"
+        if usd_col and pd.notna(row.get(usd_col)):
+            line += f"; balancing_price_usd={float(row[usd_col]):.1f}"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 _SHARE_THRESHOLD_RULES: list[tuple[str, str, str]] = [
     (r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+(\d+(?:\.\d+)?)\s*%?", "gt", "exceeded"),
     (r"(at least|not less than|minimum of)\s+(\d+(?:\.\d+)?)\s*%?", "ge", "was at least"),
@@ -1181,34 +1304,38 @@ def _find_share_answer_price_columns(df: pd.DataFrame) -> tuple[Optional[str], O
     return gel_col, usd_col
 
 
-def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: str) -> Optional[str]:
-    """Produce a deterministic textual answer for share queries to avoid LLM hallucinations."""
+def _build_share_summary_artifact(
+    df: pd.DataFrame,
+    plan: Dict[str, Any],
+    user_query: str,
+) -> tuple[Optional[str], str]:
+    """Produce deterministic share summary text plus grounding support text."""
     if df is None or df.empty:
-        return None
+        return None, ""
 
     share_cols = [c for c in df.columns if c.startswith("share_")]
     if not share_cols:
-        return None
+        return None, ""
 
     target_text = str(plan.get("target", "")) + " " + user_query
     period_hint = str(plan.get("period", ""))
     period = _parse_period_hint(period_hint, user_query)
 
-    selected_col = _select_share_column(share_cols, target_text)
-    if not selected_col:
-        return None
+    working_df, selected_col, label, component_cols = _resolve_share_target(df, share_cols, target_text)
+    if not selected_col or not label:
+        return None, ""
 
-    date_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time_month"])]
+    date_cols = [c for c in working_df.columns if any(k in c.lower() for k in ["date", "time_month"])]
     threshold_rule = _extract_share_threshold(user_query)
 
     if threshold_rule and date_cols:
         date_col = date_cols[0]
-        working = df.copy()
+        working = working_df.copy()
         working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
         working[selected_col] = pd.to_numeric(working[selected_col], errors="coerce")
         working = working.dropna(subset=[date_col, selected_col]).sort_values(date_col)
         if working.empty:
-            return None
+            return None, ""
 
         operator, threshold, phrase = threshold_rule
         if operator == "gt":
@@ -1220,16 +1347,24 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
         else:
             matched = working[working[selected_col] <= threshold]
 
-        meta = BALANCING_SHARE_METADATA.get(selected_col, {})
-        label = meta.get("label", selected_col.replace("share_", "").replace("_", " "))
         threshold_pct = threshold * 100 if threshold <= 1 else threshold
+        gel_col, usd_col = _find_share_answer_price_columns(matched)
+        grounding_hint = _build_share_summary_grounding_hint(
+            matched if not matched.empty else working.head(0),
+            date_col=date_col,
+            selected_col=selected_col,
+            label=label,
+            threshold_pct=threshold_pct,
+            component_cols=component_cols,
+            gel_col=gel_col,
+            usd_col=usd_col,
+        )
         if matched.empty:
             return (
                 f"No months were found where **{label.title()}** {phrase} "
                 f"**{threshold_pct:.1f}%** of balancing electricity in the available data."
-            )
+            ), grounding_hint
 
-        gel_col, usd_col = _find_share_answer_price_columns(matched)
         include_prices = _share_query_requests_prices(user_query)
         summary_parts = [
             f"Months where **{label.title()}** {phrase} **{threshold_pct:.1f}%** of balancing electricity:"
@@ -1248,14 +1383,14 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
                 if price_bits:
                     line += f"; balancing price {', '.join(price_bits)}"
             summary_parts.append(line)
-        if include_prices and not (gel_col or usd_col):
-            summary_parts.append("- Balancing price columns were not available in the retrieved evidence for these months.")
-        return "\n".join(summary_parts)
+            if include_prices and not (gel_col or usd_col):
+                summary_parts.append("- Balancing price columns were not available in the retrieved evidence for these months.")
+        return "\n".join(summary_parts), grounding_hint
 
     # Find the row matching the period
     if date_cols:
         date_col = date_cols[0]
-        df = df.copy()
+        df = working_df.copy()
         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
         df = df.dropna(subset=[date_col]).sort_values(date_col)
 
@@ -1277,14 +1412,11 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
     row = filtered.iloc[-1]
     value = row.get(selected_col)
     if value is None or pd.isna(value):
-        return None
+        return None, ""
 
     value_pct = float(value)
     if value_pct < 1:
         value_pct *= 100
-
-    meta = BALANCING_SHARE_METADATA.get(selected_col, {})
-    label = meta.get("label", selected_col.replace("share_", "").replace("_", " "))
 
     # Format period
     if date_cols and date_cols[0] in filtered.columns:
@@ -1307,7 +1439,20 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
             summary_parts.append(f"  - Renewable PPA: {r_pct:.1f}%")
             summary_parts.append(f"  - Thermal PPA: {t_pct:.1f}%")
 
-    return "\n".join(summary_parts)
+    grounding_hint = _build_share_summary_grounding_hint(
+        filtered.tail(1),
+        date_col=date_cols[0] if date_cols else "date",
+        selected_col=selected_col,
+        label=label,
+        component_cols=component_cols,
+    ) if date_cols else ""
+    return "\n".join(summary_parts), grounding_hint
+
+
+def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: str) -> Optional[str]:
+    """Produce a deterministic textual answer for share queries to avoid LLM hallucinations."""
+    summary, _grounding_hint = _build_share_summary_artifact(df, plan, user_query)
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1590,7 +1735,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     if share_query_detected:
         try:
-            ctx.share_summary_override = generate_share_summary(share_df_for_summary, ctx.plan, ctx.query)
+            summary_override, grounding_hint = _build_share_summary_artifact(share_df_for_summary, ctx.plan, ctx.query)
+            ctx.share_summary_override = summary_override
+            if grounding_hint:
+                ctx.stats_hint += f"\n\n{grounding_hint}"
             if ctx.share_summary_override:
                 log.info("✅ Generated deterministic share summary override.")
         except Exception as share_err:

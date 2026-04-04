@@ -822,6 +822,38 @@ class TestShareSummaryOverride:
         assert "42.3 USD/MWh" in summary
         assert "50.1%" not in summary
 
+    def test_combined_threshold_query_uses_requested_share_components(self):
+        df = pd.DataFrame(
+            {
+                "date": [
+                    pd.Timestamp("2023-04-01"),
+                    pd.Timestamp("2023-05-01"),
+                ],
+                "share_renewable_ppa": [0.70, 0.80],
+                "share_regulated_hpp": [0.20, 0.10],
+                "share_regulated_old_tpp": [0.09, 0.02],
+                "share_regulated_new_tpp": [0.01, 0.01],
+            }
+        )
+        plan = {
+            "intent": "data_retrieval",
+            "target": "total share of renewable ppa, regulated hydro, and regulated thermals in balancing electricity",
+            "period": "",
+        }
+        summary = generate_share_summary(
+            df,
+            plan,
+            (
+                "What are the months where the total share of renewable PPA, regulated hydro, "
+                "and regulated thermals in balancing electricity is more than 99%?"
+            ),
+        )
+        assert summary is not None
+        assert "April 2023" in summary
+        assert "May 2023" not in summary
+        assert "100.0%" in summary
+        assert "Renewable Ppa** exceeded **99.0%" not in summary
+
 
 class TestShareShiftNotes:
     """Ensure share shift helper produces explanatory notes for 'why' analysis."""

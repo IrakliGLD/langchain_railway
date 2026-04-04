@@ -723,6 +723,63 @@ def test_share_delta_percentage_points_pass_provenance_gate(monkeypatch):
     assert out.summary_source == "structured_summary"
 
 
+def test_combined_share_threshold_summary_passes_provenance_gate(monkeypatch):
+    share_df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2023-04-01"), pd.Timestamp("2023-05-01")],
+            "share_renewable_ppa": [0.70, 0.80],
+            "share_regulated_hpp": [0.20, 0.10],
+            "share_regulated_old_tpp": [0.09, 0.02],
+            "share_regulated_new_tpp": [0.01, 0.01],
+        }
+    )
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+
+    ctx = QueryContext(
+        query=(
+            "What are the months where the total share of renewable PPA, regulated hydro, "
+            "and regulated thermals in balancing electricity is more than 99%?"
+        ),
+        plan={
+            "intent": "share",
+            "target": "total share of renewable ppa, regulated hydro, and regulated thermals in balancing electricity",
+        },
+        df=share_df.copy(),
+        cols=list(share_df.columns),
+        rows=[tuple(r) for r in share_df.itertuples(index=False, name=None)],
+        provenance_cols=list(share_df.columns),
+        provenance_rows=[tuple(r) for r in share_df.itertuples(index=False, name=None)],
+        provenance_query_hash="sharecombo",
+        provenance_source="sql",
+    )
+
+    enriched = analyzer.enrich(ctx)
+    out = summarizer.summarize_data(enriched)
+
+    assert out.summary_source == "deterministic_share_summary"
+    assert "April 2023" in out.summary
+    assert "99.0%" in out.summary
+    assert out.summary_provenance_gate_passed is True, (
+        f"Gate should pass; coverage={out.summary_provenance_coverage}"
+    )
+    assert out.summary_provenance_coverage == pytest.approx(1.0, rel=1e-6)
+
+
 def test_derived_analysis_evidence_supports_alias_columns_and_llm_numeric_claims(monkeypatch):
     corr_df = pd.DataFrame(
         {

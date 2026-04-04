@@ -249,7 +249,7 @@ Do not disclose specific PPA/import prices.
 - **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.  
 - **Jul 2024:** Exchange launched (GENEX) — added new trading segment  
 - **2020 onwards:** Entity-level data available 
-- **May-June 2025:** in May and June 2025, Enguri HPP, the largest state owned hydro power plant, the source of once of the cheapest electricity, sold 16698 MWH electricity for each month as balancing electiricty. For May and June, selling exactly the same quantity as balancing electricity does not look like selling reamining electricity to the balancing market. It looks like the cheap electricity for each month was devoted to the balancing market to affect the balancing electricity prices and push them down.
+- **May-June 2025:** in May and June 2025, Enguri HPP, the largest state owned hydro power plant, the source of once of the cheapest electricity, sold 16.698 thousand MWH electricity for each month as balancing electiricty. For May and June, selling exactly the same quantity as balancing electricity does not look like selling reamining electricity to the balancing market. It looks like the cheap electricity for each month was devoted to the balancing market to affect the balancing electricity prices and push them down.
 - **Jan-Mar 2024:** - the Electricity (capacity) Market Rules approved by the Ministed of Energy of Geirgia, was changed and for 3 months, January-March 2024, the reference price for the deregulated power plants were changed and linked to more expensive old thermal power plan, leading to increased prices for procurement of balancing electricity from deregulated power plants. 
 
 ---
