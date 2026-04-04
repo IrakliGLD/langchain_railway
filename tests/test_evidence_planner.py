@@ -669,6 +669,53 @@ class TestMergeEvidenceIntoContext:
         assert ctx.tool_params["currency"] == "usd"
         assert "p_bal_usd" in ctx.cols
 
+    def test_primary_promotion_restores_empty_context_for_same_tool(self):
+        ctx = QueryContext(query="test")
+        ctx.used_tool = False
+        ctx.tool_name = "get_prices"
+        ctx.tool_params = {"metric": "balancing"}
+        ctx.df = pd.DataFrame()
+        ctx.evidence_plan = [
+            {
+                "role": "primary_data",
+                "tool_name": "get_prices",
+                "params": {
+                    "metric": "balancing",
+                    "currency": "gel",
+                    "start_date": "2023-01-01",
+                    "end_date": "2023-02-01",
+                },
+                "satisfied": True,
+            },
+        ]
+        primary_df = pd.DataFrame({
+            "date": ["2023-01-01", "2023-02-01"],
+            "p_bal_gel": [50.0, 55.0],
+        })
+        ctx.evidence_collected = {
+            "primary_data": {
+                "tool": "get_prices",
+                "params": {
+                    "metric": "balancing",
+                    "currency": "gel",
+                    "start_date": "2023-01-01",
+                    "end_date": "2023-02-01",
+                },
+                "df": primary_df,
+                "cols": list(primary_df.columns),
+                "rows": [tuple(r) for r in primary_df.itertuples(index=False, name=None)],
+            },
+        }
+
+        ctx = merge_evidence_into_context(ctx)
+
+        assert ctx.used_tool is True
+        assert ctx.tool_name == "get_prices"
+        assert ctx.tool_params["metric"] == "balancing"
+        assert not ctx.df.empty
+        assert "p_bal_gel" in ctx.cols
+        assert len(ctx.rows) == 2
+
 
 # ---------------------------------------------------------------------------
 # Plan-driven helpers

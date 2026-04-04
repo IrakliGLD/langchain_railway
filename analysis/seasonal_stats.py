@@ -30,6 +30,9 @@ def detect_monthly_timeseries(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
         >>> detect_monthly_timeseries(df)
         ('month', 'demand')
     """
+    if df is None or df.empty:
+        return None
+
     # Look for time column (YYYY-MM format)
     time_cols = [c for c in df.columns if 'month' in c.lower() or 'date' in c.lower() or 'year' in c.lower()]
 
@@ -39,7 +42,10 @@ def detect_monthly_timeseries(df: pd.DataFrame) -> Optional[Tuple[str, str]]:
     time_col = time_cols[0]
 
     # Check if values look like YYYY-MM or dates
-    sample_val = str(df[time_col].iloc[0])
+    non_null_times = df[time_col].dropna()
+    if non_null_times.empty:
+        return None
+    sample_val = str(non_null_times.iloc[0])
     if not (len(sample_val) >= 7 and '-' in sample_val):
         return None
 

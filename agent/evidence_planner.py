@@ -524,11 +524,11 @@ def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:
                 or (primary_step.get("params") if primary_step else {})
                 or {},
             )
-            if ctx.tool_name != primary_tool:
+            if ctx.tool_name != primary_tool or ctx.df.empty:
                 log.info(
-                    "Evidence merge: promoting %s from evidence_collected to ctx.df "
-                    "(Stage 0.5 had matched %s)",
-                    primary_tool, ctx.tool_name,
+                    "Evidence merge: restoring primary %s from evidence_collected to ctx.df "
+                    "(Stage 0.5 matched %s, current rows=%d)",
+                    primary_tool, ctx.tool_name, len(ctx.df),
                 )
                 ctx.df = primary_df
                 ctx.tool_name = primary_tool
