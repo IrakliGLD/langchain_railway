@@ -732,6 +732,12 @@ def _build_clarification_options(ctx: QueryContext) -> List[str]:
         if option not in options:
             options.append(option)
 
+    if clarify_reason == "request_not_supported_as_phrased":
+        _add("Restate the request as a direct data retrieval or calculation with the exact entity groups, periods, and formula you want.")
+        _add("Ask for the observable monthly shares and balancing prices first, then request the calculation on top of those results.")
+        _add("If you want a derived proxy, state the exact proxy formula so I can calculate only what the available data supports.")
+        return options[:3]
+
     if clarify_reason == "underdefined_computed_target":
         if any(signal in query_lower for signal in ("remaining", "residual", "excluding", "except")):
             _add("Treat remaining energy as the residual after excluding regulated hydro, regulated thermals, and deregulated hydro.")

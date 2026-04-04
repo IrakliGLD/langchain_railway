@@ -112,7 +112,10 @@ def _derive_resolution_policy(ctx: QueryContext) -> str:
     """Derive whether the pipeline should answer or request clarification."""
 
     if ctx.has_authoritative_question_analysis:
-        if ctx.question_analysis.routing.preferred_path == PreferredPath.CLARIFY:
+        if ctx.question_analysis.routing.preferred_path in (
+            PreferredPath.CLARIFY,
+            PreferredPath.REJECT,
+        ):
             return ResolutionPolicy.CLARIFY
     return ResolutionPolicy.ANSWER
 
@@ -894,7 +897,13 @@ def process_query(
 
     if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
         if not ctx.clarify_reason:
-            ctx.clarify_reason = "analyzer_preferred_path_clarify"
+            if (
+                ctx.has_authoritative_question_analysis
+                and ctx.question_analysis.routing.preferred_path == PreferredPath.REJECT
+            ):
+                ctx.clarify_reason = "request_not_supported_as_phrased"
+            else:
+                ctx.clarify_reason = "analyzer_preferred_path_clarify"
         t_stage = time.time()
         ctx = summarizer.answer_clarify(ctx)
         _trace_stage("stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)

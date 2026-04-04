@@ -589,3 +589,88 @@ def test_pipeline_runs_active_stage_when_hints_enabled(monkeypatch):
     assert out.summary == "Active conceptual answer"
     assert out.question_analysis_source == "llm_active"
     assert out.stage_timings_ms["stage_0_2_question_analyzer"] >= 0.0
+
+
+def test_pipeline_reject_path_short_circuits_to_clarify_without_plan_generation(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": (
+            "Calculate a custom weighted average balancing price for specific entity groups and periods, "
+            "conditional on balancing composition, given that prices for PPA and import are not known."
+        ),
+        "canonical_query_en": (
+            "Calculate a custom weighted average balancing price for specific entity groups and periods, "
+            "conditional on balancing composition, given that prices for PPA and import are not known."
+        ),
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "unsupported",
+            "analysis_mode": "light",
+            "intent": "custom_weighted_average_price",
+            "needs_clarification": False,
+            "confidence": 1.0,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "reject",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.9},
+                {"name": "cfd_ppa", "score": 0.8},
+            ],
+        },
+        "tooling": {
+            "candidate_tools": [
+                {"name": "get_balancing_composition", "score": 0.9},
+                {"name": "get_prices", "score": 0.8},
+            ],
+        },
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: setattr(ctx, "is_conceptual", False) or ctx)
+    monkeypatch.setattr(
+        pipeline.planner,
+        "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner,
+        "generate_plan",
+        lambda _ctx: (_ for _ in ()).throw(AssertionError("generate_plan should not run for preferred_path=reject")),
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "answer_clarify",
+        lambda ctx: setattr(ctx, "summary", "Clarify instead of plan") or ctx,
+    )
+
+    out = pipeline.process_query(
+        "unsupported custom weighted average calculation",
+        trace_id="trace-reject",
+        session_id="session-reject",
+    )
+
+    assert out.summary == "Clarify instead of plan"
+    assert out.resolution_policy == "clarify"
+    assert out.clarify_reason == "request_not_supported_as_phrased"
