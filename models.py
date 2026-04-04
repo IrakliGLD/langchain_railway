@@ -180,7 +180,35 @@ class QueryContext:
 
         candidate_tools = qa.tooling.candidate_tools or []
         top_tool = candidate_tools[0].name if candidate_tools else None
-        return top_tool == ToolName.GET_BALANCING_COMPOSITION
+        if top_tool != ToolName.GET_BALANCING_COMPOSITION:
+            return False
+
+        query_lower = str(self.effective_query or self.query or "").strip().lower()
+        intent_lower = str(qa.classification.intent or "").strip().lower()
+
+        # Custom price/quantity calculations frequently use composition as a
+        # supporting dataset, but they should not trigger the deterministic
+        # share-summary override.
+        custom_price_calc = any(
+            signal in query_lower
+            for signal in ("weighted average", "average price", "weighted avg", "mean price")
+        ) and "balancing" in query_lower
+        quantity_request = any(
+            signal in query_lower
+            for signal in ("how much", "quantity", "volume", "mwh")
+        )
+        if custom_price_calc or quantity_request:
+            return False
+
+        share_like_query = any(
+            signal in query_lower
+            for signal in ("share", "composition", "contribute", "contribution")
+        )
+        share_like_intent = any(
+            signal in intent_lower
+            for signal in ("share", "composition")
+        )
+        return share_like_query or share_like_intent
 
 
 class Question(BaseModel):

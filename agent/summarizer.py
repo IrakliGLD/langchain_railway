@@ -1109,6 +1109,26 @@ _RESIDUAL_MONTH_NAME_TO_NUMBER = {
 }
 
 
+_RESIDUAL_THRESHOLD_RULES: list[tuple[str, str, str]] = [
+    (r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+(\d+(?:\.\d+)?)\s*%?", "gt", "exceeded"),
+    (r"(at least|not less than|minimum of)\s+(\d+(?:\.\d+)?)\s*%?", "ge", "was at least"),
+    (r"(less than|below|under|fewer than)\s+(\d+(?:\.\d+)?)\s*%?", "lt", "was below"),
+    (r"(at most|no more than|maximum of)\s+(\d+(?:\.\d+)?)\s*%?", "le", "was at most"),
+    (r"(\d+(?:\.\d+)?)\s*%\s+or\s+more", "ge", "was at least"),
+    (r"(\d+(?:\.\d+)?)\s*%\s+or\s+less", "le", "was at most"),
+]
+
+
+def _has_explicit_residual_component_query_signal(query: str) -> bool:
+    query_lower = (query or "").strip().lower()
+    return (
+        "renewable ppa" in query_lower
+        and "import" in query_lower
+        and ("thermal generation ppa" in query_lower or "thermal ppa" in query_lower)
+        and "cfd" in query_lower
+    )
+
+
 def _has_residual_weighted_price_query_signal(query: str) -> bool:
     query_lower = (query or "").strip().lower()
     if not query_lower:
@@ -1121,12 +1141,36 @@ def _has_residual_weighted_price_query_signal(query: str) -> bool:
         signal in query_lower
         for signal in ("remaining", "residual", "other electricity", "excluding", "except")
     )
+    explicit_residual_components = _has_explicit_residual_component_query_signal(query_lower)
     balancing_hit = "balancing" in query_lower
     context_hit = any(
         signal in query_lower
         for signal in ("tariff", "tariffs", "regulated", "deregulated")
     )
-    return calc_hit and scope_hit and balancing_hit and context_hit
+    return calc_hit and balancing_hit and (
+        (scope_hit and context_hit) or explicit_residual_components
+    )
+
+
+def _extract_residual_share_threshold(query: str) -> tuple[str, float, str] | None:
+    query_lower = (query or "").strip().lower()
+    if not query_lower or "%" not in query_lower:
+        return None
+    if not any(token in query_lower for token in ("share", "composition", "contribute", "contribution")):
+        return None
+
+    for pattern, operator, phrase in _RESIDUAL_THRESHOLD_RULES:
+        match = re.search(pattern, query_lower)
+        if not match:
+            continue
+        raw_group = match.group(match.lastindex or 1)
+        try:
+            raw_value = float(raw_group)
+        except (TypeError, ValueError):
+            continue
+        threshold = raw_value / 100.0 if raw_value > 1 else raw_value
+        return operator, threshold, phrase
+    return None
 
 
 def _extract_month_list_from_query(query: str) -> list[pd.Timestamp]:
@@ -1191,6 +1235,29 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     if df.empty:
         return None
 
+    threshold_rule = _extract_residual_share_threshold(ctx.query)
+    if threshold_rule:
+        operator, threshold, phrase = threshold_rule
+        if operator == "gt":
+            df = df[df["share_ppa_import_total"] > threshold]
+        elif operator == "ge":
+            df = df[df["share_ppa_import_total"] >= threshold]
+        elif operator == "lt":
+            df = df[df["share_ppa_import_total"] < threshold]
+        else:
+            df = df[df["share_ppa_import_total"] <= threshold]
+        if df.empty:
+            threshold_pct = threshold * 100 if threshold <= 1 else threshold
+            label = (
+                "renewable PPA + import + thermal PPA + CfD scheme"
+                if _has_explicit_residual_component_query_signal(ctx.query)
+                else "the residual PPA/CfD/import layer"
+            )
+            return (
+                f"No requested months were found where **{label.title()}** {phrase} "
+                f"**{threshold_pct:.1f}%** of balancing electricity."
+            )
+
     df = df.sort_values(date_col).copy()
     df["remaining_weighted_price_gel"] = (
         df["residual_contribution_ppa_import_gel"] / df["share_ppa_import_total"]
@@ -1199,15 +1266,30 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
         df["residual_contribution_ppa_import_usd"] / df["share_ppa_import_total"]
     )
 
+    explicit_components = _has_explicit_residual_component_query_signal(ctx.query)
+    title = (
+        "**Weighted Average Price of Renewable PPA + Import + Thermal PPA + CfD Scheme**"
+        if explicit_components
+        else "**Weighted Average Price of the Remaining Balancing Electricity**"
+    )
     lines = [
-        "**Weighted Average Price of the Remaining Balancing Electricity**",
+        title,
         "",
-        "Remaining bucket = balancing electricity excluding regulated hydro, regulated thermals, and deregulated hydro.",
+        (
+            "Target bucket = Renewable PPA + Import + Thermal PPA + CfD Scheme."
+            if explicit_components
+            else "Remaining bucket = balancing electricity excluding regulated hydro, regulated thermals, and deregulated hydro."
+        ),
         "This corresponds to the residual PPA/CfD/import layer in the current balancing-price decomposition.",
         "",
         "Formula used: residual weighted price = residual contribution / remaining share.",
         "",
     ]
+    if threshold_rule:
+        _operator, threshold, _phrase = threshold_rule
+        threshold_pct = threshold * 100 if threshold <= 1 else threshold
+        lines.insert(4, f"Applied filter: remaining share had to satisfy the requested {threshold_pct:.1f}% threshold.")
+        lines.insert(5, "")
     for _, row in df.iterrows():
         period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
         share_pct = float(row["share_ppa_import_total"]) * 100

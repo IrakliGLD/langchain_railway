@@ -357,6 +357,35 @@ class TestShareDetectionRespectsAnalyzer:
 
         assert share_query_detected, "Genuine share query should still be detected"
 
+    def test_weighted_average_price_query_does_not_trigger_share(self):
+        """Composition-led custom price calculations must not be downgraded to share-only answers."""
+        qa = _make_qa(
+            query_type=QueryType.UNSUPPORTED,
+            intent="custom weighted average balancing price",
+            preferred_path=PreferredPath.REJECT,
+            candidate_tools=[
+                ToolCandidate(name=ToolName.GET_BALANCING_COMPOSITION, score=0.95, reason="composition gate"),
+                ToolCandidate(name=ToolName.GET_PRICES, score=0.9, reason="price context"),
+            ],
+        )
+        ctx = _make_ctx(
+            query=(
+                "Calculate the weighted average balancing price for electricity from Renewable PPA, Import, "
+                "Thermal Generation PPA, and CfD Scheme for the specified months, only if these entities "
+                "collectively contribute 99% or more to the total balancing composition in those months."
+            ),
+            qa=qa,
+            semantic_locked=True,
+        )
+
+        share_intent = str(ctx.plan.get("intent", "")).lower()
+        analyzer_share_signal = ctx.analyzer_indicates_share_intent
+        share_query_detected = share_intent in {"calculate_share", "share"} or analyzer_share_signal
+
+        assert not share_query_detected, (
+            "Custom weighted-average price calculations should not trigger deterministic share summaries"
+        )
+
     def test_legacy_share_detection_when_no_analyzer(self):
         """Without analyzer, 'share' keyword in raw query triggers detection."""
         ctx = _make_ctx(query="what is the share of import in balancing")

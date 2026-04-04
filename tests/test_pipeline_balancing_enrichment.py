@@ -180,3 +180,45 @@ def test_balancing_driver_enrichment_adds_driver_context_for_residual_weighted_p
     assert "residual_contribution_ppa_import_gel" in out.cols
     assert "residual_contribution_ppa_import_usd" in out.cols
     assert "balancing_driver_context" in out.evidence_collected
+
+
+def test_balancing_driver_enrichment_adds_driver_context_for_explicit_residual_components(monkeypatch):
+    monkeypatch.setattr(pipeline, "ENGINE", _FakeEngine())
+    monkeypatch.setattr(
+        pipeline,
+        "compute_entity_price_contributions",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "date": ["2020-06-01", "2021-07-01"],
+                "share_ppa_import_total": [0.999, 0.994],
+                "residual_contribution_ppa_import_gel": [72.7272, 66.6362],
+                "residual_contribution_ppa_import_usd": [25.225, 21.7686],
+            }
+        ),
+    )
+
+    ctx = _seed_ctx(
+        "Calculate the weighted average balancing price for electricity from Renewable PPA, Import, "
+        "Thermal Generation PPA, and CfD Scheme for June 2020 and July 2021, only if these entities "
+        "collectively contribute 99% or more to the total balancing composition in those months."
+    )
+    invocation = ToolInvocation(
+        name="get_prices",
+        params={
+            "metric": "balancing",
+            "currency": "both",
+            "start_date": "2020-06-01",
+            "end_date": "2021-07-01",
+        },
+    )
+
+    out = pipeline._enrich_prices_with_balancing_driver_context(
+        ctx,
+        invocation,
+        is_explanation=False,
+    )
+
+    assert "share_ppa_import_total" in out.cols
+    assert "residual_contribution_ppa_import_gel" in out.cols
+    assert "residual_contribution_ppa_import_usd" in out.cols
+    assert "balancing_driver_context" in out.evidence_collected

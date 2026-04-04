@@ -36,6 +36,8 @@ _SHARE_THRESHOLD_PATTERNS = (
     r"(at least|not less than|minimum of)\s+\d+(?:\.\d+)?\s*%",
     r"(less than|below|under|fewer than)\s+\d+(?:\.\d+)?\s*%",
     r"(at most|no more than|maximum of)\s+\d+(?:\.\d+)?\s*%",
+    r"\d+(?:\.\d+)?\s*%\s+or\s+more",
+    r"\d+(?:\.\d+)?\s*%\s+or\s+less",
 )
 _SHARE_MONTH_LIST_HINTS = (
     "months where",
@@ -50,7 +52,7 @@ def _is_threshold_share_query(raw_query: str, primary_tool: str) -> bool:
     if primary_tool != ToolName.GET_BALANCING_COMPOSITION.value:
         return False
     query_lower = str(raw_query or "").lower()
-    if "share" not in query_lower:
+    if not any(token in query_lower for token in ("share", "composition", "contribute", "contribution")):
         return False
     return any(re.search(pattern, query_lower) for pattern in _SHARE_THRESHOLD_PATTERNS)
 

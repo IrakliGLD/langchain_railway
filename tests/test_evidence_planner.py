@@ -258,6 +258,28 @@ class TestResolveToolParams:
         assert ctx.evidence_plan[1]["tool_name"] == "get_prices"
         assert ctx.evidence_plan[1]["role"] == "correlation_driver"
 
+    def test_composition_threshold_contribute_query_with_price_context_adds_prices(self):
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            tools=[
+                {"name": "get_balancing_composition", "score": 0.95, "reason": "composition threshold"},
+                {"name": "get_prices", "score": 0.9, "reason": "price context"},
+            ],
+        )
+        payload["raw_query"] = (
+            "Calculate the weighted average balancing price for electricity from Renewable PPA, Import, "
+            "Thermal Generation PPA, and CfD Scheme for the specified months, only if these entities "
+            "collectively contribute 99% or more to the total balancing composition in those months."
+        )
+        payload["canonical_query_en"] = payload["raw_query"]
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        assert len(ctx.evidence_plan) == 2
+        assert ctx.evidence_plan[0]["tool_name"] == "get_balancing_composition"
+        assert ctx.evidence_plan[1]["tool_name"] == "get_prices"
+        assert ctx.evidence_plan[1]["role"] == "correlation_driver"
+
     def test_generation_mix_with_driver_adds_prices(self):
         payload = _make_qa_payload(
             query_type="data_explanation",

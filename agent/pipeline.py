@@ -316,12 +316,20 @@ def _has_residual_weighted_price_signal(query: str) -> bool:
         signal in query_lower
         for signal in ("remaining", "residual", "other electricity", "excluding", "except")
     )
+    explicit_residual_components = (
+        "renewable ppa" in query_lower
+        and "import" in query_lower
+        and ("thermal generation ppa" in query_lower or "thermal ppa" in query_lower)
+        and "cfd" in query_lower
+    )
     balancing_hit = "balancing" in query_lower
     context_hit = any(
         signal in query_lower
         for signal in ("tariff", "tariffs", "regulated", "deregulated")
     )
-    return calc_hit and scope_hit and balancing_hit and context_hit
+    return calc_hit and balancing_hit and (
+        (scope_hit and context_hit) or explicit_residual_components
+    )
 
 
 def _should_enrich_balancing_driver_context(
