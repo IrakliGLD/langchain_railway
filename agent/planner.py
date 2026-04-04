@@ -157,6 +157,35 @@ _NUMERIC_PRICE_CONTEXT_TOKENS = (
     "shares",
 )
 
+_RESIDUAL_SCOPE_TOKENS = _UNDERDEFINED_SCOPE_TOKENS + (
+    "other electricity",
+    "other energy",
+)
+
+_RESIDUAL_HYDRO_TOKENS = (
+    "regulated hydro",
+    "regulated hpp",
+    "regulated hydro generation",
+)
+
+_RESIDUAL_THERMAL_TOKENS = (
+    "regulated thermal",
+    "regulated thermals",
+    "regulated tpp",
+    "regulated old tpp",
+    "regulated new tpp",
+    "thermal generation",
+    "thermal tariffs",
+    "thermal",
+)
+
+_RESIDUAL_DEREGULATED_TOKENS = (
+    "deregulated hydro",
+    "deregulated power plant",
+    "deregulated power plants",
+    "deregulated hpp",
+)
+
 _MONTH_PATTERN_BY_NUMBER = {
     1: r"\b(january|jan|январ[ьяею]?)\b|იანვ",
     2: r"\b(february|feb|феврал[ьяею]?)\b|თებ",
@@ -399,6 +428,156 @@ def _is_underdefined_numeric_computation_query(
     ):
         return False
     return True
+
+
+def _flatten_recent_conversation_text(conversation_history) -> str:
+    """Return the last few question/answer turns as one normalized string."""
+
+    if not conversation_history:
+        return ""
+
+    parts: list[str] = []
+    for turn in conversation_history[-3:]:
+        if not isinstance(turn, dict):
+            continue
+        question = str(turn.get("question") or "").strip()
+        answer = str(turn.get("answer") or "").strip()
+        if question:
+            parts.append(question)
+        if answer:
+            parts.append(answer)
+    return " ".join(parts).lower()
+
+
+def _has_explicit_residual_bucket_definition(text: str) -> bool:
+    """Return True when text defines the priced residual bucket explicitly."""
+
+    text_lower = str(text or "").lower()
+    if not text_lower:
+        return False
+    scope_hit = any(token in text_lower for token in _RESIDUAL_SCOPE_TOKENS)
+    hydro_hit = any(token in text_lower for token in _RESIDUAL_HYDRO_TOKENS)
+    thermal_hit = any(token in text_lower for token in _RESIDUAL_THERMAL_TOKENS)
+    deregulated_hit = any(token in text_lower for token in _RESIDUAL_DEREGULATED_TOKENS)
+    return scope_hit and hydro_hit and thermal_hit and deregulated_hit
+
+
+def _is_history_resolved_numeric_computation_query(
+    qa: QuestionAnalysis,
+    raw_query: str,
+    conversation_history,
+) -> bool:
+    """Return True when recent history resolves an otherwise ambiguous residual bucket."""
+
+    if (
+        qa.classification.query_type not in (QueryType.AMBIGUOUS, QueryType.UNSUPPORTED)
+        or qa.routing.preferred_path not in (PreferredPath.CLARIFY, PreferredPath.KNOWLEDGE)
+    ):
+        return False
+
+    query_lower = str(raw_query or "").lower()
+    if not query_lower:
+        return False
+    if not any(token in query_lower for token in _NUMERIC_CALCULATION_TOKENS):
+        return False
+    if not any(token in query_lower for token in _RESIDUAL_SCOPE_TOKENS):
+        return False
+    if "balancing" not in query_lower:
+        return False
+    if not any(token in query_lower for token in _NUMERIC_PRICE_CONTEXT_TOKENS):
+        return False
+
+    history_text = _flatten_recent_conversation_text(conversation_history)
+    combined_text = " ".join(part for part in (history_text, query_lower) if part).strip()
+    if not _has_explicit_residual_bucket_definition(combined_text):
+        return False
+
+    tool_names = {
+        getattr(tool.name, "value", str(tool.name or ""))
+        for tool in (qa.tooling.candidate_tools or [])
+    }
+    if tool_names and ToolName.GET_PRICES.value not in tool_names:
+        return False
+    return True
+
+
+def _apply_history_resolved_numeric_computation_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+    conversation_history,
+) -> tuple[QuestionAnalysis, bool]:
+    """Promote history-resolved residual calculations back to tool-based retrieval."""
+
+    if not _is_history_resolved_numeric_computation_query(qa, raw_query, conversation_history):
+        return qa, False
+
+    start_date, end_date = extract_date_range(raw_query)
+    payload = qa.model_dump(mode="json")
+    payload["classification"]["query_type"] = QueryType.DATA_RETRIEVAL.value
+    payload["classification"]["needs_clarification"] = False
+    payload["classification"]["ambiguities"] = []
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.85,
+    )
+    payload["routing"].update({
+        "preferred_path": PreferredPath.TOOL.value,
+        "needs_sql": False,
+        "needs_knowledge": False,
+        "prefer_tool": True,
+        "needs_multi_tool": True,
+        "evidence_roles": [
+            "primary_data",
+            "composition_context",
+            "tariff_context",
+        ],
+    })
+    payload.setdefault("sql_hints", {})
+    if not payload["sql_hints"].get("metric"):
+        payload["sql_hints"]["metric"] = "balancing"
+
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": ToolName.GET_PRICES.value,
+            "score": 1.0,
+            "reason": "balancing price and deregulated source price needed for residual weighted-price calculation",
+            "params_hint": {
+                "metric": "balancing",
+                "currency": "both",
+                "granularity": "monthly",
+                "start_date": start_date,
+                "end_date": end_date,
+                "entities": [],
+                "types": [],
+            },
+        },
+        {
+            "name": ToolName.GET_BALANCING_COMPOSITION.value,
+            "score": 0.97,
+            "reason": "composition shares needed to recover the remaining share",
+            "params_hint": {
+                "start_date": start_date,
+                "end_date": end_date,
+                "entities": [],
+                "types": [],
+            },
+        },
+        {
+            "name": ToolName.GET_TARIFFS.value,
+            "score": 0.96,
+            "reason": "regulated tariffs needed for the excluded source-price layers",
+            "params_hint": {
+                "currency": "both",
+                "granularity": "monthly",
+                "start_date": start_date,
+                "end_date": end_date,
+                "entities": [],
+                "types": [],
+            },
+        },
+    ]
+
+    return QuestionAnalysis.model_validate(payload), True
 
 
 def _apply_underdefined_numeric_clarify_guardrail(
@@ -792,10 +971,16 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             ctx.query,
         )
         clarify_guardrail_applied = False
+        history_resolution_applied = False
         if ctx.question_analysis is not None:
             ctx.question_analysis, clarify_guardrail_applied = _apply_underdefined_numeric_clarify_guardrail(
                 ctx.question_analysis,
                 ctx.query,
+            )
+            ctx.question_analysis, history_resolution_applied = _apply_history_resolved_numeric_computation_guardrail(
+                ctx.question_analysis,
+                ctx.query,
+                ctx.conversation_history,
             )
         ctx.question_analysis_error = ""
         ctx.question_analysis_source = source
@@ -808,6 +993,12 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             ctx.clarify_reason = "underdefined_computed_target"
             log.info(
                 "Applied underdefined numeric computation guardrail: coerced analyzer output to clarify for query=%r",
+                ctx.query,
+            )
+        if history_resolution_applied:
+            ctx.clarify_reason = ""
+            log.info(
+                "Applied history-resolved numeric computation guardrail: coerced analyzer output to data_retrieval/tool for query=%r",
                 ctx.query,
             )
         log.info(
