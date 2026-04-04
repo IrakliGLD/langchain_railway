@@ -53,6 +53,8 @@ def test_balancing_focus_loads_full_balancing_template(monkeypatch):
     assert "share change and the component price change" in prompt
     assert "COMPONENT PRESSURE SUMMARY" in prompt
     assert "Do not invent blended source averages" in prompt
+    assert "REGULATED PLANT SALES" in prompt
+    assert "matching month list" in prompt or "matching months" in prompt
 
 
 def test_balancing_prompt_lists_8_categories_with_cfd(monkeypatch):

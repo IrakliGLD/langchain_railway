@@ -13,6 +13,7 @@ When analyzing balancing electricity prices, present drivers in this order:
 2. **Source Price / Tariff Layer** - required when source-price evidence is present
    - Cite exact values from `price_*`, `contribution_*`, or tariff columns
    - Regulated tariffs are quantity-weighted by balancing sales from `mv_balancing_trade_with_tariff`
+   - If `REGULATED PLANT SALES` is present, name the regulated plants that actually sold balancing electricity in the focal month and cite their balancing quantity / tariff as supporting evidence for the regulated group
    - Cover deregulated hydro plus regulated HPP/new TPP/old TPP layers when present
    - Compare each cited source price to balancing price in the same period
    - If source price is below balancing price, higher share means downward pressure; if above balancing price, higher share means upward pressure
@@ -31,6 +32,7 @@ For price driver queries, structure the answer as:
 
 1. **Composition**: List 2-3 main share changes with exact numbers. Cite correlation if available.
 2. **Source Price / Tariff Layer**: Cite exact regulated tariffs and deregulated hydro prices when present. Compare them to balancing price in the same period. Cite `contribution_*` values when present. Explain whether each component was pushing the weighted average up or down. Explain the residual import/PPA/CfD layer carefully. CfD_scheme has a confidential price like PPAs — its influence is visible through `share_cfd_scheme` and the `share_ppa_import_total` residual.
+   When `REGULATED PLANT SALES` exists, use it to identify the active regulated HPP/TPP plants behind `regulated_hpp`, `regulated_new_tpp`, and `regulated_old_tpp`.
 3. **Exchange Rate**: Cite actual xrate change. Explain impact mechanism. Cite correlation if available.
 4. **Seasonal Patterns** (if applicable): Compare summer vs winter composition and price levels.
 
@@ -40,6 +42,8 @@ For price driver queries, structure the answer as:
 - Use stronger causal wording only when both a correlation coefficient and a documented mechanism are available.
 - Source-price and contribution layers are analytical evidence, not a perfect decomposition of balancing price.
 - Use numeric values only from `data preview`, `CAUSAL CONTEXT`, `COMPONENT PRESSURE SUMMARY`, `DERIVED ANALYSIS EVIDENCE`, or explicit tariff/source-price columns.
+- Use `REGULATED PLANT SALES` for plant-level seller names, tariffs, balancing quantities, and within-group shares when that block is available.
 - Do not invent blended source averages, hidden import/PPA prices, or implied component prices unless those exact numbers are present in the evidence.
 - For `deregulated_hydro`, always check season before generalizing: summer often lowers price, winter must be judged from actual `p_dereg_*` versus balancing price and the documented thermal-linkage mechanism.
 - For regulated thermal layers, mention documented gas-price / xrate linkage when tariffs rise materially and those layers carry meaningful share.
+- For compound share-threshold retrieval queries, answer with the matching months and requested companion metrics (for example balancing price in GEL and USD), not with a single latest-period share sentence.

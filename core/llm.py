@@ -1893,6 +1893,9 @@ Important rules:
 - `candidate_topics` and `candidate_tools` are ranked candidates, not final decisions.
 - `routing.needs_multi_tool`: set to true when answering the question properly requires data from two or more tools. Common patterns: explaining price changes needs prices AND composition shares; comparing tariffs against market prices needs tariffs AND prices; correlating generation with prices needs generation_mix AND prices. Check each tool's `combined_with` field in TOOL_CATALOG.
 - `routing.evidence_roles`: when `needs_multi_tool` is true, list the required evidence roles. Valid values: `primary_data` (the main dataset), `composition_context` (share/mix breakdown for driver analysis), `tariff_context` (regulated tariff series), `correlation_driver` (secondary series for correlation). Always include `primary_data`. Only list roles that are actually needed.
+- Supported balancing explanation examples:
+  - "Why balancing electricity price changed in May 2024?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, tools should prioritize `get_prices` + `get_balancing_composition`.
+  - "Why balancing electricity prices changed in November 2024?" -> same routing as above; plural `prices` is still a supported month-specific data explanation, not `unsupported`.
 - For tool parameter hints, use the exact downstream vocabulary expected by the tool API.
 - For `get_prices`, valid `params_hint.metric` values are only:
   - `balancing`

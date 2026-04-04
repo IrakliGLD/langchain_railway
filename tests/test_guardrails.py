@@ -1350,6 +1350,94 @@ def test_why_context_adds_component_pressure_summary_block(monkeypatch):
     assert residual["observed_pressure_gel"] == "lower_residual_contribution"
 
 
+def test_why_context_adds_regulated_plant_sales_block(monkeypatch):
+    monkeypatch.setattr(analyzer, "stamp_provenance", lambda *_args, **_kwargs: None)
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(
+        analyzer,
+        "compute_regulated_plant_sales",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-04-01", "2024-05-01", "2024-05-01"]),
+                "regulated_group": ["regulated_old_tpp", "regulated_hpp", "regulated_hpp"],
+                "plant": ["mtkvari", "enguri hpp", "vardnili cascade"],
+                "entity_code": ["mtk", "enguri", "vardnili"],
+                "balancing_quantity": [12.0, 30.0, 14.0],
+                "tariff_gel": [185.8, 38.0, 41.0],
+                "tariff_usd": [69.3, 13.6, 14.6],
+                "share_of_total_balancing": [0.032, 0.112, 0.052],
+                "share_within_group": [1.0, 0.682, 0.318],
+            }
+        ),
+    )
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-04-01", "2024-05-01"]),
+            "p_bal_gel": [153.1, 124.1],
+            "p_bal_usd": [57.1269, 44.3214],
+            "xrate": [2.68, 2.8],
+            "share_deregulated_hydro": [0.0213, 0.0642],
+            "share_regulated_hpp": [0.0, 0.1639],
+            "share_regulated_old_tpp": [0.0321, 0.0],
+            "share_renewable_ppa": [0.8910, 0.7432],
+            "share_thermal_ppa": [0.0369, 0.0],
+            "share_import": [0.0188, 0.0287],
+            "price_regulated_hpp_gel": [None, 39.1],
+            "price_regulated_old_tpp_gel": [185.8, None],
+            "contribution_regulated_hpp_gel": [0.0, 6.41],
+            "contribution_regulated_old_tpp_gel": [5.97, 0.0],
+            "share_ppa_import_total": [0.9467, 0.7719],
+        }
+    )
+    ctx = QueryContext(
+        query="Explain the reasons for the change in balancing electricity price in May 2024.",
+        mode="analyst",
+        trace_id="regulated-plants-1",
+        session_id="regulated-plants-1",
+        df=df,
+        cols=list(df.columns),
+        rows=[tuple(r) for r in df.itertuples(index=False, name=None)],
+    )
+
+    analyzer._build_why_context(ctx)
+
+    hint = ctx.stats_hint
+    assert "REGULATED PLANT SALES" in hint
+    json_start = hint.index("{", hint.index("REGULATED PLANT SALES"))
+    brace_depth = 0
+    json_end = json_start
+    for i, ch in enumerate(hint[json_start:], start=json_start):
+        if ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                json_end = i + 1
+                break
+
+    block = json.loads(hint[json_start:json_end])
+    assert "current_period" in block
+    assert block["current_period"][0]["plant"] == "enguri hpp"
+    assert block["current_period"][1]["plant"] == "vardnili cascade"
+    assert block["previous_period"][0]["plant"] == "mtkvari"
+
+
 # ---------------------------------------------------------------------------
 # Reliability fix tests
 # ---------------------------------------------------------------------------

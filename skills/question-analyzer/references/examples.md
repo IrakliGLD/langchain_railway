@@ -25,13 +25,43 @@ Expected shape:
 - `version = question_analysis_v1`
 - `classification.query_type = data_explanation`
 - `classification.analysis_mode = analyst`
-- `routing.preferred_path = sql`
+- `routing.preferred_path = tool`
+- `routing.needs_multi_tool = true`
 - `knowledge.candidate_topics` should prioritize `balancing_price`
 - `sql_hints.period.start_date = 2021-11-01`
 - `sql_hints.period.end_date = 2021-11-30`
 - `analysis_requirements.needs_driver_analysis = true`
 - `analysis_requirements.derived_metrics` should include bounded requests such as `mom_absolute_change`, `mom_percent_change`, and `share_delta_mom`
 - `visualization.chart_recommended = false`
+
+## Example 2b
+
+Input:
+
+`why balancing electricity prices changed in november 2024?`
+
+Expected shape:
+
+- `classification.query_type = data_explanation`
+- `classification.analysis_mode = analyst`
+- `routing.preferred_path = tool`
+- `routing.needs_multi_tool = true`
+- `tooling.candidate_tools` should prioritize `get_prices` and `get_balancing_composition`
+- `sql_hints.period.start_date = 2024-11-01`
+- `sql_hints.period.end_date = 2024-11-30`
+
+## Example 2c
+
+Input:
+
+`why balancing electricity price changed in october 2024?`
+
+Expected shape:
+
+- `classification.query_type = data_explanation`
+- `routing.preferred_path = tool`
+- `routing.needs_multi_tool = true`
+- `tooling.candidate_tools` should prioritize `get_prices` and `get_balancing_composition`
 
 ## Example 3
 

@@ -158,6 +158,168 @@ def test_planner_shadow_records_error_without_raising(monkeypatch):
     assert out.question_analysis_source == "llm_shadow_error"
 
 
+def test_active_planner_coerces_month_specific_balancing_why_query(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Why balancing electricity prices changed in November 2024?",
+        "canonical_query_en": "Explain the reasons for changes in balancing electricity prices in November 2024.",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "unsupported",
+            "analysis_mode": "light",
+            "intent": "balancing_price_change_reason",
+            "needs_clarification": False,
+            "confidence": 0.99,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [{"name": "balancing_price", "score": 0.9}],
+        },
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query="Why balancing electricity prices changed in November 2024?")
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "data_explanation"
+    assert out.question_analysis.classification.analysis_mode.value == "analyst"
+    assert out.question_analysis.routing.preferred_path.value == "tool"
+    assert out.question_analysis.routing.needs_multi_tool is True
+    tool_names = [tool.name.value for tool in out.question_analysis.tooling.candidate_tools]
+    assert tool_names[:2] == ["get_prices", "get_balancing_composition"]
+    metric_names = {metric.metric_name.value for metric in out.question_analysis.analysis_requirements.derived_metrics}
+    assert "mom_absolute_change" in metric_names
+    assert out.question_analysis.sql_hints.period is not None
+    assert out.question_analysis.sql_hints.period.start_date == "2024-11-01"
+    assert out.question_analysis.sql_hints.period.end_date == "2024-11-30"
+
+
+def test_active_planner_does_not_coerce_multi_month_comparison_query(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Why did balancing electricity price change between October and November 2024?",
+        "canonical_query_en": "Why did balancing electricity price change between October and November 2024?",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "unsupported",
+            "analysis_mode": "light",
+            "intent": "balancing_price_change_reason",
+            "needs_clarification": False,
+            "confidence": 0.99,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [{"name": "balancing_price", "score": 0.9}],
+        },
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query="Why did balancing electricity price change between October and November 2024?")
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "unsupported"
+    assert out.question_analysis.routing.preferred_path.value == "knowledge"
+
+
+def test_active_planner_coerces_russian_month_specific_balancing_why_query(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Почему изменилась цена балансирующей электроэнергии в ноябре 2024 года?",
+        "canonical_query_en": "Why did balancing electricity price change in November 2024?",
+        "language": {"input_language": "ru", "answer_language": "ru"},
+        "classification": {
+            "query_type": "unsupported",
+            "analysis_mode": "light",
+            "intent": "balancing_price_change_reason",
+            "needs_clarification": False,
+            "confidence": 0.99,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [{"name": "balancing_price", "score": 0.9}],
+        },
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query="Почему изменилась цена балансирующей электроэнергии в ноябре 2024 года?")
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "data_explanation"
+    assert out.question_analysis.routing.preferred_path.value == "tool"
+    assert out.question_analysis.sql_hints.period is not None
+    assert out.question_analysis.sql_hints.period.start_date == "2024-11-01"
+    assert out.question_analysis.sql_hints.period.end_date == "2024-11-30"
+
+
 def test_pipeline_runs_shadow_stage_before_conceptual_return(monkeypatch):
     expected = QuestionAnalysis.model_validate(_valid_payload())
 

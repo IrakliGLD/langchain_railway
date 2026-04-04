@@ -22,7 +22,7 @@ from analysis.seasonal_stats import (
     calculate_seasonal_stats,
     format_seasonal_stats,
 )
-from analysis.shares import build_balancing_correlation_df
+from analysis.shares import build_balancing_correlation_df, compute_regulated_plant_sales
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
 from utils.trace_logging import trace_detail
@@ -1121,6 +1121,8 @@ def _select_share_column(share_cols: list[str], target_text: str) -> Optional[st
 
     # Direct entity matches
     priority_map = {
+        "cfd_scheme": "share_cfd_scheme",
+        "cfd": "share_cfd_scheme",
         "import": "share_import",
         "renewable_ppa": "share_renewable_ppa",
         "thermal_ppa": "share_thermal_ppa",
@@ -1141,6 +1143,44 @@ def _select_share_column(share_cols: list[str], target_text: str) -> Optional[st
     return share_cols[0] if share_cols else None
 
 
+_SHARE_THRESHOLD_RULES: list[tuple[str, str, str]] = [
+    (r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+(\d+(?:\.\d+)?)\s*%?", "gt", "exceeded"),
+    (r"(at least|not less than|minimum of)\s+(\d+(?:\.\d+)?)\s*%?", "ge", "was at least"),
+    (r"(less than|below|under|fewer than)\s+(\d+(?:\.\d+)?)\s*%?", "lt", "was below"),
+    (r"(at most|no more than|maximum of)\s+(\d+(?:\.\d+)?)\s*%?", "le", "was at most"),
+]
+
+
+def _extract_share_threshold(user_query: str) -> Optional[tuple[str, float, str]]:
+    """Parse threshold operators like '> 99%' from a share query."""
+    query_lower = str(user_query or "").lower()
+    if "share" not in query_lower:
+        return None
+
+    for pattern, operator, phrase in _SHARE_THRESHOLD_RULES:
+        match = re.search(pattern, query_lower)
+        if not match:
+            continue
+        try:
+            raw_value = float(match.group(2))
+        except (TypeError, ValueError):
+            continue
+        threshold = raw_value / 100.0 if raw_value > 1 else raw_value
+        return operator, threshold, phrase
+    return None
+
+
+def _share_query_requests_prices(user_query: str) -> bool:
+    query_lower = str(user_query or "").lower()
+    return any(token in query_lower for token in ("price", "gel", "usd"))
+
+
+def _find_share_answer_price_columns(df: pd.DataFrame) -> tuple[Optional[str], Optional[str]]:
+    gel_col = next((c for c in ["balancing_price_gel", "p_bal_gel"] if c in df.columns), None)
+    usd_col = next((c for c in ["balancing_price_usd", "p_bal_usd"] if c in df.columns), None)
+    return gel_col, usd_col
+
+
 def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: str) -> Optional[str]:
     """Produce a deterministic textual answer for share queries to avoid LLM hallucinations."""
     if df is None or df.empty:
@@ -1158,8 +1198,61 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
     if not selected_col:
         return None
 
-    # Find the row matching the period
     date_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time_month"])]
+    threshold_rule = _extract_share_threshold(user_query)
+
+    if threshold_rule and date_cols:
+        date_col = date_cols[0]
+        working = df.copy()
+        working[date_col] = pd.to_datetime(working[date_col], errors="coerce")
+        working[selected_col] = pd.to_numeric(working[selected_col], errors="coerce")
+        working = working.dropna(subset=[date_col, selected_col]).sort_values(date_col)
+        if working.empty:
+            return None
+
+        operator, threshold, phrase = threshold_rule
+        if operator == "gt":
+            matched = working[working[selected_col] > threshold]
+        elif operator == "ge":
+            matched = working[working[selected_col] >= threshold]
+        elif operator == "lt":
+            matched = working[working[selected_col] < threshold]
+        else:
+            matched = working[working[selected_col] <= threshold]
+
+        meta = BALANCING_SHARE_METADATA.get(selected_col, {})
+        label = meta.get("label", selected_col.replace("share_", "").replace("_", " "))
+        threshold_pct = threshold * 100 if threshold <= 1 else threshold
+        if matched.empty:
+            return (
+                f"No months were found where **{label.title()}** {phrase} "
+                f"**{threshold_pct:.1f}%** of balancing electricity in the available data."
+            )
+
+        gel_col, usd_col = _find_share_answer_price_columns(matched)
+        include_prices = _share_query_requests_prices(user_query)
+        summary_parts = [
+            f"Months where **{label.title()}** {phrase} **{threshold_pct:.1f}%** of balancing electricity:"
+        ]
+        for _, row in matched.iterrows():
+            share_value = float(row[selected_col])
+            share_pct = share_value * 100 if share_value < 1 else share_value
+            period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
+            line = f"- {period_str}: {share_pct:.1f}%"
+            if include_prices:
+                price_bits = []
+                if gel_col and pd.notna(row.get(gel_col)):
+                    price_bits.append(f"{float(row[gel_col]):.1f} GEL/MWh")
+                if usd_col and pd.notna(row.get(usd_col)):
+                    price_bits.append(f"{float(row[usd_col]):.1f} USD/MWh")
+                if price_bits:
+                    line += f"; balancing price {', '.join(price_bits)}"
+            summary_parts.append(line)
+        if include_prices and not (gel_col or usd_col):
+            summary_parts.append("- Balancing price columns were not available in the retrieved evidence for these months.")
+        return "\n".join(summary_parts)
+
+    # Find the row matching the period
     if date_cols:
         date_col = date_cols[0]
         df = df.copy()
@@ -1800,6 +1893,43 @@ def _build_standalone_analysis_evidence(ctx: QueryContext) -> None:
     )
 
 
+def _format_regulated_plant_sales_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Normalize regulated plant-sales rows for compact prompt inclusion."""
+    if df is None or df.empty:
+        return []
+
+    working = df.copy()
+    if "date" in working.columns:
+        working["date"] = pd.to_datetime(working["date"], errors="coerce")
+    sort_cols = [c for c in ["date", "regulated_group", "balancing_quantity", "plant"] if c in working.columns]
+    if sort_cols:
+        ascending = [False if c == "balancing_quantity" else True for c in sort_cols]
+        working = working.sort_values(sort_cols, ascending=ascending)
+
+    records: list[dict[str, Any]] = []
+    for row in working.to_dict(orient="records"):
+        record = {
+            "regulated_group": row.get("regulated_group"),
+            "plant": row.get("plant"),
+            "entity_code": row.get("entity_code"),
+        }
+        if row.get("date") is not None and not pd.isna(row.get("date")):
+            record["date"] = pd.to_datetime(row["date"]).strftime("%Y-%m-%d")
+        for field in (
+            "balancing_quantity",
+            "tariff_gel",
+            "tariff_usd",
+            "share_of_total_balancing",
+            "share_within_group",
+        ):
+            value = row.get(field)
+            if value is None or pd.isna(value):
+                continue
+            record[field] = round(float(value), 6)
+        records.append(record)
+    return records
+
+
 def _build_why_context(ctx: QueryContext) -> None:
     """Build causal context for 'why' queries. Modifies ctx.stats_hint."""
     why_ctx: Dict[str, Any] = {"notes": [], "signals": {}}
@@ -1862,6 +1992,38 @@ def _build_why_context(ctx: QueryContext) -> None:
 
     # 5-year historical month context
     historical_rows = _find_historical_month_rows(df, t_series_col, target_ts, lookback_years=5)
+    regulated_plant_sales_df = pd.DataFrame()
+    regulated_plant_sales_block: dict[str, Any] = {}
+
+    if target_ts is not None:
+        plant_window = [ts for ts in [prev_ts, target_ts] if ts is not None]
+        if plant_window:
+            try:
+                with ENGINE.connect() as conn:
+                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                    regulated_plant_sales_df = compute_regulated_plant_sales(
+                        conn,
+                        start_date=min(plant_window).strftime("%Y-%m-%d"),
+                        end_date=max(plant_window).strftime("%Y-%m-%d"),
+                    )
+            except Exception as plant_err:
+                log.warning("Regulated plant sales evidence build failed: %s", plant_err)
+
+    if not regulated_plant_sales_df.empty:
+        regulated_plant_sales_df = regulated_plant_sales_df.copy()
+        regulated_plant_sales_df["date"] = pd.to_datetime(regulated_plant_sales_df["date"], errors="coerce")
+        current_plants = regulated_plant_sales_df[
+            regulated_plant_sales_df["date"].dt.to_period("M") == target_ts.to_period("M")
+        ] if target_ts is not None else pd.DataFrame()
+        previous_plants = regulated_plant_sales_df[
+            regulated_plant_sales_df["date"].dt.to_period("M") == prev_ts.to_period("M")
+        ] if prev_ts is not None else pd.DataFrame()
+        if not current_plants.empty:
+            regulated_plant_sales_block["current_period"] = _format_regulated_plant_sales_records(current_plants)
+        if not previous_plants.empty:
+            regulated_plant_sales_block["previous_period"] = _format_regulated_plant_sales_records(previous_plants)
+        if regulated_plant_sales_block:
+            why_ctx["regulated_plant_sales"] = regulated_plant_sales_block
 
     share_cols = [c for c in df.columns if c.startswith("share_")]
     cur_shares: dict[str, float] = {}
@@ -1991,6 +2153,10 @@ def _build_why_context(ctx: QueryContext) -> None:
 
     share_notes = build_share_shift_notes(cur_shares, prev_shares)
     why_ctx["notes"].extend(share_notes)
+    if regulated_plant_sales_block.get("current_period"):
+        why_ctx["notes"].append(
+            "Regulated plant sales detail is available for the focal month; use the named HPP/TPP sellers to explain the regulated source layer."
+        )
 
     # YoY comparison note
     if yoy_gel is not None and cur_gel is not None:
@@ -2098,6 +2264,8 @@ def _build_why_context(ctx: QueryContext) -> None:
         combined_prov_df = pd.concat([combined_prov_df, analysis_evidence_df], ignore_index=True, sort=False)
     if not component_pressure_df.empty:
         combined_prov_df = pd.concat([combined_prov_df, component_pressure_df], ignore_index=True, sort=False)
+    if not regulated_plant_sales_df.empty:
+        combined_prov_df = pd.concat([combined_prov_df, regulated_plant_sales_df], ignore_index=True, sort=False)
     # Add share-delta values as a provenance row so the provenance gate can
     # ground LLM claims like "6.66 pp" via _tokenize_cell_value(0.0666) → 6.66.
     if cur_shares and prev_shares:
@@ -2138,6 +2306,7 @@ def _build_why_context(ctx: QueryContext) -> None:
         why_override=False,
         analysis_evidence_count=len(ctx.analysis_evidence or []),
         component_pressure_count=len(component_pressure_summary),
+        regulated_plant_rows=len(regulated_plant_sales_df),
         signals=why_ctx.get("signals", {}),
     )
     trace_detail(
@@ -2162,7 +2331,14 @@ def _build_why_context(ctx: QueryContext) -> None:
             + json.dumps(component_pressure_summary, default=str, indent=2)
         )
 
-    # PRIORITY 3: Detailed Evidence (Lower value, large size)
+    # PRIORITY 3: Regulated plant-level seller evidence (compact but valuable)
+    if regulated_plant_sales_block:
+        ctx.stats_hint += (
+            "\n\n--- REGULATED PLANT SALES ---\n"
+            + json.dumps(regulated_plant_sales_block, default=str, indent=2)
+        )
+
+    # PRIORITY 4: Detailed Evidence (Lower value, large size)
     # Prune to top 12 to reduce prompt bloat and truncation risk.
     if ctx.analysis_evidence:
         evidence_subset = ctx.analysis_evidence[:12]

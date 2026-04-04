@@ -237,6 +237,27 @@ class TestResolveToolParams:
         assert ctx.evidence_plan[1]["tool_name"] == "get_prices"
         assert ctx.evidence_plan[1]["role"] == "correlation_driver"
 
+    def test_share_threshold_query_with_price_context_adds_prices(self):
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            tools=[
+                {"name": "get_balancing_composition", "score": 0.95, "reason": "shares"},
+                {"name": "get_prices", "score": 0.9, "reason": "price context"},
+            ],
+        )
+        payload["raw_query"] = (
+            "What are the months where the share of renewable PPA in balancing electricity "
+            "is more than 99%, and what were balancing electricity prices in GEL and USD during those months?"
+        )
+        payload["canonical_query_en"] = payload["raw_query"]
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        assert len(ctx.evidence_plan) == 2
+        assert ctx.evidence_plan[0]["tool_name"] == "get_balancing_composition"
+        assert ctx.evidence_plan[1]["tool_name"] == "get_prices"
+        assert ctx.evidence_plan[1]["role"] == "correlation_driver"
+
     def test_generation_mix_with_driver_adds_prices(self):
         payload = _make_qa_payload(
             query_type="data_explanation",

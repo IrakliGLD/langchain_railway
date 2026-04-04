@@ -118,6 +118,97 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
     return df
 
 
+def compute_regulated_plant_sales(
+    conn: Any,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Return plant-level regulated balancing sales with tariff context.
+
+    This exposes the regulated plants that actually sold balancing electricity
+    in a month so balancing explanations can name the active HPP/TPP sellers
+    behind the grouped regulated buckets.
+    """
+    filters = []
+    params: dict[str, Any] = {}
+    if start_date:
+        filters.append("cs.date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        filters.append("cs.date <= :end_date")
+        params["end_date"] = end_date
+
+    sql = f"""
+    WITH plant_sales AS (
+      SELECT
+        mv.month,
+        mv.entity,
+        mv.entity_code,
+        SUM(mv.balancing_quantity) AS balancing_quantity,
+        SUM(mv.tariff_gel * mv.balancing_quantity) / NULLIF(SUM(mv.balancing_quantity), 0) AS tariff_gel
+      FROM mv_balancing_trade_with_tariff mv
+      GROUP BY mv.month, mv.entity, mv.entity_code
+    ),
+    classified_sales AS (
+      SELECT
+        ps.month AS date,
+        CASE
+          WHEN em.type = 'hpp' THEN 'regulated_hpp'
+          WHEN ps.entity = 'gardabani tpp' THEN 'regulated_new_tpp'
+          WHEN em.type = 'tpp' AND ps.entity NOT IN ('gardabani tpp', 'gardabani2 tpp') THEN 'regulated_old_tpp'
+          ELSE NULL
+        END AS regulated_group,
+        ps.entity AS plant,
+        ps.entity_code,
+        ps.balancing_quantity,
+        ps.tariff_gel
+      FROM plant_sales ps
+      JOIN entities_mv em ON em.entity = ps.entity_code
+    ),
+    balancing_totals AS (
+      SELECT
+        t.date,
+        SUM(t.quantity) AS total_balancing_qty
+      FROM trade_derived_entities t
+      WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
+      GROUP BY t.date
+    ),
+    group_totals AS (
+      SELECT
+        cs.date,
+        cs.regulated_group,
+        SUM(cs.balancing_quantity) AS group_qty
+      FROM classified_sales cs
+      WHERE cs.regulated_group IS NOT NULL
+      GROUP BY cs.date, cs.regulated_group
+    )
+    SELECT
+      cs.date,
+      cs.regulated_group,
+      cs.plant,
+      cs.entity_code,
+      cs.balancing_quantity,
+      cs.tariff_gel,
+      cs.tariff_gel / NULLIF(p.xrate, 0) AS tariff_usd,
+      cs.balancing_quantity / NULLIF(bt.total_balancing_qty, 0) AS share_of_total_balancing,
+      cs.balancing_quantity / NULLIF(gt.group_qty, 0) AS share_within_group
+    FROM classified_sales cs
+    JOIN balancing_totals bt ON bt.date = cs.date
+    LEFT JOIN group_totals gt
+      ON gt.date = cs.date
+     AND gt.regulated_group = cs.regulated_group
+    LEFT JOIN price_with_usd p ON p.date = cs.date
+    WHERE cs.regulated_group IS NOT NULL
+    {"AND " + " AND ".join(filters) if filters else ""}
+    ORDER BY cs.date, cs.regulated_group, cs.balancing_quantity DESC, cs.plant
+    """
+    sql_with_limit = f"{sql.strip()}\nLIMIT {MAX_ROWS};"
+    res = conn.execute(text(sql_with_limit), params)
+    df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    check_dataframe_memory(df)
+    return df
+
+
 def compute_weighted_balancing_price(conn: Any) -> pd.DataFrame:
     """
     Compute each month's contribution to the grand-total weighted-average balancing price.

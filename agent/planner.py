@@ -7,6 +7,7 @@ and generates the LLM plan + raw SQL.
 import json
 import logging
 import re
+from calendar import monthrange
 from datetime import date
 from typing import Optional
 
@@ -94,6 +95,246 @@ def _expand_single_month_explanation_window(
         end_date,
     )
     return expanded_start, end_date
+
+
+_BALANCING_PRICE_EXPLANATION_TOKENS = (
+    "why",
+    "reason",
+    "reasons",
+    "explain",
+    "cause",
+    "caused",
+    "changed",
+    "change",
+    "changes",
+    "რატომ",
+    "მიზეზ",
+    "ახსენ",
+    "почему",
+    "причин",
+    "объясн",
+)
+
+_BALANCING_PRICE_BALANCING_TOKENS = (
+    "balancing",
+    "balance market",
+    "საბალანს",
+    "баланс",
+)
+
+_BALANCING_PRICE_PRICE_TOKENS = (
+    "price",
+    "prices",
+    "ფას",
+    "цен",
+)
+
+_MONTH_PATTERN_BY_NUMBER = {
+    1: r"\b(january|jan|январ[ьяею]?)\b|იანვ",
+    2: r"\b(february|feb|феврал[ьяею]?)\b|თებ",
+    3: r"\b(march|mar|март[аеу]?)\b|მარტ",
+    4: r"\b(april|apr|апрел[ьяею]?)\b|აპრ",
+    5: r"\b(may|май|мая)\b|მაის",
+    6: r"\b(june|jun|июн[ьяею]?)\b|ივნ",
+    7: r"\b(july|jul|июл[ьяею]?)\b|ივლ",
+    8: r"\b(august|aug|август[аеу]?)\b|აგვ",
+    9: r"\b(september|sept|sep|сентябр[ьяею]?)\b|სექტ",
+    10: r"\b(october|oct|октябр[ьяею]?)\b|ოქტ",
+    11: r"\b(november|nov|ноябр[ьяею]?)\b|ნოემბ",
+    12: r"\b(december|dec|декабр[ьяею]?)\b|დეკ",
+}
+
+
+def _extract_explicit_month_period(raw_query: str) -> tuple[Optional[str], Optional[str]]:
+    """Extract a concrete month-year period directly from the raw query text."""
+    query_lower = str(raw_query or "").lower()
+    year_match = re.search(r"\b(20\d{2})\b", query_lower)
+    if not year_match:
+        return None, None
+    year = int(year_match.group(1))
+
+    matched_months = [
+        month_num
+        for month_num, pattern in _MONTH_PATTERN_BY_NUMBER.items()
+        if re.search(pattern, query_lower)
+    ]
+    if len(matched_months) != 1:
+        return None, None
+    month = matched_months[0]
+
+    last_day = monthrange(year, month)[1]
+    return date(year, month, 1).isoformat(), date(year, month, last_day).isoformat()
+
+
+def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
+    """Detect month-specific balancing-price why/explanation questions.
+
+    This guardrail catches phrasing such as "why balancing electricity prices
+    changed in November 2024" so the runtime analyzer cannot misroute it to
+    conceptual/knowledge mode.
+    """
+    query_lower = str(raw_query or "").lower()
+    if not query_lower:
+        return False
+    if not any(token in query_lower for token in _BALANCING_PRICE_EXPLANATION_TOKENS):
+        return False
+    if not any(token in query_lower for token in _BALANCING_PRICE_BALANCING_TOKENS):
+        return False
+    if not any(token in query_lower for token in _BALANCING_PRICE_PRICE_TOKENS):
+        return False
+
+    start_date, end_date = _extract_explicit_month_period(raw_query)
+    if not start_date or not end_date:
+        start_date, end_date = extract_date_range(raw_query)
+    start_dt = _parse_iso_date(start_date)
+    end_dt = _parse_iso_date(end_date)
+    if start_dt is None or end_dt is None:
+        return False
+    return (start_dt.year, start_dt.month) == (end_dt.year, end_dt.month)
+
+
+def _apply_balancing_month_explanation_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> tuple[QuestionAnalysis, bool]:
+    """Coerce obvious month-specific balancing-price why-queries to tool mode."""
+    if not _is_month_specific_balancing_price_explanation(raw_query):
+        return qa, False
+
+    already_supported = (
+        qa.classification.query_type == QueryType.DATA_EXPLANATION
+        and qa.routing.preferred_path == PreferredPath.TOOL
+    )
+    if already_supported:
+        return qa, False
+
+    start_date, end_date = _extract_explicit_month_period(raw_query)
+    if not start_date or not end_date:
+        start_date, end_date = extract_date_range(raw_query)
+    payload = qa.model_dump(mode="json")
+
+    payload["classification"]["query_type"] = QueryType.DATA_EXPLANATION.value
+    payload["classification"]["analysis_mode"] = "analyst"
+    payload["classification"]["needs_clarification"] = False
+    payload["classification"]["ambiguities"] = []
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.95,
+    )
+
+    payload["routing"].update({
+        "preferred_path": PreferredPath.TOOL.value,
+        "needs_sql": False,
+        "needs_knowledge": False,
+        "prefer_tool": True,
+        "needs_multi_tool": True,
+        "evidence_roles": [
+            "primary_data",
+            "composition_context",
+        ],
+    })
+
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": ToolName.GET_PRICES.value,
+            "score": 1.0,
+            "reason": "balancing price history for monthly driver explanation",
+            "params_hint": {
+                "metric": "balancing",
+                "currency": "both",
+                "granularity": "monthly",
+                "start_date": start_date,
+                "end_date": end_date,
+                "entities": [],
+                "types": [],
+            },
+        },
+        {
+            "name": ToolName.GET_BALANCING_COMPOSITION.value,
+            "score": 0.95,
+            "reason": "balancing composition needed to explain price changes",
+            "params_hint": {
+                "start_date": start_date,
+                "end_date": end_date,
+                "entities": [],
+                "types": [],
+            },
+        },
+    ]
+
+    period_payload = payload.get("sql_hints", {}).get("period")
+    start_dt = _parse_iso_date(start_date)
+    end_dt = _parse_iso_date(end_date)
+    if (
+        not isinstance(period_payload, dict)
+        and start_dt is not None
+        and end_dt is not None
+        and (start_dt.year, start_dt.month) == (end_dt.year, end_dt.month)
+    ):
+        payload.setdefault("sql_hints", {})
+        payload["sql_hints"]["period"] = {
+            "kind": "month",
+            "start_date": start_date,
+            "end_date": end_date,
+            "granularity": "month",
+            "raw_text": f"{start_dt.strftime('%B')} {start_dt.year}",
+        }
+    payload.setdefault("sql_hints", {})
+    if not payload["sql_hints"].get("metric"):
+        payload["sql_hints"]["metric"] = "balancing"
+
+    payload.setdefault("knowledge", {})
+    topic_rows = [
+        topic
+        for topic in payload["knowledge"].get("candidate_topics", [])
+        if isinstance(topic, dict) and topic.get("name")
+    ]
+    topic_names = {topic.get("name") for topic in topic_rows}
+    for name, score in (
+        ("balancing_price", 1.0),
+        ("currency_influence", 0.7),
+        ("seasonal_patterns", 0.55),
+    ):
+        if name not in topic_names:
+            topic_rows.append({
+                "name": name,
+                "score": score,
+            })
+    topic_rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    payload["knowledge"]["candidate_topics"] = topic_rows[:5]
+
+    forced_metrics = [
+        {"metric_name": "mom_absolute_change", "metric": "balancing"},
+        {"metric_name": "mom_percent_change", "metric": "balancing"},
+        {"metric_name": "yoy_absolute_change", "metric": "balancing"},
+        {"metric_name": "yoy_percent_change", "metric": "balancing"},
+        {"metric_name": "mom_absolute_change", "metric": "exchange_rate"},
+        {"metric_name": "share_delta_mom", "metric": "share_import"},
+        {"metric_name": "share_delta_mom", "metric": "share_regulated_hpp"},
+        {"metric_name": "share_delta_mom", "metric": "share_regulated_old_tpp"},
+        {"metric_name": "share_delta_mom", "metric": "share_renewable_ppa"},
+        {"metric_name": "share_delta_mom", "metric": "share_thermal_ppa"},
+    ]
+    existing_metrics = payload["analysis_requirements"].get("derived_metrics", []) or []
+    merged_metrics = []
+    seen_metric_keys: set[tuple[str, str | None]] = set()
+    for item in list(existing_metrics) + forced_metrics:
+        if not isinstance(item, dict):
+            continue
+        metric_name = str(item.get("metric_name") or "").strip()
+        metric = str(item.get("metric") or "").strip() or None
+        if not metric_name:
+            continue
+        key = (metric_name, metric)
+        if key in seen_metric_keys:
+            continue
+        seen_metric_keys.add(key)
+        merged_metrics.append(item)
+    payload["analysis_requirements"]["needs_driver_analysis"] = True
+    payload["analysis_requirements"]["needs_correlation_context"] = False
+    payload["analysis_requirements"]["derived_metrics"] = merged_metrics
+
+    return QuestionAnalysis.model_validate(payload), True
 
 
 # ---------------------------------------------------------------------------
@@ -448,12 +689,21 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
     """Stage 0.2: Run structured question analysis and stamp its source."""
 
     try:
-        ctx.question_analysis = llm_analyze_question(
+        analyzed = llm_analyze_question(
             user_query=ctx.query,
             conversation_history=ctx.conversation_history,
         )
+        ctx.question_analysis, guardrail_applied = _apply_balancing_month_explanation_guardrail(
+            analyzed,
+            ctx.query,
+        )
         ctx.question_analysis_error = ""
         ctx.question_analysis_source = source
+        if guardrail_applied:
+            log.info(
+                "Applied balancing month explanation guardrail: coerced analyzer output to data_explanation/tool for query=%r",
+                ctx.query,
+            )
         log.info(
             "Question analyzer result | source=%s type=%s path=%s confidence=%.2f",
             source,

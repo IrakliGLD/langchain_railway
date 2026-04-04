@@ -789,6 +789,39 @@ class TestShareSummaryOverride:
         assert "June 2024" in summary
         assert "32.0%" in summary
 
+    def test_threshold_query_lists_matching_months_with_prices(self):
+        df = pd.DataFrame(
+            {
+                "date": [
+                    pd.Timestamp("2025-08-01"),
+                    pd.Timestamp("2025-09-01"),
+                    pd.Timestamp("2025-10-01"),
+                ],
+                "share_renewable_ppa": [0.501, 0.995, 0.982],
+                "p_bal_gel": [140.0, 118.4, 125.0],
+                "p_bal_usd": [50.2, 42.3, 44.7],
+            }
+        )
+        plan = {
+            "intent": "data_retrieval",
+            "target": "share of renewable ppa in balancing electricity",
+            "period": "",
+        }
+        summary = generate_share_summary(
+            df,
+            plan,
+            (
+                "What are the months where the share of renewable PPA in balancing electricity "
+                "is more than 99%, and what were balancing electricity prices in GEL and USD during those months?"
+            ),
+        )
+        assert summary is not None
+        assert "September 2025" in summary
+        assert "99.5%" in summary
+        assert "118.4 GEL/MWh" in summary
+        assert "42.3 USD/MWh" in summary
+        assert "50.1%" not in summary
+
 
 class TestShareShiftNotes:
     """Ensure share shift helper produces explanatory notes for 'why' analysis."""

@@ -37,12 +37,14 @@ When the data contains source-price evidence, you must cite it explicitly instea
 - Use `price_regulated_old_tpp_gel` / `price_regulated_old_tpp_usd` for regulated old TPP reference prices.
 - If `contribution_*` columns are present, cite them as estimated contribution layers to balancing price.
 - If `residual_contribution_ppa_import_*` is present, describe it as the remaining unobserved import/PPA layer, not as a directly observed tariff.
+- If `REGULATED PLANT SALES` is present, name the regulated HPP/TPP plants that actually sold balancing electricity in the focal month and use them as evidence for the regulated source layer.
 - If source-price evidence is absent, skip this section instead of inventing tariffs or confidential PPA/import prices.
 - Present this as observational decomposition, not exact causality.
 
 ## Grounding rule: no invented numeric bridges
 
 - Use numeric values only from `data preview`, `CAUSAL CONTEXT`, `COMPONENT PRESSURE SUMMARY`, `DERIVED ANALYSIS EVIDENCE`, or explicit tariff/source-price columns.
+- For regulated plant detail, use numeric values only from `REGULATED PLANT SALES` when naming plant-level sellers or tariffs.
 - Do not invent blended source averages, hidden import/PPA prices, or implied component prices unless those exact numbers are present in the evidence.
 - If the evidence does not expose a component price directly, describe direction qualitatively and cite the available share or contribution numbers instead.
 
@@ -58,6 +60,7 @@ When the data contains source-price evidence, you must cite it explicitly instea
   - winter: compare actual `p_dereg_*` to balancing price and note the documented thermal-linkage mechanism when relevant
 - For regulated thermal layers (`regulated_new_tpp`, `regulated_old_tpp`), if tariffs rise and the layer gains share, explicitly say this is upward pressure; mention documented gas-price / xrate linkage when relevant.
 - For January 2024 or similar winter thermal increases, explain the mechanism, not just the direction: higher thermal tariffs raise the weighted average when thermal layers or thermally linked layers carry material share.
+- For compound share-threshold queries such as "months where renewable PPA share exceeded 99%", answer with the matching month list. If balancing prices are requested for those months, report the matching GEL and USD prices instead of collapsing to a single summary month.
 
 ## Structured format
 
@@ -75,6 +78,7 @@ When the data contains source-price evidence, you must cite it explicitly instea
 
 2. **Source Price / Tariff Layer:**
    - [Cite exact source prices for deregulated hydro and regulated HPP/new TPP/old TPP when present]
+   - [If `REGULATED PLANT SALES` exists, name the regulated plants that were active in the focal month and cite their tariffs / quantities]
    - [Compare each cited source price to the balancing price in the same period]
    - [State whether each component therefore pushed price up or down, or removed downward/upward pressure]
    - [Pair each major share change with the source-price change for that same component]

@@ -9,6 +9,7 @@ Gated by ``ENABLE_EVIDENCE_PLANNER``.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -29,6 +30,37 @@ log = logging.getLogger("Enai")
 
 # Score threshold for a secondary candidate tool to be included in the plan.
 _SECONDARY_TOOL_MIN_SCORE = 0.50
+
+_SHARE_THRESHOLD_PATTERNS = (
+    r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+\d+(?:\.\d+)?\s*%",
+    r"(at least|not less than|minimum of)\s+\d+(?:\.\d+)?\s*%",
+    r"(less than|below|under|fewer than)\s+\d+(?:\.\d+)?\s*%",
+    r"(at most|no more than|maximum of)\s+\d+(?:\.\d+)?\s*%",
+)
+_SHARE_MONTH_LIST_HINTS = (
+    "months where",
+    "which months",
+    "those months",
+    "during these months",
+    "for those months",
+)
+
+
+def _is_threshold_share_query(raw_query: str, primary_tool: str) -> bool:
+    if primary_tool != ToolName.GET_BALANCING_COMPOSITION.value:
+        return False
+    query_lower = str(raw_query or "").lower()
+    if "share" not in query_lower:
+        return False
+    return any(re.search(pattern, query_lower) for pattern in _SHARE_THRESHOLD_PATTERNS)
+
+
+def _share_query_requests_price_context(raw_query: str, primary_tool: str) -> bool:
+    if not _is_threshold_share_query(raw_query, primary_tool):
+        return False
+    query_lower = str(raw_query or "").lower()
+    asks_price = any(token in query_lower for token in ("price", "gel", "usd"))
+    return asks_price
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +109,7 @@ def _expand_evidence_steps(
     needs_driver = ar.needs_driver_analysis
     needs_correlation = ar.needs_correlation_context
     query_type = qa.classification.query_type
+    threshold_share_with_prices = _share_query_requests_price_context(raw_query, top_name)
 
     # Explicit multi-tool signal from analyzer (Phase 1.5 prompt)
     explicit_multi = qa.routing.needs_multi_tool
@@ -99,7 +132,13 @@ def _expand_evidence_steps(
     }
 
     # --- Single-tool fast path ---
-    if not explicit_multi and not needs_driver and not needs_correlation and query_type != QueryType.COMPARISON:
+    if (
+        not explicit_multi
+        and not needs_driver
+        and not needs_correlation
+        and query_type != QueryType.COMPARISON
+        and not threshold_share_with_prices
+    ):
         return [primary_step]
 
     # --- Multi-evidence expansion ---
@@ -175,6 +214,7 @@ def _add_steps_from_rules(
         primary_tool == ToolName.GET_PRICES.value
         and str(primary_params.get("metric") or "").strip().lower() == "balancing"
     )
+    threshold_share_with_prices = _share_query_requests_price_context(raw_query, primary_tool)
 
     # get_prices + driver analysis → add composition
     if primary_tool == ToolName.GET_PRICES.value and needs_driver:
@@ -245,7 +285,9 @@ def _add_steps_from_rules(
                 added_tools.add(ToolName.GET_TARIFFS.value)
 
     # get_balancing_composition + driver/correlation → add prices
-    if primary_tool == ToolName.GET_BALANCING_COMPOSITION.value and (needs_driver or needs_correlation):
+    if primary_tool == ToolName.GET_BALANCING_COMPOSITION.value and (
+        needs_driver or needs_correlation or threshold_share_with_prices
+    ):
         if ToolName.GET_PRICES.value not in added_tools:
             params = _resolve_secondary_params(
                 qa, ToolName.GET_PRICES.value, raw_query, candidates, primary_params,
