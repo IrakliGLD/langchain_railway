@@ -2443,6 +2443,22 @@ def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypa
     assert out.used_tool is False
 
 
+def test_answer_clarify_offers_residual_bucket_options_for_underdefined_numeric_target():
+    ctx = QueryContext(
+        query=(
+            "For the following periods, knowing the balancing electricity price and tariffs for regulated hydro and thermal, "
+            "what is the weighted average price of the remaining energy?"
+        ),
+        clarify_reason="underdefined_computed_target",
+    )
+
+    out = summarizer.answer_clarify(ctx)
+
+    assert out.summary_source == "clarification_request"
+    assert "residual after excluding regulated Hydro Generation, regulated thermals, and deregulated Hydro Generation" in out.summary
+    assert "existing PPA/CfD/Import residual layer" in out.summary
+
+
 def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
     """Missing requested analytical evidence should downgrade Stage 4 to clarify."""
     from contracts.question_analysis import QuestionAnalysis

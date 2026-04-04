@@ -320,6 +320,140 @@ def test_active_planner_coerces_russian_month_specific_balancing_why_query(monke
     assert out.question_analysis.sql_hints.period.end_date == "2024-11-30"
 
 
+def test_active_planner_coerces_underdefined_numeric_computation_to_clarify(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "For the following periods, knowing the balancing electricity price and tariffs for regulated hydro and thermal, what is the weighted average price of the remaining energy?",
+        "canonical_query_en": "Calculate the weighted average price of the remaining energy for the specified periods.",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "ambiguous",
+            "analysis_mode": "light",
+            "intent": "residual_weighted_price_calculation",
+            "needs_clarification": False,
+            "confidence": 0.8,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.95},
+                {"name": "tariffs", "score": 0.9},
+                {"name": "generation_mix", "score": 0.8},
+            ],
+        },
+        "tooling": {
+            "candidate_tools": [
+                {"name": "get_prices", "score": 0.98},
+                {"name": "get_tariffs", "score": 0.95},
+                {"name": "get_balancing_composition", "score": 0.9},
+            ],
+        },
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(
+        query=(
+            "For the following periods, knowing the balancing electricity price and tariffs for regulated hydro and thermal, "
+            "what is the weighted average price of the remaining energy?"
+        )
+    )
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "ambiguous"
+    assert out.question_analysis.classification.needs_clarification is True
+    assert out.question_analysis.routing.preferred_path.value == "clarify"
+    assert out.clarify_reason == "underdefined_computed_target"
+
+
+def test_active_planner_coerces_unsupported_underdefined_numeric_computation_to_clarify(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "For the following periods, knowing the balancing electricity price, tariffs for regulated hydro and thermal, and deregulated power plant prices, what is the weighted average price of the remaining energy sold on the balancing market?",
+        "canonical_query_en": "Calculate the weighted average price of electricity sold on the balancing market, excluding regulated hydro, regulated thermal, and deregulated power plants, for the specified months.",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "unsupported",
+            "analysis_mode": "analyst",
+            "intent": "residual_weighted_price_calculation",
+            "needs_clarification": False,
+            "confidence": 1.0,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.95},
+                {"name": "tariffs", "score": 0.9},
+                {"name": "market_structure", "score": 0.8},
+            ],
+        },
+        "tooling": {
+            "candidate_tools": [
+                {"name": "get_prices", "score": 0.98},
+                {"name": "get_tariffs", "score": 0.95},
+                {"name": "get_balancing_composition", "score": 0.9},
+            ],
+        },
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(
+        query=(
+            "For the following periods, knowing the balancing electricity price, tariffs for regulated hydro and thermal, "
+            "and deregulated power plant prices, what is the weighted average price of the remaining energy sold on the balancing market?"
+        )
+    )
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "unsupported"
+    assert out.question_analysis.classification.needs_clarification is True
+    assert out.question_analysis.routing.preferred_path.value == "clarify"
+    assert out.clarify_reason == "underdefined_computed_target"
+
+
 def test_pipeline_runs_shadow_stage_before_conceptual_return(monkeypatch):
     expected = QuestionAnalysis.model_validate(_valid_payload())
 

@@ -723,11 +723,19 @@ def _build_clarification_options(ctx: QueryContext) -> List[str]:
     """Build a concise set of clarification options for ambiguous queries."""
 
     query_lower = (ctx.query or "").strip().lower()
+    clarify_reason = str(ctx.clarify_reason or "")
     options: List[str] = []
 
     def _add(option: str) -> None:
         if option not in options:
             options.append(option)
+
+    if clarify_reason == "underdefined_computed_target":
+        if any(signal in query_lower for signal in ("remaining", "residual", "excluding", "except")):
+            _add("Treat remaining energy as the residual after excluding regulated hydro, regulated thermals, and deregulated hydro.")
+            _add("Treat remaining energy as the existing PPA/CfD/import residual layer.")
+            _add("List the exact components that should be included in the remaining-energy bucket, and I will calculate it for the requested months.")
+            return options[:3]
 
     if any(signal in query_lower for signal in ("trend", "history", "historical", "past", "change")):
         _add("Summarize the historical trend in observed electricity prices in Georgia.")

@@ -129,6 +129,34 @@ _BALANCING_PRICE_PRICE_TOKENS = (
     "цен",
 )
 
+_NUMERIC_CALCULATION_TOKENS = (
+    "calculate",
+    "weighted average",
+    "average price",
+    "weighted avg",
+    "mean price",
+)
+
+_UNDERDEFINED_SCOPE_TOKENS = (
+    "remaining",
+    "residual",
+    "leftover",
+    "everything except",
+    "excluding",
+    "except",
+)
+
+_NUMERIC_PRICE_CONTEXT_TOKENS = (
+    "price",
+    "prices",
+    "tariff",
+    "tariffs",
+    "gel",
+    "usd",
+    "share",
+    "shares",
+)
+
 _MONTH_PATTERN_BY_NUMBER = {
     1: r"\b(january|jan|январ[ьяею]?)\b|იანვ",
     2: r"\b(february|feb|феврал[ьяею]?)\b|თებ",
@@ -333,6 +361,72 @@ def _apply_balancing_month_explanation_guardrail(
     payload["analysis_requirements"]["needs_driver_analysis"] = True
     payload["analysis_requirements"]["needs_correlation_context"] = False
     payload["analysis_requirements"]["derived_metrics"] = merged_metrics
+
+    return QuestionAnalysis.model_validate(payload), True
+
+
+def _is_underdefined_numeric_computation_query(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> bool:
+    """Return True when an underdefined numeric calculation should clarify, not use knowledge."""
+
+    if (
+        qa.classification.query_type not in (QueryType.AMBIGUOUS, QueryType.UNSUPPORTED)
+        or qa.routing.preferred_path != PreferredPath.KNOWLEDGE
+    ):
+        return False
+
+    query_lower = str(raw_query or "").lower()
+    if not query_lower:
+        return False
+    if not any(token in query_lower for token in _NUMERIC_CALCULATION_TOKENS):
+        return False
+    if not any(token in query_lower for token in _UNDERDEFINED_SCOPE_TOKENS):
+        return False
+    if not any(token in query_lower for token in _NUMERIC_PRICE_CONTEXT_TOKENS):
+        return False
+
+    tool_names = {
+        getattr(tool.name, "value", str(tool.name or ""))
+        for tool in (qa.tooling.candidate_tools or [])
+    }
+    if ToolName.GET_PRICES.value not in tool_names:
+        return False
+    if not (
+        ToolName.GET_TARIFFS.value in tool_names
+        or ToolName.GET_BALANCING_COMPOSITION.value in tool_names
+    ):
+        return False
+    return True
+
+
+def _apply_underdefined_numeric_clarify_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> tuple[QuestionAnalysis, bool]:
+    """Coerce unresolved numeric computation requests to clarification."""
+
+    if not _is_underdefined_numeric_computation_query(qa, raw_query):
+        return qa, False
+
+    payload = qa.model_dump(mode="json")
+    payload["classification"]["needs_clarification"] = True
+    payload["classification"]["ambiguities"] = [
+        "computed target definition is underdefined",
+    ]
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.8,
+    )
+    payload["routing"].update({
+        "preferred_path": PreferredPath.CLARIFY.value,
+        "needs_sql": False,
+        "needs_knowledge": False,
+        "prefer_tool": False,
+        "needs_multi_tool": False,
+        "evidence_roles": [],
+    })
 
     return QuestionAnalysis.model_validate(payload), True
 
@@ -697,11 +791,23 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             analyzed,
             ctx.query,
         )
+        clarify_guardrail_applied = False
+        if ctx.question_analysis is not None:
+            ctx.question_analysis, clarify_guardrail_applied = _apply_underdefined_numeric_clarify_guardrail(
+                ctx.question_analysis,
+                ctx.query,
+            )
         ctx.question_analysis_error = ""
         ctx.question_analysis_source = source
         if guardrail_applied:
             log.info(
                 "Applied balancing month explanation guardrail: coerced analyzer output to data_explanation/tool for query=%r",
+                ctx.query,
+            )
+        if clarify_guardrail_applied:
+            ctx.clarify_reason = "underdefined_computed_target"
+            log.info(
+                "Applied underdefined numeric computation guardrail: coerced analyzer output to clarify for query=%r",
                 ctx.query,
             )
         log.info(

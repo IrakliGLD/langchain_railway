@@ -1777,10 +1777,21 @@ def _compact_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _sanitize_chart_hints(payload: dict) -> dict:
-    """Best-effort cleanup for optional semantic chart hints before model validation."""
+def _sanitize_question_analysis_payload(payload: dict) -> dict:
+    """Best-effort cleanup for question-analysis payloads before model validation."""
     if not isinstance(payload, dict):
         return payload
+
+    sql_hints = payload.get("sql_hints")
+    if isinstance(sql_hints, dict):
+        period = sql_hints.get("period")
+        if isinstance(period, dict):
+            start_date = period.get("start_date")
+            end_date = period.get("end_date")
+            if not start_date or not end_date:
+                sql_hints.pop("period", None)
+        elif period is None:
+            sql_hints.pop("period", None)
 
     vis = payload.get("visualization")
     if not isinstance(vis, dict):
@@ -1831,6 +1842,11 @@ def _sanitize_chart_hints(payload: dict) -> dict:
     return payload
 
 
+def _sanitize_chart_hints(payload: dict) -> dict:
+    """Backward-compatible alias for question-analysis payload sanitization."""
+    return _sanitize_question_analysis_payload(payload)
+
+
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
 def llm_analyze_question(
     user_query: str,
@@ -1849,7 +1865,7 @@ def llm_analyze_question(
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
-        payload = _sanitize_chart_hints(_extract_json_payload(cached_response))
+        payload = _sanitize_question_analysis_payload(_extract_json_payload(cached_response))
         return QuestionAnalysis.model_validate(payload)
 
     system = (
@@ -1896,6 +1912,8 @@ Important rules:
 - Supported balancing explanation examples:
   - "Why balancing electricity price changed in May 2024?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, tools should prioritize `get_prices` + `get_balancing_composition`.
   - "Why balancing electricity prices changed in November 2024?" -> same routing as above; plural `prices` is still a supported month-specific data explanation, not `unsupported`.
+- For unusual numeric calculation requests with data/tool signals, do not fall back to `knowledge` just because the computed target is underdefined.
+  Example: "calculate the weighted average price of the remaining energy for these months" should stay on the data path; if the residual bucket is unclear, prefer `query_type=ambiguous` with `preferred_path=clarify`.
 - For tool parameter hints, use the exact downstream vocabulary expected by the tool API.
 - For `get_prices`, valid `params_hint.metric` values are only:
   - `balancing`
@@ -1960,7 +1978,7 @@ Important rules:
             metrics.log_error()
             raise
 
-    payload = _sanitize_chart_hints(_extract_json_payload(raw_output))
+    payload = _sanitize_question_analysis_payload(_extract_json_payload(raw_output))
     try:
         result = QuestionAnalysis.model_validate(payload)
     except ValidationError as exc:
