@@ -228,7 +228,8 @@ STATIC_ALLOWED_TABLES = {
     "tech_quantity_view",
     "trade_derived_entities",
     "monthly_cpi_mv",
-    "energy_balance_long_mv"
+    "energy_balance_long_mv",
+    "mv_balancing_trade_with_tariff",
 }
 
 ALLOWED_TABLES = set(STATIC_ALLOWED_TABLES)
@@ -303,33 +304,7 @@ WINTER_MONTHS = [1, 2, 3, 8, 9, 10, 11, 12]
 # Balancing segment normalizer
 BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"
 
-# Balancing share pivot SQL template
-BALANCING_SHARE_PIVOT_SQL = dedent(
-    f"""
-    SELECT
-        t.date,
-        'balancing'::text AS segment,
-        SUM(t.quantity) AS total_quantity_debug,
-        SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_import,
-        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_deregulated_hydro,
-        SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_hpp,
-        SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_new_tpp,
-        SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_regulated_old_tpp,
-        SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_renewable_ppa,
-        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_thermal_ppa,
-        SUM(CASE WHEN t.entity IN ('renewable_ppa','thermal_ppa') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_all_ppa,
-        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp','renewable_ppa') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_all_renewables,
-        SUM(CASE WHEN t.entity IN ('deregulated_hydro','regulated_hpp') THEN t.quantity ELSE 0 END) / NULLIF(SUM(t.quantity), 0) AS share_total_hpp
-    FROM trade_derived_entities t
-    WHERE {BALANCING_SEGMENT_NORMALIZER} = 'balancing'
-      AND t.entity IN (
-        'import', 'deregulated_hydro', 'regulated_hpp',
-        'regulated_new_tpp', 'regulated_old_tpp',
-        'renewable_ppa', 'thermal_ppa'
-      )
-    GROUP BY t.date
-    ORDER BY t.date
-    """
-).strip()
+# Balancing share pivot SQL — canonical definition lives in agent/sql_executor.py.
+# Do not define a separate copy here to avoid drift.
 
 

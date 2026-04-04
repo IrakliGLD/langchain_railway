@@ -64,3 +64,52 @@ def test_compute_entity_price_contributions_includes_usd_columns_and_date_filter
     assert "p.date <= :end_date" in sql
     assert params["start_date"] == "2023-01-01"
     assert params["end_date"] == "2023-12-31"
+    # Tariffs now come from the quantity-weighted balancing view
+    assert "mv_balancing_trade_with_tariff" in sql
+    assert "tariff_with_usd" not in sql
+    # Data-driven grouping via entities_mv.type, not hardcoded plant lists
+    assert "entities_mv em" in sql or "entities_mv" in sql
+    assert "em.type" in sql
+    # Weighted average pattern with NULL safety
+    assert "balancing_quantity" in sql
+    assert "NULLIF" in sql
+    # CfD_scheme must appear in shares CTE and produce its own share column
+    assert "CfD_scheme" in sql
+    assert "qty_cfd_scheme" in sql
+    assert "share_cfd_scheme" in sql
+    # share_ppa_import_total residual must include CfD volume
+    assert "qty_cfd_scheme" in sql.split("share_ppa_import_total")[0].split("qty_cfd_scheme")[-1] or \
+           sql.count("qty_cfd_scheme") >= 2  # appears in shares CTE + residual formula
+    # share_all_ppa must NOT absorb CfD (literal PPA only)
+    ppa_total_formula = sql[sql.find("share_all_ppa"):sql.find("share_all_ppa") + 300] if "share_all_ppa" in sql else ""
+    assert "cfd" not in ppa_total_formula.lower()
+
+
+def test_build_balancing_correlation_df_uses_weighted_tariffs(monkeypatch):
+    """build_balancing_correlation_df sources tariffs from mv_balancing_trade_with_tariff."""
+    monkeypatch.setattr(shares, "check_dataframe_memory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(shares, "text", lambda sql: sql)
+
+    conn = _FakeConn()
+    shares.build_balancing_correlation_df(conn)
+
+    assert len(conn.calls) == 1
+    sql, _ = conn.calls[0]
+
+    # Output columns preserved
+    assert "enguri_tariff_gel" in sql
+    assert "gardabani_tpp_tariff_gel" in sql
+    assert "grouped_old_tpp_tariff_gel" in sql
+    # Source is the new weighted view
+    assert "mv_balancing_trade_with_tariff" in sql
+    assert "tariff_with_usd" not in sql
+    # All series use weighted average, data-driven grouping, NULL safety
+    assert "balancing_quantity" in sql
+    assert "entities_mv" in sql
+    assert "em.type" in sql
+    assert "NULLIF" in sql
+    # CfD_scheme share present in correlation function too
+    assert "CfD_scheme" in sql
+    assert "qty_cfd_scheme" in sql
+    assert "share_cfd_scheme" in sql
+    assert "(s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme)" in sql

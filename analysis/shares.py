@@ -26,7 +26,8 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
     Variables included:
     - Targets: p_bal_gel, p_bal_usd
     - Drivers: xrate, entity shares (import, deregulated_hydro, regulated_hpp,
-               renewable_ppa, thermal_ppa), tariffs (Enguri, Gardabani, old TPPs)
+               renewable_ppa, thermal_ppa), tariffs from mv_balancing_trade_with_tariff
+               (Enguri, Gardabani, old TPPs weighted by balancing quantity)
 
     CRITICAL: Shares are calculated using ONLY the canonical balancing
     segment filter LOWER(REPLACE(segment, ' ', '_')) = 'balancing' to
@@ -56,32 +57,35 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
         SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
         SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
-        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa,
+        SUM(CASE WHEN t.entity = 'CfD_scheme' THEN t.quantity ELSE 0 END) AS qty_cfd_scheme
       FROM trade_derived_entities t
       WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
       GROUP BY t.date
     ),
     tariffs AS (
       SELECT
-        date,
-        MAX(CASE
-          WHEN entity = 'ltd "engurhesi"1'
-          THEN tariff_gel
-        END) AS enguri_tariff_gel,
-        MAX(CASE
-          WHEN entity = 'ltd "gardabni thermal power plant"'
-          THEN tariff_gel
-        END) AS gardabani_tpp_tariff_gel,
-        AVG(CASE
-          WHEN entity IN (
-            'ltd "mtkvari energy"',
-            'ltd "iec" (tbilresi)',
-            'ltd "g power" (capital turbines)'
-          )
-          THEN tariff_gel
-        END) AS grouped_old_tpp_tariff_gel
-      FROM tariff_with_usd
-      GROUP BY date
+        mv.month,
+        SUM(CASE WHEN mv.entity = 'enguri hpp'
+            THEN mv.tariff_gel * mv.balancing_quantity END)
+          / NULLIF(SUM(CASE WHEN mv.entity = 'enguri hpp'
+            THEN mv.balancing_quantity END), 0)
+          AS enguri_tariff_gel,
+        SUM(CASE WHEN mv.entity = 'gardabani tpp'
+            THEN mv.tariff_gel * mv.balancing_quantity END)
+          / NULLIF(SUM(CASE WHEN mv.entity = 'gardabani tpp'
+            THEN mv.balancing_quantity END), 0)
+          AS gardabani_tpp_tariff_gel,
+        SUM(CASE WHEN em.type = 'tpp'
+              AND mv.entity NOT IN ('gardabani tpp', 'gardabani2 tpp')
+            THEN mv.tariff_gel * mv.balancing_quantity END)
+          / NULLIF(SUM(CASE WHEN em.type = 'tpp'
+              AND mv.entity NOT IN ('gardabani tpp', 'gardabani2 tpp')
+            THEN mv.balancing_quantity END), 0)
+          AS grouped_old_tpp_tariff_gel
+      FROM mv_balancing_trade_with_tariff mv
+      JOIN entities_mv em ON em.entity = mv.entity_code
+      GROUP BY mv.month
     )
     SELECT
       p.date,
@@ -95,14 +99,15 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
       (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
       (s.qty_ren_ppa / NULLIF(s.total_qty,0)) AS share_renewable_ppa,
       (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
+      (s.qty_cfd_scheme / NULLIF(s.total_qty,0)) AS share_cfd_scheme,
       ((s.qty_ren_ppa + s.qty_thermal_ppa) / NULLIF(s.total_qty,0)) AS share_all_ppa,
-      ((s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa) / NULLIF(s.total_qty,0)) AS share_all_renewables,
+      ((s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme) / NULLIF(s.total_qty,0)) AS share_all_renewables,
       tr.enguri_tariff_gel,
       tr.gardabani_tpp_tariff_gel,
       tr.grouped_old_tpp_tariff_gel
     FROM price_with_usd p
     LEFT JOIN shares s ON s.date = p.date
-    LEFT JOIN tariffs tr ON tr.date = p.date
+    LEFT JOIN tariffs tr ON tr.month = p.date
     ORDER BY p.date
     """
     # Add LIMIT using configured MAX_ROWS
@@ -184,7 +189,10 @@ def compute_entity_price_contributions(
     - Estimated contribution to balancing price: share × reference_price
 
     CRITICAL NOTES:
-    - Regulated entities (regulated_hpp, regulated TPPs): use tariff_gel from tariff_with_usd
+    - Regulated entities (regulated_hpp, regulated TPPs): quantity-weighted
+      tariff_gel from mv_balancing_trade_with_tariff (weighted by balancing_quantity).
+      Tariffs reflect only months when the entity actually sold on balancing.
+      NULL when a regulated group had no balancing sales in a month.
     - Deregulated hydro: use p_dereg_gel from price_with_usd
     - PPAs and imports: reference prices NOT available in database (confidential), but reference number are provided in domain_knowldege.py
     - Actual balancing transaction prices differ from reference prices
@@ -241,69 +249,53 @@ def compute_entity_price_contributions(
         SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
         SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
         SUM(CASE WHEN t.entity = 'renewable_ppa' THEN t.quantity ELSE 0 END) AS qty_ren_ppa,
-        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa
+        SUM(CASE WHEN t.entity = 'thermal_ppa' THEN t.quantity ELSE 0 END) AS qty_thermal_ppa,
+        SUM(CASE WHEN t.entity = 'CfD_scheme' THEN t.quantity ELSE 0 END) AS qty_cfd_scheme
       FROM trade_derived_entities t
       WHERE {share_where}
       GROUP BY t.date
     ),
+    weighted_tariffs AS (
+      SELECT
+        mv.month,
+        -- regulated_hpp: all HPPs with tariffs (view already filters to tariff_gen)
+        SUM(CASE WHEN em.type = 'hpp'
+            THEN mv.tariff_gel * mv.balancing_quantity END)
+          / NULLIF(SUM(CASE WHEN em.type = 'hpp'
+            THEN mv.balancing_quantity END), 0)
+          AS wtariff_hpp_gel,
+        -- regulated_new_tpp: Gardabani only
+        SUM(CASE WHEN mv.entity = 'gardabani tpp'
+            THEN mv.tariff_gel * mv.balancing_quantity END)
+          / NULLIF(SUM(CASE WHEN mv.entity = 'gardabani tpp'
+            THEN mv.balancing_quantity END), 0)
+          AS wtariff_new_tpp_gel,
+        -- regulated_old_tpp: all TPPs except Gardabani variants
+        SUM(CASE WHEN em.type = 'tpp'
+              AND mv.entity NOT IN ('gardabani tpp', 'gardabani2 tpp')
+            THEN mv.tariff_gel * mv.balancing_quantity END)
+          / NULLIF(SUM(CASE WHEN em.type = 'tpp'
+              AND mv.entity NOT IN ('gardabani tpp', 'gardabani2 tpp')
+            THEN mv.balancing_quantity END), 0)
+          AS wtariff_old_tpp_gel
+      FROM mv_balancing_trade_with_tariff mv
+      JOIN entities_mv em ON em.entity = mv.entity_code
+      GROUP BY mv.month
+    ),
     entity_prices AS (
       SELECT
         p.date,
-        -- Reference prices from available sources
         p.p_dereg_gel AS price_deregulated_hydro_gel,
         p.p_dereg_usd AS price_deregulated_hydro_usd,
-
-        -- Regulated HPP: use weighted average of main HPPs or Enguri as proxy
-        -- Using ILIKE for case-insensitive matching (PostgreSQL extension)
-        (SELECT AVG(t1.tariff_gel)
-         FROM tariff_with_usd t1
-         WHERE t1.date = p.date
-           AND (t1.entity ILIKE '%engurhesi%'
-                OR t1.entity ILIKE '%energo-pro%'
-                OR t1.entity ILIKE '%vardnili%')
-        ) AS price_regulated_hpp_gel,
-        (SELECT AVG(t1.tariff_usd)
-         FROM tariff_with_usd t1
-         WHERE t1.date = p.date
-           AND (t1.entity ILIKE '%engurhesi%'
-                OR t1.entity ILIKE '%energo-pro%'
-                OR t1.entity ILIKE '%vardnili%')
-        ) AS price_regulated_hpp_usd,
-
-        -- Regulated new TPP: Gardabani
-        (SELECT t2.tariff_gel
-         FROM tariff_with_usd t2
-         WHERE t2.date = p.date
-           AND t2.entity = 'ltd "gardabni thermal power plant"'
-         LIMIT 1
-        ) AS price_regulated_new_tpp_gel,
-        (SELECT t2.tariff_usd
-         FROM tariff_with_usd t2
-         WHERE t2.date = p.date
-           AND t2.entity = 'ltd "gardabni thermal power plant"'
-         LIMIT 1
-        ) AS price_regulated_new_tpp_usd,
-
-        -- Regulated old TPPs: average of old thermal plants
-        (SELECT AVG(t3.tariff_gel)
-         FROM tariff_with_usd t3
-         WHERE t3.date = p.date
-           AND t3.entity IN ('ltd "mtkvari energy"',
-                             'ltd "iec" (tbilresi)',
-                             'ltd "g power" (capital turbines)')
-        ) AS price_regulated_old_tpp_gel,
-        (SELECT AVG(t3.tariff_usd)
-         FROM tariff_with_usd t3
-         WHERE t3.date = p.date
-           AND t3.entity IN ('ltd "mtkvari energy"',
-                             'ltd "iec" (tbilresi)',
-                             'ltd "g power" (capital turbines)')
-        ) AS price_regulated_old_tpp_usd
-
+        wt.wtariff_hpp_gel AS price_regulated_hpp_gel,
+        wt.wtariff_hpp_gel / NULLIF(p.xrate, 0) AS price_regulated_hpp_usd,
+        wt.wtariff_new_tpp_gel AS price_regulated_new_tpp_gel,
+        wt.wtariff_new_tpp_gel / NULLIF(p.xrate, 0) AS price_regulated_new_tpp_usd,
+        wt.wtariff_old_tpp_gel AS price_regulated_old_tpp_gel,
+        wt.wtariff_old_tpp_gel / NULLIF(p.xrate, 0) AS price_regulated_old_tpp_usd
         -- Note: PPA and import prices are NOT available in database
-        -- These would need to be estimated or obtained from confidential data
-
       FROM price_with_usd p
+      LEFT JOIN weighted_tariffs wt ON wt.month = p.date
       {price_where}
     )
     SELECT
@@ -320,6 +312,7 @@ def compute_entity_price_contributions(
       (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
       (s.qty_ren_ppa / NULLIF(s.total_qty,0)) AS share_renewable_ppa,
       (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
+      (s.qty_cfd_scheme / NULLIF(s.total_qty,0)) AS share_cfd_scheme,
 
       -- Reference prices (where available)
       ep.price_deregulated_hydro_gel,
@@ -376,9 +369,10 @@ def compute_entity_price_contributions(
         COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_usd, 0)
       ) AS residual_contribution_ppa_import_usd,
 
-      -- Shares of PPA and import (for context on residual)
+      -- Shares of PPA, CfD, and import (for context on residual)
       (s.qty_ren_ppa / NULLIF(s.total_qty,0)) +
       (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) +
+      (s.qty_cfd_scheme / NULLIF(s.total_qty,0)) +
       (s.qty_import / NULLIF(s.total_qty,0)) AS share_ppa_import_total
 
     FROM (

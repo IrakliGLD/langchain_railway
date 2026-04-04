@@ -60,10 +60,15 @@ SELECT
     MAX(CASE WHEN entity='regulated_old_tpp' THEN share ELSE 0 END) AS share_regulated_old_tpp,
     MAX(CASE WHEN entity='renewable_ppa' THEN share ELSE 0 END) AS share_renewable_ppa,
     MAX(CASE WHEN entity='thermal_ppa' THEN share ELSE 0 END) AS share_thermal_ppa,
+    MAX(CASE WHEN entity='CfD_scheme' THEN share ELSE 0 END) AS share_cfd_scheme,
     MAX(CASE WHEN entity='renewable_ppa' THEN share ELSE 0 END) +
         MAX(CASE WHEN entity='thermal_ppa' THEN share ELSE 0 END) AS share_all_ppa,
-    MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro','renewable_ppa') THEN share ELSE 0 END) AS share_all_renewables,
-    MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro') THEN share ELSE 0 END) AS share_total_hpp
+    MAX(CASE WHEN entity='regulated_hpp' THEN share ELSE 0 END) +
+        MAX(CASE WHEN entity='deregulated_hydro' THEN share ELSE 0 END) +
+        MAX(CASE WHEN entity='renewable_ppa' THEN share ELSE 0 END) +
+        MAX(CASE WHEN entity='CfD_scheme' THEN share ELSE 0 END) AS share_all_renewables,
+    MAX(CASE WHEN entity='regulated_hpp' THEN share ELSE 0 END) +
+        MAX(CASE WHEN entity='deregulated_hydro' THEN share ELSE 0 END) AS share_total_hpp
 FROM (
     SELECT date, entity,
            ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) AS share
@@ -113,9 +118,13 @@ def build_trade_share_cte(original_sql: str) -> str:
         MAX(CASE WHEN entity='regulated_old_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_old_tpp,
         MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_renewable_ppa,
         MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_thermal_ppa,
+        MAX(CASE WHEN entity='CfD_scheme' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_cfd_scheme,
         (MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
          MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_ppa,
-        (MAX(CASE WHEN entity IN ('regulated_hpp','deregulated_hydro','renewable_ppa') THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_renewables
+        (MAX(CASE WHEN entity='regulated_hpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
+         MAX(CASE WHEN entity='deregulated_hydro' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
+         MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
+         MAX(CASE WHEN entity='CfD_scheme' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_renewables
     FROM trade_derived_entities
     WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
     GROUP BY date, entity

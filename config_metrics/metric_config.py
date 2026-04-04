@@ -16,6 +16,7 @@ BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
     "share_regulated_hpp": {"label": "regulated HPP", "cost": "cheap", "usd_linked": False},
     "share_deregulated_hydro": {"label": "deregulated hydro", "cost": "cheap", "usd_linked": False},
     "share_renewable_ppa": {"label": "renewable PPA", "cost": "moderate", "usd_linked": True},
+    "share_cfd_scheme": {"label": "CfD scheme", "cost": "moderate", "usd_linked": True},
     "share_thermal_ppa": {"label": "thermal PPA", "cost": "expensive", "usd_linked": True},
     "share_import": {"label": "imports", "cost": "expensive", "usd_linked": True},
     "share_regulated_new_tpp": {"label": "new regulated TPP", "cost": "expensive", "usd_linked": True},

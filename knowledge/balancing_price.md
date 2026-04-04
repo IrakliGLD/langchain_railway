@@ -68,7 +68,12 @@ Therefore:
 
 ## Data Source
 Table: `price_with_usd` — columns: `p_bal_gel` (GEL/MWh), `p_bal_usd` (USD/MWh).  
-Coverage: 2020–present, monthly granularity.
+Coverage: January 2015–present, monthly granularity.
+
+**Coverage distinction (important):**
+- **Price history** (`price_with_usd`): available from January 2015. Price trends, levels, and year-over-year comparisons can be shown for any period from 2015 onward.
+- **Composition and driver evidence** (`trade_derived_entities`): reliable from 2020 onward only. Entity shares, balancing composition analysis, and driver explanations based on who sold what cannot be produced for pre-2020 periods.
+- For pre-2020 periods: quote prices freely, but do NOT claim composition-based driver evidence. Say "composition data is not available before 2020."
 
 ---
 
@@ -296,9 +301,11 @@ Calculates monthly entity contributions.
 
 **Available prices:**
 - `deregulated_hydro` → `p_dereg_gel`  
-- `regulated_hpp` → tariff_with_usd  
-- `regulated_new_tpp` → Gardabani  
-- `regulated_old_tpp` → Tbilisi, Mtkvari, G-Power  
+- `regulated_hpp` → quantity-weighted tariff from `mv_balancing_trade_with_tariff`  
+- `regulated_new_tpp` → Gardabani tariff from `mv_balancing_trade_with_tariff`  
+- `regulated_old_tpp` → quantity-weighted tariff from `mv_balancing_trade_with_tariff` (all non-Gardabani TPPs with regulated tariffs)
+
+Tariffs are weighted by each entity's actual balancing quantity. NULL when a regulated group had no balancing sales in a month.  
 
 ---
 

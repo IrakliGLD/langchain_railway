@@ -92,6 +92,7 @@ VIEW_LABELS = {
     "energy_balance_long_mv": "Annual Energy Balance",
     "monthly_cpi_mv": "Monthly Consumer Price Index",
     "dates_mv": "Date Reference",
+    "mv_balancing_trade_with_tariff": "Balancing Tariffs by Entity",
 }
 
 # --- Demand/Supply classification for type_tech ---
@@ -168,6 +169,10 @@ DB_SCHEMA_DICT = {
             "columns": ["date"],
             "desc": "Date Reference (Utility View)",
         },
+        "mv_balancing_trade_with_tariff": {
+            "columns": ["month", "entity", "entity_code", "tariff_gel", "balancing_quantity"],
+            "desc": "Balancing Market Tariffs by Entity (monthly regulated tariff with balancing quantity per entity)",
+        },
     },
     "rules": {
        
@@ -185,6 +190,7 @@ DB_SCHEMA_DOC = """
 - entities_mv(entity, entity_normalized, type, ownership, source)
 - price_with_usd(date, p_dereg_gel, p_bal_gel, p_gcap_gel, xrate, p_dereg_usd, p_bal_usd, p_gcap_usd)
 - tariff_with_usd(date, entity, tariff_gel, tariff_usd)
+- mv_balancing_trade_with_tariff(month, entity, entity_code, tariff_gel, balancing_quantity)
 - tech_quantity_view(date, type_tech, quantity_tech)
 - trade_derived_entities(date, entity, segment, quantity)
 
@@ -202,8 +208,16 @@ segment values (trade_derived_entities):
 
 entity values (trade_derived_entities, balancing segment):
 - 'import', 'deregulated_hydro', 'regulated_hpp', 'regulated_new_tpp',
-  'regulated_old_tpp', 'renewable_ppa', 'thermal_ppa'
-- IMPORTANT: Use exact strings as shown above!
+  'regulated_old_tpp', 'renewable_ppa', 'thermal_ppa', 'CfD_scheme'
+- IMPORTANT: Use exact strings as shown above! Note CfD_scheme uses mixed case.
+
+mv_balancing_trade_with_tariff notes:
+- 'month' = first day of each month (same granularity as 'date' in other views)
+- 'entity' = entity_normalized name (plant-level, e.g. from entities_mv)
+- 'entity_code' = raw entity code from trade/tariff tables
+- Contains only regulated entities that sold on the balancing segment
+- tariff_gel = regulated tariff for that entity; balancing_quantity = energy sold on balancing
+- JOIN to other views: mv_balancing_trade_with_tariff.month = price_with_usd.date (cross-column join)
 
 **Units & Conversions:**
 - Quantities in thousand MWh (multiply ×1000 for MWh)
@@ -230,6 +244,8 @@ entity values (trade_derived_entities, balancing segment):
 - trade_derived_entities: complete from **2020** onwards (NO data before 2020)
   * If shares are NULL for a period → data is NOT available, do NOT treat as 0%
   * For balancing composition analysis, always filter: date >= '2020-01-01'
+- mv_balancing_trade_with_tariff: complete from **2020** onwards (derived from trade + tariff_gen)
+  * NULL for a regulated group in a month means that group had no balancing sales — do NOT treat as 0
 """
 
 # --- Join Map ---
@@ -242,6 +258,7 @@ DB_JOINS = {
     "energy_balance_long_mv": {"join_on": "year", "related_to": []},
     "monthly_cpi_mv": {"join_on": "date", "related_to": ["price_with_usd"]},
     "dates_mv": {"join_on": "date", "related_to": ["price_with_usd", "tariff_with_usd", "tech_quantity_view", "trade_derived_entities", "monthly_cpi_mv"]},
+    "mv_balancing_trade_with_tariff": {"join_on": "month", "related_to": ["price_with_usd"], "join_note": "month = price_with_usd.date (different column names)"},
 }
 
 # --- Output scrubber ---

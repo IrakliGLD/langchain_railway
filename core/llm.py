@@ -1117,7 +1117,7 @@ SUPPORT SCHEMES TERMINOLOGY (CRITICAL):
             guidance_sections.append("""
 BALANCING PRICE ANALYSIS:
 - Weighted-average balancing price = weighted by total balancing-market quantities
-- Entities: deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa
+- Entities (8 observable categories): deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa, CfD_scheme
 - PRIMARY DRIVER #1: xrate (exchange rate) - MOST IMPORTANT for GEL/MWh price
   * Use xrate from price_with_usd view
   * Critical because gas and imports are USD-priced
@@ -1517,8 +1517,8 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
    1. **გენერაციის სტრუქტურა (Composition):**
       - [List 2-3 main share changes with EXACT numbers from data]
-      - [Analyze these 7 entity categories: renewable_ppa, deregulated_hydro, thermal_ppa, regulated_hpp, regulated_old_tpp, regulated_new_tpp, import]
-      - [USD-priced: renewable_ppa, thermal_ppa, import / GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
+      - [Analyze these 8 observable categories: renewable_ppa, deregulated_hydro, thermal_ppa, regulated_hpp, regulated_old_tpp, regulated_new_tpp, import, CfD_scheme]
+      - [USD-priced: renewable_ppa, thermal_ppa, import, CfD_scheme / GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
       - [Explain: cheap sources (regulated_hpp ~30-40 GEL/MWh, deregulated_hydro ~40-50 GEL/MWh) vs expensive (import, thermal_ppa, renewable_ppa - all market-based)]
       - [Cite correlation if available]
       - [For long-term: MUST compare summer vs winter composition + mention structural trends]
@@ -1527,7 +1527,7 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
    2. **გაცვლითი კურსი (Exchange Rate):**
       - [Cite actual xrate change from data: from X to Y GEL/USD]
-      - [USD-priced entities: renewable_ppa, thermal_ppa, import]
+      - [USD-priced entities: renewable_ppa, thermal_ppa, CfD_scheme, import]
       - [GEL-priced entities: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
       - [Important: xrate has MAJOR impact on GEL price, SMALL impact on USD price (through GEL-priced entities)]
       - [The small USD price impact is because GEL-priced shares (deregulated_hydro + regulated_hpp) are very small]
@@ -1542,12 +1542,12 @@ PRICE LEVEL GUIDANCE (use when explaining why sources are cheap/expensive):
 - Support schemes = PPA + CfD ONLY (regulated tariffs are NOT support schemes)
 
 PRIMARY DRIVERS (in order of importance):
-1. Composition (shares of 7 entity categories) - PRIMARY DRIVER for BOTH GEL and USD prices - MUST cite actual numbers from data
+1. Composition (shares of 8 observable entity categories) - PRIMARY DRIVER for BOTH GEL and USD prices - MUST cite actual numbers from data
 2. Exchange Rate (xrate) - CRITICAL for GEL price, SMALL impact on USD price (through GEL-priced entities) - MUST cite actual change from data
 3. Seasonal patterns - MUST separate summer/winter for long-term trends
 
 Entity Pricing:
-- USD-priced: renewable_ppa, thermal_ppa, import
+- USD-priced: renewable_ppa, thermal_ppa, CfD_scheme, import
 - GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp (note: regulated TPPs reflect current xrate)
 
 CONFIDENTIALITY RULES:

@@ -22,7 +22,7 @@ If `stats_hint` contains correlation coefficients, you must cite them.
 
 Present drivers in this order (see `energy-analyst/references/driver-framework.md` for full rules):
 
-1. **Composition** (shares of 7 entity categories) - primary driver
+1. **Composition** (shares of 8 observable entity categories) - primary driver
 2. **Source Price / Tariff Layer** - required when `price_*`, `contribution_*`, or tariff columns are present
 3. **Exchange Rate** (`xrate`) - critical for GEL, smaller for USD
 4. **Seasonal patterns** - separate summer/winter for long-term analysis

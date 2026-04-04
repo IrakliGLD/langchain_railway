@@ -203,13 +203,13 @@ _COMPONENT_PRESSURE_SPECS = (
     {
         "component": "residual_ppa_import",
         "share_col": "share_ppa_import_total",
-        "label": "residual PPA/import layer",
+        "label": "residual PPA/CfD/import layer",
         "price_cols": {},
         "contribution_cols": {
             "gel": "residual_contribution_ppa_import_gel",
             "usd": "residual_contribution_ppa_import_usd",
         },
-        "mechanism_note": "residual import/PPA layer; contribution is observed, but a direct source price is not exposed.",
+        "mechanism_note": "residual PPA/CfD/import layer; contribution is observed, but direct source prices are not exposed (confidential).",
     },
 )
 

@@ -12,6 +12,7 @@ When analyzing balancing electricity prices, present drivers in this order:
    - For each major share shift, state whether that component was cheap or expensive relative to balancing price in that period
 2. **Source Price / Tariff Layer** - required when source-price evidence is present
    - Cite exact values from `price_*`, `contribution_*`, or tariff columns
+   - Regulated tariffs are quantity-weighted by balancing sales from `mv_balancing_trade_with_tariff`
    - Cover deregulated hydro plus regulated HPP/new TPP/old TPP layers when present
    - Compare each cited source price to balancing price in the same period
    - If source price is below balancing price, higher share means downward pressure; if above balancing price, higher share means upward pressure
@@ -29,7 +30,7 @@ When analyzing balancing electricity prices, present drivers in this order:
 For price driver queries, structure the answer as:
 
 1. **Composition**: List 2-3 main share changes with exact numbers. Cite correlation if available.
-2. **Source Price / Tariff Layer**: Cite exact regulated tariffs and deregulated hydro prices when present. Compare them to balancing price in the same period. Cite `contribution_*` values when present. Explain whether each component was pushing the weighted average up or down. Explain the residual import/PPA layer carefully.
+2. **Source Price / Tariff Layer**: Cite exact regulated tariffs and deregulated hydro prices when present. Compare them to balancing price in the same period. Cite `contribution_*` values when present. Explain whether each component was pushing the weighted average up or down. Explain the residual import/PPA/CfD layer carefully. CfD_scheme has a confidential price like PPAs — its influence is visible through `share_cfd_scheme` and the `share_ppa_import_total` residual.
 3. **Exchange Rate**: Cite actual xrate change. Explain impact mechanism. Cite correlation if available.
 4. **Seasonal Patterns** (if applicable): Compare summer vs winter composition and price levels.
 

@@ -379,6 +379,16 @@ class TestDispatch:
         }
         assert set(METRIC_REGISTRY.keys()) == expected
 
+    def test_cfd_scheme_in_balancing_share_metadata(self):
+        """CfD_scheme must be tracked as a separate share — USD-linked, moderate cost."""
+        from config_metrics.metric_config import BALANCING_SHARE_METADATA
+        assert "share_cfd_scheme" in BALANCING_SHARE_METADATA
+        meta = BALANCING_SHARE_METADATA["share_cfd_scheme"]
+        assert meta["usd_linked"] is True
+        assert meta["cost"] in ("moderate", "expensive")  # aligned with support-scheme treatment
+        # share_all_ppa must NOT include CfD (literal PPA only)
+        assert "share_cfd_scheme" not in BALANCING_SHARE_METADATA.get("share_all_ppa", {}).get("components", [])
+
 
 # ---------------------------------------------------------------------------
 # Integration: end-to-end via _build_requested_analysis_evidence

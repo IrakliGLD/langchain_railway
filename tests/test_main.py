@@ -649,8 +649,9 @@ class TestBalancingSharePanel:
                 0.05,
                 0.15,
                 0.25,
+                0.08,
                 0.6,
-                0.7,
+                0.73,
                 0.65,
             )
         ]
@@ -664,6 +665,7 @@ class TestBalancingSharePanel:
             "share_regulated_old_tpp",
             "share_renewable_ppa",
             "share_thermal_ppa",
+            "share_cfd_scheme",
             "share_all_ppa",
             "share_all_renewables",
             "share_total_hpp",
@@ -697,6 +699,7 @@ class TestBalancingSharePanel:
         assert list(df.columns) == cols
         assert conn.last_sql == BALANCING_SHARE_PIVOT_SQL
         assert pytest.approx(df.iloc[0]["share_renewable_ppa"], rel=1e-6) == 0.15
+        assert pytest.approx(df.iloc[0]["share_cfd_scheme"], rel=1e-6) == 0.08
         assert BALANCING_SEGMENT_NORMALIZER in BALANCING_SHARE_PIVOT_SQL
 
 
