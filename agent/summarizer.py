@@ -12,6 +12,8 @@ from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Set
 
+import pandas as pd
+
 from models import QueryContext, ResolutionPolicy, GroundingPolicy
 from core.llm import (
     llm_summarize,
@@ -1091,6 +1093,132 @@ def _is_deterministic_scenario_eligible(ctx: QueryContext) -> bool:
     return _build_scenario_fallback_answer(ctx) is not None
 
 
+_RESIDUAL_MONTH_NAME_TO_NUMBER = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}
+
+
+def _has_residual_weighted_price_query_signal(query: str) -> bool:
+    query_lower = (query or "").strip().lower()
+    if not query_lower:
+        return False
+    calc_hit = any(
+        signal in query_lower
+        for signal in ("weighted average", "average price", "weighted avg", "mean price")
+    )
+    scope_hit = any(
+        signal in query_lower
+        for signal in ("remaining", "residual", "other electricity", "excluding", "except")
+    )
+    balancing_hit = "balancing" in query_lower
+    context_hit = any(
+        signal in query_lower
+        for signal in ("tariff", "tariffs", "regulated", "deregulated")
+    )
+    return calc_hit and scope_hit and balancing_hit and context_hit
+
+
+def _extract_month_list_from_query(query: str) -> list[pd.Timestamp]:
+    """Extract explicit month-year mentions from the raw query in stable order."""
+    pattern = re.compile(
+        r"\b("
+        + "|".join(sorted(_RESIDUAL_MONTH_NAME_TO_NUMBER.keys(), key=len, reverse=True))
+        + r")\s+(20\d{2})\b",
+        re.IGNORECASE,
+    )
+    months: list[pd.Timestamp] = []
+    seen: set[tuple[int, int]] = set()
+    for match in pattern.finditer(query or ""):
+        month_token = match.group(1).lower()
+        year = int(match.group(2))
+        month_num = _RESIDUAL_MONTH_NAME_TO_NUMBER.get(month_token)
+        if not month_num:
+            continue
+        key = (year, month_num)
+        if key in seen:
+            continue
+        seen.add(key)
+        months.append(pd.Timestamp(year=year, month=month_num, day=1))
+    return months
+
+
+def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | None:
+    """Build a deterministic answer for residual weighted-price calculations."""
+    if ctx.df.empty or not _has_residual_weighted_price_query_signal(ctx.query):
+        return None
+
+    required_cols = {
+        "share_ppa_import_total",
+        "residual_contribution_ppa_import_gel",
+        "residual_contribution_ppa_import_usd",
+    }
+    if not required_cols.issubset(set(ctx.df.columns)):
+        return None
+
+    date_col = next((c for c in ctx.df.columns if "date" in c.lower()), None)
+    if not date_col:
+        return None
+
+    df = ctx.df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df["share_ppa_import_total"] = pd.to_numeric(df["share_ppa_import_total"], errors="coerce")
+    df["residual_contribution_ppa_import_gel"] = pd.to_numeric(
+        df["residual_contribution_ppa_import_gel"], errors="coerce"
+    )
+    df["residual_contribution_ppa_import_usd"] = pd.to_numeric(
+        df["residual_contribution_ppa_import_usd"], errors="coerce"
+    )
+    df = df.dropna(subset=[date_col, "share_ppa_import_total"])
+    df = df[df["share_ppa_import_total"] > 0]
+    if df.empty:
+        return None
+
+    requested_months = _extract_month_list_from_query(ctx.query)
+    if requested_months:
+        requested_keys = {(ts.year, ts.month) for ts in requested_months}
+        df = df[df[date_col].map(lambda ts: (ts.year, ts.month) in requested_keys if pd.notna(ts) else False)]
+    if df.empty:
+        return None
+
+    df = df.sort_values(date_col).copy()
+    df["remaining_weighted_price_gel"] = (
+        df["residual_contribution_ppa_import_gel"] / df["share_ppa_import_total"]
+    )
+    df["remaining_weighted_price_usd"] = (
+        df["residual_contribution_ppa_import_usd"] / df["share_ppa_import_total"]
+    )
+
+    lines = [
+        "**Weighted Average Price of the Remaining Balancing Electricity**",
+        "",
+        "Remaining bucket = balancing electricity excluding regulated hydro, regulated thermals, and deregulated hydro.",
+        "This corresponds to the residual PPA/CfD/import layer in the current balancing-price decomposition.",
+        "",
+        "Formula used: residual weighted price = residual contribution / remaining share.",
+        "",
+    ]
+    for _, row in df.iterrows():
+        period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
+        share_pct = float(row["share_ppa_import_total"]) * 100
+        lines.append(
+            f"- {period_str}: remaining share {share_pct:.1f}%; "
+            f"weighted average remaining price {float(row['remaining_weighted_price_gel']):.1f} GEL/MWh "
+            f"({float(row['remaining_weighted_price_usd']):.1f} USD/MWh)"
+        )
+    return "\n".join(lines)
+
+
 def summarize_data(ctx: QueryContext) -> QueryContext:
     """Generate an answer from SQL query results.
 
@@ -1127,6 +1255,14 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_confidence = 0.95
         metrics.log_deterministic_skip(ctx.summary_source)
         log.info("Deterministic scenario answer eligible; skipping Stage 4 LLM.")
+    elif (residual_answer := _build_residual_weighted_price_direct_answer(ctx)) is not None:
+        ctx.summary = residual_answer
+        ctx.summary_source = "deterministic_residual_weighted_price_direct"
+        ctx.summary_claims = []
+        ctx.summary_citations = ["deterministic_residual_weighted_price_direct"]
+        ctx.summary_confidence = 0.95
+        metrics.log_deterministic_skip(ctx.summary_source)
+        log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.

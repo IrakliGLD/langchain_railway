@@ -139,3 +139,44 @@ def test_balancing_driver_enrichment_falls_back_to_composition_for_comparison_qu
 
     assert "share_import" in out.cols
     assert "share_regulated_hpp" in out.cols
+
+
+def test_balancing_driver_enrichment_adds_driver_context_for_residual_weighted_price_query(monkeypatch):
+    monkeypatch.setattr(pipeline, "ENGINE", _FakeEngine())
+    monkeypatch.setattr(
+        pipeline,
+        "compute_entity_price_contributions",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "date": ["2020-06-01", "2021-07-01"],
+                "share_ppa_import_total": [0.999, 0.994],
+                "residual_contribution_ppa_import_gel": [72.7272, 66.6362],
+                "residual_contribution_ppa_import_usd": [25.225, 21.7686],
+            },
+        ),
+    )
+
+    ctx = _seed_ctx(
+        "For the following periods, knowing the balancing electricity price, tariffs for regulated hydro and thermal, "
+        "and deregulated power plant prices, what is the weighted average price of the remaining energy sold on the balancing market?"
+    )
+    invocation = ToolInvocation(
+        name="get_prices",
+        params={
+            "metric": "balancing",
+            "currency": "both",
+            "start_date": "2020-06-01",
+            "end_date": "2021-07-01",
+        },
+    )
+
+    out = pipeline._enrich_prices_with_balancing_driver_context(
+        ctx,
+        invocation,
+        is_explanation=False,
+    )
+
+    assert "share_ppa_import_total" in out.cols
+    assert "residual_contribution_ppa_import_gel" in out.cols
+    assert "residual_contribution_ppa_import_usd" in out.cols
+    assert "balancing_driver_context" in out.evidence_collected

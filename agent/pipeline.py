@@ -303,6 +303,27 @@ def _has_comparison_signal(query: str) -> bool:
     )
 
 
+def _has_residual_weighted_price_signal(query: str) -> bool:
+    """Return True when the query asks for a residual/remaining weighted price."""
+    query_lower = (query or "").strip().lower()
+    if not query_lower:
+        return False
+    calc_hit = any(
+        signal in query_lower
+        for signal in ("weighted average", "average price", "weighted avg", "mean price")
+    )
+    scope_hit = any(
+        signal in query_lower
+        for signal in ("remaining", "residual", "other electricity", "excluding", "except")
+    )
+    balancing_hit = "balancing" in query_lower
+    context_hit = any(
+        signal in query_lower
+        for signal in ("tariff", "tariffs", "regulated", "deregulated")
+    )
+    return calc_hit and scope_hit and balancing_hit and context_hit
+
+
 def _should_enrich_balancing_driver_context(
     ctx: QueryContext,
     invocation: ToolInvocation,
@@ -327,6 +348,9 @@ def _should_enrich_balancing_driver_context(
         return False
 
     if is_explanation:
+        return True
+
+    if _has_residual_weighted_price_signal(ctx.query):
         return True
 
     if ctx.has_authoritative_question_analysis:

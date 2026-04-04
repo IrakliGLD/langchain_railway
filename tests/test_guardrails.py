@@ -5262,6 +5262,60 @@ def test_summarize_data_deterministic_scenario_direct_includes_total_income_comp
     assert "220.0 USD" in out.summary
 
 
+def test_summarize_data_uses_deterministic_residual_weighted_price_direct_without_llm(monkeypatch):
+    payload = _make_analyzer_payload("data_retrieval", "sql", confidence=0.95)
+    payload["classification"]["intent"] = "residual_weighted_price_calculation"
+    qa = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("llm_summarize_structured should not be called for deterministic-direct")
+        ),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("domain knowledge should not be loaded for deterministic-direct")
+        ),
+    )
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2020-06-01", "2021-07-01", "2021-08-01"]),
+            "share_ppa_import_total": [0.999, 0.994, 0.88],
+            "residual_contribution_ppa_import_gel": [72.7272, 66.6362, 40.0],
+            "residual_contribution_ppa_import_usd": [25.225, 21.7686, 14.0],
+        }
+    )
+    ctx = QueryContext(
+        query=(
+            "For the following periods, knowing the balancing electricity price, tariffs for regulated hydro and thermal, "
+            "and deregulated power plant prices, what is the weighted average price of the remaining energy sold on the balancing market?\n"
+            "- June 2020\n- July 2021"
+        ),
+        df=df,
+        cols=list(df.columns),
+        rows=[tuple(r) for r in df.itertuples(index=False, name=None)],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "deterministic_residual_weighted_price_direct"
+    assert out.summary_claims == []
+    assert "June 2020" in out.summary
+    assert "72.8 GEL/MWh" in out.summary
+    assert "25.3 USD/MWh" in out.summary
+    assert "July 2021" in out.summary
+    assert "67.0 GEL/MWh" in out.summary
+    assert "21.9 USD/MWh" in out.summary
+    assert "August 2021" not in out.summary
+
+
 def test_scenario_data_explanation_tool_route_not_treated_as_explanation():
     from agent import pipeline
 
