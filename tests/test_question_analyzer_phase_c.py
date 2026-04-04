@@ -542,6 +542,107 @@ def test_sanitize_chart_hints_clears_semantic_hints_when_chart_not_requested():
     assert "target_series" not in sanitized["visualization"]
 
 
+def test_sanitize_question_analysis_payload_drops_incomplete_period():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["sql_hints"]["period"] = {
+        "kind": "range",
+        "start_date": None,
+        "end_date": None,
+        "granularity": "range",
+        "raw_text": "all available months",
+    }
+
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+
+    assert "period" not in sanitized["sql_hints"]
+
+
+def test_llm_analyze_question_tolerates_null_period_stub(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _conceptual_payload().model_dump(mode="json")
+    payload["raw_query"] = (
+        "what are the months where the total share of renewable ppa, regulated hydro, "
+        "and regulated thermals in balancing electricity is more than 99%?"
+    )
+    payload["canonical_query_en"] = (
+        "Retrieve the months when the combined share of renewable PPA, regulated hydro, "
+        "and regulated thermals in balancing electricity exceeded 99%."
+    )
+    payload["classification"]["query_type"] = "data_retrieval"
+    payload["routing"]["preferred_path"] = "tool"
+    payload["routing"]["needs_knowledge"] = False
+    payload["routing"]["prefer_tool"] = True
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": "get_balancing_composition",
+            "score": 0.98,
+            "reason": "Need monthly balancing composition shares.",
+            "params_hint": {
+                "metric": None,
+                "currency": None,
+                "granularity": "monthly",
+                "start_date": None,
+                "end_date": None,
+                "entities": [],
+                "types": [],
+                "mode": None,
+            },
+        }
+    ]
+    payload["sql_hints"]["period"] = {
+        "kind": "range",
+        "start_date": None,
+        "end_date": None,
+        "granularity": "range",
+        "raw_text": "all available months",
+    }
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question(payload["raw_query"])
+
+    assert result.classification.query_type.value == "data_retrieval"
+    assert result.routing.preferred_path.value == "tool"
+    assert result.sql_hints.period is None
+    assert result.tooling.candidate_tools[0].name.value == "get_balancing_composition"
+
+
+def test_llm_analyze_question_tolerates_null_dimensions_stub(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["raw_query"] = "forecast balancing electricity price to 2030"
+    payload["canonical_query_en"] = "Forecast balancing electricity price to 2030."
+    payload["classification"]["query_type"] = "forecast"
+    payload["routing"]["preferred_path"] = "sql"
+    payload["routing"]["needs_knowledge"] = False
+    payload["routing"]["prefer_tool"] = False
+    payload["sql_hints"]["dimensions"] = None
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question(payload["raw_query"])
+
+    assert result.classification.query_type.value == "forecast"
+    assert result.routing.preferred_path.value == "sql"
+    assert result.sql_hints.dimensions == []
+
+
 # ---------------------------------------------------------------------------
 # Scenario keyword tests
 # ---------------------------------------------------------------------------

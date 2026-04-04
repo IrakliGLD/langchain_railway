@@ -1784,6 +1784,8 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
 
     sql_hints = payload.get("sql_hints")
     if isinstance(sql_hints, dict):
+        if sql_hints.get("dimensions") is None:
+            sql_hints["dimensions"] = []
         period = sql_hints.get("period")
         if isinstance(period, dict):
             start_date = period.get("start_date")
