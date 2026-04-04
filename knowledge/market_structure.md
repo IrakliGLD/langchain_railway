@@ -129,6 +129,19 @@ Key features:
 
 ---
 
+### 3.5 Forecasting Implication
+
+- Forecasts based on the **current monthly weighted-average balancing price** should not be treated as structurally reliable beyond the expected transition to the target model.
+- Any forecast extending toward or beyond **July 2027** crosses a likely **price-formation regime change**:
+  - current model: monthly weighted-average settlement price under central dispatch
+  - target model: hourly, time-dependent, more market-based balancing price under self-dispatch
+- Therefore, long-horizon forecasts should be framed as **scenario-based** rather than as precise continuation of the historical monthly trend.
+- Because implementation delays are possible, both of the following can be true at the same time:
+  - the current model remains relevant for near-term extrapolation
+  - the long-term structural break still limits confidence in forecasts approaching the target-model horizon
+
+---
+
 ## 4. Comparison with EU Practice
 
 ### Current Georgian Model

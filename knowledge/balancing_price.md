@@ -249,8 +249,8 @@ Do not disclose specific PPA/import prices.
 - **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.  
 - **Jul 2024:** Exchange launched (GENEX) — added new trading segment  
 - **2020 onwards:** Entity-level data available 
-- **May-June 2025:** in May and June 2025, Enguri HPP, the largest state owned hydro power plant, the source of once of the cheapest electricity, sold 16.698 thousand MWH electricity for each month as balancing electiricty. For May and June, selling exactly the same quantity as balancing electricity does not look like selling reamining electricity to the balancing market. It looks like the cheap electricity for each month was devoted to the balancing market to affect the balancing electricity prices and push them down.
-- **Jan-Mar 2024:** - the Electricity (capacity) Market Rules approved by the Ministed of Energy of Geirgia, was changed and for 3 months, January-March 2024, the reference price for the deregulated power plants were changed and linked to more expensive old thermal power plan, leading to increased prices for procurement of balancing electricity from deregulated power plants. 
+- **May-June 2025:** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. Identical monthly balancing volumes do not look like random residual sales. This pattern suggests that cheap state-owned hydro may have been deliberately allocated to the balancing segment in those months to help push the balancing price downward. Treat this as a strong analytical inference, not a proven policy fact unless supported by direct operational evidence.
+- **Jan-Mar 2024:** the Electricity (Capacity) Market Rules were temporarily changed for three months. During **January-March 2024**, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
 
 ---
 
@@ -276,6 +276,28 @@ Do not disclose specific PPA/import prices.
 - Summer → hydro/renewable → lower price  
 - Winter → thermal/import → higher price  
 - Use MoM and YoY comparisons  
+
+---
+
+### For Forecasting
+
+**Core rule:** forecasting the balancing electricity price is inherently difficult because it is **not directly determined by supply-demand clearing**. Under the current transitional model, it is a **weighted-average price** of electricity actually sold on the balancing segment.
+
+Therefore, a serious forecast of balancing price requires forecasting **both**:
+- the future **price** of each component
+- the future **share/composition** of each component in balancing electricity
+
+**Main forecasting uncertainties:**
+- **Imports:** prices depend on regional market conditions and external electricity prices, so they are highly uncertain and difficult to forecast.
+- **Regulated hydro:** its share in balancing electricity is currently modest and is expected to decline as hydropower deregulation expands. However, **state-owned hydropower plants remain regulated** and can still influence balancing prices when their cheap electricity is directed into the balancing segment. The **May-June 2025 Enguri HPP case** is an important example of this possibility.
+- **PPA and CfD:** these support schemes are the main component and key driver of the reference balancing price. Their future effect depends on how quickly new projects are commissioned and what their contract prices are.
+- **Regulated thermal power plants:** their cost is driven mainly by **gas prices** and the **exchange rate**. Gas prices are influenced by state decisions and negotiations, so future costs are uncertain.
+- **Exchange rate risk:** most important components are directly or indirectly **USD-linked**, so GEL balancing price is highly sensitive to FX movements.
+
+**Forecast interpretation rule:**
+- Trend-based forecasts can be constructed from historical price series, but their reliability is limited because imports, gas prices, exchange rate, policy decisions, and market reform can all change the future balancing mix.
+- For simple trend-based forecasting, it is better to **avoid separately forecasting the exchange rate**. If an assumption is needed, assume the exchange rate remains broadly stable around recent/current levels, and state that assumption explicitly.
+- Forecasts extending toward or beyond **July 2027** must be treated with extra caution because the planned target market model would fundamentally change balancing price formation.
 
 ---
 

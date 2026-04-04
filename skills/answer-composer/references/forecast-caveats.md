@@ -1,6 +1,23 @@
 # Forecast Caveats
 
-For detailed non-extrapolatable factors and forecasting challenges, see domain knowledge topic: `seasonal_patterns`.
+For detailed non-extrapolatable factors and forecasting challenges, rely on domain knowledge covering balancing price formation, market structure, and seasonal patterns.
+
+## Balancing Price Forecasting Logic
+
+- Balancing electricity price is **not a direct supply-demand clearing price** under the current Georgian transitional model.
+- It is a **weighted-average price** of electricity actually sold on the balancing segment during the month.
+- Therefore, a balancing-price forecast is inherently a forecast of:
+  - component prices
+  - component shares in the balancing mix
+- Do NOT describe balancing-price forecasts as if they were driven only by generic market demand or exchange-style price discovery.
+
+## Main Structural Uncertainties
+
+- **Imports:** highly uncertain because they depend on external market conditions and regional electricity prices.
+- **PPA/CfD:** the main reference component of balancing price; their future effect depends on project buildout speed and contract prices.
+- **Regulated thermal:** strongly affected by gas prices and exchange rate, both of which are uncertain.
+- **Regulated hydro:** overall share may decline as deregulation expands, but state-owned hydropower can still influence balancing prices when cheap electricity is directed to the balancing segment.
+- **Market reform:** the planned target model around **July 2027** would fundamentally change balancing price formation, so long-horizon forecasts face regime-break risk.
 
 ## Trendline citation rule
 
@@ -33,3 +50,8 @@ If stats_hint contains "TRENDLINE FORECASTS", YOU MUST cite the forecast values 
 | Long-term (5+ years) | Focus on structural drivers rather than linear extrapolation |
 
 ALWAYS separate summer and winter forecasts (different driver mixes).
+
+Additional rules:
+- If a balancing-price forecast extends toward or beyond **July 2027**, explicitly warn that the planned target model introduces a likely structural break in price formation.
+- When giving a simple trend-based balancing-price forecast, do **not** separately forecast the exchange rate unless the user explicitly asks for an FX scenario.
+- If an assumption about FX is needed for explanation, assume the exchange rate stays broadly stable around recent/current levels and state that this is only a simplifying assumption, not a forecasted fact.
