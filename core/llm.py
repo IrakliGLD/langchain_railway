@@ -1783,6 +1783,9 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
         return payload
 
     sql_hints = payload.get("sql_hints")
+    if sql_hints is None:
+        payload["sql_hints"] = {}
+        sql_hints = payload["sql_hints"]
     if isinstance(sql_hints, dict):
         if sql_hints.get("dimensions") is None:
             sql_hints["dimensions"] = []

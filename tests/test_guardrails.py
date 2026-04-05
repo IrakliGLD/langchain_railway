@@ -2459,6 +2459,32 @@ def test_answer_clarify_offers_residual_bucket_options_for_underdefined_numeric_
     assert "existing PPA/CfD/Import residual layer" in out.summary
 
 
+def test_clarify_selection_preserves_original_forecast_context():
+    from agent import pipeline
+
+    history = [
+        {
+            "question": "forecast balancing electricity price for 2030",
+            "answer": (
+                "I can answer this, but I want to make sure we take the right interpretation first.\n\n"
+                "Please choose one of these directions:\n"
+                "1. Give a cautious forward-looking view based on the available regulatory context and recent data.\n"
+                "2. Summarize the historical trend in observed electricity prices in Georgia.\n"
+            ),
+        }
+    ]
+
+    selected = pipeline._detect_clarify_selection("1", history)
+
+    assert selected == "Give a cautious forward-looking view based on the available regulatory context and recent data."
+
+    rewritten = pipeline._rewrite_query_for_clarify_selection(selected, history)
+
+    assert "forecast balancing electricity price for 2030" in rewritten
+    assert "Selected interpretation:" in rewritten
+    assert "cautious forward-looking view" in rewritten
+
+
 def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
     """Missing requested analytical evidence should downgrade Stage 4 to clarify."""
     from contracts.question_analysis import QuestionAnalysis

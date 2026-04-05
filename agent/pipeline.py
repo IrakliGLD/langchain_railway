@@ -148,6 +148,24 @@ def _detect_clarify_selection(query: str, conversation_history) -> str | None:
     return None
 
 
+def _rewrite_query_for_clarify_selection(selected: str, conversation_history) -> str:
+    """Preserve the original question context when applying a clarify option."""
+    if not conversation_history:
+        return selected
+
+    original_question = ""
+    for turn in reversed(conversation_history):
+        answer = str(turn.get("answer") or "")
+        question = str(turn.get("question") or "").strip()
+        if answer and "Please choose one of these directions:" in answer:
+            original_question = question
+            break
+
+    if not original_question:
+        return selected
+    return f"{original_question}\nSelected interpretation: {selected}"
+
+
 def _requested_derived_metric_names(ctx: QueryContext) -> list[str]:
     """Return active analyzer requested derived metrics in stable order."""
 
@@ -723,8 +741,8 @@ def process_query(
     # Detect clarification-selection replies (e.g. "1", "option 2")
     selected = _detect_clarify_selection(query, conversation_history)
     if selected:
-        query = selected
-        log.info("Clarification selection detected; rewriting query to: %s", selected)
+        query = _rewrite_query_for_clarify_selection(selected, conversation_history)
+        log.info("Clarification selection detected; rewriting query to: %s", query)
 
     ctx = QueryContext(
         query=query,

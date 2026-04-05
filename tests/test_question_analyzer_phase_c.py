@@ -643,6 +643,35 @@ def test_llm_analyze_question_tolerates_null_dimensions_stub(monkeypatch):
     assert result.sql_hints.dimensions == []
 
 
+def test_llm_analyze_question_tolerates_null_sql_hints(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["raw_query"] = "forecast balancing electricity price for 2030"
+    payload["canonical_query_en"] = "Forecast balancing electricity price for 2030."
+    payload["classification"]["query_type"] = "forecast"
+    payload["routing"]["preferred_path"] = "tool"
+    payload["routing"]["needs_knowledge"] = False
+    payload["routing"]["prefer_tool"] = True
+    payload["sql_hints"] = None
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question(payload["raw_query"])
+
+    assert result.classification.query_type.value == "forecast"
+    assert result.routing.preferred_path.value == "tool"
+    assert result.sql_hints.metric is None
+    assert result.sql_hints.dimensions == []
+
+
 # ---------------------------------------------------------------------------
 # Scenario keyword tests
 # ---------------------------------------------------------------------------
