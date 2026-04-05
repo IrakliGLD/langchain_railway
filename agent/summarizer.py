@@ -43,6 +43,31 @@ _SUPPORTED_DETERMINISTIC_QUERY_TYPES = {
     "data_retrieval",
     "data_explanation",
 }
+_REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES = {
+    "regulated_hpp": ("regulated_hpp_tariff_",),
+    "regulated_new_tpp": ("regulated_new_tpp_tariff_", "gardabani_tpp_tariff_"),
+    "regulated_old_tpp": ("regulated_old_tpp_tariff_", "grouped_old_tpp_tariff_"),
+    "enguri": ("enguri_tariff_",),
+    "gardabani_tpp": ("gardabani_tpp_tariff_",),
+    "old_tpp_group": ("grouped_old_tpp_tariff_",),
+}
+_REGULATED_TARIFF_ALIAS_GROUP_LABELS = {
+    "regulated_hpp": "Regulated HPPs",
+    "regulated_new_tpp": "Regulated new TPP",
+    "regulated_old_tpp": "Regulated old TPPs",
+    "enguri": "Regulated HPP",
+    "gardabani_tpp": "Regulated new TPP",
+    "old_tpp_group": "Regulated old TPPs",
+}
+_REGULATED_TARIFF_ENTITY_DISPLAY_NAMES = {
+    'ltd "engurhesi"1': "Enguri HPP",
+    'jsc "energo-pro georgia generation"': "Energo-Pro Georgia Generation",
+    'ltd "vardnilihesi"': "Vardnili Cascade",
+    'ltd "gardabni thermal power plant"': "Gardabani Thermal Power Plant",
+    'ltd "mtkvari energy"': "Mtkvari Energy",
+    'ltd "iec" (tbilresi)': "IEC (Tbilresi)",
+    'ltd "g power" (capital turbines)': "G Power (Capital Turbines)",
+}
 _EXPLANATION_QUERY_SIGNALS = (
     "why",
     "explain",
@@ -76,6 +101,7 @@ _CFD_COMPONENT_QUERY_SIGNALS = (
     "payoff",
 )
 _MIXED_EVIDENCE_QUERY_TYPES = {"forecast", "comparison"}
+_FORECAST_QUERY_SIGNALS = ("forecast", "predict", "projection", "project", "outlook")
 
 
 def _normalize_number_token(raw_token: str) -> Optional[str]:
@@ -1099,6 +1125,109 @@ def _is_deterministic_scenario_eligible(ctx: QueryContext) -> bool:
     return _build_scenario_fallback_answer(ctx) is not None
 
 
+def _has_regulated_tariff_list_query_signal(ctx: QueryContext) -> bool:
+    """Return True for broad list-style questions about regulated plants."""
+    if (ctx.tool_name or "").strip() != "get_tariffs":
+        return False
+
+    query_lower = (ctx.query or "").strip().lower()
+    if not query_lower:
+        return False
+
+    regulation_hit = (
+        any(
+            token in query_lower
+            for token in (
+                "under regulation",
+                "under price regulation",
+                "price regulation",
+                "regulated plant",
+                "regulated plants",
+                "regulated power plant",
+                "regulated power plants",
+            )
+        )
+        or ("regulated" in query_lower and any(token in query_lower for token in ("plant", "plants", "entity", "entities")))
+    )
+    list_hit = any(
+        token in query_lower
+        for token in ("which", "what are the", "list", "show all", "enumerate", "name")
+    )
+    explanation_hit = any(
+        token in query_lower for token in _EXPLANATION_QUERY_SIGNALS + _FORECAST_QUERY_SIGNALS
+    )
+    return regulation_hit and list_hit and not explanation_hit
+
+
+def _tariff_alias_has_observations(df: pd.DataFrame, alias: str) -> bool:
+    """Return True when the retrieved tariff frame includes data for an alias."""
+    prefixes = _REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES.get(alias, ())
+    if not prefixes:
+        return False
+
+    for col in df.columns:
+        if not any(col.startswith(prefix) for prefix in prefixes):
+            continue
+        values = pd.to_numeric(df[col], errors="coerce")
+        if values.notna().any():
+            return True
+    return False
+
+
+def _build_regulated_tariff_list_direct_answer(ctx: QueryContext) -> str | None:
+    """Build a deterministic list of regulated plants from tariff evidence."""
+    if ctx.df.empty or not _has_regulated_tariff_list_query_signal(ctx):
+        return None
+
+    from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
+
+    selected_aliases = [
+        str(entity).strip()
+        for entity in (ctx.tool_params.get("entities") or [])
+        if str(entity).strip() in _REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES
+    ]
+    if not selected_aliases:
+        selected_aliases = ["regulated_hpp", "regulated_new_tpp", "regulated_old_tpp"]
+
+    active_aliases = [
+        alias for alias in selected_aliases if _tariff_alias_has_observations(ctx.df, alias)
+    ]
+    if not active_aliases:
+        return None
+
+    date_col = next((col for col in ctx.df.columns if "date" in col.lower()), None)
+    period_line = ""
+    if date_col:
+        dates = pd.to_datetime(ctx.df[date_col], errors="coerce").dropna()
+        if not dates.empty:
+            period_line = (
+                f"Retrieved tariff coverage: {dates.min().strftime('%B %Y')} to "
+                f"{dates.max().strftime('%B %Y')}."
+            )
+
+    group_lines: list[str] = []
+    for alias in active_aliases:
+        raw_entities = TARIFF_ENTITY_ALIASES.get(alias, [])
+        display_names = [
+            _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES.get(raw_entity, raw_entity)
+            for raw_entity in raw_entities
+        ]
+        if not display_names:
+            continue
+        group_label = _REGULATED_TARIFF_ALIAS_GROUP_LABELS.get(alias, alias.replace("_", " ").title())
+        group_lines.append(f"- {group_label}: {', '.join(display_names)}")
+
+    if not group_lines:
+        return None
+
+    parts = ["The power plants under price regulation in the retrieved tariff data are:"]
+    if period_line:
+        parts.append(period_line)
+    parts.append("")
+    parts.extend(group_lines)
+    return "\n".join(parts)
+
+
 _RESIDUAL_MONTH_NAME_TO_NUMBER = {
     "january": 1, "jan": 1,
     "february": 2, "feb": 2,
@@ -1343,6 +1472,14 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_confidence = 0.95
         metrics.log_deterministic_skip(ctx.summary_source)
         log.info("Deterministic scenario answer eligible; skipping Stage 4 LLM.")
+    elif (regulated_tariff_answer := _build_regulated_tariff_list_direct_answer(ctx)) is not None:
+        ctx.summary = regulated_tariff_answer
+        ctx.summary_source = "deterministic_regulated_tariff_list_direct"
+        ctx.summary_claims = []
+        ctx.summary_citations = ["deterministic_regulated_tariff_list_direct"]
+        ctx.summary_confidence = 0.98
+        metrics.log_deterministic_skip(ctx.summary_source)
+        log.info("Deterministic regulated tariff list answer eligible; skipping Stage 4 LLM.")
     elif (residual_answer := _build_residual_weighted_price_direct_answer(ctx)) is not None:
         ctx.summary = residual_answer
         ctx.summary_source = "deterministic_residual_weighted_price_direct"

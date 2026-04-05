@@ -331,7 +331,47 @@ def extract_tariff_entities(query_lower: str) -> List[str]:
     if any(t in query_lower for t in ["old tpp", "old thermal", "ძველი თეს", "стар"]):
         hits.append("old_tpp_group")
         hits.append("regulated_old_tpp")
-    return [h for h in hits if h in ALLOWED_TARIFF_ENTITY_ALIASES]
+    # Broad regulated-plant lookups should fetch all regulated tariff buckets
+    # instead of falling back to the narrow Enguri/Gardabani defaults.
+    generic_regulated_lookup = (
+        any(
+            token in query_lower
+            for token in (
+                "under regulation",
+                "under price regulation",
+                "price regulation",
+                "regulated plant",
+                "regulated plants",
+                "regulated power plant",
+                "regulated power plants",
+            )
+        )
+        or (
+            "regulated" in query_lower
+            and any(token in query_lower for token in ("plant", "plants", "entity", "entities"))
+        )
+    )
+    list_shaped_lookup = any(
+        token in query_lower
+        for token in ("which", "what are the", "list", "show all", "enumerate", "name")
+    )
+    mentions_specific_alias = any(
+        token in query_lower
+        for token in (
+            "enguri",
+            "gardabani",
+            "regulated hpp",
+            "regulated_hpp",
+            "new tpp",
+            "regulated_new_tpp",
+            "old tpp",
+            "old thermal",
+        )
+    )
+    if generic_regulated_lookup and list_shaped_lookup and not mentions_specific_alias:
+        hits.extend(["regulated_hpp", "regulated_new_tpp", "regulated_old_tpp"])
+
+    return [h for h in dict.fromkeys(hits) if h in ALLOWED_TARIFF_ENTITY_ALIASES]
 
 
 def extract_generation_types(query_lower: str) -> List[str]:
