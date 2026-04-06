@@ -27,6 +27,7 @@ def render(
     grouping: Optional[Grouping] = None,
     entity_scope: Optional[str] = None,
     language_code: str = "en",
+    metric_hint: Optional[str] = None,
 ) -> str | None:
     """Format a canonical frame into a user-facing text answer.
 
@@ -35,7 +36,7 @@ def render(
     formatter).
     """
     if answer_kind == AnswerKind.SCALAR:
-        return _render_scalar(frame)
+        return _render_scalar(frame, metric_hint=metric_hint)
     if answer_kind == AnswerKind.LIST:
         return _render_list(frame, entity_scope)
     if answer_kind == AnswerKind.TIMESERIES:
@@ -50,12 +51,26 @@ def render(
 # SCALAR — extract single value + unit + period
 # ---------------------------------------------------------------------------
 
-def _render_scalar(frame: CanonicalFrame) -> str | None:
+def _render_scalar(
+    frame: CanonicalFrame,
+    metric_hint: Optional[str] = None,
+) -> str | None:
     if not isinstance(frame, ObservationFrame) or frame.is_empty():
         return None
 
-    # Take the last row (most recent observation)
-    row = frame.rows[-1]
+    # Select the row matching the requested metric when a hint is available.
+    # Adapters emit the primary metric first, so rows[0] is the safest fallback
+    # (rows[-1] could be an unrelated metric like xrate for balancing queries).
+    row = None
+    if metric_hint:
+        hint_lower = metric_hint.lower()
+        for r in frame.rows:
+            if hint_lower in (r.get("metric") or "").lower():
+                row = r
+                break
+    if row is None:
+        row = frame.rows[0]
+
     val = row.get("value")
     unit = row.get("unit", "")
     period = row.get("period", "")
@@ -262,9 +277,15 @@ def _render_timeseries_by_metric(frame, periods, entities, metrics, lookup) -> s
 # ---------------------------------------------------------------------------
 
 def _render_comparison(frame: CanonicalFrame) -> str | None:
-    if not isinstance(frame, ComparisonFrame) or frame.is_empty():
-        return None
+    if isinstance(frame, ComparisonFrame) and not frame.is_empty():
+        return _render_comparison_native(frame)
+    if isinstance(frame, ObservationFrame) and not frame.is_empty():
+        return _render_comparison_from_observations(frame)
+    return None
 
+
+def _render_comparison_native(frame: ComparisonFrame) -> str:
+    """Render a pre-built ComparisonFrame."""
     header = "| Metric | Subject | Baseline | Delta | Change % | Unit |"
     sep = "|---|---|---|---|---|---|"
     lines = [header, sep]
@@ -283,6 +304,119 @@ def _render_comparison(frame: CanonicalFrame) -> str | None:
         lines.append(
             f"| {metric} | {subj_label}: {subj_val} | {base_label}: {base_val} "
             f"| {delta} | {delta_pct_str} | {unit} |"
+        )
+
+    return "\n".join(lines)
+
+
+def _render_comparison_from_observations(frame: ObservationFrame) -> str | None:
+    """Pivot an ObservationFrame into a comparison table.
+
+    Strategy: if 2+ periods exist, compare last two periods across all metrics.
+    Otherwise if 2+ entities exist, compare first two entities.
+    Returns None if neither condition is met (not enough data for comparison).
+    """
+    periods = frame.periods
+    entities = frame.entities
+    metrics = frame.metrics
+
+    # Build lookup: (period, entity_id, metric) -> row
+    lookup: dict[tuple, dict] = {}
+    for row in frame.rows:
+        key = (row.get("period"), row.get("entity_id"), row.get("metric"))
+        lookup[key] = row
+
+    if len(periods) >= 2:
+        # Compare last two periods (baseline = second-to-last, subject = last)
+        baseline_period = periods[-2]
+        subject_period = periods[-1]
+        comparison_rows = []
+        for m in metrics:
+            for e in (entities or [None]):
+                base_row = lookup.get((baseline_period, e, m))
+                subj_row = lookup.get((subject_period, e, m))
+                if base_row and subj_row:
+                    comparison_rows.append(_build_comparison_row(
+                        metric=m,
+                        subj_label=subject_period,
+                        subj_value=subj_row.get("value"),
+                        base_label=baseline_period,
+                        base_value=base_row.get("value"),
+                        unit=subj_row.get("unit", ""),
+                    ))
+        if comparison_rows:
+            return _format_comparison_table(comparison_rows)
+
+    if len(entities) >= 2:
+        # Compare first two entities across all metrics and periods
+        ent_a, ent_b = entities[0], entities[1]
+        comparison_rows = []
+        for m in metrics:
+            for p in (periods or [None]):
+                row_a = lookup.get((p, ent_a, m))
+                row_b = lookup.get((p, ent_b, m))
+                if row_a and row_b:
+                    label_a = row_a.get("entity_label", ent_a)
+                    label_b = row_b.get("entity_label", ent_b)
+                    comparison_rows.append(_build_comparison_row(
+                        metric=m,
+                        subj_label=label_a,
+                        subj_value=row_a.get("value"),
+                        base_label=label_b,
+                        base_value=row_b.get("value"),
+                        unit=row_a.get("unit", ""),
+                    ))
+        if comparison_rows:
+            return _format_comparison_table(comparison_rows)
+
+    return None
+
+
+def _build_comparison_row(
+    metric: str,
+    subj_label: str,
+    subj_value,
+    base_label: str,
+    base_value,
+    unit: str,
+) -> dict:
+    delta = None
+    delta_percent = None
+    if subj_value is not None and base_value is not None:
+        try:
+            delta = float(subj_value) - float(base_value)
+            if float(base_value) != 0:
+                delta_percent = (delta / float(base_value)) * 100
+        except (TypeError, ValueError):
+            pass
+    return {
+        "metric": metric,
+        "subject_label": subj_label,
+        "subject_value": subj_value,
+        "baseline_label": base_label,
+        "baseline_value": base_value,
+        "delta": delta,
+        "delta_percent": delta_percent,
+        "unit": unit,
+    }
+
+
+def _format_comparison_table(rows: list[dict]) -> str:
+    header = "| Metric | Subject | Baseline | Delta | Change % | Unit |"
+    sep = "|---|---|---|---|---|---|"
+    lines = [header, sep]
+
+    for row in rows:
+        subj_val = _fmt_number(row.get("subject_value"))
+        base_val = _fmt_number(row.get("baseline_value"))
+        delta = _fmt_number(row.get("delta"))
+        delta_pct = row.get("delta_percent")
+        delta_pct_str = f"{delta_pct:+.1f}%" if delta_pct is not None else "—"
+
+        lines.append(
+            f"| {row['metric']} | {row['subject_label']}: {subj_val} "
+            f"| {row['baseline_label']}: {base_val} "
+            f"| {delta} | {delta_pct_str} | {row.get('unit', '')} |"
         )
 
     return "\n".join(lines)

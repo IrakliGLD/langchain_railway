@@ -1,15 +1,20 @@
 """
-Pipeline Orchestrator
+Pipeline Orchestrator — analyzer-first flow with evidence-based rendering.
 
-Coordinates request handling with optional fast tool path:
-  0. planner.prepare_context            -> cheap language/mode/conceptual detection
-  1. router.match_tool (optional)       -> pre-LLM deterministic routing
-  2. orchestrator.run_agent_loop        -> bounded typed-tool loop (optional)
-  3. planner.generate_plan              -> legacy LLM plan path (fallback only)
-  4. sql_executor.validate_and_execute  -> SQL validation/execution fallback
-  5. analyzer.enrich
-  6. summarizer.summarize_data
-  7. chart_pipeline.build_chart
+Stages:
+  0.1  planner.prepare_context           -> language / mode / conceptual detection
+  0.2  llm.analyze_question (active)     -> QuestionAnalysis with answer_kind / render_style
+       answer_kind cross-check           -> safety override vs query_type-derived kind
+  0.3  vector knowledge retrieval        -> skipped for deterministic data paths
+  0.4  evidence plan derivation          -> tool invocations needed for the answer
+  0.5  evidence collection loop          -> frame adapters + canonical evidence frames
+  0.6  evidence validation               -> gap detection, render_style degradation
+  0.7  router.match_tool (legacy)        -> fallback pre-LLM deterministic routing
+  0.8  orchestrator.run_agent_loop       -> bounded typed-tool loop (legacy fallback)
+  1/2  planner / sql_executor            -> legacy LLM plan + SQL fallback
+  3    analyzer.enrich                   -> stats, correlation, trendlines
+  4    summarizer.summarize_data         -> generic renderer or LLM narrative
+  5    chart_pipeline.build_chart        -> chart from evidence or SQL results
 """
 import json
 import logging
@@ -788,14 +793,17 @@ def _build_and_attach_evidence_frame(ctx: QueryContext, invocation: ToolInvocati
                     "Evidence gap (correctable): %s — downstream may re-plan or degrade",
                     gap,
                 )
-                # Store gap for downstream stages to act on.
                 ctx.evidence_gap = gap
+                trace_detail(log, ctx, "evidence", "evidence_gap_correctable",
+                             answer_kind=str(gap.answer_kind), reason=gap.reason)
             else:
                 log.warning(
                     "Evidence gap (not correctable): %s — degrading render_style to narrative",
                     gap,
                 )
                 ctx.evidence_gap = gap
+                trace_detail(log, ctx, "evidence", "evidence_gap_not_correctable",
+                             answer_kind=str(gap.answer_kind), reason=gap.reason)
                 # Degrade: let LLM narrative handle the mismatch.
                 if ctx.has_authoritative_question_analysis:
                     ctx.question_analysis.render_style = RenderStyle.NARRATIVE
@@ -973,8 +981,44 @@ def process_query(
     if routing_query_source == "llm_active_canonical":
         ctx.semantic_locked = True
 
+    # --- answer_kind cross-check (before Stage 0.3 so we can skip retrieval) ---
+    _cross_check_answer_kind(ctx)
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
+        if qa.answer_kind is None:
+            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
+        # Fallback: if LLM did not emit render_style, default to narrative (safer).
+        if qa.render_style is None:
+            qa.render_style = RenderStyle.NARRATIVE
+        log.info(
+            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
+            qa.answer_kind.value if qa.answer_kind else None,
+            qa.render_style.value if qa.render_style else None,
+            qa.grouping.value if qa.grouping else None,
+            qa.entity_scope,
+            ctx.query,
+        )
+
+    # Determine whether vector retrieval can be skipped: deterministic data paths
+    # (answer_kind not in {KNOWLEDGE, EXPLANATION, CLARIFY} + DETERMINISTIC render_style)
+    # never use the vector knowledge prompt, so retrieval is wasted work.
+    _skip_vector_retrieval = False
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        if (
+            qa.answer_kind is not None
+            and qa.answer_kind not in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION, AnswerKind.CLARIFY)
+            and qa.render_style == RenderStyle.DETERMINISTIC
+        ):
+            _skip_vector_retrieval = True
+            log.info(
+                "Skipping vector retrieval: answer_kind=%s render_style=%s (deterministic data path)",
+                qa.answer_kind.value, qa.render_style.value,
+            )
+
     # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
-    if ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS:
+    if (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS) and not _skip_vector_retrieval:
         t_stage = time.time()
         retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
         bundle = retrieve_vector_knowledge(
@@ -1028,40 +1072,6 @@ def process_query(
             error=bool(bundle.error),
             strategy=bundle.strategy.value,
         )
-
-    # --- answer_kind cross-check (Phase 1: shadow logging + safety override) ---
-    _cross_check_answer_kind(ctx)
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
-        if qa.answer_kind is None:
-            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
-        # Fallback: if LLM did not emit render_style, default to narrative (safer).
-        if qa.render_style is None:
-            qa.render_style = RenderStyle.NARRATIVE
-        log.info(
-            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
-            qa.answer_kind.value if qa.answer_kind else None,
-            qa.render_style.value if qa.render_style else None,
-            qa.grouping.value if qa.grouping else None,
-            qa.entity_scope,
-            ctx.query,
-        )
-
-    # --- Phase 3: Clear vector knowledge for deterministic data paths (after cross-check) ---
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        if (
-            qa.answer_kind is not None
-            and qa.answer_kind not in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION, AnswerKind.CLARIFY)
-            and qa.render_style == RenderStyle.DETERMINISTIC
-            and ctx.vector_knowledge_prompt
-        ):
-            log.info(
-                "Clearing vector knowledge prompt: answer_kind=%s render_style=%s (deterministic data path)",
-                qa.answer_kind.value, qa.render_style.value,
-            )
-            ctx.vector_knowledge_prompt = ""
 
     # --- Derive response_mode (single source of truth for answer mode) ---
     ctx.response_mode = _derive_response_mode(ctx)

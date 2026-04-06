@@ -1698,6 +1698,11 @@ def _try_generic_renderer(ctx: QueryContext) -> str | None:
     qa = ctx.question_analysis
     if qa.answer_kind is None or qa.render_style != RenderStyle.DETERMINISTIC:
         return None
+    # Correctable evidence gaps mean data is incomplete — fall through to legacy
+    # paths that can handle partial data or re-plan.
+    gap = getattr(ctx, "evidence_gap", None)
+    if gap is not None and getattr(gap, "correctable", False):
+        return None
     frame = getattr(ctx, "evidence_frame", None)
     if frame is None or frame.is_empty():
         return None
@@ -1706,12 +1711,24 @@ def _try_generic_renderer(ctx: QueryContext) -> str | None:
     if qa.answer_kind not in (AnswerKind.SCALAR, AnswerKind.LIST, AnswerKind.TIMESERIES, AnswerKind.COMPARISON):
         return None
 
+    # Extract metric_hint from the top candidate tool's params_hint so that
+    # scalar rendering selects the correct metric row (e.g. balancing_price
+    # instead of xrate).
+    metric_hint: str | None = None
+    try:
+        top_tool = (qa.tooling.candidate_tools or [None])[0]
+        if top_tool and top_tool.params_hint:
+            metric_hint = top_tool.params_hint.metric
+    except (AttributeError, IndexError):
+        pass
+
     result = generic_render(
         frame=frame,
         answer_kind=qa.answer_kind,
         grouping=qa.grouping,
         entity_scope=qa.entity_scope,
         language_code=qa.language.answer_language.value if qa.language else "en",
+        metric_hint=metric_hint,
     )
     if result and result.strip():
         return result
