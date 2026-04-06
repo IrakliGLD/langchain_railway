@@ -149,6 +149,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                 mean_first_year = df_first[numeric.columns].values.mean()
                 mean_last_year = df_last[numeric.columns].values.mean()
 
+                # Express the overall change relative to the first comparable full year.
                 change = ((mean_last_year - mean_first_year) / mean_first_year * 100) if mean_first_year != 0 else 0
                 trend = "increasing" if mean_last_year > mean_first_year else "decreasing"
                 out.append(f"Trend (Yearly Avg, {first_full_year}→{last_full_year}): {trend} ({change:.1f}%)")
@@ -182,6 +183,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                             cagr_summer = seasonal_cagr(df.loc[summer_mask], col)
                             cagr_winter = seasonal_cagr(df.loc[winter_mask], col)
 
+                            # Report both the absolute seasonal shift and the compounded annual pace.
                             out.append(
                                 f"Seasonal Trend ({col}): "
                                 f"Summer {first_full_year}→{last_full_year}: "

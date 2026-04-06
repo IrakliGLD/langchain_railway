@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from contracts.question_analysis import ChartIntent, SemanticRole
+from contracts.question_analysis import AnswerKind, ChartIntent, SemanticRole
 from models import QueryContext
 from core.query_executor import ENGINE
 from analysis.stats import quick_stats, rows_to_preview
@@ -446,6 +446,7 @@ def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
 
 
 def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
+    # Prefer structured analyzer requests, then fall back to heuristic scenario extraction.
     if ctx.has_authoritative_question_analysis:
         requests = [
             req.model_dump(mode="json")
@@ -513,6 +514,7 @@ def _build_historical_month_context(
     if historical_rows.empty:
         return {}
 
+    # Collect per-currency history so Stage 4 can compare the target month with its seasonal peers.
     result: dict[str, Any] = {
         "years_found": len(historical_rows),
         "periods": [str(historical_rows[time_col].iloc[i]) for i in range(len(historical_rows))],
@@ -560,7 +562,7 @@ def _build_historical_month_context(
             threshold = stats["avg"] * 0.02 if stats["avg"] > 0 else 0.5
             stats["trend_direction"] = "rising" if slope > threshold else ("falling" if slope < -threshold else "stable")
 
-        # Current month's position in historical range
+        # Position the current observation inside the historical min/max envelope.
         if cur_val is not None:
             stats["current_value"] = round(cur_val, 2)
             range_size = stats["max"] - stats["min"]
@@ -576,7 +578,7 @@ def _build_historical_month_context(
 
         result[f"price_{label}"] = stats
 
-    # Cross-currency comparison: separate real price movement from xrate effect
+    # Cross-currency comparison helps separate real price movement from exchange-rate effects.
     gel_stats = result.get("price_gel")
     usd_stats = result.get("price_usd")
     if (
@@ -617,6 +619,7 @@ def _build_requested_analysis_evidence(
     if not requests:
         return pd.DataFrame()
 
+    # Build one shared metric context so each registry function sees the same resolved periods and snapshots.
     yoy_row = _find_yoy_row(df, time_col, current_ts)
     yoy_ts = pd.to_datetime(yoy_row[time_col].iloc[0], errors="coerce") if not yoy_row.empty else None
     yoy_shares: dict[str, float] = {}
@@ -644,6 +647,7 @@ def _build_requested_analysis_evidence(
         correlation_results=ctx.correlation_results,
     )
 
+    # Dispatch each requested metric to the registry and keep only successful materializations.
     evidence_rows: list[dict[str, Any]] = []
     for request in requests:
         metric_name = str(request.get("metric_name", "")).strip()
@@ -692,6 +696,7 @@ def _find_chart_time_column(df: pd.DataFrame) -> Optional[str]:
     )
 
 
+# Semantic chart override helpers translate derived evidence into ready-to-render series.
 def _format_chart_time_values(values: pd.Series) -> list[str]:
     """Format time values consistently with Stage 5 chart output."""
     if values.empty:
@@ -1115,6 +1120,7 @@ def _parse_period_hint(period_hint: str, user_query: str) -> Optional[pd.Period]
     return None
 
 
+# Share-target resolution helpers map user phrasing onto the share_* columns already in evidence.
 def _select_share_column(share_cols: list[str], target_text: str) -> Optional[str]:
     """Choose the most relevant share column based on the user's target description."""
     target_lower = target_text.lower()
@@ -1662,10 +1668,15 @@ def enrich(ctx: QueryContext) -> QueryContext:
     """
     # --- Share resolution ---
     share_intent = str(ctx.plan.get("intent", "")).lower()
-    if ctx.has_authoritative_question_analysis:
-        # When the semantic contract is available, trust only structured analyzer
-        # signals for share/composition intent. Free-form intent text is not
-        # authoritative enough for downstream execution.
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+        # Phase 4: answer_kind is the authoritative signal for share enrichment.
+        # Share intent maps to SCALAR/TIMESERIES with composition tool results.
+        share_query_detected = (
+            ctx.analyzer_indicates_share_intent
+            or ctx.tool_name == "get_balancing_composition"
+        )
+    elif ctx.has_authoritative_question_analysis:
+        # Structured analyzer available but no answer_kind — use existing signals.
         share_query_detected = ctx.analyzer_indicates_share_intent
     else:
         # No analyzer available: fall back to keyword matching (legacy behavior)
@@ -1746,11 +1757,19 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     # --- Correlation analysis ---
     needs_correlation_analysis = False
-    if ctx.has_authoritative_question_analysis:
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+        # Phase 4: answer_kind = EXPLANATION triggers correlation analysis.
+        if ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION:
+            log.info("Semantic intent → correlation (answer_kind=EXPLANATION).")
+            needs_correlation_analysis = True
+        elif ctx.question_analysis.analysis_requirements.needs_correlation_context:
+            log.info("Semantic intent → correlation (needs_correlation_context=True).")
+            needs_correlation_analysis = True
+    elif ctx.has_authoritative_question_analysis:
         # Use structured analyzer signals for correlation detection
         qa_reqs = ctx.question_analysis.analysis_requirements
         if qa_reqs.needs_driver_analysis or qa_reqs.needs_correlation_context:
-            log.info("🧮 Semantic intent → correlation (analyzer: needs_driver=%s needs_correlation=%s).",
+            log.info("Semantic intent → correlation (analyzer: needs_driver=%s needs_correlation=%s).",
                      qa_reqs.needs_driver_analysis, qa_reqs.needs_correlation_context)
             needs_correlation_analysis = True
     else:
@@ -1828,11 +1847,12 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"⚠️ Correlation analysis failed: {e}")
 
     # --- Forecast mode (CAGR) ---
-    _forecast_detected = (
-        ctx.question_analysis.classification.query_type.value == "forecast"
-        if ctx.has_authoritative_question_analysis
-        else _detect_forecast_mode(ctx.query)
-    )
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+        _forecast_detected = ctx.question_analysis.answer_kind == AnswerKind.FORECAST
+    elif ctx.has_authoritative_question_analysis:
+        _forecast_detected = ctx.question_analysis.classification.query_type.value == "forecast"
+    else:
+        _forecast_detected = _detect_forecast_mode(ctx.query)
     if _forecast_detected and not ctx.df.empty:
         try:
             ctx.df, _forecast_note = _generate_cagr_forecast(ctx.df, ctx.query)
@@ -1843,7 +1863,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     # --- Why mode (causal reasoning) ---
     _why_detected = False
-    if ctx.has_authoritative_question_analysis:
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+        # Phase 4: answer_kind is the authoritative signal.
+        _why_detected = ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION
+    elif ctx.has_authoritative_question_analysis:
         qa_reqs = ctx.question_analysis.analysis_requirements
         _why_detected = (
             qa_reqs.needs_driver_analysis
@@ -1872,7 +1895,9 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
-    if ctx.has_authoritative_question_analysis:
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+        ctx.add_trendlines = ctx.question_analysis.answer_kind == AnswerKind.FORECAST
+    elif ctx.has_authoritative_question_analysis:
         ctx.add_trendlines = ctx.question_analysis.classification.query_type.value == "forecast"
     else:
         trend_keywords = [
@@ -1921,6 +1946,7 @@ def _prepare_timeseries_rows(
     Returns ``(df, time_col, current_ts, current_row, previous_ts, previous_row)``
     or ``None`` if the data lacks a usable time column or rows.
     """
+    # Reuse one normalized time-series snapshot for standalone MoM/YoY analysis.
     t_series_col = next(
         (c for c in ctx.df.columns if any(k in c.lower() for k in ["date", "year", "month"])),
         None,
@@ -2078,6 +2104,7 @@ def _format_regulated_plant_sales_records(df: pd.DataFrame) -> list[dict[str, An
     return records
 
 
+# Why-context assembly adds comparison drivers, historical bounds, and plant-level evidence to stats_hint.
 def _build_why_context(ctx: QueryContext) -> None:
     """Build causal context for 'why' queries. Modifies ctx.stats_hint."""
     why_ctx: Dict[str, Any] = {"notes": [], "signals": {}}

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 ISODate = Annotated[str, StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$")]
 
 
+# Core enums describe the analyzer's language, routing, period, and metric vocabulary.
 class LanguageCode(str, Enum):
     EN = "en"
     KA = "ka"
@@ -43,6 +44,36 @@ class PreferredPath(str, Enum):
     SQL = "sql"
     CLARIFY = "clarify"
     REJECT = "reject"
+
+
+class AnswerKind(str, Enum):
+    """Shape of the final answer the user expects."""
+
+    SCALAR = "scalar"
+    LIST = "list"
+    TIMESERIES = "timeseries"
+    COMPARISON = "comparison"
+    EXPLANATION = "explanation"
+    FORECAST = "forecast"
+    SCENARIO = "scenario"
+    KNOWLEDGE = "knowledge"
+    CLARIFY = "clarify"
+
+
+class RenderStyle(str, Enum):
+    """Whether the answer should be formatted deterministically or via LLM narrative."""
+
+    DETERMINISTIC = "deterministic"
+    NARRATIVE = "narrative"
+
+
+class Grouping(str, Enum):
+    """How the answer rows should be grouped in the final output."""
+
+    NONE = "none"
+    BY_ENTITY = "by_entity"
+    BY_PERIOD = "by_period"
+    BY_METRIC = "by_metric"
 
 
 class KnowledgeTopicName(str, Enum):
@@ -161,6 +192,7 @@ class DerivedMetricName(str, Enum):
     SCENARIO_PAYOFF = "scenario_payoff"
 
 
+# Nested models capture each structured sub-decision emitted by the analyzer.
 class LanguageInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -203,6 +235,27 @@ class KnowledgeInfo(BaseModel):
     candidate_topics: List[TopicCandidate] = Field(default_factory=list, max_length=5)
 
 
+class FilterOperator(str, Enum):
+    """Comparison operators for value-based evidence filtering."""
+
+    GT = "gt"
+    GTE = "gte"
+    LT = "lt"
+    LTE = "lte"
+    EQ = "eq"
+
+
+class FilterCondition(BaseModel):
+    """Value-based filter applied during evidence collection (after fetch, before framing)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metric: str = Field(min_length=1, max_length=64)
+    operator: FilterOperator
+    value: float
+    unit: Optional[str] = Field(default=None, max_length=16)
+
+
 class ToolParamsHint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -214,6 +267,7 @@ class ToolParamsHint(BaseModel):
     entities: List[str] = Field(default_factory=list, max_length=25)
     types: List[str] = Field(default_factory=list, max_length=25)
     mode: Optional[str] = Field(default=None, max_length=32)
+    filter: Optional[FilterCondition] = None
 
     @field_validator("end_date")
     @classmethod
@@ -314,6 +368,7 @@ _VALID_ROLES_BY_INTENT = {
 }
 
 
+# Derived-metric requests carry the extra parameters needed for analytical calculations.
 class DerivedMetricRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -359,6 +414,7 @@ class AnalysisRequirementsInfo(BaseModel):
     derived_metrics: List[DerivedMetricRequest] = Field(default_factory=list, max_length=12)
 
 
+# Top-level payload validated once, then reused by the rest of the pipeline.
 class QuestionAnalysis(BaseModel):
     """Validated output for the question-analyzer LLM call."""
 
@@ -375,6 +431,34 @@ class QuestionAnalysis(BaseModel):
     sql_hints: SqlHints
     visualization: VisualizationInfo
     analysis_requirements: AnalysisRequirementsInfo = Field(default_factory=AnalysisRequirementsInfo)
+
+    # --- Phase 1 contract extensions (answer shape emitted by LLM) ---
+    answer_kind: Optional[AnswerKind] = Field(
+        default=None,
+        description=(
+            "Shape of the final answer. The LLM should emit this directly; "
+            "downstream stages trust it without re-interpretation."
+        ),
+    )
+    render_style: Optional[RenderStyle] = Field(
+        default=None,
+        description=(
+            "Whether the answer should be rendered deterministically (data lookup) "
+            "or via LLM narrative (explanation, causal reasoning)."
+        ),
+    )
+    grouping: Optional[Grouping] = Field(
+        default=None,
+        description="How answer rows should be grouped: none, by_entity, by_period, by_metric.",
+    )
+    entity_scope: Optional[str] = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "Scoping hint for entity selection, e.g. 'regulated_plants', 'all', "
+            "or specific entity names. Tells downstream stages which entities to include."
+        ),
+    )
 
     @field_validator("raw_query", "canonical_query_en")
     @classmethod

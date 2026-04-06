@@ -42,6 +42,7 @@ ALLOWED_AGENT_TOOL_NAMES = {
 }
 
 
+# JSON schemas are the only tool surface exposed to the bounded agent loop.
 AGENT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "get_prices",
@@ -103,6 +104,7 @@ AGENT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
 ]
 
 
+# Provider helpers and response parsers normalize differences across LLM backends.
 def _build_agent_model():
     llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
     try:
@@ -206,6 +208,7 @@ def _query_prefers_data_exit(query: str) -> bool:
     return any(marker in q for marker in data_markers)
 
 
+# Dataset selection prefers the result whose tool semantics best match the request.
 def _score_dataset_for_query(query: str, result: ToolExecutionResult) -> int:
     q = query.lower()
     score = 0
@@ -242,6 +245,7 @@ def _select_primary_dataset(
     return dataset_id, result
 
 
+# Main loop alternates between model turns and deterministic tool execution.
 def _attach_dataset(ctx: QueryContext, dataset_id: str, result: ToolExecutionResult) -> QueryContext:
     ctx.used_tool = True
     ctx.tool_name = result.name

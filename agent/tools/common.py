@@ -13,6 +13,7 @@ from core.query_executor import ENGINE, check_dataframe_memory
 from .types import ToolResult
 
 
+# Input normalization helpers keep downstream SQL builders on a strict contract.
 def normalize_limit(limit: Optional[int]) -> int:
     """Clamp tool row limits to a safe bounded value."""
     if limit is None:
@@ -54,6 +55,7 @@ def last_day_of_month(year: int, month: int) -> str:
     return (next_month - dt.timedelta(days=1)).isoformat()
 
 
+# Query runners always enforce read-only access and consistent DataFrame output.
 def run_text_query(sql: str, params: Optional[Dict[str, Any]] = None) -> ToolResult:
     """Execute read-only SQL text and return (df, cols, rows)."""
     params = params or {}

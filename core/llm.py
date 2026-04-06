@@ -65,8 +65,10 @@ from skills.loader import (
     _extract_section,
 )
 from contracts.question_analysis_catalogs import (
+    QUESTION_ANALYSIS_ANSWER_KIND_GUIDE,
     QUESTION_ANALYSIS_CHART_POLICY,
     QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG,
+    QUESTION_ANALYSIS_FILTER_GUIDE,
     QUESTION_ANALYSIS_QUERY_TYPE_GUIDE,
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
@@ -1862,11 +1864,12 @@ def llm_analyze_question(
     history_str = str(conversation_history) if conversation_history else ""
     schema_hint = QuestionAnalysis.model_json_schema()
     cache_input = (
-        f"question_analysis_v4|{user_query}|{history_str}|"
+        f"question_analysis_v5|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOPIC_CATALOG)}|"
         f"{_compact_json(QUESTION_ANALYSIS_TOOL_CATALOG)}|"
-        f"{_compact_json(QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG)}"
+        f"{_compact_json(QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG)}|"
+        f"{_compact_json(QUESTION_ANALYSIS_ANSWER_KIND_GUIDE)}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -1892,6 +1895,12 @@ UNTRUSTED_CONVERSATION_HISTORY:
 QUERY_TYPE_GUIDE:
 <<<{_compact_json(QUESTION_ANALYSIS_QUERY_TYPE_GUIDE)}>>>
 
+ANSWER_KIND_GUIDE:
+<<<{_compact_json(QUESTION_ANALYSIS_ANSWER_KIND_GUIDE)}>>>
+
+FILTER_GUIDE:
+<<<{_compact_json(QUESTION_ANALYSIS_FILTER_GUIDE)}>>>
+
 TOPIC_CATALOG:
 <<<{_compact_json(QUESTION_ANALYSIS_TOPIC_CATALOG)}>>>
 
@@ -1908,6 +1917,17 @@ Respond with JSON exactly matching this schema:
 {_compact_json(schema_hint)}
 
 Important rules:
+- `answer_kind` must be set: choose the answer shape the user expects from ANSWER_KIND_GUIDE.
+  - `scalar`: single value/fact. `list`: entity enumeration. `timeseries`: period-indexed data.
+  - `comparison`: side-by-side periods/entities. `explanation`: why/how causal reasoning.
+  - `forecast`: projection/trend. `scenario`: what-if/CfD. `knowledge`: conceptual/regulatory. `clarify`: ambiguous.
+  - When in doubt between `scalar` and `timeseries`, prefer `timeseries` (safer shape).
+  - When in doubt between `list` and `timeseries`, check if the user wants entities enumerated or data over time.
+- `render_style` must be set: `deterministic` for data lookups/tables, `narrative` for explanations/causal reasoning.
+  - Use the `render_style_hint` from ANSWER_KIND_GUIDE as default, but override when the user explicitly asks for explanation of data.
+- `grouping`: `none` for single-entity/single-metric, `by_entity` for multi-entity, `by_period` for time comparison, `by_metric` for multi-metric.
+- `entity_scope`: set when the question targets a specific subset (e.g., `regulated_plants`, `thermal`, entity names). Null for broad/unscoped queries.
+- `filter` in `params_hint`: set when the question includes a numeric threshold (e.g., "price above 15", "tariff exceeding 10"). Use FILTER_GUIDE for patterns. Null when no threshold is mentioned.
 - `canonical_query_en` must preserve the meaning, not answer the question.
 - `preferred_path` must be one of the allowed enum values.
 - `preferred_path` routing: use `knowledge` for `conceptual_definition`, `regulatory_procedure`, `ambiguous`, or `unsupported`; use `tool` or `sql` for `data_retrieval`, `data_explanation`, and `factual_lookup`; for `comparison` and `forecast`, use `knowledge` when the question is about concepts, policy, or market design, and `tool` or `sql` when the question is about specific numeric data or time-series.

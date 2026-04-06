@@ -8,6 +8,7 @@ from .common import normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
 
 
+# Canonical balancing buckets accepted by the composition tool.
 ALLOWED_BALANCING_ENTITIES = (
     "import",
     "deregulated_hydro",
@@ -20,6 +21,7 @@ ALLOWED_BALANCING_ENTITIES = (
 )
 
 
+# Normalize user-provided entity names while preserving the public output order.
 def _validate_entities(entities: Optional[Iterable[str]]) -> List[str]:
     if not entities:
         return list(ALLOWED_BALANCING_ENTITIES)
@@ -47,11 +49,13 @@ def get_balancing_composition(
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
 
+    # Build the dynamic pivot only for the validated entity set requested.
     all_entities_sql = ", ".join([f"'{e}'" for e in ALLOWED_BALANCING_ENTITIES])
     select_expr = ",\n    ".join(
         [f"MAX(CASE WHEN entity='{e}' THEN share ELSE 0 END) AS share_{e}" for e in selected_entities]
     )
 
+    # Apply the time filters once so the share calculation and outer pivot stay aligned.
     where_parts = [
         "LOWER(REPLACE(segment, ' ', '_')) = 'balancing'",
         f"entity IN ({all_entities_sql})"
@@ -69,6 +73,7 @@ def get_balancing_composition(
 
     sql = f"""
 WITH base AS (
+    -- First calculate each entity's share of total balancing quantity per date.
     SELECT
         date,
         entity,

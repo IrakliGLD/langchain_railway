@@ -25,6 +25,7 @@ from agent.tools.types import ToolInvocation
 log = logging.getLogger("Enai")
 
 
+# Typed exceptions keep retries reserved for transient execution failures.
 class ToolTimeoutError(TimeoutError):
     """Raised when typed tool execution exceeds the configured timeout."""
 
@@ -48,6 +49,7 @@ class ToolExecutionResult:
     preview: str = ""
 
 
+# Preview helpers keep LLM-visible tool output compact and deterministic.
 def _truncate_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
@@ -66,6 +68,7 @@ def _frame_preview(df: pd.DataFrame, max_rows: int) -> str:
     return preview
 
 
+# Run tools in a worker thread so the agent loop can enforce hard timeouts.
 def _run_tool_once(invocation: ToolInvocation, timeout_seconds: int):
     executor = ThreadPoolExecutor(max_workers=1)
     future = executor.submit(execute_tool, invocation)
@@ -115,6 +118,7 @@ def format_tool_preview_message(dataset_id: str, result: ToolExecutionResult) ->
     )
 
 
+# Main adapter entrypoint: execute the tool, then package a safe preview and raw data.
 def execute_tool_for_agent(
     tool_name: str,
     params: Optional[Dict[str, Any]],

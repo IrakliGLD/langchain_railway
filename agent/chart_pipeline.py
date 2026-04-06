@@ -217,7 +217,7 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     intent = str(ctx.plan.get("intent", "")).lower()
     query_text = ctx.query.lower()
 
-    # Chart group filtering from plan
+    # Chart-plan hints can narrow the visible metrics before chart-type selection.
     chart_strategy = ctx.plan.get("chart_strategy", "single")
     chart_groups = ctx.plan.get("chart_groups", [])
 
@@ -285,7 +285,7 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         dim_map = {c: infer_dimension(c) for c in num_cols}
         dims = set(dim_map.values())
 
-    # --- Enforce max 2 dimensions per chart ---
+    # Keep mixed-dimension charts readable by limiting them to the two strongest dimensions.
     if len(dims) > 2:
         query_lower = ctx.query.lower()
         dim_best: dict[str, int] = {}
@@ -356,7 +356,7 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         has_categories=has_categories,
     )
 
-    # --- Yearly aggregation for mixed-dimension charts ---
+    # Long share-heavy timelines are rolled up yearly so the resulting chart stays readable.
     chart_aggregation = None
     if "share" in dims and len(df) > 24 and time_key and time_key in df.columns:
         try:

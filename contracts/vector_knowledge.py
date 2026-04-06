@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+# Retrieval-mode enums describe how vector knowledge should be assembled and used.
 class VectorKnowledgeMode(str, Enum):
     """How vector retrieval output is being used in the pipeline."""
 
@@ -23,6 +24,7 @@ class RetrievalStrategy(str, Enum):
     hybrid = "hybrid"
 
 
+# Stored document and chunk records mirror the Supabase persistence model.
 class VectorDocumentRecord(BaseModel):
     """Metadata for a source document stored in Supabase."""
 
@@ -100,6 +102,7 @@ class VectorRetrievalFilters(BaseModel):
     boost_terms: List[str] = Field(default_factory=list)
 
 
+# Retrieval bundles are carried through the runtime after search completes.
 class VectorKnowledgeBundle(BaseModel):
     """Structured retrieval output carried through the pipeline."""
 
@@ -115,6 +118,7 @@ class VectorKnowledgeBundle(BaseModel):
     error: str = ""
 
 
+# Registration and ingestion payloads define the write-side contract for new sources.
 class DocumentRegistration(BaseModel):
     """Input payload for registering a source document before chunk ingestion."""
 

@@ -111,7 +111,7 @@ def calculate_seasonal_stats(
     stats['incomplete_last_year'] = is_incomplete_last_year
     stats['last_year_months'] = int(last_year_months)
 
-    # 3. Calculate yearly totals (excluding incomplete last year for trends)
+    # Keep incomplete trailing years out of multi-year growth comparisons.
     complete_years = yearly_totals.iloc[:-1] if is_incomplete_last_year else yearly_totals
 
     if len(complete_years) >= 2:
@@ -133,8 +133,7 @@ def calculate_seasonal_stats(
             cagr = (pow(last_year_total / first_year_total, 1 / years_span) - 1) * 100
             stats['cagr'] = round(cagr, 1)
 
-    # 4. Year-over-year growth (same months comparison)
-    # Compare each month to the same month in previous year
+    # Compare each observed month only against the same month in the prior year.
     yoy_growth_rates = []
 
     for year in df['_year'].unique()[1:]:  # Skip first year (no previous year)
@@ -155,7 +154,7 @@ def calculate_seasonal_stats(
         stats['yoy_growth_median'] = round(np.median(yoy_growth_rates), 1)
         stats['yoy_growth_std'] = round(np.std(yoy_growth_rates), 1)
 
-    # 5. Seasonal pattern (average value per month across all years)
+    # Summarize the recurring seasonal shape by averaging each calendar month.
     monthly_avg = df.groupby('_month')[value_col].mean().sort_index()
 
     if len(monthly_avg) >= 12:

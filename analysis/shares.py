@@ -46,6 +46,7 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
         ...     df = build_balancing_correlation_df(conn)
         ...     print(df[['date', 'p_bal_gel', 'share_import']].head())
     """
+    # Assemble one monthly panel where the target price series, driver shares, and tariff layers align by date.
     sql = """
     WITH shares AS (
       SELECT
@@ -138,6 +139,7 @@ def compute_regulated_plant_sales(
         filters.append("cs.date <= :end_date")
         params["end_date"] = end_date
 
+    # Expose the actual regulated plants behind the grouped buckets used in balancing explanations.
     sql = f"""
     WITH plant_sales AS (
       SELECT
@@ -238,6 +240,7 @@ def compute_weighted_balancing_price(conn: Any) -> pd.DataFrame:
         ...     total_contribution = df['contribution_gel'].sum()
         ...     print(f"Total should equal weighted average: {total_contribution:.2f}")
     """
+    # Weight each month's observed balancing price by balancing volume to explain the all-period average.
     sql = """
     WITH t AS (
       SELECT date, entity, SUM(quantity) AS qty
@@ -329,6 +332,7 @@ def compute_entity_price_contributions(
     if price_filters:
         price_where += " AND p.date >= '2015-01-01'"
 
+    # Build one decomposition table that combines shares, observable source prices, and residual contribution.
     sql = f"""
     WITH shares AS (
       SELECT

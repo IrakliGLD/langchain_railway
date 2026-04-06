@@ -1,617 +1,1166 @@
 # Query Pipeline Architecture
 
-Comprehensive technical reference for the Enai query processing pipeline. Covers every stage, decision point, threshold, and fallback path from HTTP request to JSON response.
+Current technical reference for the `langchain_railway` query pipeline, with an explicit architectural assessment and recommended redesign.
 
-**Last updated:** 2026-03-15
-
----
-
-## 1. System Overview
-
-Enai is a conversational Q&A system for the Georgian electricity market. Users ask questions about balancing prices, generation mix, tariffs, and market composition. The system retrieves data from a PostgreSQL database, runs deterministic analysis, and returns grounded natural-language answers with optional charts.
-
-### Key Design Principles
-
-1. **Deterministic over generative.** Typed tools with parameterized SQL are preferred over LLM-generated SQL. The LLM identifies intent, but Python executes the logic. The system never trusts an LLM to produce numbers — all numeric claims are verified against raw database cells.
-2. **Context-Aware Intent Routing (Option A).** The pipeline leverages a fast LLM (Question Analyzer) to maintain conversational memory. It resolves follow-up queries (e.g., "What about 2024?") by resolving the context before selecting a deterministic Python tool.
-3. **Provenance-gated output.** Every numeric token in the final answer must trace back to a specific database cell with a SHA256 fingerprint. If coverage drops below 100%, the answer is replaced with a conservative fallback.
-4. **Defense in depth.** A firewall blocks prompt injection; typed tools prevent SQL errors; read-only transactions are enforced; and the provenance gate catches hallucination.
-5. **Decoupled Pipeline.** By separating intent identification (LLM) from data retrieval (Python), we achieve the semantic power of an LLM with the stability and security of deterministic code.
-
-### Architecture Diagram
-
-```
- Browser → Supabase Edge Function → Railway Backend
-                                      │
-                                      ├─ Stage 0:   Firewall + Heuristic Bypass
-                                      ├─ Stage 0.2: LLM Question Analyzer (Intent identification)
-                                      ├─ Stage 0.5: Keyword Router (Fast path - stateless)
-                                      │   ├─ HIT → Stage 0.6: Tool Execute
-                                      │   │         └─ Composition Enrichment (for why-queries)
-                                      │   └─ MISS → Stage 0.7: LLM Analyzer Routing (Fallback - context aware)
-                                      │              ├─ HIT → Tool Execute + Enrichment
-                                      │              └─ MISS ─┐
-                                      ├─ Agent Loop ←─────────┘ (Bounded ReACT / Skills / Knowledge)
-                                      │   ├─ data_exit → continue
-                                      │   ├─ conceptual_exit → return
-                                      │   └─ fallback_exit ─┐
-                                      ├─ SQL Fallback ←─────┘ (LLM plan + Validated SQL)
-                                      ├─ Stage 3:   Analysis Enrichment (Stats, Correlations, Trends)
-                                      ├─ Stage 4:   Summarization + Provenance Gate
-                                      └─ Stage 5:   Chart Pipeline
-```
+**Last updated:** 2026-04-05  
+**Status:** Active and corrected for the current evidence-planner pipeline
 
 ---
 
-## 2. Request Lifecycle
+## 1. Executive Summary
 
-### 2.1 Frontend → Edge Function → Railway
+The pipeline is no longer best described as "keyword router first, then analyzer fallback." The current runtime flow is:
 
-1. **User submits query** via the chat UI (`ChatPage.jsx`).
-2. **Supabase Edge Function** (`chat-with-enerbot`) handles the request:
-   - Authenticates the user via Supabase JWT token.
-   - Validates `X-App-Key` header against the shared secret.
-   - Loads the last 3 Q&A pairs from the `chat_history` table (6 rows, newest first, reversed to chronological order). Uses sequential role scanning to pair user→assistant messages resiliently.
-   - Sends to Railway: `{ query, service_tier, conversation_history? }` with headers `X-App-Key`, `X-Request-Id`.
-3. **Railway backend** (`main.py /ask POST`) receives the request:
-   - Validates `X-App-Key` against `GATEWAY_SHARED_SECRET`.
-   - Validates `Referer` header against allowed origins.
-   - Applies **backpressure gate**: if concurrent requests exceed `ASK_MAX_CONCURRENT_REQUESTS` (default 8), returns 503.
-   - Generates or validates `X-Session-Token` (HMAC-SHA256 signed).
+1. prepare context
+2. run the structured LLM question analyzer
+3. retrieve vector knowledge
+4. derive response mode and resolution policy
+5. build a deterministic evidence plan
+6. execute the primary tool step
+7. execute remaining evidence-plan steps and merge them
+8. run deterministic analysis enrichment
+9. choose a deterministic direct answer when possible, otherwise call the summarizer LLM
+10. run provenance gating and chart generation
 
-### 2.2 Session Management
+The system works, but it has a meaningful architectural weakness: semantics are spread across too many layers. Query meaning is interpreted in the analyzer, again in router heuristics, again in evidence-planner rules, and again in Stage 4 summarizer special cases. That is the main reason individual user questions can require targeted fixes.
 
-- **Session token issuance:** Railway generates an HMAC-SHA256 signed session token on first request. The token is returned in the `X-Session-Token` response header.
-- **In-process session store:** Thread-safe dictionary keyed by session ID. Stores up to `SESSION_HISTORY_MAX_TURNS` (default 3) Q&A pairs per session. Sessions expire after `SESSION_IDLE_TTL_SECONDS` (default 3600).
-- **History seeding:** If the in-process session has no history (e.g., first request after deploy) but the edge function provided `conversation_history`, Railway seeds the session store with those turns. Individual items are truncated to 2000 characters to prevent memory bloat.
-- **History consumption:** The bound history is passed to `process_query()` and consumed by the LLM Question Analyzer (Stage 0.2) and the Summarizer (Stage 4).
+The problem is not that the codebase is generally "bad." The main problem is missing middle-layer structure:
+
+- tools return tool-shaped data, not answer-shaped evidence
+- the analyzer produces routing hints, not a strong answer contract
+- the summarizer has accumulated business logic that should live earlier in the pipeline
+
+This also means the LLM is not used as efficiently as it could be. It is strong at normalization, ambiguity handling, and narrative explanation, but today it is also being used to bridge gaps between raw tool output and final answer shape.
 
 ---
 
-## 3. Pipeline Stages
-
-All stages are orchestrated by `pipeline.process_query()`. Each stage records its duration in `ctx.stage_timings_ms` and emits a structured `TRACE` log line with timing and decision data.
-
-### 3.0 Stage 0: Prepare Context
-
-**Function:** `planner.prepare_context(ctx)`
-
-Three cheap heuristic checks before any LLM call:
-
-1. **Language detection** — Identifies EN, KA (Georgian), RU, or ZH from the query text. Sets `ctx.lang_instruction` which is prepended to all subsequent LLM prompts (e.g., "Respond in Georgian").
-
-2. **Analysis mode selection** — Classifies the query as `light` or `analyst`:
-   - **Light mode** (higher priority): Triggered by simple-fact patterns — "what is", "what was", "list", "show", "give me", plus Georgian/Russian equivalents.
-   - **Analyst mode**: Triggered by deep-analysis keywords — "trend over time", "correlation", "driver", "impact on", "analyze", "what drives", "what causes", or any word in the analytical keyword set (trend, change, growth, compare, volatility, etc.).
-   - **Default:** `light`.
-
-3. **Conceptual question detection** — Regex scan for definition-seeking patterns ("What is a PPA?", "რა არის...", "что такое..."). If detected, the pipeline **short-circuits** directly to `summarizer.answer_conceptual()`, bypassing all data stages. This avoids unnecessary LLM calls, tool routing, and SQL generation for pure knowledge questions.
-
-### 3.0.2 Stage 0.2: LLM Question Analyzer
-
-**Function:** `planner.analyze_question_active(ctx)` or `planner.analyze_question_shadow(ctx)`
-**Controlled by:** `ENABLE_QUESTION_ANALYZER_HINTS` (active mode) or `ENABLE_QUESTION_ANALYZER_SHADOW` (shadow/logging-only mode)
-
-Calls `llm_analyze_question()` which sends the query + conversation history + domain catalogs to the LLM (using `ROUTER_MODEL` if configured, otherwise the global default). Returns a structured `QuestionAnalysis` Pydantic model:
-
-- **classification**: `query_type` (data_retrieval, data_explanation, conceptual_definition, etc.), `analysis_mode` (light/analyst), `confidence` (0.0-1.0)
-- **routing**: `preferred_path` (tool/sql/knowledge/clarify), `prefer_tool` (bool)
-- **tooling**: `candidate_tools` — list of `(name, score, params_hint, reason)` sorted by score
-- **sql_hints**: `period` (start_date, end_date), `entities`, `metrics`
-- **canonical_query_en**: English translation of the query for consistent parameter extraction
-
-**Disagreement logging:** The trace logs whether the analyzer and heuristic disagree on conceptual classification (`conceptual_disagree`) and analysis mode (`mode_disagree`). This is essential for tuning the heuristic layer.
-
-**Shadow mode:** When `ENABLE_QUESTION_ANALYZER_SHADOW=true` and `ENABLE_QUESTION_ANALYZER_HINTS=false`, the analyzer runs and logs results but does NOT influence routing decisions. This allows comparison logging before cutover.
-
-### 3.0.5 Stage 0.5: Keyword Router (Fast Path)
-
-**Function:** `router.match_tool(query, is_explanation)`
-**Returns:** `ToolInvocation(name, params, confidence, reason)` or `None`
-
-The keyword router is the primary routing mechanism — zero LLM cost, <10ms latency. It evaluates the query against four deterministic keyword chains:
-
-**Keyword chains:**
-
-| Tool | Trigger keywords (subset) | Example query |
-|------|--------------------------|---------------|
-| `get_tariffs` | tariff, regulated, gnerc, enguri, gardabani, capacity fee | "What are the regulated tariffs?" |
-| `get_balancing_composition` | share, composition, mix, proportion, ppa, import share | "What is the import share?" |
-| `get_generation_mix` | generation, technology, hydro, thermal, wind, solar, demand | "Show generation by technology" |
-| `get_prices` | price, cost, balancing price, deregulated, exchange rate, xrate | "Balancing price trend in 2024" |
-
-**Semantic fallback** — When no keyword chain matches, the router computes a semantic score for each tool:
-- Multi-word terms (e.g., "balancing price"): +2.0 for exact match in query
-- Single-word terms (e.g., "price"): +1.0 for word-level match
-- Score = `min(1.0, raw_hits / max(2.0, len(terms) * 0.35))`
-- **Minimum score threshold:** `ROUTER_SEMANTIC_MIN_SCORE` (default 0.62)
-- **Competitive margin:** Top score must exceed second-best by at least **0.08** to avoid ambiguous routing
-- **Confidence:** `min(0.95, max(0.65, score))` — bounded between 0.65 and 0.95
-
-**is_explanation detection** — Before calling the router, the pipeline checks if the query is an explanation request. Sources (in priority order):
-1. If the LLM Question Analyzer classified the query as `data_explanation` or `conceptual_definition` → `is_exp=True`
-2. Otherwise, keyword scan for "why", "explain", "reason" (plus Georgian/Russian equivalents) → `is_exp=True`
-
-This flag affects date range extraction: for "why" queries, the router automatically expands the start date to include the previous month for month-over-month delta calculations.
-
-**Parameter extraction** — When a tool matches, the router extracts parameters using deterministic regex:
-- **Dates:** "from 2020 to 2024", "2020-2024", "june 2023", standalone "2024"
-- **Currency:** "in USD", "in GEL" → defaults to "GEL"
-- **Price metric:** "balancing", "deregulated", "guaranteed capacity", "exchange rate" → defaults to "balancing"
-- **Entities:** Tool-specific entity lists for tariffs, balancing composition, generation types
-
-### 3.0.6 Stage 0.6: Tool Execution
-
-**Function:** `execute_tool(invocation)` → `(DataFrame, columns, rows)`
-
-When the router returns a match:
-1. Execute the typed tool (parameterized SQL via `run_text_query()` — no LLM-generated SQL).
-2. **Stamp provenance** — Record the exact columns, rows, source="tool", and a hash of the tool invocation for later verification.
-3. **Relevance validation** — `validate_tool_relevance(query, tool_name)` checks whether the tool output is semantically relevant to the query. If irrelevant (e.g., router matched `get_prices` but query is "What is GNERC?"):
-   - Clear the tool result (empty DataFrame)
-   - Clear provenance
-   - Set `ctx.used_tool = False`
-   - Fall through to the next routing layer
-
-### 3.0.7 Stage 0.7: LLM Analyzer Routing (Fallback)
-
-**When:** The keyword router returned `None` (no match) AND `ENABLE_QUESTION_ANALYZER_HINTS=true` AND the Question Analyzer produced a result in Stage 0.2.
-
-**Function:** `planner.build_tool_invocation_from_analysis(qa, raw_query)`
-
-This stage converts the LLM analyzer's structured output into a concrete `ToolInvocation`. The analyzer sees conversation history, so it can resolve follow-up queries like "What about 2024?" that the keyword router cannot.
-
-**Routing gate:**
-- Primary: `preferred_path` must be `TOOL`
-- Soft boost: `prefer_tool=True` allows routing for ambiguous paths (e.g., `CLARIFY`), but NOT when `preferred_path` is explicitly `SQL` or `KNOWLEDGE`
-- **Minimum tool score:** 0.55 on the top candidate
-
-**Parameter resolution cascade** (3-tier, per parameter):
-1. Analyzer's `params_hint` (from the LLM)
-2. Analyzer's `sql_hints.period` (structured period extraction)
-3. Deterministic regex extraction (same functions as the keyword router)
-
-If either start_date or end_date is still missing after tiers 1-2, the regex fallback fills in whichever date is absent.
-
-**After tool execution:** Same flow as Stage 0.6 — provenance stamping, relevance validation, and fallthrough on failure.
-
-### 3.1 Composition Enrichment (Why-Queries)
-
-**Function:** `_enrich_prices_with_composition(ctx, invocation, is_explanation)`
-
-**When:** `is_explanation=True` AND tool is `get_prices` AND the result has no `share_*` columns yet.
-
-**What it does:** Automatically fetches `get_balancing_composition` with the same date range and merges the share columns (share_import, share_deregulated_hydro, share_regulated_hpp, etc.) into the price DataFrame via a left join on the date column.
-
-**Why:** Users asking "Why did balancing prices increase?" need both the price trend AND the supply composition shift to form a valid causal answer. Without composition data, the summarizer can only describe the price change, not explain it.
-
-**Runs identically** from both Stage 0.5 (keyword router) and Stage 0.7 (analyzer router) paths. Non-fatal — if the composition fetch fails, the pipeline continues with price data only.
-
-### 3.2 Agent Loop
-
-**Function:** `orchestrator.run_agent_loop(ctx)`
-**When:** No tool route was used AND `ENABLE_AGENT_LOOP=true`
-**Controlled by:** `AGENT_MAX_ROUNDS` (default 3)
-
-A bounded ReACT-style agent loop that gives the LLM access to typed tools:
-
-**Tool whitelist:** `get_prices`, `get_balancing_composition`, `get_tariffs`, `get_generation_mix`
-
-**Per-round flow:**
-1. LLM receives: system prompt (instruction + language) + user query + previous tool results
-2. LLM decides: call a tool, or return a text answer
-3. If tool call: execute with timeout (`AGENT_TOOL_TIMEOUT_SECONDS`, default 15s), format preview (`AGENT_TOOL_PREVIEW_ROWS`, default 10 rows; `AGENT_TOOL_PREVIEW_MAX_CHARS`, default 3000 chars)
-4. Feed result back to LLM for next round
-
-**Three exit conditions:**
-
-| Exit | Trigger | What happens |
-|------|---------|-------------|
-| `data_exit` | LLM returns content + datasets collected + query prefers data | Primary dataset selected by keyword relevance scoring; attached to context for enrichment + summarization |
-| `conceptual_exit` | LLM returns content + no datasets (or query doesn't prefer data) | Answer used directly; pipeline returns |
-| `fallback_exit` | Model error, ambiguous datasets, empty response, max rounds exceeded | Falls through to SQL fallback |
-
-After `data_exit`, the result is validated by `validate_tool_relevance()`. If blocked, the exit is downgraded to `fallback_exit`.
-
-### 3.3 SQL Fallback (Legacy Path)
-
-**When:** `ctx.used_tool` is still False after all routing attempts.
-
-**Stage 1: Generate Plan** — `planner.generate_plan(ctx)`
-- LLM generates a JSON plan + raw SQL in a single call, separated by `---SQL---`
-- Plan structure: `{intent, target, period, chart_strategy?, chart_groups?}`
-- Uses `PLANNER_MODEL` if configured
-- Retries once on parsing failure; salvages SQL even if plan JSON is malformed
-- Checks `should_skip_sql_execution()` — certain intents (pure conceptual, ambiguous) bypass SQL
-
-**Stage 2: SQL Execution** — `sql_executor.validate_and_execute(ctx)`
-
-SQL goes through multiple validation/repair steps:
-
-1. **Sanitization:** Strip markdown fences, normalize whitespace
-2. **Table whitelist check:** Extract table names from SQL; reject if any table not in `ALLOWED_TABLES`:
-   - `dates_mv`, `entities_mv`, `price_with_usd`, `tariff_with_usd`, `tech_quantity_view`, `trade_derived_entities`, `monthly_cpi_mv`, `energy_balance_long_mv`
-3. **Synonym repair:** Auto-replace common misnames:
-   - Tables: "prices" → "price_with_usd", "tariffs" → "tariff_with_usd"
-   - Columns: "tech_type" → "type_tech", "quantity_mwh" → "quantity_tech"
-4. **LIMIT enforcement:** Ensures every query has a LIMIT clause (max `MAX_ROWS`, default 5000)
-5. **Balancing pivot injection:** For share/composition queries on `trade_derived_entities`, auto-injects a CTE with CASE WHEN pivots for all entity types
-6. **Tech type filtering:** Applies supply/demand/transit type filters based on query keywords
-
-**Error recovery:**
-- `UndefinedColumn` on `trade_derived_entities` → auto-inject balancing pivot CTE and retry
-- `UndefinedColumn` on other tables → column synonym replacement and retry
-- All other errors → propagate up
-
-**Security:** Read-only transactions enforced. Dangerous SQL (DROP, TRUNCATE, ALTER, INSERT, DELETE, UPDATE) is blocked at the firewall stage before any SQL execution.
-
-### 3.4 Stage 3: Analysis Enrichment
-
-**Function:** `analyzer.enrich(ctx)`
-
-All computation is deterministic Python — zero LLM involvement. The enrichment adds derived metrics to the context for the summarizer:
-
-1. **Statistical analysis:**
-   - Pearson correlation between price and composition share columns
-   - Trend calculation (linear regression slope)
-   - CAGR (compound annual growth rate) for multi-year data
-   - Year-over-year comparison
-   - Seasonal pattern detection (summer vs winter months)
-
-2. **Share shift filtering:**
-   - Only month-over-month balancing share shifts with absolute delta >= **0.005** (0.5 percentage points) are considered significant
-   - Below this threshold, shifts are treated as noise
-
-3. **Why-analysis signal detection:**
-   - Computes `price_direction` vs `mix_pressure` (did expensive sources increase?) vs `xrate_direction`
-   - **Contradiction guard:** If price direction contradicts both mix pressure and exchange rate direction, the analyzer generates a deterministic override string (e.g., "The observed composition shift points in the opposite direction..."). This string **replaces** the LLM summary to prevent hallucinated causal claims.
-   - **Missing data guard:** If no share data is available, explicitly outputs "No balancing composition data was available" rather than a false "No shift observed."
-
-4. **Trendline pre-calculation:** If enabled, computes linear trendlines with optional forward extension for chart overlays.
-
-### 3.5 Stage 4: Summarization + Provenance Gate
-
-**Function:** `summarizer.summarize_data(ctx)`
-
-#### Summarization
-
-- **Deterministic override path:** If `share_summary_override` or `why_summary_override` is populated (e.g., by the contradiction guard), the LLM path is completely bypassed. The override text becomes the answer.
-- **LLM summarization path:** The LLM receives: user query + data preview (first 200 rows) + stats hint + domain knowledge. Uses `SUMMARIZER_MODEL` if configured.
-- **Structured output:** `SummaryEnvelope(answer, claims, citations, confidence)`
-  - `answer`: Natural-language narrative
-  - `claims`: List of factual claims extracted from the answer
-  - `citations`: List of data references
-  - `confidence`: Float 0.0-1.0
-- **Grounding check:** After generation, the system compares every numeric token in the answer+claims to the source data. Match ratio must be >= **0.7** (70%). If below, retries with `strict_grounding=True`.
-
-#### Provenance Gate
-
-The provenance gate is the final quality barrier. It verifies that every numeric claim in the LLM's answer traces back to an exact database cell.
-
-**Step-by-step:**
-1. Extract all numeric tokens from `ctx.summary_claim_provenance`
-2. If no claims at all → gate passes (reason: `no_claims`)
-3. If no numeric claims → gate passes (reason: `no_numeric_claims`)
-4. For each numeric claim, check if it maps to an exact cell reference with: `(row_index, column, value, SHA256_fingerprint)`
-5. Compute coverage = grounded_numeric_claims / total_numeric_claims
-
-**Gate decision:**
-- **Pass:** No ungrounded claims AND coverage >= `PROVENANCE_MIN_COVERAGE` (default **1.0** = 100%)
-- **Fail:** ANY ungrounded claim OR coverage below threshold
-
-**On failure:**
-- Answer is **completely replaced** with: "I could not produce citation-grade grounding for all numeric claims..."
-- Claims list cleared
-- Confidence forced to `min(current, 0.2)`
-- Unmatched tokens logged for debugging
-
-**Provenance limits:**
-- Max references per token: 4
-- Max references per claim: 12
-- Max total citations: 30
-- Max rows scanned: 200
-
-### 3.6 Stage 5: Chart Pipeline
-
-**Function:** `chart_pipeline.build_chart(ctx)`
-
-#### Chart Type Selection
-
-The pipeline infers chart type from the data structure:
-
-| Condition | Chart Type |
-|-----------|-----------|
-| Time column + categories + "share" dimension | `stackedbar` |
-| Time column + categories | `line` |
-| Time column only | `line` |
-| Categories + "share" + unique categories <= 8 | `pie` |
-| Categories + "share" + unique categories > 8 | `bar` |
-| Categories only | `bar` |
-| Default | `line` |
-
-Time detection keywords: "date", "year", "month" (plus Georgian equivalents).
-Category detection keywords: "type", "sector", "entity", "source", "segment", "technology", "region", etc.
-
-#### Series Limiting
-
-Maximum **3 series** per chart. When exceeded, columns are scored by relevance:
-- Price/tariff keywords: +10
-- Exchange rate keywords: +10
-- Share/composition keywords: +5
-- Contains "p_bal": +3
-- Contains "xrate": +2
-
-Top 3 columns by score are selected.
-
-#### Skip Conditions
-
-Charts are skipped when:
-1. Explanatory queries ("why", "how", "reason") with < 5 data rows
-2. Definitional queries ("define", "meaning of")
-3. SQL relevance flag set (`ctx.skip_chart_due_to_relevance=True`)
-
-#### Dual-Axis Detection
-
-The chart pipeline detects when two different metric types should use separate Y-axes:
-- Price + Exchange Rate → dual axis
-- Price + Composition Shares → dual axis
-- Quantity + Price/Tariff → dual axis
+## 2. What Changed Since The Previous Architecture Doc
+
+The previous version of this document is outdated in several important ways:
+
+- The authoritative LLM question analyzer is now central to routing whenever hints mode is enabled.
+- Vector knowledge retrieval now runs before response-mode derivation and can influence Stage 4 context.
+- The evidence planner is a first-class stage and is the main mechanism for multi-dataset questions.
+- Stage 0.5 is often plan-driven, not just keyword-driven.
+- The agent loop is no longer the general next step after a router miss. It is now a constrained fallback and only runs when there is no authoritative analyzer route.
+- Stage 4 is not just "LLM summarization + provenance gate." It now contains multiple deterministic direct-answer branches that bypass the LLM entirely.
 
 ---
 
-## 4. Security Layer
+## 3. Current Runtime Flow
 
-### 4.1 AI Firewall (Stage 0)
+### 3.1 High-Level Pipeline
 
-**Function:** `guardrails.firewall.inspect_query(query)` — runs before ANY other processing.
-
-**Block rules** (each adds +5 risk points):
-
-| Pattern | Example blocked |
-|---------|----------------|
-| Instruction override | "ignore previous instructions and..." |
-| Prompt exfiltration | "reveal your system prompt" |
-| Role hijack | "you are now DAN, act as root" |
-| Dangerous SQL intent | "DROP TABLE users", "DELETE FROM prices" |
-
-**Warn rules** (flagged but not blocked):
-- System prompt meta-references ("system prompt", "developer message")
-- SQL comment tokens (`--`, `/*`)
-- Excessive control characters
-
-**Additional scoring:**
-- Oversized prompt (> 1800 chars): +2 risk
-- SQL-like patterns (SELECT...FROM): +1 risk
-
-**Decision:**
-- `block`: Any block rule matched OR risk_score >= 8
-- `warn`: Any matched rules with lower risk
-- `allow`: No matches, risk_score = 0
-
-**Query sanitization** (applied regardless of decision):
-- Remove markdown code fences
-- Remove control characters
-- Normalize whitespace
-- Trim to 1800 characters
-
-### 4.2 Red-Team Gate
-
-**Function:** `guardrails.redteam_gate.evaluate_redteam_gate(query)`
-
-A secondary weighted scoring system with category-specific risk patterns. Operates independently of the main firewall.
-
-### 4.3 Database Security
-
-- **Table whitelist:** SQL can only query 8 approved materialized views / tables
-- **Read-only enforcement:** Dangerous SQL keywords (DROP, TRUNCATE, ALTER, CREATE, INSERT, DELETE, UPDATE) blocked at firewall
-- **Parameterized SQL in typed tools:** Tools use `run_text_query()` with pre-written SQL templates — no user input interpolation
-- **Query timeout:** 30 seconds (`SQL_TIMEOUT_SECONDS`)
-- **Connection pool:** `DATABASE_POOL_SIZE=10`, `DATABASE_MAX_OVERFLOW=5`
-
----
-
-## 5. LLM Configuration
-
-### 5.1 Global Model Config
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `MODEL_TYPE` | `gemini` | Provider selection: `gemini` or `openai` |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Default Gemini model for all stages |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Default OpenAI model (when MODEL_TYPE=openai) |
-
-### 5.2 Per-Stage Overrides
-
-Each pipeline stage can use a different model. When set, overrides the global default for that stage only. Only Gemini model names are supported for overrides.
-
-| Env Var | Stage | Typical use |
-|---------|-------|-------------|
-| `ROUTER_MODEL` | Question Analyzer (Stage 0.2) | Cheap/fast model for intent classification |
-| `PLANNER_MODEL` | Plan + SQL Generation (Stage 1) | Capable model for SQL generation |
-| `SUMMARIZER_MODEL` | Summarization (Stage 4) | Capable model for grounded narrative |
-
-### 5.3 Model Instance Management
-
-`get_llm_for_stage(stage_model)` in `core/llm.py`:
-- If no override (or override matches global default) → returns the global singleton (zero overhead)
-- If override set + `GOOGLE_API_KEY` present → creates and caches a dedicated `ChatGoogleGenerativeAI` instance
-- If override set + `GOOGLE_API_KEY` missing → logs warning, falls back to global default
-- Instances cached per model name for the lifetime of the process
-
-### 5.4 Circuit Breakers
-
-Separate circuit breakers for LLM and database:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `LLM_CB_FAILURE_THRESHOLD` | 5 | Failures before circuit opens |
-| `LLM_CB_RESET_TIMEOUT_SECONDS` | 30 | Seconds before retry after open |
-| `DB_CB_FAILURE_THRESHOLD` | 5 | Same, for database |
-| `DB_CB_RESET_TIMEOUT_SECONDS` | 30 | Same, for database |
-
-When a circuit breaker opens, all requests to that provider fail fast with a `RuntimeError` until the reset timeout.
-
-### 5.5 LLM Response Cache
-
-In-memory hash-based cache (`LLMResponseCache`):
-- Key: SHA256 of the prompt string (first 16 chars)
-- Max size: `CACHE_MAX_SIZE` (default 1000)
-- Eviction: Oldest 10% when full (`CACHE_EVICTION_PERCENT=0.1`)
-- Cached: Plan+SQL generation, domain reasoning, question analysis
-- Not cached: Summarization (varies by data context)
-
----
-
-## 6. Feature Flags & Configuration
-
-### Feature Flags
-
-| Flag | Default | Effect |
-|------|---------|--------|
-| `ENABLE_TYPED_TOOLS` | `true` | Enable/disable the entire typed tool routing layer (Stages 0.5-0.7) |
-| `ENABLE_AGENT_LOOP` | `true` | Enable/disable the ReACT agent loop fallback |
-| `ENABLE_QUESTION_ANALYZER_HINTS` | `true` | Active mode: analyzer output influences routing (Stage 0.7) |
-| `ENABLE_QUESTION_ANALYZER_SHADOW` | `false` | Shadow mode: analyzer runs but doesn't influence routing (logging only) |
-| `ENABLE_TRACE_DEBUG_ARTIFACTS` | `false` | Emit full debug artifacts (raw SQL, full analysis objects) in traces |
-
-### Key Thresholds
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `MAX_ROWS` | 5000 | Maximum rows returned from any SQL query |
-| `ROUTER_SEMANTIC_MIN_SCORE` | 0.62 | Minimum semantic score for router fallback match |
-| `PROVENANCE_MIN_COVERAGE` | 1.0 | Minimum provenance coverage (1.0 = 100%) |
-| `AGENT_MAX_ROUNDS` | 3 | Maximum agent loop iterations |
-| `AGENT_TOOL_TIMEOUT_SECONDS` | 15 | Per-tool execution timeout in agent loop |
-| `AGENT_TOOL_PREVIEW_ROWS` | 10 | Rows shown to LLM in tool preview |
-| `AGENT_TOOL_PREVIEW_MAX_CHARS` | 3000 | Max chars in tool preview |
-| `PROMPT_BUDGET_MAX_CHARS` | 30000 | Maximum prompt size sent to LLM |
-| `SESSION_HISTORY_MAX_TURNS` | 3 | Q&A pairs stored per session |
-| `SESSION_IDLE_TTL_SECONDS` | 3600 | Session expiry (1 hour) |
-| `TRACE_TEXT_MAX_CHARS` | 800 | Max text length in trace events |
-| `TRACE_MAX_LIST_ITEMS` | 8 | Max list items in trace events |
-
-### Cost Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `OPENAI_INPUT_COST_PER_1K_USD` | 0 | USD per 1K input tokens (OpenAI) |
-| `OPENAI_OUTPUT_COST_PER_1K_USD` | 0 | USD per 1K output tokens (OpenAI) |
-| `GEMINI_INPUT_COST_PER_1K_USD` | 0 | USD per 1K input tokens (Gemini) |
-| `GEMINI_OUTPUT_COST_PER_1K_USD` | 0 | USD per 1K output tokens (Gemini) |
-
----
-
-## 7. Observability
-
-### Per-Request Telemetry
-
-Every request is assigned a `trace_id` (UUID). Per-request LLM usage is tracked via `ContextVar`:
-- `llm_calls`: Number of LLM API calls in this request
-- `prompt_tokens`, `completion_tokens`, `total_tokens`: Token counts
-- `estimated_cost_usd`: Cost estimate based on configured rates
-- `models`: Per-model breakdown
-
-Exposed in response headers: `X-Trace-ID`, `X-LLM-Total-Tokens`, `X-LLM-Estimated-Cost-USD`.
-
-### Stage Timing
-
-Each pipeline stage records its wall-clock duration in `ctx.stage_timings_ms`. A structured `TRACE` JSON line is emitted:
-
-```json
-{
-  "trace_id": "abc-123",
-  "session_id": "def-456",
-  "stage": "stage_0_5_router_match",
-  "duration_ms": 3.42,
-  "extra": { "matched": true }
-}
+```text
+HTTP /ask
+  -> Stage 0   prepare_context
+  -> Stage 0.2 question analyzer (LLM, structured JSON)
+  -> Stage 0.3 vector knowledge retrieval
+  -> response_mode + resolution_policy derivation
+  -> Stage 0.4 evidence planner
+  -> Stage 0.5 / 0.6 primary tool execution
+  -> Stage 0.7 analyzer tool route fallback
+  -> Stage 0.8 evidence loop + evidence merge
+  -> Stage 1/2 legacy planner + SQL fallback (only if no usable tool path)
+  -> Stage 3 analyzer enrichment
+  -> Stage 4 deterministic direct answer OR LLM structured summary
+  -> provenance gate
+  -> Stage 5 chart builder
 ```
 
-### Structured Trace Events
+### 3.2 Short-Circuit Paths
 
-Detailed decision data is emitted via `trace_detail()` with `TRACE_DETAIL` prefix:
+There are several early exits:
 
-| Stage | Events | Key data |
-|-------|--------|----------|
-| stage_0_2_question_analyzer | validated, artifact, error | query_type, preferred_path, confidence, candidate_tools |
-| stage_0_5_router_match | (via _trace_stage) | matched (bool) |
-| stage_0_7_analyzer_route | decision | invocation_built, preferred_path, top_tool, top_score |
-| stage_1_generate_plan | plan_ready, artifact | plan dict, raw_sql_present, question_analysis_used |
-| stage_2_sql_execute | sql_ready, artifact, blocked, sql_result, error | sql_hash, tables, rows, cols, elapsed_ms |
-| stage_3_analyzer_enrich | enrichment_ready, why_analysis | share_override, why_override, correlation_keys |
-| stage_4_summarize_data | provenance_gate, summary_ready, final_summary | gate_passed, coverage, confidence, claims_count |
-| stage_5_chart_build | selection | chart_type, row_count, reason |
+- `ResolutionPolicy.CLARIFY` -> `summarizer.answer_clarify()`
+- `ResponseMode.KNOWLEDGE_PRIMARY` -> `summarizer.answer_conceptual()`
+- deterministic Stage 4 direct-answer branches -> skip Stage 4 LLM
 
-### Endpoints
+This means the pipeline is not a simple linear chain anymore. It is a policy-driven decision graph.
 
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /healthz` | Liveness probe — returns `{"status": "ok"}` |
-| `GET /readyz` | Readiness probe — checks DB connection + schema reflection |
-| `GET /metrics` | Full metrics snapshot: request counts, LLM usage, tool stats, cache stats, circuit breaker state, per-stage timing averages |
+### 3.3 Current Decision Tree
 
-### Metrics Inventory (34+ counters)
+This is the actual branching logic as implemented in `pipeline.py::process_query()`.
 
-**Request:** request_count, total_request_time, error_count
-**LLM:** llm_call_count, prompt/completion/total_tokens, estimated_cost_usd, per-model breakdown
-**SQL:** sql_query_count, total_sql_time
-**Tools:** tool_call_count, tool_error_count, total_tool_time
-**Agent:** agent_round_count, data/conceptual/fallback_exit_count
-**Guardrails:** firewall_allow/warn/block_count, summary_schema/grounding_failure_count, provenance_gate_failure_count, relevance_block_count
-**Router:** deterministic/semantic/analyzer_match_count, miss_count, fallback_intents
-**Resilience:** circuit_open_events, load_shed_count
-**Security:** security_event_count, security_events_by_type
+```text
+HTTP /ask
+│
+├─ Stage 0: prepare_context
+│   → detect language, select light/analyst mode, heuristic conceptual detection
+│
+├─ Stage 0.2: question analyzer (LLM)
+│   ├─ [analyzer enabled in ACTIVE mode + succeeds]
+│   │   → ctx.has_authoritative_question_analysis = True
+│   │   → ctx.semantic_locked = True
+│   │   → produces QuestionAnalysis: query_type, preferred_path, candidate_tools,
+│   │     evidence_roles, derived_metrics, canonical_query_en
+│   │
+│   ├─ [analyzer enabled in SHADOW mode + succeeds]
+│   │   → analysis stored for observability only
+│   │   → NOT authoritative — all downstream decisions use heuristics
+│   │
+│   └─ [analyzer disabled or fails]
+│       → no analysis; heuristic fallback for everything downstream
+│
+├─ Resolve downstream query
+│   ├─ [authoritative analysis] → use canonical_query_en
+│   └─ [no analysis]           → use raw query
+│
+├─ Stage 0.3: vector knowledge retrieval
+│   → retrieve domain/policy passages for the resolved query
+│   → pack for later Stage 4 prompts (active or shadow)
+│
+├─ Response Mode Derivation (single source of truth, set once)
+│   ├─ [has authoritative analysis]
+│   │   ├─ query_type in {conceptual_definition, regulatory_procedure}
+│   │   │   → KNOWLEDGE_PRIMARY
+│   │   ├─ query_type in {data_retrieval, data_explanation, factual_lookup}
+│   │   │   → DATA_PRIMARY
+│   │   └─ query_type in {comparison, forecast, ambiguous, unsupported}
+│   │       ├─ preferred_path = "knowledge" → KNOWLEDGE_PRIMARY
+│   │       └─ preferred_path != "knowledge" → DATA_PRIMARY
+│   │
+│   └─ [no authoritative analysis]
+│       ├─ heuristic is_conceptual = true  → KNOWLEDGE_PRIMARY
+│       └─ heuristic is_conceptual = false → DATA_PRIMARY
+│
+├─ Resolution Policy Derivation
+│   ├─ [has authoritative analysis + preferred_path in {CLARIFY, REJECT}]
+│   │   → CLARIFY
+│   └─ [otherwise]
+│       → ANSWER
+│
+├─ Policy Short-Circuits *** EXIT POINTS ***
+│   ├─ [CLARIFY]
+│   │   → summarizer.answer_clarify() → RETURN
+│   │
+│   └─ [KNOWLEDGE_PRIMARY]
+│       → summarizer.answer_conceptual() → RETURN
+│
+│   *** Only DATA_PRIMARY + ANSWER continues past this point ***
+│
+├─ Stage 0.4: evidence planner
+│   ├─ [enabled + has authoritative analysis]
+│   │   → expand analysis into ordered evidence steps
+│   │   → each step: {tool_name, params, role, satisfied: false}
+│   │   → roles: PRIMARY_DATA, COMPOSITION_CONTEXT, TARIFF_CONTEXT, CORRELATION_DRIVER
+│   │
+│   └─ [disabled or no analysis]
+│       → no plan; rely on keyword/analyzer routing below
+│
+├─ Stage 0.5: primary tool routing *** THREE-WAY BRANCH ***
+│   │
+│   ├─ [evidence plan exists + has unsatisfied step]
+│   │   → plan-driven: use first unsatisfied step as ToolInvocation
+│   │   → confidence = 0.85, reason = "evidence_plan:{role}"
+│   │
+│   ├─ [no plan + has authoritative analysis]
+│   │   → skip keyword router entirely (invocation = None)
+│   │   → fall through to Stage 0.7
+│   │
+│   └─ [no plan + no authoritative analysis]
+│       → keyword router match_tool():
+│         4-tier ladder: tariffs(0.92) → composition(0.94) → generation(0.85) → prices(0.82)
+│         optional semantic fallback (token similarity scoring)
+│
+├─ Stage 0.6: tool execution (if Stage 0.5 produced an invocation)
+│   ├─ [execute + relevance validated]
+│   │   → store result on ctx, stamp provenance
+│   │   → if evidence plan: mark matching step satisfied
+│   │
+│   ├─ [execute + relevance BLOCKED]
+│   │   → clear result, ctx.used_tool = false
+│   │   → fall through to Stage 0.7
+│   │
+│   └─ [execution ERROR]
+│       → mark plan step failed, ctx.used_tool = false
+│       → fall through to Stage 0.7
+│
+├─ Stage 0.7: analyzer tool route fallback (only if Stage 0.5/0.6 produced no result)
+│   ├─ [has authoritative analysis + hints enabled]
+│   │   → build ToolInvocation from analyzer candidates
+│   │   ├─ [built + executed + relevant] → store result
+│   │   ├─ [built + executed + failed + plan has unsatisfied steps]
+│   │   │   → mark step failed, let Stage 0.8 handle
+│   │   ├─ [built + executed + failed + no plan steps]
+│   │   │   → attempt limited recovery (composition→prices swap, resolved-query re-route)
+│   │   └─ [build failed]
+│   │       → attempt recovery or log miss
+│   │
+│   └─ [no authoritative analysis or hints disabled]
+│       → log router miss
+│
+├─ Stage 0.8: evidence loop (if plan has unsatisfied steps)
+│   → execute remaining plan steps
+│   → store evidence by role in ctx.evidence_collected
+│   → merge secondary datasets into primary frame by date
+│   → record join provenance
+│
+├─ Stage 1/2: legacy fallback (only if NO tool succeeded AND no satisfied plan)
+│   │ Additional gate: does NOT run if authoritative analysis is active
+│   │
+│   ├─ [agent loop enabled + no authoritative analysis]
+│   │   → orchestrator.run_agent_loop()
+│   │   ├─ conceptual_exit → RETURN
+│   │   ├─ data_exit + relevant → continue
+│   │   └─ fallback_exit → fall through to SQL
+│   │
+│   └─ [generate plan + SQL]
+│       ├─ plan says conceptual or skip_sql → answer_conceptual() → RETURN
+│       ├─ SQL execute blocked → answer_conceptual() → RETURN
+│       └─ SQL execute succeeds → continue
+│
+├─ Stage 3: analyzer enrichment
+│   → share resolution + summary construction + grounding hints
+│   → scenario evidence dispatch
+│   → forecast/CAGR, correlation, "why" causal reasoning
+│   → trendline pre-calculation, MoM/YoY, seasonal signals
+│   → build structured analysis_evidence records
+│
+├─ Post-Stage 3: evidence readiness check
+│   ├─ [missing requested evidence + no evidence at all]
+│   │   → CLARIFY → RETURN
+│   ├─ [missing requested evidence + partial evidence]
+│   │   → continue with warning
+│   └─ [all evidence present]
+│       → continue
+│
+├─ Stage 4: answer dispatch *** DECISION LADDER (first match wins) ***
+│   │
+│   ├─ [ctx.share_summary_override populated]
+│   │   → pass-through Stage 3's deterministic share answer (confidence 1.0)
+│   │
+│   ├─ [scenario eligible: scenario records in analysis_evidence
+│   │    + query_type in {data_retrieval, data_explanation}
+│   │    + no explanation signals]
+│   │   → deterministic scenario formatter (confidence 0.95)
+│   │
+│   ├─ [regulated tariff list signal: get_tariffs tool
+│   │    + regulation keywords + list keywords + no explanation signals]
+│   │   → deterministic tariff list formatter (confidence 0.98)
+│   │
+│   ├─ [residual weighted-price signal: weighted-average keywords
+│   │    + balancing context + residual/remaining scope]
+│   │   → deterministic residual calculation formatter (confidence 0.95)
+│   │
+│   ├─ [trendline forecast eligible: trendline data in stats_hint
+│   │    + forecast query_type or forecast keywords]
+│   │   → deterministic forecast formatter (confidence 0.95)
+│   │
+│   └─ [none of the above]
+│       → LLM llm_summarize_structured()
+│       ├─ [grounding passes] → final answer
+│       └─ [grounding fails]
+│           ├─ scenario fallback available → deterministic scenario answer
+│           └─ no fallback → generic grounding-failure message
+│
+├─ Provenance gate
+│   → validate summary claims against source data
+│
+└─ Stage 5: chart builder
+    → infer chart type, limit series, construct payload
+    → RETURN
+```
+
+### 3.4 Ideal Decision Tree
+
+**Design principle: Stage 0.2 is the one LLM call. Make it emit the full contract. Everything after just executes — no re-interpretation.**
+
+The current pipeline has 13 steps because downstream stages constantly re-interpret what the analyzer already understood. The ideal pipeline is shorter: 0.2 produces a firm plan, and every subsequent stage is pure execution.
+
+**Current → Ideal step reduction:**
+
+```text
+Current (13 steps):
+  0 → 0.2 → 0.3 → mode deriv → 0.4 → 0.5 → 0.6 → 0.7 → 0.8 → 1/2 → 3 → 4 → prov → 5
+
+Ideal (8 steps):
+  0 → 0.2 → 0.3 → 0.4 → tool exec → evidence collect → 3 → 4 → 5
+```
+
+**What was eliminated or merged:**
+
+| Removed step | Why it existed | How it's absorbed |
+|---|---|---|
+| Mode derivation (separate step) | Translates analyzer output into response_mode | 0.2 emits `answer_kind` + `render_style` directly; mode is trivially derived inline |
+| Stage 0.2b AnswerSpec construction | Builds typed contract from analyzer | Unnecessary — 0.2 emits the contract itself |
+| Stage 0.7 analyzer fallback | 0.5 skips router when analyzer active but doesn't use analyzer to route | `candidate_tools[0]` + evidence planner selects tool deterministically; no fallback needed |
+| Stage 0.8b evidence validation | Validates evidence against answer contract | Merged into evidence collection — validate as you collect, not as a separate pass |
+| Stage 0.8c canonical framing | Normalizes DataFrames into evidence frames | Merged into evidence collection — frame as you collect |
+| Stage 1/2 legacy SQL | Fallback when no tool matches | Rare escape hatch inside tool execution failure path, not a separate pipeline stage |
+| Provenance gate (separate step) | Post-hoc numeric grounding check | Provenance bound at construction time in Stage 4; separate gate is redundant |
+
+```text
+HTTP /ask
+│
+├─ Stage 0: prepare_context
+│   → detect language, select light/analyst mode, init context
+│   → cheap, no LLM
+│
+├─ Stage 0.2: question analyzer (THE LLM call — firm contract, no questioning after)
+│   │
+│   │ This is the single point where the question is interpreted.
+│   │ Every field needed by downstream stages is emitted here.
+│   │ Nothing downstream re-parses the query text.
+│   │
+│   │ Current QuestionAnalysis fields (kept):
+│   │   query_type, preferred_path, candidate_tools, params_hint,
+│   │   evidence_roles, derived_metrics, canonical_query_en, etc.
+│   │
+│   │ New fields added to QuestionAnalysis:
+│   │
+│   │   answer_kind: scalar | list | timeseries | comparison |
+│   │                explanation | forecast | scenario | knowledge | clarify
+│   │
+│   │   render_style: deterministic | narrative
+│   │     (LLM decides: "is this a data lookup or does the user want explanation?")
+│   │
+│   │   grouping: none | by_entity | by_period | by_metric
+│   │
+│   │   entity_scope: e.g., "regulated_plants", "all", specific entity names
+│   │
+│   │   NOTE: primary_tool is NOT emitted by the LLM. Tool selection remains
+│   │   deterministic: candidate_tools[0] + evidence planner. Only 4 tools exist;
+│   │   the mapping is trivial and should not be an LLM decision.
+│   │
+│   │ Why the LLM should emit answer shape, not downstream code:
+│   │   - "which plants are regulated?" → LLM says LIST + entity_scope=regulated
+│   │     (today: query_type=data_retrieval, Stage 4 regex detects "which" + "regulated")
+│   │   - "how did price change Jan vs Feb?" → LLM says COMPARISON
+│   │     (today: query_type=data_retrieval, regex detects "vs" in 3 places)
+│   │   - "show monthly prices for 2025" → LLM says TIMESERIES + grouping=by_period
+│   │     (today: query_type=data_retrieval, no way to distinguish from SCALAR until Stage 4)
+│   │   - "explain why prices rose" → LLM says render_style=narrative + answer_kind=explanation
+│   │     (today: _EXPLANATION_ROUTING_SIGNALS regex checked in 3 different places)
+│   │
+│   │ Fallback when analyzer is disabled/fails:
+│   │   → derive answer_kind from query_type mapping + keyword heuristics
+│   │   → derive tool from keyword router (existing match_tool logic)
+│   │   → render_style defaults to narrative (safer)
+│   │
+│   │ Active cross-check (always, even when analyzer succeeds):
+│   │   → also derive answer_kind from query_type mapping
+│   │   → if LLM-emitted and derived answer_kind disagree, log warning
+│   │   → prefer the safer option (see Section 8.7)
+│   │
+│   │ After this point, response_mode and resolution_policy are derived
+│   │ trivially inline (no separate stage):
+│   │   answer_kind in {knowledge, clarify} → short-circuit RETURN
+│   │   render_style = narrative + answer_kind = explanation → KNOWLEDGE check
+│   │   everything else → continue to tool execution
+│   │
+│   → The analyzer's output is the contract. Downstream stages trust it.
+│
+├─ Stage 0.3: vector knowledge retrieval (conditional)
+│   ├─ [answer_kind in {knowledge, explanation}] → full retrieval
+│   ├─ [answer_kind is data + render_style = narrative] → light retrieval
+│   └─ [answer_kind is data + render_style = deterministic] → skip
+│
+├─ Stage 0.4: evidence planner
+│   │ Reads the analyzer contract to build evidence steps.
+│   │ The contract tells the planner what it needs to satisfy:
+│   │
+│   │   answer_kind = LIST → planner ensures entity-enumeration step
+│   │   answer_kind = COMPARISON → planner ensures two periods or two entities
+│   │   answer_kind = TIMESERIES → planner ensures period range
+│   │   answer_kind = SCENARIO → planner ensures scenario params available
+│   │
+│   │ Tool is selected deterministically from candidate_tools[0] — no keyword routing needed.
+│   │ Evidence roles are known from 0.2 — secondary datasets planned directly.
+│   │
+│   → Ordered list of tool steps, validated against the answer contract
+│
+├─ Tool execution + evidence collection (merges current 0.5/0.6/0.7/0.8)
+│   │
+│   │ Tool selection is deterministic:
+│   │   candidate_tools[0] from analyzer + evidence planner expansion.
+│   │   No LLM decision needed — only 4 tools exist.
+│   │
+│   │ Simple execution loop — no routing decisions, just run the plan:
+│   │
+│   │ for each evidence step:
+│   │   1. execute tool (params from analyzer / planner)
+│   │   2. validate relevance
+│   │   3. normalize output into canonical evidence frame:
+│   │      ├─ ObservationFrame {period, entity_id, entity_label, metric, value, unit}
+│   │      ├─ EntitySetFrame   {entity_id, entity_label, membership_reason}
+│   │      └─ ComparisonFrame  {subject, baseline, value, delta}
+│   │      (adapters contain domain-specific column mapping — see note in 8.3)
+│   │   4. validate frame against answer_kind requirements
+│   │   5. store evidence by role, bind provenance refs
+│   │
+│   │ On tool failure:
+│   │   ├─ [other plan steps remain] → continue, mark step failed
+│   │   ├─ [no plan steps + SQL fallback possible] → try SQL escape hatch
+│   │   └─ [nothing works] → downgrade to CLARIFY
+│   │
+│   │ Stage 0.7 (analyzer fallback) is eliminated:
+│   │   candidate_tools[0] + evidence planner already selects the tool.
+│   │
+│   │ Legacy SQL (Stage 1/2) is folded in as a failure-path escape hatch,
+│   │   not a separate pipeline stage.
+│   │
+│   → Evidence frames collected, validated, provenance-bound
+│
+├─ [CHANGED] Stage 3: analyzer enrichment — switches on answer_kind
+│   │
+│   │ Same computation as today, but dispatch uses answer_kind instead of
+│   │ its own signal detection (share-intent regex, scenario-eligibility
+│   │ checks, forecast-mode keywords, why-mode detection):
+│   │
+│   │   answer_kind = SCALAR/TIMESERIES + subject_domain = shares → share enrichment
+│   │   answer_kind = SCENARIO → scenario evidence dispatch
+│   │   answer_kind = FORECAST → trendline pre-calculation
+│   │   answer_kind = EXPLANATION → "why" causal reasoning + correlation
+│   │   answer_kind = COMPARISON → MoM/YoY derived metrics
+│   │
+│   │ Outputs written as canonical evidence frames.
+│   │ Share-summary grounding pattern generalized to all paths.
+│
+├─ Stage 4: answer rendering *** SINGLE SWITCH on answer_kind ***
+│   │
+│   │ No regex. No query-signal detection. No re-interpretation.
+│   │ Just: switch(answer_kind) with evidence frames as input.
+│   │
+│   ├─ [render_style = DETERMINISTIC]
+│   │   │
+│   │   │ Generic tabular renderer (one function, handles most cases):
+│   │   │
+│   │   ├─ SCALAR   → extract value + unit + period from ObservationFrame
+│   │   ├─ LIST     → enumerate entities from EntitySetFrame, group by reason
+│   │   ├─ TIMESERIES → format period-indexed rows from ObservationFrame
+│   │   ├─ COMPARISON → format subject vs baseline + delta from ComparisonFrame
+│   │   │
+│   │   │ Specialized formatters (only for domain-specific decomposition):
+│   │   ├─ SCENARIO → payoff breakdown (positive/negative, market vs combined)
+│   │   ├─ FORECAST → trendline + R² caveat + seasonal + assumptions
+│   │   │
+│   │   │ Provenance refs already bound from evidence collection.
+│   │   │ No separate provenance gate needed.
+│   │   │
+│   │   → New question family that is SCALAR/LIST/TIMESERIES/COMPARISON:
+│   │     works automatically. Zero Stage 4 code. Zero regex.
+│   │
+│   └─ [render_style = NARRATIVE]
+│       → LLM receives pre-structured evidence frames
+│       → focused on explanation quality, not schema recovery
+│       → provenance refs pre-bound
+│
+└─ Stage 5: chart builder (unchanged)
+```
+
+**Step count comparison:**
+
+| | Current | Ideal |
+|---|---|---|
+| Total steps | 13 | 8 |
+| Steps that interpret query semantics | 5+ (analyzer, mode deriv, router, evidence planner rules, Stage 4 regex) | 1 (analyzer) |
+| Separate fallback/recovery stages | 3 (Stage 0.7, Stage 1/2, provenance gate) | 0 (folded into execution loop) |
+| LLM calls for data questions | 1 (analyzer) + sometimes 1 (Stage 4 summarizer) | 1 (analyzer) + only for narrative render_style |
+
+**Key differences summary:**
+
+| Decision Point | Current | Ideal |
+|---|---|---|
+| `answer_kind` source | Not emitted; inferred from `query_type` in Stage 4 regex | LLM emits directly in QuestionAnalysis; cross-checked against `query_type` derivation |
+| Tool selection | Keyword router or analyzer-candidate fallback | Deterministic: `candidate_tools[0]` + evidence planner (not LLM-emitted) |
+| Tool routing mechanism | 3-way branch (plan / analyzer-skip / keyword router) + fallback stage | Direct execution from evidence plan; no routing stages |
+| Evidence framing | Raw DataFrames passed to Stage 4 | Canonical frames built during collection |
+| Evidence validation | None — Stage 4 discovers gaps late | Validated during collection against answer_kind |
+| Stage 4 dispatch | 5 query-signal regex detectors | Single switch on `answer_kind` |
+| Stage 4 rendering | One bespoke formatter per answer family | Generic renderer for SCALAR/LIST/TIMESERIES/COMPARISON |
+| Grounding | Post-hoc token overlap | Provenance bound at construction time; no separate gate |
+| Vector knowledge | Always collected | Conditional on answer_kind |
+| New question family requires | Regex detector + bespoke formatter + Stage 4 patch | Usually nothing — generic renderer handles it |
 
 ---
 
-## 8. Conversation History Lifecycle
+## 4. Current Stage Semantics
 
-End-to-end flow of conversation context:
+### 4.1 Stage 0: Prepare Context
 
-```
-1. Frontend (ChatPage.jsx)
-   └─ User sends message
-   └─ After response: record_chat_turn_txn RPC saves Q+A to chat_history table
+Owned by `agent/planner.py`.
 
-2. Edge Function (chat-with-enerbot)
-   └─ Loads last 6 rows from chat_history (user_id filter, newest first)
-   └─ Reverses to chronological order
-   └─ Pairs user→assistant messages via sequential scan
-   └─ Sends as conversation_history in request body (max 3 pairs)
+Responsibilities:
 
-3. Railway Backend (main.py)
-   └─ Resolves session_id from X-Session-Token header
-   └─ Checks in-process session store for existing history
-   └─ If empty + edge function provided history:
-       └─ Truncates items to 2000 chars each
-       └─ Seeds session store
-   └─ Passes bound_history to process_query()
+- detect language
+- select `light` vs `analyst` mode
+- run heuristic conceptual detection for fallback compatibility
+- initialize query context
 
-4. Pipeline Consumption
-   └─ Stage 0.2 (Question Analyzer): history enables follow-up resolution
-       └─ "What about 2024?" → analyzer sees previous "prices in 2023" context
-   └─ Stage 4 (Summarizer): history provides conversational context
-   └─ Stage 0.5 (Keyword Router): NO access to history (stateless, query-only)
-       └─ This is why Stage 0.7 exists — the analyzer fallback fills this gap
-```
+This stage is intentionally cheap and does not decide the final answer path by itself.
 
-**Key constraint:** The keyword router (Stage 0.5) is stateless by design — it only sees the current query. Conversation continuity depends on the LLM Question Analyzer (Stage 0.2/0.7), which receives the full conversation history. When a follow-up query like "What about 2024?" arrives, the keyword router misses (no price/tariff keywords), but the analyzer correctly identifies it as a continuation and routes to the appropriate tool.
+### 4.2 Stage 0.2: Structured Question Analyzer
+
+Owned by `core/llm.py::llm_analyze_question()` and consumed in `agent/pipeline.py`.
+
+Responsibilities:
+
+- normalize the question into a strict `QuestionAnalysis`
+- choose `query_type`
+- choose `preferred_path`
+- propose candidate tools
+- emit `analysis_requirements`
+- optionally mark `needs_multi_tool` and `evidence_roles`
+- provide `canonical_query_en`
+
+This is the semantic center of the current system. When active, it is the authoritative source for:
+
+- response mode
+- clarify vs answer
+- requested derived metrics
+- evidence-planning inputs
+
+### 4.3 Stage 0.3: Vector Knowledge Retrieval
+
+Owned by `knowledge/vector_retrieval.py`.
+
+Responsibilities:
+
+- retrieve policy/regulation/domain passages for the resolved query
+- pack passages for Stage 4 prompts
+- run in active or shadow mode
+
+This stage is useful for policy, procedure, and explanation support, but it increases prompt volume and can become expensive if overused for simple fact/list answers.
+
+### 4.4 Response Mode Derivation
+
+Owned by `agent/pipeline.py`.
+
+Responsibilities:
+
+- convert question-analysis output into one authoritative runtime mode
+- derive `ResponseMode`
+- derive `ResolutionPolicy`
+- synchronize legacy flags such as `ctx.is_conceptual`
+
+Current behavior is intentionally simple, but also coarse:
+
+- `conceptual_definition` and `regulatory_procedure` -> `KNOWLEDGE_PRIMARY`
+- `data_retrieval`, `data_explanation`, `factual_lookup` -> `DATA_PRIMARY`
+- otherwise use `preferred_path` as the tie-breaker
+
+This simplicity is operationally helpful, but it is also one reason some semantically different questions collapse into the same downstream handling.
+
+### 4.5 Stage 0.4: Evidence Planner
+
+Owned by `agent/evidence_planner.py`.
+
+Responsibilities:
+
+- expand `QuestionAnalysis` into ordered evidence steps
+- choose the primary dataset
+- add secondary evidence roles such as:
+  - `composition_context`
+  - `tariff_context`
+  - `correlation_driver`
+- keep time windows aligned across evidence sources
+
+This is the most important recent architectural addition. It makes the pipeline much more explicit about multi-dataset questions than the older "tool plus ad hoc enrichment" model.
+
+### 4.6 Stage 0.5 / 0.6: Primary Tool Execution
+
+Owned by `agent/pipeline.py`, `agent/router.py`, and typed tools in `agent/tools/`.
+
+Important current behavior:
+
+- when an evidence plan exists, Stage 0.5 prefers the first unsatisfied plan step
+- raw-query keyword routing is mostly fallback behavior when no authoritative analyzer is available
+- Stage 0.6 executes the tool and stamps provenance
+- tool relevance is validated after execution
+
+This is a major change from the old documentation. The keyword router is no longer the main semantic entry point in analyzer-enabled mode.
+
+### 4.7 Stage 0.7: Analyzer Tool Route Fallback
+
+Responsibilities:
+
+- if Stage 0.5 does not yield an invocation, convert analyzer candidates into a concrete tool call
+- execute that tool
+- validate relevance
+- optionally fall through to limited recovery logic
+
+This is now a constrained second-chance routing step, not the main route-selection mechanism.
+
+### 4.8 Stage 0.8: Evidence Loop And Merge
+
+Owned by `agent/evidence_planner.py`.
+
+Responsibilities:
+
+- execute remaining unsatisfied evidence-plan steps
+- store evidence by role
+- merge secondary datasets into the primary frame
+- record join provenance
+- optionally restore the primary dataset from collected evidence
+
+This is the stage that makes multi-tool reasoning concrete. It is one of the strongest parts of the current architecture.
+
+### 4.9 Stage 1 / 2: Legacy Planner And SQL Fallback
+
+Responsibilities:
+
+- generate plan + SQL only when deterministic tool paths are exhausted
+- validate SQL
+- execute SQL under safety constraints
+
+This path still matters, but it is now clearly a fallback path, not the dominant architecture.
+
+### 4.10 Stage 3: Analyzer Enrichment
+
+Owned by `agent/analyzer.py`.
+
+Responsibilities:
+
+- compute deterministic derived metrics
+- compute comparisons, trends, correlations, seasonal signals
+- build analysis evidence
+- emit contradiction guards and overrides
+
+This stage is where numeric interpretation becomes more semantic, but it still operates on raw tool-shaped frames and merged columns.
+
+### 4.11 Stage 4: Deterministic Direct Answers Plus LLM Summarization
+
+Owned by `agent/summarizer.py`.
+
+Current behavior:
+
+- first try deterministic direct answers
+- otherwise call `llm_summarize_structured()`
+- then run summary grounding and provenance gating
+
+The important update here is that Stage 4 now contains several deterministic answer builders, including direct handling for:
+
+- share summaries
+- scenario queries
+- regulated tariff list queries
+- residual weighted-price queries
+- trendline forecast answers
+
+This is a sign of progress, but also a sign that Stage 4 has become a catch-all for missing architecture in earlier stages.
+
+### 4.12 Stage 5: Chart Pipeline
+
+Responsibilities:
+
+- infer chart type
+- limit series
+- decide skip conditions
+- construct chart payload
+
+This stage remains mostly deterministic and isolated from the main architecture issues.
 
 ---
 
-## 9. Evolution: The Decoupled Pipeline (Option A)
+## 5. Current Module Responsibilities
 
-The system has transitioned from a brittle, purely keyword-based router to a robust **LLM-Driven Intent Routing** layer.
+### `agent/pipeline.py`
 
-### Why the Shift?
-1. **Conversational Memory:** Heuristics evaluate queries in isolation. Option A allows the system to understand that "What about 2024?" refers back to "Balancing prices."
-2. **Semantic Nuance:** Distinguishes "Explain why prices changed" (requires composition enrichment) from "Show the prices" (standard retrieval) with high confidence.
+Main orchestrator. Owns stage ordering, policy decisions, fallback order, and integration logic between planner, tools, analyzer, summarizer, and charting.
 
-### Preserved Core Assets
-While routing has become more "intelligent," the following pillars remain unchanged and central to the system's stability:
-- **Deterministic Tools:** Hand-written Python tools (`get_prices`, etc.) remain the only way to touch the data. The LLM picks the tool, but the Python logic executes it.
-- **AI Firewall:** No query reaches the LLM without passing the heuristic safety gate.
-- **Provenance Gate:** No number reaches the user without passing the cell-matching verification.
-- **Agent Loop & SQL Fallback:** These serve as robust catch-alls for highly complex or ad-hoc queries that don't fit pre-defined tools.
-- **Skills & Knowledge:** The `skills/` directory provides the specific domain knowledge the LLM uses to interpret intent and summarize results.
+### `agent/router.py`
+
+Deterministic extraction and fallback routing:
+
+- query keyword heuristics
+- semantic fallback scoring
+- date, currency, metric, and entity extraction
+
+Today it acts partly as parameter extractor and partly as route selector.
+
+### `agent/evidence_planner.py`
+
+The current architectural backbone for multi-evidence questions:
+
+- expands analyzer output into tool steps
+- resolves aligned parameters
+- executes remaining evidence
+- merges evidence into the main frame
+
+### `agent/analyzer.py`
+
+Deterministic enrichment layer. Produces derived metrics and contextual evidence that Stage 4 can use.
+
+### `agent/summarizer.py`
+
+Mixed responsibility module:
+
+- conceptual answer generation
+- clarify answer generation
+- deterministic direct answers
+- LLM structured summarization
+- grounding checks
+- provenance preparation
+
+This module currently contains more business logic than ideal.
+
+### `core/llm.py`
+
+LLM access layer:
+
+- question analyzer prompt
+- structured summarizer prompt
+- domain knowledge retrieval prompt selection
+- model selection, resilience, caching, prompt budgeting
+
+---
+
+## 6. Architectural Assessment
+
+The system has strong deterministic assets, but there is a real architecture issue. The main issue is not "too much LLM" or "too little LLM" in isolation. The main issue is that the LLM and deterministic layers do not meet through a strong enough contract.
+
+### 6.1 Query Semantics Are Re-Implemented In Multiple Places
+
+The same intent is interpreted in several layers:
+
+- question analyzer prompt and schema
+- response-mode derivation
+- router keyword/entity extraction
+- evidence-planner expansion rules
+- summarizer query-signal detection
+
+Impact:
+
+- fixes often land as local patches rather than reusable architecture
+- new query families tend to require touching multiple modules
+- debugging becomes difficult because there is no single semantic source of truth after Stage 0.2
+
+### 6.2 Tool Outputs Are Tool-Shaped, Not Answer-Shaped
+
+Typed tools return pivots, alias groups, and dataset-specific columns. That is useful for computation, but not always ideal for final answers.
+
+Symptom:
+
+- a user asks for a list of regulated plants
+- the tool returns tariff-group evidence rather than a canonical "regulated entities" list
+- the summarizer then needs special logic to convert raw columns into the expected answer shape
+
+Impact:
+
+- Stage 4 accumulates ad hoc answer builders
+- broad natural-language questions fail unless special handling is added
+
+### 6.3 Stage 4 Owns Too Much Business Logic
+
+The summarizer now contains:
+
+- prompt construction
+- grounding policy selection
+- deterministic list answers
+- deterministic scenario answers
+- deterministic forecast answers
+- provenance token matching
+
+This is too much responsibility for one stage.
+
+Impact:
+
+- answer correctness depends on Stage 4 knowing too much about tool schemas
+- direct-answer logic grows one case at a time
+- the LLM is sometimes skipped for the right reason, but without a general pattern
+
+### 6.4 Grounding Is Mostly Post-Hoc
+
+Today the system often generates or assembles the answer first and then checks whether the numbers can be grounded.
+
+Impact:
+
+- failures are discovered late
+- user-visible fallbacks can happen even when the underlying evidence was sufficient
+- the answer builder is not explicitly tied to evidence structure
+
+### 6.5 Evidence Planning Is Better Than The Old Model, But It Stops Too Early
+
+The evidence planner is good at selecting datasets, but it does not yet produce a canonical answer contract.
+
+It decides:
+
+- what evidence to fetch
+- how to align periods
+- which secondary sources to add
+
+It does not decide strongly enough:
+
+- what answer kind is expected
+- what final entity set or aggregation should be rendered
+- whether the output should be deterministic list/scalar/comparison/explanation
+
+Impact:
+
+- Stage 4 must still infer answer shape from query text and raw columns
+
+### 6.6 The LLM Is Not Used Efficiently
+
+The LLM is valuable for:
+
+- resolving ambiguous follow-ups
+- normalizing user intent
+- identifying evidence needs
+- producing concise explanation text when data is already structured
+- answering knowledge/procedure questions
+
+It is less efficient when used to recover answer structure that deterministic code could have defined earlier.
+
+Current inefficiencies:
+
+- analyzer output does not fully specify answer shape, so downstream code re-interprets the question
+- Stage 4 often receives very large prompts containing preview, statistics, history, domain knowledge, and vector knowledge even when the answer is fundamentally a deterministic list or scalar
+- special-case direct answers exist because the generic LLM summary path is not reliable enough for those shapes
+- vector/domain knowledge can be attached late even when the user asked for a simple data retrieval
+
+---
+
+## 7. Why Individual Question Fixes Keep Happening
+
+Individual fixes are not always a sign of poor engineering. Some are normal in language systems.
+
+However, repeated fixes in the same area are a signal of missing generalization. In this codebase, repeated fixes are most likely when all three conditions are true:
+
+1. the analyzer correctly identifies the broad path
+2. the tool retrieves technically relevant evidence
+3. the final answer shape is not represented explicitly anywhere before Stage 4
+
+When that happens, the system tends to need one more of the following:
+
+- router lexical expansion
+- evidence-planner expansion rule
+- summarizer direct-answer branch
+- grounding exception or enrichment logic
+
+That pattern indicates a structural gap, not just random edge cases.
+
+### 7.1 Per-Question Fix Taxonomy
+
+Not all per-question fixes are the same. Breaking them into categories reveals which ones the recommended architecture would eliminate and which require additional changes.
+
+| Fix category | Example | Root cause | Would AnswerSpec alone fix it? |
+|---|---|---|---|
+| **Stage 4 regex miss** | New phrasing for "list regulated plants" doesn't match `_has_regulated_tariff_list_query_signal` | Answer shape detected by keyword matching instead of typed contract | **Yes** — `answer_kind = LIST` replaces regex |
+| **Missing deterministic formatter** | New answer shape (e.g., residual weighted-price) needs a bespoke builder in summarizer.py | No generic renderer for the answer_kind; each shape is hand-coded | **Partially** — dispatch is cleaner, but still need to write a formatter |
+| **Tool returns wrong shape** | User asks for regulated plants, tool returns tariff-group evidence, not an entity list | Tool output is tool-shaped, not answer-shaped | **Partially** — canonical frames help, but adapters need per-tool logic |
+| **Evidence planner miss** | Comparison question needs two datasets but planner only fetches one | Evidence expansion rules don't cover this combination | **No** — AnswerSpec doesn't change evidence planning |
+| **Analyzer misclassification** | "Which plants are regulated?" classified as `data_retrieval` instead of `factual_lookup` with list intent | LLM prompt doesn't emit answer_kind; post-hoc derivation can't recover | **No** — AnswerSpec derives from analyzer output, so bad classification propagates |
+| **Grounding failure on valid data** | Answer is correct but post-hoc token overlap check fails | Provenance binding is too late | **Yes** — construction-time binding eliminates most of these |
+
+### 7.2 The Generalization Gap
+
+The AnswerSpec proposal in Section 8.1 eliminates the top row (regex dispatch) and bottom row (grounding). But the middle rows — missing formatters, wrong tool shape, evidence planning misses, analyzer misclassification — still produce per-question fixes.
+
+The key missing generalization is: **there is no generic answer renderer that can handle an arbitrary SCALAR/LIST/TIMESERIES/COMPARISON question from canonical evidence frames without a bespoke formatter.** Today each answer shape (share summary, scenario, tariff list, residual weighted-price, trendline forecast) has its own hand-coded builder. When a new question family appears, a new builder must be written.
+
+Three additional changes are needed to close this gap:
+
+1. **Move `answer_kind` into the analyzer LLM prompt** — let the LLM emit answer_kind directly as part of `QuestionAnalysis`, rather than deriving it post-hoc from `query_type`. The LLM is better at understanding "this is a list question" or "this is a comparison" than a mapping table.
+
+2. **Build a generic tabular answer renderer** — a single renderer that can format any `ObservationFrame`, `EntitySetFrame`, or `ComparisonFrame` into a user-facing answer based on `answer_kind` + `grouping` + `entity_scope`, without needing a bespoke function per question family. Specialized formatters (like the scenario payoff breakdown) remain for cases where the generic renderer is insufficient.
+
+3. **Add evidence planner validation against AnswerSpec** — after collecting evidence, check whether the evidence satisfies the AnswerSpec's requirements (correct entity scope, expected metric present, enough periods for a comparison). If not, re-plan or clarify before reaching Stage 4.
+
+---
+
+## 8. Recommended Target Architecture
+
+**Design principle: make Stage 0.2 emit the full contract. Everything after just executes.**
+
+The LLM at Stage 0.2 is the smartest part of the pipeline. It already understands whether the user wants a list, a comparison, a timeseries, or an explanation. But today it only says `query_type = data_retrieval`, and then 5+ downstream stages try to reconstruct what the LLM already knew. That reconstruction is where per-question fixes land.
+
+The fix is not more LLM calls. It is: strengthen the one LLM call so that nothing downstream needs to re-interpret the question.
+
+### 8.1 Strengthen The Analyzer Contract (Stage 0.2)
+
+This is the highest-impact change. Extend `QuestionAnalysis` so the LLM emits everything downstream stages need:
+
+**New fields:**
+
+| Field | Values | What it replaces |
+|---|---|---|
+| `answer_kind` | `scalar`, `list`, `timeseries`, `comparison`, `explanation`, `forecast`, `scenario`, `knowledge`, `clarify` | Stage 4 regex detectors + `_EXPLANATION_ROUTING_SIGNALS` checks + mode derivation logic |
+| `render_style` | `deterministic`, `narrative` | `_should_route_tool_as_explanation()` + per-branch explanation-signal checks |
+| `grouping` | `none`, `by_entity`, `by_period`, `by_metric` | Implicit; today inferred ad-hoc in Stage 4 formatters |
+| `entity_scope` | e.g., `regulated_plants`, `all`, specific names | Implicit; today inferred from tool params or query text regex |
+
+**Tool selection stays deterministic, not LLM-emitted.** There are only 4 tools. The mapping from domain to tool is trivial: prices → `get_prices`, tariffs → `get_tariffs`, generation → `get_generation_mix`, shares → `get_balancing_composition`. The LLM already emits `candidate_tools` with scores. Asking it to also emit `primary_tool` would add a redundant field that can conflict with `candidate_tools[0]`, requiring arbitration logic worse than the current router. Tool selection is a deterministic function of `candidate_tools[0]` + evidence planner — 3 lines of code, not an LLM decision.
+
+**Why the LLM should decide answer shape, not downstream code:**
+
+| User question | LLM understands | Today's pipeline infers |
+|---|---|---|
+| "which plants are regulated?" | LIST + entity_scope=regulated | `query_type=data_retrieval` → Stage 4 regex detects "which" + "regulated" |
+| "how did price change Jan vs Feb?" | COMPARISON | `query_type=data_retrieval` → regex detects "vs" in 3 places |
+| "show monthly prices for 2025" | TIMESERIES + grouping=by_period | `query_type=data_retrieval` → no way to distinguish from SCALAR until Stage 4 |
+| "explain why prices rose" | render_style=narrative + EXPLANATION | `_EXPLANATION_ROUTING_SIGNALS` checked in pipeline.py, router.py, summarizer.py |
+| "what if gas price increases 20%?" | SCENARIO + render_style=deterministic | `derived_metrics` contains scenario_payoff → Stage 4 `_is_deterministic_scenario_eligible()` regex |
+
+**Fallback when analyzer is disabled or fails:**
+
+- derive `answer_kind` from `query_type` mapping + keyword heuristics (existing logic, kept as active cross-check — see Section 8.7)
+- derive tool selection from keyword router (existing `match_tool()`)
+- default `render_style` to `narrative` (safer)
+
+**What this eliminates:**
+
+- response-mode derivation as a separate step (trivially inline: `answer_kind in {knowledge, clarify}` → short-circuit)
+- Stage 0.7 analyzer fallback (evidence planner + `candidate_tools[0]` selects tool deterministically)
+- all 5 query-signal regex detectors in Stage 4
+- `_EXPLANATION_ROUTING_SIGNALS` checks scattered across 3 files
+- Stage 3's own signal detection (share-intent regex, scenario-eligibility, forecast-mode keywords) — replaced by `answer_kind` switch
+
+### 8.2 Normalize Tool Outputs Into Canonical Evidence Frames
+
+During evidence collection (not as a separate stage), normalize tool DataFrames into typed frames:
+
+- `ObservationFrame` — `{period, entity_id, entity_label, metric, value, unit, provenance_refs}`
+- `EntitySetFrame` — `{entity_id, entity_label, membership_reason, provenance_refs}`
+- `ComparisonFrame` — `{subject, baseline, comparison_value, delta, provenance_refs}`
+
+Normalization happens inline as each tool result is collected. Not a separate pipeline stage.
+
+Why this helps:
+
+- answer builders operate on stable field names, not raw column names like `p_bal_gel` or `share_import`
+- the generic renderer (8.3) becomes possible
+- provenance refs are bound at collection time, eliminating the separate provenance gate
+
+### 8.3 Build A Generic Tabular Answer Renderer
+
+The change that most directly stops per-question fixes.
+
+Currently each deterministic answer type has a bespoke builder. When a new question family appears, a new builder must be written. The generic renderer replaces most of them with one function:
+
+| `answer_kind` | Input frame | Output |
+|---|---|---|
+| `SCALAR` | `ObservationFrame` | Single value + unit + period |
+| `LIST` | `EntitySetFrame` | Bulleted entity list grouped by reason |
+| `TIMESERIES` | `ObservationFrame` | Period-indexed table applying `grouping` |
+| `COMPARISON` | `ComparisonFrame` | Subject vs baseline + delta + percent |
+
+Specialized formatters remain only for answer kinds with domain-specific decomposition:
+
+- `SCENARIO` — payoff breakdown (positive/negative sums, market vs combined)
+- `FORECAST` — trendline + R² caveat + seasonal breakdown + regulatory assumptions
+
+**Where the domain logic goes:** The generic renderer does not eliminate domain-specific formatting — it moves it to the evidence frame adapters. Each tool's adapter still needs domain-aware column mapping:
+
+- `get_tariffs` adapter maps `regulated_hpp_tariff_` column prefixes → display names ("Enguri HPP") in `EntitySetFrame.entity_label`
+- `get_prices` adapter maps `p_bal_gel`/`p_bal_usd` → dual-currency `ObservationFrame` entries with correct units
+- `get_balancing_composition` adapter maps `share_import`, `share_thermal_ppa` → labeled entity shares
+
+This adapter logic is written once per tool and is stable — it does not grow per question family. The net win is: domain logic at the adapter boundary is write-once, vs. domain logic in Stage 4 regex that grows every time a new question pattern appears.
+
+**The practical test:** when a new question family appears that produces SCALAR, LIST, TIMESERIES, or COMPARISON, does it require new code? With the generic renderer: no, if the canonical evidence frame adapter is correct. Zero Stage 4 patches. Possibly a new adapter if a new tool is added (rare — 4 tools have been stable).
+
+### 8.4 Validate Evidence During Collection
+
+As each tool result is collected and framed, validate it against `answer_kind`:
+
+- `LIST` → frame must contain entity identifiers
+- `COMPARISON` → evidence must have two periods or two entities
+- `TIMESERIES` → evidence must have >= 2 period observations
+- `SCALAR` → evidence must contain the requested metric
+- `FORECAST` → evidence must have trend data or enough history
+
+On failure:
+
+1. **Re-plannable** (missing secondary dataset) → planner adds corrective step, re-executes
+2. **Not re-plannable** (fundamental mismatch) → downgrade `render_style` to `NARRATIVE` or `CLARIFY`
+
+This is part of the evidence collection loop, not a separate pipeline stage.
+
+Why this helps:
+
+- gaps caught during collection, not discovered as Stage 4 failures
+- evidence planner becomes self-correcting
+- Stage 4 never receives evidence that cannot produce the expected answer
+
+### 8.5 Stage 3 Enrichment Dispatch On `answer_kind`
+
+Stage 3 (`analyzer.py`) contains ~90% of the pipeline's business logic but currently uses its own signal detection to decide what enrichment to run:
+
+| Enrichment | Current signal detection | With `answer_kind` |
+|---|---|---|
+| Share resolution | `analyzer_indicates_share_intent` regex OR "share" keyword in query | `answer_kind` in {SCALAR, TIMESERIES} + `subject_domain` = shares |
+| Scenario evidence | `_is_deterministic_scenario_eligible()` checks | `answer_kind` = SCENARIO |
+| Forecast/CAGR | `query_type == "forecast"` OR forecast keywords | `answer_kind` = FORECAST |
+| "Why" causal reasoning | `needs_driver_analysis` OR "why"/"explain" keywords | `answer_kind` = EXPLANATION |
+| Standalone MoM/YoY | analyst-mode flag + derived_metrics presence | `answer_kind` = COMPARISON (or any data kind with derived_metrics) |
+
+This eliminates a significant per-question fix surface: when a new analytical pattern is added to Stage 3, it switches on `answer_kind` instead of adding a new signal detector to `analyzer.py`. The enrichment dispatch becomes a simple switch like Stage 4's answer dispatch.
+
+### 8.6 Make Vector Knowledge Conditional
+
+- `answer_kind` in {`knowledge`, `explanation`} → full vector retrieval
+- `render_style = narrative` for data questions → light retrieval
+- `render_style = deterministic` → skip vector retrieval entirely
+
+Why this helps: lower prompt size, lower latency, less irrelevant context in data answers.
+
+### 8.7 Keep SQL As The Escape Hatch
+
+Folded into the tool execution failure path, not a separate pipeline stage. Fires only when:
+
+- typed tools fail or produce no result
+- unusual aggregations not covered by typed tools
+- narrow expert-mode fallback
+
+### 8.8 Risk: Trading Regex Brittleness For LLM Non-Determinism
+
+The target architecture trades one failure mode for another:
+
+- **Current failure mode (regex brittleness):** loud. Regex miss → falls to LLM summarizer → grounding may catch the mismatch → user sees a fallback or generic answer. The failure is visible.
+- **New failure mode (LLM non-determinism):** silent. LLM emits wrong `answer_kind` → generic renderer confidently formats the wrong answer shape → no grounding failure because the evidence frame is technically valid. The failure is invisible — the user gets a well-formatted wrong answer.
+
+Additionally, different phrasings of the same question may produce different `answer_kind` values. "List prices for each month" could be LIST or TIMESERIES depending on phrasing. The current regex system is brittle but consistent — same keywords always produce the same path. The LLM is more flexible but less predictable.
+
+**Mitigations:**
+
+1. **Active cross-check (not just fallback):** The `query_type` → `answer_kind` derivation should always run, even when the analyzer succeeds. If LLM-emitted and derived `answer_kind` disagree, log a warning and prefer the safer option (e.g., prefer NARRATIVE over DETERMINISTIC when in doubt, since the LLM summarizer can handle ambiguity).
+
+2. **Evidence validation catches structural mismatches:** Section 8.4's validation catches cases like COMPARISON with only one period — the frame doesn't have the required structure, so the system re-plans or degrades. This is a safety net for misclassification.
+
+3. **Phase 1 shadow mode must measure consistency:** Before switching behavior, shadow mode must validate not just accuracy ("did the LLM pick the right answer_kind?") but consistency ("do semantically equivalent paraphrases get the same answer_kind?"). If "list regulated plants" → LIST but "which plants are regulated" → SCALAR, the contract needs tightening (constrained examples in the prompt, or fewer `answer_kind` values with `grouping` carrying the variance).
+
+### 8.9 Handling Edge Cases: Filters And Cross-Tool Computations
+
+The architecture in 8.1–8.8 covers ~80% of question diversity automatically. Two remaining gaps (~5% of questions) need small extensions, not new architecture.
+
+**Gap 1 — Filtered/conditional questions** (e.g., "show months where price exceeded 15 tetri", "list entities where tariff increased"):
+
+The analyzer already emits `sql_hints` with `aggregation`, `dimensions`, `entities`. The missing piece is a value-based filter condition in the contract. Solution: a `filter` field on `ToolParamsHint` with `{metric, operator (gt/lt/eq/gte/lte), value, unit}`. The LLM at 0.2 emits the filter (it already understands threshold conditions). Evidence collection applies the filter after fetching, before framing. `answer_kind` stays LIST or TIMESERIES — no new rendering logic needed. ~20 lines of code in the evidence pipeline, not a new stage or concept.
+
+**Gap 2 — Cross-tool computational questions** (e.g., "weighted average price excluding regulated entities"):
+
+Currently handled by `_build_residual_weighted_price_direct_answer` bespoke formatter. Default solution: `render_style = narrative` + `answer_kind = EXPLANATION` — let the LLM synthesize the cross-tool computation from pre-structured evidence. This already works for "why did price change" questions. If a repeating pattern appears: add a new `derived_metric` type to the catalog (e.g., `weighted_residual`). Stage 3 computes it from multi-tool evidence, same as existing MoM/YoY/correlation patterns. Principle: narrative rendering as default, derived_metric only when a pattern repeats.
+
+| Gap | Solution | Where it lives | New code |
+|---|---|---|---|
+| Value filtering | `filter` field in ToolParamsHint | contracts + evidence collection | ~20 lines |
+| Cross-tool computation | narrative rendering (default) OR new derived_metric (if pattern repeats) | existing LLM path OR catalogs + Stage 3 | 0–50 lines per pattern |
+
+---
+
+## 9. Recommended Refactor Plan
+
+Ordered by impact on per-question fix rate. Each phase is independently deployable. Four phases, not seven — the previous plan had too many separate steps for what is fundamentally one architectural change: make 0.2 firm, then execute.
+
+### Phase 1: Strengthen The Analyzer Contract
+
+**The single highest-impact change.** Everything else depends on this.
+
+Scope:
+
+- extend `QuestionAnalysis` schema in `contracts/question_analysis.py` with `answer_kind`, `render_style`, `grouping`, `entity_scope` (NOT `primary_tool` — tool selection stays deterministic via `candidate_tools[0]`)
+- update the analyzer LLM prompt in `core/llm.py` to emit these fields
+- add fallback derivation from `query_type` + keyword heuristics for when analyzer is disabled/fails
+- implement active cross-check: always derive `answer_kind` from `query_type` mapping alongside the LLM-emitted value; log disagreements; prefer safer option on mismatch (see Section 8.8)
+- run in shadow mode first: log analyzer-emitted `answer_kind` vs current Stage 4 dispatch decision to validate **both accuracy and consistency**
+- consistency validation: test that semantically equivalent paraphrases produce the same `answer_kind` (e.g., "list regulated plants" vs "which plants are regulated" vs "show me the regulated power plants" should all produce LIST). If consistency is low, tighten via constrained examples in the prompt or reduce `answer_kind` cardinality with `grouping` carrying the variance
+
+Expected payoff:
+
+- validates that the LLM can reliably and consistently classify answer shape
+- zero behavioral change initially (shadow mode)
+- once validated: eliminates all 5 query-signal regex detectors in `summarizer.py`, eliminates `_EXPLANATION_ROUTING_SIGNALS` checks in 3 files, eliminates Stage 0.7 fallback routing, collapses mode derivation into inline code
+
+Files: `contracts/question_analysis.py`, `core/llm.py`, `agent/pipeline.py`
+
+### Phase 2: Canonical Evidence Frames + Generic Renderer
+
+These two changes are coupled — the renderer needs the frames, and the frames are pointless without the renderer.
+
+Scope:
+
+- define `ObservationFrame`, `EntitySetFrame`, `ComparisonFrame` dataclasses
+- build per-tool frame adapters with domain-specific column mapping (e.g., `regulated_hpp_tariff_` → "Enguri HPP" in `entity_label`; `p_bal_gel`/`p_bal_usd` → dual-currency ObservationFrame entries)
+- normalize tool outputs into canonical frames inline during evidence collection (not a separate stage)
+- build the generic tabular renderer: one function that formats any frame based on `answer_kind` + `grouping`
+- migrate existing deterministic answer branches one at a time:
+  1. regulated tariff list → generic LIST renderer over EntitySetFrame
+  2. residual weighted-price → generic SCALAR renderer over ObservationFrame
+  3. share summary → keep as-is (already works as Stage 3 pass-through)
+- keep scenario and forecast as specialized formatters
+- switch Stage 4 dispatch from regex to `answer_kind`
+- switch Stage 3 enrichment dispatch from signal detection to `answer_kind` (see Section 8.5)
+- bind provenance refs during frame construction (eliminates separate provenance gate)
+
+Expected payoff:
+
+- most new question families work with zero Stage 4 code
+- Stage 4 shrinks from mixed-responsibility module to simple switch + generic renderer
+- Stage 3 enrichment dispatch simplifies (no more share-intent regex, scenario-eligibility checks, forecast-mode keywords)
+- provenance is structural, not post-hoc token matching
+- domain logic lives in write-once tool adapters, not in growing Stage 4 regex
+
+Files: new `contracts/evidence_frames.py`, new `agent/frame_adapters.py`, new `agent/generic_renderer.py`, `agent/pipeline.py`, `agent/summarizer.py`, `agent/analyzer.py`
+
+### Phase 3: Evidence Validation + Conditional Knowledge
+
+Scope:
+
+- add `filter` field to `ToolParamsHint` in `contracts/question_analysis.py` for value-based filtering (see Section 8.9)
+- apply filter during evidence collection (after fetch, before frame construction)
+- validate evidence against `answer_kind` during collection (LIST needs entities, COMPARISON needs two periods, etc.)
+- re-plan on correctable gaps, degrade gracefully on uncorrectable ones
+- make vector knowledge retrieval conditional on `answer_kind` (skip for deterministic data answers)
+
+Expected payoff:
+
+- evidence gaps caught during collection, not discovered as Stage 4 failures
+- lower latency and cost for simple data questions
+- pipeline becomes self-correcting for common evidence gaps
+
+Files: `agent/evidence_planner.py`, `agent/pipeline.py`, `knowledge/vector_retrieval.py`
+
+### Phase 4: Consolidate Pipeline Steps
+
+Once Phases 1-3 are in place, clean up the pipeline:
+
+Scope:
+
+- remove Stage 0.7 (analyzer fallback) — `candidate_tools[0]` + evidence planner makes it unnecessary
+- fold mode derivation into 0.2 output processing (inline, not separate step)
+- fold legacy SQL into tool execution failure path (not separate stage)
+- remove separate provenance gate (provenance bound at construction)
+- remove `_EXPLANATION_ROUTING_SIGNALS`, `_has_regulated_tariff_list_query_signal`, `_is_deterministic_scenario_eligible`, `_has_residual_weighted_price_query_signal`, `_is_forecast_direct_answer_eligible` — all replaced by `answer_kind` switch
+
+Expected payoff:
+
+- pipeline goes from 13 steps to 8
+- per-question fixes drop to near-zero for SCALAR/LIST/TIMESERIES/COMPARISON
+- remaining fix surface is only: analyzer prompt tuning (improve LLM classification) or specialized formatter additions (rare)
+
+Files: `agent/pipeline.py`, `agent/summarizer.py`, `agent/router.py`
+
+---
+
+## 10. Practical Conclusion
+
+The pipeline works. The evidence planner, structured analyzer, and deterministic direct answers are real progress. But the per-question fix pattern is a clear signal that something structural is missing.
+
+**The root cause is simple:** the LLM at Stage 0.2 already understands what the user wants — list, comparison, timeseries, scalar — but it only says `query_type = data_retrieval`. Then 5+ downstream stages try to reconstruct what the LLM already knew, using regex and keyword matching. Each new question family that doesn't match the existing regex needs a patch.
+
+**The fix is also simple:** make Stage 0.2 emit the full answer contract (`answer_kind`, `render_style`, `grouping`, `entity_scope`), then build one generic renderer that can format any SCALAR/LIST/TIMESERIES/COMPARISON from canonical evidence frames. No regex. No per-question formatters. No re-interpretation.
+
+The result is a shorter pipeline (13 steps → 8) that does more with less code, because the LLM's understanding is trusted and executed, not discarded and reconstructed.
+
+**The practical test:** when a new question family appears, does it require a Stage 4 patch?
+
+- **Today:** almost always yes (new regex detector + new bespoke formatter)
+- **After Phase 1 (analyzer contract):** only if Stage 4 dispatch is wrong (regex replaced by `answer_kind` switch)
+- **After Phase 2 (generic renderer):** only if the answer has domain-specific decomposition the generic renderer can't express (scenario payoff breakdowns, forecast reliability caveats)
+- **For most data questions:** the answer just works
+
+---
+
+## 11. Source Of Truth
+
+This document reflects the runtime behavior currently implemented in:
+
+- `agent/pipeline.py`
+- `agent/router.py`
+- `agent/evidence_planner.py`
+- `agent/analyzer.py`
+- `agent/summarizer.py`
+- `core/llm.py`
+- `knowledge/vector_retrieval.py`
+
+If code and documentation diverge, update this file together with the relevant pipeline change.

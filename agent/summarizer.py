@@ -22,6 +22,8 @@ from core.llm import (
     classify_query_type,
     get_relevant_domain_knowledge,
 )
+from contracts.question_analysis import AnswerKind, RenderStyle
+from agent.generic_renderer import render as generic_render
 from context import scrub_schema_mentions
 from config import PROVENANCE_MIN_COVERAGE
 from utils.metrics import metrics
@@ -102,6 +104,27 @@ _CFD_COMPONENT_QUERY_SIGNALS = (
 )
 _MIXED_EVIDENCE_QUERY_TYPES = {"forecast", "comparison"}
 _FORECAST_QUERY_SIGNALS = ("forecast", "predict", "projection", "project", "outlook")
+_FORECAST_METRIC_LABELS = {
+    "p_bal_gel": "Balancing electricity price",
+    "p_bal_usd": "Balancing electricity price",
+    "p_dereg_gel": "Deregulated electricity price",
+    "p_dereg_usd": "Deregulated electricity price",
+    "p_gcap_gel": "Guaranteed capacity price",
+    "p_gcap_usd": "Guaranteed capacity price",
+    "xrate": "Exchange rate",
+}
+
+
+# Numeric grounding helpers normalize every number before provenance matching.
+def _price_unit_for_metric(metric: str) -> str:
+    metric_lower = str(metric or "").lower()
+    if metric_lower.endswith("_usd"):
+        return "USD/MWh"
+    if metric_lower.endswith("_gel"):
+        return "GEL/MWh"
+    if metric_lower == "xrate":
+        return "GEL per USD"
+    return "Value"
 
 
 def _normalize_number_token(raw_token: str) -> Optional[str]:
@@ -225,6 +248,7 @@ def _add_join_provenance_tokens(tokens: Set[str], ctx: QueryContext) -> None:
                 tokens.update(_tokenize_cell_value(val))
 
 
+# Grounding-token builders widen the evidence space to include aggregates and derived metrics.
 def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
     tokens = _extract_number_tokens(_build_grounding_corpus(ctx))
     # Expand text-extracted numbers with cell-level tokenization so that
@@ -611,6 +635,7 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
         )
         return
 
+    # When coverage is too low, replace the draft answer with a safe retry prompt.
     metrics.log_summary_grounding_failure()
     if hasattr(metrics, "log_provenance_gate_failure"):
         metrics.log_provenance_gate_failure()
@@ -689,6 +714,7 @@ def _extract_vector_preferred_topics(ctx: QueryContext) -> Optional[List[str]]:
     return preferred[:5] or None
 
 
+# Topic and policy helpers decide how much non-tabular evidence Stage 4 may rely on.
 def _build_data_summary_topic_preferences(ctx: QueryContext) -> Optional[List[str]]:
     """Merge analyzer and vector topic preferences for data summaries."""
 
@@ -816,6 +842,7 @@ def answer_clarify(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+# Clarification/conceptual answers bypass numeric grounding and cite background knowledge only.
 def answer_conceptual(ctx: QueryContext) -> QueryContext:
     """Generate an answer for conceptual/definitional questions (no SQL).
 
@@ -994,7 +1021,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     log.info("✅ Conceptual answer generated")
     return ctx
 
-
+# Deterministic direct answers avoid LLM summarization when the analytical evidence is already complete.
 def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
     """Build a deterministic answer from scenario evidence when LLM grounding fails.
 
@@ -1101,6 +1128,18 @@ def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
 
 def _is_deterministic_scenario_eligible(ctx: QueryContext) -> bool:
     """Return True when scenario evidence is complete enough to skip Stage 4 LLM."""
+    # Phase 4: answer_kind = SCENARIO is the authoritative signal when available.
+    if (
+        ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.answer_kind == AnswerKind.SCENARIO
+    ):
+        evidence = ctx.analysis_evidence or []
+        scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
+        if len(scenario_records) == 1 and scenario_records[0].get("aggregate_result") is not None:
+            return _build_scenario_fallback_answer(ctx) is not None
+        return False
+
+    # Legacy path: regex-based detection.
     evidence = ctx.analysis_evidence or []
     scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
     if len(scenario_records) != 1:
@@ -1254,6 +1293,7 @@ _RESIDUAL_THRESHOLD_RULES: list[tuple[str, str, str]] = [
 ]
 
 
+# Residual weighted-price helpers turn decomposition outputs into a direct answer when possible.
 def _has_explicit_residual_component_query_signal(query: str) -> bool:
     query_lower = (query or "").strip().lower()
     return (
@@ -1394,6 +1434,7 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
             )
 
     df = df.sort_values(date_col).copy()
+    # Recover the implied weighted price by dividing the residual contribution by the residual share.
     df["remaining_weighted_price_gel"] = (
         df["residual_contribution_ppa_import_gel"] / df["share_ppa_import_total"]
     )
@@ -1436,6 +1477,247 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     return "\n".join(lines)
 
 
+def _is_forecast_direct_answer_eligible(ctx: QueryContext) -> bool:
+    if "trendline forecasts" not in (ctx.stats_hint or "").lower():
+        return False
+    # Phase 4: answer_kind = FORECAST is the authoritative signal.
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind == AnswerKind.FORECAST:
+        return True
+    # Legacy path.
+    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
+        query_type = getattr(ctx.question_analysis.classification.query_type, "value", "")
+        if query_type == "forecast":
+            return True
+    query_lower = (ctx.query or "").strip().lower()
+    return any(signal in query_lower for signal in _FORECAST_QUERY_SIGNALS)
+
+
+# Forecast helpers parse the precomputed trendline block produced in Stage 3.
+def _extract_first_float(text: str) -> float | None:
+    match = re.search(r"-?\d+(?:\.\d+)?", text or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _parse_trendline_forecasts(stats_hint: str) -> tuple[str | None, list[dict[str, Any]]]:
+    if not stats_hint:
+        return None, []
+
+    marker = "--- TRENDLINE FORECASTS"
+    start_idx = stats_hint.find(marker)
+    if start_idx < 0:
+        return None, []
+
+    section = stats_hint[start_idx:].splitlines()
+    target_date: str | None = None
+    current: dict[str, Any] | None = None
+    entries: list[dict[str, Any]] = []
+
+    for raw_line in section[1:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("--- ") and "TRENDLINE FORECASTS" not in line:
+            break
+        if line.lower().startswith("target date:"):
+            target_date = line.split(":", 1)[1].strip()
+            continue
+        if line.endswith(":") and not line.startswith("-"):
+            if current:
+                entries.append(current)
+            label = line[:-1].strip()
+            metric = label
+            season = None
+            season_match = re.match(r"^(.*?)\s+\(([^)]+)\)$", label)
+            if season_match:
+                metric = season_match.group(1).strip()
+                season = season_match.group(2).strip()
+            current = {"label": label, "metric": metric, "season": season}
+            continue
+        if current is None or not line.startswith("-"):
+            continue
+        if "forecast value" in line.lower():
+            current["forecast_value"] = _extract_first_float(line)
+        elif "equation" in line.lower():
+            current["equation"] = line.split(":", 1)[1].strip() if ":" in line else ""
+        elif (
+            "goodness of fit" in line.lower()
+            or "r²" in line.lower()
+            or "râ²" in line.lower()
+            or "r^2" in line.lower()
+        ):
+            current["r_squared"] = _extract_first_float(line)
+
+    if current:
+        entries.append(current)
+    return target_date, [entry for entry in entries if entry.get("forecast_value") is not None]
+
+
+def _filter_relevant_forecast_entries(ctx: QueryContext, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+
+    query_lower = (ctx.query or "").strip().lower()
+    selected = list(entries)
+
+    if "balancing" in query_lower:
+        selected = [entry for entry in selected if str(entry.get("metric", "")).startswith("p_bal_")]
+    elif any(token in query_lower for token in ("deregulated", "power plant")):
+        selected = [entry for entry in selected if str(entry.get("metric", "")).startswith("p_dereg_")]
+    elif "guaranteed capacity" in query_lower:
+        selected = [entry for entry in selected if str(entry.get("metric", "")).startswith("p_gcap_")]
+    elif any(token in query_lower for token in ("exchange rate", "xrate", "gel per usd")):
+        selected = [entry for entry in selected if str(entry.get("metric", "")) == "xrate"]
+
+    if not selected:
+        selected = list(entries)
+
+    wants_gel = "gel" in query_lower
+    wants_usd = "usd" in query_lower
+    if wants_gel and not wants_usd:
+        gel_selected = [entry for entry in selected if str(entry.get("metric", "")).endswith("_gel")]
+        if gel_selected:
+            selected = gel_selected
+    elif wants_usd and not wants_gel:
+        usd_selected = [entry for entry in selected if str(entry.get("metric", "")).endswith("_usd")]
+        if usd_selected:
+            selected = usd_selected
+
+    non_xrate = [entry for entry in selected if str(entry.get("metric", "")) != "xrate"]
+    if non_xrate:
+        selected = non_xrate
+
+    return selected
+
+
+def _format_forecast_target_date(raw_target_date: str | None) -> str:
+    if not raw_target_date:
+        return "the requested forecast horizon"
+    try:
+        ts = pd.to_datetime(raw_target_date, errors="raise")
+    except Exception:
+        return raw_target_date
+    return ts.strftime("%B %Y")
+
+
+def _forecast_caveat_for_r_squared(r_squared: float | None) -> str:
+    if r_squared is None:
+        return (
+            "This forecast is based on historical trendline extrapolation and should be treated cautiously "
+            "because balancing prices can change with tariffs, new PPA/CfD capacity, market rules, and import prices."
+        )
+    if r_squared < 0.5:
+        return (
+            f"This forecast has moderate-to-low reliability (R²={r_squared:.3f}) due to variability in historical prices. "
+            "Actual prices may differ significantly because of regulatory decisions, new PPA/CfD capacity, market rule changes, or import price shifts."
+        )
+    if r_squared < 0.7:
+        return (
+            f"This forecast assumes current market structure, PPA contracts, and regulatory framework remain unchanged (R²={r_squared:.3f}). "
+            "Actual prices may differ because of gas-price negotiations, new PPA/CfD capacity additions, GNERC tariff decisions, or changes in neighboring electricity markets."
+        )
+    return (
+        f"While this trend is statistically strong (R²={r_squared:.3f}), it still reflects past patterns and assumes unchanged regulatory and contractual conditions. "
+        "Key uncertainties remain PPA/CfD capacity growth, gas-price negotiations, market-rule changes, and import-price dynamics."
+    )
+
+
+def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
+    if not _is_forecast_direct_answer_eligible(ctx):
+        return None
+
+    target_date, entries = _parse_trendline_forecasts(ctx.stats_hint or "")
+    entries = _filter_relevant_forecast_entries(ctx, entries)
+    if not entries:
+        return None
+
+    target_label = _format_forecast_target_date(target_date)
+    primary_entry = next(
+        (entry for entry in entries if str(entry.get("metric", "")).endswith("_gel")),
+        entries[0],
+    )
+    primary_metric = str(primary_entry.get("metric", "")).strip()
+    metric_label = _FORECAST_METRIC_LABELS.get(primary_metric, primary_metric.replace("_", " ").title())
+
+    # Prefer the seasonal breakdown when Stage 3 produced separate summer/winter forecasts.
+    season_entries = [entry for entry in entries if entry.get("season")]
+    if season_entries:
+        lines = [f"**{metric_label} Forecast**", "", f"Based on linear regression to {target_label}:"]
+        for entry in season_entries:
+            season = str(entry.get("season", "")).title()
+            unit = _price_unit_for_metric(str(entry.get("metric", "")))
+            lines.append(
+                f"- {season}: {float(entry['forecast_value']):.2f} {unit} (R²={float(entry.get('r_squared') or 0.0):.3f})"
+            )
+        lines.append("")
+        lines.append(_forecast_caveat_for_r_squared(primary_entry.get("r_squared")))
+        return "\n".join(lines)
+
+    gel_entry = next((entry for entry in entries if str(entry.get("metric", "")).endswith("_gel")), None)
+    usd_entry = next((entry for entry in entries if str(entry.get("metric", "")).endswith("_usd")), None)
+
+    if gel_entry is not None:
+        answer = (
+            f"Based on linear regression, **{metric_label}** is forecast to reach "
+            f"**{float(gel_entry['forecast_value']):.2f} {_price_unit_for_metric(str(gel_entry.get('metric', '')))}** "
+            f"by **{target_label}** (R²={float(gel_entry.get('r_squared') or 0.0):.3f})."
+        )
+        if usd_entry is not None:
+            answer += (
+                f" The parallel USD series points to **{float(usd_entry['forecast_value']):.2f} "
+                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}** "
+                f"(R²={float(usd_entry.get('r_squared') or 0.0):.3f})."
+            )
+        answer += f"\n\n{_forecast_caveat_for_r_squared(gel_entry.get('r_squared'))}"
+        return answer
+
+    first_entry = entries[0]
+    return (
+        f"Based on linear regression, **{metric_label}** is forecast to reach "
+        f"**{float(first_entry['forecast_value']):.2f} {_price_unit_for_metric(str(first_entry.get('metric', '')))}** "
+        f"by **{target_label}** (R²={float(first_entry.get('r_squared') or 0.0):.3f}).\n\n"
+        f"{_forecast_caveat_for_r_squared(first_entry.get('r_squared'))}"
+    )
+
+
+def _try_generic_renderer(ctx: QueryContext) -> str | None:
+    """Attempt the generic renderer when answer_kind + evidence frame are available.
+
+    Returns the rendered answer string, or None if not applicable (caller
+    should fall through to legacy dispatch).
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return None
+    # Yield to share_summary_override — Stage 3 produces richer narrative for shares.
+    if ctx.share_summary_override:
+        return None
+    qa = ctx.question_analysis
+    if qa.answer_kind is None or qa.render_style != RenderStyle.DETERMINISTIC:
+        return None
+    frame = getattr(ctx, "evidence_frame", None)
+    if frame is None or frame.is_empty():
+        return None
+    # Only handle the four generic shapes; scenario/forecast/explanation/knowledge/clarify
+    # fall through to existing specialized paths.
+    if qa.answer_kind not in (AnswerKind.SCALAR, AnswerKind.LIST, AnswerKind.TIMESERIES, AnswerKind.COMPARISON):
+        return None
+
+    result = generic_render(
+        frame=frame,
+        answer_kind=qa.answer_kind,
+        grouping=qa.grouping,
+        entity_scope=qa.entity_scope,
+        language_code=qa.language.answer_language.value if qa.language else "en",
+    )
+    if result and result.strip():
+        return result
+    return None
+
+
 def summarize_data(ctx: QueryContext) -> QueryContext:
     """Generate an answer from SQL query results.
 
@@ -1443,6 +1725,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
            ctx.conversation_history, ctx.share_summary_override
     Writes: ctx.summary
     """
+    # Choose the strongest deterministic answer path first, then fall back to LLM summarization.
     strict_grounding_retry = False
     ctx.summary_source = ""
     ctx.grounding_policy = ""
@@ -1458,7 +1741,21 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             )
             ctx.share_summary_override = None
 
-    if ctx.share_summary_override:
+    # --- Phase 2: Generic renderer path (answer_kind + evidence frame) ---
+    # Attempt the generic renderer FIRST when we have a canonical evidence frame
+    # and a deterministic render_style.  This replaces per-question regex dispatch
+    # for SCALAR, LIST, TIMESERIES, COMPARISON answer kinds.
+    _generic_answer = _try_generic_renderer(ctx)
+    if _generic_answer is not None:
+        ctx.summary = _generic_answer
+        ctx.summary_source = "generic_renderer"
+        ctx.summary_claims = _derive_claims_from_text(ctx.summary)
+        ctx.summary_citations = ["generic_renderer"]
+        ctx.summary_confidence = 0.97
+        metrics.log_deterministic_skip("generic_renderer")
+        log.info("Generic renderer produced answer (answer_kind=%s); skipping legacy dispatch.",
+                 ctx.question_analysis.answer_kind.value if ctx.question_analysis and ctx.question_analysis.answer_kind else "?")
+    elif ctx.share_summary_override:
         ctx.summary = ctx.share_summary_override
         ctx.summary_source = "deterministic_share_summary"
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
@@ -1488,6 +1785,14 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_confidence = 0.95
         metrics.log_deterministic_skip(ctx.summary_source)
         log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
+    elif (forecast_answer := _build_trendline_forecast_direct_answer(ctx)) is not None:
+        ctx.summary = forecast_answer
+        ctx.summary_source = "deterministic_trendline_forecast_direct"
+        ctx.summary_claims = []
+        ctx.summary_citations = ["deterministic_trendline_forecast_direct"]
+        ctx.summary_confidence = 0.95
+        metrics.log_deterministic_skip(ctx.summary_source)
+        log.info("Deterministic trendline forecast answer eligible; skipping Stage 4 LLM.")
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.

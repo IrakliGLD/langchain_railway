@@ -37,9 +37,11 @@ from utils.query_validation import validate_tool_relevance
 from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator, evidence_planner
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
 from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores
+from agent.evidence_validator import validate_evidence
+from agent.frame_adapters import adapt_tool_result
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
-from contracts.question_analysis import PreferredPath
+from contracts.question_analysis import AnswerKind, PreferredPath, RenderStyle
 from contracts.vector_knowledge import VectorKnowledgeMode
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
@@ -78,6 +80,7 @@ _ALWAYS_KNOWLEDGE_TYPES = {"conceptual_definition", "regulatory_procedure"}
 _ALWAYS_DATA_TYPES = {"data_retrieval", "data_explanation", "factual_lookup"}
 
 
+# Clarification/evidence helpers decide whether later stages can answer safely.
 def _derive_response_mode(ctx: QueryContext) -> str:
     """Derive response_mode once from question-analysis or heuristic fallback.
 
@@ -118,6 +121,74 @@ def _derive_resolution_policy(ctx: QueryContext) -> str:
         ):
             return ResolutionPolicy.CLARIFY
     return ResolutionPolicy.ANSWER
+
+
+# --- answer_kind cross-check: derive from query_type, compare with LLM-emitted ---
+
+_QUERY_TYPE_TO_ANSWER_KIND: dict[str, AnswerKind] = {
+    "conceptual_definition": AnswerKind.KNOWLEDGE,
+    "regulatory_procedure": AnswerKind.KNOWLEDGE,
+    "factual_lookup": AnswerKind.SCALAR,
+    "data_retrieval": AnswerKind.TIMESERIES,  # conservative default
+    "data_explanation": AnswerKind.EXPLANATION,
+    "comparison": AnswerKind.COMPARISON,
+    "forecast": AnswerKind.FORECAST,
+    "ambiguous": AnswerKind.CLARIFY,
+    "unsupported": AnswerKind.CLARIFY,
+}
+
+# answer_kind values considered "safe" — can display any shape without data loss.
+_SAFE_ANSWER_KINDS = frozenset({AnswerKind.TIMESERIES, AnswerKind.EXPLANATION, AnswerKind.KNOWLEDGE})
+
+
+def _derive_answer_kind_from_query_type(ctx) -> AnswerKind | None:
+    """Deterministic answer_kind derivation from query_type (fallback + cross-check)."""
+    if not ctx.has_authoritative_question_analysis:
+        return None
+    qa_type = ctx.question_analysis.classification.query_type.value
+    return _QUERY_TYPE_TO_ANSWER_KIND.get(qa_type)
+
+
+def _cross_check_answer_kind(ctx) -> None:
+    """Compare LLM-emitted answer_kind against query_type-derived value.
+
+    If they disagree, log a warning and prefer the safer option.
+    This runs as an active check even when the analyzer succeeds.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return
+    qa = ctx.question_analysis
+    llm_kind = qa.answer_kind
+    derived_kind = _derive_answer_kind_from_query_type(ctx)
+
+    if llm_kind is None or derived_kind is None:
+        return
+
+    if llm_kind == derived_kind:
+        return
+
+    # Disagreement detected — prefer the safer option.
+    # "Safer" means: narrative-friendly or broader shape that can still display correctly.
+    if llm_kind in _SAFE_ANSWER_KINDS:
+        chosen = llm_kind
+    elif derived_kind in _SAFE_ANSWER_KINDS:
+        chosen = derived_kind
+    else:
+        # Neither is in the safe set — trust the LLM (it has more context).
+        chosen = llm_kind
+
+    log.warning(
+        "answer_kind cross-check disagreement: llm=%s derived=%s chosen=%s "
+        "(query_type=%s, query=%.80s)",
+        llm_kind.value if llm_kind else None,
+        derived_kind.value if derived_kind else None,
+        chosen.value,
+        qa.classification.query_type.value,
+        ctx.query,
+    )
+    # Update the analysis in-place if the chosen value differs from what the LLM emitted.
+    if chosen != llm_kind:
+        qa.answer_kind = chosen
 
 
 def _detect_clarify_selection(query: str, conversation_history) -> str | None:
@@ -220,6 +291,7 @@ def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
     return False
 
 
+# Inline enrichment helpers augment tool results with supporting datasets when the evidence planner is off.
 def _enrich_prices_with_composition(
     ctx: QueryContext,
     invocation: ToolInvocation,
@@ -417,6 +489,7 @@ def _merge_frame_into_context_by_date(
     if not date_col_primary or not date_col_secondary:
         return 0, []
 
+    # Only merge genuinely new columns so the primary result shape stays stable.
     candidate_cols = []
     for col in secondary_df.columns:
         if col == date_col_secondary:
@@ -449,6 +522,7 @@ def _merge_frame_into_context_by_date(
     ctx.df = merged
     ctx.cols = list(merged.columns)
     ctx.rows = [tuple(r) for r in merged.itertuples(index=False, name=None)]
+    # Record the join metadata so Stage 4 can ground merged-evidence explanations.
     ctx.join_provenance.append(
         {
             "primary_tool": ctx.tool_name or "",
@@ -552,7 +626,15 @@ def _enrich_prices_with_balancing_driver_context(
 
 
 def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
-    """Return True when tool routing should use explanation-style handling."""
+    """Return True when tool routing should use explanation-style handling.
+
+    Phase 4: answer_kind is the primary signal when available.
+    Legacy keyword detection remains as fallback when answer_kind is not set.
+    """
+    # Phase 4: answer_kind is the authoritative signal.
+    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+        return ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION
+
     query_lower = (ctx.query or "").strip().lower()
     explanation_signal_hit = any(signal in query_lower for signal in _EXPLANATION_ROUTING_SIGNALS)
 
@@ -596,6 +678,7 @@ def _derive_resolved_query(ctx: QueryContext) -> tuple[str, str]:
     return ctx.query, "raw_query"
 
 
+# Shared attachment logic keeps router, analyzer, and recovery tool paths consistent.
 def _apply_tool_result(
     ctx: QueryContext,
     invocation: ToolInvocation,
@@ -643,6 +726,10 @@ def _apply_tool_result(
         return ctx
 
     log.info("Recovered tool relevance validated. reason=%s", tool_reason)
+
+    # --- Phase 2: Build canonical evidence frame alongside raw df ---
+    _build_and_attach_evidence_frame(ctx, invocation)
+
     if ENABLE_EVIDENCE_PLANNER:
         # Composition enrichment is handled by the evidence loop
         # (Stage 0.8 via COMPOSITION_CONTEXT role); skip inline enrichment.
@@ -650,6 +737,68 @@ def _apply_tool_result(
     return _enrich_prices_with_balancing_driver_context(
         ctx, invocation, is_explanation,
     )
+
+
+def _build_and_attach_evidence_frame(ctx: QueryContext, invocation: ToolInvocation) -> None:
+    """Build a canonical evidence frame from the tool result and attach to ctx.
+
+    The frame is stored on ctx.evidence_frame for use by the generic renderer
+    in Stage 4.  This is additive — the raw df/cols/rows remain untouched for
+    backward compatibility with Stage 3 enrichment and existing summarizer paths.
+    """
+    if ctx.df is None or ctx.df.empty:
+        return
+
+    answer_kind = None
+    filter_cond = None
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        answer_kind = qa.answer_kind
+        # Extract filter from the matching tool candidate's params_hint
+        for tc in qa.tooling.candidate_tools:
+            if tc.name.value == invocation.name and tc.params_hint is not None:
+                filter_cond = tc.params_hint.filter
+                break
+
+    prov_refs = []
+    if hasattr(ctx, "provenance") and ctx.provenance:
+        prov_refs = [p.get("query_hash", "") for p in ctx.provenance if isinstance(p, dict)]
+
+    frame = adapt_tool_result(
+        tool_name=invocation.name,
+        df=ctx.df,
+        provenance_refs=prov_refs,
+        filter_cond=filter_cond,
+        answer_kind=answer_kind,
+    )
+    if frame is not None:
+        ctx.evidence_frame = frame
+        log.info(
+            "Built canonical evidence frame: type=%s rows=%d (tool=%s)",
+            type(frame).__name__,
+            len(frame.rows),
+            invocation.name,
+        )
+
+        # Phase 3: validate evidence against answer_kind requirements.
+        gap = validate_evidence(frame, answer_kind)
+        if gap is not None:
+            if gap.correctable:
+                log.warning(
+                    "Evidence gap (correctable): %s — downstream may re-plan or degrade",
+                    gap,
+                )
+                # Store gap for downstream stages to act on.
+                ctx.evidence_gap = gap
+            else:
+                log.warning(
+                    "Evidence gap (not correctable): %s — degrading render_style to narrative",
+                    gap,
+                )
+                ctx.evidence_gap = gap
+                # Degrade: let LLM narrative handle the mismatch.
+                if ctx.has_authoritative_question_analysis:
+                    ctx.question_analysis.render_style = RenderStyle.NARRATIVE
 
 
 def _attempt_analyzer_tool_recovery(
@@ -666,6 +815,7 @@ def _attempt_analyzer_tool_recovery(
     - if none succeed, let the normal planner/SQL path take over
     """
 
+    # Try a tiny set of safe alternatives instead of reopening the full search space.
     candidates: list[ToolInvocation] = []
     if failed_invocation is not None and failed_invocation.name == "get_balancing_composition" and is_explanation:
         candidates.append(
@@ -879,6 +1029,40 @@ def process_query(
             strategy=bundle.strategy.value,
         )
 
+    # --- answer_kind cross-check (Phase 1: shadow logging + safety override) ---
+    _cross_check_answer_kind(ctx)
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
+        if qa.answer_kind is None:
+            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
+        # Fallback: if LLM did not emit render_style, default to narrative (safer).
+        if qa.render_style is None:
+            qa.render_style = RenderStyle.NARRATIVE
+        log.info(
+            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
+            qa.answer_kind.value if qa.answer_kind else None,
+            qa.render_style.value if qa.render_style else None,
+            qa.grouping.value if qa.grouping else None,
+            qa.entity_scope,
+            ctx.query,
+        )
+
+    # --- Phase 3: Clear vector knowledge for deterministic data paths (after cross-check) ---
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        if (
+            qa.answer_kind is not None
+            and qa.answer_kind not in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION, AnswerKind.CLARIFY)
+            and qa.render_style == RenderStyle.DETERMINISTIC
+            and ctx.vector_knowledge_prompt
+        ):
+            log.info(
+                "Clearing vector knowledge prompt: answer_kind=%s render_style=%s (deterministic data path)",
+                qa.answer_kind.value, qa.render_style.value,
+            )
+            ctx.vector_knowledge_prompt = ""
+
     # --- Derive response_mode (single source of truth for answer mode) ---
     ctx.response_mode = _derive_response_mode(ctx)
     ctx.resolution_policy = _derive_resolution_policy(ctx)
@@ -934,7 +1118,7 @@ def process_query(
         _trace_stage("stage_4_conceptual_summary", t_stage)
         return ctx
 
-    # Stage 0.4: Evidence planning (multi-tool expansion)
+    # Stage 0.4: expand the authoritative analyzer output into the exact datasets we still need.
     if ENABLE_EVIDENCE_PLANNER:
         t_stage = time.time()
         ctx = evidence_planner.build_evidence_plan(ctx)
@@ -945,7 +1129,7 @@ def process_query(
             tools=[s["tool_name"] for s in ctx.evidence_plan],
         )
 
-    # Stage 0.5: pre-LLM typed tool routing
+    # Stage 0.5: prefer deterministic tool execution before falling back to heavier planners.
     if ENABLE_TYPED_TOOLS:
         t_stage = time.time()
 
@@ -1088,7 +1272,7 @@ def process_query(
                 semantic_scores=_last_semantic_scores.copy(),
             )
 
-            # --- Stage 0.7: LLM analyzer-driven tool routing (fallback) ---
+            # Stage 0.7: if keyword/plan routing misses, let the active analyzer nominate one tool.
             # Fires when Stage 0.5 keyword/plan-driven routing misses.
             # When ENABLE_EVIDENCE_PLANNER is on, this is a second chance
             # to satisfy the primary plan step; secondary steps are handled
@@ -1249,7 +1433,7 @@ def process_query(
                 else:
                     metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
 
-    # Stage 0.8: Evidence completeness loop
+    # Stage 0.8: finish any remaining evidence-plan steps and merge them into the main frame.
     if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan and not all(
         s.get("satisfied") for s in ctx.evidence_plan
     ):
@@ -1275,7 +1459,7 @@ def process_query(
             _should_route_tool_as_explanation(ctx),
         )
 
-    # Stage 1/2: fallback SQL path when no tool route was used.
+    # Stage 1/2: agent loop or SQL fallback only runs after deterministic tool paths are exhausted.
     # When Stage 0.2 is authoritative, it owns route selection, so the
     # context-blind agent loop must not run ahead of planner/SQL fallback.
     # Without authoritative Stage 0.2, the agent loop remains the last resort.
@@ -1323,7 +1507,7 @@ def process_query(
         elif ctx.agent_outcome == "fallback_exit":
             log.info("Agent fallback exit | reason=%s", ctx.agent_fallback_reason)
 
-    # Stage 1/2: hard-coded legacy fallback path when no tool route was used
+    # Final legacy fallback: generate SQL, execute it, then continue through analysis/summarization.
     if not ctx.used_tool:
         if ctx.tool_fallback_reason:
             metrics.log_tool_fallback_intent(ctx.query, f"tool_fallback:{ctx.tool_fallback_reason}")
@@ -1353,7 +1537,7 @@ def process_query(
     else:
         log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
 
-    # Snapshot the source tabular output before analyzer mutates/augments rows.
+    # Snapshot the source tabular output before analyzer mutates or augments the evidence.
     if ctx.rows and ctx.cols and not ctx.provenance_rows:
         inferred_source = str(ctx.provenance_source or "")
         inferred_hash = str(ctx.provenance_query_hash or "")

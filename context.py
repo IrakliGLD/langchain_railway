@@ -42,6 +42,11 @@ COLUMN_LABELS = {
     "cpi_type": "CPI Category",
     "cpi": "Consumer Price Index",
 
+    # mv_balancing_trade_with_tariff
+    "month": "Period (Year-Month)",
+    "entity_code": "Entity Code",
+    "balancing_quantity": "Balancing Quantity (thousand MWh)",
+
     # energy_balance_long_mv
     "year": "Year",
     "category": "Energy Balance Category",

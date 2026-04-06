@@ -41,6 +41,7 @@ from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
 log = logging.getLogger("Enai")
 
 
+# Date/window helpers support analyzer guardrails and downstream tool parameter resolution.
 def _parse_iso_date(value: Optional[str]) -> Optional[date]:
     """Parse an ISO date string safely."""
     if not value:
@@ -97,6 +98,7 @@ def _expand_single_month_explanation_window(
     return expanded_start, end_date
 
 
+# Token vocabularies below power deterministic planner guardrails before any SQL is generated.
 _BALANCING_PRICE_EXPLANATION_TOKENS = (
     "why",
     "reason",
@@ -239,6 +241,7 @@ def _extract_explicit_month_period(raw_query: str) -> tuple[Optional[str], Optio
         return None, None
     year = int(year_match.group(1))
 
+    # Resolve a unique month mention so the guardrail can force a precise analysis window.
     matched_months = [
         month_num
         for month_num, pattern in _MONTH_PATTERN_BY_NUMBER.items()
@@ -299,6 +302,7 @@ def _apply_balancing_month_explanation_guardrail(
         start_date, end_date = extract_date_range(raw_query)
     payload = qa.model_dump(mode="json")
 
+    # Rewrite the analyzer payload so later stages see a deterministic multi-tool explanation task.
     payload["classification"]["query_type"] = QueryType.DATA_EXPLANATION.value
     payload["classification"]["analysis_mode"] = "analyst"
     payload["classification"]["needs_clarification"] = False
@@ -423,6 +427,7 @@ def _apply_balancing_month_explanation_guardrail(
     return QuestionAnalysis.model_validate(payload), True
 
 
+# Forecast guardrails catch plain balancing-price forecasts that should stay on tool data.
 def _is_simple_balancing_price_forecast_query(
     qa: QuestionAnalysis,
     raw_query: str,
@@ -557,6 +562,7 @@ def _apply_balancing_price_forecast_guardrail(
     return QuestionAnalysis.model_validate(payload), True
 
 
+# Clarify/history guardrails protect ambiguous residual weighted-price calculations.
 def _is_underdefined_numeric_computation_query(
     qa: QuestionAnalysis,
     raw_query: str,
@@ -1047,6 +1053,7 @@ def _generate_plan_and_sql_with_retry(
     return _extract_plan_and_sql(combined_output)
 
 
+# Legacy plan/SQL generation remains as the fallback when tool routing is insufficient.
 def _build_plan_from_question_analysis(qa: QuestionAnalysis) -> dict[str, object]:
     """Project authoritative Stage 0.2 semantics into the legacy plan shape."""
     target = ""
@@ -1125,6 +1132,7 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
     """Stage 0.2: Run structured question analysis and stamp its source."""
 
     try:
+        # Run the structured analyzer once, then patch obvious misroutes with deterministic guardrails.
         analyzed = llm_analyze_question(
             user_query=ctx.query,
             conversation_history=ctx.conversation_history,
@@ -1242,6 +1250,7 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
     if ctx.is_conceptual:
         return ctx
 
+    # Preserve authoritative analyzer semantics, but still let the legacy planner add SQL/chart hints.
     authoritative_qa = ctx.has_authoritative_question_analysis
     authoritative_plan = (
         _build_plan_from_question_analysis(ctx.question_analysis)
@@ -1249,7 +1258,7 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
         else None
     )
 
-    # Generate plan + SQL in one LLM call
+    # Generate the fallback plan and SQL together so both stay semantically aligned.
     try:
         retry_kwargs = dict(
             user_query=ctx.query,
@@ -1437,8 +1446,7 @@ def resolve_tool_params(
     Returns ``None`` only for unknown tools.  Raises ``ValueError`` for
     unresolvable entity references so the caller can decide on fallback.
     """
-    # Use the canonical English query for parameter extraction so that
-    # keyword extractors work reliably even for non-English input.
+    # Use the canonical English query for parameter extraction so keyword extractors behave consistently.
     effective_query = (qa.canonical_query_en or raw_query).lower()
 
     # --- Resolve dates ---

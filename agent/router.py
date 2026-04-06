@@ -16,6 +16,7 @@ from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_GAP_THRESHOL
 _last_semantic_scores: Dict[str, float] = {}
 
 
+# Public entity vocabularies keep deterministic extraction aligned with tool enums.
 ALLOWED_BALANCING_ENTITIES = {
     "import",
     "deregulated_hydro",
@@ -74,6 +75,7 @@ _SEMANTIC_TOOL_TERMS: Dict[str, Set[str]] = {
 }
 
 
+# Lightweight semantic scoring helps recover from keyword misses without using an LLM.
 def _tokenize_words(query_lower: str) -> Set[str]:
     return set(re.findall(r"[a-zA-Z_]+", query_lower))
 
@@ -102,6 +104,7 @@ def _build_semantic_invocation(
     end_date: Optional[str],
     score: float,
 ) -> Optional[ToolInvocation]:
+    # Use the same parameter extractors as the direct router so fallback behavior stays deterministic.
     has_share = any(t in query_lower for t in ["share", "shares", "proportion", "percentage", "percent"])
     has_balancing = any(t in query_lower for t in ["balancing", "p_bal", "balance market", "balancing electricity"])
     if tool_name == "get_tariffs":
@@ -192,6 +195,7 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date: 
     return _build_semantic_invocation(top_tool, query_lower, start_date, end_date, top_score)
 
 
+# Regex extractors below convert natural-language hints into concrete tool params.
 def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """Extract coarse date range hints from NL query."""
     # from 2020 to 2024 / between 2020 and 2024
@@ -394,6 +398,7 @@ def extract_generation_types(query_lower: str) -> List[str]:
     return list(dict.fromkeys(hits))
 
 
+# Main deterministic routing ladder: tariffs, composition, generation, prices, then semantic fallback.
 def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocation]:
     """Return a deterministic tool invocation when confidence is high."""
     q = query.lower().strip()

@@ -10,6 +10,7 @@ def execute_tool(invocation: ToolInvocation) -> ToolResult:
     return _execute_tool(invocation)
 
 
+# Mirror the registry helper without importing the heavier modules at package import time.
 def list_tools():
     from .registry import list_tools as _list_tools
     return _list_tools()

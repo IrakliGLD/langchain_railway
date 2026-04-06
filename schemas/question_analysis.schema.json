@@ -38,6 +38,22 @@
       "title": "AnalysisRequirementsInfo",
       "type": "object"
     },
+    "AnswerKind": {
+      "description": "Shape of the final answer the user expects.",
+      "enum": [
+        "scalar",
+        "list",
+        "timeseries",
+        "comparison",
+        "explanation",
+        "forecast",
+        "scenario",
+        "knowledge",
+        "clarify"
+      ],
+      "title": "AnswerKind",
+      "type": "string"
+    },
     "ChartFamily": {
       "enum": [
         "line",
@@ -194,6 +210,17 @@
             }
           ],
           "default": null
+        },
+        "season": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Season"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -230,6 +257,68 @@
         "correlation_driver"
       ],
       "title": "EvidenceRole",
+      "type": "string"
+    },
+    "FilterCondition": {
+      "additionalProperties": false,
+      "description": "Value-based filter applied during evidence collection (after fetch, before framing).",
+      "properties": {
+        "metric": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Metric",
+          "type": "string"
+        },
+        "operator": {
+          "$ref": "#/$defs/FilterOperator"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        }
+      },
+      "required": [
+        "metric",
+        "operator",
+        "value"
+      ],
+      "title": "FilterCondition",
+      "type": "object"
+    },
+    "FilterOperator": {
+      "description": "Comparison operators for value-based evidence filtering.",
+      "enum": [
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "eq"
+      ],
+      "title": "FilterOperator",
+      "type": "string"
+    },
+    "Grouping": {
+      "description": "How the answer rows should be grouped in the final output.",
+      "enum": [
+        "none",
+        "by_entity",
+        "by_period",
+        "by_metric"
+      ],
+      "title": "Grouping",
       "type": "string"
     },
     "KnowledgeInfo": {
@@ -382,6 +471,15 @@
       "title": "QueryType",
       "type": "string"
     },
+    "RenderStyle": {
+      "description": "Whether the answer should be formatted deterministically or via LLM narrative.",
+      "enum": [
+        "deterministic",
+        "narrative"
+      ],
+      "title": "RenderStyle",
+      "type": "string"
+    },
     "RoutingInfo": {
       "additionalProperties": false,
       "properties": {
@@ -431,6 +529,15 @@
         "max"
       ],
       "title": "ScenarioAggregation",
+      "type": "string"
+    },
+    "Season": {
+      "enum": [
+        "summer",
+        "winter",
+        "full"
+      ],
+      "title": "Season",
       "type": "string"
     },
     "SemanticRole": {
@@ -663,6 +770,17 @@
           ],
           "default": null,
           "title": "Mode"
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilterCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "title": "ToolParamsHint",
@@ -803,6 +921,56 @@
     },
     "analysis_requirements": {
       "$ref": "#/$defs/AnalysisRequirementsInfo"
+    },
+    "answer_kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AnswerKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Shape of the final answer. The LLM should emit this directly; downstream stages trust it without re-interpretation."
+    },
+    "render_style": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RenderStyle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Whether the answer should be rendered deterministically (data lookup) or via LLM narrative (explanation, causal reasoning)."
+    },
+    "grouping": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Grouping"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "How answer rows should be grouped: none, by_entity, by_period, by_metric."
+    },
+    "entity_scope": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Scoping hint for entity selection, e.g. 'regulated_plants', 'all', or specific entity names. Tells downstream stages which entities to include.",
+      "title": "Entity Scope"
     }
   },
   "required": [

@@ -138,6 +138,7 @@ def compute_mom(
     prev_val = share_value(mctx.prev_shares, metric) if is_share else row_value(mctx.previous_row, metric)
     if cur_val is None or prev_val is None:
         return None
+    # Compare the latest resolved observation against the immediately preceding one.
     delta = cur_val - prev_val
     pct = None if abs(prev_val) < 1e-12 else (delta / prev_val) * 100.0
     _cur_period = _period_str(mctx.current_ts)
@@ -169,6 +170,7 @@ def compute_yoy(
     yoy_val = share_value(mctx.yoy_shares, metric) if is_share else row_value(mctx.yoy_row, metric)
     if cur_val is None or yoy_val is None:
         return None
+    # YoY uses the same calendar period from the prior year as the reference point.
     delta = cur_val - yoy_val
     pct = None if abs(yoy_val) < 1e-12 else (delta / yoy_val) * 100.0
     _cur_period = _period_str(mctx.current_ts)
@@ -259,6 +261,7 @@ def compute_trend_slope(
     valid = numeric_series.notna()
     if valid.sum() < 2:
         return None
+    # Fit a simple linear trend over ordered observations to summarize direction and pace.
     x = np.arange(valid.sum(), dtype=float)
     y = numeric_series[valid].astype(float).to_numpy()
     slope = np.polyfit(x, y, deg=1)[0]
@@ -313,15 +316,18 @@ def compute_scenario(
         return None
 
     if metric_name == "scenario_scale":
+        # Scale scenarios multiply every observation by the requested factor.
         scenario_series = series * factor
     elif metric_name == "scenario_offset":
+        # Offset scenarios add or subtract a fixed amount per observation.
         scenario_series = series + factor
     else:  # scenario_payoff
+        # Payoff scenarios compare the observed market price against a strike/reference price.
         scenario_series = (factor - series) * volume
 
     agg_result = float(getattr(scenario_series, agg_name)())
 
-    # Positive/negative decomposition for payoff queries
+    # Split payoff results into positive and negative buckets so answers can explain both sides.
     if metric_name == "scenario_payoff":
         _pos_mask = scenario_series > 0
         _neg_mask = scenario_series < 0
@@ -339,7 +345,7 @@ def compute_scenario(
         market_component_result = None
         combined_total_result = None
 
-    # Baseline/delta only meaningful for scale and offset
+    # Baseline deltas only make sense when the scenario modifies the observed series directly.
     if metric_name in ("scenario_scale", "scenario_offset"):
         baseline_result = float(getattr(series, agg_name)())
         delta = agg_result - baseline_result

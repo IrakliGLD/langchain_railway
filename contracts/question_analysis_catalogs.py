@@ -5,6 +5,72 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
+# Answer-kind guide teaches the analyzer how to classify the expected answer shape.
+QUESTION_ANALYSIS_ANSWER_KIND_GUIDE: List[Dict[str, str]] = [
+    {
+        "name": "scalar",
+        "use_for": "Single numeric value or fact for a specific period/entity. Examples: 'What was the price in March?', 'What is the current exchange rate?'",
+        "render_style_hint": "deterministic",
+    },
+    {
+        "name": "list",
+        "use_for": "Enumeration of entities, categories, or items. Examples: 'Which plants are regulated?', 'List all tariff entities', 'What types of generation exist?'",
+        "render_style_hint": "deterministic",
+    },
+    {
+        "name": "timeseries",
+        "use_for": "Period-indexed data series or table. Examples: 'Show monthly prices for 2025', 'Generation mix over the last year', 'Tariff history for Enguri'",
+        "render_style_hint": "deterministic",
+    },
+    {
+        "name": "comparison",
+        "use_for": "Side-by-side comparison of periods, entities, or metrics. Examples: 'Compare Jan vs Feb prices', 'Enguri vs Gardabani tariffs', 'Price in GEL vs USD'",
+        "render_style_hint": "deterministic",
+    },
+    {
+        "name": "explanation",
+        "use_for": "Why/how questions requiring causal reasoning or driver analysis. Examples: 'Why did prices rise in March?', 'What drives balancing price changes?', 'Explain the price variation'",
+        "render_style_hint": "narrative",
+    },
+    {
+        "name": "forecast",
+        "use_for": "Projection, trend extension, or future estimate. Examples: 'Forecast prices for next quarter', 'What is the price trend?', 'Project generation for 2026'",
+        "render_style_hint": "deterministic",
+    },
+    {
+        "name": "scenario",
+        "use_for": "Hypothetical what-if calculations, CfD/PPA payoffs. Examples: 'What if prices were 20% higher?', 'Calculate CfD payoff at 60 USD strike'",
+        "render_style_hint": "deterministic",
+    },
+    {
+        "name": "knowledge",
+        "use_for": "Conceptual, definitional, or regulatory procedure questions. Examples: 'What is balancing price?', 'How does GNERC regulate tariffs?', 'Describe the market structure'",
+        "render_style_hint": "narrative",
+    },
+    {
+        "name": "clarify",
+        "use_for": "The question is too ambiguous or underspecified to answer. The system should ask for clarification.",
+        "render_style_hint": "narrative",
+    },
+]
+
+
+# Filter guidance teaches the analyzer when to emit value-based filters.
+QUESTION_ANALYSIS_FILTER_GUIDE: List[Dict[str, str]] = [
+    {
+        "pattern": "threshold",
+        "use_for": "Questions with numeric thresholds: 'months where price exceeded 15', 'entities with tariff above 10'",
+        "example_filter": '{"metric": "balancing", "operator": "gt", "value": 15, "unit": "tetri"}',
+    },
+    {
+        "pattern": "change_filter",
+        "use_for": "Questions filtering by change magnitude: 'months where price increased by more than 5%'",
+        "example_filter": '{"metric": "balancing", "operator": "gt", "value": 5, "unit": "percent"}',
+    },
+]
+
+
+# Query-type guidance teaches the analyzer how to classify the user request.
 QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
     {
         "name": "conceptual_definition",
@@ -45,6 +111,7 @@ QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
 ]
 
 
+# Topic catalog tells the analyzer which knowledge domains are available.
 QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "general_definitions",
@@ -94,6 +161,7 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+# Tool catalog describes when each deterministic tool should or should not be used.
 QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "get_prices",
@@ -154,6 +222,7 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+# Chart policy keeps chart suggestions lightweight and query-type aware.
 QUESTION_ANALYSIS_CHART_POLICY: List[Dict[str, str]] = [
     {
         "case": "definition_or_conceptual",
@@ -174,6 +243,7 @@ QUESTION_ANALYSIS_CHART_POLICY: List[Dict[str, str]] = [
 ]
 
 
+# Derived-metric catalog documents the analytical calculations the runtime can materialize.
 QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "mom_absolute_change",

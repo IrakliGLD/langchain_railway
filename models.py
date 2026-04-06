@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
+from contracts.evidence_frames import CanonicalFrame
 from contracts.question_analysis import QuestionAnalysis, ToolName
 from contracts.vector_knowledge import VectorKnowledgeBundle
 
@@ -79,6 +80,10 @@ class QueryContext:
     grounding_policy: str = ""
     data_summary_blocked_reason: str = ""
     summary_domain_knowledge: str = ""
+
+    # --- canonical evidence frame (Phase 2: built during evidence collection) ---
+    evidence_frame: Optional[CanonicalFrame] = None
+    evidence_gap: Optional[Any] = None  # EvidenceGap from evidence_validator (Phase 3)
 
     # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
     evidence_plan: List[Dict[str, Any]] = dc_field(default_factory=list)

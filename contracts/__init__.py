@@ -1,5 +1,6 @@
 """Runtime contracts for structured LLM outputs."""
 
+# Re-export question-analysis contracts used across planner, pipeline, and summarizer.
 from contracts.question_analysis import QuestionAnalysis
 from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_CHART_POLICY,
@@ -20,6 +21,7 @@ from contracts.vector_knowledge import (
     VectorRetrievalFilters,
 )
 
+# Keep the public contract surface explicit for downstream imports.
 __all__ = [
     "QuestionAnalysis",
     "QUESTION_ANALYSIS_QUERY_TYPE_GUIDE",

@@ -395,7 +395,7 @@ def _resolve_secondary_params(
     if params is None:
         return None
 
-    # Inherit date range from primary if secondary didn't resolve its own
+    # Inherit the primary time window so cross-tool evidence lines up on the same periods.
     if "start_date" not in params and "start_date" in primary_params:
         params["start_date"] = primary_params["start_date"]
     if "end_date" not in params and "end_date" in primary_params:
@@ -407,8 +407,7 @@ def _resolve_secondary_params(
     ):
         params["currency"] = primary_params["currency"]
 
-    # Balancing-price auto-enrichment should default to category-level tariff
-    # series so the fallback evidence shape matches the balancing templates.
+    # Balancing-price enrichment defaults to grouped tariff buckets used by the analyzer templates.
     if (
         tool_name == ToolName.GET_TARIFFS.value
         and primary_params.get("metric") == "balancing"
@@ -489,7 +488,7 @@ def execute_remaining_evidence(ctx: QueryContext) -> QueryContext:
                 step["role"], step["tool_name"], exc,
             )
 
-    # Merge secondary evidence into the primary DataFrame
+    # Merge secondary evidence into the primary DataFrame once all available steps have run.
     ctx = merge_evidence_into_context(ctx)
     ctx.evidence_plan_complete = all(s.get("satisfied") for s in ctx.evidence_plan)
     return ctx

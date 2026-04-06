@@ -43,7 +43,7 @@ def join_evidence(
         )
         return primary_df
 
-    # Resolve which columns to select from the secondary dataset
+    # Keep join behavior explicit by selecting only the known cross-tool columns.
     select_cols = _select_columns(secondary_df, secondary_tool, primary_tool)
     if not select_cols:
         log.info(
@@ -180,13 +180,13 @@ def _merge_on_date(
     primary = primary.dropna(subset=[date_primary])
     secondary = secondary.dropna(subset=[date_secondary])
 
-    # Select only the date column + desired columns from secondary
+    # Trim the secondary frame to the exact columns the calling pattern allows.
     merge_cols = [date_secondary] + [c for c in select_cols if c in secondary.columns]
     secondary_subset = secondary[merge_cols].rename(
         columns={date_secondary: date_primary},
     )
 
-    # Drop duplicate date rows in secondary (keep first)
+    # Secondary evidence should contribute at most one record per date.
     secondary_subset = secondary_subset.drop_duplicates(subset=[date_primary], keep="first")
 
     merged = primary.merge(secondary_subset, on=date_primary, how="left")

@@ -13,6 +13,7 @@ ALLOWED_CURRENCIES = {"gel", "usd", "both"}
 ALLOWED_GRANULARITY = {"monthly", "yearly"}
 
 
+# Map semantic price requests onto the exact storage columns the tool exposes.
 def _resolve_columns(metric: str, currency: str) -> List[str]:
     if metric == "exchange_rate":
         return ["xrate"]
@@ -29,7 +30,7 @@ def _resolve_columns(metric: str, currency: str) -> List[str]:
     else:
         cols.append(metric_map[metric][currency])
         
-    # Always include xrate, p_bal_gel, p_bal_usd for causal context if metric is balancing
+    # Balancing-price explanations often need both currencies plus xrate in one fetch.
     if metric == "balancing":
         for implicit_col in ["p_bal_gel", "p_bal_usd", "xrate"]:
             if implicit_col not in cols:
@@ -63,10 +64,7 @@ def get_prices(
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
 
-    # Build WHERE clause and params dynamically so each bind parameter appears
-    # exactly once.  PostgreSQL rejects the "(:p IS NULL OR col >= :p)" pattern
-    # as AmbiguousParameter when a named param is used in two different type
-    # contexts in the same statement.
+    # Build WHERE clauses dynamically so PostgreSQL sees each bind param once.
     where_parts: list[str] = []
     params: dict = {"limit": limit}
     if start_date:
@@ -78,6 +76,7 @@ def get_prices(
     where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     if granularity == "yearly":
+        # Yearly mode averages each selected price column over the calendar year.
         select_cols = ", ".join([f"AVG({c}) AS {c}" for c in cols])
         sql = f"""
 SELECT
@@ -90,6 +89,7 @@ ORDER BY 1
 LIMIT :limit
 """.strip()
     else:
+        # Monthly mode returns the stored series directly so downstream analysis keeps fidelity.
         select_cols = ", ".join(cols)
         sql = f"""
 SELECT
@@ -102,4 +102,3 @@ LIMIT :limit
 """.strip()
 
     return run_text_query(sql, params)
-

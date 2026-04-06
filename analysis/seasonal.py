@@ -121,7 +121,7 @@ def compute_seasonal_cagr(
     else:
         df_season = df[~df['month'].isin(summer_months)]
 
-    # Group by year and calculate mean
+    # Collapse each season down to one yearly average before computing CAGR.
     yearly_avg = df_season.groupby('year')[value_col].mean().dropna()
 
     if len(yearly_avg) < 2:
@@ -136,7 +136,7 @@ def compute_seasonal_cagr(
         log.warning(f"⚠️ Cannot calculate CAGR: first value is {first_value} (must be > 0)")
         return np.nan
 
-    # CAGR formula: ((end_value / start_value) ^ (1 / n_years)) - 1
+    # CAGR turns the first-to-last seasonal change into an annualized growth rate.
     cagr = ((last_value / first_value) ** (1 / n_years) - 1) * 100
 
     return cagr
@@ -196,7 +196,7 @@ def compute_seasonal_comparison(
         mask = (df['year'] == year) & (df['is_summer'] == is_summer)
         return df.loc[mask, value_col].mean()
 
-    # Calculate metrics
+    # Compare the start and end years directly, then attach the multi-year CAGR context.
     summer_first = seasonal_avg(first_year, True)
     summer_last = seasonal_avg(last_year, True)
     winter_first = seasonal_avg(first_year, False)

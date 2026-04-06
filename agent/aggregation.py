@@ -15,6 +15,7 @@ from typing import Dict, Tuple
 log = logging.getLogger("Enai")
 
 
+# Intent detection is keyword-driven and multilingual because it runs before SQL generation.
 def detect_aggregation_intent(user_query: str) -> Dict[str, bool]:
     """
     Detect aggregation intent from user query.
@@ -105,7 +106,7 @@ def detect_aggregation_intent(user_query: str) -> Dict[str, bool]:
         "доля", "процент", "доля в", "состав"
     ]
 
-    # Check for each type
+    # Evaluate each aggregation family independently, then resolve precedence below.
     if any(indicator in query_lower for indicator in total_indicators):
         # But if they also say "by", they want total PER category, not grand total
         if not any(ind in query_lower for ind in breakdown_indicators):
@@ -164,7 +165,7 @@ def validate_aggregation_logic(sql: str, intent: Dict[str, bool]) -> Tuple[bool,
     sql_upper = sql.upper()
     sql_lower = sql.lower()
 
-    # 1. Check TOTAL intent
+    # 1. Totals should collapse the result to one aggregated row.
     if intent.get("needs_total") and not intent.get("needs_breakdown"):
         # User wants a single total, should have SUM() and NO GROUP BY
         if "SUM(" not in sql_upper and "sum(" not in sql_lower:
@@ -182,7 +183,7 @@ def validate_aggregation_logic(sql: str, intent: Dict[str, bool]) -> Tuple[bool,
 
         log.info("✅ Average SQL validation: OK (has AVG)")
 
-    # 3. Check BREAKDOWN intent
+    # 3. Breakdowns need category-level grouping whenever aggregation is present.
     if intent.get("needs_breakdown"):
         if "GROUP BY" not in sql_upper:
             # Exception: If they want breakdown AND it's a simple entity list, no GROUP BY needed

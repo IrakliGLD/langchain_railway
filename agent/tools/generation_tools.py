@@ -11,6 +11,7 @@ from .common import normalize_date, normalize_limit, run_statement
 from .types import ToolResult
 
 
+# Supported request enums are derived from the configured technology groups.
 ALLOWED_MODES = {"quantity", "share"}
 ALLOWED_GRANULARITY = {"monthly", "yearly"}
 ALLOWED_TYPES = (
@@ -20,6 +21,7 @@ ALLOWED_TYPES = (
 )
 
 
+# Validate requested technology filters before they reach SQL construction.
 def _validate_types(types: Optional[Iterable[str]]) -> List[str]:
     if not types:
         return []
@@ -53,6 +55,7 @@ def get_generation_mix(
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
 
+    # Switch between monthly date output and yearly rollups from the same source view.
     if granularity == "yearly":
         period_expr = "EXTRACT(YEAR FROM date)::int AS period"
         period_ref = "period"
@@ -78,6 +81,7 @@ def get_generation_mix(
     if mode == "share":
         sql = f"""
 WITH base AS (
+    -- Aggregate quantity first so shares are computed within each requested period.
     SELECT
         {period_expr},
         type_tech,
@@ -96,6 +100,7 @@ ORDER BY {period_ref}, type_tech
 LIMIT :limit
 """.strip()
     else:
+        # Quantity mode returns the direct grouped totals without an extra share layer.
         sql = f"""
 SELECT
     {period_expr},
@@ -113,4 +118,3 @@ LIMIT :limit
         statement = statement.bindparams(bindparam("types", expanding=True))
 
     return run_statement(statement, params)
-

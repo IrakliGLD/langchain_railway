@@ -10,6 +10,7 @@ from typing import Any, Iterable, Sequence
 from models import QueryContext
 
 
+# Hash helpers provide stable identifiers for SQL and tool-derived evidence.
 def tool_invocation_hash(tool_name: str, tool_params: dict) -> str:
     """Build a stable short hash for a typed-tool invocation."""
     payload = {
@@ -25,6 +26,7 @@ def sql_query_hash(sql_text: str) -> str:
     return hashlib.sha256(str(sql_text or "").encode("utf-8")).hexdigest()[:16]
 
 
+# Context mutators copy the exact rows/columns used for downstream claim tracing.
 def stamp_provenance(
     ctx: QueryContext,
     cols: Sequence[Any],

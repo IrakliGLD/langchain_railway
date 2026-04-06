@@ -49,6 +49,7 @@ except ImportError:
 
 BALANCING_SEGMENT_NORMALIZER = "balancing"
 
+# Deterministic share pivot used both for direct fallback queries and repair paths.
 BALANCING_SHARE_PIVOT_SQL = f"""
 SELECT
     date,
@@ -106,6 +107,7 @@ def build_trade_share_cte(original_sql: str) -> str:
     """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
     cte_name = "tde"
     cte = f"""WITH {cte_name} AS (
+    -- Materialize both raw quantity and reusable share_* columns in one place.
     SELECT
         date,
         entity,
@@ -167,7 +169,7 @@ def ensure_share_dataframe(
         if share_cols:
             return df, False
 
-    # Fallback: run deterministic pivot
+    # Fallback to the canonical deterministic panel when the executed SQL omitted share columns.
     fallback_df = fetch_balancing_share_panel(conn)
     return fallback_df, True
 
@@ -297,7 +299,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         from utils.metrics import metrics
         metrics.log_sql_query(elapsed)
 
-        # Filter by tech type if relevant
+        # Narrow mixed generation results to the side of the market implied by the question.
         if "type_tech" in df.columns:
             user_query_lower = ctx.query.lower()
             if any(w in user_query_lower for w in ["demand", "consumption", "loss", "export"]):
@@ -368,7 +370,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
         )
 
-        # Auto-pivot fix for hallucinated trade_derived_entities columns
+        # Repair a common failure mode where SQL references share columns that do not exist yet.
         if "UndefinedColumn" in msg and "trade_derived_entities" in safe_sql:
             log.warning("🩹 Auto-pivoting trade_derived_entities: converting entity rows into share_* columns.")
             safe_sql = build_trade_share_cte(safe_sql)
@@ -386,7 +388,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             )
 
         elif "UndefinedColumn" in msg:
-            # Column synonym auto-fix
+            # Retry once with configured column synonyms before surfacing the DB error.
             fixed = False
             for bad, good in COLUMN_SYNONYMS.items():
                 if re.search(rf"\b{bad}\b", safe_sql, flags=re.IGNORECASE):

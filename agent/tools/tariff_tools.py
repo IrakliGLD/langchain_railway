@@ -8,6 +8,7 @@ from .common import normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
 
 
+# Public aliases group one or more plant-level tariff series into stable buckets.
 TARIFF_ENTITY_ALIASES = {
     "enguri": ['ltd "engurhesi"1'],
     "gardabani_tpp": ['ltd "gardabni thermal power plant"'],
@@ -24,6 +25,7 @@ DEFAULT_TARIFF_ENTITY_ALIASES = ["enguri", "gardabani_tpp", "old_tpp_group"]
 ALLOWED_CURRENCIES = {"gel", "usd"}
 
 
+# Validate aliases early so the SQL builder only works with known entity groups.
 def _validate_entities(entities: Optional[Iterable[str]]) -> List[str]:
     if not entities:
         return list(DEFAULT_TARIFF_ENTITY_ALIASES)
@@ -54,6 +56,7 @@ def get_tariffs(
     limit = normalize_limit(limit)
     tariff_col = f"tariff_{currency}"
 
+    # Each selected alias expands into a correlated subquery against the per-date tariff table.
     select_parts = []
     params = {
         "start_date": start_date,
@@ -114,6 +117,7 @@ def get_tariffs(
     if not select_parts:
         raise ValueError("No tariff entities selected")
 
+    # The outer date spine keeps all requested tariff groups aligned on one timeline.
     select_clause = ",\n    ".join(select_parts)
     where_parts = []
     if start_date:

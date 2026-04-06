@@ -10,6 +10,7 @@ from .tariff_tools import get_tariffs
 from .types import ToolInvocation, ToolResult
 
 
+# Central mapping from public tool names to concrete implementations.
 TOOL_REGISTRY: Dict[str, Callable[..., ToolResult]] = {
     "get_prices": get_prices,
     "get_balancing_composition": get_balancing_composition,
@@ -18,6 +19,7 @@ TOOL_REGISTRY: Dict[str, Callable[..., ToolResult]] = {
 }
 
 
+# Keep registry access minimal so routing and execution stay predictable.
 def list_tools() -> List[str]:
     return sorted(TOOL_REGISTRY.keys())
 
@@ -28,4 +30,3 @@ def execute_tool(invocation: ToolInvocation) -> ToolResult:
         raise ValueError(f"Unknown tool: {invocation.name}")
     func = TOOL_REGISTRY[invocation.name]
     return func(**invocation.params)
-
