@@ -25,6 +25,18 @@ def normalize_limit(limit: Optional[int]) -> int:
     return max(1, min(parsed, MAX_ROWS))
 
 
+def get_sort_direction(start_date: Optional[str], end_date: Optional[str]) -> str:
+    """Return 'DESC' when no date range is provided, 'ASC' otherwise.
+
+    When a user provides no date filters, we want the LIMIT to capture the
+    most recent records.  When they specify a range, ASC preserves natural
+    chronological order within that window.
+    """
+    if start_date is not None or end_date is not None:
+        return "ASC"
+    return "DESC"
+
+
 def normalize_date(value: Optional[str]) -> Optional[str]:
     """Normalize user/router date into YYYY-MM-DD string for bind params."""
     if value is None:

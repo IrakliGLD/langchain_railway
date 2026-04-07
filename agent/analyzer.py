@@ -1808,6 +1808,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
             allowed_drivers = [
                 "xrate", "share_import", "share_deregulated_hydro",
                 "share_regulated_hpp", "share_renewable_ppa",
+                "share_all_ppa", "share_all_renewables", "share_all_hydro",
                 "enguri_tariff_gel", "gardabani_tpp_tariff_gel",
                 "grouped_old_tpp_tariff_gel"
             ]

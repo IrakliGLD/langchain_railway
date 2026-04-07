@@ -103,6 +103,7 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
       (s.qty_cfd_scheme / NULLIF(s.total_qty,0)) AS share_cfd_scheme,
       ((s.qty_ren_ppa + s.qty_thermal_ppa) / NULLIF(s.total_qty,0)) AS share_all_ppa,
       ((s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme) / NULLIF(s.total_qty,0)) AS share_all_renewables,
+      ((s.qty_dereg_hydro + s.qty_reg_hpp) / NULLIF(s.total_qty,0)) AS share_all_hydro,
       tr.enguri_tariff_gel,
       tr.gardabani_tpp_tariff_gel,
       tr.grouped_old_tpp_tariff_gel

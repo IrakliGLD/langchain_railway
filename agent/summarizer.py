@@ -23,6 +23,7 @@ from core.llm import (
     get_relevant_domain_knowledge,
 )
 from contracts.question_analysis import AnswerKind, RenderStyle
+from agent.analyzer import _extract_forecast_horizon
 from agent.generic_renderer import render as generic_render
 from context import scrub_schema_mentions
 from config import PROVENANCE_MIN_COVERAGE
@@ -1480,6 +1481,14 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
 def _is_forecast_direct_answer_eligible(ctx: QueryContext) -> bool:
     if "trendline forecasts" not in (ctx.stats_hint or "").lower():
         return False
+
+    # Long-term forecasts need LLM narrative for proper risk/uncertainty framing.
+    # Deterministic trendline rendering is only suitable for short/medium-term
+    # horizons where a single extrapolation sentence suffices.
+    horizon_years = _extract_forecast_horizon(ctx.query or "")
+    if horizon_years >= 5:
+        return False
+
     # Phase 4: answer_kind = FORECAST is the authoritative signal.
     if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind == AnswerKind.FORECAST:
         return True

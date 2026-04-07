@@ -7,7 +7,7 @@ from sqlalchemy import bindparam, text
 
 from config import MAX_ROWS
 from context import TECH_TYPE_GROUPS
-from .common import normalize_date, normalize_limit, run_statement
+from .common import get_sort_direction, normalize_date, normalize_limit, run_statement
 from .types import ToolResult
 
 
@@ -54,6 +54,7 @@ def get_generation_mix(
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
+    direction = get_sort_direction(start_date, end_date)
 
     # Switch between monthly date output and yearly rollups from the same source view.
     if granularity == "yearly":
@@ -96,7 +97,7 @@ SELECT
     quantity_tech,
     ROUND(quantity_tech / NULLIF(SUM(quantity_tech) OVER (PARTITION BY {period_ref}), 0), 4) AS share_tech
 FROM base
-ORDER BY {period_ref}, type_tech
+ORDER BY {period_ref} {direction}, type_tech
 LIMIT :limit
 """.strip()
     else:
@@ -109,7 +110,7 @@ SELECT
 FROM tech_quantity_view
 {where_clause}
 GROUP BY period, type_tech
-ORDER BY period, type_tech
+ORDER BY period {direction}, type_tech
 LIMIT :limit
 """.strip()
 

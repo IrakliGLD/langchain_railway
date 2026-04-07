@@ -4,7 +4,7 @@ Typed retrieval tools for price queries.
 from typing import List, Optional
 
 from config import MAX_ROWS
-from .common import normalize_date, normalize_limit, run_text_query
+from .common import get_sort_direction, normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
 
 
@@ -63,6 +63,7 @@ def get_prices(
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
+    direction = get_sort_direction(start_date, end_date)
 
     # Build WHERE clauses dynamically so PostgreSQL sees each bind param once.
     where_parts: list[str] = []
@@ -85,7 +86,7 @@ SELECT
 FROM price_with_usd
 {where_clause}
 GROUP BY 1
-ORDER BY 1
+ORDER BY 1 {direction}
 LIMIT :limit
 """.strip()
     else:
@@ -97,7 +98,7 @@ SELECT
     {select_cols}
 FROM price_with_usd
 {where_clause}
-ORDER BY date
+ORDER BY date {direction}
 LIMIT :limit
 """.strip()
 

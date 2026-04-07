@@ -4,7 +4,7 @@ Typed retrieval tools for tariff queries.
 from typing import Iterable, List, Optional
 
 from config import MAX_ROWS
-from .common import normalize_date, normalize_limit, run_text_query
+from .common import get_sort_direction, normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
 
 
@@ -61,6 +61,7 @@ def get_tariffs(
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
+    direction = get_sort_direction(start_date, end_date)
     tariff_col = f"tariff_{currency}"
 
     # Each selected alias expands into a correlated subquery against the per-date tariff table.
@@ -154,7 +155,7 @@ SELECT
     d.date,
     {select_clause}
 FROM dates d
-ORDER BY d.date
+ORDER BY d.date {direction}
 LIMIT :limit
 """.strip()
 

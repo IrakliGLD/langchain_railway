@@ -4,7 +4,7 @@ Typed retrieval tools for balancing composition queries.
 from typing import Iterable, List, Optional
 
 from config import MAX_ROWS
-from .common import normalize_date, normalize_limit, run_text_query
+from .common import get_sort_direction, normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
 
 
@@ -48,6 +48,7 @@ def get_balancing_composition(
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
+    direction = get_sort_direction(start_date, end_date)
 
     # Build the dynamic pivot only for the validated entity set requested.
     all_entities_sql = ", ".join([f"'{e}'" for e in ALLOWED_BALANCING_ENTITIES])
@@ -88,7 +89,7 @@ SELECT
     {select_expr}
 FROM base
 GROUP BY date
-ORDER BY date
+ORDER BY date {direction}
 LIMIT :limit
 """.strip()
 
