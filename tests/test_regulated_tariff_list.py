@@ -114,10 +114,18 @@ def test_summarize_data_returns_direct_regulated_tariff_plant_list(monkeypatch):
 
     assert out.summary_source == "deterministic_regulated_tariff_list_direct"
     assert "Enguri Hydropower Plant" in out.summary
-    assert "Energo-Pro Georgia Generation" in out.summary
-    assert "Vardnili Cascade" in out.summary
-    assert "Gardabani Thermal Generation Power Plant" in out.summary
+    assert "Gumati Hydropower Plant" in out.summary
+    assert "Dzevruli Hydropower Plant" in out.summary
+    assert "Lajanuri Hydropower Plant" in out.summary
+    assert "Zhinvali Hydropower Plant" in out.summary
+    assert "Vardnili Hydropower Plant" in out.summary
+    assert "Vartsikhe Hydropower Plant" in out.summary
+    assert "Khrami I Hydropower Plant" in out.summary
+    assert "Khrami II Hydropower Plant" in out.summary
+    assert "Shaori Hydropower Plant" not in out.summary
+    assert "Rioni Hydropower Plant" not in out.summary
+    assert "Gardabani Thermal Power Plant" in out.summary
     assert "Mtkvari Energy" in out.summary
-    assert "IEC (Tbilresi)" in out.summary
-    assert "G Power (Capital Turbines)" in out.summary
+    assert "Tbilisi Thermal Power Plant" in out.summary
+    assert "G-POWER" in out.summary
     assert out.summary_citations == ["deterministic_regulated_tariff_list_direct"]

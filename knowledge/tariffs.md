@@ -25,7 +25,7 @@
 
 ### Hydro Tariffs
 - Hydro tariffs mainly consist of fixed O&M and depreciation, with minimal variable costs.
-- For hydro power plants, tariffs are set in advance and are GEL-denominated.
+- For hydro power plants, tariffs are set in advance and are GEL-denominated. According to the new Law of Georgia on Energy and Water Supply, adopted in decemter 2019, the tariffs can be set for the power plants with public service obligation (PSO). So, nowadays, only power plants with PSO can have regulated tariff. the reason for assigning PSO to individual power plants are different. e.g. "zhinvali hpp" has PSO to supply electricity under regulated tariff to the water supply company providing water supply to Tbilisi, capital city of Georgia. PSO applies to this part of generation. "vartsikhe hpp" has to supply electricity to the largest feroalloy plant and PSO applies to that part of generation. for other regulated power plants the reason for PSO is price stability, protection fo cosnumer and system stability.
 - If hydro power plants have USD-linked costs, they bear exchange rate risk within the regulatory period.
 - Exchange rate effects for hydro are reflected only in the next regulatory period, not immediately.
 
@@ -60,8 +60,8 @@
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `ltd "engurhesi"1` | Enguri HPP | 1300 MW | 26% | deregulation not anticipated |
-| `ltd "vardnili hpp cascade"` | Vardnili HPP | 220 MW | 4.5% | deregulation not anticipated |
+| `enguri hpp` | Enguri HPP | 1300 MW | 26% | deregulation not anticipated |
+| `vardnili hpp` | Vardnili HPP | 220 MW | 4.5% | deregulation not anticipated |
 
 ---
 
@@ -69,11 +69,11 @@
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `jsc "energo-pro georgia genration" (dzevrulhesi)` | Dzevruli HPP | 80 MW | 1.6% | expected from May 2026 |
-| `jsc "energo-pro georgia genration" (gumathesi)` | Gumati HPP | 71.2 MW | 1.4% | deregulated from May 2024 |
-| `jsc "energo-pro georgia genration" (shaorhesi)` | Shaori HPP | 40.4 MW | <1% | deregulated from Jan 2021 |
-| `jsc "energo-pro georgia genration" (rionhesi)` | Rioni HPP | 54 MW | 1% | deregulated from May 2022 |
-| `jsc "energo-pro georgia genration" (lajanurhesi)` | Lajanuri HPP | 115.6 MW | 2.3% | expected from Jan 2027 |
+| `dzevrula hpp` | Dzevruli HPP | 80 MW | 1.6% | expected from May 2026 |
+| `gumati hpp` | Gumati HPP | 71.2 MW | 1.4% | deregulated from May 2024 |
+| `shaori hpp` | Shaori HPP | 40.4 MW | <1% | deregulated from Jan 2021 |
+| `rioni hpp` | Rioni HPP | 54 MW | 1% | deregulated from May 2022 |
+| `lajanuri hpp` | Lajanuri HPP | 115.6 MW | 2.3% | expected from Jan 2027 |
 
 ---
 
@@ -81,10 +81,10 @@
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `jsc "georgian water & power" (zhinvalhesi)` | Zhinvali HPP | 130 MW | 2.6% | deregulation not anticipated |
-| `ltd "vartsikhe-2005"` | Vartsikhe HPP | 184 MW | 3.7% | deregulation not anticipated |
-| `ltd "khrami_1"` | Khrami I HPP | 113.5 MW | 2.2% | expected from Jan 2027 |
-| `ltd "khrami_2"` | Khrami II HPP | 110 MW | 2.2% | expected from Jan 2027 |
+| `zhinvali hpp` | Zhinvali HPP | 130 MW | 2.6% | deregulation not anticipated |
+| `vartsikhe hpp` | Vartsikhe HPP | 184 MW | 3.7% | deregulation not anticipated |
+| `khramhesi I` | Khrami I HPP | 113.5 MW | 2.2% | expected from Jan 2027 |
+| `khramhesi II` | Khrami II HPP | 110 MW | 2.2% | expected from Jan 2027 |
 
 ---
 
@@ -94,7 +94,7 @@
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `ltd "gardabni thermal power plant"` | Gardabani TPP | 231.2 MW | 4.7% | deregulation not anticipated |
+| `gardabani tpp` | Gardabani TPP | 231.2 MW | 4.7% | deregulation not anticipated |
 
 ---
 
@@ -102,7 +102,7 @@
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `ltd "g power" (capital turbines)` | G-POWER | 110 MW | 2.2% | deregulation not anticipated |
+| `gpower tpp` | G-POWER | 110 MW | 2.2% | deregulation not anticipated |
 
 ---
 
@@ -110,8 +110,8 @@
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `ltd "mtkvari energy"` | Mtkvari Energy | 300 MW | 6% | deregulation not anticipated |
-| `ltd "iec" (tbilresi)` | Tbilisi TPP | 272 MW | 5.5% | deregulation not anticipated |
+| `mktvari tpp` | Mtkvari Energy | 300 MW | 6% | deregulation not anticipated |
+| `tbilsresi tpp` | Tbilisi TPP | 272 MW | 5.5% | deregulation not anticipated |
 
 ---
 

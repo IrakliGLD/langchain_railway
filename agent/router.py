@@ -27,8 +27,26 @@ ALLOWED_BALANCING_ENTITIES = {
     "thermal_ppa",
 }
 ALLOWED_TARIFF_ENTITY_ALIASES = {
+    "enguri_hpp",
     "enguri",
+    "vardnili_hpp",
+    "vardnili",
+    "dzevrula_hpp",
+    "dzevruli_hpp",
+    "gumati_hpp",
+    "shaori_hpp",
+    "rioni_hpp",
+    "lajanuri_hpp",
+    "zhinvali_hpp",
+    "vartsikhe_hpp",
+    "khramhesi_i",
+    "khramhesi_ii",
     "gardabani_tpp",
+    "mktvari_tpp",
+    "mtkvari_tpp",
+    "tbilsresi_tpp",
+    "tbilresi_tpp",
+    "gpower_tpp",
     "old_tpp_group",
     "regulated_hpp",
     "regulated_new_tpp",
@@ -327,8 +345,34 @@ def extract_tariff_entities(query_lower: str) -> List[str]:
     hits = []
     if any(t in query_lower for t in ["enguri", "ენგურ", "энгур"]):
         hits.append("enguri")
+    if "vardnili" in query_lower:
+        hits.append("vardnili")
+    if any(t in query_lower for t in ["dzevruli", "dzevrula", "dzevrul"]):
+        hits.append("dzevruli_hpp")
+    if "gumati" in query_lower:
+        hits.append("gumati_hpp")
+    if "shaori" in query_lower:
+        hits.append("shaori_hpp")
+    if "rioni" in query_lower:
+        hits.append("rioni_hpp")
+    if "lajanuri" in query_lower:
+        hits.append("lajanuri_hpp")
+    if any(t in query_lower for t in ["zhinvali", "zhinval"]):
+        hits.append("zhinvali_hpp")
+    if "vartsikhe" in query_lower:
+        hits.append("vartsikhe_hpp")
+    if any(t in query_lower for t in ["khramhesi i", "khrami i"]):
+        hits.append("khramhesi_i")
+    if any(t in query_lower for t in ["khramhesi ii", "khrami ii"]):
+        hits.append("khramhesi_ii")
     if any(t in query_lower for t in ["gardabani", "გარდაბ", "гардаб"]):
         hits.append("gardabani_tpp")
+    if any(t in query_lower for t in ["mktvari", "mtkvari"]):
+        hits.append("mtkvari_tpp")
+    if any(t in query_lower for t in ["tbilsresi", "tbilresi", "iec", "tbilisi tpp"]):
+        hits.append("tbilresi_tpp")
+    if any(t in query_lower for t in ["g-power", "g power", "gpower"]):
+        hits.append("gpower_tpp")
     if any(t in query_lower for t in ["regulated hpp", "regulated_hpp"]):
         hits.append("regulated_hpp")
     if any(t in query_lower for t in ["new tpp", "regulated_new_tpp"]):

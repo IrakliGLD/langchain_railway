@@ -50,26 +50,70 @@ _REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES = {
     "regulated_hpp": ("regulated_hpp_tariff_",),
     "regulated_new_tpp": ("regulated_new_tpp_tariff_", "gardabani_tpp_tariff_"),
     "regulated_old_tpp": ("regulated_old_tpp_tariff_", "grouped_old_tpp_tariff_"),
+    "enguri_hpp": ("enguri_hpp_tariff_",),
     "enguri": ("enguri_tariff_",),
+    "vardnili_hpp": ("vardnili_hpp_tariff_",),
+    "vardnili": ("vardnili_tariff_",),
+    "dzevrula_hpp": ("dzevrula_hpp_tariff_",),
+    "dzevruli_hpp": ("dzevruli_hpp_tariff_",),
+    "gumati_hpp": ("gumati_hpp_tariff_",),
+    "shaori_hpp": ("shaori_hpp_tariff_",),
+    "rioni_hpp": ("rioni_hpp_tariff_",),
+    "lajanuri_hpp": ("lajanuri_hpp_tariff_",),
+    "zhinvali_hpp": ("zhinvali_hpp_tariff_",),
+    "vartsikhe_hpp": ("vartsikhe_hpp_tariff_",),
+    "khramhesi_i": ("khramhesi_i_tariff_",),
+    "khramhesi_ii": ("khramhesi_ii_tariff_",),
     "gardabani_tpp": ("gardabani_tpp_tariff_",),
+    "mtkvari_tpp": ("mtkvari_tpp_tariff_",),
+    "mktvari_tpp": ("mktvari_tpp_tariff_",),
+    "tbilresi_tpp": ("tbilresi_tpp_tariff_",),
+    "tbilsresi_tpp": ("tbilsresi_tpp_tariff_",),
+    "gpower_tpp": ("gpower_tpp_tariff_",),
     "old_tpp_group": ("grouped_old_tpp_tariff_",),
 }
 _REGULATED_TARIFF_ALIAS_GROUP_LABELS = {
     "regulated_hpp": "Regulated HPPs",
     "regulated_new_tpp": "Regulated new TPP",
     "regulated_old_tpp": "Regulated old TPPs",
-    "enguri": "Regulated HPP",
-    "gardabani_tpp": "Regulated new TPP",
-    "old_tpp_group": "Regulated old TPPs",
+    "enguri_hpp": "Enguri HPP",
+    "enguri": "Enguri HPP",
+    "vardnili_hpp": "Vardnili HPP",
+    "vardnili": "Vardnili HPP",
+    "dzevrula_hpp": "Dzevruli HPP",
+    "dzevruli_hpp": "Dzevruli HPP",
+    "gumati_hpp": "Gumati HPP",
+    "shaori_hpp": "Shaori HPP",
+    "rioni_hpp": "Rioni HPP",
+    "lajanuri_hpp": "Lajanuri HPP",
+    "zhinvali_hpp": "Zhinvali HPP",
+    "vartsikhe_hpp": "Vartsikhe HPP",
+    "khramhesi_i": "Khrami I HPP",
+    "khramhesi_ii": "Khrami II HPP",
+    "gardabani_tpp": "Gardabani TPP",
+    "mtkvari_tpp": "Mtkvari Energy",
+    "mktvari_tpp": "Mtkvari Energy",
+    "tbilresi_tpp": "Tbilisi TPP",
+    "tbilsresi_tpp": "Tbilisi TPP",
+    "gpower_tpp": "G-POWER",
+    "old_tpp_group": "Old TPP Group",
 }
 _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES = {
-    'ltd "engurhesi"1': "Enguri HPP",
-    'jsc "energo-pro georgia generation"': "Energo-Pro Georgia Generation",
-    'ltd "vardnilihesi"': "Vardnili Cascade",
-    'ltd "gardabni thermal power plant"': "Gardabani Thermal Power Plant",
-    'ltd "mtkvari energy"': "Mtkvari Energy",
-    'ltd "iec" (tbilresi)': "IEC (Tbilresi)",
-    'ltd "g power" (capital turbines)': "G Power (Capital Turbines)",
+    "enguri hpp": "Enguri HPP",
+    "vardnili hpp": "Vardnili HPP",
+    "dzevrula hpp": "Dzevruli HPP",
+    "gumati hpp": "Gumati HPP",
+    "shaori hpp": "Shaori HPP",
+    "rioni hpp": "Rioni HPP",
+    "lajanuri hpp": "Lajanuri HPP",
+    "zhinvali hpp": "Zhinvali HPP",
+    "vartsikhe hpp": "Vartsikhe HPP",
+    "khramhesi i": "Khrami I HPP",
+    "khramhesi ii": "Khrami II HPP",
+    "gardabani tpp": "Gardabani TPP",
+    "gpower tpp": "G-POWER",
+    "mktvari tpp": "Mtkvari Energy",
+    "tbilsresi tpp": "Tbilisi TPP",
 }
 _EXPLANATION_QUERY_SIGNALS = (
     "why",
@@ -1219,7 +1263,7 @@ def _build_regulated_tariff_list_direct_answer(ctx: QueryContext) -> str | None:
     if ctx.df.empty or not _has_regulated_tariff_list_query_signal(ctx):
         return None
 
-    from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
+    from agent.tools.tariff_tools import resolve_tariff_alias_entities
 
     selected_aliases = [
         str(entity).strip()
@@ -1246,8 +1290,14 @@ def _build_regulated_tariff_list_direct_answer(ctx: QueryContext) -> str | None:
             )
 
     group_lines: list[str] = []
+    as_of_date = None
+    if date_col:
+        dates = pd.to_datetime(ctx.df[date_col], errors="coerce").dropna()
+        if not dates.empty:
+            as_of_date = dates.max().date()
+
     for alias in active_aliases:
-        raw_entities = TARIFF_ENTITY_ALIASES.get(alias, [])
+        raw_entities = resolve_tariff_alias_entities(alias, as_of=as_of_date)
         display_names = [
             _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES.get(raw_entity, raw_entity)
             for raw_entity in raw_entities
