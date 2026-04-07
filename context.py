@@ -14,16 +14,16 @@ COLUMN_LABELS = {
     "entity_normalized": "Standardized Entity ID",
     "type": "Entity Type",
     "ownership": "Ownership",
-    "source": "Source (Local vs Import-Dependent)",
+    "source": "Source",
 
 
     # price_with_usd
     "p_dereg_gel": "Deregulated Price (GEL/MWh)",
-    "p_bal_gel": "Balancing Electricity Price (GEL/MWh)",
+    "p_bal_gel": "Balancing electricity price (GEL/MWh)",
     "p_gcap_gel": "Guaranteed Capacity Fee (GEL/MWh)",
     "xrate": "Exchange Rate (GEL/USD)",
     "p_dereg_usd": "Deregulated Price (USD/MWh)",
-    "p_bal_usd": "Balancing Electricity Price (USD/MWh)",
+    "p_bal_usd": "Balancing electricity price (USD/MWh)",
     "p_gcap_usd": "Guaranteed Capacity Fee (USD/MWh)",
 
     # tariff_with_usd

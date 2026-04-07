@@ -7,23 +7,22 @@ from knowledge.vector_ingestion import VectorKnowledgeIngestor
 def main() -> None:
     # Replace this with your local .md or .txt file path.
     text_path = Path(
-        r"D:\Enaiapp\langchain_railway\docs_to_ingest\law_on_energy_and_water_supply.md"
+        r"D:\Enaiapp\langchain_railway\docs_to_ingest\electricity_retail_market_rules.md"
     )
     text_content = text_path.read_text(encoding="utf-8")
 
     document = DocumentRegistration(
-        source_key="Law_of_Georgia_on_Energy_and_water_supply_2025_electricity_part",
-        title="Law of Georgia on Energy and Water Supply",
-        document_type="regulation",
-        issuer="Parliament of Georgia",
+        source_key="Electricity_retail_market_runes_______only_net_metering_and_net_billing_sections_20250731",
+        title="Exctract about net metering and net billing from the 'Electricity Retail Market Rules'",
+        issuer="GNERC",
         language="ka",
         source_url=None,
         storage_path=None,
-        logical_key="Law_of_Georgia_on_Energy_and_water_supply",
-        published_date="2019-12-27",
-        effective_date="2019-12-27",
+        logical_key="Exctract_about_net_metering_and_net_billing_from_the_Electricity_Retail_Market_Rules'",
+        published_date="2020-08-14",
+        effective_date="2020-08-14",
         effective_end_date=None,
-        version_label="2025-06-12",
+        version_label="2025-07-31",
         is_latest=True,
         is_active=True,
         abolished=False,
@@ -31,22 +30,20 @@ def main() -> None:
         metadata={
             "country": "georgia",
             "city": "tbilisi",
-            "resolution_number": "5646-რს",
+            "resolution_number": "47",
             "annex_number": "NA",
-            "notes": "Excerpt focused on electricity",
+            "notes": "Excerpt focused on net metering and net billing",
         },
     )
 
     topics = [
-        "Georgian_electricity_sector_market_participants",
-        "market_structure",
-        "general_direction_of_the_electricity_sector",
-        "Law_general_definitions",
-        "responsibilities_of_market_participants",
-        "functions_of_market_participants",
-        "electricity_policy_making",
-        "sanctioning_mechanisms",
-        
+        "net_metering",
+        "net_billing",
+        "microgeneration",
+        "consumer_engagement",
+        "renewable_energy_integration",
+        "renewable_energy_communities",
+
     ]
 
     ingestor = VectorKnowledgeIngestor()

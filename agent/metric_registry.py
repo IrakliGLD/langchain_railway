@@ -226,19 +226,40 @@ def compute_correlation(
     """Correlation of a metric to a target metric."""
     metric = record["metric"]
     corr_target = record.get("target_metric") or "p_bal_gel"
-    corr_map = mctx.correlation_results.get(corr_target, {})
+
+    # Resolve target: try semantic aliases then exact match
+    target_candidates = SEMANTIC_TO_COLUMNS.get(corr_target, [corr_target])
+    corr_map: Dict[str, Any] = {}
+    resolved_target = corr_target
+    for t in target_candidates:
+        if t in mctx.correlation_results:
+            corr_map = mctx.correlation_results[t]
+            resolved_target = t
+            break
+    if not corr_map:
+        corr_map = mctx.correlation_results.get(corr_target, {})
+
+    # Resolve metric: try exact match first, then semantic aliases
     corr_value = corr_map.get(metric)
+    resolved_metric = metric
+    if corr_value is None:
+        for candidate in SEMANTIC_TO_COLUMNS.get(metric, []):
+            if candidate in corr_map:
+                corr_value = corr_map[candidate]
+                resolved_metric = candidate
+                break
     if corr_value is None:
         return None
+
     record.update({
-        "target_metric": corr_target,
+        "target_metric": resolved_target,
         "correlation_value": round(float(corr_value), 6),
-        "formula": f"corr({metric}, {corr_target}) over available series",
-        "source_column": metric,
+        "formula": f"corr({resolved_metric}, {resolved_target}) over available series",
+        "source_column": resolved_metric,
         "source_row_count": len(mctx.df),
         "source_cells": [
-            {"column": metric, "role": "source_series", "row_count": len(mctx.df)},
-            {"column": corr_target, "role": "target_series", "row_count": len(mctx.df)},
+            {"column": resolved_metric, "role": "source_series", "row_count": len(mctx.df)},
+            {"column": resolved_target, "role": "target_series", "row_count": len(mctx.df)},
         ],
     })
     return record

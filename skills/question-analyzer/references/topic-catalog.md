@@ -33,3 +33,7 @@ Runtime source of truth: [contracts/question_analysis_catalogs.py](../../../cont
 ## generation_mix
 
 - Use for: generation by type, technology mix, imports vs domestic supply
+
+## pso_trading
+
+- Use for: PSO supplier procurement structures, Telmico and EP Georgia trading results, Enguri/Vardnili cascade supply distribution

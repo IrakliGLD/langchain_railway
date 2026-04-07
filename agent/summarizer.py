@@ -1685,6 +1685,27 @@ def _forecast_caveat_for_r_squared(r_squared: float | None) -> str:
     )
 
 
+_BALANCING_PRICE_METRICS = {"p_bal_gel", "p_bal_usd"}
+_REGIME_BREAK_DATE = "2027-07"
+_REGIME_BREAK_WARNING = (
+    "\n\n**Important:** Georgia's planned target electricity market model (~July 2027) "
+    "would shift balancing price formation from monthly weighted-average settlement to hourly marginal pricing "
+    "under self-dispatch. This forecast extends into or beyond that horizon, so the structural break "
+    "may fundamentally change price dynamics. Past policy changes (e.g., the January 2024 gas price increase "
+    "for regulated thermals, and temporary deregulated hydro pricing rule changes in Jan\u2013Mar 2024) "
+    "illustrate how regulatory decisions can materially shift balancing prices."
+)
+
+
+def _regime_break_warning_if_needed(target_date: str, metrics: set[str]) -> str:
+    """Return regime-break warning if forecast extends to/beyond July 2027 for balancing prices."""
+    if not target_date or not (metrics & _BALANCING_PRICE_METRICS):
+        return ""
+    if target_date >= _REGIME_BREAK_DATE:
+        return _REGIME_BREAK_WARNING
+    return ""
+
+
 def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
     if not _is_forecast_direct_answer_eligible(ctx):
         return None
@@ -1702,6 +1723,10 @@ def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
     primary_metric = str(primary_entry.get("metric", "")).strip()
     metric_label = _FORECAST_METRIC_LABELS.get(primary_metric, primary_metric.replace("_", " ").title())
 
+    # Check if regime-break warning is needed
+    entry_metrics = {str(e.get("metric", "")).split("_summer")[0].split("_winter")[0] for e in entries}
+    regime_warning = _regime_break_warning_if_needed(target_date, entry_metrics)
+
     # Prefer the seasonal breakdown when Stage 3 produced separate summer/winter forecasts.
     season_entries = [entry for entry in entries if entry.get("season")]
     if season_entries:
@@ -1714,6 +1739,8 @@ def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
             )
         lines.append("")
         lines.append(_forecast_caveat_for_r_squared(primary_entry.get("r_squared")))
+        if regime_warning:
+            lines.append(regime_warning)
         return "\n".join(lines)
 
     gel_entry = next((entry for entry in entries if str(entry.get("metric", "")).endswith("_gel")), None)
@@ -1732,6 +1759,7 @@ def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
                 f"(R²={float(usd_entry.get('r_squared') or 0.0):.3f})."
             )
         answer += f"\n\n{_forecast_caveat_for_r_squared(gel_entry.get('r_squared'))}"
+        answer += regime_warning
         return answer
 
     first_entry = entries[0]
@@ -1740,6 +1768,7 @@ def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
         f"**{float(first_entry['forecast_value']):.2f} {_price_unit_for_metric(str(first_entry.get('metric', '')))}** "
         f"by **{target_label}** (R²={float(first_entry.get('r_squared') or 0.0):.3f}).\n\n"
         f"{_forecast_caveat_for_r_squared(first_entry.get('r_squared'))}"
+        f"{regime_warning}"
     )
 
 

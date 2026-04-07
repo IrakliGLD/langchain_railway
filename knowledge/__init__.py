@@ -82,13 +82,22 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "ტარიფი": ["tariffs"],
     "тариф": ["tariffs"],
     "regulated": ["tariffs", "general_definitions"],
-    "enguri": ["tariffs"],
-    "vardnili": ["tariffs"],
+    "enguri": ["tariffs", "pso_trading"],
+    "vardnili": ["tariffs", "pso_trading"],
     "gardabani": ["tariffs"],
     "gnerc": ["tariffs", "market_structure"],
     "cost-plus": ["tariffs"],
     "capacity fee": ["tariffs"],
     "engurhesi": ["tariffs"],
+
+    # PSO Trading
+    "pso": ["pso_trading", "tariffs"],
+    "public service obligation": ["pso_trading"],
+    "telmico": ["pso_trading"],
+    "ep georgia": ["pso_trading"],
+    "procurement": ["pso_trading"],
+    "universal service": ["pso_trading"],
+    "cascade distribution": ["pso_trading"],
 
     # CfD / PPA
     "cfd": ["cfd_ppa"],

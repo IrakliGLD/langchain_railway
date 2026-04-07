@@ -98,4 +98,11 @@ SEMANTIC_TO_COLUMNS: dict[str, list[str]] = {
     "deregulated": ["p_dereg_gel", "p_dereg_usd"],
     "guaranteed_capacity": ["p_gcap_gel", "p_gcap_usd"],
     "exchange_rate": ["xrate"],
+    # Share-based metrics for correlation resolution
+    "hydro": ["share_all_hydro", "share_deregulated_hydro", "share_regulated_hpp"],
+    "import": ["share_import"],
+    "renewable": ["share_all_renewables", "share_renewable_ppa"],
+    "thermal": ["share_regulated_old_tpp", "share_regulated_new_tpp"],
+    "ppa": ["share_all_ppa", "share_renewable_ppa", "share_thermal_ppa"],
+    "cfd": ["share_cfd_scheme"],
 }

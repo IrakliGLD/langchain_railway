@@ -754,7 +754,7 @@ def _amount_unit_for_metric(metric: str) -> str:
 def _metric_label(metric: str) -> str:
     from context import COLUMN_LABELS
 
-    return COLUMN_LABELS.get(metric, metric.replace("_", " ").title())
+    return COLUMN_LABELS.get(metric, metric.replace("_", " "))
 
 
 def _scenario_chart_request(
@@ -2572,6 +2572,7 @@ def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
                             "season": season,
                         }
         else:
+            # Overall (non-seasonal) trendlines
             for col in num_cols:
                 td = calculate_trendline(df_calc, time_key, col, extend_to_date=ctx.trendline_extend_to)
                 if td and td["dates"] and td["values"]:
@@ -2581,6 +2582,32 @@ def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
                         "equation": td["equation"],
                         "r_squared": round(td["r_squared"], 3),
                     }
+
+            # Derive seasonal split from month when no explicit season column
+            try:
+                dates = pd.to_datetime(df_calc[time_key], errors="coerce")
+                months = dates.dt.month
+                if months.notna().sum() > 6:
+                    summer_df = df_calc[months.isin(SUMMER_MONTHS)].copy()
+                    winter_df = df_calc[~months.isin(SUMMER_MONTHS)].copy()
+                    for season_label, s_df in [("summer", summer_df), ("winter", winter_df)]:
+                        if len(s_df) < 3:
+                            continue
+                        for col in num_cols:
+                            td = calculate_trendline(s_df, time_key, col, extend_to_date=ctx.trendline_extend_to)
+                            if td and td["dates"] and td["values"]:
+                                forecast_key = f"{col}_{season_label}"
+                                trendline_forecasts[forecast_key] = {
+                                    "target_date": td["dates"][-1],
+                                    "forecast_value": round(td["values"][-1], 2),
+                                    "equation": td["equation"],
+                                    "r_squared": round(td["r_squared"], 3),
+                                    "season": season_label,
+                                }
+                    if any(fi.get("season") for fi in trendline_forecasts.values()):
+                        log.info("📈 Derived seasonal trendlines from month-based split")
+            except Exception as seasonal_err:
+                log.warning(f"Seasonal split derivation failed: {seasonal_err}")
 
         if trendline_forecasts:
             forecast_summary = f"\n\n--- TRENDLINE FORECASTS (Linear Regression) ---\nTarget date: {ctx.trendline_extend_to}\n"

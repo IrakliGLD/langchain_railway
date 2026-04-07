@@ -85,6 +85,7 @@ class KnowledgeTopicName(str, Enum):
     CURRENCY_INFLUENCE = "currency_influence"
     SEASONAL_PATTERNS = "seasonal_patterns"
     GENERATION_MIX = "generation_mix"
+    PSO_TRADING = "pso_trading"
     SQL_EXAMPLES = "sql_examples"
 
 
@@ -143,6 +144,7 @@ class DimensionName(str, Enum):
     ENTITY = "entity"
     POWER_PLANT = "power_plant"
     REGULATION_STATUS = "regulation_status"
+    PERIOD = "period"
 
 
 class ChartFamily(str, Enum):
@@ -319,6 +321,7 @@ class SqlHints(BaseModel):
     aggregation: Optional[SqlAggregation] = None
     dimensions: List[DimensionName] = Field(default_factory=list, max_length=8)
     period: Optional[PeriodInfo] = None
+    filter: Optional[FilterCondition] = None
 
 
 class VisualizationInfo(BaseModel):

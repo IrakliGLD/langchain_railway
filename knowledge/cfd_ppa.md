@@ -125,6 +125,29 @@ Contracts for Difference are introduced for new renewable power plant projects u
 
 ---
 
+## 3.5 CfD in the Electricity Market Concept Design (Different Usage)
+
+**CRITICAL DISAMBIGUATION:** The term "CfD" (Contract for Difference) appears in the Electricity Market Concept Design regulation with a **different meaning** from the renewable support scheme CfD described above.
+
+### Support Scheme CfD (Sections 3.1–3.4 above)
+- Applies to **new renewable power plants** built via capacity auctions
+- Purpose: ensure revenue stability for generators via a **strike price** vs. **market reference price** difference
+- Counterparty: government (via ESCO)
+- Context: generation development and investment bankability
+
+### Electricity Market Concept Design CfD
+- Applies to **existing regulated generators** during the transition to the target market model
+- Purpose: compensate the difference between the **regulated tariff** and the **market price** during the transitional period
+- Context: market reform and deregulation — ensures regulated generators are not harmed by moving to market-based pricing
+- This is a **transitional compensation mechanism**, not a support scheme for new investment
+
+### How to distinguish
+- If the context is **renewable energy, capacity auctions, or new project development** → use the support scheme CfD definition
+- If the context is **market reform, transitional model, deregulation, or regulated tariff compensation** → use the Market Concept Design CfD definition
+- Do NOT conflate or merge these two uses in a single answer
+
+---
+
 ## 4. PPA (Power Purchase Agreements)
 
 - Used for both renewable and thermal projects

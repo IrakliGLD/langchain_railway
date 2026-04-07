@@ -140,6 +140,12 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Support schemes, PPA/CfD concepts, and scheme-specific explanations.",
     },
     {
+        "name": "pso_trading",
+        "concepts": ["PSO", "public service obligation", "Telmico", "EP Georgia Supply",
+                      "procurement", "universal service", "public service", "cascade distribution"],
+        "use_for": "PSO supplier procurement structures, Telmico and EP Georgia trading results, and Enguri/Vardnili cascade supply distribution.",
+    },
+    {
         "name": "currency_influence",
         "concepts": ["exchange rate", "GEL/USD", "xrate", "USD-linked costs"],
         "use_for": "Exchange-rate impact and currency-linked price pressure.",

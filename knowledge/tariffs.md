@@ -25,9 +25,10 @@
 
 ### Hydro Tariffs
 - Hydro tariffs mainly consist of fixed O&M and depreciation, with minimal variable costs.
-- For hydro power plants, tariffs are set in advance and are GEL-denominated. According to the new Law of Georgia on Energy and Water Supply, adopted in decemter 2019, the tariffs can be set for the power plants with public service obligation (PSO). So, nowadays, only power plants with PSO can have regulated tariff. the reason for assigning PSO to individual power plants are different. e.g. "zhinvali hpp" has PSO to supply electricity under regulated tariff to the water supply company providing water supply to Tbilisi, capital city of Georgia. PSO applies to this part of generation. "vartsikhe hpp" has to supply electricity to the largest feroalloy plant and PSO applies to that part of generation. for other regulated power plants the reason for PSO is price stability, protection fo cosnumer and system stability.
+- For hydro power plants, tariffs are set in advance and are GEL-denominated. According to the new Law of Georgia on Energy and Water Supply, adopted in decemter 2019, the tariffs can be set for the power plants with public service obligation (PSO). So, nowadays, only power plants with PSO can have regulated tariff. the reason for assigning PSO to individual power plants are different. e.g. "zhinvali hpp" has PSO to supply electricity under regulated tariff to the water supply company providing water supply to Tbilisi, capital city of Georgia. PSO applies to this part of generation. "vartsikhe hpp" has to supply electricity to the largest feroalloy plant and PSO applies to the part of generation that is not supplied to the plant. for other regulated power plants the reason for PSO is price stability, protection fo cosnumer and system stability.
 - If hydro power plants have USD-linked costs, they bear exchange rate risk within the regulatory period.
 - Exchange rate effects for hydro are reflected only in the next regulatory period, not immediately.
+
 
 **Simplified formula:**
 - `tariff_gel = expected_average_total_cost / expected_generation`
@@ -36,6 +37,7 @@
 
 ### Thermal Tariffs
 - **Fixed Component:** Guaranteed Capacity Fee. Covers fixed costs and is paid for every day the thermal power plant is ready to provide capacity to the system.
+- Because `gardabani tpp` is the new power plant, its investment cost not yet depreciated and capital cost is much giher compared to other guaranteed capacity sources (`gpower tpp`, `mktvari tpp`, `tbilsresi tpp`). According to 2025 numbers, about 67% of total guaranteed capacity payments was accounted for `gardabani tpp`.
 - The capacity fee is **not included** in the thermal per-MWh tariff.
 - The guaranteed capacity fee is paid by all end-consumers proportionally to their consumption.
 - **Variable Component:** Per-MWh fee depends mainly on natural gas cost and plant efficiency.

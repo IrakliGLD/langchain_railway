@@ -4603,12 +4603,12 @@ def test_materialize_chart_override_builds_trend_compare_line():
     assert ctx.chart_override_meta is not None
     assert ctx.chart_override_meta["yAxisTitle"] == "USD/MWh"
     assert ctx.chart_override_meta["labels"] == [
-        "Balancing Electricity Price (USD/MWh)",
+        "Balancing electricity price (USD/MWh)",
         "Strike Price",
     ]
     assert ctx.chart_override_data is not None
     assert ctx.chart_override_data[0]["date"] == "2024-01"
-    assert ctx.chart_override_data[0]["Balancing Electricity Price (USD/MWh)"] == 40.0
+    assert ctx.chart_override_data[0]["Balancing electricity price (USD/MWh)"] == 40.0
     assert ctx.chart_override_data[0]["Strike Price"] == 55.0
 
 
@@ -4631,12 +4631,12 @@ def test_materialize_chart_override_preserves_requested_role_order():
 
     assert ctx.chart_override_meta is not None
     assert ctx.chart_override_meta["labels"] == [
-        "Scaled Balancing Electricity Price (USD/MWh)",
-        "Balancing Electricity Price (USD/MWh)",
+        "Scaled Balancing electricity price (USD/MWh)",
+        "Balancing electricity price (USD/MWh)",
     ]
     assert ctx.chart_override_data is not None
-    assert ctx.chart_override_data[0]["Scaled Balancing Electricity Price (USD/MWh)"] == 60.0
-    assert ctx.chart_override_data[0]["Balancing Electricity Price (USD/MWh)"] == 40.0
+    assert ctx.chart_override_data[0]["Scaled Balancing electricity price (USD/MWh)"] == 60.0
+    assert ctx.chart_override_data[0]["Balancing electricity price (USD/MWh)"] == 40.0
 
 
 def test_materialize_chart_override_builds_decomposition_stackedbar():
@@ -4740,12 +4740,12 @@ def test_materialize_chart_override_falls_back_to_trend_compare_for_scale_withou
     assert ctx.chart_override_type == "line"
     assert ctx.chart_override_meta is not None
     assert ctx.chart_override_meta["labels"] == [
-        "Balancing Electricity Price (USD/MWh)",
-        "Scaled Balancing Electricity Price (USD/MWh)",
+        "Balancing electricity price (USD/MWh)",
+        "Scaled Balancing electricity price (USD/MWh)",
     ]
     assert ctx.chart_override_data is not None
-    assert ctx.chart_override_data[0]["Balancing Electricity Price (USD/MWh)"] == 40.0
-    assert ctx.chart_override_data[0]["Scaled Balancing Electricity Price (USD/MWh)"] == 60.0
+    assert ctx.chart_override_data[0]["Balancing electricity price (USD/MWh)"] == 40.0
+    assert ctx.chart_override_data[0]["Scaled Balancing electricity price (USD/MWh)"] == 60.0
 
 
 def test_materialize_chart_override_payoff_without_total_income_signals_stays_trend_compare():
@@ -4776,7 +4776,7 @@ def test_materialize_chart_override_payoff_without_total_income_signals_stays_tr
     assert ctx.chart_override_type == "line"
     assert ctx.chart_override_meta is not None
     assert ctx.chart_override_meta["labels"] == [
-        "Balancing Electricity Price (USD/MWh)",
+        "Balancing electricity price (USD/MWh)",
         "Strike Price",
     ]
 
@@ -4877,7 +4877,7 @@ def test_build_chart_prefers_override_without_raw_rows():
     ctx.chart_override_data = [
         {
             "date": "2024-01",
-            "Balancing Electricity Price (USD/MWh)": 40.0,
+            "Balancing electricity price (USD/MWh)": 40.0,
             "Strike Price": 55.0,
         }
     ]
@@ -4885,9 +4885,9 @@ def test_build_chart_prefers_override_without_raw_rows():
     ctx.chart_override_meta = {
         "xAxisTitle": "period",
         "yAxisTitle": "USD/MWh",
-        "title": "Balancing Electricity Price (USD/MWh) vs Strike Price",
+        "title": "Balancing electricity price (USD/MWh) vs Strike Price",
         "axisMode": "single",
-        "labels": ["Balancing Electricity Price (USD/MWh)", "Strike Price"],
+        "labels": ["Balancing electricity price (USD/MWh)", "Strike Price"],
     }
 
     out = build_chart(ctx)

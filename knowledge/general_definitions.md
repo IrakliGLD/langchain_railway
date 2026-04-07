@@ -170,6 +170,8 @@ Regulated tariffs are **NOT support schemes**.
   - reduced curtailment exposure
   - imbalance risk emerges
 
+**Disambiguation:** The Electricity Market Concept Design regulation also uses "CfD" to describe a transitional compensation mechanism for existing regulated generators — compensating the difference between regulated tariff and market price during market reform. This is NOT the same as the renewable support scheme CfD. Context determines which meaning applies. See `cfd_ppa.md` Section 3.5 for details.
+
 ---
 
 ## 4. Physical System Concepts

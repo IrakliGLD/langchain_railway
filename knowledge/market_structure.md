@@ -341,9 +341,10 @@ Key features:
   - electric heating
   - crypto mining
   - economic activity
+- `enguri hpp` and `vardnili hpp` are shared plants between Georgian and its occipied territory of Abkhazia. in 2025, 43.7% of `enguri hpp` and `vardnili hpp` total generation was devoted to cover demand of Abkhazia. The percentage of electricity supplied from `enguri hpp` and `vardnili hpp` differs by season. For example, in Jan-feb 2025, 100% of plants generation was supplied to Abkhazia (here to mention that generation during winter is significantly lower in winter period). In contrary, during summer period, when generation of those plants peak, about 30% is supplied to Abkhazia.
 
 - From May 2025:
-  - Enguri/Vardnili tariffs increased to cover supply costs
+  - Enguri/Vardnili tariffs increased to cover supply costs for Abkhazia. Relevant change was made in the Law of Georgia on Energy and Water Supply to make this allowed.
 
 ---
 
