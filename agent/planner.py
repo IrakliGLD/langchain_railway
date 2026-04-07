@@ -951,6 +951,18 @@ def normalize_tool_granularity_hint(raw_granularity: str | None) -> str | None:
     return _TOOL_GRANULARITY_HINT_MAP.get(key)
 
 
+def _date_range_spans_full_year(start: str | None, end: str | None) -> bool:
+    """Return True when the date window covers at least 12 months."""
+    if not start or not end:
+        return False
+    try:
+        s = date.fromisoformat(str(start))
+        e = date.fromisoformat(str(end))
+    except (ValueError, TypeError):
+        return False
+    return (e.year - s.year) * 12 + (e.month - s.month) >= 11
+
+
 # ---------------------------------------------------------------------------
 # Constants (moved from main.py)
 # ---------------------------------------------------------------------------
@@ -1504,7 +1516,10 @@ def resolve_tool_params(
                 implied_currency,
             )
         currency = implied_currency or hint_currency or extract_currency(effective_query)
-        granularity = normalize_tool_granularity_hint(getattr(hint, "granularity", None) if hint else None) or "monthly"
+        raw_gran = getattr(hint, "granularity", None) if hint else None
+        if not raw_gran and qa.sql_hints.period and qa.sql_hints.period.granularity:
+            raw_gran = qa.sql_hints.period.granularity.value
+        granularity = normalize_tool_granularity_hint(raw_gran) or "monthly"
         params.update({"metric": metric, "currency": currency, "granularity": granularity})
 
     elif tool_name == ToolName.GET_TARIFFS.value:
@@ -1517,7 +1532,10 @@ def resolve_tool_params(
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)
         mode = (getattr(hint, "mode", None) if hint else None) or "quantity"
-        granularity = normalize_tool_granularity_hint(getattr(hint, "granularity", None) if hint else None) or "monthly"
+        raw_gran = getattr(hint, "granularity", None) if hint else None
+        if not raw_gran and qa.sql_hints.period and qa.sql_hints.period.granularity:
+            raw_gran = qa.sql_hints.period.granularity.value
+        granularity = normalize_tool_granularity_hint(raw_gran) or "monthly"
         if types:
             params["types"] = types
         params.update({"mode": mode, "granularity": granularity})
@@ -1539,5 +1557,19 @@ def resolve_tool_params(
     else:
         log.warning("Unknown tool from analyzer: %s", tool_name)
         return None
+
+    # Generic post-processing: promote granularity for annual-total queries.
+    # When the user asks for a "total" (not a breakdown) over a year-spanning
+    # range and granularity is still "monthly", switch to "yearly" so the tool
+    # aggregates into a single row per year instead of 12 monthly rows.
+    if params.get("granularity") == "monthly":
+        agg = detect_aggregation_intent(raw_query)
+        if (
+            agg.get("needs_total")
+            and not agg.get("needs_breakdown")
+            and _date_range_spans_full_year(params.get("start_date"), params.get("end_date"))
+        ):
+            params["granularity"] = "yearly"
+            log.info("Promoted granularity to yearly for annual-total query")
 
     return params

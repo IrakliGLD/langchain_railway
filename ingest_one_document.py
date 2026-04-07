@@ -7,23 +7,23 @@ from knowledge.vector_ingestion import VectorKnowledgeIngestor
 def main() -> None:
     # Replace this with your local .md or .txt file path.
     text_path = Path(
-        r"D:\Enaiapp\langchain_railway\docs_to_ingest\gnerc_electricity_market_rules_excerpt_ka.md"
+        r"D:\Enaiapp\langchain_railway\docs_to_ingest\law_on_energy_and_water_supply.md"
     )
     text_content = text_path.read_text(encoding="utf-8")
 
     document = DocumentRegistration(
-        source_key="electricity_day_ahead_intraday_rules_aug2020",
-        title="Electricity Day-Ahead and Intraday Market Rules",
+        source_key="Law_of_Georgia_on_Energy_and_water_supply_2025_electricity_part",
+        title="Law of Georgia on Energy and Water Supply",
         document_type="regulation",
-        issuer="GNERC",
+        issuer="Parliament of Georgia",
         language="ka",
         source_url=None,
         storage_path=None,
-        logical_key="day_ahead_intraday_market_rules",
-        published_date="2020-08-11",
-        effective_date="2020-08-11",
+        logical_key="Law_of_Georgia_on_Energy_and_water_supply",
+        published_date="2019-12-27",
+        effective_date="2019-12-27",
         effective_end_date=None,
-        version_label="2020-08-11",
+        version_label="2025-06-12",
         is_latest=True,
         is_active=True,
         abolished=False,
@@ -31,22 +31,22 @@ def main() -> None:
         metadata={
             "country": "georgia",
             "city": "tbilisi",
-            "resolution_number": "46",
-            "annex_number": "1",
-            "notes": "Excerpt focused on electricity day-ahead and intraday exchange rules",
+            "resolution_number": "5646-რს",
+            "annex_number": "NA",
+            "notes": "Excerpt focused on electricity",
         },
     )
 
     topics = [
-        "day_ahead_market",
-        "intraday_market",
-        "exchange_rules",
-        "exchange_participation",
-        "exchange_registration",
-        "exchange_price_formation",
-        "financial_clearing",
-        "market_operator_procedures",
-        "exchange_fee",
+        "Georgian_electricity_sector_market_participants",
+        "market_structure",
+        "general_direction_of_the_electricity_sector",
+        "Law_general_definitions",
+        "responsibilities_of_market_participants",
+        "functions_of_market_participants",
+        "electricity_policy_making",
+        "sanctioning_mechanisms",
+        
     ]
 
     ingestor = VectorKnowledgeIngestor()
