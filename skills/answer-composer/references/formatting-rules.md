@@ -1,5 +1,11 @@
 # Formatting Rules
 
+## Date and month display
+
+- When referring to a specific month in narrative text, use "Month YYYY" format (e.g., "May 2025", "January 2024")
+- Do not use raw date strings like "2024-01-01" or schema-derived labels like "Period (Year-Month)"
+- In tables and data displays, "YYYY-MM" format is acceptable
+
 ## Number formatting
 
 - Use thousand separators: 1,234 not 1234

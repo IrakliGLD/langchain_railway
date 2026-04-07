@@ -27,6 +27,8 @@ Present drivers in this order (see `energy-analyst/references/driver-framework.m
 3. **Exchange Rate** (`xrate`) - critical for GEL, smaller for USD
 4. **Seasonal patterns** - separate summer/winter for long-term analysis
 
+<!-- EXTENDED -->
+
 ## Source price / tariff layer
 
 When the data contains source-price evidence, you must cite it explicitly instead of giving a composition-only explanation.

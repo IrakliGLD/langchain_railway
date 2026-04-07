@@ -20,6 +20,13 @@ TARIFF_ENTITY_ALIASES = {
     ],
     "regulated_new_tpp": ['ltd "gardabni thermal power plant"'],
     "regulated_old_tpp": ['ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)'],
+    "regulated_plants": [
+        'ltd "engurhesi"1',
+        'jsc "energo-pro georgia generation"',
+        'ltd "vardnilihesi"',
+        'ltd "gardabni thermal power plant"',
+        'ltd "mtkvari energy"', 'ltd "iec" (tbilresi)', 'ltd "g power" (capital turbines)',
+    ],
 }
 DEFAULT_TARIFF_ENTITY_ALIASES = ["enguri", "gardabani_tpp", "old_tpp_group"]
 ALLOWED_CURRENCIES = {"gel", "usd"}
@@ -112,6 +119,17 @@ def get_tariffs(
      FROM tariff_with_usd t
      WHERE t.date = d.date
        AND t.entity IN (:old_tpp_1, :old_tpp_2, :old_tpp_3)) AS regulated_old_tpp_tariff_{currency}"""
+        )
+    if "regulated_plants" in selected:
+        select_parts.append(
+            f"""(SELECT AVG(t.{tariff_col})
+     FROM tariff_with_usd t
+     WHERE t.date = d.date
+       AND (t.entity ILIKE '%engurhesi%'
+            OR t.entity ILIKE '%energo-pro%'
+            OR t.entity ILIKE '%vardnili%'
+            OR t.entity ILIKE '%gardabni%'
+            OR t.entity IN (:old_tpp_1, :old_tpp_2, :old_tpp_3))) AS regulated_plants_tariff_{currency}"""
         )
 
     if not select_parts:

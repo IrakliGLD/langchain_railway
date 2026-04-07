@@ -33,6 +33,7 @@ ALLOWED_TARIFF_ENTITY_ALIASES = {
     "regulated_hpp",
     "regulated_new_tpp",
     "regulated_old_tpp",
+    "regulated_plants",
 }
 
 
@@ -372,7 +373,7 @@ def extract_tariff_entities(query_lower: str) -> List[str]:
             "old thermal",
         )
     )
-    if generic_regulated_lookup and list_shaped_lookup and not mentions_specific_alias:
+    if generic_regulated_lookup and not mentions_specific_alias:
         hits.extend(["regulated_hpp", "regulated_new_tpp", "regulated_old_tpp"])
 
     return [h for h in dict.fromkeys(hits) if h in ALLOWED_TARIFF_ENTITY_ALIASES]

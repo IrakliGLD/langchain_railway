@@ -86,7 +86,7 @@ QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
     },
     {
         "name": "data_retrieval",
-        "use_for": "Requests for data series, tables, or descriptive retrieval without explanation.",
+        "use_for": "Requests for data series, tables, quantitative value lookups ('how much', 'what was the total'), or descriptive retrieval without explanation.",
     },
     {
         "name": "data_explanation",
@@ -125,8 +125,9 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "market_structure",
-        "concepts": ["GENEX", "ESCO", "GSE", "participants", "market roles", "balancing market"],
-        "use_for": "Market participants, institutions, and market structure questions.",
+        "concepts": ["GENEX", "ESCO", "GSE", "participants", "market roles", "balancing market",
+                      "transitory period", "market design", "market model", "target model"],
+        "use_for": "Market participants, institutions, market structure, and market model design questions.",
     },
     {
         "name": "tariffs",

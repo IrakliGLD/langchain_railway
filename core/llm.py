@@ -430,7 +430,11 @@ def classify_query_type(user_query: str) -> str:
         "რა არის", "რა იყო", "сколько"
     ]) and any(p in query_lower for p in [
         "in june", "in 2024", "for june", "for 2024", "latest", "last month",
-        "იუნის", "წელს", "в июне", "в 2024"
+        "during", "იუნის", "წელს", "в июне", "в 2024",
+        "jan ", "feb ", "mar ", "apr ", "may ", "jun ",
+        "jul ", "aug ", "sep ", "oct ", "nov ", "dec ",
+        "january", "february", "march", "april", "june", "july",
+        "august", "september", "october", "november", "december",
     ]):
         return "single_value"
 
@@ -469,6 +473,12 @@ def classify_query_type(user_query: str) -> str:
         "table", "tabular"
     ]):
         return "table"
+
+    # Date-range patterns → trend (catches "jan 2024 to dec 2024", "during 2024")
+    if re.search(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{4}\s+to\s+", query_lower):
+        return "trend"
+    if "during" in query_lower and re.search(r"\d{4}", query_lower):
+        return "trend"
 
     return "unknown"
 
@@ -1624,6 +1634,7 @@ Use tech_quantity_view for energy security analysis:
     # General formatting guidelines (always included)
     guidance_sections.append("""
 FORMATTING AND LENGTH GUIDELINES:
+- Dates: Use 'Month YYYY' format (e.g., 'May 2025') in narrative text. Do not use raw date strings, column labels, or parenthesized formats like 'Period (Year-Month)'.
 - When referring to electricity prices or tariffs, always include the correct physical unit (GEL/MWh or USD/MWh) rather than currency only.
 
 FOR SIMPLE LOOKUPS (single value, current status):
@@ -2148,14 +2159,16 @@ def llm_summarize_structured(
             if answer_template:
                 guidance_parts.append(f"ANSWER STRUCTURE FOR THIS QUERY:\n{answer_template}")
 
-        # Balancing-specific: full analysis template (skip if focus guidance already covers balancing)
+        # Balancing-specific: analysis template (core for simple lookups, full for analytical)
+        _EXTENDED_BALANCING_TYPES = {"data_explanation", "comparison", "trend", "unknown"}
+        _use_extended = query_type in _EXTENDED_BALANCING_TYPES
         if query_focus != "balancing" and any(k in query_lower for k in ["balancing", "p_bal", "საბალანსო", "баланс"]):
-            balancing_template = get_balancing_template()
+            balancing_template = get_balancing_template(extended=_use_extended)
             if balancing_template:
                 guidance_parts.append(balancing_template)
 
         if query_focus == "balancing":
-            balancing_template = get_balancing_template()
+            balancing_template = get_balancing_template(extended=_use_extended)
             if balancing_template:
                 guidance_parts.append(balancing_template)
 

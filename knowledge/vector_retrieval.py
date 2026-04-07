@@ -118,9 +118,20 @@ def _extract_bridge_topics(
         _add("cross_border_trade")
 
     if _has_any("transitory", "transitional", "transition model", "transition"):
+        # Always add concept-level topic
         _add("electricity_market_transitory_model")
-        _add("electricity_balancing_transitory_model")
         _add("market_transition")
+
+        # Rules-specific topic only when query signals rules/operational intent
+        if _has_any("rule", "rules", "settlement", "dispatch", "scheduling",
+                    "penalty", "penalties", "metering", "billing",
+                    "market operator", "transmission system operator"):
+            _add("electricity_balancing_transitory_model")
+
+        # Reinforce concept/design topics for concept-oriented queries
+        if _has_any("who", "what is", "concept", "design", "eligible",
+                    "model", "structure", "architecture", "period"):
+            _add("market_design")
 
     if _has_any("capacity market", "guaranteed capacity", "capacity"):
         _add("capacity_market")

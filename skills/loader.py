@@ -179,9 +179,21 @@ def get_seasonal_trend_guidance() -> str:
 # Balancing analysis template (for enriching balancing queries)
 # ---------------------------------------------------------------------------
 
-def get_balancing_template() -> str:
-    """Return the full balancing analysis template."""
-    return load_reference("answer-composer", "balancing-analysis-template.md")
+def get_balancing_template(*, extended: bool = True) -> str:
+    """Return the balancing analysis template.
+
+    Args:
+        extended: If True (default), return the full template. If False,
+            return only the core section (citation, correlation, driver
+            priority, grounding) — skipping source-price analysis and
+            comparison rules to save ~4,300 chars of prompt space.
+    """
+    full = load_reference("answer-composer", "balancing-analysis-template.md")
+    if not full or extended:
+        return full or ""
+    marker = "<!-- EXTENDED -->"
+    idx = full.find(marker)
+    return full[:idx].rstrip() if idx > 0 else full
 
 
 # ---------------------------------------------------------------------------

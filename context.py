@@ -6,7 +6,7 @@ import re
 # --- Column label mapping ---
 COLUMN_LABELS = {
     # shared
-    "date": "Period (Year-Month-Day)",
+    "date": "Date",
 
 
     # entities_mv
@@ -43,7 +43,7 @@ COLUMN_LABELS = {
     "cpi": "Consumer Price Index",
 
     # mv_balancing_trade_with_tariff
-    "month": "Period (Year-Month)",
+    "month": "Month",
     "entity_code": "Entity Code",
     "balancing_quantity": "Balancing Quantity (thousand MWh)",
 
