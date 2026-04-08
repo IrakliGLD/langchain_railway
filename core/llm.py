@@ -50,6 +50,7 @@ from utils.resilience import get_llm_breaker
 import knowledge as knowledge_module
 from contracts.question_analysis import (
     ChartIntent,
+    PeriodInfo,
     QuestionAnalysis,
     SemanticRole,
     _VALID_ROLES_BY_INTENT,
@@ -1790,6 +1791,15 @@ def _compact_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+_PERIOD_RAW_TEXT_MAX_LENGTH = (
+    PeriodInfo.model_json_schema()
+    .get("properties", {})
+    .get("raw_text", {})
+    .get("anyOf", [{}])[0]
+    .get("maxLength", 120)
+)
+
+
 def _sanitize_question_analysis_payload(payload: dict) -> dict:
     """Best-effort cleanup for question-analysis payloads before model validation."""
     if not isinstance(payload, dict):
@@ -1808,6 +1818,10 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
             end_date = period.get("end_date")
             if not start_date or not end_date:
                 sql_hints.pop("period", None)
+            else:
+                raw_text = period.get("raw_text")
+                if isinstance(raw_text, str) and len(raw_text) > _PERIOD_RAW_TEXT_MAX_LENGTH:
+                    period.pop("raw_text", None)
         elif period is None:
             sql_hints.pop("period", None)
 

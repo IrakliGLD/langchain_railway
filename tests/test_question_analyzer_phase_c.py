@@ -557,6 +557,29 @@ def test_sanitize_question_analysis_payload_drops_incomplete_period():
     assert "period" not in sanitized["sql_hints"]
 
 
+def test_sanitize_question_analysis_payload_drops_oversized_period_raw_text_but_keeps_dates():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["sql_hints"]["period"] = {
+        "kind": "range",
+        "start_date": "2020-06-01",
+        "end_date": "2025-06-01",
+        "granularity": "range",
+        "raw_text": (
+            "- June 2020: - July 2020: - July 2021: - September 2021: - October 2021: "
+            "- June 2022: - July 2022: - August 2022: - September 2022: - April 2023: "
+            "- May 2023: - June 2023: - July 2023: - August 2023: - September 2023: "
+            "- October 2023: - November 2023: - December 2023: - March 2024: - August 2024: "
+            "- April 2025: - June 2025:"
+        ),
+    }
+
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+
+    assert sanitized["sql_hints"]["period"]["start_date"] == "2020-06-01"
+    assert sanitized["sql_hints"]["period"]["end_date"] == "2025-06-01"
+    assert "raw_text" not in sanitized["sql_hints"]["period"]
+
+
 def test_llm_analyze_question_tolerates_null_period_stub(monkeypatch):
     monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
     monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
@@ -613,6 +636,61 @@ def test_llm_analyze_question_tolerates_null_period_stub(monkeypatch):
     assert result.routing.preferred_path.value == "tool"
     assert result.sql_hints.period is None
     assert result.tooling.candidate_tools[0].name.value == "get_balancing_composition"
+
+
+def test_llm_analyze_question_tolerates_oversized_period_raw_text(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["raw_query"] = (
+        "different entities sold on balancing segment. for some, like regulated hydro, deregulated plants, "
+        "all regulated thermals, the prices are known. i want to calculate the weighted average price for "
+        "the remaining electricity for the following dates: - June 2020: - July 2020: - July 2021: "
+        "- September 2021: - October 2021: - June 2022: - July 2022: - August 2022: - September 2022: "
+        "- April 2023: - May 2023: - June 2023: - July 2023: - August 2023: - September 2023: "
+        "- October 2023: - November 2023: - December 2023: - March 2024: - August 2024: - April 2025: "
+        "- June 2025:"
+    )
+    payload["canonical_query_en"] = (
+        "Calculate the weighted average price for the remaining balancing electricity for selected months "
+        "between June 2020 and June 2025, given that regulated hydro, deregulated plants, and all regulated "
+        "thermals have known prices."
+    )
+    payload["classification"]["query_type"] = "data_retrieval"
+    payload["routing"]["preferred_path"] = "tool"
+    payload["routing"]["needs_knowledge"] = False
+    payload["routing"]["prefer_tool"] = True
+    payload["sql_hints"]["period"] = {
+        "kind": "range",
+        "start_date": "2020-06-01",
+        "end_date": "2025-06-01",
+        "granularity": "range",
+        "raw_text": (
+            "- June 2020: - July 2020: - July 2021: - September 2021: - October 2021: "
+            "- June 2022: - July 2022: - August 2022: - September 2022: - April 2023: "
+            "- May 2023: - June 2023: - July 2023: - August 2023: - September 2023: "
+            "- October 2023: - November 2023: - December 2023: - March 2024: - August 2024: "
+            "- April 2025: - June 2025:"
+        ),
+    }
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question(payload["raw_query"])
+
+    assert result.classification.query_type.value == "data_retrieval"
+    assert result.routing.preferred_path.value == "tool"
+    assert result.sql_hints.period is not None
+    assert result.sql_hints.period.start_date == "2020-06-01"
+    assert result.sql_hints.period.end_date == "2025-06-01"
+    assert result.sql_hints.period.raw_text is None
 
 
 def test_llm_analyze_question_tolerates_null_dimensions_stub(monkeypatch):
