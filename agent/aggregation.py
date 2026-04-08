@@ -63,8 +63,8 @@ def detect_aggregation_intent(user_query: str) -> Dict[str, bool]:
     # Total/Sum indicators (English, Georgian, Russian)
     total_indicators = [
         # English
-        "total", "sum", "overall", "all", "aggregate", "combined",
-        "entire", "whole", "cumulative",
+        "total", "sum", "overall", "aggregate", "combined",
+        "cumulative",
         # Georgian
         "სულ", "ჯამი", "მთლიანი", "ყველა", "ერთობლივი",
         # Russian
@@ -107,7 +107,15 @@ def detect_aggregation_intent(user_query: str) -> Dict[str, bool]:
     ]
 
     # Evaluate each aggregation family independently, then resolve precedence below.
-    if any(indicator in query_lower for indicator in total_indicators):
+    weak_total_patterns = [
+        r"\ball\b\s+(generation|production|consumption|sales|volume|quantity|electricity|energy|revenue|capacity|imports?|exports?)\b",
+        r"\b(entire|whole)\b\s+(generation|production|consumption|sales|volume|quantity|electricity|energy|revenue|capacity|imports?|exports?)\b",
+    ]
+
+    if (
+        any(indicator in query_lower for indicator in total_indicators)
+        or any(re.search(pattern, query_lower) for pattern in weak_total_patterns)
+    ):
         # But if they also say "by", they want total PER category, not grand total
         if not any(ind in query_lower for ind in breakdown_indicators):
             intent["needs_total"] = True

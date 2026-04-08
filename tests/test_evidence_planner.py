@@ -25,6 +25,7 @@ from agent.evidence_planner import (
     merge_evidence_into_context,
     next_unsatisfied_step,
 )
+from agent.aggregation import detect_aggregation_intent
 from agent.planner import resolve_tool_params
 from agent.summarizer import _add_evidence_record_tokens, _tokenize_cell_value
 
@@ -198,6 +199,47 @@ class TestResolveToolParams:
         assert ctx.evidence_plan[1]["role"] == "composition_context"
         assert ctx.evidence_plan[2]["tool_name"] == "get_tariffs"
         assert ctx.evidence_plan[2]["role"] == "tariff_context"
+
+    def test_weighted_average_scope_phrase_does_not_trigger_total_intent(self):
+        intent = detect_aggregation_intent(
+            "Different entities sold on balancing segment. For some, like regulated hydro, "
+            "deregulated plants, all regulated thermals, the prices are known. I want to "
+            "calculate the weighted average price for the remaining electricity."
+        )
+
+        assert intent["needs_average"] is True
+        assert intent["needs_total"] is False
+        assert intent["aggregation_type"] == "average"
+
+    def test_resolve_tool_params_keeps_monthly_for_sparse_month_list_average_query(self):
+        payload = _make_qa_payload(
+            tools=[{"name": "get_prices", "score": 0.95, "reason": "price data"}],
+            period={
+                "kind": "range",
+                "start_date": "2020-06-01",
+                "end_date": "2025-06-01",
+                "granularity": "range",
+                "raw_text": None,
+            },
+        )
+        payload["raw_query"] = (
+            "Different entities sold on balancing segment. For some, like regulated hydro, "
+            "deregulated plants, all regulated thermals, the prices are known. I want to "
+            "calculate the weighted average price for the remaining electricity for the "
+            "following dates: June 2020, July 2020, July 2021, September 2021, October 2021, "
+            "June 2022, July 2022, August 2022, September 2022, April 2023, May 2023, "
+            "June 2023, July 2023, August 2023, September 2023, October 2023, November 2023, "
+            "December 2023, March 2024, August 2024, April 2025, June 2025."
+        )
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["granularity"] == "monthly"
+        assert params["start_date"] == "2020-06-01"
+        assert params["end_date"] == "2025-06-01"
 
     def test_prices_with_correlation_adds_composition_and_tariffs(self):
         payload = _make_qa_payload(

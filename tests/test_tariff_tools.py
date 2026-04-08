@@ -53,6 +53,29 @@ def test_get_tariffs_treats_none_currency_as_default_gel(monkeypatch):
     assert "regulated_new_tpp_tariff_gel" in captured["sql"]
 
 
+def test_get_tariffs_supports_both_currencies(monkeypatch):
+    captured = {}
+
+    def _fake_run_text_query(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return None, [], []
+
+    monkeypatch.setattr(tariff_tools, "run_text_query", _fake_run_text_query)
+
+    tariff_tools.get_tariffs(
+        start_date="2024-01-01",
+        end_date="2024-02-01",
+        entities=["regulated_new_tpp", "regulated_old_tpp"],
+        currency="both",
+    )
+
+    assert "regulated_new_tpp_tariff_gel" in captured["sql"]
+    assert "regulated_new_tpp_tariff_usd" in captured["sql"]
+    assert "regulated_old_tpp_tariff_gel" in captured["sql"]
+    assert "regulated_old_tpp_tariff_usd" in captured["sql"]
+
+
 def test_get_tariffs_defaults_to_exact_plant_aliases(monkeypatch):
     captured = {}
 

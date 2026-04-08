@@ -81,7 +81,7 @@ AGENT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "start_date": {"type": "string"},
                 "end_date": {"type": "string"},
                 "entities": {"type": "array", "items": {"type": "string"}},
-                "currency": {"type": "string", "enum": ["gel", "usd"]},
+                "currency": {"type": "string", "enum": ["gel", "usd", "both"]},
                 "limit": {"type": "integer"},
             },
         },

@@ -989,6 +989,40 @@ def _date_range_spans_full_year(start: str | None, end: str | None) -> bool:
     return (e.year - s.year) * 12 + (e.month - s.month) >= 11
 
 
+_EXPLICIT_MONTH_YEAR_LIST_PATTERN = re.compile(
+    r"\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r")\s+(20\d{2})\b",
+    re.IGNORECASE,
+)
+
+
+def _query_has_explicit_month_list(raw_query: str) -> bool:
+    """Return True when the query names multiple concrete month-year targets."""
+    query = str(raw_query or "")
+    if not query:
+        return False
+    matches = _EXPLICIT_MONTH_YEAR_LIST_PATTERN.findall(query)
+    if len(matches) > 1:
+        return True
+    query_lower = query.lower()
+    return (
+        len(matches) == 1
+        and any(
+            token in query_lower
+            for token in (
+                "following dates",
+                "following months",
+                "specified months",
+                "selected months",
+                "these months",
+                "those months",
+            )
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Constants (moved from main.py)
 # ---------------------------------------------------------------------------
@@ -1592,8 +1626,10 @@ def resolve_tool_params(
         agg = detect_aggregation_intent(raw_query)
         if (
             agg.get("needs_total")
+            and not agg.get("needs_average")
             and not agg.get("needs_breakdown")
             and _date_range_spans_full_year(params.get("start_date"), params.get("end_date"))
+            and not _query_has_explicit_month_list(raw_query)
         ):
             params["granularity"] = "yearly"
             log.info("Promoted granularity to yearly for annual-total query")

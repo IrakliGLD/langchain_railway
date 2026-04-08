@@ -129,7 +129,7 @@ DEFAULT_TARIFF_ENTITY_ALIASES = [
     "mktvari_tpp",
     "tbilsresi_tpp",
 ]
-ALLOWED_CURRENCIES = {"gel", "usd"}
+ALLOWED_CURRENCIES = {"gel", "usd", "both"}
 
 
 # Validate aliases early so the SQL builder only works with known entity groups.
@@ -184,7 +184,7 @@ def get_tariffs(
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
     direction = get_sort_direction(start_date, end_date)
-    tariff_col = f"tariff_{currency}"
+    requested_currencies = ("gel", "usd") if currency == "both" else (currency,)
 
     # Each selected alias expands into a correlated subquery against the per-date tariff table.
     def _in_clause(param_prefix: str, entities: List[str]) -> str:
@@ -221,52 +221,64 @@ def get_tariffs(
             continue
         bind_name = f"{column_alias}_entity"
         params[bind_name] = TARIFF_ENTITY_ALIASES[alias][0]
-        select_parts.append(
-            f"""(SELECT t.{tariff_col}
+        for selected_currency in requested_currencies:
+            tariff_col = f"tariff_{selected_currency}"
+            select_parts.append(
+                f"""(SELECT t.{tariff_col}
      FROM tariff_with_usd t
      WHERE t.date = d.date AND t.entity = :{bind_name}
-     LIMIT 1) AS {column_alias}_tariff_{currency}"""
-        )
+     LIMIT 1) AS {column_alias}_tariff_{selected_currency}"""
+            )
     if "old_tpp_group" in selected:
         old_tpp_in_clause = _in_clause("old_tpp_entity", TARIFF_ENTITY_ALIASES["old_tpp_group"])
-        select_parts.append(
-            f"""(SELECT AVG(t.{tariff_col})
+        for selected_currency in requested_currencies:
+            tariff_col = f"tariff_{selected_currency}"
+            select_parts.append(
+                f"""(SELECT AVG(t.{tariff_col})
      FROM tariff_with_usd t
      WHERE t.date = d.date
-       AND t.entity IN ({old_tpp_in_clause})) AS grouped_old_tpp_tariff_{currency}"""
-        )
+       AND t.entity IN ({old_tpp_in_clause})) AS grouped_old_tpp_tariff_{selected_currency}"""
+            )
     if "regulated_hpp" in selected:
         regulated_hpp_predicate = _dated_entity_predicate("regulated_hpp_entity", TARIFF_ENTITY_ALIASES["regulated_hpp"])
-        select_parts.append(
-            f"""(SELECT AVG(t.{tariff_col})
+        for selected_currency in requested_currencies:
+            tariff_col = f"tariff_{selected_currency}"
+            select_parts.append(
+                f"""(SELECT AVG(t.{tariff_col})
      FROM tariff_with_usd t
      WHERE t.date = d.date
-       AND ({regulated_hpp_predicate})) AS regulated_hpp_tariff_{currency}"""
-        )
+       AND ({regulated_hpp_predicate})) AS regulated_hpp_tariff_{selected_currency}"""
+            )
     if "regulated_new_tpp" in selected:
         params["gardabani_entity"] = GARDABANI_ENTITY
-        select_parts.append(
-            f"""(SELECT t.{tariff_col}
+        for selected_currency in requested_currencies:
+            tariff_col = f"tariff_{selected_currency}"
+            select_parts.append(
+                f"""(SELECT t.{tariff_col}
      FROM tariff_with_usd t
      WHERE t.date = d.date AND t.entity = :gardabani_entity
-     LIMIT 1) AS regulated_new_tpp_tariff_{currency}"""
-        )
+     LIMIT 1) AS regulated_new_tpp_tariff_{selected_currency}"""
+            )
     if "regulated_old_tpp" in selected:
         regulated_old_tpp_in_clause = _in_clause("regulated_old_tpp_entity", TARIFF_ENTITY_ALIASES["regulated_old_tpp"])
-        select_parts.append(
-            f"""(SELECT AVG(t.{tariff_col})
+        for selected_currency in requested_currencies:
+            tariff_col = f"tariff_{selected_currency}"
+            select_parts.append(
+                f"""(SELECT AVG(t.{tariff_col})
      FROM tariff_with_usd t
      WHERE t.date = d.date
-       AND t.entity IN ({regulated_old_tpp_in_clause})) AS regulated_old_tpp_tariff_{currency}"""
-        )
+       AND t.entity IN ({regulated_old_tpp_in_clause})) AS regulated_old_tpp_tariff_{selected_currency}"""
+            )
     if "regulated_plants" in selected:
         regulated_plants_predicate = _dated_entity_predicate("regulated_plants_entity", TARIFF_ENTITY_ALIASES["regulated_plants"])
-        select_parts.append(
-            f"""(SELECT AVG(t.{tariff_col})
+        for selected_currency in requested_currencies:
+            tariff_col = f"tariff_{selected_currency}"
+            select_parts.append(
+                f"""(SELECT AVG(t.{tariff_col})
      FROM tariff_with_usd t
      WHERE t.date = d.date
-       AND ({regulated_plants_predicate})) AS regulated_plants_tariff_{currency}"""
-        )
+       AND ({regulated_plants_predicate})) AS regulated_plants_tariff_{selected_currency}"""
+            )
 
     if not select_parts:
         raise ValueError("No tariff entities selected")
