@@ -1218,7 +1218,11 @@ def _extract_combined_share_components(
     if not explicit_combine and not any(signal in target_lower for signal in _GROUP_SHARE_ALIAS_SIGNALS):
         return [], False
 
-    entity_to_col = {col.removeprefix("share_"): col for col in share_cols}
+    # Evidence frames expose share_* columns in lowercase snake_case
+    # (for example ``share_cfd_scheme``), while routing uses canonical
+    # balancing entity IDs such as ``CfD_scheme``. Normalize both sides so
+    # deterministic combined-share answers don't miss live columns due to case.
+    entity_to_col = {col.removeprefix("share_").lower(): col for col in share_cols}
     components: list[str] = []
 
     if explicit_combine:
@@ -1230,7 +1234,7 @@ def _extract_combined_share_components(
                 break
             segment_component_count = 0
             for entity in segment_entities:
-                col_name = entity_to_col.get(entity)
+                col_name = entity_to_col.get(str(entity).lower())
                 if not col_name:
                     continue
                 segment_component_count += 1
@@ -1246,7 +1250,7 @@ def _extract_combined_share_components(
 
     extracted_entities = extract_balancing_entities(target_lower)
     for entity in extracted_entities:
-        col_name = entity_to_col.get(entity)
+        col_name = entity_to_col.get(str(entity).lower())
         if col_name and col_name not in components:
             components.append(col_name)
 

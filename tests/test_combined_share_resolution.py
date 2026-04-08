@@ -22,12 +22,12 @@ def test_combined_share_artifact_sums_full_requested_bucket():
             "date": pd.to_datetime(["2020-06-01", "2020-07-01"]),
             "share_renewable_ppa": [0.20, 0.10],
             "share_thermal_ppa": [0.15, 0.10],
-            "share_CfD_scheme": [0.10, 0.05],
+            "share_cfd_scheme": [0.10, 0.05],
             "share_regulated_hpp": [0.15, 0.15],
             "share_regulated_new_tpp": [0.12, 0.10],
             "share_regulated_old_tpp": [0.14, 0.10],
-            "share_deregulated_hydro": [0.15, 0.10],
-            "share_import": [0.01, 0.30],
+            "share_deregulated_hydro": [0.135, 0.10],
+            "share_import": [0.005, 0.30],
         }
     )
 
@@ -35,7 +35,7 @@ def test_combined_share_artifact_sums_full_requested_bucket():
         df,
         plan={},
         user_query=(
-            "In which months was the aggregated share of renewable ppa, thermal ppa, CfD_scheme, "
+            "In which months was the aggregated share of renewable ppa, thermal ppa, CfD scheme, "
             "regulated hydro, all regulated thermal and deregulated hydro in balancing electricity more than 99%?"
         ),
     )
@@ -43,9 +43,10 @@ def test_combined_share_artifact_sums_full_requested_bucket():
     assert summary is not None
     assert "June 2020" in summary
     assert "July 2020" not in summary
+    assert "99.5%" in summary
     assert "Deregulated Hydro Generation exceeded" not in summary
     assert "share_regulated_new_tpp" in grounding
-    assert "share_CfD_scheme" in grounding
+    assert "share_cfd_scheme" in grounding
 
 
 def test_combined_share_artifact_fails_closed_when_bucket_is_only_partially_resolved():
