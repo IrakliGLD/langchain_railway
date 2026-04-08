@@ -25,6 +25,7 @@ ALLOWED_BALANCING_ENTITIES = {
     "regulated_old_tpp",
     "renewable_ppa",
     "thermal_ppa",
+    "CfD_scheme",
 }
 ALLOWED_TARIFF_ENTITY_ALIASES = {
     "enguri_hpp",
@@ -89,6 +90,7 @@ _SEMANTIC_TOOL_TERMS: Dict[str, Set[str]] = {
     "get_balancing_composition": {
         "share", "shares", "composition", "mix", "proportion", "weight",
         "contribution", "balancing electricity", "balancing market", "ppa",
+        "cfd", "hydro", "thermal", "deregulated", "regulated",
         "import share", "entity share",
     },
 }
@@ -320,25 +322,78 @@ def extract_price_metric(query_lower: str) -> str:
     return "balancing"
 
 
+_BALANCING_ENTITY_ALIAS_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("renewable ppa", ("renewable_ppa",)),
+    ("renewable ppas", ("renewable_ppa",)),
+    ("renewable_ppa", ("renewable_ppa",)),
+    ("thermal generation ppa", ("thermal_ppa",)),
+    ("thermal generation ppas", ("thermal_ppa",)),
+    ("thermal ppa", ("thermal_ppa",)),
+    ("thermal ppas", ("thermal_ppa",)),
+    ("thermal_ppa", ("thermal_ppa",)),
+    ("cfd scheme", ("CfD_scheme",)),
+    ("cfd_scheme", ("CfD_scheme",)),
+    ("support scheme cfd", ("CfD_scheme",)),
+    ("contract for difference", ("CfD_scheme",)),
+    ("imports", ("import",)),
+    ("import", ("import",)),
+    ("deregulated hydro generation", ("deregulated_hydro",)),
+    ("deregulated hydropower", ("deregulated_hydro",)),
+    ("deregulated hydro", ("deregulated_hydro",)),
+    ("deregulated_hydro", ("deregulated_hydro",)),
+    ("deregulated plants", ("deregulated_hydro",)),
+    ("deregulated plant", ("deregulated_hydro",)),
+    ("deregulated power plants", ("deregulated_hydro",)),
+    ("deregulated power plant", ("deregulated_hydro",)),
+    ("regulated hydro generation", ("regulated_hpp",)),
+    ("regulated hydropower", ("regulated_hpp",)),
+    ("regulated hydro", ("regulated_hpp",)),
+    ("regulated hpps", ("regulated_hpp",)),
+    ("regulated hpp", ("regulated_hpp",)),
+    ("regulated_hpp", ("regulated_hpp",)),
+    ("regulated new tpp", ("regulated_new_tpp",)),
+    ("new regulated tpp", ("regulated_new_tpp",)),
+    ("new tpp", ("regulated_new_tpp",)),
+    ("regulated_new_tpp", ("regulated_new_tpp",)),
+    ("regulated old tpp", ("regulated_old_tpp",)),
+    ("old regulated tpp", ("regulated_old_tpp",)),
+    ("old tpp", ("regulated_old_tpp",)),
+    ("regulated_old_tpp", ("regulated_old_tpp",)),
+    ("all regulated thermal", ("regulated_new_tpp", "regulated_old_tpp")),
+    ("all regulated thermals", ("regulated_new_tpp", "regulated_old_tpp")),
+    ("regulated thermal", ("regulated_new_tpp", "regulated_old_tpp")),
+    ("regulated thermals", ("regulated_new_tpp", "regulated_old_tpp")),
+    ("regulated tpp", ("regulated_new_tpp", "regulated_old_tpp")),
+    ("regulated tpps", ("regulated_new_tpp", "regulated_old_tpp")),
+    ("ppa cfd import residual", ("renewable_ppa", "thermal_ppa", "CfD_scheme", "import")),
+    ("residual ppa/cfd/import", ("renewable_ppa", "thermal_ppa", "CfD_scheme", "import")),
+    ("remaining electricity", ("renewable_ppa", "thermal_ppa", "CfD_scheme", "import")),
+    ("remaining energy", ("renewable_ppa", "thermal_ppa", "CfD_scheme", "import")),
+)
+
+
 def extract_balancing_entities(query_lower: str) -> List[str]:
-    entity_map = {
-        "import": "import",
-        "deregulated hydro": "deregulated_hydro",
-        "deregulated_hydro": "deregulated_hydro",
-        "regulated hpp": "regulated_hpp",
-        "regulated_hpp": "regulated_hpp",
-        "new tpp": "regulated_new_tpp",
-        "old tpp": "regulated_old_tpp",
-        "renewable ppa": "renewable_ppa",
-        "thermal ppa": "thermal_ppa",
-        "renewable_ppa": "renewable_ppa",
-        "thermal_ppa": "thermal_ppa",
-    }
-    hits = []
-    for key, value in entity_map.items():
-        if key in query_lower and value in ALLOWED_BALANCING_ENTITIES:
+    positioned_hits: List[tuple[int, int, int, tuple[str, ...]]] = []
+    for order, (key, values) in enumerate(_BALANCING_ENTITY_ALIAS_MAP):
+        pattern = re.compile(rf"(?<![a-z0-9_]){re.escape(key)}(?![a-z0-9_])")
+        for match in pattern.finditer(query_lower):
+            if any(value in ALLOWED_BALANCING_ENTITIES for value in values):
+                positioned_hits.append((match.start(), -(match.end() - match.start()), order, values))
+
+    hits: List[str] = []
+    seen: Set[str] = set()
+    occupied_spans: List[tuple[int, int]] = []
+    for start, neg_len, _, values in sorted(positioned_hits):
+        end = start - neg_len
+        if any(not (end <= span_start or start >= span_end) for span_start, span_end in occupied_spans):
+            continue
+        occupied_spans.append((start, end))
+        for value in values:
+            if value not in ALLOWED_BALANCING_ENTITIES or value in seen:
+                continue
+            seen.add(value)
             hits.append(value)
-    return list(dict.fromkeys(hits))
+    return hits
 
 
 def extract_tariff_entities(query_lower: str) -> List[str]:

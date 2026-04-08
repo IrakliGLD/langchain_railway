@@ -369,12 +369,16 @@ def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = TOO
     if not query_topics:
         return True, "No specific query topics detected"
 
+    normalized_tool = (tool_name or "").strip()
+    if normalized_tool == "get_balancing_composition" and "price" in query_topics and "share" not in query_topics:
+        return False, "Tool relevance mismatch: price-centric query without share/composition target"
+
     tool_topics = {
         "get_prices": {"price", "balancing", "exchange_rate"},
         "get_tariffs": {"tariff", "price"},
         "get_generation_mix": {"generation", "demand", "quantity", "share"},
-        "get_balancing_composition": {"share", "composition", "balancing"},
-    }.get((tool_name or "").strip(), set())
+        "get_balancing_composition": {"share", "composition", "balancing", "cfd", "ppa", "hydro", "thermal", "import", "deregulated"},
+    }.get(normalized_tool, set())
 
     if not tool_topics:
         return False, f"Unknown tool relevance mapping: {tool_name}"

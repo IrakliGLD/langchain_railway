@@ -25,6 +25,7 @@ from analysis.seasonal_stats import (
 from analysis.shares import build_balancing_correlation_df, compute_regulated_plant_sales
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
+from agent.router import extract_balancing_entities
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -1154,11 +1155,59 @@ def _share_label_from_column(col_name: str) -> str:
     return meta.get("label", col_name.replace("share_", "").replace("_", " "))
 
 
-def _extract_combined_share_components(target_text: str, share_cols: list[str]) -> list[str]:
+_GROUP_SHARE_ALIAS_SIGNALS = (
+    "regulated thermal",
+    "regulated thermals",
+    "all regulated thermal",
+    "all regulated thermals",
+    "regulated tpp",
+    "regulated tpps",
+    "remaining electricity",
+    "remaining energy",
+    "residual ppa/cfd/import",
+    "ppa cfd import residual",
+)
+
+
+_EXPLICIT_SHARE_SEGMENT_SPLIT_RE = re.compile(r"\s*(?:,|\band\b|\+)\s*")
+
+
+def _share_fraction_to_pct(value: Any) -> float:
+    numeric = float(value)
+    return numeric * 100 if numeric <= 1 else numeric
+
+
+def _extract_share_component_clause(target_lower: str) -> str:
+    patterns = (
+        r"share\s+(?:of|or)\s+(?P<clause>.+?)\s+in\s+balancing(?:\s+electricity)?",
+        r"share\s+(?:of|or)\s+(?P<clause>.+?)(?:\s+(?:more than|above|over|greater than|at least|below|under|less than|exceed(?:ed|s|ing)?)\b|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, target_lower)
+        if match:
+            clause = str(match.group("clause") or "").strip()
+            if clause:
+                return clause
+    return target_lower
+
+
+def _extract_explicit_share_segments(target_lower: str) -> list[str]:
+    clause = _extract_share_component_clause(target_lower)
+    segments = [
+        re.sub(r"^[\s:;.-]+|[\s:;?.-]+$", "", segment).strip()
+        for segment in _EXPLICIT_SHARE_SEGMENT_SPLIT_RE.split(clause)
+    ]
+    return [segment for segment in segments if segment]
+
+
+def _extract_combined_share_components(
+    target_text: str,
+    share_cols: list[str],
+) -> tuple[list[str], bool]:
     """Resolve explicit multi-component share requests into component columns."""
     target_lower = str(target_text or "").lower()
     if not target_lower:
-        return []
+        return [], False
 
     # Only treat this as an aggregate when the query explicitly asks for a total/
     # combined/summed share or enumerates multiple components via commas/and.
@@ -1166,39 +1215,48 @@ def _extract_combined_share_components(target_text: str, share_cols: list[str]) 
         token in target_lower
         for token in ("total share", "combined share", "sum of", ",", " and ")
     )
-    if not explicit_combine:
-        return []
+    if not explicit_combine and not any(signal in target_lower for signal in _GROUP_SHARE_ALIAS_SIGNALS):
+        return [], False
 
+    entity_to_col = {col.removeprefix("share_"): col for col in share_cols}
     components: list[str] = []
 
-    def _add(col_name: str) -> None:
-        if col_name in share_cols and col_name not in components:
+    if explicit_combine:
+        unresolved_segment = False
+        for segment in _extract_explicit_share_segments(target_lower):
+            segment_entities = extract_balancing_entities(segment)
+            if not segment_entities:
+                unresolved_segment = True
+                break
+            segment_component_count = 0
+            for entity in segment_entities:
+                col_name = entity_to_col.get(entity)
+                if not col_name:
+                    continue
+                segment_component_count += 1
+                if col_name not in components:
+                    components.append(col_name)
+            if segment_component_count == 0:
+                unresolved_segment = True
+                break
+        requested_combination = True
+        if unresolved_segment or len(components) <= 1:
+            return [], True
+        return components, requested_combination
+
+    extracted_entities = extract_balancing_entities(target_lower)
+    for entity in extracted_entities:
+        col_name = entity_to_col.get(entity)
+        if col_name and col_name not in components:
             components.append(col_name)
 
-    if any(token in target_lower for token in ("renewable ppa", "renewable_ppa")):
-        _add("share_renewable_ppa")
-    if any(token in target_lower for token in ("regulated hydro", "regulated hpp", "regulated hydropower")):
-        _add("share_regulated_hpp")
-    if any(token in target_lower for token in ("regulated thermal", "regulated thermals", "regulated tpp", "regulated tpps")):
-        _add("share_regulated_old_tpp")
-        _add("share_regulated_new_tpp")
-    if any(token in target_lower for token in ("regulated old tpp", "old regulated tpp")):
-        _add("share_regulated_old_tpp")
-    if any(token in target_lower for token in ("regulated new tpp", "new regulated tpp")):
-        _add("share_regulated_new_tpp")
-
-    return components if len(components) > 1 else []
+    requested_combination = len(components) > 1
+    if requested_combination and len(components) <= 1:
+        return [], True
+    return components, requested_combination
 
 
 def _build_combined_share_label(target_text: str, components: list[str]) -> str:
-    target_lower = str(target_text or "").lower()
-    if (
-        "renewable ppa" in target_lower
-        and any(token in target_lower for token in ("regulated hydro", "regulated hpp", "regulated hydropower"))
-        and any(token in target_lower for token in ("regulated thermal", "regulated thermals", "regulated tpp", "regulated tpps"))
-    ):
-        return "renewable PPA + regulated hydro + regulated thermals"
-
     labels = [_share_label_from_column(col_name) for col_name in components]
     return " + ".join(labels)
 
@@ -1209,7 +1267,7 @@ def _resolve_share_target(
     target_text: str,
 ) -> tuple[pd.DataFrame, Optional[str], Optional[str], list[str]]:
     """Return dataframe + selected share target, supporting explicit combinations."""
-    combined_components = _extract_combined_share_components(target_text, share_cols)
+    combined_components, requested_combination = _extract_combined_share_components(target_text, share_cols)
     if combined_components:
         working = df.copy()
         synthetic_col = "share_combined_target"
@@ -1218,6 +1276,8 @@ def _resolve_share_target(
             running = running.add(pd.to_numeric(working[col_name], errors="coerce").fillna(0.0), fill_value=0.0)
         working[synthetic_col] = running
         return working, synthetic_col, _build_combined_share_label(target_text, combined_components), combined_components
+    if requested_combination:
+        return df, None, None, []
 
     selected_col = _select_share_column(share_cols, target_text)
     if not selected_col:
@@ -1251,7 +1311,7 @@ def _build_share_summary_grounding_hint(
 
     for _, row in evidence_rows.iterrows():
         share_value = float(row[selected_col])
-        share_pct = share_value * 100 if share_value < 1 else share_value
+        share_pct = _share_fraction_to_pct(share_value)
         period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
         line = f"{period_str}: {label}={share_pct:.1f}%"
         if len(component_cols) > 1:
@@ -1259,7 +1319,7 @@ def _build_share_summary_grounding_hint(
             for component_col in component_cols:
                 component_val = pd.to_numeric(pd.Series([row.get(component_col)]), errors="coerce").iloc[0]
                 if pd.notna(component_val):
-                    component_pct = float(component_val) * 100 if float(component_val) < 1 else float(component_val)
+                    component_pct = _share_fraction_to_pct(component_val)
                     component_bits.append(f"{_share_label_from_column(component_col)}={component_pct:.1f}%")
             if component_bits:
                 line += f"; components: {', '.join(component_bits)}"
@@ -1377,7 +1437,7 @@ def _build_share_summary_artifact(
         ]
         for _, row in matched.iterrows():
             share_value = float(row[selected_col])
-            share_pct = share_value * 100 if share_value < 1 else share_value
+            share_pct = _share_fraction_to_pct(share_value)
             period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
             line = f"- {period_str}: {share_pct:.1f}%"
             if include_prices:
@@ -1420,9 +1480,7 @@ def _build_share_summary_artifact(
     if value is None or pd.isna(value):
         return None, ""
 
-    value_pct = float(value)
-    if value_pct < 1:
-        value_pct *= 100
+    value_pct = _share_fraction_to_pct(value)
 
     # Format period
     if date_cols and date_cols[0] in filtered.columns:
@@ -1440,8 +1498,8 @@ def _build_share_summary_artifact(
         renewable = row.get("share_renewable_ppa")
         thermal = row.get("share_thermal_ppa")
         if renewable is not None and pd.notna(renewable) and thermal is not None and pd.notna(thermal):
-            r_pct = float(renewable) * 100 if float(renewable) < 1 else float(renewable)
-            t_pct = float(thermal) * 100 if float(thermal) < 1 else float(thermal)
+            r_pct = _share_fraction_to_pct(renewable)
+            t_pct = _share_fraction_to_pct(thermal)
             summary_parts.append(f"  - Renewable PPA: {r_pct:.1f}%")
             summary_parts.append(f"  - Thermal PPA: {t_pct:.1f}%")
 

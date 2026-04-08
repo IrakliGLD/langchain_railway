@@ -799,15 +799,41 @@ def _normalize_balancing_entity_text(value: str) -> str:
     return normalized
 
 
-_ENTITY_ALIAS_TO_ENTITY: dict[str, str] = {
-    "thermal generation ppa": "thermal_ppa",
-    "thermal generation ppas": "thermal_ppa",
-    "thermal ppa": "thermal_ppa",
-    "thermal ppas": "thermal_ppa",
-    "renewable ppas": "renewable_ppa",
-    "old regulated tpps": "regulated_old_tpp",
-    "new regulated tpps": "regulated_new_tpp",
-    "regulated hpps": "regulated_hpp",
+_ENTITY_ALIAS_TO_ENTITIES: dict[str, list[str]] = {
+    "thermal generation ppa": ["thermal_ppa"],
+    "thermal generation ppas": ["thermal_ppa"],
+    "thermal ppa": ["thermal_ppa"],
+    "thermal ppas": ["thermal_ppa"],
+    "renewable ppa": ["renewable_ppa"],
+    "renewable ppas": ["renewable_ppa"],
+    "cfd scheme": ["CfD_scheme"],
+    "cfd_scheme": ["CfD_scheme"],
+    "support scheme cfd": ["CfD_scheme"],
+    "contract for difference": ["CfD_scheme"],
+    "imports": ["import"],
+    "regulated hydro": ["regulated_hpp"],
+    "regulated hydropower": ["regulated_hpp"],
+    "regulated hydro generation": ["regulated_hpp"],
+    "regulated hpps": ["regulated_hpp"],
+    "old regulated tpp": ["regulated_old_tpp"],
+    "old regulated tpps": ["regulated_old_tpp"],
+    "new regulated tpp": ["regulated_new_tpp"],
+    "new regulated tpps": ["regulated_new_tpp"],
+    "regulated thermal": ["regulated_old_tpp", "regulated_new_tpp"],
+    "regulated thermals": ["regulated_old_tpp", "regulated_new_tpp"],
+    "all regulated thermal": ["regulated_old_tpp", "regulated_new_tpp"],
+    "all regulated thermals": ["regulated_old_tpp", "regulated_new_tpp"],
+    "regulated tpp": ["regulated_old_tpp", "regulated_new_tpp"],
+    "regulated tpps": ["regulated_old_tpp", "regulated_new_tpp"],
+    "deregulated plants": ["deregulated_hydro"],
+    "deregulated plant": ["deregulated_hydro"],
+    "deregulated power plants": ["deregulated_hydro"],
+    "deregulated power plant": ["deregulated_hydro"],
+    "residual ppa/cfd/import": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
+    "ppa cfd import residual": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
+    "ppa_cfd_import_residual": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
+    "remaining electricity": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
+    "remaining energy": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
 }
 
 for _share_key, _meta in BALANCING_SHARE_METADATA.items():
@@ -840,9 +866,9 @@ def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
         if val in _ALLOWED_LOWER:
             resolved.append(val)
             continue
-        alias_entity = _ENTITY_ALIAS_TO_ENTITY.get(val)
-        if alias_entity:
-            resolved.append(alias_entity)
+        alias_entities = _ENTITY_ALIAS_TO_ENTITIES.get(val)
+        if alias_entities:
+            resolved.extend(alias_entities)
             continue
         # 2. Underscore-normalized form?
         val_under = val.replace(" ", "_")
@@ -871,8 +897,8 @@ def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
         unresolved_seen = True
 
     # Deduplicate while preserving ALLOWED order
-    seen = set(resolved)
-    out = [e for e in ALLOWED_BALANCING_ENTITIES if e.lower() in seen]
+    seen_lower = {str(entity).lower() for entity in resolved}
+    out = [e for e in ALLOWED_BALANCING_ENTITIES if e.lower() in seen_lower]
     if unresolved_seen or not out:
         # Input had entities but one or more did not resolve -> fail closed
         log.warning(

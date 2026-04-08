@@ -158,6 +158,19 @@ def test_validate_tool_relevance_detects_mismatch():
     assert "mismatch" in reason.lower()
 
 
+def test_validate_tool_relevance_blocks_price_centric_residual_query_for_composition_tool():
+    relevant, reason = validate_tool_relevance(
+        (
+            "For April 2023, different entities sold on balancing segment. For some, regulated hydro, "
+            "deregulated plants, regulated thermals, the prices are known. I want to calculate the "
+            "weighted average price for the remaining electricity."
+        ),
+        "get_balancing_composition",
+    )
+    assert relevant is False
+    assert "price-centric" in reason.lower()
+
+
 def test_sql_executor_hard_relevance_block_skips_execution(monkeypatch):
     ctx = QueryContext(query="What is CfD?", raw_sql="SELECT 1")
 

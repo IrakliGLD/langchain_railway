@@ -47,6 +47,7 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 from models import QueryContext  # noqa: E402
 from agent.planner import normalize_balancing_entities  # noqa: E402
+from agent.router import extract_balancing_entities  # noqa: E402
 from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES  # noqa: E402
 from agent import orchestrator  # noqa: E402
 from agent.tool_adapter import ToolExecutionResult  # noqa: E402
@@ -134,6 +135,42 @@ def test_normalize_generation_aliases_from_analyzer_labels():
         ["old regulated TPPs", "imports", "renewable PPAs", "Thermal Generation PPAs"]
     )
     assert result == ["import", "regulated_old_tpp", "renewable_ppa", "thermal_ppa"]
+
+
+def test_normalize_regulated_thermal_alias_expands_to_both_tpp_groups():
+    result = normalize_balancing_entities(["all regulated thermal"])
+    assert result == ["regulated_new_tpp", "regulated_old_tpp"]
+
+
+def test_normalize_residual_bucket_alias_expands_to_canonical_residual_components():
+    result = normalize_balancing_entities(["ppa_cfd_import_residual"])
+    assert result == ["import", "renewable_ppa", "thermal_ppa", "CfD_scheme"]
+
+
+def test_extract_balancing_entities_supports_full_eight_component_vocabulary():
+    result = extract_balancing_entities(
+        "aggregated share of renewable ppa, thermal ppa, cfd_scheme, regulated hydro, "
+        "all regulated thermal and deregulated hydro in balancing electricity"
+    )
+    assert result == [
+        "renewable_ppa",
+        "thermal_ppa",
+        "CfD_scheme",
+        "regulated_hpp",
+        "regulated_new_tpp",
+        "regulated_old_tpp",
+        "deregulated_hydro",
+    ]
+
+
+def test_extract_balancing_entities_does_not_match_regulated_inside_deregulated():
+    result = extract_balancing_entities("deregulated hydro")
+    assert result == ["deregulated_hydro"]
+
+
+def test_extract_balancing_entities_does_not_match_old_group_inside_new_regulated_tpp():
+    result = extract_balancing_entities("new regulated tpp")
+    assert result == ["regulated_new_tpp"]
 
 
 # ---------------------------------------------------------------------------
