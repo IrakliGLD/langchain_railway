@@ -242,6 +242,13 @@ From cheapest to most expensive (approximate):
 **CONFIDENTIALITY RULE:**  
 Do not disclose specific PPA/import prices.
 
+**Allowed analytical inference:**  
+- Exact PPA and CfD contract prices are not public and must not be presented as disclosed tariffs.  
+- However, an approximate system-level benchmark may be inferred from balancing-market data in months where PPA/CfD volumes together with entities that have known prices account for more than roughly 99% of balancing electricity.  
+- In those months, the implied weighted-average price of the remaining support-scheme block is approximately **55-57 USD/MWh**.  
+- This should be treated as an **analytical estimate**, not as an official public contract price, not as a plant-specific tariff, and not as a guarantee that the same value applies in every month.  
+- If imports or other residual components are still material in the unexplained bucket, the inferred value may reflect a blended residual benchmark rather than a pure PPA-only price.
+
 ---
 
 ## Key Events

@@ -257,6 +257,21 @@ Support schemes are not directly stored as tariffs but can be observed indirectl
   - They should be treated as **price-forming supply**, not external or residual
   - Changes in their volume or price directly affect system-wide price signals
 
+#### Approximate PPA/CfD Price Benchmark
+
+- Exact PPA and CfD contract prices are not public. Do not present them as officially disclosed tariffs.
+- A system-level approximation can still be inferred from balancing-market data.
+- Method:
+  - identify months where PPA/CfD volumes plus entities with known prices account for more than roughly 99% of balancing electricity
+  - calculate the implied residual weighted-average price for the remaining unexplained support-scheme block
+- Based on this type of assessment, an approximate average benchmark for the PPA/CfD support-price layer is around **55-57 USD/MWh**.
+- Treat this as:
+  - an analytical estimate
+  - not a disclosed contractual price
+  - not plant-specific
+  - strongest in months where import or other residual contamination is negligible
+- In some months, the residual block may still contain a mix of `renewable_ppa`, `thermal_ppa`, `CfD_scheme`, and possibly small import effects. In those cases the inferred value is best understood as a blended support-scheme benchmark, not a pure single-project PPA tariff.
+
 ---
 
 #### Target Market Model (Future)
