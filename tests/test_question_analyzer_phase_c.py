@@ -750,6 +750,68 @@ def test_llm_analyze_question_tolerates_null_sql_hints(monkeypatch):
     assert result.sql_hints.dimensions == []
 
 
+def test_sanitize_question_analysis_payload_coerces_null_list_fields():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["classification"]["ambiguities"] = None
+    payload["routing"]["evidence_roles"] = None
+    payload["knowledge"]["candidate_topics"] = None
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": "get_prices",
+            "score": 0.91,
+            "reason": "price data",
+            "params_hint": {
+                "entities": None,
+                "types": None,
+            },
+        }
+    ]
+    payload["sql_hints"]["entities"] = None
+    payload["sql_hints"]["dimensions"] = None
+    payload["visualization"]["target_series"] = None
+    payload["analysis_requirements"]["derived_metrics"] = None
+
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+
+    assert sanitized["classification"]["ambiguities"] == []
+    assert sanitized["routing"]["evidence_roles"] == []
+    assert sanitized["knowledge"]["candidate_topics"] == []
+    assert sanitized["tooling"]["candidate_tools"][0]["params_hint"]["entities"] == []
+    assert sanitized["tooling"]["candidate_tools"][0]["params_hint"]["types"] == []
+    assert sanitized["sql_hints"]["entities"] == []
+    assert sanitized["sql_hints"]["dimensions"] == []
+    assert "target_series" not in sanitized["visualization"]
+    assert sanitized["analysis_requirements"]["derived_metrics"] == []
+
+
+def test_llm_analyze_question_tolerates_null_sql_hint_entities(monkeypatch):
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["raw_query"] = "show balancing composition for 2024"
+    payload["canonical_query_en"] = "Show balancing composition for 2024."
+    payload["classification"]["query_type"] = "data_retrieval"
+    payload["routing"]["preferred_path"] = "tool"
+    payload["routing"]["needs_knowledge"] = False
+    payload["routing"]["prefer_tool"] = True
+    payload["sql_hints"]["entities"] = None
+
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(json.dumps(payload)),
+    )
+
+    result = llm_core.llm_analyze_question(payload["raw_query"])
+
+    assert result.classification.query_type.value == "data_retrieval"
+    assert result.routing.preferred_path.value == "tool"
+    assert result.sql_hints.entities == []
+
+
 # ---------------------------------------------------------------------------
 # Scenario keyword tests
 # ---------------------------------------------------------------------------

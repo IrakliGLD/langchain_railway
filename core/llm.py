@@ -1800,10 +1800,81 @@ _PERIOD_RAW_TEXT_MAX_LENGTH = (
 )
 
 
+_QUESTION_ANALYSIS_SCHEMA = QuestionAnalysis.model_json_schema()
+_QUESTION_ANALYSIS_SCHEMA_DEFS = _QUESTION_ANALYSIS_SCHEMA.get("$defs", {})
+
+
+def _resolve_schema_node(schema: dict | None) -> dict:
+    """Resolve simple local $ref pointers inside the QuestionAnalysis schema."""
+    if not isinstance(schema, dict):
+        return {}
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+        return schema
+    return _QUESTION_ANALYSIS_SCHEMA_DEFS.get(ref.split("/")[-1], schema)
+
+
+def _schema_allows_array(schema: dict | None) -> bool:
+    """Return True when the schema node accepts an array value."""
+    node = _resolve_schema_node(schema)
+    if not isinstance(node, dict):
+        return False
+    if node.get("type") == "array":
+        return True
+    for option in node.get("anyOf", []):
+        resolved = _resolve_schema_node(option)
+        if isinstance(resolved, dict) and resolved.get("type") == "array":
+            return True
+    return False
+
+
+def _coerce_null_lists_from_schema(value, schema: dict | None):
+    """Recursively coerce nulls to [] for fields declared as arrays in the contract."""
+    node = _resolve_schema_node(schema)
+    if not isinstance(node, dict):
+        return value
+
+    if value is None and _schema_allows_array(node):
+        return []
+
+    if value is None:
+        return value
+
+    if "anyOf" in node:
+        for option in node.get("anyOf", []):
+            resolved = _resolve_schema_node(option)
+            if not isinstance(resolved, dict):
+                continue
+            option_type = resolved.get("type")
+            if option_type == "object" and isinstance(value, dict):
+                return _coerce_null_lists_from_schema(value, resolved)
+            if option_type == "array" and isinstance(value, list):
+                return _coerce_null_lists_from_schema(value, resolved)
+        return value
+
+    node_type = node.get("type")
+    if node_type == "object" and isinstance(value, dict):
+        properties = node.get("properties", {})
+        for key, child_schema in properties.items():
+            if key in value:
+                value[key] = _coerce_null_lists_from_schema(value.get(key), child_schema)
+        return value
+
+    if node_type == "array" and isinstance(value, list):
+        item_schema = node.get("items")
+        if item_schema is None:
+            return value
+        return [_coerce_null_lists_from_schema(item, item_schema) for item in value]
+
+    return value
+
+
 def _sanitize_question_analysis_payload(payload: dict) -> dict:
     """Best-effort cleanup for question-analysis payloads before model validation."""
     if not isinstance(payload, dict):
         return payload
+
+    payload = _coerce_null_lists_from_schema(payload, _QUESTION_ANALYSIS_SCHEMA)
 
     sql_hints = payload.get("sql_hints")
     if sql_hints is None:
