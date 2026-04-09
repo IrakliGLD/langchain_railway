@@ -154,6 +154,31 @@ class TestResolveToolParams:
         assert params["start_date"] == "2019-05-01"
         assert params["end_date"] == "2024-05-31"
 
+    def test_expands_single_month_range_window_for_derived_metrics(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            needs_driver=True,
+            derived_metrics=[
+                {"metric_name": "mom_absolute_change", "metric": "balancing"},
+            ],
+            period={
+                "kind": "range",
+                "start_date": "2023-05-01",
+                "end_date": "2023-05-31",
+                "granularity": "range",
+                "raw_text": "May 2023",
+            },
+        )
+        payload["raw_query"] = "Why balancing price changed in May 2023?"
+        payload["canonical_query_en"] = "Explain why the balancing price changed in May 2023."
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["start_date"] == "2018-05-01"
+        assert params["end_date"] == "2023-05-31"
+
     def test_keeps_single_month_window_without_derived_metrics(self):
         payload = _make_qa_payload(
             query_type="data_explanation",

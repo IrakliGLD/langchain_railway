@@ -65,13 +65,10 @@ def _expand_single_month_explanation_window(
     start date to five years before the target month while preserving the same
     end date.
     """
-    period = getattr(qa.sql_hints, "period", None)
     derived_metrics = list(getattr(qa.analysis_requirements, "derived_metrics", []) or [])
     if (
         qa.classification.query_type != QueryType.DATA_EXPLANATION
         or not derived_metrics
-        or period is None
-        or getattr(period, "kind", None) != "month"
     ):
         return start_date, end_date
 
