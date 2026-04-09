@@ -56,6 +56,8 @@ def _expand_single_month_explanation_window(
     qa: QuestionAnalysis,
     start_date: Optional[str],
     end_date: Optional[str],
+    *,
+    tool_name: str = "",
 ) -> tuple[Optional[str], Optional[str]]:
     """Widen single-month explanation queries so derived metrics can be computed.
 
@@ -86,7 +88,8 @@ def _expand_single_month_explanation_window(
         return start_date, end_date
 
     log.info(
-        "Expanding single-month data explanation window for derived metrics: %s–%s -> %s–%s",
+        "Expanding single-month data explanation window for derived metrics: tool=%s %s–%s -> %s–%s",
+        tool_name or "unknown",
         start_date,
         end_date,
         expanded_start,
@@ -1568,7 +1571,7 @@ def resolve_tool_params(
             start_date, end_date = regex_start, regex_end
 
     start_date, end_date = _expand_single_month_explanation_window(
-        qa, start_date, end_date,
+        qa, start_date, end_date, tool_name=tool_name,
     )
 
     params: dict = {}
