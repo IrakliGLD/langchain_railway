@@ -647,6 +647,92 @@ def test_active_planner_resolves_deregulated_plants_alias_for_residual_bucket(mo
     assert out.clarify_reason == ""
 
 
+def test_active_planner_residual_month_list_guardrail_uses_sparse_month_bounds(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": (
+            "Different entities sold on balancing segment. For some, like regulated hydro, deregulated plants, "
+            "all regulated thermals, the prices are known. I want to calculate the weighted average price "
+            "for the remaining electricity for the following dates: June 2020, July 2020, July 2021, "
+            "September 2021, October 2021."
+        ),
+        "canonical_query_en": (
+            "Calculate the weighted average price for electricity on the balancing segment, excluding "
+            "regulated hydro, deregulated plants, and all regulated thermals, for June 2020, July 2020, "
+            "July 2021, September 2021, and October 2021."
+        ),
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "ambiguous",
+            "analysis_mode": "light",
+            "intent": "residual_weighted_price_calculation",
+            "needs_clarification": True,
+            "confidence": 0.6,
+            "ambiguities": ["remaining bucket could be interpreted multiple ways"],
+        },
+        "routing": {
+            "preferred_path": "clarify",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.95},
+                {"name": "tariffs", "score": 0.9},
+            ],
+        },
+        "tooling": {
+            "candidate_tools": [
+                {"name": "get_prices", "score": 0.98},
+                {"name": "get_tariffs", "score": 0.95},
+                {"name": "get_balancing_composition", "score": 0.9},
+            ],
+        },
+        "sql_hints": {
+            "metric": "balancing",
+            "entities": [],
+            "aggregation": None,
+            "dimensions": [],
+            "period": {
+                "kind": "range",
+                "start_date": "2020-01-01",
+                "end_date": "2020-12-31",
+                "granularity": "range",
+                "raw_text": "2020",
+            },
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query=payload["raw_query"])
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.routing.preferred_path.value == "tool"
+    assert out.question_analysis.tooling.candidate_tools[0].params_hint is not None
+    assert out.question_analysis.tooling.candidate_tools[0].params_hint.start_date == "2020-06-01"
+    assert out.question_analysis.tooling.candidate_tools[0].params_hint.end_date == "2021-10-01"
+    assert out.question_analysis.tooling.candidate_tools[1].params_hint.start_date == "2020-06-01"
+    assert out.question_analysis.tooling.candidate_tools[1].params_hint.end_date == "2021-10-01"
+    assert out.question_analysis.tooling.candidate_tools[2].params_hint.start_date == "2020-06-01"
+    assert out.question_analysis.tooling.candidate_tools[2].params_hint.end_date == "2021-10-01"
+
+
 def test_active_planner_uses_history_to_resolve_residual_bucket_followup(monkeypatch):
     payload = {
         "version": "question_analysis_v1",

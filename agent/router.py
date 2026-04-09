@@ -71,6 +71,15 @@ MONTH_MAP = {
     "december": 12, "dec": 12,
 }
 
+
+_MONTH_YEAR_PATTERN = re.compile(
+    r"\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r")\s+(20\d{2})\b",
+    re.IGNORECASE,
+)
+
 _SEMANTIC_TOOL_TERMS: Dict[str, Set[str]] = {
     "get_prices": {
         "price", "prices", "cost", "costs", "balancing price", "deregulated",
@@ -219,6 +228,40 @@ def _semantic_match_tool(query_lower: str, start_date: Optional[str], end_date: 
 # Regex extractors below convert natural-language hints into concrete tool params.
 def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """Extract coarse date range hints from NL query."""
+    query_text = str(query_lower or "")
+    if not query_text:
+        return None, None
+    query_lower = query_text.lower()
+
+    explicit_months: list[tuple[int, int]] = []
+    seen_months: set[tuple[int, int]] = set()
+    for match in _MONTH_YEAR_PATTERN.finditer(query_text):
+        month_token = match.group(1).lower()
+        year = int(match.group(2))
+        month_num = MONTH_MAP.get(month_token)
+        if not month_num:
+            continue
+        key = (year, month_num)
+        if key in seen_months:
+            continue
+        seen_months.add(key)
+        explicit_months.append(key)
+
+    if explicit_months:
+        start_year, start_month = min(explicit_months)
+        end_year, end_month = max(explicit_months)
+        end = f"{end_year}-{end_month:02d}-01"
+        if is_explanation and len(explicit_months) == 1:
+            # Shift back 1 year and 1 month to support MoM and YoY enrichment
+            start_month_adj = start_month - 1
+            start_year_adj = start_year - 5
+            if start_month_adj == 0:
+                start_month_adj = 12
+                start_year_adj -= 1
+            start = f"{start_year_adj}-{start_month_adj:02d}-01"
+            return start, end
+        return f"{start_year}-{start_month:02d}-01", end
+
     # from 2020 to 2024 / between 2020 and 2024
     m = re.search(r"(?:from|between)\s+(20\d{2})\s+(?:to|and|\-)\s+(20\d{2})", query_lower)
     if m:
@@ -232,41 +275,6 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
         y1, y2 = int(m.group(1)), int(m.group(2))
         start_year, end_year = min(y1, y2), max(y1, y2)
         return f"{start_year}-01-01", f"{end_year}-12-31"
-
-    # month-year range, e.g. jan 2023 to dec 2024
-    m = re.search(
-        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\s+(?:to|and|\-\s|until)\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\b",
-        query_lower,
-    )
-    if m:
-        m1 = MONTH_MAP[m.group(1)]
-        y1 = int(m.group(2))
-        m2 = MONTH_MAP[m.group(3)]
-        y2 = int(m.group(4))
-        # normalize order
-        if (y1 > y2) or (y1 == y2 and m1 > m2):
-            y1, m1, y2, m2 = y2, m2, y1, m1
-        return f"{y1}-{m1:02d}-01", f"{y2}-{m2:02d}-01"
-
-    # month + year, e.g. june 2024
-    m = re.search(
-        r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(20\d{2})\b",
-        query_lower,
-    )
-    if m:
-        month = MONTH_MAP[m.group(1)]
-        year = int(m.group(2))
-        end = f"{year}-{month:02d}-01"
-        if is_explanation:
-            # Shift back 1 year and 1 month to support MoM and YoY enrichment
-            start_month = month - 1
-            start_year = year - 5
-            if start_month == 0:
-                start_month = 12
-                start_year -= 1
-            start = f"{start_year}-{start_month:02d}-01"
-            return start, end
-        return end, end
 
     # explicit year
     years = re.findall(r"\b(20\d{2})\b", query_lower)

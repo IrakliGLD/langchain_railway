@@ -3908,6 +3908,17 @@ def test_extract_date_range_month_year_range():
     assert end == "2024-12-01"
 
 
+def test_extract_date_range_sparse_month_list_is_case_insensitive_and_uses_min_max_bounds():
+    """Explicit month lists should preserve sparse month coverage instead of collapsing to the first year."""
+    from agent.router import extract_date_range
+
+    start, end = extract_date_range(
+        "Following dates: June 2020, July 2020, July 2021, September 2021, October 2021"
+    )
+    assert start == "2020-06-01"
+    assert end == "2021-10-01"
+
+
 def test_extract_date_range_year_range():
     """'from 2020 to 2024' should produce correct year boundaries."""
     from agent.router import extract_date_range
