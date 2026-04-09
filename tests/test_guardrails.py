@@ -2498,6 +2498,23 @@ def test_clarify_selection_preserves_original_forecast_context():
     assert "cautious forward-looking view" in rewritten
 
 
+def test_clarify_selection_override_forces_answer_policy():
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("ambiguous", "clarify", confidence=0.6)
+    payload["classification"]["needs_clarification"] = True
+    qa = QuestionAnalysis.model_validate(payload)
+
+    ctx = QueryContext(
+        query="forecast balancing electricity price for 2030\nSelected interpretation: Give a cautious forward-looking view based on the available regulatory context and recent data.",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        clarify_selection_override=True,
+    )
+
+    assert pipeline._derive_resolution_policy(ctx) == pipeline.ResolutionPolicy.ANSWER
+
+
 def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
     """Missing requested analytical evidence should downgrade Stage 4 to clarify."""
     from contracts.question_analysis import QuestionAnalysis

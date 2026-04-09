@@ -573,6 +573,80 @@ def test_active_planner_resolves_explicit_residual_bucket_query_from_current_tur
     assert out.clarify_reason == ""
 
 
+def test_active_planner_resolves_deregulated_plants_alias_for_residual_bucket(monkeypatch):
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": (
+            "Different entities sold on balancing segment. For some, like regulated hydro, "
+            "deregulated plants, and all regulated thermals, the prices are known. "
+            "Calculate the weighted average price of the remaining electricity."
+        ),
+        "canonical_query_en": (
+            "Calculate the weighted average price of electricity sold on the balancing "
+            "segment excluding regulated hydro, deregulated plants, and all regulated thermals."
+        ),
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "ambiguous",
+            "analysis_mode": "light",
+            "intent": "residual_weighted_price_calculation",
+            "needs_clarification": True,
+            "confidence": 0.6,
+            "ambiguities": ["remaining bucket could be interpreted multiple ways"],
+        },
+        "routing": {
+            "preferred_path": "clarify",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": False,
+            "needs_multi_tool": False,
+            "evidence_roles": [],
+        },
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.95},
+                {"name": "tariffs", "score": 0.9},
+            ],
+        },
+        "tooling": {
+            "candidate_tools": [
+                {"name": "get_prices", "score": 0.98},
+                {"name": "get_tariffs", "score": 0.95},
+                {"name": "get_balancing_composition", "score": 0.9},
+            ],
+        },
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+    }
+    expected = QuestionAnalysis.model_validate(payload)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+
+    ctx = QueryContext(query=payload["raw_query"])
+    out = planner.analyze_question_active(ctx)
+
+    assert out.question_analysis is not None
+    assert out.question_analysis.classification.query_type.value == "data_retrieval"
+    assert out.question_analysis.classification.needs_clarification is False
+    assert out.question_analysis.routing.preferred_path.value == "tool"
+    assert out.question_analysis.routing.needs_multi_tool is True
+    assert [tool.name.value for tool in out.question_analysis.tooling.candidate_tools] == [
+        "get_prices",
+        "get_balancing_composition",
+        "get_tariffs",
+    ]
+    assert out.clarify_reason == ""
+
+
 def test_active_planner_uses_history_to_resolve_residual_bucket_followup(monkeypatch):
     payload = {
         "version": "question_analysis_v1",

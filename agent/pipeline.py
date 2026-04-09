@@ -119,6 +119,15 @@ def _derive_response_mode(ctx: QueryContext) -> str:
 def _derive_resolution_policy(ctx: QueryContext) -> str:
     """Derive whether the pipeline should answer or request clarification."""
 
+    if (
+        ctx.clarify_selection_override
+        and ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.routing.preferred_path == PreferredPath.CLARIFY
+    ):
+        # The user already chose one of the offered clarify branches, so this turn
+        # should continue with that interpretation instead of re-asking.
+        return ResolutionPolicy.ANSWER
+
     if ctx.has_authoritative_question_analysis:
         if ctx.question_analysis.routing.preferred_path in (
             PreferredPath.CLARIFY,

@@ -212,10 +212,16 @@ _RESIDUAL_THERMAL_TOKENS = (
 
 _RESIDUAL_DEREGULATED_TOKENS = (
     "deregulated hydro",
+    "deregulated plant",
+    "deregulated plants",
     "deregulated power plant",
     "deregulated power plants",
     "deregulated hpp",
 )
+
+_RESIDUAL_HYDRO_ENTITIES = frozenset({"regulated_hpp"})
+_RESIDUAL_THERMAL_ENTITIES = frozenset({"regulated_old_tpp", "regulated_new_tpp"})
+_RESIDUAL_DEREGULATED_ENTITIES = frozenset({"deregulated_hydro"})
 
 _MONTH_PATTERN_BY_NUMBER = {
     1: r"\b(january|jan|январ[ьяею]?)\b|იანვ",
@@ -624,10 +630,23 @@ def _has_explicit_residual_bucket_definition(text: str) -> bool:
     text_lower = str(text or "").lower()
     if not text_lower:
         return False
+    extracted_entities = {
+        str(entity).lower()
+        for entity in extract_balancing_entities(text_lower)
+    }
     scope_hit = any(token in text_lower for token in _RESIDUAL_SCOPE_TOKENS)
-    hydro_hit = any(token in text_lower for token in _RESIDUAL_HYDRO_TOKENS)
-    thermal_hit = any(token in text_lower for token in _RESIDUAL_THERMAL_TOKENS)
-    deregulated_hit = any(token in text_lower for token in _RESIDUAL_DEREGULATED_TOKENS)
+    hydro_hit = (
+        any(token in text_lower for token in _RESIDUAL_HYDRO_TOKENS)
+        or bool(extracted_entities & _RESIDUAL_HYDRO_ENTITIES)
+    )
+    thermal_hit = (
+        any(token in text_lower for token in _RESIDUAL_THERMAL_TOKENS)
+        or bool(extracted_entities & _RESIDUAL_THERMAL_ENTITIES)
+    )
+    deregulated_hit = (
+        any(token in text_lower for token in _RESIDUAL_DEREGULATED_TOKENS)
+        or bool(extracted_entities & _RESIDUAL_DEREGULATED_ENTITIES)
+    )
     return scope_hit and hydro_hit and thermal_hit and deregulated_hit
 
 
