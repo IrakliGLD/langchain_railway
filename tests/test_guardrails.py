@@ -1811,6 +1811,63 @@ def test_technical_conceptual_definition_can_use_data_primary_path(monkeypatch):
     assert out.summary == "data answer"
 
 
+def test_technical_conceptual_definition_can_fallback_to_router_tool_after_authoritative_qa(monkeypatch):
+    """If Stage 0.2 stays conceptual but response_mode promotes to data, Stage 0.7 may still route a tool."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+    from agent.tools.types import ToolInvocation
+
+    payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_EVIDENCE_PLANNER", True)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(pipeline.evidence_planner, "build_evidence_plan", lambda ctx: setattr(ctx, "evidence_plan", []) or setattr(ctx, "evidence_plan_source", "") or ctx)
+    monkeypatch.setattr(pipeline.planner, "build_tool_invocation_from_analysis", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pipeline,
+        "match_tool",
+        lambda query, **_kwargs: ToolInvocation(
+            name="get_generation_mix",
+            params={"mode": "quantity", "granularity": "monthly"},
+            confidence=0.8,
+            reason=f"semantic fallback matched generation intent:{query}",
+        ) if "energy security" in query.lower() else None,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "execute_tool",
+        lambda invocation: (
+            pd.DataFrame({"period": ["2024-01-01"], "total_demand": [100.0]}),
+            ["period", "total_demand"],
+            [("2024-01-01", 100.0)],
+        ),
+    )
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer, "summarize_data",
+        lambda ctx: setattr(ctx, "summary", "data answer via router fallback") or ctx,
+    )
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("What can you say about import dependency and energy security of Georgia?")
+
+    assert out.used_tool is True
+    assert out.tool_name == "get_generation_mix"
+    assert out.summary == "data answer via router fallback"
+
+
 def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
     """Ambiguous queries with knowledge path should stay conceptual (safe fallback)."""
     from contracts.question_analysis import QuestionAnalysis

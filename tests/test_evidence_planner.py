@@ -329,6 +329,28 @@ class TestResolveToolParams:
         assert "start_date" not in params
         assert "end_date" not in params
 
+    def test_forecast_resolve_tool_params_ignores_future_structured_period_for_source_window(self):
+        payload = _make_qa_payload(
+            query_type="forecast",
+            derived_metrics=[],
+            period={
+                "kind": "year",
+                "start_date": "2035-01-01",
+                "end_date": "2035-12-31",
+                "granularity": "year",
+                "raw_text": "2035",
+            },
+        )
+        payload["raw_query"] = "Forecast balancing price for 2035"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert "start_date" not in params
+        assert "end_date" not in params
+
     def test_yearly_generation_secondary_inherits_primary_granularity(self):
         payload = _make_qa_payload(
             query_type="data_explanation",

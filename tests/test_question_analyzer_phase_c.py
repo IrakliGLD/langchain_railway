@@ -3,6 +3,7 @@
 import json
 import os
 
+import pandas as pd
 import sqlalchemy
 
 # Ensure config validation passes before importing modules that depend on config.
@@ -40,7 +41,7 @@ class _DummyEngine:
 
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
-from agent import planner, summarizer  # noqa: E402
+from agent import analyzer, planner, summarizer  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core import llm as llm_core  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
@@ -366,6 +367,79 @@ def test_generate_plan_target_falls_back_to_semantic_intent_not_tool_id(monkeypa
 
     assert out.plan["target"] == "import share in balancing electricity"
     assert out.plan["target"] != "get_balancing_composition"
+
+
+def test_active_analysis_requests_normalize_balancing_vs_demand_correlation():
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": "What is the correlation between balancing price and demand?",
+            "canonical_query_en": "What is the correlation between balancing price and electricity demand?",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "data_explanation",
+                "analysis_mode": "analyst",
+                "intent": "correlation_check",
+                "needs_clarification": False,
+                "confidence": 0.9,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "tool",
+                "needs_sql": False,
+                "needs_knowledge": False,
+                "prefer_tool": True,
+                "needs_multi_tool": True,
+            },
+            "knowledge": {},
+            "tooling": {"candidate_tools": []},
+            "sql_hints": {},
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.0,
+                "preferred_chart_family": None,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_trend_context": False,
+                "needs_correlation_context": True,
+                "derived_metrics": [
+                    {
+                        "metric_name": "correlation_to_target",
+                        "metric": "generation",
+                        "target_metric": "balancing",
+                    }
+                ],
+            },
+        }
+    )
+    ctx = QueryContext(
+        query="What is the correlation between balancing price and demand?",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+
+    requests = analyzer._active_analysis_requests(ctx)
+
+    assert requests[0]["metric"] == "demand"
+    assert requests[0]["target_metric"] == "balancing"
+
+
+def test_build_correlation_matrix_from_frame_coerces_object_numeric_series():
+    df = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-02-01", "2024-03-01"],
+            "p_bal_gel": ["10.0", "20.0", "30.0"],
+            "total_demand": ["100.0", "200.0", "300.0"],
+        }
+    )
+
+    results = analyzer._build_correlation_matrix_from_frame(df)
+
+    assert "p_bal_gel" in results
+    assert "total_demand" in results
+    assert "total_demand" in results["p_bal_gel"]
 
 
 def test_answer_conceptual_uses_active_analyzer_topics_and_canonical_query(monkeypatch):

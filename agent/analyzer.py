@@ -399,6 +399,43 @@ def _normalize_query_target_metric(query: str, target_metric: Optional[str]) -> 
     return target
 
 
+def _normalize_correlation_request(
+    query: str,
+    metric: Optional[str],
+    target_metric: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Correct common analyzer drift for two-series technical correlations."""
+
+    query_lower = str(query or "").lower()
+    normalized_metric = str(metric or "").strip().lower() or None
+    normalized_target = _normalize_query_target_metric(query, target_metric)
+
+    balancing_terms = (
+        "balancing electricity price",
+        "balancing price",
+        "balancing electricity cost",
+        "balancing cost",
+        "p_bal",
+    )
+    has_balancing = any(term in query_lower for term in balancing_terms)
+
+    comparison_metric = None
+    if any(token in query_lower for token in ("demand", "consumption")):
+        comparison_metric = "demand"
+    elif any(
+        token in query_lower
+        for token in ("import dependency", "import dependence", "energy security", "self-sufficiency")
+    ):
+        comparison_metric = "import_dependency"
+    elif "generation" in query_lower:
+        comparison_metric = "generation"
+
+    if has_balancing and comparison_metric:
+        return comparison_metric, "balancing"
+
+    return normalized_metric, normalized_target
+
+
 def _build_correlation_matrix_from_frame(df: pd.DataFrame) -> dict[str, dict[str, float]]:
     """Compute pairwise correlations from the current analysis frame."""
     if df is None or df.empty:
@@ -410,9 +447,9 @@ def _build_correlation_matrix_from_frame(df: pd.DataFrame) -> dict[str, dict[str
         working[time_col] = normalize_period_series(working[time_col])
         working = working.dropna(subset=[time_col]).sort_values(time_col)
 
-    numeric_df = working.select_dtypes(include="number").apply(pd.to_numeric, errors="coerce")
-    if time_col and time_col in numeric_df.columns:
-        numeric_df = numeric_df.drop(columns=[time_col], errors="ignore")
+    candidate_cols = [col for col in working.columns if col != time_col]
+    numeric_df = working[candidate_cols].apply(pd.to_numeric, errors="coerce")
+    numeric_df = numeric_df.dropna(axis=1, how="all")
     if len(numeric_df) < 3 or numeric_df.shape[1] < 2:
         return {}
 
@@ -519,8 +556,9 @@ def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
         for req in ctx.question_analysis.analysis_requirements.derived_metrics:
             payload = req.model_dump(mode="json")
             if payload.get("metric_name") == "correlation_to_target":
-                payload["target_metric"] = _normalize_query_target_metric(
+                payload["metric"], payload["target_metric"] = _normalize_correlation_request(
                     ctx.query,
+                    payload.get("metric"),
                     payload.get("target_metric"),
                 )
             requests.append(payload)

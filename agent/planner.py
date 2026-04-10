@@ -1580,13 +1580,8 @@ def resolve_tool_params(
     if qa.classification.query_type == QueryType.FORECAST:
         start_dt = _parse_iso_date(start_date)
         end_dt = _parse_iso_date(end_date)
-        has_structured_dates = bool(
-            (hint and (getattr(hint, "start_date", None) or getattr(hint, "end_date", None)))
-            or qa.sql_hints.period
-        )
         if (
-            not has_structured_dates
-            and start_dt is not None
+            start_dt is not None
             and end_dt is not None
             and start_dt.year >= date.today().year
         ):

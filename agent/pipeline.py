@@ -120,6 +120,29 @@ _REGULATORY_CONCEPT_TOKENS = (
 )
 
 
+def _should_attempt_authoritative_router_fallback(ctx: QueryContext) -> bool:
+    """Allow a narrow raw-router fallback after Stage 0.2 for technical concepts.
+
+    This keeps the general rule intact: authoritative QA should drive routing.
+    But when the analyzer classifies a query as conceptual while response-mode
+    derivation has already promoted it to DATA_PRIMARY, we still need a second
+    chance to reach a typed tool if the analyzer did not nominate one.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return False
+    if ctx.response_mode != ResponseMode.DATA_PRIMARY:
+        return False
+
+    qa = ctx.question_analysis
+    if qa.classification.query_type.value != "conceptual_definition":
+        return False
+
+    query_text = " ".join(
+        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+    ).lower()
+    return any(token in query_text for token in _TECHNICAL_CONCEPT_TOKENS)
+
+
 # Clarification/evidence helpers decide whether later stages can answer safely.
 def _derive_response_mode(ctx: QueryContext) -> str:
     """Derive response_mode once from question-analysis or heuristic fallback.
@@ -1360,6 +1383,16 @@ def process_query(
                     analyzer_build_error = str(exc)
                     ctx.tool_fallback_reason = f"analyzer_tool_build_error:{exc}"
                     log.warning("Analyzer tool invocation build failed: %s", exc)
+
+            if (
+                analyzer_invocation is None
+                and _should_attempt_authoritative_router_fallback(ctx)
+            ):
+                analyzer_invocation = match_tool(ctx.query, is_explanation=is_exp)
+                if analyzer_invocation is not None:
+                    analyzer_invocation.reason = (
+                        f"authoritative_data_primary_router_fallback:{analyzer_invocation.reason}"
+                    )
 
             # Trace the analyzer routing decision regardless of outcome
             qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
