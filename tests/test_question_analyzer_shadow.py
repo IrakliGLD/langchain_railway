@@ -217,7 +217,7 @@ def test_active_planner_coerces_month_specific_balancing_why_query(monkeypatch):
     assert out.question_analysis.sql_hints.period.end_date == "2024-11-30"
 
 
-def test_active_planner_does_not_coerce_multi_month_comparison_query(monkeypatch):
+def test_active_planner_coerces_between_month_balancing_why_query(monkeypatch):
     payload = {
         "version": "question_analysis_v1",
         "raw_query": "Why did balancing electricity price change between October and November 2024?",
@@ -263,8 +263,17 @@ def test_active_planner_does_not_coerce_multi_month_comparison_query(monkeypatch
     out = planner.analyze_question_active(ctx)
 
     assert out.question_analysis is not None
-    assert out.question_analysis.classification.query_type.value == "unsupported"
-    assert out.question_analysis.routing.preferred_path.value == "knowledge"
+    assert out.question_analysis.classification.query_type.value == "data_explanation"
+    assert out.question_analysis.classification.analysis_mode.value == "analyst"
+    assert out.question_analysis.routing.preferred_path.value == "tool"
+    assert out.question_analysis.routing.needs_multi_tool is True
+    tool_names = [tool.name.value for tool in out.question_analysis.tooling.candidate_tools]
+    assert tool_names[:2] == ["get_prices", "get_balancing_composition"]
+    metric_names = {metric.metric_name.value for metric in out.question_analysis.analysis_requirements.derived_metrics}
+    assert {"mom_absolute_change", "mom_percent_change", "yoy_absolute_change", "yoy_percent_change"} <= metric_names
+    assert out.question_analysis.sql_hints.period is not None
+    assert out.question_analysis.sql_hints.period.start_date == "2024-11-01"
+    assert out.question_analysis.sql_hints.period.granularity.value == "month"
 
 
 def test_active_planner_coerces_russian_month_specific_balancing_why_query(monkeypatch):

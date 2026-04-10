@@ -28,6 +28,7 @@ from agent.evidence_planner import (
 from agent.aggregation import detect_aggregation_intent
 from agent.planner import resolve_tool_params
 from agent.summarizer import _add_evidence_record_tokens, _tokenize_cell_value
+from analysis.system_quantities import normalize_tool_dataframe
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +287,80 @@ class TestResolveToolParams:
         assert "get_balancing_composition" in tool_names
         assert "get_tariffs" in tool_names
         assert len(ctx.evidence_plan) == 3
+
+    def test_prices_with_demand_correlation_adds_generation_mix(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            tools=[
+                {"name": "get_prices", "score": 0.9, "reason": "prices"},
+                {"name": "get_generation_mix", "score": 0.8, "reason": "system quantities"},
+            ],
+            needs_correlation=True,
+            derived_metrics=[
+                {
+                    "metric_name": "correlation_to_target",
+                    "metric": "balancing",
+                    "target_metric": "generation",
+                }
+            ],
+        )
+        payload["raw_query"] = "What is the correlation between balancing price and demand?"
+        payload["canonical_query_en"] = payload["raw_query"]
+        ctx = _ctx_with_qa(payload)
+
+        ctx = build_evidence_plan(ctx)
+
+        tool_names = [s["tool_name"] for s in ctx.evidence_plan]
+        assert tool_names == ["get_prices", "get_generation_mix"]
+        assert ctx.evidence_plan[1]["role"] == "correlation_driver"
+
+    def test_forecast_resolve_tool_params_does_not_fetch_future_source_window(self):
+        payload = _make_qa_payload(
+            query_type="forecast",
+            derived_metrics=[],
+        )
+        payload["raw_query"] = "Forecast balancing price for 2035"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert "start_date" not in params
+        assert "end_date" not in params
+
+    def test_yearly_generation_secondary_inherits_primary_granularity(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            tools=[
+                {"name": "get_prices", "score": 0.9, "reason": "prices"},
+                {"name": "get_generation_mix", "score": 0.8, "reason": "system quantities"},
+            ],
+            needs_correlation=True,
+            derived_metrics=[
+                {
+                    "metric_name": "correlation_to_target",
+                    "metric": "balancing",
+                    "target_metric": "demand",
+                }
+            ],
+            period={
+                "kind": "range",
+                "start_date": "2020-01-01",
+                "end_date": "2024-12-31",
+                "granularity": "year",
+                "raw_text": "2020-2024",
+            },
+        )
+        payload["raw_query"] = "What is the correlation between balancing price and demand from 2020 to 2024 by year?"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+        ctx = QueryContext(query=payload["raw_query"], question_analysis=qa, question_analysis_source="llm_active")
+
+        ctx = build_evidence_plan(ctx)
+
+        assert ctx.evidence_plan[0]["params"]["granularity"] == "yearly"
+        assert ctx.evidence_plan[1]["params"]["granularity"] == "yearly"
 
     def test_composition_with_driver_adds_prices(self):
         payload = _make_qa_payload(
@@ -1050,6 +1125,36 @@ class TestErrorSkipBehavior:
         # Plan completeness: primary satisfied, composition errored (not retried), tariffs succeeded
         assert ctx.evidence_plan[1].get("error") == "stage_0_5:connection refused"
         assert ctx.evidence_plan[2].get("satisfied") is True
+
+    def test_generation_mix_evidence_loop_normalizes_long_rows(self, monkeypatch):
+        def _mock(_invocation):
+            df = pd.DataFrame(
+                {
+                    "period": [2023, 2023, 2023, 2023, 2023],
+                    "type_tech": ["hydro", "thermal", "import", "export", "losses"],
+                    "quantity_tech": [100.0, 50.0, 25.0, 10.0, 5.0],
+                }
+            )
+            return df, list(df.columns), [tuple(r) for r in df.itertuples(index=False)]
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", _mock)
+
+        ctx = QueryContext(query="test")
+        ctx.tool_name = "get_prices"
+        ctx.df = pd.DataFrame({"date": ["2023-01-01"], "p_bal_gel": [50.0]})
+        ctx.cols = list(ctx.df.columns)
+        ctx.rows = [tuple(r) for r in ctx.df.itertuples(index=False)]
+        ctx.evidence_plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "params": {}, "satisfied": True},
+            {"role": "correlation_driver", "tool_name": "get_generation_mix", "params": {}, "satisfied": False},
+        ]
+
+        ctx = execute_remaining_evidence(ctx)
+
+        stored = ctx.evidence_collected["correlation_driver"]["df"]
+        assert "total_demand" in stored.columns
+        assert "total_domestic_generation" in stored.columns
+        assert "import_dependency_ratio" in stored.columns
 
 
 # ---------------------------------------------------------------------------

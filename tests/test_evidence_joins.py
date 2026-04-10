@@ -136,6 +136,24 @@ class TestJoinEvidence:
         assert "p_bal_gel" in result.columns
         assert "hydro" in result.columns
 
+    def test_join_yearly_frames_on_year_column(self):
+        prices = pd.DataFrame({
+            "year": [2023, 2024],
+            "p_bal_gel": [120.0, 135.0],
+        })
+        generation = pd.DataFrame({
+            "year": [2023, 2024],
+            "total_demand": [1400.0, 1500.0],
+            "import_dependency_ratio": [0.18, 0.22],
+        })
+
+        result = join_evidence(prices, generation, "get_prices", "get_generation_mix")
+
+        assert "total_demand" in result.columns
+        assert "import_dependency_ratio" in result.columns
+        assert result["total_demand"].tolist() == [1400.0, 1500.0]
+        assert result["import_dependency_ratio"].tolist() == [0.18, 0.22]
+
 
 class TestJoinEvidenceWithProvenance:
     def test_provenance_returned_on_successful_join(self):

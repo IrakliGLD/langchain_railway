@@ -1779,6 +1779,38 @@ def test_conceptual_definition_with_knowledge_path_stays_conceptual(monkeypatch)
     assert out.summary == "conceptual answer"
 
 
+def test_technical_conceptual_definition_can_use_data_primary_path(monkeypatch):
+    """Technical concept overviews should not get trapped on regulation-only answers."""
+    from contracts.question_analysis import QuestionAnalysis
+    from agent import pipeline
+
+    payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    expected = QuestionAnalysis.model_validate(payload)
+
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
+    monkeypatch.setattr(
+        pipeline.planner, "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.planner, "analyze_question_active",
+        lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
+    )
+    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda ctx, **kw: setattr(ctx, "plan", {"intent": "generation"}) or ctx)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "data answer") or ctx)
+    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
+
+    out = pipeline.process_query("What can you say about demand on electricity in Georgia?")
+
+    assert out.is_conceptual is False
+    assert out.summary == "data answer"
+
+
 def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
     """Ambiguous queries with knowledge path should stay conceptual (safe fallback)."""
     from contracts.question_analysis import QuestionAnalysis

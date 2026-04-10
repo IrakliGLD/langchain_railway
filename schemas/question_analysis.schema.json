@@ -243,7 +243,8 @@
         "market_structure",
         "entity",
         "power_plant",
-        "regulation_status"
+        "regulation_status",
+        "period"
       ],
       "title": "DimensionName",
       "type": "string"
@@ -346,6 +347,7 @@
         "currency_influence",
         "seasonal_patterns",
         "generation_mix",
+        "pso_trading",
         "sql_examples"
       ],
       "title": "KnowledgeTopicName",
@@ -609,6 +611,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/PeriodInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilterCondition"
             },
             {
               "type": "null"

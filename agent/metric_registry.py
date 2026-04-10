@@ -252,6 +252,7 @@ def compute_correlation(
         return None
 
     record.update({
+        "metric": resolved_metric,
         "target_metric": resolved_target,
         "correlation_value": round(float(corr_value), 6),
         "formula": f"corr({resolved_metric}, {resolved_target}) over available series",

@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from analysis.system_quantities import normalize_period_series
+
 log = logging.getLogger("Enai")
 
 
@@ -172,9 +174,10 @@ def _merge_on_date(
     primary = primary_df.copy()
     secondary = secondary_df.copy()
 
-    # Normalize date columns to datetime
-    primary[date_primary] = pd.to_datetime(primary[date_primary], errors="coerce")
-    secondary[date_secondary] = pd.to_datetime(secondary[date_secondary], errors="coerce")
+    # Normalize time keys consistently so year-only series do not degrade into
+    # epoch-like timestamps during analytical joins.
+    primary[date_primary] = normalize_period_series(primary[date_primary])
+    secondary[date_secondary] = normalize_period_series(secondary[date_secondary])
 
     # Drop rows with unparseable dates
     primary = primary.dropna(subset=[date_primary])
@@ -196,7 +199,7 @@ def _merge_on_date(
 def _find_date_column(df: pd.DataFrame) -> Optional[str]:
     """Find the date column in a DataFrame by name heuristic."""
     for col in df.columns:
-        if col.lower() in ("date", "month", "period", "trade_date"):
+        if col.lower() in ("date", "month", "period", "trade_date", "year"):
             return col
         if "date" in col.lower():
             return col

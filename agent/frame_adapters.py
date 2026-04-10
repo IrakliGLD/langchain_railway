@@ -212,6 +212,42 @@ def adapt_generation_mix(
     rows: list[dict] = []
     prov = provenance_refs or []
 
+    if "type_tech" not in df.columns:
+        period_col = next((col for col in ("period", "date", "year", "month") if col in df.columns), None)
+        if period_col is None:
+            return ObservationFrame(rows=rows, provenance_refs=prov)
+
+        for _, raw_row in df.iterrows():
+            period = str(raw_row.get(period_col, ""))
+            for col in df.columns:
+                if col == period_col:
+                    continue
+                val = raw_row.get(col)
+                if pd.isna(val):
+                    continue
+                if col.startswith("quantity_"):
+                    entity_id = col[len("quantity_"):]
+                    rows.append({
+                        "period": period,
+                        "entity_id": entity_id,
+                        "entity_label": entity_id.replace("_", " ").title(),
+                        "metric": "generation_quantity",
+                        "value": float(val),
+                        "unit": "MWh",
+                    })
+                elif col.startswith("share_"):
+                    entity_id = col[len("share_"):]
+                    rows.append({
+                        "period": period,
+                        "entity_id": entity_id,
+                        "entity_label": entity_id.replace("_", " ").title(),
+                        "metric": "generation_share",
+                        "value": float(val),
+                        "unit": "%",
+                    })
+        rows = _apply_filter(rows, filter_cond)
+        return ObservationFrame(rows=rows, provenance_refs=prov)
+
     for _, raw_row in df.iterrows():
         period = str(raw_row.get("period", ""))
         tech_type = str(raw_row.get("type_tech", "unknown"))

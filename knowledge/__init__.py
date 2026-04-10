@@ -127,6 +127,8 @@ TOPIC_MAP: Dict[str, List[str]] = {
 
     # Generation
     "generation": ["generation_mix"],
+    "demand": ["generation_mix"],
+    "consumption": ["generation_mix"],
     "გენერაცია": ["generation_mix"],
     "генерация": ["generation_mix"],
     "hydro": ["generation_mix", "balancing_price"],
@@ -163,6 +165,7 @@ TOPIC_MAP: Dict[str, List[str]] = {
 
     # Energy security
     "energy security": ["generation_mix", "sql_examples"],
+    "import dependency": ["generation_mix", "market_structure"],
     "import dependence": ["generation_mix", "market_structure"],
     "self-sufficiency": ["generation_mix", "sql_examples"],
 
@@ -246,6 +249,13 @@ def get_knowledge_json(user_query: str = "", use_cache: bool = True) -> str:
     if use_cache:
         return _KNOWLEDGE_JSON
 
+    relevant = {}
+    for stem in sorted(infer_topic_matches(user_query)):
+        content = _KNOWLEDGE.get(stem)
+        if content:
+            relevant[stem] = content
+    return json.dumps(relevant, indent=2, ensure_ascii=False)
+
     # For filtered mode, convert matched Markdown to a JSON-serializable dict
     query_lower = user_query.lower()
     matched_files: set = set()
@@ -272,6 +282,24 @@ def get_knowledge_json(user_query: str = "", use_cache: bool = True) -> str:
     return json.dumps(relevant, indent=2, ensure_ascii=False)
 
 
+def infer_topic_matches(user_query: str = "") -> Set[str]:
+    """Infer relevant knowledge file stems directly from query text."""
+
+    query_lower = str(user_query or "").lower()
+    matched_files: set[str] = set()
+
+    for keyword, file_stems in TOPIC_MAP.items():
+        if keyword in query_lower:
+            matched_files.update(file_stems)
+
+    if matched_files:
+        return matched_files
+
+    definition_patterns = ["what is", "what are", "define", "explain"]
+    is_conceptual = any(pattern in query_lower for pattern in definition_patterns)
+    return {"general_definitions"} if is_conceptual else {"balancing_price", "sql_examples"}
+
+
 def get_knowledge_json_with_topics(
     preferred_topics: Optional[Iterable[str]],
     *,
@@ -288,6 +316,9 @@ def get_knowledge_json_with_topics(
         for topic_name in (str(topic).strip() for topic in (preferred_topics or []))
         if topic_name in _KNOWLEDGE
     }
+    inferred = infer_topic_matches(fallback_query)
+    if preferred == {"general_definitions"} and inferred - {"general_definitions"}:
+        preferred = preferred | (inferred - {"general_definitions"})
 
     if preferred:
         relevant = {
@@ -312,6 +343,9 @@ def get_knowledge_for_topics(
         for topic_name in (str(topic).strip() for topic in (preferred_topics or []))
         if topic_name in _KNOWLEDGE
     }
+    inferred = infer_topic_matches(fallback_query)
+    if preferred == {"general_definitions"} and inferred - {"general_definitions"}:
+        preferred = preferred | (inferred - {"general_definitions"})
     if preferred:
         sections = [_KNOWLEDGE[stem] for stem in sorted(preferred) if stem in _KNOWLEDGE]
         return "\n\n---\n\n".join(sections)

@@ -245,6 +245,19 @@ class TestComputeCorrelation:
         result = compute_correlation({}, record, mctx)
         assert result is None
 
+    def test_correlation_resolves_semantic_target_and_metric_aliases(self):
+        mctx = _make_context()
+        mctx.correlation_results = {"total_demand": {"p_bal_gel": -0.42}}
+        record = _base_record("correlation_to_target", "balancing", mctx.current_ts)
+        record["target_metric"] = "demand"
+
+        result = compute_correlation({}, record, mctx)
+
+        assert result is not None
+        assert result["metric"] == "p_bal_gel"
+        assert result["target_metric"] == "total_demand"
+        assert result["correlation_value"] == pytest.approx(-0.42, abs=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # Trend slope tests

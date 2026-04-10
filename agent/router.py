@@ -94,7 +94,8 @@ _SEMANTIC_TOOL_TERMS: Dict[str, Set[str]] = {
     "get_generation_mix": {
         "generation", "generated", "output", "technology", "tech", "hydro",
         "thermal", "wind", "solar", "demand", "consumption", "losses",
-        "supply", "import dependence",
+        "supply", "import dependence", "import dependency", "energy security",
+        "self-sufficiency",
     },
     "get_balancing_composition": {
         "share", "shares", "composition", "mix", "proportion", "weight",

@@ -46,6 +46,7 @@ from agent.evidence_validator import validate_evidence
 from agent.frame_adapters import adapt_tool_result
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
+from analysis.system_quantities import normalize_tool_dataframe
 from contracts.question_analysis import AnswerKind, PreferredPath, RenderStyle
 from contracts.vector_knowledge import VectorKnowledgeMode
 from knowledge.vector_retrieval import (
@@ -84,6 +85,40 @@ _SCENARIO_DERIVED_METRICS = {
 _ALWAYS_KNOWLEDGE_TYPES = {"conceptual_definition", "regulatory_procedure"}
 _ALWAYS_DATA_TYPES = {"data_retrieval", "data_explanation", "factual_lookup"}
 
+_TECHNICAL_CONCEPT_TOKENS = (
+    "generation mix",
+    "generation",
+    "demand",
+    "consumption",
+    "import dependency",
+    "import dependence",
+    "energy security",
+    "self-sufficiency",
+)
+
+_TECHNICAL_CONCEPT_EXPLORATION_TOKENS = (
+    "what can you say",
+    "tell me about",
+    "describe",
+    "overview",
+    "characteristic",
+    "trend",
+    "mix",
+    "dependency",
+    "security",
+)
+
+_REGULATORY_CONCEPT_TOKENS = (
+    "regulation",
+    "law",
+    "procedure",
+    "eligibility",
+    "license",
+    "licence",
+    "registration",
+    "rule",
+)
+
 
 # Clarification/evidence helpers decide whether later stages can answer safely.
 def _derive_response_mode(ctx: QueryContext) -> str:
@@ -101,6 +136,17 @@ def _derive_response_mode(ctx: QueryContext) -> str:
     if ctx.has_authoritative_question_analysis:
         qa_type = ctx.question_analysis.classification.query_type.value
         qa_path = ctx.question_analysis.routing.preferred_path.value
+        query_text = " ".join(
+            part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+        )
+        query_lower = query_text.lower()
+        if (
+            qa_type == "conceptual_definition"
+            and any(token in query_lower for token in _TECHNICAL_CONCEPT_TOKENS)
+            and any(token in query_lower for token in _TECHNICAL_CONCEPT_EXPLORATION_TOKENS)
+            and not any(token in query_lower for token in _REGULATORY_CONCEPT_TOKENS)
+        ):
+            return ResponseMode.DATA_PRIMARY
         if qa_type in _ALWAYS_KNOWLEDGE_TYPES:
             return ResponseMode.KNOWLEDGE_PRIMARY
         if qa_type in _ALWAYS_DATA_TYPES:
@@ -704,9 +750,10 @@ def _apply_tool_result(
     relevance_query: str | None = None,
 ) -> QueryContext:
     """Attach a successful tool result to ctx and run shared post-processing."""
+    df = normalize_tool_dataframe(invocation.name, df)
     ctx.df = df
-    ctx.cols = list(cols)
-    ctx.rows = [tuple(r) for r in rows]
+    ctx.cols = list(df.columns)
+    ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
     ctx.used_tool = True
     ctx.tool_name = invocation.name
     ctx.tool_params = dict(invocation.params)
@@ -1202,9 +1249,10 @@ def process_query(
                 metrics.log_tool_call(time.time() - t_tool)
                 _trace_stage("stage_0_6_tool_execute", t_tool, tool=invocation.name, rows=len(rows))
 
+                df = normalize_tool_dataframe(invocation.name, df)
                 ctx.df = df
-                ctx.cols = list(cols)
-                ctx.rows = [tuple(r) for r in rows]
+                ctx.cols = list(df.columns)
+                ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
                 stamp_provenance(
                     ctx,
                     ctx.cols,
@@ -1348,9 +1396,10 @@ def process_query(
                         "stage_0_7_analyzer_tool_execute", t_tool,
                         tool=analyzer_invocation.name, rows=len(rows),
                     )
+                    df = normalize_tool_dataframe(analyzer_invocation.name, df)
                     ctx.df = df
-                    ctx.cols = list(cols)
-                    ctx.rows = [tuple(r) for r in rows]
+                    ctx.cols = list(df.columns)
+                    ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
                     stamp_provenance(
                         ctx, ctx.cols, ctx.rows, source="tool",
                         query_hash=tool_invocation_hash(analyzer_invocation.name, analyzer_invocation.params),
@@ -1578,6 +1627,21 @@ def process_query(
     # Stage 3: enrich
     t_stage = time.time()
     ctx = analyzer.enrich(ctx)
+    if ctx.rows and ctx.cols and set(ctx.cols) - set(ctx.provenance_cols or []):
+        inferred_source = str(ctx.provenance_source or ("tool" if ctx.used_tool else "sql"))
+        inferred_hash = str(ctx.provenance_query_hash or "")
+        if not inferred_hash:
+            if ctx.used_tool and ctx.tool_name:
+                inferred_hash = tool_invocation_hash(ctx.tool_name, ctx.tool_params)
+            elif ctx.safe_sql:
+                inferred_hash = sql_query_hash(ctx.safe_sql)
+        stamp_provenance(
+            ctx,
+            ctx.cols,
+            ctx.rows,
+            source=inferred_source or "tool",
+            query_hash=inferred_hash or sql_query_hash(f"{ctx.query}|stage3_enriched"),
+        )
     _trace_stage(
         "stage_3_analyzer_enrich",
         t_stage,

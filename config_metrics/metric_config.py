@@ -47,6 +47,11 @@ METRIC_VALUE_ALIASES: dict[str, list[str]] = {
     "tariff_usd": ["tariff_usd", "regulated_tariff_usd"],
     # Generation
     "quantity_tech": ["quantity_tech", "generation_quantity"],
+    "total_demand": ["total_demand"],
+    "total_domestic_generation": ["total_domestic_generation"],
+    "local_generation": ["local_generation"],
+    "import_dependent_supply": ["import_dependent_supply"],
+    "import_dependency_ratio": ["import_dependency_ratio"],
     # CPI
     "cpi": ["cpi", "consumer_price_index"],
 }
@@ -98,6 +103,15 @@ SEMANTIC_TO_COLUMNS: dict[str, list[str]] = {
     "deregulated": ["p_dereg_gel", "p_dereg_usd"],
     "guaranteed_capacity": ["p_gcap_gel", "p_gcap_usd"],
     "exchange_rate": ["xrate"],
+    "demand": ["total_demand"],
+    "consumption": ["total_demand"],
+    "generation": ["total_domestic_generation", "local_generation"],
+    "local_generation": ["local_generation", "total_domestic_generation"],
+    "import_dependency": ["import_dependency_ratio", "import_dependent_supply", "quantity_import"],
+    "import dependence": ["import_dependency_ratio", "import_dependent_supply", "quantity_import"],
+    "energy_security": ["import_dependency_ratio", "local_generation", "total_domestic_generation"],
+    "energy security": ["import_dependency_ratio", "local_generation", "total_domestic_generation"],
+    "self-sufficiency": ["local_generation", "total_domestic_generation", "import_dependency_ratio"],
     # Share-based metrics for correlation resolution
     "hydro": ["share_all_hydro", "share_deregulated_hydro", "share_regulated_hpp"],
     "import": ["share_import"],

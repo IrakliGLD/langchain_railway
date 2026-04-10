@@ -812,6 +812,41 @@ def test_llm_analyze_question_tolerates_null_sql_hint_entities(monkeypatch):
     assert result.sql_hints.entities == []
 
 
+def test_sanitize_question_analysis_payload_salvages_misplaced_ambiguities_and_params_hint():
+    payload = {
+        "classification": {
+            "query_type": "data_explanation",
+            "analysis_mode": "analyst",
+            "intent": "generation overview",
+            "needs_clarification": False,
+            "confidence": 0.8,
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {},
+        "tooling": {
+            "params_hint": {
+                "mode": "share",
+                "types": ["hydro", "import"],
+                "granularity": "yearly",
+            },
+        },
+        "ambiguities": ["Need to distinguish demand and supply layers."],
+    }
+
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+
+    assert sanitized["classification"]["ambiguities"] == ["Need to distinguish demand and supply layers."]
+    assert "params_hint" not in sanitized["tooling"]
+    assert sanitized["tooling"]["candidate_tools"][0]["name"] == "get_generation_mix"
+    assert sanitized["tooling"]["candidate_tools"][0]["params_hint"]["mode"] == "share"
+    assert sanitized["tooling"]["candidate_tools"][0]["params_hint"]["types"] == ["hydro", "import"]
+
+
 # ---------------------------------------------------------------------------
 # Scenario keyword tests
 # ---------------------------------------------------------------------------

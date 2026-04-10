@@ -1876,6 +1876,91 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
 
     payload = _coerce_null_lists_from_schema(payload, _QUESTION_ANALYSIS_SCHEMA)
 
+    def _pop_dict(source: dict, key: str) -> dict | None:
+        value = source.pop(key, None)
+        return value if isinstance(value, dict) else None
+
+    def _sanitize_topic_candidates(raw_topics: object) -> list[dict]:
+        if not isinstance(raw_topics, list):
+            return []
+        sanitized_topics: list[dict] = []
+        for item in raw_topics:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                score = item.get("score", 0.5)
+            else:
+                name = str(item or "").strip()
+                score = 0.5
+            if not name:
+                continue
+            try:
+                score_val = max(0.0, min(1.0, float(score)))
+            except (TypeError, ValueError):
+                score_val = 0.5
+            sanitized_topics.append({"name": name, "score": score_val})
+        return sanitized_topics
+
+    def _guess_tool_name_from_params_hint(params_hint: dict) -> str | None:
+        if not isinstance(params_hint, dict):
+            return None
+        if params_hint.get("types") or params_hint.get("mode") in {"quantity", "share"}:
+            return "get_generation_mix"
+        entities = {
+            str(entity).strip().lower()
+            for entity in (params_hint.get("entities") or [])
+            if str(entity).strip()
+        }
+        if entities:
+            tariff_like = {
+                "enguri", "vardnili", "gardabani", "regulated_hpp",
+                "regulated_new_tpp", "regulated_old_tpp", "old_tpp_group",
+            }
+            if entities & tariff_like:
+                return "get_tariffs"
+            return "get_balancing_composition"
+        if any(params_hint.get(key) is not None for key in ("metric", "currency", "granularity", "start_date", "end_date")):
+            return "get_prices"
+        return None
+
+    classification = payload.get("classification")
+    if isinstance(classification, dict):
+        raw_ambiguities = payload.pop("ambiguities", None)
+        if raw_ambiguities is not None and not classification.get("ambiguities"):
+            classification["ambiguities"] = raw_ambiguities
+
+    knowledge = payload.get("knowledge")
+    if isinstance(knowledge, dict):
+        raw_topics = payload.pop("candidate_topics", None)
+        if raw_topics is not None and not knowledge.get("candidate_topics"):
+            sanitized_topics = _sanitize_topic_candidates(raw_topics)
+            if sanitized_topics:
+                knowledge["candidate_topics"] = sanitized_topics
+
+    tooling = payload.get("tooling")
+    if isinstance(tooling, dict):
+        raw_candidate_tools = payload.pop("candidate_tools", None)
+        if isinstance(raw_candidate_tools, list) and not tooling.get("candidate_tools"):
+            tooling["candidate_tools"] = raw_candidate_tools
+
+        raw_params_hint = _pop_dict(tooling, "params_hint")
+        if raw_params_hint is None:
+            raw_params_hint = _pop_dict(payload, "params_hint")
+        if raw_params_hint is not None:
+            candidate_tools = tooling.get("candidate_tools")
+            if isinstance(candidate_tools, list) and candidate_tools:
+                first_candidate = candidate_tools[0]
+                if isinstance(first_candidate, dict) and not first_candidate.get("params_hint"):
+                    first_candidate["params_hint"] = raw_params_hint
+            else:
+                guessed_tool = _guess_tool_name_from_params_hint(raw_params_hint)
+                if guessed_tool:
+                    tooling["candidate_tools"] = [{
+                        "name": guessed_tool,
+                        "score": 0.5,
+                        "reason": "sanitized params_hint",
+                        "params_hint": raw_params_hint,
+                    }]
+
     sql_hints = payload.get("sql_hints")
     if sql_hints is None:
         payload["sql_hints"] = {}

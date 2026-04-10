@@ -22,6 +22,7 @@ from analysis.seasonal_stats import (
     calculate_seasonal_stats,
     format_seasonal_stats,
 )
+from analysis.system_quantities import normalize_period_series
 from analysis.shares import build_balancing_correlation_df, compute_regulated_plant_sales
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
@@ -374,6 +375,71 @@ def _metric_aliases(metric: str) -> list[str]:
     return [metric_name]
 
 
+def _find_time_series_column(df: pd.DataFrame) -> Optional[str]:
+    """Return the most likely time column from an analysis frame."""
+    return next(
+        (
+            c for c in df.columns
+            if any(k in c.lower() for k in ["date", "year", "month", "period"])
+        ),
+        None,
+    )
+
+
+def _normalize_query_target_metric(query: str, target_metric: Optional[str]) -> Optional[str]:
+    """Correct common analyzer target drift for technical correlation questions."""
+    query_lower = str(query or "").lower()
+    target = str(target_metric or "").strip().lower() or None
+    if any(token in query_lower for token in ("demand", "consumption")):
+        return "demand"
+    if any(token in query_lower for token in ("import dependency", "import dependence", "energy security", "self-sufficiency")):
+        return "import_dependency"
+    if "generation" in query_lower:
+        return "generation"
+    return target
+
+
+def _build_correlation_matrix_from_frame(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Compute pairwise correlations from the current analysis frame."""
+    if df is None or df.empty:
+        return {}
+
+    working = df.copy()
+    time_col = _find_time_series_column(working)
+    if time_col and time_col in working.columns:
+        working[time_col] = normalize_period_series(working[time_col])
+        working = working.dropna(subset=[time_col]).sort_values(time_col)
+
+    numeric_df = working.select_dtypes(include="number").apply(pd.to_numeric, errors="coerce")
+    if time_col and time_col in numeric_df.columns:
+        numeric_df = numeric_df.drop(columns=[time_col], errors="ignore")
+    if len(numeric_df) < 3 or numeric_df.shape[1] < 2:
+        return {}
+
+    preferred_targets = [
+        "p_bal_gel",
+        "p_bal_usd",
+        "total_demand",
+        "total_domestic_generation",
+        "local_generation",
+        "import_dependency_ratio",
+        "import_dependent_supply",
+    ]
+    targets = [col for col in preferred_targets if col in numeric_df.columns]
+    if not targets:
+        return {}
+
+    corr_results: dict[str, dict[str, float]] = {}
+    corr_matrix = numeric_df.corr(numeric_only=True)
+    for target in targets:
+        if target not in corr_matrix.columns:
+            continue
+        series = corr_matrix[target].drop(labels=[target], errors="ignore").dropna()
+        if not series.empty:
+            corr_results[target] = series.sort_values(ascending=False).round(3).to_dict()
+    return corr_results
+
+
 _SCENARIO_FALLBACK_PATTERNS: list[tuple[str, str, str]] = [
     # (regex, metric_name, factor_group_meaning)
     # "X% higher/lower" → scenario_scale
@@ -449,10 +515,15 @@ def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
 def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
     # Prefer structured analyzer requests, then fall back to heuristic scenario extraction.
     if ctx.has_authoritative_question_analysis:
-        requests = [
-            req.model_dump(mode="json")
-            for req in ctx.question_analysis.analysis_requirements.derived_metrics
-        ]
+        requests = []
+        for req in ctx.question_analysis.analysis_requirements.derived_metrics:
+            payload = req.model_dump(mode="json")
+            if payload.get("metric_name") == "correlation_to_target":
+                payload["target_metric"] = _normalize_query_target_metric(
+                    ctx.query,
+                    payload.get("target_metric"),
+                )
+            requests.append(payload)
         if requests:
             return requests
         log.info(
@@ -1208,14 +1279,15 @@ def _extract_combined_share_components(
     target_lower = str(target_text or "").lower()
     if not target_lower:
         return [], False
+    clause = _extract_share_component_clause(target_lower)
 
     # Only treat this as an aggregate when the query explicitly asks for a total/
     # combined/summed share or enumerates multiple components via commas/and.
     explicit_combine = any(
-        token in target_lower
+        token in clause
         for token in ("total share", "combined share", "sum of", ",", " and ")
     )
-    if not explicit_combine and not any(signal in target_lower for signal in _GROUP_SHARE_ALIAS_SIGNALS):
+    if not explicit_combine and not any(signal in clause for signal in _GROUP_SHARE_ALIAS_SIGNALS):
         return [], False
 
     # Evidence frames expose share_* columns in lowercase snake_case
@@ -1227,7 +1299,7 @@ def _extract_combined_share_components(
 
     if explicit_combine:
         unresolved_segment = False
-        for segment in _extract_explicit_share_segments(target_lower):
+        for segment in _extract_explicit_share_segments(clause):
             segment_entities = extract_balancing_entities(segment)
             if not segment_entities:
                 unresolved_segment = True
@@ -1248,7 +1320,7 @@ def _extract_combined_share_components(
             return [], True
         return components, requested_combination
 
-    extracted_entities = extract_balancing_entities(target_lower)
+    extracted_entities = extract_balancing_entities(clause)
     for entity in extracted_entities:
         col_name = entity_to_col.get(str(entity).lower())
         if col_name and col_name not in components:
@@ -1860,48 +1932,51 @@ def enrich(ctx: QueryContext) -> QueryContext:
             needs_correlation_analysis = True
 
     if needs_correlation_analysis:
-        log.info("🔍 Building comprehensive balancing-price correlation analysis")
+        log.info("🔍 Building correlation analysis from aligned evidence")
         try:
-            with ENGINE.connect() as conn:
-                conn.execute(text("SET TRANSACTION READ ONLY"))
-                corr_df = build_balancing_correlation_df(conn)
+            current_frame_results = _build_correlation_matrix_from_frame(ctx.df)
+            if current_frame_results:
+                ctx.correlation_results.update(current_frame_results)
 
-            allowed_targets = ["p_bal_gel", "p_bal_usd"]
-            allowed_drivers = [
-                "xrate", "share_import", "share_deregulated_hydro",
-                "share_regulated_hpp", "share_renewable_ppa",
-                "share_all_ppa", "share_all_renewables", "share_all_hydro",
-                "enguri_tariff_gel", "gardabani_tpp_tariff_gel",
-                "grouped_old_tpp_tariff_gel"
-            ]
-            corr_df = corr_df[[c for c in corr_df.columns if c in (["date"] + allowed_targets + allowed_drivers)]].copy()
+            if not ctx.correlation_results:
+                with ENGINE.connect() as conn:
+                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                    corr_df = build_balancing_correlation_df(conn)
 
-            # Overall correlations
-            numeric_df = corr_df.drop(columns=["date"], errors="ignore").apply(pd.to_numeric, errors="coerce")
-            for target in allowed_targets:
-                if target not in numeric_df.columns:
-                    continue
-                series = numeric_df.corr(numeric_only=True)[target].drop(labels=[target], errors="ignore")
-                if series.notna().any():
-                    ctx.correlation_results[target] = series.sort_values(ascending=False).round(3).to_dict()
+                allowed_targets = ["p_bal_gel", "p_bal_usd"]
+                allowed_drivers = [
+                    "xrate", "share_import", "share_deregulated_hydro",
+                    "share_regulated_hpp", "share_renewable_ppa",
+                    "share_all_ppa", "share_all_renewables", "share_all_hydro",
+                    "enguri_tariff_gel", "gardabani_tpp_tariff_gel",
+                    "grouped_old_tpp_tariff_gel"
+                ]
+                corr_df = corr_df[[c for c in corr_df.columns if c in (["date"] + allowed_targets + allowed_drivers)]].copy()
 
-            # Seasonal correlations
-            if "date" in corr_df.columns:
-                corr_df["date"] = pd.to_datetime(corr_df["date"], errors="coerce")
-                corr_df["month"] = corr_df["date"].dt.month
-                summer_df = corr_df[corr_df["month"].isin(SUMMER_MONTHS)].drop(columns=["date", "month"], errors="ignore")
-                winter_df = corr_df[~corr_df["month"].isin(SUMMER_MONTHS)].drop(columns=["date", "month"], errors="ignore")
+                numeric_df = corr_df.drop(columns=["date"], errors="ignore").apply(pd.to_numeric, errors="coerce")
+                for target in allowed_targets:
+                    if target not in numeric_df.columns:
+                        continue
+                    series = numeric_df.corr(numeric_only=True)[target].drop(labels=[target], errors="ignore")
+                    if series.notna().any():
+                        ctx.correlation_results[target] = series.sort_values(ascending=False).round(3).to_dict()
 
-                for label, seasonal_df in {"summer": summer_df, "winter": winter_df}.items():
-                    seasonal_numeric = seasonal_df.apply(pd.to_numeric, errors="coerce")
-                    for target in allowed_targets:
-                        if target in seasonal_numeric.columns and len(seasonal_numeric) > 2:
-                            seasonal_corr = seasonal_numeric.corr(numeric_only=True)[target].drop(labels=[target], errors="ignore")
-                            if seasonal_corr.notna().any():
-                                ctx.correlation_results[f"{target}_{label}"] = seasonal_corr.sort_values(ascending=False).round(3).to_dict()
+                if "date" in corr_df.columns:
+                    corr_df["date"] = pd.to_datetime(corr_df["date"], errors="coerce")
+                    corr_df["month"] = corr_df["date"].dt.month
+                    summer_df = corr_df[corr_df["month"].isin(SUMMER_MONTHS)].drop(columns=["date", "month"], errors="ignore")
+                    winter_df = corr_df[~corr_df["month"].isin(SUMMER_MONTHS)].drop(columns=["date", "month"], errors="ignore")
+
+                    for label, seasonal_df in {"summer": summer_df, "winter": winter_df}.items():
+                        seasonal_numeric = seasonal_df.apply(pd.to_numeric, errors="coerce")
+                        for target in allowed_targets:
+                            if target in seasonal_numeric.columns and len(seasonal_numeric) > 2:
+                                seasonal_corr = seasonal_numeric.corr(numeric_only=True)[target].drop(labels=[target], errors="ignore")
+                                if seasonal_corr.notna().any():
+                                    ctx.correlation_results[f"{target}_{label}"] = seasonal_corr.sort_values(ascending=False).round(3).to_dict()
 
             if ctx.correlation_results:
-                ctx.stats_hint += "\n\n--- CORRELATION MATRIX (vs Balancing Price) ---\n" + json.dumps(ctx.correlation_results, indent=2)
+                ctx.stats_hint += "\n\n--- CORRELATION MATRIX ---\n" + json.dumps(ctx.correlation_results, indent=2)
                 log.info(f"✅ Consolidated correlations computed: {list(ctx.correlation_results.keys())}")
             else:
                 log.info("⚠️ No valid correlations found")
@@ -2010,15 +2085,12 @@ def _prepare_timeseries_rows(
     or ``None`` if the data lacks a usable time column or rows.
     """
     # Reuse one normalized time-series snapshot for standalone MoM/YoY analysis.
-    t_series_col = next(
-        (c for c in ctx.df.columns if any(k in c.lower() for k in ["date", "year", "month"])),
-        None,
-    )
+    t_series_col = _find_time_series_column(ctx.df)
     if not t_series_col:
         return None
 
     df = ctx.df.copy()
-    df[t_series_col] = pd.to_datetime(df[t_series_col], errors="coerce")
+    df[t_series_col] = normalize_period_series(df[t_series_col])
     df = df.dropna(subset=[t_series_col]).sort_values(t_series_col)
     if df.empty:
         return None
@@ -2172,12 +2244,12 @@ def _build_why_context(ctx: QueryContext) -> None:
     """Build causal context for 'why' queries. Modifies ctx.stats_hint."""
     why_ctx: Dict[str, Any] = {"notes": [], "signals": {}}
 
-    t_series_col = next((c for c in ctx.df.columns if any(k in c.lower() for k in ["date", "year", "month"])), None)
+    t_series_col = _find_time_series_column(ctx.df)
     if not t_series_col:
         return
 
     df = ctx.df.copy()
-    df[t_series_col] = pd.to_datetime(df[t_series_col], errors="coerce")
+    df[t_series_col] = normalize_period_series(df[t_series_col])
     df = df.dropna(subset=[t_series_col]).sort_values(t_series_col)
 
     years = [int(y) for y in re.findall(r"(20\d{2})", ctx.query)]
@@ -2590,19 +2662,11 @@ def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
     try:
         from visualization.chart_builder import calculate_trendline
 
-        time_key = next((c for c in ctx.cols if any(k in c.lower() for k in ["date", "year", "month", "თვე", "წელი", "თარიღი"])), None)
+        time_key = next((c for c in ctx.cols if any(k in c.lower() for k in ["date", "year", "month", "period", "თვე", "წელი", "თარიღი"])), None)
         season_col = next((c for c in ctx.cols if c.lower() in ["season", "სეზონი"]), None)
 
-        # Fix year-only columns
         if time_key and time_key in ctx.df.columns:
-            try:
-                first_val = ctx.df[time_key].iloc[0]
-                if isinstance(first_val, (int, float)) or str(type(first_val).__name__) == "Decimal":
-                    if 1900 <= float(first_val) <= 2100:
-                        ctx.df[time_key] = pd.to_datetime(ctx.df[time_key].astype(int), format="%Y")
-                        log.info(f"📅 Converted year-only column '{time_key}' to datetime format")
-            except Exception:
-                pass
+            ctx.df[time_key] = normalize_period_series(ctx.df[time_key])
 
         num_cols = [c for c in ctx.cols if c != time_key and c != season_col]
         df_calc = ctx.df.copy()

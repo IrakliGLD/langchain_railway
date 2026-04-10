@@ -1042,6 +1042,26 @@ def _query_has_explicit_month_list(raw_query: str) -> bool:
     )
 
 
+def _query_requests_correlation(qa: QuestionAnalysis, raw_query: str) -> bool:
+    """Return True when the request is about correlation/relationship, not totals."""
+    query_lower = str(raw_query or "").lower()
+    if any(
+        token in query_lower
+        for token in (
+            "correlation",
+            "relationship",
+            "depends on",
+            "dependence",
+            "correlat",
+        )
+    ):
+        return True
+    return any(
+        getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip() == "correlation_to_target"
+        for metric in (qa.analysis_requirements.derived_metrics or [])
+    )
+
+
 # ---------------------------------------------------------------------------
 # Constants (moved from main.py)
 # ---------------------------------------------------------------------------
@@ -1556,6 +1576,28 @@ def resolve_tool_params(
         start_date = start_date or regex_start
         end_date = end_date or regex_end
 
+    # Forecasts need historical source data, not the future horizon itself.
+    if qa.classification.query_type == QueryType.FORECAST:
+        start_dt = _parse_iso_date(start_date)
+        end_dt = _parse_iso_date(end_date)
+        has_structured_dates = bool(
+            (hint and (getattr(hint, "start_date", None) or getattr(hint, "end_date", None)))
+            or qa.sql_hints.period
+        )
+        if (
+            not has_structured_dates
+            and start_dt is not None
+            and end_dt is not None
+            and start_dt.year >= date.today().year
+        ):
+            log.info(
+                "Forecast query resolved only future horizon dates (%s-%s); clearing source window so tools fetch historical data",
+                start_date,
+                end_date,
+            )
+            start_date = None
+            end_date = None
+
     # Sanity check: if the query is a comparison or trend but dates collapsed
     # to a single point, fall back to regex for a wider range.
     _RANGE_QUERY_TYPES = {QueryType.COMPARISON, QueryType.DATA_EXPLANATION, QueryType.DATA_RETRIEVAL}
@@ -1649,6 +1691,7 @@ def resolve_tool_params(
             and not agg.get("needs_breakdown")
             and _date_range_spans_full_year(params.get("start_date"), params.get("end_date"))
             and not _query_has_explicit_month_list(raw_query)
+            and not _query_requests_correlation(qa, raw_query)
         ):
             params["granularity"] = "yearly"
             log.info("Promoted granularity to yearly for annual-total query")

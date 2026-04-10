@@ -54,6 +54,13 @@ def test_match_generation_mix_tool():
     assert inv.params["end_date"] == "2023-12-31"
 
 
+def test_match_generation_mix_tool_for_import_dependency():
+    inv = match_tool("What can you say about import dependency and energy security of Georgia?")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert "semantic fallback" in (inv.reason or "").lower()
+
+
 def test_match_price_tool():
     inv = match_tool("Balancing price trend in USD from 2021 to 2022")
     assert inv is not None
@@ -118,13 +125,13 @@ def test_semantic_threshold_routes_at_055():
 def test_semantic_margin_gate_rejects_ambiguous():
     """When top two tool scores are within 0.08, query is rejected even above 0.55.
 
-    'costs dynamics usd gel volatility of output hydro solar' scores:
+    'costs dynamics usd gel output solar losses supply evolution' scores:
       get_prices:         5 hits / 7.35 denom ≈ 0.680
-      get_generation_mix: 3 hits / 4.90 denom ≈ 0.612
-    Margin ≈ 0.068 < 0.08 → rejected despite both being above 0.55.
+      get_generation_mix: 4 hits / 5.95 denom ≈ 0.672
+    Margin ≈ 0.008 < 0.08 → rejected despite both being above 0.55.
     None of these words trigger deterministic rules.
     """
-    inv = match_tool("costs dynamics usd gel volatility of output hydro solar")
+    inv = match_tool("costs dynamics usd gel output solar losses supply evolution")
     assert inv is None
 
 

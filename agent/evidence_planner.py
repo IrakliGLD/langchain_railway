@@ -25,6 +25,7 @@ from agent.planner import resolve_tool_params
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
+from analysis.system_quantities import normalize_tool_dataframe
 
 log = logging.getLogger("Enai")
 
@@ -47,6 +48,21 @@ _SHARE_MONTH_LIST_HINTS = (
     "for those months",
 )
 
+_GENERATION_CORRELATION_TARGETS = {
+    "demand",
+    "consumption",
+    "generation",
+    "local_generation",
+    "import_dependency",
+    "import dependence",
+    "energy_security",
+    "energy security",
+    "self-sufficiency",
+    "total_demand",
+    "total_domestic_generation",
+    "import_dependency_ratio",
+}
+
 
 def _is_threshold_share_query(raw_query: str, primary_tool: str) -> bool:
     if primary_tool != ToolName.GET_BALANCING_COMPOSITION.value:
@@ -63,6 +79,39 @@ def _share_query_requests_price_context(raw_query: str, primary_tool: str) -> bo
     query_lower = str(raw_query or "").lower()
     asks_price = any(token in query_lower for token in ("price", "gel", "usd"))
     return asks_price
+
+
+def _correlation_needs_generation_mix(
+    qa: QuestionAnalysis,
+    raw_query: str,
+    primary_tool: str,
+) -> bool:
+    """Return True when a correlation/explanation needs system quantity context."""
+    if primary_tool not in {ToolName.GET_PRICES.value, ToolName.GET_GENERATION_MIX.value}:
+        return False
+
+    query_lower = str(raw_query or "").lower()
+    if any(
+        token in query_lower
+        for token in (
+            "demand",
+            "consumption",
+            "generation mix",
+            "generation",
+            "import dependency",
+            "import dependence",
+            "energy security",
+            "self-sufficiency",
+        )
+    ):
+        return True
+
+    for metric in qa.analysis_requirements.derived_metrics or []:
+        metric_name = getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
+        target_metric = str(getattr(metric, "target_metric", "") or "").strip().lower()
+        if metric_name == "correlation_to_target" and target_metric in _GENERATION_CORRELATION_TARGETS:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +229,18 @@ def _add_steps_from_roles(
 ) -> None:
     """Add steps for explicit evidence_roles emitted by the analyzer."""
     role_to_tool = _role_to_default_tool(steps[0]["tool_name"])
+    needs_generation_mix = _correlation_needs_generation_mix(qa, raw_query, steps[0]["tool_name"])
 
     for role in explicit_roles:
         if role == EvidenceRole.PRIMARY_DATA.value:
             continue
         tool_name = role_to_tool.get(role)
+        if (
+            role == EvidenceRole.CORRELATION_DRIVER.value
+            and needs_generation_mix
+            and steps[0]["tool_name"] == ToolName.GET_PRICES.value
+        ):
+            tool_name = ToolName.GET_GENERATION_MIX.value
         if not tool_name or tool_name in added_tools:
             continue
         params = _resolve_secondary_params(qa, tool_name, raw_query, candidates, primary_params)
@@ -217,6 +273,7 @@ def _add_steps_from_rules(
         and str(primary_params.get("metric") or "").strip().lower() == "balancing"
     )
     threshold_share_with_prices = _share_query_requests_price_context(raw_query, primary_tool)
+    needs_generation_mix = _correlation_needs_generation_mix(qa, raw_query, primary_tool)
 
     # get_prices + driver analysis → add composition
     if primary_tool == ToolName.GET_PRICES.value and needs_driver:
@@ -239,6 +296,7 @@ def _add_steps_from_rules(
     if (
         is_balancing_prices_primary
         and (needs_driver or needs_correlation or query_type == QueryType.COMPARISON)
+        and not needs_generation_mix
         and ToolName.GET_TARIFFS.value not in added_tools
     ):
         params = _resolve_secondary_params(
@@ -256,22 +314,33 @@ def _add_steps_from_rules(
 
     # get_prices + correlation context → add composition + tariffs
     if primary_tool == ToolName.GET_PRICES.value and needs_correlation:
-        if ToolName.GET_BALANCING_COMPOSITION.value not in added_tools:
+        secondary_tool = (
+            ToolName.GET_GENERATION_MIX.value
+            if needs_generation_mix
+            else ToolName.GET_BALANCING_COMPOSITION.value
+        )
+        secondary_role = (
+            EvidenceRole.CORRELATION_DRIVER.value
+            if needs_generation_mix
+            else EvidenceRole.COMPOSITION_CONTEXT.value
+        )
+        if secondary_tool not in added_tools:
             params = _resolve_secondary_params(
-                qa, ToolName.GET_BALANCING_COMPOSITION.value, raw_query, candidates, primary_params,
+                qa, secondary_tool, raw_query, candidates, primary_params,
             )
             if params is not None:
                 steps.append({
-                    "role": EvidenceRole.COMPOSITION_CONTEXT.value,
-                    "tool_name": ToolName.GET_BALANCING_COMPOSITION.value,
+                    "role": secondary_role,
+                    "tool_name": secondary_tool,
                     "params": params,
                     "satisfied": False,
                     "source": "planner_rule",
                 })
-                added_tools.add(ToolName.GET_BALANCING_COMPOSITION.value)
+                added_tools.add(secondary_tool)
         if (
             not is_balancing_prices_primary
             and ToolName.GET_TARIFFS.value not in added_tools
+            and not needs_generation_mix
         ):
             params = _resolve_secondary_params(
                 qa, ToolName.GET_TARIFFS.value, raw_query, candidates, primary_params,
@@ -406,6 +475,11 @@ def _resolve_secondary_params(
         and not params.get("currency")
     ):
         params["currency"] = primary_params["currency"]
+    if (
+        tool_name in {ToolName.GET_PRICES.value, ToolName.GET_GENERATION_MIX.value}
+        and primary_params.get("granularity") == "yearly"
+    ):
+        params["granularity"] = "yearly"
 
     # Balancing-price enrichment defaults to grouped tariff buckets used by the analyzer templates.
     if (
@@ -469,12 +543,13 @@ def execute_remaining_evidence(ctx: QueryContext) -> QueryContext:
         )
         try:
             df, cols, rows = execute_tool(invocation)
+            df = normalize_tool_dataframe(invocation.name, df)
             ctx.evidence_collected[step["role"]] = {
                 "tool": invocation.name,
                 "params": dict(invocation.params),
                 "df": df,
-                "cols": list(cols),
-                "rows": [tuple(r) for r in rows],
+                "cols": list(df.columns),
+                "rows": [tuple(r) for r in df.itertuples(index=False, name=None)],
             }
             step["satisfied"] = True
             log.info(
