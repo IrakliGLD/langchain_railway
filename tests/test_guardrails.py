@@ -153,7 +153,7 @@ def test_firewall_does_not_block_natural_language_update_phrase():
 
 
 def test_validate_tool_relevance_detects_mismatch():
-    relevant, reason = validate_tool_relevance("Explain inflation and CPI trend", "get_generation_mix")
+    relevant, reason = validate_tool_relevance("Explain inflation and CPI in Georgia", "get_generation_mix")
     assert relevant is False
     assert "mismatch" in reason.lower()
 
@@ -1818,6 +1818,9 @@ def test_technical_conceptual_definition_can_fallback_to_router_tool_after_autho
     from agent.tools.types import ToolInvocation
 
     payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
+    payload["raw_query"] = "What can you say about import dependency and energy security of Georgia?"
+    payload["canonical_query_en"] = payload["raw_query"]
+    payload["sql_hints"]["metric"] = "energy_security"
     expected = QuestionAnalysis.model_validate(payload)
 
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)

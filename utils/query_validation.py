@@ -12,6 +12,7 @@ import re
 from typing import Tuple, Set, Optional
 
 from config import TOOL_RELEVANCE_OVERLAP_THRESHOLD
+from contracts.question_analysis import QuestionAnalysis
 
 log = logging.getLogger("Enai")
 
@@ -22,6 +23,114 @@ _ANALYTICAL_KEYWORDS = re.compile(
     r"comparison|compare|correlat|ტენდენც|ტრენდ|тренд|динамик)\b",
     re.IGNORECASE,
 )
+
+_METRIC_CAPABILITY_ALIASES = {
+    "balancing": {"balancing", "price", "forecast", "trend"},
+    "p_bal_gel": {"balancing", "price"},
+    "p_bal_usd": {"balancing", "price"},
+    "exchange_rate": {"exchange_rate", "price"},
+    "xrate": {"exchange_rate", "price"},
+    "demand": {"demand", "consumption", "quantity", "total_demand"},
+    "consumption": {"demand", "consumption", "quantity", "total_demand"},
+    "total_demand": {"demand", "consumption", "quantity", "total_demand"},
+    "generation": {"generation", "quantity", "total_domestic_generation", "local_generation"},
+    "local_generation": {"generation", "quantity", "local_generation", "total_domestic_generation"},
+    "total_domestic_generation": {"generation", "quantity", "total_domestic_generation"},
+    "import_dependency": {
+        "import",
+        "import_dependency",
+        "energy_security",
+        "self-sufficiency",
+        "import_dependency_ratio",
+        "import_dependent_supply",
+    },
+    "import dependence": {
+        "import",
+        "import_dependency",
+        "energy_security",
+        "self-sufficiency",
+        "import_dependency_ratio",
+        "import_dependent_supply",
+    },
+    "import_dependency_ratio": {
+        "import",
+        "import_dependency",
+        "energy_security",
+        "self-sufficiency",
+        "import_dependency_ratio",
+    },
+    "energy_security": {
+        "import",
+        "energy_security",
+        "import_dependency",
+        "self-sufficiency",
+        "local_generation",
+    },
+    "energy security": {
+        "import",
+        "energy_security",
+        "import_dependency",
+        "self-sufficiency",
+        "local_generation",
+    },
+    "self-sufficiency": {
+        "energy_security",
+        "import_dependency",
+        "self-sufficiency",
+        "local_generation",
+    },
+}
+
+
+def _expand_metric_capabilities(metric_name: str) -> Set[str]:
+    metric = str(metric_name or "").strip().lower()
+    if not metric:
+        return set()
+    normalized = metric.replace("_", " ")
+    capabilities = {metric, normalized}
+    for key, aliases in _METRIC_CAPABILITY_ALIASES.items():
+        if metric == key or normalized == key:
+            capabilities.update(aliases)
+    return capabilities
+
+
+def _semantic_capabilities_from_query(query: str) -> Set[str]:
+    query_lower = str(query or "").lower()
+    capabilities = set(extract_query_topics(query))
+    phrase_map = {
+        "import_dependency": ("import dependency", "import dependence"),
+        "energy_security": ("energy security", "self-sufficiency", "self sufficiency"),
+        "local_generation": ("local generation", "domestic generation"),
+        "total_demand": ("electricity consumption", "consumption", "demand"),
+        "trend": ("trend", "evolution", "trajectory", "evolve"),
+        "correlation": ("correlation", "relationship", "association"),
+    }
+    for capability, phrases in phrase_map.items():
+        if any(phrase in query_lower for phrase in phrases):
+            capabilities.add(capability)
+    return capabilities
+
+
+def _semantic_capabilities_from_analysis(question_analysis: Optional[QuestionAnalysis]) -> Set[str]:
+    if question_analysis is None:
+        return set()
+
+    capabilities: Set[str] = set()
+    if question_analysis.sql_hints.metric:
+        capabilities.update(_expand_metric_capabilities(question_analysis.sql_hints.metric))
+    for derived in question_analysis.analysis_requirements.derived_metrics or []:
+        capabilities.update(_expand_metric_capabilities(getattr(derived, "metric", "")))
+        capabilities.update(_expand_metric_capabilities(getattr(derived, "target_metric", "")))
+        metric_name = getattr(getattr(derived, "metric_name", None), "value", str(getattr(derived, "metric_name", "") or ""))
+        if metric_name:
+            capabilities.add(metric_name.strip().lower())
+    for tool in question_analysis.tooling.candidate_tools or []:
+        reason = str(getattr(tool, "reason", "") or "").lower()
+        if "correlation" in reason:
+            capabilities.add("correlation")
+        if "trend" in reason:
+            capabilities.add("trend")
+    return capabilities
 
 
 def is_conceptual_question(query: str) -> bool:
@@ -151,6 +260,11 @@ def extract_query_topics(query: str) -> Set[str]:
         'exchange_rate': ['exchange rate', 'xrate', 'კურსი', 'курс'],
         'cpi': ['cpi', 'inflation', 'ინფლაცია', 'инфляция'],
     }
+
+    topic_map["import_dependency"] = ["import dependency", "import dependence"]
+    topic_map["energy_security"] = ["energy security", "self-sufficiency", "self sufficiency"]
+    topic_map["trend"] = ["trend", "trends", "evolution", "trajectory", "evolve"]
+    topic_map["correlation"] = ["correlation", "relationship", "association"]
 
     # Check each topic
     for topic_key, keywords in topic_map.items():
@@ -363,9 +477,16 @@ def should_skip_sql_execution(
     return False, "Data query - SQL needed"
 
 
-def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = TOOL_RELEVANCE_OVERLAP_THRESHOLD) -> Tuple[bool, str]:
-    """Validate if selected typed tool is relevant to the query topics."""
-    query_topics = extract_query_topics(query)
+def validate_tool_relevance(
+    query: str,
+    tool_name: str,
+    min_overlap: float = TOOL_RELEVANCE_OVERLAP_THRESHOLD,
+    question_analysis: Optional[QuestionAnalysis] = None,
+) -> Tuple[bool, str]:
+    """Validate if selected typed tool is relevant to the resolved query capabilities."""
+    query_topics = _semantic_capabilities_from_query(query)
+    if question_analysis is not None:
+        query_topics.update(_semantic_capabilities_from_analysis(question_analysis))
     if not query_topics:
         return True, "No specific query topics detected"
 
@@ -374,9 +495,26 @@ def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = TOO
         return False, "Tool relevance mismatch: price-centric query without share/composition target"
 
     tool_topics = {
-        "get_prices": {"price", "balancing", "exchange_rate"},
+        "get_prices": {"price", "balancing", "exchange_rate", "forecast", "trend", "correlation"},
         "get_tariffs": {"tariff", "price"},
-        "get_generation_mix": {"generation", "demand", "quantity", "share"},
+        "get_generation_mix": {
+            "generation",
+            "demand",
+            "consumption",
+            "quantity",
+            "share",
+            "import",
+            "import_dependency",
+            "energy_security",
+            "self-sufficiency",
+            "local_generation",
+            "total_demand",
+            "total_domestic_generation",
+            "import_dependency_ratio",
+            "import_dependent_supply",
+            "trend",
+            "correlation",
+        },
         "get_balancing_composition": {"share", "composition", "balancing", "cfd", "ppa", "hydro", "thermal", "import", "deregulated"},
     }.get(normalized_tool, set())
 
@@ -384,6 +522,11 @@ def validate_tool_relevance(query: str, tool_name: str, min_overlap: float = TOO
         return False, f"Unknown tool relevance mapping: {tool_name}"
 
     common = query_topics & tool_topics
+    if question_analysis is not None:
+        if common:
+            return True, f"Tool relevance validated via resolved capabilities: topics={sorted(common)}"
+        return False, f"Tool relevance mismatch: query={sorted(query_topics)} tool={sorted(tool_topics)}"
+
     overlap = len(common) / len(query_topics)
     if overlap >= min_overlap:
         return True, f"Tool relevance validated: topics={sorted(common)}"

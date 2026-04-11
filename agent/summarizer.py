@@ -1532,13 +1532,6 @@ def _is_forecast_direct_answer_eligible(ctx: QueryContext) -> bool:
     if "trendline forecasts" not in (ctx.stats_hint or "").lower():
         return False
 
-    # Long-term forecasts need LLM narrative for proper risk/uncertainty framing.
-    # Deterministic trendline rendering is only suitable for short/medium-term
-    # horizons where a single extrapolation sentence suffices.
-    horizon_years = _extract_forecast_horizon(ctx.query or "")
-    if horizon_years >= 5:
-        return False
-
     # Phase 4: answer_kind = FORECAST is the authoritative signal.
     if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind == AnswerKind.FORECAST:
         return True
@@ -1729,16 +1722,48 @@ def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
 
     # Prefer the seasonal breakdown when Stage 3 produced separate summer/winter forecasts.
     season_entries = [entry for entry in entries if entry.get("season")]
+    overall_entries = [entry for entry in entries if not entry.get("season")]
+    gel_entry = next((entry for entry in overall_entries if str(entry.get("metric", "")).endswith("_gel")), None)
+    usd_entry = next((entry for entry in overall_entries if str(entry.get("metric", "")).endswith("_usd")), None)
     if season_entries:
         lines = [f"**{metric_label} Forecast**", "", f"Based on linear regression to {target_label}:"]
-        for entry in season_entries:
+        if gel_entry is not None:
+            lines.append(
+                f"- Overall (GEL): {float(gel_entry['forecast_value']):.2f} "
+                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))} "
+                f"(R^2={float(gel_entry.get('r_squared') or 0.0):.3f})"
+            )
+        if usd_entry is not None:
+            lines.append(
+                f"- Overall (USD): {float(usd_entry['forecast_value']):.2f} "
+                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))} "
+                f"(R^2={float(usd_entry.get('r_squared') or 0.0):.3f})"
+            )
+        gel_entry = None
+        usd_entry = None
+        if gel_entry is not None:
+            lines.append(
+                f"- Overall (GEL): {float(gel_entry['forecast_value']):.2f} "
+                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))} "
+                f"(RÂ²={float(gel_entry.get('r_squared') or 0.0):.3f})"
+            )
+        if usd_entry is not None:
+            lines.append(
+                f"- Overall (USD): {float(usd_entry['forecast_value']):.2f} "
+                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))} "
+                f"(RÂ²={float(usd_entry.get('r_squared') or 0.0):.3f})"
+            )
+        for entry in sorted(season_entries, key=lambda item: ({"summer": 0, "winter": 1}.get(str(item.get("season", "")).strip().lower(), 99), 0 if str(item.get("metric", "")).strip().lower().endswith("_gel") else 1 if str(item.get("metric", "")).strip().lower().endswith("_usd") else 2)):
             season = str(entry.get("season", "")).title()
+            metric = str(entry.get("metric", "")).strip().lower()
+            currency_label = "GEL" if metric.endswith("_gel") else "USD" if metric.endswith("_usd") else metric.upper()
+            season = f"{season} ({currency_label})"
             unit = _price_unit_for_metric(str(entry.get("metric", "")))
             lines.append(
                 f"- {season}: {float(entry['forecast_value']):.2f} {unit} (R²={float(entry.get('r_squared') or 0.0):.3f})"
             )
         lines.append("")
-        lines.append(_forecast_caveat_for_r_squared(primary_entry.get("r_squared")))
+        lines.append(_forecast_caveat_for_r_squared((gel_entry or primary_entry).get("r_squared")))
         if regime_warning:
             lines.append(regime_warning)
         return "\n".join(lines)

@@ -211,6 +211,14 @@ def adapt_generation_mix(
     """Convert get_generation_mix DataFrame into ObservationFrame."""
     rows: list[dict] = []
     prov = provenance_refs or []
+    canonical_metric_units = {
+        "total_demand": "MWh",
+        "total_domestic_generation": "MWh",
+        "local_generation": "MWh",
+        "import_dependent_supply": "MWh",
+        "total_supply": "MWh",
+        "import_dependency_ratio": "%",
+    }
 
     if "type_tech" not in df.columns:
         period_col = next((col for col in ("period", "date", "year", "month") if col in df.columns), None)
@@ -225,7 +233,16 @@ def adapt_generation_mix(
                 val = raw_row.get(col)
                 if pd.isna(val):
                     continue
-                if col.startswith("quantity_"):
+                if col in canonical_metric_units:
+                    rows.append({
+                        "period": period,
+                        "entity_id": "system",
+                        "entity_label": "System",
+                        "metric": col,
+                        "value": float(val),
+                        "unit": canonical_metric_units[col],
+                    })
+                elif col.startswith("quantity_"):
                     entity_id = col[len("quantity_"):]
                     rows.append({
                         "period": period,

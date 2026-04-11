@@ -1930,12 +1930,19 @@ def enrich(ctx: QueryContext) -> QueryContext:
     # --- Correlation analysis ---
     needs_correlation_analysis = False
     if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
-        # Phase 4: answer_kind = EXPLANATION triggers correlation analysis.
-        if ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION:
-            log.info("Semantic intent → correlation (answer_kind=EXPLANATION).")
+        qa_reqs = ctx.question_analysis.analysis_requirements
+        requested_metric_names = {
+            getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
+            for metric in (qa_reqs.derived_metrics or [])
+        }
+        if "correlation_to_target" in requested_metric_names:
+            log.info("Semantic intent → correlation (derived_metrics include correlation_to_target).")
             needs_correlation_analysis = True
-        elif ctx.question_analysis.analysis_requirements.needs_correlation_context:
+        elif qa_reqs.needs_correlation_context:
             log.info("Semantic intent → correlation (needs_correlation_context=True).")
+            needs_correlation_analysis = True
+        elif qa_reqs.needs_driver_analysis:
+            log.info("Semantic intent → correlation (needs_driver_analysis=True).")
             needs_correlation_analysis = True
     elif ctx.has_authoritative_question_analysis:
         # Use structured analyzer signals for correlation detection

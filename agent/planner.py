@@ -124,6 +124,533 @@ _BALANCING_PRICE_BALANCING_TOKENS = (
     "баланс",
 )
 
+_TECHNICAL_QUANTITY_CONCEPT_TOKENS = (
+    "generation mix",
+    "generation",
+    "demand",
+    "consumption",
+    "import dependency",
+    "import dependence",
+    "energy security",
+    "self-sufficiency",
+)
+
+_TECHNICAL_EXPLORATION_TOKENS = (
+    "what can you say",
+    "tell me about",
+    "describe",
+    "overview",
+    "characteristic",
+    "characteristics",
+    "explain",
+)
+
+_GEOGRAPHY_SCOPE_TOKENS = (
+    "georgia",
+    "georgian",
+    "in georgia",
+    "of georgia",
+    "georgia's",
+)
+
+_REGULATORY_CONCEPT_TOKENS = (
+    "regulation",
+    "law",
+    "procedure",
+    "eligibility",
+    "license",
+    "licence",
+    "registration",
+    "rule",
+)
+
+_TREND_QUERY_TOKENS = (
+    "trend",
+    "trends",
+    "historical trend",
+    "evolution",
+    "evolve",
+    "trajectory",
+    "change over time",
+)
+
+_CORRELATION_QUERY_TOKENS = (
+    "correlation",
+    "relationship",
+    "association",
+    "correlat",
+)
+
+_PRICE_CONTEXT_TOKENS = (
+    "price",
+    "prices",
+    "tariff",
+    "tariffs",
+    "gel/mwh",
+    "usd/mwh",
+)
+
+
+def _query_mentions_any(query_lower: str, tokens: tuple[str, ...]) -> bool:
+    return any(token in query_lower for token in tokens)
+
+
+def _primary_query_surface(raw_query: str) -> str:
+    query_text = str(raw_query or "").strip()
+    if not query_text:
+        return ""
+    marker = "\nSelected interpretation:"
+    if marker in query_text:
+        return query_text.split(marker, 1)[0].strip()
+    return query_text
+
+
+def _resolved_quantity_metric_from_query(raw_query: str) -> str | None:
+    query_lower = _primary_query_surface(raw_query).lower()
+    if "energy security" in query_lower:
+        return "energy_security"
+    if "self-sufficiency" in query_lower:
+        return "self-sufficiency"
+    if "import dependency" in query_lower or "import dependence" in query_lower:
+        return "import_dependency"
+    if "local generation" in query_lower or "domestic generation" in query_lower:
+        return "local_generation"
+    if "generation mix" in query_lower:
+        return "generation"
+    if "consumption" in query_lower:
+        return "consumption"
+    if "demand" in query_lower:
+        return "demand"
+    if "generation" in query_lower:
+        return "generation"
+    return None
+
+
+def _set_answer_contract(
+    payload: dict[str, object],
+    *,
+    answer_kind: str,
+    render_style: str,
+    grouping: str = "none",
+    entity_scope: str | None = None,
+) -> None:
+    payload["answer_kind"] = answer_kind
+    payload["render_style"] = render_style
+    payload["grouping"] = grouping
+    payload["entity_scope"] = entity_scope
+
+
+def _merge_derived_metric_dicts(
+    existing_metrics: list[dict[str, object]] | None,
+    forced_metrics: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged_metrics: list[dict[str, object]] = []
+    seen_metric_keys: set[tuple[str, str | None, str | None]] = set()
+    for item in list(existing_metrics or []) + list(forced_metrics):
+        if not isinstance(item, dict):
+            continue
+        metric_name = str(item.get("metric_name") or "").strip()
+        metric = str(item.get("metric") or "").strip() or None
+        target_metric = str(item.get("target_metric") or "").strip() or None
+        if not metric_name:
+            continue
+        key = (metric_name, metric, target_metric)
+        if key in seen_metric_keys:
+            continue
+        seen_metric_keys.add(key)
+        merged_metrics.append(item)
+    return merged_metrics
+
+
+def _is_technical_indicator_bundle_query(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> bool:
+    query_lower = _primary_query_surface(raw_query).lower()
+    if not query_lower:
+        return False
+    if qa.classification.query_type != QueryType.CONCEPTUAL_DEFINITION:
+        return False
+    if qa.routing.preferred_path not in (PreferredPath.KNOWLEDGE, PreferredPath.CLARIFY):
+        return False
+    if _query_mentions_any(query_lower, _REGULATORY_CONCEPT_TOKENS):
+        return False
+    if _query_mentions_any(query_lower, _TREND_QUERY_TOKENS):
+        return False
+    if _query_mentions_any(query_lower, _CORRELATION_QUERY_TOKENS):
+        return False
+    if not _query_mentions_any(query_lower, _TECHNICAL_QUANTITY_CONCEPT_TOKENS):
+        return False
+
+    concept_hits = sum(token in query_lower for token in _TECHNICAL_QUANTITY_CONCEPT_TOKENS)
+    has_scope = _query_mentions_any(query_lower, _GEOGRAPHY_SCOPE_TOKENS)
+    has_exploration = _query_mentions_any(query_lower, _TECHNICAL_EXPLORATION_TOKENS)
+    return concept_hits >= 2 or (has_scope and has_exploration)
+
+
+def _apply_technical_indicator_bundle_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> tuple[QuestionAnalysis, bool]:
+    """Promote broad technical concept queries to generation-mix evidence."""
+    if not _is_technical_indicator_bundle_query(qa, raw_query):
+        return qa, False
+
+    primary_query = _primary_query_surface(raw_query)
+    resolved_metric = _resolved_quantity_metric_from_query(primary_query) or "generation"
+    payload = qa.model_dump(mode="json")
+    payload["canonical_query_en"] = primary_query or payload.get("canonical_query_en") or raw_query
+    payload["classification"]["query_type"] = QueryType.DATA_EXPLANATION.value
+    payload["classification"]["analysis_mode"] = "analyst"
+    payload["classification"]["needs_clarification"] = False
+    payload["classification"]["ambiguities"] = []
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.92,
+    )
+
+    payload["routing"].update({
+        "preferred_path": PreferredPath.TOOL.value,
+        "needs_sql": False,
+        "needs_knowledge": True,
+        "prefer_tool": True,
+        "needs_multi_tool": False,
+        "evidence_roles": ["primary_data"],
+    })
+    _set_answer_contract(
+        payload,
+        answer_kind="explanation",
+        render_style="narrative",
+        grouping="none",
+        entity_scope="system",
+    )
+
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": ToolName.GET_GENERATION_MIX.value,
+            "score": 1.0,
+            "reason": "system quantity evidence needed for technical concept assessment",
+            "params_hint": {
+                "metric": resolved_metric,
+                "granularity": "yearly",
+                "start_date": None,
+                "end_date": None,
+                "entities": [],
+                "types": [],
+                "mode": "quantity",
+            },
+        }
+    ]
+
+    payload.setdefault("sql_hints", {})
+    payload["sql_hints"]["metric"] = resolved_metric
+
+    topic_rows = [
+        topic
+        for topic in payload.get("knowledge", {}).get("candidate_topics", [])
+        if isinstance(topic, dict) and topic.get("name")
+    ]
+    topic_names = {topic.get("name") for topic in topic_rows}
+    for name, score in (
+        ("generation_mix", 1.0),
+        ("seasonal_patterns", 0.55),
+        ("general_definitions", 0.45),
+    ):
+        if name not in topic_names:
+            topic_rows.append({"name": name, "score": score})
+    topic_rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    payload["knowledge"]["candidate_topics"] = topic_rows[:5]
+
+    return QuestionAnalysis.model_validate(payload), True
+
+
+def _is_quantity_trend_query(raw_query: str) -> bool:
+    query_lower = _primary_query_surface(raw_query).lower()
+    if not query_lower:
+        return False
+    if not _query_mentions_any(query_lower, _TREND_QUERY_TOKENS):
+        return False
+    if not _query_mentions_any(query_lower, _TECHNICAL_QUANTITY_CONCEPT_TOKENS):
+        return False
+    if _query_mentions_any(query_lower, _PRICE_CONTEXT_TOKENS):
+        return False
+    if _query_mentions_any(query_lower, _CORRELATION_QUERY_TOKENS):
+        return False
+    if "forecast" in query_lower or "predict" in query_lower:
+        return False
+    return True
+
+
+def _apply_quantity_trend_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> tuple[QuestionAnalysis, bool]:
+    """Coerce explicit quantity-trend questions to canonical system quantities."""
+    if not _is_quantity_trend_query(raw_query):
+        return qa, False
+
+    primary_query = _primary_query_surface(raw_query)
+    resolved_metric = _resolved_quantity_metric_from_query(primary_query)
+    if resolved_metric is None:
+        return qa, False
+
+    existing_tool_names = {
+        getattr(tool.name, "value", str(tool.name or ""))
+        for tool in (qa.tooling.candidate_tools or [])
+    }
+    payload_metrics = qa.model_dump(mode="json")["analysis_requirements"].get("derived_metrics", []) or []
+    has_trend_metric = any(
+        isinstance(item, dict)
+        and str(item.get("metric_name") or "").strip() == "trend_slope"
+        and str(item.get("metric") or "").strip().lower() in {resolved_metric, "demand", "consumption"}
+        for item in payload_metrics
+    )
+    already_supported = (
+        qa.routing.preferred_path == PreferredPath.TOOL
+        and ToolName.GET_GENERATION_MIX.value in existing_tool_names
+        and has_trend_metric
+    )
+    if already_supported:
+        return qa, False
+
+    payload = qa.model_dump(mode="json")
+    payload["canonical_query_en"] = primary_query or payload.get("canonical_query_en") or raw_query
+    payload["classification"]["query_type"] = QueryType.DATA_EXPLANATION.value
+    payload["classification"]["analysis_mode"] = "analyst"
+    payload["classification"]["needs_clarification"] = False
+    payload["classification"]["ambiguities"] = []
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.93,
+    )
+
+    payload["routing"].update({
+        "preferred_path": PreferredPath.TOOL.value,
+        "needs_sql": False,
+        "needs_knowledge": False,
+        "prefer_tool": True,
+        "needs_multi_tool": False,
+        "evidence_roles": ["primary_data"],
+    })
+    _set_answer_contract(
+        payload,
+        answer_kind="explanation",
+        render_style="narrative",
+        grouping="none",
+        entity_scope="system",
+    )
+
+    payload["tooling"]["candidate_tools"] = [
+        {
+            "name": ToolName.GET_GENERATION_MIX.value,
+            "score": 1.0,
+            "reason": "system quantity time series needed for trend assessment",
+            "params_hint": {
+                "metric": resolved_metric,
+                "granularity": "monthly",
+                "start_date": None,
+                "end_date": None,
+                "entities": [],
+                "types": [],
+                "mode": "quantity",
+            },
+        }
+    ]
+    payload.setdefault("sql_hints", {})
+    payload["sql_hints"]["metric"] = resolved_metric
+
+    payload["analysis_requirements"]["needs_driver_analysis"] = False
+    payload["analysis_requirements"]["needs_trend_context"] = True
+    payload["analysis_requirements"]["needs_correlation_context"] = False
+    payload["analysis_requirements"]["derived_metrics"] = _merge_derived_metric_dicts(
+        payload["analysis_requirements"].get("derived_metrics", []) or [],
+        [{"metric_name": "trend_slope", "metric": resolved_metric}],
+    )
+
+    topic_rows = [
+        topic
+        for topic in payload.get("knowledge", {}).get("candidate_topics", [])
+        if isinstance(topic, dict) and topic.get("name")
+    ]
+    topic_names = {topic.get("name") for topic in topic_rows}
+    for name, score in (
+        ("generation_mix", 1.0),
+        ("seasonal_patterns", 0.7),
+    ):
+        if name not in topic_names:
+            topic_rows.append({"name": name, "score": score})
+    topic_rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    payload["knowledge"]["candidate_topics"] = topic_rows[:5]
+
+    return QuestionAnalysis.model_validate(payload), True
+
+
+def _supported_pairwise_metrics(raw_query: str) -> list[str]:
+    query_lower = _primary_query_surface(raw_query).lower()
+    metrics: list[str] = []
+    if any(term in query_lower for term in ("balancing price", "balancing electricity price", "balancing electricity", "p_bal")):
+        metrics.append("balancing")
+    if "consumption" in query_lower:
+        metrics.append("consumption")
+    elif "demand" in query_lower:
+        metrics.append("demand")
+    if "local generation" in query_lower or "domestic generation" in query_lower:
+        metrics.append("local_generation")
+    elif "generation" in query_lower:
+        metrics.append("generation")
+    if "energy security" in query_lower:
+        metrics.append("energy_security")
+    elif "self-sufficiency" in query_lower:
+        metrics.append("self-sufficiency")
+    elif "import dependency" in query_lower or "import dependence" in query_lower:
+        metrics.append("import_dependency")
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for metric in metrics:
+        if metric in seen:
+            continue
+        deduped.append(metric)
+        seen.add(metric)
+    return deduped
+
+
+def _is_supported_pairwise_correlation_query(raw_query: str) -> bool:
+    query_lower = _primary_query_surface(raw_query).lower()
+    if not _query_mentions_any(query_lower, _CORRELATION_QUERY_TOKENS):
+        return False
+    return len(_supported_pairwise_metrics(raw_query)) >= 2
+
+
+def _apply_pairwise_correlation_guardrail(
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> tuple[QuestionAnalysis, bool]:
+    """Coerce supported pairwise technical correlations to a deterministic multi-tool contract."""
+    if not _is_supported_pairwise_correlation_query(raw_query):
+        return qa, False
+
+    primary_query = _primary_query_surface(raw_query)
+    pair = _supported_pairwise_metrics(primary_query)
+    if len(pair) < 2:
+        return qa, False
+
+    primary_metric = next((metric for metric in pair if metric != "balancing"), pair[0])
+    target_metric = "balancing" if "balancing" in pair else pair[1]
+
+    payload = qa.model_dump(mode="json")
+    payload["canonical_query_en"] = primary_query or payload.get("canonical_query_en") or raw_query
+    existing_metrics = payload["analysis_requirements"].get("derived_metrics", []) or []
+    has_supported_corr = any(
+        isinstance(item, dict)
+        and str(item.get("metric_name") or "").strip() == "correlation_to_target"
+        and str(item.get("metric") or "").strip().lower() == primary_metric
+        and str(item.get("target_metric") or "").strip().lower() == target_metric
+        for item in existing_metrics
+    )
+    existing_tool_names = {
+        getattr(tool.name, "value", str(tool.name or ""))
+        for tool in (qa.tooling.candidate_tools or [])
+    }
+    already_supported = (
+        qa.routing.preferred_path == PreferredPath.TOOL
+        and has_supported_corr
+        and (
+            {ToolName.GET_PRICES.value, ToolName.GET_GENERATION_MIX.value}.issubset(existing_tool_names)
+            or (target_metric != "balancing" and ToolName.GET_GENERATION_MIX.value in existing_tool_names)
+        )
+    )
+    if already_supported:
+        return qa, False
+
+    needs_prices = "balancing" in pair
+    payload["classification"]["query_type"] = QueryType.DATA_EXPLANATION.value
+    payload["classification"]["analysis_mode"] = "analyst"
+    payload["classification"]["needs_clarification"] = False
+    payload["classification"]["ambiguities"] = []
+    payload["classification"]["confidence"] = max(
+        float(payload["classification"].get("confidence", 0.0)),
+        0.94,
+    )
+
+    payload["routing"].update({
+        "preferred_path": PreferredPath.TOOL.value,
+        "needs_sql": False,
+        "needs_knowledge": False,
+        "prefer_tool": True,
+        "needs_multi_tool": needs_prices,
+        "evidence_roles": ["primary_data", "correlation_driver"] if needs_prices else ["primary_data"],
+    })
+    _set_answer_contract(
+        payload,
+        answer_kind="explanation",
+        render_style="narrative",
+        grouping="none",
+        entity_scope="system",
+    )
+
+    candidate_tools = []
+    if needs_prices:
+        candidate_tools.append(
+            {
+                "name": ToolName.GET_PRICES.value,
+                "score": 1.0,
+                "reason": "price series required as the reference side of the requested correlation",
+                "params_hint": {
+                    "metric": "balancing",
+                    "currency": "both",
+                    "granularity": "monthly",
+                    "start_date": None,
+                    "end_date": None,
+                    "entities": [],
+                    "types": [],
+                },
+            }
+        )
+    candidate_tools.append(
+        {
+            "name": ToolName.GET_GENERATION_MIX.value,
+            "score": 0.97 if needs_prices else 1.0,
+            "reason": "system quantity series required as the comparison side of the requested correlation",
+            "params_hint": {
+                "metric": primary_metric,
+                "granularity": "monthly",
+                "start_date": None,
+                "end_date": None,
+                "entities": [],
+                "types": [],
+                "mode": "quantity",
+            },
+        }
+    )
+    payload["tooling"]["candidate_tools"] = candidate_tools
+
+    payload.setdefault("sql_hints", {})
+    payload["sql_hints"]["metric"] = primary_metric
+    payload["analysis_requirements"]["needs_driver_analysis"] = False
+    payload["analysis_requirements"]["needs_trend_context"] = False
+    payload["analysis_requirements"]["needs_correlation_context"] = True
+    payload["analysis_requirements"]["derived_metrics"] = _merge_derived_metric_dicts(
+        existing_metrics,
+        [{"metric_name": "correlation_to_target", "metric": primary_metric, "target_metric": target_metric}],
+    )
+
+    topic_rows = [
+        topic
+        for topic in payload.get("knowledge", {}).get("candidate_topics", [])
+        if isinstance(topic, dict) and topic.get("name")
+    ]
+    topic_names = {topic.get("name") for topic in topic_rows}
+    for name, score in (
+        ("balancing_price", 1.0 if needs_prices else 0.0),
+        ("generation_mix", 0.9),
+    ):
+        if score > 0 and name not in topic_names:
+            topic_rows.append({"name": name, "score": score})
+    topic_rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    payload["knowledge"]["candidate_topics"] = topic_rows[:5]
+
+    return QuestionAnalysis.model_validate(payload), True
+
 _BALANCING_PRICE_PRICE_TOKENS = (
     "price",
     "prices",
@@ -1044,7 +1571,7 @@ def _query_has_explicit_month_list(raw_query: str) -> bool:
 
 def _query_requests_correlation(qa: QuestionAnalysis, raw_query: str) -> bool:
     """Return True when the request is about correlation/relationship, not totals."""
-    query_lower = str(raw_query or "").lower()
+    query_lower = _primary_query_surface(raw_query).lower()
     if any(
         token in query_lower
         for token in (
@@ -1058,6 +1585,17 @@ def _query_requests_correlation(qa: QuestionAnalysis, raw_query: str) -> bool:
         return True
     return any(
         getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip() == "correlation_to_target"
+        for metric in (qa.analysis_requirements.derived_metrics or [])
+    )
+
+
+def _query_requests_trend(qa: QuestionAnalysis, raw_query: str) -> bool:
+    """Return True when the request explicitly asks for a trend/trendline."""
+    query_lower = _primary_query_surface(raw_query).lower()
+    if _query_mentions_any(query_lower, _TREND_QUERY_TOKENS):
+        return True
+    return any(
+        getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip() == "trend_slope"
         for metric in (qa.analysis_requirements.derived_metrics or [])
     )
 
@@ -1255,6 +1793,9 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
         forecast_guardrail_applied = False
         clarify_guardrail_applied = False
         history_resolution_applied = False
+        technical_bundle_applied = False
+        quantity_trend_applied = False
+        pairwise_correlation_applied = False
         if ctx.question_analysis is not None:
             ctx.question_analysis, forecast_guardrail_applied = _apply_balancing_price_forecast_guardrail(
                 ctx.question_analysis,
@@ -1268,6 +1809,18 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
                 ctx.question_analysis,
                 ctx.query,
                 ctx.conversation_history,
+            )
+            ctx.question_analysis, technical_bundle_applied = _apply_technical_indicator_bundle_guardrail(
+                ctx.question_analysis,
+                ctx.query,
+            )
+            ctx.question_analysis, quantity_trend_applied = _apply_quantity_trend_guardrail(
+                ctx.question_analysis,
+                ctx.query,
+            )
+            ctx.question_analysis, pairwise_correlation_applied = _apply_pairwise_correlation_guardrail(
+                ctx.question_analysis,
+                ctx.query,
             )
         ctx.question_analysis_error = ""
         ctx.question_analysis_source = source
@@ -1291,6 +1844,21 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             ctx.clarify_reason = ""
             log.info(
                 "Applied history-resolved numeric computation guardrail: coerced analyzer output to data_retrieval/tool for query=%r",
+                ctx.query,
+            )
+        if technical_bundle_applied:
+            log.info(
+                "Applied technical indicator bundle guardrail: coerced analyzer output to data_explanation/tool for query=%r",
+                ctx.query,
+            )
+        if quantity_trend_applied:
+            log.info(
+                "Applied quantity trend guardrail: coerced analyzer output to data_explanation/tool for query=%r",
+                ctx.query,
+            )
+        if pairwise_correlation_applied:
+            log.info(
+                "Applied pairwise correlation guardrail: coerced analyzer output to data_explanation/tool for query=%r",
                 ctx.query,
             )
         log.info(
@@ -1687,6 +2255,7 @@ def resolve_tool_params(
             and _date_range_spans_full_year(params.get("start_date"), params.get("end_date"))
             and not _query_has_explicit_month_list(raw_query)
             and not _query_requests_correlation(qa, raw_query)
+            and not _query_requests_trend(qa, raw_query)
         ):
             params["granularity"] = "yearly"
             log.info("Promoted granularity to yearly for annual-total query")

@@ -46,6 +46,7 @@ from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core import llm as llm_core  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 from models import QueryContext  # noqa: E402
+from utils.query_validation import validate_tool_relevance  # noqa: E402
 
 
 class _DummyCache:
@@ -440,6 +441,249 @@ def test_build_correlation_matrix_from_frame_coerces_object_numeric_series():
     assert "p_bal_gel" in results
     assert "total_demand" in results
     assert "total_demand" in results["p_bal_gel"]
+
+
+def test_technical_indicator_guardrail_rewrites_energy_security_to_generation_mix():
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": "What can you say about import dependency and energy security of Georgia?",
+            "canonical_query_en": "Explain the concepts of import dependency and energy security in Georgia.",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "conceptual_definition",
+                "analysis_mode": "light",
+                "intent": "general_definitions",
+                "needs_clarification": False,
+                "confidence": 0.95,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "knowledge",
+                "needs_sql": False,
+                "needs_knowledge": True,
+                "prefer_tool": False,
+            },
+            "knowledge": {"candidate_topics": [{"name": "general_definitions", "score": 0.8}]},
+            "tooling": {"candidate_tools": []},
+            "sql_hints": {"metric": None, "entities": [], "aggregation": None, "dimensions": [], "period": None},
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.0,
+                "preferred_chart_family": None,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_trend_context": False,
+                "needs_correlation_context": False,
+                "derived_metrics": [],
+            },
+        }
+    )
+
+    guarded, changed = planner._apply_technical_indicator_bundle_guardrail(qa, qa.raw_query)
+
+    assert changed is True
+    assert guarded.canonical_query_en == "What can you say about import dependency and energy security of Georgia?"
+    assert guarded.classification.query_type.value == "data_explanation"
+    assert guarded.routing.preferred_path.value == "tool"
+    assert guarded.tooling.candidate_tools[0].name.value == "get_generation_mix"
+    assert guarded.tooling.candidate_tools[0].params_hint.metric == "energy_security"
+
+
+def test_quantity_trend_guardrail_prefers_primary_query_over_selected_interpretation():
+    raw_query = (
+        "what is a trend on electricity consumption?\n"
+        "Selected interpretation: Summarize the historical trend in observed electricity prices in Georgia."
+    )
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": raw_query,
+            "canonical_query_en": "Summarize the historical trend in observed electricity prices in Georgia.",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "data_explanation",
+                "analysis_mode": "light",
+                "intent": "trend",
+                "needs_clarification": False,
+                "confidence": 1.0,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "tool",
+                "needs_sql": False,
+                "needs_knowledge": False,
+                "prefer_tool": True,
+            },
+            "knowledge": {"candidate_topics": []},
+            "tooling": {
+                "candidate_tools": [
+                    {
+                        "name": "get_prices",
+                        "score": 0.95,
+                        "reason": "price trend",
+                        "params_hint": {
+                            "metric": "balancing",
+                            "currency": "gel",
+                            "granularity": "yearly",
+                            "start_date": None,
+                            "end_date": None,
+                            "entities": [],
+                            "types": [],
+                            "mode": None,
+                        },
+                    }
+                ]
+            },
+            "sql_hints": {"metric": "p_bal_gel", "entities": [], "aggregation": "yearly", "dimensions": [], "period": None},
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.0,
+                "preferred_chart_family": None,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_trend_context": True,
+                "needs_correlation_context": False,
+                "derived_metrics": [{"metric_name": "trend_slope", "metric": "balancing"}],
+            },
+        }
+    )
+
+    guarded, changed = planner._apply_quantity_trend_guardrail(qa, raw_query)
+
+    assert changed is True
+    assert guarded.canonical_query_en == "what is a trend on electricity consumption?"
+    assert guarded.tooling.candidate_tools[0].name.value == "get_generation_mix"
+    assert guarded.tooling.candidate_tools[0].params_hint.metric == "consumption"
+    assert any(
+        metric.metric_name.value == "trend_slope" and metric.metric == "consumption"
+        for metric in guarded.analysis_requirements.derived_metrics
+    )
+
+
+def test_pairwise_correlation_guardrail_overrides_clarify_for_supported_metric_pair():
+    raw_query = "What is the correlation between balancing price and demand?"
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": raw_query,
+            "canonical_query_en": raw_query,
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "ambiguous",
+                "analysis_mode": "light",
+                "intent": "unknown",
+                "needs_clarification": True,
+                "confidence": 0.9,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "clarify",
+                "needs_sql": False,
+                "needs_knowledge": False,
+                "prefer_tool": False,
+            },
+            "knowledge": {"candidate_topics": [{"name": "balancing_price", "score": 0.8}]},
+            "tooling": {"candidate_tools": []},
+            "sql_hints": {"metric": None, "entities": [], "aggregation": None, "dimensions": [], "period": None},
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.0,
+                "preferred_chart_family": None,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_trend_context": False,
+                "needs_correlation_context": False,
+                "derived_metrics": [],
+            },
+        }
+    )
+
+    guarded, changed = planner._apply_pairwise_correlation_guardrail(qa, raw_query)
+
+    assert changed is True
+    assert guarded.classification.query_type.value == "data_explanation"
+    assert guarded.routing.preferred_path.value == "tool"
+    assert guarded.routing.needs_multi_tool is True
+    assert [tool.name.value for tool in guarded.tooling.candidate_tools] == ["get_prices", "get_generation_mix"]
+    assert any(
+        metric.metric_name.value == "correlation_to_target"
+        and metric.metric == "demand"
+        and metric.target_metric == "balancing"
+        for metric in guarded.analysis_requirements.derived_metrics
+    )
+
+
+def test_tool_relevance_uses_metric_capabilities_for_energy_security_generation_mix():
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": "What can you say about import dependency and energy security of Georgia?",
+            "canonical_query_en": "What can you say about import dependency and energy security of Georgia?",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "data_explanation",
+                "analysis_mode": "analyst",
+                "intent": "energy_security_overview",
+                "needs_clarification": False,
+                "confidence": 0.95,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "tool",
+                "needs_sql": False,
+                "needs_knowledge": True,
+                "prefer_tool": True,
+            },
+            "knowledge": {"candidate_topics": [{"name": "generation_mix", "score": 1.0}]},
+            "tooling": {
+                "candidate_tools": [
+                    {
+                        "name": "get_generation_mix",
+                        "score": 1.0,
+                        "reason": "system quantity evidence needed for technical concept assessment",
+                        "params_hint": {
+                            "metric": "energy_security",
+                            "granularity": "yearly",
+                            "start_date": None,
+                            "end_date": None,
+                            "entities": [],
+                            "types": [],
+                            "mode": "quantity",
+                        },
+                    }
+                ]
+            },
+            "sql_hints": {"metric": "energy_security", "entities": [], "aggregation": "yearly", "dimensions": [], "period": None},
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.0,
+                "preferred_chart_family": None,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_trend_context": False,
+                "needs_correlation_context": False,
+                "derived_metrics": [],
+            },
+        }
+    )
+
+    ok, reason = validate_tool_relevance(
+        qa.canonical_query_en,
+        "get_generation_mix",
+        question_analysis=qa,
+    )
+
+    assert ok is True
+    assert "resolved capabilities" in reason
 
 
 def test_answer_conceptual_uses_active_analyzer_topics_and_canonical_query(monkeypatch):

@@ -797,6 +797,7 @@ def _apply_tool_result(
     tool_relevant, tool_reason = validate_tool_relevance(
         (relevance_query or ctx.query),
         invocation.name,
+        question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
     )
     if not tool_relevant:
         metrics.log_relevance_block()
@@ -1287,7 +1288,11 @@ def process_query(
                     ctx.plan.setdefault("intent", "tool_query")
                     ctx.plan.setdefault("target", invocation.name)
                 _relevance_q = ctx.resolved_query or ctx.query
-                tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, invocation.name)
+                tool_relevant, tool_reason = validate_tool_relevance(
+                    _relevance_q,
+                    invocation.name,
+                    question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+                )
                 if not tool_relevant:
                     metrics.log_relevance_block()
                     ctx.used_tool = False
@@ -1441,7 +1446,11 @@ def process_query(
                         ctx.plan.setdefault("intent", "tool_query")
                         ctx.plan.setdefault("target", analyzer_invocation.name)
                     _relevance_q = ctx.resolved_query or ctx.query
-                    tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, analyzer_invocation.name)
+                    tool_relevant, tool_reason = validate_tool_relevance(
+                        _relevance_q,
+                        analyzer_invocation.name,
+                        question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+                    )
                     if not tool_relevant:
                         metrics.log_relevance_block()
                         ctx.used_tool = False
@@ -1589,7 +1598,11 @@ def process_query(
             return ctx
         if ctx.agent_outcome == "data_exit":
             _relevance_q = ctx.resolved_query or ctx.query
-            tool_relevant, tool_reason = validate_tool_relevance(_relevance_q, ctx.tool_name or "")
+            tool_relevant, tool_reason = validate_tool_relevance(
+                _relevance_q,
+                ctx.tool_name or "",
+                question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+            )
             if not tool_relevant:
                 metrics.log_relevance_block()
                 ctx.used_tool = False
