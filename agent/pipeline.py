@@ -47,7 +47,7 @@ from agent.frame_adapters import adapt_tool_result
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from analysis.system_quantities import normalize_tool_dataframe
-from contracts.question_analysis import AnswerKind, PreferredPath, RenderStyle
+from contracts.question_analysis import AnswerKind, PreferredPath, RenderStyle, _SCENARIO_METRIC_NAMES
 from contracts.vector_knowledge import VectorKnowledgeMode
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
@@ -74,11 +74,7 @@ _EXPLANATION_ROUTING_SIGNALS = (
     "почему",
     "объясни",
 )
-_SCENARIO_DERIVED_METRICS = {
-    "scenario_payoff",
-    "scenario_scale",
-    "scenario_offset",
-}
+_SCENARIO_DERIVED_METRICS = _SCENARIO_METRIC_NAMES
 
 # --- Response-mode derivation constants ---
 # Types where the answer mode is unambiguous regardless of preferred_path.
@@ -711,42 +707,23 @@ def _enrich_prices_with_balancing_driver_context(
 def _should_route_tool_as_explanation(ctx: QueryContext) -> bool:
     """Return True when tool routing should use explanation-style handling.
 
-    Phase 4: answer_kind is the primary signal when available.
-    Legacy keyword detection remains as fallback when answer_kind is not set.
+    When the analyzer is authoritative, answer_kind is the single signal.
+    Keyword detection is a legacy fallback that only fires when the analyzer
+    is absent (shadow-mode, disabled, or failed).
     """
-    # Phase 4: answer_kind is the authoritative signal.
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
-        return ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION
-
-    query_lower = (ctx.query or "").strip().lower()
-    explanation_signal_hit = any(signal in query_lower for signal in _EXPLANATION_ROUTING_SIGNALS)
-
     if ctx.has_authoritative_question_analysis:
-        qa_type = ctx.question_analysis.classification.query_type.value
-        if qa_type == "conceptual_definition":
-            return True
-        if qa_type != "data_explanation":
-            return False
+        qa = ctx.question_analysis
+        # answer_kind is the authoritative signal when present.
+        if qa.answer_kind is not None:
+            return qa.answer_kind == AnswerKind.EXPLANATION
+        # answer_kind is None but analyzer is authoritative — derive from
+        # query_type as a safe fallback within the contract.
+        qa_type = qa.classification.query_type.value
+        return qa_type in ("conceptual_definition", "data_explanation")
 
-        # Authoritative signal: analyzer explicitly requests driver analysis
-        if ctx.question_analysis.analysis_requirements.needs_driver_analysis:
-            return True
-
-        intent_text = str(ctx.question_analysis.classification.intent or "").strip().lower()
-        intent_signal_hit = any(
-            signal in intent_text
-            for signal in ("why", "explain", "reason", "cause", "driver", "factor")
-        )
-        derived_metrics = list(ctx.question_analysis.analysis_requirements.derived_metrics or [])
-        has_scenario_metric = any(
-            getattr(metric.metric_name, "value", str(metric.metric_name)) in _SCENARIO_DERIVED_METRICS
-            for metric in derived_metrics
-        )
-        if has_scenario_metric and not explanation_signal_hit and not intent_signal_hit:
-            return False
-        return True
-
-    return explanation_signal_hit
+    # Legacy keyword fallback: only when analyzer is absent.
+    query_lower = (ctx.query or "").strip().lower()
+    return any(signal in query_lower for signal in _EXPLANATION_ROUTING_SIGNALS)
 
 
 def _derive_resolved_query(ctx: QueryContext) -> tuple[str, str]:
@@ -1068,6 +1045,17 @@ def process_query(
         # Fallback: if LLM did not emit answer_kind, derive it from query_type.
         if qa.answer_kind is None:
             qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
+        # Override: scenario-family derived metrics signal SCENARIO regardless
+        # of query_type (the LLM sometimes emits data_explanation for scenario
+        # queries while correctly setting scenario derived metrics).
+        if qa.answer_kind not in (AnswerKind.SCENARIO, AnswerKind.FORECAST, None):
+            derived = qa.analysis_requirements.derived_metrics or []
+            if any(m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived):
+                log.info(
+                    "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
+                    qa.answer_kind.value if qa.answer_kind else None,
+                )
+                qa.answer_kind = AnswerKind.SCENARIO
         # Fallback: if LLM did not emit render_style, default to narrative (safer).
         if qa.render_style is None:
             qa.render_style = RenderStyle.NARRATIVE

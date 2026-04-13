@@ -15,10 +15,12 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from contracts.question_analysis import (
+    AnswerKind,
     EvidenceRole,
     QuestionAnalysis,
     QueryType,
     ToolName,
+    _SCENARIO_METRIC_NAMES,
 )
 from models import QueryContext
 from agent.planner import resolve_tool_params
@@ -214,6 +216,9 @@ def _expand_evidence_steps(
         _add_steps_from_comparison(
             steps, added_tools, qa, raw_query, candidates, primary_params,
         )
+
+    # Validate that planned steps can satisfy the expected answer shape.
+    _validate_plan_against_answer_kind(steps, qa, raw_query)
 
     return steps
 
@@ -418,6 +423,91 @@ def _add_steps_from_comparison(
             })
             added_tools.add(cand_name)
             break  # at most one secondary for comparison
+
+
+# ---------------------------------------------------------------------------
+# Plan validation against answer_kind
+# ---------------------------------------------------------------------------
+
+def _validate_plan_against_answer_kind(
+    steps: List[Dict[str, Any]],
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> None:
+    """Check that planned evidence steps can produce the expected answer shape.
+
+    Logs warnings for mismatches so they are visible in shadow-mode before any
+    plans are actually rejected.  Does NOT remove or reject steps — only
+    augments or warns.  This keeps the change safe for incremental rollout.
+
+    Rules checked:
+    - COMPARISON → at least two evidence sources, or single source with
+      multi-entity params (comparison can be intra-dataset).
+    - TIMESERIES → primary step has a date range (start_date + end_date).
+    - SCENARIO → analysis_requirements contains at least one scenario-family
+      derived metric.
+    - LIST → primary step's entities param is non-empty or tool naturally
+      returns entity-enumerated rows (get_balancing_composition,
+      get_generation_mix).
+    """
+    answer_kind = qa.answer_kind
+    if answer_kind is None or not steps:
+        return
+
+    primary = steps[0]
+    primary_params = primary.get("params") or {}
+    primary_tool = primary.get("tool_name", "")
+
+    if answer_kind == AnswerKind.COMPARISON:
+        has_multi_source = len(steps) >= 2
+        entities = primary_params.get("entities") or []
+        has_multi_entity = len(entities) >= 2
+        # Tools that inherently return multi-entity rows count as comparison-capable.
+        inherently_multi = primary_tool in {
+            ToolName.GET_BALANCING_COMPOSITION.value,
+            ToolName.GET_GENERATION_MIX.value,
+        }
+        if not has_multi_source and not has_multi_entity and not inherently_multi:
+            log.warning(
+                "Plan validation: answer_kind=COMPARISON but plan has single "
+                "source with single/no entity. query=%.80s",
+                raw_query,
+            )
+
+    elif answer_kind == AnswerKind.TIMESERIES:
+        has_date_range = bool(primary_params.get("start_date") and primary_params.get("end_date"))
+        if not has_date_range:
+            log.warning(
+                "Plan validation: answer_kind=TIMESERIES but primary step "
+                "lacks date range. query=%.80s",
+                raw_query,
+            )
+
+    elif answer_kind == AnswerKind.SCENARIO:
+        derived = qa.analysis_requirements.derived_metrics or []
+        has_scenario = any(m.metric_name in _SCENARIO_METRIC_NAMES for m in derived)
+        if not has_scenario:
+            log.warning(
+                "Plan validation: answer_kind=SCENARIO but no scenario-family "
+                "derived metric found. query=%.80s",
+                raw_query,
+            )
+
+    elif answer_kind == AnswerKind.LIST:
+        entities = primary_params.get("entities") or []
+        # These tools naturally produce entity-enumerated rows.
+        inherently_enumerated = primary_tool in {
+            ToolName.GET_BALANCING_COMPOSITION.value,
+            ToolName.GET_GENERATION_MIX.value,
+            ToolName.GET_TARIFFS.value,
+        }
+        if not entities and not inherently_enumerated:
+            log.warning(
+                "Plan validation: answer_kind=LIST but primary step has no "
+                "entities and tool is not inherently entity-enumerated. "
+                "query=%.80s",
+                raw_query,
+            )
 
 
 # ---------------------------------------------------------------------------

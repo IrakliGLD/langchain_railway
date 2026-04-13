@@ -5480,6 +5480,10 @@ def test_scenario_data_explanation_tool_route_not_treated_as_explanation():
 
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
     payload["classification"]["intent"] = "cfd_total_income"
+    # answer_kind=SCENARIO: in the real pipeline, the scenario-metric override
+    # at _cross_check_answer_kind would set this even if the LLM emitted
+    # query_type=data_explanation.
+    payload["answer_kind"] = "scenario"
     payload["analysis_requirements"]["derived_metrics"] = [
         {
             "metric_name": "scenario_payoff",
