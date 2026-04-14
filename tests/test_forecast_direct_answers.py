@@ -8,10 +8,56 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from agent import summarizer
-from models import QueryContext
+from models import QueryContext, QuestionAnalysis
 
 
-def test_summarize_data_uses_deterministic_trendline_forecast_answer(monkeypatch):
+def _make_forecast_qa(query: str = "test query") -> QuestionAnalysis:
+    """Build a minimal QuestionAnalysis with answer_kind=FORECAST for forecast tests."""
+    return QuestionAnalysis.model_validate({
+        "version": "question_analysis_v1",
+        "raw_query": query,
+        "canonical_query_en": query,
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "forecast",
+            "analysis_mode": "analyst",
+            "intent": "forecast_price",
+            "needs_clarification": False,
+            "confidence": 0.95,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "sql",
+            "needs_sql": True,
+            "needs_knowledge": False,
+            "prefer_tool": False,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": "monthly",
+            "dimensions": [],
+            "period": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": "line",
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+        "answer_kind": "forecast",
+    })
+
+
+def test_summarize_data_uses_generic_renderer_for_forecast(monkeypatch):
     def _unexpected_structured(*_args, **_kwargs):
         raise AssertionError("llm_summarize_structured should not be called for deterministic forecast answers")
 
@@ -39,22 +85,25 @@ xrate:
   - R² (goodness of fit): 0.221
 """.strip()
 
+    qa = _make_forecast_qa("forecast balancing electricity price for 2030")
     ctx = QueryContext(
         query="forecast balancing electricity price for 2030",
         preview="date,p_bal_gel,p_bal_usd,xrate\n2025-09-01,131.7,47.5,2.77",
         stats_hint=stats_hint,
         provenance_cols=["date", "p_bal_gel", "p_bal_usd", "xrate"],
         provenance_rows=[("2025-09-01", 131.7, 47.5, 2.77)],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
     )
 
     summarizer.summarize_data(ctx)
 
-    assert ctx.summary_source == "deterministic_trendline_forecast_direct"
+    assert ctx.summary_source == "generic_renderer"
     assert "145.25 GEL/MWh" in ctx.summary
     assert "52.40 USD/MWh" in ctx.summary
     assert "December 2030" in ctx.summary
-    assert "R²=0.412" in ctx.summary
-    assert "R²=0.398" in ctx.summary
+    assert "R\u00b2=0.412" in ctx.summary
+    assert "R\u00b2=0.398" in ctx.summary
     assert "2.77" not in ctx.summary
 
 
@@ -99,17 +148,20 @@ p_bal_usd (winter):
   - RÂ² (goodness of fit): 0.365
 """.strip()
 
+    qa = _make_forecast_qa("forecast balancing electricity price for 2035")
     ctx = QueryContext(
         query="forecast balancing electricity price for 2035",
         preview="date,p_bal_gel,p_bal_usd\n2025-09-01,159.81,58.99",
         stats_hint=stats_hint,
         provenance_cols=["date", "p_bal_gel", "p_bal_usd"],
         provenance_rows=[("2025-09-01", 159.81, 58.99)],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
     )
 
     summarizer.summarize_data(ctx)
 
-    assert ctx.summary_source == "deterministic_trendline_forecast_direct"
+    assert ctx.summary_source == "generic_renderer"
     assert "Overall (GEL): 182.10 GEL/MWh" in ctx.summary
     assert "Overall (USD): 63.40 USD/MWh" in ctx.summary
     assert "Summer (GEL): 160.55 GEL/MWh" in ctx.summary

@@ -106,5 +106,66 @@ class ComparisonFrame:
         return len(self.rows) == 0
 
 
+@dataclass
+class ScenarioFrame:
+    """Scenario analysis — used for SCENARIO answer_kind.
+
+    Each row is one scenario result (payoff, scale, or offset) derived from
+    Stage 3 enrichment.  The generic renderer formats payoff breakdowns,
+    scale/offset deltas, and per-period ranges from this frame.
+    """
+
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+    # Expected keys per row:
+    #   metric_name: str          — "scenario_payoff" | "scenario_scale" | "scenario_offset"
+    #   scenario_factor: float    — strike price / scale factor / offset amount
+    #   scenario_volume: float | None  — MW capacity (optional)
+    #   aggregate_result: float   — main computed result
+    #   row_count: int            — number of periods
+    #   period_range: str         — e.g. "Jan 2024 – Dec 2024"
+    #   min_period_value: float
+    #   max_period_value: float
+    #   mean_period_value: float
+    #   formula: str              — computation formula
+    #   metric: str               — price metric key ("p_bal_usd", "p_bal_gel")
+    #   --- payoff-specific (optional) ---
+    #   positive_sum: float       — income from favorable periods
+    #   negative_sum: float       — cost from unfavorable periods
+    #   positive_count: int
+    #   negative_count: int
+    #   market_component_aggregate: float | None
+    #   combined_total_aggregate: float | None
+    provenance_refs: List[str] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return len(self.rows) == 0
+
+
+@dataclass
+class ForecastFrame:
+    """Trendline forecast — used for FORECAST answer_kind.
+
+    Each row is one forecast entry (metric × season combination) from
+    Stage 3 trendline pre-calculation.  The generic renderer formats the
+    forecast value, R² caveat, and seasonal breakdown from this frame.
+    """
+
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+    # Expected keys per row:
+    #   metric: str              — "p_bal_gel", "p_bal_usd", "xrate", etc.
+    #   forecast_value: float    — predicted value at target_date
+    #   r_squared: float | None  — R² goodness of fit
+    #   equation: str | None     — regression equation
+    #   season: str | None       — "summer" | "winter" | None (overall)
+    target_date: Optional[str] = None
+    provenance_refs: List[str] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return len(self.rows) == 0
+
+
 # Type alias for any canonical frame
-CanonicalFrame = ObservationFrame | EntitySetFrame | ComparisonFrame
+CanonicalFrame = (
+    ObservationFrame | EntitySetFrame | ComparisonFrame
+    | ScenarioFrame | ForecastFrame
+)

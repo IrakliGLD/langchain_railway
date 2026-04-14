@@ -1637,28 +1637,6 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
 # Forecast helpers (moved from ask_post inner functions)
 # ---------------------------------------------------------------------------
 
-def _detect_forecast_mode(text_: str) -> bool:
-    keys = ["forecast", "predict", "projection", "project", "future", "next year", "estimate", "estimation", "outlook"]
-    t = text_.lower()
-    return any(k in t for k in keys)
-
-
-def _detect_why_mode(text_: str) -> bool:
-    """Detect if the query requires causal/driver analysis."""
-    keys = [
-        # English
-        "why", "reason", "cause", "factor", "explain", "due to", "behind",
-        "what caused", "what influenced", "driver", "impact", "influence",
-        "relationship", "correlation", "depend", "determinant",
-        # Georgian
-        "რატომ", "მიზეზი", "ფაქტორი", "ახსენი", "გავლენა", "დრაივერი",
-        # Russian
-        "почему", "причина", "фактор", "объясни", "влияние", "драйвер"
-    ]
-    t = text_.lower()
-    return any(k in t for k in keys)
-
-
 def _extract_forecast_horizon(query: str) -> int:
     """Extract forecast duration (in years) from user query."""
     q = query.lower()
@@ -1839,20 +1817,14 @@ def enrich(ctx: QueryContext) -> QueryContext:
             ctx.trendline_extend_to
     """
     # --- Share resolution ---
-    share_intent = str(ctx.plan.get("intent", "")).lower()
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
-        # Phase 4: answer_kind is the authoritative signal for share enrichment.
-        # Share intent maps to SCALAR/TIMESERIES with composition tool results.
+    # Structural signal: analyzer indicates share/composition intent or tool is get_balancing_composition.
+    if ctx.has_authoritative_question_analysis:
         share_query_detected = (
             ctx.analyzer_indicates_share_intent
             or ctx.tool_name == "get_balancing_composition"
         )
-    elif ctx.has_authoritative_question_analysis:
-        # Structured analyzer available but no answer_kind — use existing signals.
-        share_query_detected = ctx.analyzer_indicates_share_intent
     else:
-        # No analyzer available: fall back to keyword matching (legacy behavior)
-        share_query_detected = share_intent in {"calculate_share", "share"} or "share" in ctx.query.lower()
+        share_query_detected = False
     share_df_for_summary = ctx.df
 
     if share_query_detected:
@@ -1929,7 +1901,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     # --- Correlation analysis ---
     needs_correlation_analysis = False
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
+    if ctx.has_authoritative_question_analysis:
         qa_reqs = ctx.question_analysis.analysis_requirements
         requested_metric_names = {
             getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
@@ -1943,37 +1915,6 @@ def enrich(ctx: QueryContext) -> QueryContext:
             needs_correlation_analysis = True
         elif qa_reqs.needs_driver_analysis:
             log.info("Semantic intent → correlation (needs_driver_analysis=True).")
-            needs_correlation_analysis = True
-    elif ctx.has_authoritative_question_analysis:
-        # Use structured analyzer signals for correlation detection
-        qa_reqs = ctx.question_analysis.analysis_requirements
-        if qa_reqs.needs_driver_analysis or qa_reqs.needs_correlation_context:
-            log.info("Semantic intent → correlation (analyzer: needs_driver=%s needs_correlation=%s).",
-                     qa_reqs.needs_driver_analysis, qa_reqs.needs_correlation_context)
-            needs_correlation_analysis = True
-    else:
-        # Legacy keyword-based correlation detection (no analyzer available)
-        user_text = ctx.query.lower().strip()
-        intent_text = str(ctx.plan.get("intent", "")).lower()
-        combined_text = f"{intent_text} {user_text}"
-
-        driver_keywords = [
-            "driver", "cause", "effect", "factor", "reason", "impact", "influence",
-            "relationship", "correlation", "depend", "why", "behind", "due to",
-            "explain", "determinant", "driven by", "lead to", "affect", "because",
-            "based on", "results in", "responsible for"
-        ]
-        causal_patterns = [
-            r"what.*cause", r"what.*affect", r"why.*change", r"why.*increase",
-            r"factors?.*behind", r"factors?.*influenc", r"reason.*for",
-            r"cause.*of", r"impact.*on", r"driv.*price", r"lead.*to"
-        ]
-
-        text_hit = any(k in combined_text for k in driver_keywords)
-        pattern_hit = any(re.search(p, combined_text) for p in causal_patterns)
-
-        if text_hit or pattern_hit:
-            log.info("🧮 Semantic intent → correlation (detected cause/effect phrasing).")
             needs_correlation_analysis = True
 
     if needs_correlation_analysis:
@@ -2030,12 +1971,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"⚠️ Correlation analysis failed: {e}")
 
     # --- Forecast mode (CAGR) ---
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
-        _forecast_detected = ctx.question_analysis.answer_kind == AnswerKind.FORECAST
-    elif ctx.has_authoritative_question_analysis:
-        _forecast_detected = ctx.question_analysis.classification.query_type.value == "forecast"
-    else:
-        _forecast_detected = _detect_forecast_mode(ctx.query)
+    _forecast_detected = (
+        ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.answer_kind == AnswerKind.FORECAST
+    )
     if _forecast_detected and not ctx.df.empty:
         try:
             ctx.df, _forecast_note = _generate_cagr_forecast(ctx.df, ctx.query)
@@ -2045,18 +1984,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Forecast generation failed: {_e}")
 
     # --- Why mode (causal reasoning) ---
-    _why_detected = False
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
-        # Phase 4: answer_kind is the authoritative signal.
-        _why_detected = ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION
-    elif ctx.has_authoritative_question_analysis:
-        qa_reqs = ctx.question_analysis.analysis_requirements
-        _why_detected = (
-            qa_reqs.needs_driver_analysis
-            or ctx.question_analysis.classification.query_type.value == "data_explanation"
-        )
-    else:
-        _why_detected = _detect_why_mode(ctx.query)
+    _why_detected = (
+        ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION
+    )
     if _why_detected and not ctx.df.empty:
         try:
             _build_why_context(ctx)
@@ -2078,16 +2009,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind is not None:
-        ctx.add_trendlines = ctx.question_analysis.answer_kind == AnswerKind.FORECAST
-    elif ctx.has_authoritative_question_analysis:
-        ctx.add_trendlines = ctx.question_analysis.classification.query_type.value == "forecast"
-    else:
-        trend_keywords = [
-            "trend", "ტრენდი", "тренд", "trending", "forecast", "პროგნოზი", "прогноз",
-            "projection", "predict", "future", "მომავალი", "continue", "extrapolate"
-        ]
-        ctx.add_trendlines = any(keyword in ctx.query.lower() for keyword in trend_keywords)
+    ctx.add_trendlines = (
+        ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.answer_kind == AnswerKind.FORECAST
+    )
 
     if ctx.add_trendlines:
         year_matches = re.findall(r'\b(20[2-9][0-9])\b', ctx.query)

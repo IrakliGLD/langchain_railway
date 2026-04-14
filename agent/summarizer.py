@@ -23,6 +23,7 @@ from core.llm import (
     get_relevant_domain_knowledge,
 )
 from contracts.question_analysis import AnswerKind, RenderStyle
+from contracts.evidence_frames import ForecastFrame, ScenarioFrame
 from agent.analyzer import _extract_forecast_horizon
 from agent.generic_renderer import render as generic_render
 from context import scrub_schema_mentions
@@ -37,15 +38,6 @@ _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "seg
 _MAX_REFS_PER_TOKEN = 4
 _MAX_REFS_PER_CLAIM = 12
 _MAX_PROVENANCE_CITATIONS = 30
-_SUPPORTED_DETERMINISTIC_SCENARIOS = {
-    "scenario_payoff",
-    "scenario_scale",
-    "scenario_offset",
-}
-_SUPPORTED_DETERMINISTIC_QUERY_TYPES = {
-    "data_retrieval",
-    "data_explanation",
-}
 _REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES = {
     "regulated_hpp": ("regulated_hpp_tariff_",),
     "regulated_new_tpp": ("regulated_new_tpp_tariff_", "gardabani_tpp_tariff_"),
@@ -115,21 +107,6 @@ _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES = {
     "mktvari tpp": "Mtkvari Energy",
     "tbilsresi tpp": "Tbilisi TPP",
 }
-_EXPLANATION_QUERY_SIGNALS = (
-    "why",
-    "explain",
-    "interpret",
-    "reason",
-    "cause",
-    "what does this mean",
-    "what does that mean",
-    "meaning",
-    "implication",
-    "imply",
-    "compare",
-    "comparison",
-    "versus",
-)
 _TOTAL_INCOME_QUERY_SIGNALS = (
     "total income",
     "total revenue",
@@ -157,30 +134,9 @@ _ANALYTICAL_ANSWER_KINDS = frozenset({
     AnswerKind.SCENARIO,
     AnswerKind.COMPARISON,
 })
-_FORECAST_QUERY_SIGNALS = ("forecast", "predict", "projection", "project", "outlook")
-_FORECAST_METRIC_LABELS = {
-    "p_bal_gel": "Balancing electricity price",
-    "p_bal_usd": "Balancing electricity price",
-    "p_dereg_gel": "Deregulated electricity price",
-    "p_dereg_usd": "Deregulated electricity price",
-    "p_gcap_gel": "Guaranteed capacity price",
-    "p_gcap_usd": "Guaranteed capacity price",
-    "xrate": "Exchange rate",
-}
 
 
 # Numeric grounding helpers normalize every number before provenance matching.
-def _price_unit_for_metric(metric: str) -> str:
-    metric_lower = str(metric or "").lower()
-    if metric_lower.endswith("_usd"):
-        return "USD/MWh"
-    if metric_lower.endswith("_gel"):
-        return "GEL/MWh"
-    if metric_lower == "xrate":
-        return "GEL per USD"
-    return "Value"
-
-
 def _normalize_number_token(raw_token: str) -> Optional[str]:
     token = (raw_token or "").strip().replace(",", "")
     if token.endswith("%"):
@@ -1200,78 +1156,6 @@ def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
     return "\n\n".join(parts)
 
 
-def _is_deterministic_scenario_eligible(ctx: QueryContext) -> bool:
-    """Return True when scenario evidence is complete enough to skip Stage 4 LLM."""
-    # Phase 4: answer_kind = SCENARIO is the authoritative signal when available.
-    if (
-        ctx.has_authoritative_question_analysis
-        and ctx.question_analysis.answer_kind == AnswerKind.SCENARIO
-    ):
-        evidence = ctx.analysis_evidence or []
-        scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
-        if len(scenario_records) == 1 and scenario_records[0].get("aggregate_result") is not None:
-            return _build_scenario_fallback_answer(ctx) is not None
-        return False
-
-    # Legacy path: regex-based detection.
-    evidence = ctx.analysis_evidence or []
-    scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
-    if len(scenario_records) != 1:
-        return False
-
-    rec = scenario_records[0]
-    metric_name = str(rec.get("derived_metric_name") or "").strip()
-    if metric_name not in _SUPPORTED_DETERMINISTIC_SCENARIOS:
-        return False
-    if rec.get("aggregate_result") is None:
-        return False
-
-    if ctx.question_analysis is not None:
-        query_type = getattr(ctx.question_analysis.classification.query_type, "value", "")
-        if query_type and query_type not in _SUPPORTED_DETERMINISTIC_QUERY_TYPES:
-            return False
-
-    query_lower = (ctx.query or "").strip().lower()
-    if any(signal in query_lower for signal in _EXPLANATION_QUERY_SIGNALS):
-        return False
-
-    return _build_scenario_fallback_answer(ctx) is not None
-
-
-def _has_regulated_tariff_list_query_signal(ctx: QueryContext) -> bool:
-    """Return True for broad list-style questions about regulated plants."""
-    if (ctx.tool_name or "").strip() != "get_tariffs":
-        return False
-
-    query_lower = (ctx.query or "").strip().lower()
-    if not query_lower:
-        return False
-
-    regulation_hit = (
-        any(
-            token in query_lower
-            for token in (
-                "under regulation",
-                "under price regulation",
-                "price regulation",
-                "regulated plant",
-                "regulated plants",
-                "regulated power plant",
-                "regulated power plants",
-            )
-        )
-        or ("regulated" in query_lower and any(token in query_lower for token in ("plant", "plants", "entity", "entities")))
-    )
-    list_hit = any(
-        token in query_lower
-        for token in ("which", "what are the", "list", "show all", "enumerate", "name")
-    )
-    explanation_hit = any(
-        token in query_lower for token in _EXPLANATION_QUERY_SIGNALS + _FORECAST_QUERY_SIGNALS
-    )
-    return regulation_hit and list_hit and not explanation_hit
-
-
 def _tariff_alias_has_observations(df: pd.DataFrame, alias: str) -> bool:
     """Return True when the retrieved tariff frame includes data for an alias."""
     prefixes = _REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES.get(alias, ())
@@ -1288,8 +1172,20 @@ def _tariff_alias_has_observations(df: pd.DataFrame, alias: str) -> bool:
 
 
 def _build_regulated_tariff_list_direct_answer(ctx: QueryContext) -> str | None:
-    """Build a deterministic list of regulated plants from tariff evidence."""
-    if ctx.df.empty or not _has_regulated_tariff_list_query_signal(ctx):
+    """Build a deterministic list of regulated plants from tariff evidence.
+
+    Gated by answer_kind=LIST + tool_name=get_tariffs (no regex).
+    """
+    if ctx.df.empty:
+        return None
+    # Structural gate: must be a LIST question using the tariff tool.
+    if (ctx.tool_name or "").strip() != "get_tariffs":
+        return None
+    if (
+        ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.answer_kind is not None
+        and ctx.question_analysis.answer_kind != AnswerKind.LIST
+    ):
         return None
 
     from agent.tools.tariff_tools import resolve_tariff_alias_entities
@@ -1384,29 +1280,6 @@ def _has_explicit_residual_component_query_signal(query: str) -> bool:
     )
 
 
-def _has_residual_weighted_price_query_signal(query: str) -> bool:
-    query_lower = (query or "").strip().lower()
-    if not query_lower:
-        return False
-    calc_hit = any(
-        signal in query_lower
-        for signal in ("weighted average", "average price", "weighted avg", "mean price")
-    )
-    scope_hit = any(
-        signal in query_lower
-        for signal in ("remaining", "residual", "other electricity", "excluding", "except")
-    )
-    explicit_residual_components = _has_explicit_residual_component_query_signal(query_lower)
-    balancing_hit = "balancing" in query_lower
-    context_hit = any(
-        signal in query_lower
-        for signal in ("tariff", "tariffs", "regulated", "deregulated")
-    )
-    return calc_hit and balancing_hit and (
-        (scope_hit and context_hit) or explicit_residual_components
-    )
-
-
 def _extract_residual_share_threshold(query: str) -> tuple[str, float, str] | None:
     query_lower = (query or "").strip().lower()
     if not query_lower or "%" not in query_lower:
@@ -1453,8 +1326,11 @@ def _extract_month_list_from_query(query: str) -> list[pd.Timestamp]:
 
 
 def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | None:
-    """Build a deterministic answer for residual weighted-price calculations."""
-    if ctx.df.empty or not _has_residual_weighted_price_query_signal(ctx.query):
+    """Build a deterministic answer for residual weighted-price calculations.
+
+    Gated by required column presence (no regex).
+    """
+    if ctx.df.empty:
         return None
 
     required_cols = {
@@ -1555,22 +1431,6 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
             f"({float(row['remaining_weighted_price_usd']):.1f} USD/MWh)"
         )
     return "\n".join(lines)
-
-
-def _is_forecast_direct_answer_eligible(ctx: QueryContext) -> bool:
-    if "trendline forecasts" not in (ctx.stats_hint or "").lower():
-        return False
-
-    # Phase 4: answer_kind = FORECAST is the authoritative signal.
-    if ctx.has_authoritative_question_analysis and ctx.question_analysis.answer_kind == AnswerKind.FORECAST:
-        return True
-    # Legacy path.
-    if ctx.question_analysis is not None and ctx.question_analysis_source == "llm_active":
-        query_type = getattr(ctx.question_analysis.classification.query_type, "value", "")
-        if query_type == "forecast":
-            return True
-    query_lower = (ctx.query or "").strip().lower()
-    return any(signal in query_lower for signal in _FORECAST_QUERY_SIGNALS)
 
 
 # Forecast helpers parse the precomputed trendline block produced in Stage 3.
@@ -1675,182 +1535,89 @@ def _filter_relevant_forecast_entries(ctx: QueryContext, entries: list[dict[str,
     return selected
 
 
-def _format_forecast_target_date(raw_target_date: str | None) -> str:
-    if not raw_target_date:
-        return "the requested forecast horizon"
-    try:
-        ts = pd.to_datetime(raw_target_date, errors="raise")
-    except Exception:
-        return raw_target_date
-    return ts.strftime("%B %Y")
-
-
-def _forecast_caveat_for_r_squared(r_squared: float | None) -> str:
-    if r_squared is None:
-        return (
-            "This forecast is based on historical trendline extrapolation and should be treated cautiously "
-            "because balancing prices can change with tariffs, new PPA/CfD capacity, market rules, and import prices."
-        )
-    if r_squared < 0.5:
-        return (
-            f"This forecast has moderate-to-low reliability (R²={r_squared:.3f}) due to variability in historical prices. "
-            "Actual prices may differ significantly because of regulatory decisions, new PPA/CfD capacity, market rule changes, or import price shifts."
-        )
-    if r_squared < 0.7:
-        return (
-            f"This forecast assumes current market structure, PPA contracts, and regulatory framework remain unchanged (R²={r_squared:.3f}). "
-            "Actual prices may differ because of gas-price negotiations, new PPA/CfD capacity additions, GNERC tariff decisions, or changes in neighboring electricity markets."
-        )
-    return (
-        f"While this trend is statistically strong (R²={r_squared:.3f}), it still reflects past patterns and assumes unchanged regulatory and contractual conditions. "
-        "Key uncertainties remain PPA/CfD capacity growth, gas-price negotiations, market-rule changes, and import-price dynamics."
-    )
-
-
-_BALANCING_PRICE_METRICS = {"p_bal_gel", "p_bal_usd"}
-_REGIME_BREAK_DATE = "2027-07"
-_REGIME_BREAK_WARNING = (
-    "\n\n**Important:** Georgia's planned target electricity market model (~July 2027) "
-    "would shift balancing price formation from monthly weighted-average settlement to hourly marginal pricing "
-    "under self-dispatch. This forecast extends into or beyond that horizon, so the structural break "
-    "may fundamentally change price dynamics. Past policy changes (e.g., the January 2024 gas price increase "
-    "for regulated thermals, and temporary deregulated hydro pricing rule changes in Jan\u2013Mar 2024) "
-    "illustrate how regulatory decisions can materially shift balancing prices."
-)
-
-
-def _regime_break_warning_if_needed(target_date: str, metrics: set[str]) -> str:
-    """Return regime-break warning if forecast extends to/beyond July 2027 for balancing prices."""
-    if not target_date or not (metrics & _BALANCING_PRICE_METRICS):
-        return ""
-    if target_date >= _REGIME_BREAK_DATE:
-        return _REGIME_BREAK_WARNING
-    return ""
-
-
-def _build_trendline_forecast_direct_answer(ctx: QueryContext) -> str | None:
-    if not _is_forecast_direct_answer_eligible(ctx):
+def _build_scenario_frame(ctx: QueryContext) -> ScenarioFrame | None:
+    """Build a ScenarioFrame from Stage 3 scenario evidence records."""
+    evidence = ctx.analysis_evidence or []
+    scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
+    if not scenario_records:
         return None
+    rows = []
+    for rec in scenario_records:
+        if rec.get("aggregate_result") is None:
+            continue
+        rows.append({
+            "metric_name": rec.get("derived_metric_name", ""),
+            "scenario_factor": rec.get("scenario_factor"),
+            "scenario_volume": rec.get("scenario_volume"),
+            "aggregate_result": rec.get("aggregate_result"),
+            "row_count": rec.get("row_count"),
+            "period_range": rec.get("period_range", ""),
+            "min_period_value": rec.get("min_period_value"),
+            "max_period_value": rec.get("max_period_value"),
+            "mean_period_value": rec.get("mean_period_value"),
+            "formula": rec.get("formula", ""),
+            "metric": rec.get("metric", ""),
+            "positive_sum": rec.get("positive_sum", 0.0),
+            "negative_sum": rec.get("negative_sum", 0.0),
+            "positive_count": rec.get("positive_count", 0),
+            "negative_count": rec.get("negative_count", 0),
+            "market_component_aggregate": rec.get("market_component_aggregate"),
+            "combined_total_aggregate": rec.get("combined_total_aggregate"),
+            "baseline_aggregate": rec.get("baseline_aggregate"),
+            "delta_aggregate": rec.get("delta_aggregate"),
+            "delta_percent": rec.get("delta_percent"),
+        })
+    return ScenarioFrame(rows=rows) if rows else None
 
+
+def _build_forecast_frame(ctx: QueryContext) -> ForecastFrame | None:
+    """Build a ForecastFrame from Stage 3 trendline forecast data in stats_hint."""
     target_date, entries = _parse_trendline_forecasts(ctx.stats_hint or "")
+    if not entries:
+        return None
     entries = _filter_relevant_forecast_entries(ctx, entries)
     if not entries:
         return None
-
-    target_label = _format_forecast_target_date(target_date)
-    primary_entry = next(
-        (entry for entry in entries if str(entry.get("metric", "")).endswith("_gel")),
-        entries[0],
-    )
-    primary_metric = str(primary_entry.get("metric", "")).strip()
-    metric_label = _FORECAST_METRIC_LABELS.get(primary_metric, primary_metric.replace("_", " ").title())
-
-    # Check if regime-break warning is needed
-    entry_metrics = {str(e.get("metric", "")).split("_summer")[0].split("_winter")[0] for e in entries}
-    regime_warning = _regime_break_warning_if_needed(target_date, entry_metrics)
-
-    # Prefer the seasonal breakdown when Stage 3 produced separate summer/winter forecasts.
-    season_entries = [entry for entry in entries if entry.get("season")]
-    overall_entries = [entry for entry in entries if not entry.get("season")]
-    gel_entry = next((entry for entry in overall_entries if str(entry.get("metric", "")).endswith("_gel")), None)
-    usd_entry = next((entry for entry in overall_entries if str(entry.get("metric", "")).endswith("_usd")), None)
-    if season_entries:
-        lines = [f"**{metric_label} Forecast**", "", f"Based on linear regression to {target_label}:"]
-        if gel_entry is not None:
-            lines.append(
-                f"- Overall (GEL): {float(gel_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))} "
-                f"(R^2={float(gel_entry.get('r_squared') or 0.0):.3f})"
-            )
-        if usd_entry is not None:
-            lines.append(
-                f"- Overall (USD): {float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))} "
-                f"(R^2={float(usd_entry.get('r_squared') or 0.0):.3f})"
-            )
-        gel_entry = None
-        usd_entry = None
-        if gel_entry is not None:
-            lines.append(
-                f"- Overall (GEL): {float(gel_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))} "
-                f"(RÂ²={float(gel_entry.get('r_squared') or 0.0):.3f})"
-            )
-        if usd_entry is not None:
-            lines.append(
-                f"- Overall (USD): {float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))} "
-                f"(RÂ²={float(usd_entry.get('r_squared') or 0.0):.3f})"
-            )
-        for entry in sorted(season_entries, key=lambda item: ({"summer": 0, "winter": 1}.get(str(item.get("season", "")).strip().lower(), 99), 0 if str(item.get("metric", "")).strip().lower().endswith("_gel") else 1 if str(item.get("metric", "")).strip().lower().endswith("_usd") else 2)):
-            season = str(entry.get("season", "")).title()
-            metric = str(entry.get("metric", "")).strip().lower()
-            currency_label = "GEL" if metric.endswith("_gel") else "USD" if metric.endswith("_usd") else metric.upper()
-            season = f"{season} ({currency_label})"
-            unit = _price_unit_for_metric(str(entry.get("metric", "")))
-            lines.append(
-                f"- {season}: {float(entry['forecast_value']):.2f} {unit} (R²={float(entry.get('r_squared') or 0.0):.3f})"
-            )
-        lines.append("")
-        lines.append(_forecast_caveat_for_r_squared((gel_entry or primary_entry).get("r_squared")))
-        if regime_warning:
-            lines.append(regime_warning)
-        return "\n".join(lines)
-
-    gel_entry = next((entry for entry in entries if str(entry.get("metric", "")).endswith("_gel")), None)
-    usd_entry = next((entry for entry in entries if str(entry.get("metric", "")).endswith("_usd")), None)
-
-    if gel_entry is not None:
-        answer = (
-            f"Based on linear regression, **{metric_label}** is forecast to reach "
-            f"**{float(gel_entry['forecast_value']):.2f} {_price_unit_for_metric(str(gel_entry.get('metric', '')))}** "
-            f"by **{target_label}** (R²={float(gel_entry.get('r_squared') or 0.0):.3f})."
-        )
-        if usd_entry is not None:
-            answer += (
-                f" The parallel USD series points to **{float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}** "
-                f"(R²={float(usd_entry.get('r_squared') or 0.0):.3f})."
-            )
-        answer += f"\n\n{_forecast_caveat_for_r_squared(gel_entry.get('r_squared'))}"
-        answer += regime_warning
-        return answer
-
-    first_entry = entries[0]
-    return (
-        f"Based on linear regression, **{metric_label}** is forecast to reach "
-        f"**{float(first_entry['forecast_value']):.2f} {_price_unit_for_metric(str(first_entry.get('metric', '')))}** "
-        f"by **{target_label}** (R²={float(first_entry.get('r_squared') or 0.0):.3f}).\n\n"
-        f"{_forecast_caveat_for_r_squared(first_entry.get('r_squared'))}"
-        f"{regime_warning}"
-    )
+    return ForecastFrame(rows=entries, target_date=target_date)
 
 
 def _try_generic_renderer(ctx: QueryContext) -> str | None:
     """Attempt the generic renderer when answer_kind + evidence frame are available.
 
-    Returns the rendered answer string, or None if not applicable (caller
-    should fall through to legacy dispatch).
+    Handles all standard deterministic answer_kinds: SCALAR, LIST, TIMESERIES,
+    COMPARISON, SCENARIO, and FORECAST.  Returns the rendered answer string,
+    or None if not applicable (caller should fall through to legacy dispatch).
     """
     if not ctx.has_authoritative_question_analysis:
         return None
-    # Yield to share_summary_override — Stage 3 produces richer narrative for shares.
-    if ctx.share_summary_override:
-        return None
     qa = ctx.question_analysis
-    if qa.answer_kind is None or qa.render_style != RenderStyle.DETERMINISTIC:
+    if qa.answer_kind is None:
         return None
+
+    # For SCENARIO and FORECAST, build typed frames from Stage 3 enrichment
+    # data.  These answer_kinds are inherently deterministic when evidence is
+    # available, so they bypass the render_style gate.
+    frame = getattr(ctx, "evidence_frame", None)
+    if qa.answer_kind == AnswerKind.SCENARIO:
+        scenario_frame = _build_scenario_frame(ctx)
+        if scenario_frame is not None and not scenario_frame.is_empty():
+            frame = scenario_frame
+    elif qa.answer_kind == AnswerKind.FORECAST:
+        forecast_frame = _build_forecast_frame(ctx)
+        if forecast_frame is not None and not forecast_frame.is_empty():
+            frame = forecast_frame
+    else:
+        # Non-scenario/forecast shapes require explicit DETERMINISTIC render_style.
+        if qa.render_style != RenderStyle.DETERMINISTIC:
+            return None
+
     # Correctable evidence gaps mean data is incomplete — fall through to legacy
     # paths that can handle partial data or re-plan.
     gap = getattr(ctx, "evidence_gap", None)
     if gap is not None and getattr(gap, "correctable", False):
         return None
-    frame = getattr(ctx, "evidence_frame", None)
+
     if frame is None or frame.is_empty():
-        return None
-    # Only handle the four generic shapes; scenario/forecast/explanation/knowledge/clarify
-    # fall through to existing specialized paths.
-    if qa.answer_kind not in (AnswerKind.SCALAR, AnswerKind.LIST, AnswerKind.TIMESERIES, AnswerKind.COMPARISON):
         return None
 
     # Extract metric_hint from the top candidate tool's params_hint so that
@@ -1900,15 +1667,22 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             )
             ctx.share_summary_override = None
 
-    # --- Phase 2: Generic renderer path (answer_kind + evidence frame) ---
+    # --- Generic renderer path (answer_kind + evidence frame) ---
     # Attempt the generic renderer FIRST when we have a canonical evidence frame
-    # and a deterministic render_style.  This replaces per-question regex dispatch
-    # for SCALAR, LIST, TIMESERIES, COMPARISON answer kinds.
+    # and a deterministic render_style.  Handles SCALAR, LIST, TIMESERIES,
+    # COMPARISON, SCENARIO, and FORECAST answer kinds — no regex detection.
     _generic_answer = _try_generic_renderer(ctx)
     if _generic_answer is not None:
         ctx.summary = _generic_answer
         ctx.summary_source = "generic_renderer"
-        ctx.summary_claims = _derive_claims_from_text(ctx.summary)
+        # SCENARIO/FORECAST values are computed by Stage 3 enrichment, not
+        # present in provenance rows.  Skip claim extraction so the
+        # provenance gate doesn't reject derived values.
+        ak = ctx.question_analysis.answer_kind if ctx.question_analysis else None
+        if ak in (AnswerKind.SCENARIO, AnswerKind.FORECAST):
+            ctx.summary_claims = []
+        else:
+            ctx.summary_claims = _derive_claims_from_text(ctx.summary)
         ctx.summary_citations = ["generic_renderer"]
         ctx.summary_confidence = 0.97
         metrics.log_deterministic_skip("generic_renderer")
@@ -1920,14 +1694,6 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
         ctx.summary_citations = ["deterministic_share_summary"]
         ctx.summary_confidence = 1.0
-    elif _is_deterministic_scenario_eligible(ctx):
-        ctx.summary = _build_scenario_fallback_answer(ctx) or ""
-        ctx.summary_source = "deterministic_scenario_direct"
-        ctx.summary_claims = []
-        ctx.summary_citations = ["deterministic_scenario_direct"]
-        ctx.summary_confidence = 0.95
-        metrics.log_deterministic_skip(ctx.summary_source)
-        log.info("Deterministic scenario answer eligible; skipping Stage 4 LLM.")
     elif (regulated_tariff_answer := _build_regulated_tariff_list_direct_answer(ctx)) is not None:
         ctx.summary = regulated_tariff_answer
         ctx.summary_source = "deterministic_regulated_tariff_list_direct"
@@ -1944,14 +1710,6 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_confidence = 0.95
         metrics.log_deterministic_skip(ctx.summary_source)
         log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
-    elif (forecast_answer := _build_trendline_forecast_direct_answer(ctx)) is not None:
-        ctx.summary = forecast_answer
-        ctx.summary_source = "deterministic_trendline_forecast_direct"
-        ctx.summary_claims = []
-        ctx.summary_citations = ["deterministic_trendline_forecast_direct"]
-        ctx.summary_confidence = 0.95
-        metrics.log_deterministic_skip(ctx.summary_source)
-        log.info("Deterministic trendline forecast answer eligible; skipping Stage 4 LLM.")
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.
