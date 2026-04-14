@@ -4493,6 +4493,87 @@ def test_evidence_aware_policy_requires_non_tabular_need(monkeypatch):
     assert summarizer._derive_data_summary_grounding_policy(ctx, "forecast") == "strict_numeric"
 
 
+def test_explanation_with_driver_analysis_gets_evidence_aware_grounding():
+    """EXPLANATION answer_kind + needs_driver_analysis should use evidence_aware grounding."""
+    from agent import summarizer
+    from models import QueryContext
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.9)
+    payload["routing"]["needs_knowledge"] = False
+    payload["analysis_requirements"]["needs_driver_analysis"] = True
+    payload["answer_kind"] = "explanation"
+    expected = QuestionAnalysis.model_validate(payload)
+
+    ctx = QueryContext(
+        query="Why did the balancing price increase in January?",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        response_mode="data_primary",
+        resolution_policy="answer",
+    )
+
+    assert summarizer._derive_data_summary_grounding_policy(ctx, "data_explanation") == "evidence_aware"
+
+
+def test_explanation_without_analytical_signals_stays_strict():
+    """EXPLANATION answer_kind without any analytical signal should remain strict_numeric."""
+    from agent import summarizer
+    from models import QueryContext
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.9)
+    payload["routing"]["needs_knowledge"] = False
+    payload["analysis_requirements"]["needs_driver_analysis"] = False
+    payload["answer_kind"] = "explanation"
+    expected = QuestionAnalysis.model_validate(payload)
+
+    ctx = QueryContext(
+        query="Explain the data for January",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        response_mode="data_primary",
+        resolution_policy="answer",
+    )
+
+    assert summarizer._derive_data_summary_grounding_policy(ctx, "data_explanation") == "strict_numeric"
+
+
+def test_evidence_aware_grounding_uses_lower_threshold():
+    """Evidence-aware grounding should use 0.7 threshold instead of 0.9."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext
+
+    # Realistic explanation answer: includes dates and values from data,
+    # plus a derived percentage (10%) not literally in the source.
+    # Tokens: "50" "2024" "55" "10" → 3 of 4 matched (75%) — above 0.7 but below 0.9.
+    envelope = SummaryEnvelope(
+        answer="The price rose from 50 GEL in January 2024 to 55 GEL, a change of 10%.",
+        claims=[],
+        citations=["data_preview"],
+        confidence=0.8,
+    )
+    ctx = QueryContext(
+        query="Why did the balancing price increase?",
+        preview="date,p_bal_gel\n2024-01-01,50.0\n2024-02-01,55.0",
+        stats_hint="min=50.0 max=55.0",
+        grounding_policy="evidence_aware",
+    )
+
+    # With evidence_aware (0.7 threshold), this should pass
+    assert summarizer._is_summary_grounded(envelope, ctx) is True
+
+    # With strict_numeric (0.9 threshold), it would fail
+    ctx_strict = QueryContext(
+        query="Why did the balancing price increase?",
+        preview="date,p_bal_gel\n2024-01-01,50.0\n2024-02-01,55.0",
+        stats_hint="min=50.0 max=55.0",
+        grounding_policy="strict_numeric",
+    )
+    assert summarizer._is_summary_grounded(envelope, ctx_strict) is False
+
+
 def test_claim_provenance_indexes_domain_and_vector_numeric_tokens():
     """Provenance coverage should include domain/vector numeric evidence for evidence-aware summaries."""
     from agent import summarizer
@@ -5503,6 +5584,45 @@ def test_scenario_data_explanation_tool_route_not_treated_as_explanation():
     )
 
     assert pipeline._should_route_tool_as_explanation(ctx) is False
+
+
+def test_comparison_with_scenario_metrics_not_overridden_to_scenario():
+    """COMPARISON answer_kind must not be overridden to SCENARIO even when scenario
+    derived metrics are present — COMPARISON is a strong structural signal."""
+    from agent import pipeline
+    from contracts.question_analysis import AnswerKind
+
+    payload = _make_analyzer_payload("comparison", "tool", confidence=0.95)
+    payload["answer_kind"] = "comparison"
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {
+            "metric_name": "scenario_payoff",
+            "metric": "p_bal_usd",
+            "target_metric": None,
+            "rank_limit": None,
+            "scenario_factor": 55.0,
+            "scenario_volume": 1.0,
+            "scenario_aggregation": "sum",
+        }
+    ]
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query="Compare CfD payoff for Plant A vs Plant B",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+
+    # Simulate the answer_kind derivation block from process_query
+    pipeline._cross_check_answer_kind(ctx)
+    if qa.answer_kind is None:
+        qa.answer_kind = pipeline._derive_answer_kind_from_query_type(ctx)
+    if qa.answer_kind in pipeline._SCENARIO_OVERRIDE_ELIGIBLE:
+        derived = qa.analysis_requirements.derived_metrics or []
+        if any(m.metric_name in pipeline._SCENARIO_DERIVED_METRICS for m in derived):
+            qa.answer_kind = AnswerKind.SCENARIO
+
+    # answer_kind should stay COMPARISON, not be overridden to SCENARIO
+    assert qa.answer_kind == AnswerKind.COMPARISON
 
 
 def test_why_data_explanation_tool_route_still_treated_as_explanation():

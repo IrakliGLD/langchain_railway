@@ -483,6 +483,15 @@ def _validate_plan_against_answer_kind(
                 raw_query,
             )
 
+    elif answer_kind == AnswerKind.FORECAST:
+        has_date_range = bool(primary_params.get("start_date") and primary_params.get("end_date"))
+        if not has_date_range:
+            log.warning(
+                "Plan validation: answer_kind=FORECAST but primary step "
+                "lacks date range. query=%.80s",
+                raw_query,
+            )
+
     elif answer_kind == AnswerKind.SCENARIO:
         derived = qa.analysis_requirements.derived_metrics or []
         has_scenario = any(m.metric_name in _SCENARIO_METRIC_NAMES for m in derived)

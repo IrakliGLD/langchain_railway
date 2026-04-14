@@ -148,6 +148,15 @@ _CFD_COMPONENT_QUERY_SIGNALS = (
     "payoff",
 )
 _MIXED_EVIDENCE_QUERY_TYPES = {"forecast", "comparison"}
+# answer_kind values whose summaries inherently contain derived values
+# (MoM changes, percentages, projections, scenario payoffs) that strict
+# numeric grounding rejects as false positives.
+_ANALYTICAL_ANSWER_KINDS = frozenset({
+    AnswerKind.EXPLANATION,
+    AnswerKind.FORECAST,
+    AnswerKind.SCENARIO,
+    AnswerKind.COMPARISON,
+})
 _FORECAST_QUERY_SIGNALS = ("forecast", "predict", "projection", "project", "outlook")
 _FORECAST_METRIC_LABELS = {
     "p_bal_gel": "Balancing electricity price",
@@ -332,7 +341,10 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
 
     matched = sum(1 for t in answer_tokens if t in source_tokens)
     match_ratio = matched / max(1, len(answer_tokens))
-    return match_ratio >= 0.9
+    # Evidence-aware queries produce derived values (percentages, deltas)
+    # that legitimately extend beyond raw data; use a lower threshold.
+    min_ratio = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE else 0.9
+    return match_ratio >= min_ratio
 
 
 def _serialize_scalar(value: Any) -> Any:
@@ -792,6 +804,23 @@ def _derive_data_summary_grounding_policy(ctx: QueryContext, query_type: str) ->
         ctx.vector_knowledge_prompt
         and ctx.vector_knowledge_source == "vector_active"
     )
+    has_derived_metrics = bool(
+        analyzer_active
+        and ctx.question_analysis.analysis_requirements.derived_metrics
+    )
+    # answer_kind-aware: analytical answer shapes produce derived values
+    # (MoM deltas, percentages, projections) that strict grounding rejects.
+    answer_kind = (
+        ctx.question_analysis.answer_kind
+        if analyzer_active
+        else None
+    )
+    if (
+        answer_kind in _ANALYTICAL_ANSWER_KINDS
+        and (needs_knowledge or needs_driver_analysis or has_non_tabular_evidence or has_derived_metrics)
+    ):
+        return GroundingPolicy.EVIDENCE_AWARE
+    # Legacy query_type fallback when answer_kind is unavailable.
     if (
         query_type in _MIXED_EVIDENCE_QUERY_TYPES
         and has_non_tabular_evidence

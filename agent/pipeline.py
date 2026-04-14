@@ -75,6 +75,13 @@ _EXPLANATION_ROUTING_SIGNALS = (
     "объясни",
 )
 _SCENARIO_DERIVED_METRICS = _SCENARIO_METRIC_NAMES
+# answer_kind values eligible for scenario-metric override.  Strong structural
+# shapes (COMPARISON, LIST, KNOWLEDGE, CLARIFY) are never overridden.
+_SCENARIO_OVERRIDE_ELIGIBLE = frozenset({
+    AnswerKind.EXPLANATION,
+    AnswerKind.SCALAR,
+    AnswerKind.TIMESERIES,
+})
 
 # --- Response-mode derivation constants ---
 # Types where the answer mode is unambiguous regardless of preferred_path.
@@ -1045,10 +1052,11 @@ def process_query(
         # Fallback: if LLM did not emit answer_kind, derive it from query_type.
         if qa.answer_kind is None:
             qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
-        # Override: scenario-family derived metrics signal SCENARIO regardless
-        # of query_type (the LLM sometimes emits data_explanation for scenario
-        # queries while correctly setting scenario derived metrics).
-        if qa.answer_kind not in (AnswerKind.SCENARIO, AnswerKind.FORECAST, None):
+        # Override: scenario-family derived metrics signal SCENARIO when the
+        # LLM misclassified a scenario query as data_explanation or similar.
+        # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
+        # are never overridden — they represent a deliberate shape choice.
+        if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
             derived = qa.analysis_requirements.derived_metrics or []
             if any(m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived):
                 log.info(
