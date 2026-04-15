@@ -1009,6 +1009,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             domain_knowledge=domain_knowledge_for_summary,
             vector_knowledge=vector_knowledge,
             question_analysis=ctx.question_analysis,
+            effective_answer_kind=ctx.effective_answer_kind,
             vector_knowledge_bundle=ctx.vector_knowledge,
             response_mode=ctx.response_mode,
         )
@@ -1723,8 +1724,13 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             routing_query = ctx.query
         ctx.grounding_policy = _derive_data_summary_grounding_policy(ctx, query_type)
         comparison_focus = _should_use_comparison_first_guidance(ctx, query_type)
+        render_deterministic = (
+            ctx.question_analysis is not None
+            and ctx.question_analysis_source == "llm_active"
+            and ctx.question_analysis.render_style == RenderStyle.DETERMINISTIC
+        )
         domain_knowledge = ""
-        if query_type not in ("single_value", "list"):
+        if not render_deterministic and query_type not in ("single_value", "list"):
             preferred_topics = _build_data_summary_topic_preferences(ctx)
             domain_knowledge = get_relevant_domain_knowledge(
                 routing_query, use_cache=False, preferred_topics=preferred_topics,
@@ -1748,6 +1754,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 domain_knowledge=domain_knowledge,
                 vector_knowledge=vector_knowledge,
                 question_analysis=ctx.question_analysis,
+                effective_answer_kind=ctx.effective_answer_kind,
                 vector_knowledge_bundle=ctx.vector_knowledge,
                 response_mode=ctx.response_mode,
                 resolution_policy=ctx.resolution_policy,
