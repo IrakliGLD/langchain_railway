@@ -5536,6 +5536,8 @@ def test_summarize_data_scenario_generic_renderer_includes_income_breakdown(monk
 def test_summarize_data_uses_deterministic_residual_weighted_price_direct_without_llm(monkeypatch):
     payload = _make_analyzer_payload("data_retrieval", "sql", confidence=0.95)
     payload["classification"]["intent"] = "residual_weighted_price_calculation"
+    payload["answer_kind"] = "timeseries"
+    payload["render_style"] = "deterministic"
     qa = QuestionAnalysis.model_validate(payload)
 
     monkeypatch.setattr(

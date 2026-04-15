@@ -1009,7 +1009,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             domain_knowledge=domain_knowledge_for_summary,
             vector_knowledge=vector_knowledge,
             question_analysis=ctx.question_analysis,
-            effective_answer_kind=ctx.effective_answer_kind,
+            effective_answer_kind=getattr(ctx, "effective_answer_kind", None),
             vector_knowledge_bundle=ctx.vector_knowledge,
             response_mode=ctx.response_mode,
         )
@@ -1270,6 +1270,33 @@ _RESIDUAL_THRESHOLD_RULES: list[tuple[str, str, str]] = [
 ]
 
 
+_RESIDUAL_DIRECT_INTENTS = frozenset({
+    "residual_weighted_price_calculation",
+    "residual_weighted_price_followup",
+})
+_RESIDUAL_DIRECT_ANSWER_KINDS = frozenset({
+    AnswerKind.SCALAR,
+    AnswerKind.TIMESERIES,
+    AnswerKind.COMPARISON,
+})
+
+
+def _residual_direct_answer_is_authorized(ctx: QueryContext) -> bool:
+    """Return True only when Stage 0.2 explicitly authorized the residual shortcut."""
+    if not ctx.has_authoritative_question_analysis:
+        return False
+
+    qa = ctx.question_analysis
+    if qa is None or qa.render_style != RenderStyle.DETERMINISTIC:
+        return False
+    if qa.answer_kind not in _RESIDUAL_DIRECT_ANSWER_KINDS:
+        return False
+
+    classification = getattr(qa, "classification", None)
+    intent = str(getattr(classification, "intent", "") or "").strip().lower()
+    return intent in _RESIDUAL_DIRECT_INTENTS
+
+
 # Residual weighted-price helpers turn decomposition outputs into a direct answer when possible.
 def _has_explicit_residual_component_query_signal(query: str) -> bool:
     query_lower = (query or "").strip().lower()
@@ -1329,9 +1356,12 @@ def _extract_month_list_from_query(query: str) -> list[pd.Timestamp]:
 def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | None:
     """Build a deterministic answer for residual weighted-price calculations.
 
-    Gated by required column presence (no regex).
+    Gated by an authoritative deterministic residual-computation contract plus
+    required column presence.
     """
     if ctx.df.empty:
+        return None
+    if not _residual_direct_answer_is_authorized(ctx):
         return None
 
     required_cols = {
@@ -1754,7 +1784,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 domain_knowledge=domain_knowledge,
                 vector_knowledge=vector_knowledge,
                 question_analysis=ctx.question_analysis,
-                effective_answer_kind=ctx.effective_answer_kind,
+                effective_answer_kind=getattr(ctx, "effective_answer_kind", None),
                 vector_knowledge_bundle=ctx.vector_knowledge,
                 response_mode=ctx.response_mode,
                 resolution_policy=ctx.resolution_policy,

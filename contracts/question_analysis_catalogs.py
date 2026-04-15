@@ -19,7 +19,7 @@ QUESTION_ANALYSIS_ANSWER_KIND_GUIDE: List[Dict[str, str]] = [
     },
     {
         "name": "timeseries",
-        "use_for": "Period-indexed data series or table. Examples: 'Show monthly prices for 2025', 'Generation mix over the last year', 'Tariff history for Enguri'",
+        "use_for": "Period-indexed historical data series or table, including historical trend summaries. Examples: 'Show monthly prices for 2025', 'Show the historical trend of balancing prices', 'Generation mix over the last year', 'Tariff history for Enguri'",
         "render_style_hint": "deterministic",
     },
     {
@@ -34,7 +34,7 @@ QUESTION_ANALYSIS_ANSWER_KIND_GUIDE: List[Dict[str, str]] = [
     },
     {
         "name": "forecast",
-        "use_for": "Projection, trend extension, or future estimate. Examples: 'Forecast prices for next quarter', 'What is the price trend?', 'Project generation for 2026'",
+        "use_for": "Explicit forward-looking projection, future estimate, or trendline extension beyond observed data. Examples: 'Forecast prices for next quarter', 'Project generation for 2026', 'Extend the trendline to 2030'. Historical trend summaries stay timeseries, not forecast.",
         "render_style_hint": "deterministic",
     },
     {
@@ -86,7 +86,7 @@ QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
     },
     {
         "name": "data_retrieval",
-        "use_for": "Requests for data series, tables, quantitative value lookups ('how much', 'what was the total'), or descriptive retrieval without explanation.",
+        "use_for": "Requests for historical data series, trend summaries, tables, quantitative value lookups ('how much', 'what was the total'), or descriptive retrieval without explanation.",
     },
     {
         "name": "data_explanation",
@@ -98,7 +98,7 @@ QUESTION_ANALYSIS_QUERY_TYPE_GUIDE: List[Dict[str, str]] = [
     },
     {
         "name": "forecast",
-        "use_for": "Questions about projection, forecast, future trend, or trendline extension.",
+        "use_for": "Questions about explicit forward-looking projection, forecast, future estimate, or trendline extension beyond observed data. Historical trend summaries are data_retrieval, not forecast.",
     },
     {
         "name": "ambiguous",

@@ -491,6 +491,22 @@ def classify_query_type(user_query: str) -> str:
     return "unknown"
 
 
+_EXPLICIT_FORECAST_QUERY_SIGNALS = (
+    "forecast",
+    "predict",
+    "projection",
+    "trendline",
+    "future",
+    "პროგნოზი",
+    "პროგნოზირება",
+    "მომავალი",
+)
+
+
+def _has_explicit_forecast_prompt_signal(query_lower: str) -> bool:
+    return any(signal in query_lower for signal in _EXPLICIT_FORECAST_QUERY_SIGNALS)
+
+
 def get_query_focus(user_query: str) -> str:
     """
     Determine the main focus of the query to filter domain knowledge appropriately.
@@ -988,10 +1004,11 @@ def llm_generate_plan_and_sql(
         "CRITICAL: Always use ENGLISH column aliases in SQL output (e.g., AS month, AS balancing_price_gel), "
         "never use Georgian/Russian names in column aliases, even if the user query is in Georgian/Russian. "
         "\n"
-        "CRITICAL - FORECASTING/TRENDLINES: "
+        "CRITICAL - TRENDS VS FORECASTS: "
         "NEVER use SQL regression functions (regr_slope, regr_intercept, etc.) for forecasting or trendline calculation. "
-        "For trend/forecast queries, return ONLY historical data - the Python visualization layer will automatically "
-        "calculate trendlines and forecasts using scipy.stats.linregress. "
+        "For historical trend queries, return ONLY observed historical data - do not imply or calculate future values in SQL. "
+        "For explicit forecast queries, still return ONLY historical source data - the Python visualization layer will extend "
+        "the series into the future when the contract explicitly asks for a forecast. "
         "DO NOT attempt to predict future values in SQL. "
         "Example: For 'forecast 2032 price', return historical price data (SELECT date, p_bal_gel FROM price_with_usd ORDER BY date), "
         "and the system will extend the trendline to 2032. "
@@ -1059,7 +1076,7 @@ def llm_generate_plan_and_sql(
         # Cross-cutting: seasonal guidance (keyword-triggered)
         if any(k in query_lower for k in ["season", "summer", "winter", "сезон", "ზაფხულ", "ზამთარ"]):
             catalog = load_reference("sql-planner", "guidance-catalog.md")
-            is_forecast = any(k in query_lower for k in ["trend", "ტრენდი", "forecast", "პროგნოზი", "predict", "პროგნოზირება", "future", "მომავალი"])
+            is_forecast = _has_explicit_forecast_prompt_signal(query_lower)
             if is_forecast:
                 seasonal_section = _extract_section(catalog, "## Focus: Seasonal-Forecast")
             else:
@@ -1152,12 +1169,13 @@ BALANCING PRICE ANALYSIS:
 
         # Conditionally include seasonal guidance
         if any(k in query_lower for k in ["season", "summer", "winter", "сезон", "ზაფხულ", "ზამთარ"]):
-            # Check if this is a forecast/trend query with seasonal split
-            is_forecast = any(k in query_lower for k in ["trend", "ტრენდი", "forecast", "პროგნოზი", "predict", "პროგნოზირება", "future", "მომავალი"])
+            # Check if this is an explicit forecast query with seasonal split.
+            # Historical trend questions should stay on the non-forecast path.
+            is_forecast = _has_explicit_forecast_prompt_signal(query_lower)
             if is_forecast:
                 guidance_sections.append("""
 SEASONAL FORECAST QUERIES (CRITICAL):
-- For seasonal forecast/trend queries, return MONTHLY data WITH a season column
+- For seasonal forecast queries, return MONTHLY data WITH a season column
 - DO NOT aggregate by season (no GROUP BY season) - this loses time series data
 - Pattern: SELECT month, value, CASE WHEN EXTRACT(MONTH FROM date) IN (4,5,6,7) THEN 'summer' ELSE 'winter' END AS season
 - The Python layer will calculate separate trendlines for summer/winter months
@@ -2068,7 +2086,9 @@ _ANALYZER_CORE_RULES = """\
 - `answer_kind` must be set: choose the answer shape the user expects from ANSWER_KIND_GUIDE.
   - `scalar`: single value/fact. `list`: entity enumeration. `timeseries`: period-indexed data.
   - `comparison`: side-by-side periods/entities. `explanation`: why/how causal reasoning.
-  - `forecast`: projection/trend. `scenario`: what-if/CfD. `knowledge`: conceptual/regulatory. `clarify`: ambiguous.
+  - `forecast`: explicit forward-looking projection or trendline extension beyond observed data.
+    Historical trend summaries stay `timeseries`, not `forecast`.
+  - `scenario`: what-if/CfD. `knowledge`: conceptual/regulatory. `clarify`: ambiguous.
   - When in doubt between `scalar` and `timeseries`, prefer `timeseries` (safer shape).
   - When in doubt between `list` and `timeseries`, check if the user wants entities enumerated or data over time.
 - `render_style` must be set: `deterministic` for data lookups/tables, `narrative` for explanations/causal reasoning.
