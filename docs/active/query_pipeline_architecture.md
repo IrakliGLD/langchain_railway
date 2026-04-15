@@ -1370,26 +1370,23 @@ Protected core
 
 Rationale: missing scenario/forecast rules causes the highest semantic loss — incorrect `scenario_factor`, wrong `scenario_volume`, or missing seasonal decomposition.
 
-**For ambiguous, unsupported questions:**
+**For clarify-turn follow-up replies (free-text answers to a prior clarification request):**
 
 ```
 Protected core
-→ CONVERSATION_HISTORY   (always include — context is critical for disambiguation)
-→ Clarification routing rules (keep prominent)
-→ TOPIC_CATALOG           (helps distinguish knowledge from data intent)
-→ TOOL_CATALOG           (abbreviated — only needed to assess if tool path is plausible)
-→ [DERIVED_METRIC_CATALOG omitted]
-→ [CHART_POLICY_HINTS omitted]
-→ [FILTER_GUIDE omitted]
+→ CONVERSATION_HISTORY   (promoted to the front of the middle order)
+→ remaining middle blocks keep the base order for the underlying question family
+  (data-shaped replies still keep TOOL_CATALOG ahead of TOPIC_CATALOG;
+   knowledge-shaped replies still keep TOPIC_CATALOG ahead of TOOL_CATALOG)
 ```
 
-Rationale: overloading ambiguous prompts wastes budget when the correct output is just `clarify` or `reject`. The critical information is conversation history (for disambiguation) and routing safety rules.
+Rationale: the strongest pre-analyzer clarify signal is not a short query or a bare question mark; it is a prior assistant clarification turn. When the current user turn is answering that prompt, conversation history becomes load-bearing for disambiguation, but the non-history ordering should still follow the underlying data vs. knowledge family.
 
 ### 14.4 Conditional Block Inclusion Rules
 
 | Block | Include When | Detection Method |
 |-------|-------------|-----------------|
-| CONVERSATION_HISTORY | History exists AND (question <20 chars OR contains: "it", "the same", "those", "that one", "this", "them", "and also", "what about", Georgian/Russian equivalents) | Regex on question text |
+| CONVERSATION_HISTORY | History exists AND (question contains anaphoric signals such as "it", "the same", "those", "that one", "this", "them", "and also", "what about", Georgian/Russian equivalents OR the latest assistant answer is a clarification prompt such as "Please choose one of these directions", "Reply with the option number", or "Which ... did you mean?") | Regex on question text + marker scan over the last assistant answer from raw `conversation_history` |
 | TOOL_CATALOG | Pre-classified as data-path (not `conceptual_definition`, not `regulatory_procedure`) | `classify_query_type()` result |
 | FILTER_GUIDE | Question contains numeric token adjacent to comparison word, or "%", or threshold verbs ("above", "below", "exceed", "more than", "less than") | Regex: `\d+.*?(above\|below\|exceed\|more than\|less than)` or reverse |
 | CHART_POLICY_HINTS | Question contains chart/visual keywords ("chart", "graph", "plot", "show", "visualize", "diagram") OR pre-classified as timeseries/comparison | Keyword check |
@@ -1400,60 +1397,51 @@ Rationale: overloading ambiguous prompts wastes budget when the correct output i
 
 ### 14.5 Analyzer-Specific Truncation Priorities
 
-**Current limitation**: The catalog blocks in the analyzer prompt are NOT wrapped in `UNTRUSTED_*:\n<<<...>>>` tags. The section-aware truncation regex (`_SECTION_CONTENT_RE` at `core/llm.py:2579-2581`) only matches this pattern. Consequence: when the analyzer prompt exceeds budget, the system can only truncate `UNTRUSTED_CONVERSATION_HISTORY` and then falls through to the head+tail fallback.
+**Implemented design**: The analyzer prompt now wraps catalog blocks in truncation-compatible section tags, and section-aware truncation can drop them individually. The protected core remains pinned via `CONTRACT_*` blocks and is never truncated.
 
-**Required change**: Wrap catalog blocks in truncation-compatible section tags:
-
-```
-UNTRUSTED_TOOL_CATALOG:
-<<<{_compact_json(QUESTION_ANALYSIS_TOOL_CATALOG)}>>>
-
-UNTRUSTED_DERIVED_METRIC_CATALOG:
-<<<{_compact_json(QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG)}>>>
-
-UNTRUSTED_TOPIC_CATALOG:
-<<<{_compact_json(QUESTION_ANALYSIS_TOPIC_CATALOG)}>>>
-```
-
-Then define analyzer-specific truncation priorities:
+The current runtime uses two **base** truncation priorities plus one **clarify overlay**:
 
 ```
 _ANALYZER_TRUNCATION_DATA (data-path questions):
   1. UNTRUSTED_CONVERSATION_HISTORY
-  2. UNTRUSTED_DERIVED_METRIC_CATALOG   (if not scenario/forecast)
-  3. UNTRUSTED_CHART_POLICY
+  2. UNTRUSTED_CHART_POLICY_HINTS
+  3. UNTRUSTED_TOPIC_CATALOG
   4. UNTRUSTED_FILTER_GUIDE
-  5. UNTRUSTED_TOPIC_CATALOG
+  5. UNTRUSTED_DERIVED_METRIC_CATALOG
   6. UNTRUSTED_TOOL_CATALOG              (last resort — tool info is critical for data)
 
 _ANALYZER_TRUNCATION_KNOWLEDGE (knowledge-path questions):
-  1. UNTRUSTED_TOOL_CATALOG              (first — not needed for knowledge)
-  2. UNTRUSTED_DERIVED_METRIC_CATALOG
-  3. UNTRUSTED_CHART_POLICY
-  4. UNTRUSTED_FILTER_GUIDE
-  5. UNTRUSTED_CONVERSATION_HISTORY
+  1. UNTRUSTED_CONVERSATION_HISTORY
+  2. UNTRUSTED_TOOL_CATALOG              (first non-history block — not needed for knowledge)
+  3. UNTRUSTED_DERIVED_METRIC_CATALOG
+  4. UNTRUSTED_CHART_POLICY_HINTS
+  5. UNTRUSTED_FILTER_GUIDE
   6. UNTRUSTED_TOPIC_CATALOG              (last resort — topic info is critical)
 
-_ANALYZER_TRUNCATION_CLARIFY (ambiguous/unsupported questions):
-  1. UNTRUSTED_DERIVED_METRIC_CATALOG
-  2. UNTRUSTED_CHART_POLICY
-  3. UNTRUSTED_FILTER_GUIDE
-  4. UNTRUSTED_TOOL_CATALOG
-  5. UNTRUSTED_TOPIC_CATALOG
-  6. UNTRUSTED_CONVERSATION_HISTORY       (last — history is critical for disambiguation)
+CLARIFY overlay:
+  - Start from the base DATA or KNOWLEDGE priority chosen by the underlying
+    question family.
+  - Move UNTRUSTED_CONVERSATION_HISTORY to the LAST truncation slot.
+  - Preserve the relative order of all non-history blocks.
 ```
 
-Selection at `core/llm.py:2165`:
+Selection at Stage 0.2:
 ```python
 _pre_type = classify_query_type(user_query)
-if _pre_type in ("conceptual_definition", "regulatory_procedure"):
+_prompt_profile = _classify_analyzer_prompt_profile(conversation_history, _pre_type)
+
+if _pre_type == "regulatory_procedure":
     _ana_priority = _ANALYZER_TRUNCATION_KNOWLEDGE
-elif _pre_type in ("ambiguous", "unsupported"):
-    _ana_priority = _ANALYZER_TRUNCATION_CLARIFY
 else:
     _ana_priority = _ANALYZER_TRUNCATION_DATA
+
+if _prompt_profile == "clarify":
+    _ana_priority = move_history_to_end(_ana_priority)
+
 prompt = _enforce_prompt_budget(prompt, label="question_analysis", truncation_priority=_ana_priority)
 ```
+
+This keeps the spec intent ("history is critical for disambiguation") while avoiding a single global CLARIFY list that would accidentally make data clarifications topic-heavy.
 
 ### 14.6 Deterministic Choices Stay Out Of The Prompt
 
@@ -1522,9 +1510,9 @@ The contract-first, question-type-aware design follows this principle:
 
 For the core: user question, output schema, and the rules for `answer_kind`, `render_style`, `grouping`, `entity_scope`, `preferred_path`, `candidate_tools`, and `params_hint`. This is the minimum the ideal decision tree depends on.
 
-For ordering: the most important reference material for the current question family appears first. Data questions front-load the tool catalog; knowledge questions front-load the topic catalog; forecast/scenario questions front-load the derived metric catalog; ambiguous questions front-load conversation history.
+For ordering: the most important reference material for the current question family appears first. Data questions front-load the tool catalog; knowledge questions front-load the topic catalog; forecast/scenario questions front-load the derived metric catalog; and free-text replies to prior clarification turns front-load conversation history via a Stage 0.2 prompt-profile overlay.
 
-For truncation: when budget pressure forces cuts, the system drops the least relevant blocks for the current question type — not a global ordering that is wrong for half the question families.
+For truncation: when budget pressure forces cuts, the system drops the least relevant blocks for the current question type — and clarify-turn replies additionally keep conversation history the longest without discarding the underlying data-vs-knowledge priority.
 
 For conditional inclusion: blocks that are irrelevant to the current question type are omitted entirely, not just pushed to the back. This is cleaner than truncation because it saves the budget without any content loss.
 
@@ -1601,11 +1589,11 @@ Six phases, each independently deployable. Ordered so that each phase builds on 
 |---|------|------|-----------|
 | 1 | Wrap catalog blocks (TOOL_CATALOG, DERIVED_METRIC_CATALOG, TOPIC_CATALOG, FILTER_GUIDE, CHART_POLICY_HINTS) in `UNTRUSTED_*:\n<<<...>>>` tags for truncation compatibility | `core/llm.py:2076-2095` | Section 14.5 |
 | 2 | Extract scenario extraction rules (lines 2142-2152), chart-intent rules (2155-2163), and season comparison guidance (2138-2140) from the always-present rule block into conditional add-on blocks | `core/llm.py:2100-2163` | Section 14.8 |
-| 3 | Create `_build_analyzer_prompt_blocks(user_query, history_str, pre_type)` helper that returns ordered blocks based on the pre-classified question type from `classify_query_type()` | `core/llm.py` | Section 14.3, 14.9 step 1 |
+| 3 | Create `_classify_analyzer_prompt_profile(conversation_history, pre_type)` and `_build_analyzer_prompt_blocks(user_query, history_str, pre_type, prompt_profile)` helpers so Stage 0.2 can separately model query shape vs. clarify-turn context | `core/llm.py` | Section 14.3, 14.9 step 1 |
 | 4 | Replace static prompt concatenation in `llm_analyze_question()` with dynamic block assembly from the helper | `core/llm.py:2069-2163` | Section 14.9 step 4 |
-| 5 | Implement conditional block inclusion: omit TOOL_CATALOG for knowledge questions, omit DERIVED_METRIC_CATALOG for simple lookups, omit CHART_POLICY for non-chart questions, include CONVERSATION_HISTORY only when anaphoric signals detected | `core/llm.py` | Section 14.4, 13.5 |
-| 6 | Define three analyzer-specific truncation priority lists (`_ANALYZER_TRUNCATION_DATA`, `_KNOWLEDGE`, `_CLARIFY`) | `core/llm.py:~2551` | Section 14.5 |
-| 7 | Pass question-type-specific truncation priority to `_enforce_prompt_budget()` at the analyzer call site | `core/llm.py:2165` | Section 14.5, 14.9 step 5 |
+| 5 | Implement conditional block inclusion: omit TOOL_CATALOG for knowledge questions, omit DERIVED_METRIC_CATALOG for simple lookups, omit CHART_POLICY for non-chart questions, and include/promote CONVERSATION_HISTORY when anaphoric signals or prior clarify-turn markers are present | `core/llm.py` | Section 14.4, 13.5 |
+| 6 | Define base analyzer-specific truncation priority lists (`_ANALYZER_TRUNCATION_DATA`, `_KNOWLEDGE`) and implement CLARIFY as a history-priority overlay instead of a separate global list | `core/llm.py:~2551` | Section 14.5 |
+| 7 | Pass prompt-profile-aware truncation priority to `_enforce_prompt_budget()` at the analyzer call site | `core/llm.py:2165` | Section 14.5, 14.9 step 5 |
 | 8 | Cache `_compact_json()` results for static catalogs at module load time instead of reserializing per request | `core/llm.py:2047-2053` | Section 13.6 item 7 |
 
 **What to expect after:**

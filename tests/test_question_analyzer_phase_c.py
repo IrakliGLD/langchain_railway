@@ -1212,11 +1212,109 @@ def test_non_scenario_queries_remain_light():
         assert result == "light", f"Expected light for: {query!r}, got: {result!r}"
 
 
+def test_classifier_returns_clarify_when_last_assistant_turn_is_disambiguation():
+    history = [{"question": "show prices", "answer": "Which plant did you mean?"}]
+
+    assert llm_core._has_clarify_marker_in_last_assistant_turn(history) is True
+    assert llm_core._classify_analyzer_prompt_profile(history, "comparison") == "clarify"
+
+
+def test_classifier_returns_clarify_for_current_answer_clarify_wording():
+    history = [
+        {
+            "question": "forecast balancing electricity price for 2030",
+            "answer": (
+                "I can answer this, but I want to make sure we take the right interpretation first.\n\n"
+                "Please choose one of these directions:\n"
+                "1. Give a cautious forward-looking view based on the available regulatory context and recent data.\n\n"
+                "Reply with the option number, or restate the question in the direction you want."
+            ),
+        }
+    ]
+
+    assert llm_core._has_clarify_marker_in_last_assistant_turn(history) is True
+    assert llm_core._classify_analyzer_prompt_profile(history, "unknown") == "clarify"
+
+
+def test_classifier_returns_knowledge_for_regulatory_procedure_without_clarify_history():
+    history = [{"question": "foo", "answer": "The price was 15.2 GEL."}]
+
+    assert llm_core._has_clarify_marker_in_last_assistant_turn(history) is False
+    assert llm_core._classify_analyzer_prompt_profile(history, "regulatory_procedure") == "knowledge"
+
+
+def test_classifier_returns_data_for_non_clarify_data_history():
+    history = [{"question": "foo", "answer": "The price was 15.2 GEL."}]
+
+    assert llm_core._classify_analyzer_prompt_profile(history, "comparison") == "data"
+
+
+def test_classifier_ignores_generic_question_mark_without_clarify_markers():
+    history = [{"question": "foo", "answer": "Want more detail?"}]
+
+    assert llm_core._has_clarify_marker_in_last_assistant_turn(history) is False
+    assert llm_core._classify_analyzer_prompt_profile(history, "comparison") == "data"
+
+
+def test_clarify_profile_pins_history_after_contract_head_for_data_turn():
+    history_str = str([{"question": "show prices", "answer": "Which plant did you mean?"}])
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        "Enguri",
+        history_str,
+        "comparison",
+        "clarify",
+    )
+    names = [name for name, _body in blocks]
+
+    assert names[:4] == [
+        "UNTRUSTED_USER_QUESTION",
+        "CONTRACT_QUERY_TYPE_GUIDE",
+        "CONTRACT_ANSWER_KIND_GUIDE",
+        "UNTRUSTED_CONVERSATION_HISTORY",
+    ]
+    assert names.index("UNTRUSTED_CONVERSATION_HISTORY") < names.index("UNTRUSTED_TOOL_CATALOG")
+
+
+def test_clarify_profile_keeps_knowledge_drop_set_but_promotes_history():
+    history_str = str([{"question": "who is eligible", "answer": "Which market did you mean?"}])
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        "Day-ahead market",
+        history_str,
+        "regulatory_procedure",
+        "clarify",
+    )
+    names = [name for name, _body in blocks]
+
+    assert names[:4] == [
+        "UNTRUSTED_USER_QUESTION",
+        "CONTRACT_QUERY_TYPE_GUIDE",
+        "CONTRACT_ANSWER_KIND_GUIDE",
+        "UNTRUSTED_CONVERSATION_HISTORY",
+    ]
+    assert "UNTRUSTED_TOOL_CATALOG" not in names
+    assert "UNTRUSTED_DERIVED_METRIC_CATALOG" not in names
+    assert "UNTRUSTED_TOPIC_CATALOG" in names
+
+
+def test_clarify_profile_keeps_history_without_anaphoric_tokens():
+    history_str = str([{"question": "show prices", "answer": "Which plant did you mean?"}])
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        "Enguri",
+        history_str,
+        "unknown",
+        "clarify",
+    )
+    names = [name for name, _body in blocks]
+
+    assert "UNTRUSTED_CONVERSATION_HISTORY" in names
+
+
 def test_analyzer_prompt_uses_contract_tags_and_data_ordering():
     blocks = llm_core._build_analyzer_prompt_blocks(
         "Compare January and February balancing prices.",
         "",
         "comparison",
+        "data",
     )
     names = [name for name, _body in blocks]
 
@@ -1238,6 +1336,7 @@ def test_analyzer_prompt_orders_knowledge_blocks_with_topic_first():
         "Who is eligible to participate in the electricity exchange?",
         "",
         "regulatory_procedure",
+        "knowledge",
     )
     names = [name for name, _body in blocks]
 
@@ -1285,6 +1384,28 @@ def test_analyzer_budget_preserves_contract_blocks():
     assert "CONTRACT_QUERY_TYPE_GUIDE:\n<<<query-guide>>>" in trimmed
     assert "CONTRACT_ANSWER_KIND_GUIDE:\n<<<answer-guide>>>" in trimmed
     assert "CONTRACT_RULES:\n<<<rules>>>" in trimmed
+
+
+def test_truncation_selector_moves_history_last_only_for_clarify():
+    data_priority = llm_core._select_analyzer_truncation_priority("comparison", "data")
+    clarify_priority = llm_core._select_analyzer_truncation_priority("comparison", "clarify")
+
+    assert data_priority[0] == "UNTRUSTED_CONVERSATION_HISTORY"
+    assert clarify_priority[-1] == "UNTRUSTED_CONVERSATION_HISTORY"
+    assert [name for name in clarify_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"] == [
+        name for name in data_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"
+    ]
+
+
+def test_truncation_selector_preserves_knowledge_priority_for_clarify_overlay():
+    knowledge_priority = llm_core._select_analyzer_truncation_priority("regulatory_procedure", "knowledge")
+    clarify_priority = llm_core._select_analyzer_truncation_priority("regulatory_procedure", "clarify")
+
+    assert knowledge_priority[-1] == "UNTRUSTED_TOPIC_CATALOG"
+    assert clarify_priority[-1] == "UNTRUSTED_CONVERSATION_HISTORY"
+    assert [name for name in clarify_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"] == [
+        name for name in knowledge_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"
+    ]
 
 
 def test_llm_analyze_question_system_prompt_scopes_untrusted_blocks(monkeypatch):

@@ -2174,6 +2174,87 @@ def _has_any_signal(query_lower: str, signals: tuple) -> bool:
     return any(s in query_lower for s in signals)
 
 
+_CLARIFY_ASSISTANT_MARKERS = (
+    "i want to make sure we take the right interpretation first",
+    "please choose one of these directions",
+    "reply with the option number",
+    "restate the question in the direction you want",
+    "please clarify",
+    "could you clarify",
+    "did you mean",
+    "are you asking about",
+    "to confirm",
+    "can you specify",
+)
+_CLARIFY_ASSISTANT_QUESTION_PREFIXES = (
+    "which ",
+    "what ",
+    "can you ",
+    "could you ",
+    "would you ",
+    "did you ",
+    "do you ",
+    "are you ",
+    "to confirm",
+)
+
+
+def _get_last_assistant_turn_text(conversation_history: Optional[list]) -> str:
+    """Return the most recent assistant answer from raw conversation history."""
+    if not conversation_history:
+        return ""
+    for turn in reversed(conversation_history):
+        if not isinstance(turn, dict):
+            continue
+        answer = str(turn.get("answer") or "").strip()
+        if answer:
+            return answer
+    return ""
+
+
+def _has_clarify_marker_in_last_assistant_turn(conversation_history: Optional[list]) -> bool:
+    """Return True when the latest assistant answer is a clarification turn."""
+    answer = _get_last_assistant_turn_text(conversation_history).strip().lower()
+    if not answer:
+        return False
+    if _has_any_signal(answer, _CLARIFY_ASSISTANT_MARKERS):
+        return True
+    if answer.endswith("?") and any(answer.startswith(prefix) for prefix in _CLARIFY_ASSISTANT_QUESTION_PREFIXES):
+        return True
+    return False
+
+
+def _classify_analyzer_prompt_profile(
+    conversation_history: Optional[list],
+    pre_type: str,
+) -> str:
+    """Pick the Stage 0.2 analyzer prompt profile: data, knowledge, or clarify."""
+    pre_type = (pre_type or "").lower().strip()
+    if _has_clarify_marker_in_last_assistant_turn(conversation_history):
+        return "clarify"
+    if pre_type == "regulatory_procedure":
+        return "knowledge"
+    return "data"
+
+
+def _promote_history_to_front(section_names: list[str], prompt_profile: str) -> list[str]:
+    """Move conversation history to the front of the middle order for clarify turns."""
+    if prompt_profile != "clarify" or "UNTRUSTED_CONVERSATION_HISTORY" not in section_names:
+        return list(section_names)
+    return ["UNTRUSTED_CONVERSATION_HISTORY"] + [
+        name for name in section_names if name != "UNTRUSTED_CONVERSATION_HISTORY"
+    ]
+
+
+def _move_history_to_end(priority: list[str], prompt_profile: str) -> list[str]:
+    """Move conversation history to the last truncation slot for clarify turns."""
+    if prompt_profile != "clarify" or "UNTRUSTED_CONVERSATION_HISTORY" not in priority:
+        return list(priority)
+    return [name for name in priority if name != "UNTRUSTED_CONVERSATION_HISTORY"] + [
+        "UNTRUSTED_CONVERSATION_HISTORY"
+    ]
+
+
 _ANALYZER_PINNED_HEAD = [
     "UNTRUSTED_USER_QUESTION",
     "CONTRACT_QUERY_TYPE_GUIDE",
@@ -2201,6 +2282,7 @@ def _build_analyzer_prompt_blocks(
     user_query: str,
     history_str: str,
     pre_type: str,
+    prompt_profile: str,
 ) -> list[tuple[str, str]]:
     """Assemble ordered analyzer prompt blocks.
 
@@ -2209,11 +2291,12 @@ def _build_analyzer_prompt_blocks(
     second is the block body.  A section with empty content is filtered out by
     the caller.
 
-    ``pre_type`` is the return value of :func:`classify_query_type`.  C2
-    keeps all catalog blocks unconditionally; C3 will use ``pre_type`` to
-    omit irrelevant ones.  Rule-block inclusion already uses keyword
-    signals (scenario / chart / season) because they are orthogonal to the
-    coarse pre-classifier.
+    ``pre_type`` is the return value of :func:`classify_query_type` and still
+    drives catalog omission. ``prompt_profile`` is a Stage 0.2-only shaping
+    decision that affects middle-block ordering and truncation emphasis
+    without changing the query-type vocabulary used elsewhere in the pipeline.
+    Rule-block inclusion already uses keyword signals (scenario / chart /
+    season) because they are orthogonal to the coarse pre-classifier.
     """
     query_lower = (user_query or "").lower()
 
@@ -2264,7 +2347,7 @@ def _build_analyzer_prompt_blocks(
         drop.add("UNTRUSTED_DERIVED_METRIC_CATALOG")
     if not chart_intent:
         drop.add("UNTRUSTED_CHART_POLICY_HINTS")
-    if not history_str or not has_anaphoric:
+    if prompt_profile != "clarify" and (not history_str or not has_anaphoric):
         drop.add("UNTRUSTED_CONVERSATION_HISTORY")
     included_blocks = [(name, body) for (name, body) in blocks if name not in drop]
     block_map = {name: body for name, body in included_blocks}
@@ -2276,6 +2359,7 @@ def _build_analyzer_prompt_blocks(
         middle_order = _ANALYZER_BLOCK_ORDER_DATA
     else:
         middle_order = _ANALYZER_BLOCK_ORDER_DATA
+    middle_order = _promote_history_to_front(middle_order, prompt_profile)
 
     for name in _ANALYZER_PINNED_HEAD + middle_order + _ANALYZER_PINNED_TAIL:
         if name in block_map and name not in ordered_names:
@@ -2309,6 +2393,8 @@ def _render_analyzer_prompt(
 # possible because they carry hard routing invariants.
 # CONTRACT_* blocks are protected core per query_pipeline_architecture.md §14.2
 # and are intentionally omitted from analyzer truncation priorities.
+# Clarify is implemented as a history-priority overlay on top of these base
+# profiles so data/knowledge families keep their existing non-history ordering.
 _ANALYZER_TRUNCATION_DATA = [
     "UNTRUSTED_CONVERSATION_HISTORY",
     "UNTRUSTED_CHART_POLICY_HINTS",
@@ -2325,17 +2411,19 @@ _ANALYZER_TRUNCATION_KNOWLEDGE = [
     "UNTRUSTED_FILTER_GUIDE",
     "UNTRUSTED_TOPIC_CATALOG",
 ]
-def _select_analyzer_truncation_priority(pre_type: str) -> list[str]:
-    """Pick the analyzer-specific truncation profile for a pre-classified type.
+def _select_analyzer_truncation_priority(pre_type: str, prompt_profile: str) -> list[str]:
+    """Pick the analyzer prompt truncation profile for the current turn.
 
-    Only two profiles are meaningful here: knowledge-only (regulatory_procedure)
-    and everything else.  ``classify_query_type`` is keyword-based and cannot
-    detect clarify intent, so a CLARIFY profile would be dead code.
+    ``pre_type`` chooses the base priority (data vs. knowledge). ``prompt_profile``
+    can then re-prioritize conversation history for clarify turns without
+    changing the omission logic or the query-type vocabulary used elsewhere.
     """
     pre_type = (pre_type or "").lower().strip()
     if pre_type == "regulatory_procedure":
-        return _ANALYZER_TRUNCATION_KNOWLEDGE
-    return _ANALYZER_TRUNCATION_DATA
+        base_priority = _ANALYZER_TRUNCATION_KNOWLEDGE
+    else:
+        base_priority = _ANALYZER_TRUNCATION_DATA
+    return _move_history_to_end(base_priority, prompt_profile)
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
@@ -2345,6 +2433,8 @@ def llm_analyze_question(
 ) -> QuestionAnalysis:
     """Normalize and classify a raw user question into the question-analysis contract."""
 
+    pre_type = classify_query_type(user_query or "")
+    prompt_profile = _classify_analyzer_prompt_profile(conversation_history, pre_type)
     history_str = str(conversation_history) if conversation_history else ""
     schema_hint = QuestionAnalysis.model_json_schema()
     cache_input = (
@@ -2373,10 +2463,9 @@ def llm_analyze_question(
     # Dynamic block assembly (§15 Phase C / C2-C3).  Pre-classify the query
     # to pick a truncation profile and drop catalogs that the question type
     # cannot use.
-    pre_type = classify_query_type(user_query or "")
-    blocks = _build_analyzer_prompt_blocks(user_query, history_str, pre_type)
+    blocks = _build_analyzer_prompt_blocks(user_query, history_str, pre_type, prompt_profile)
     prompt = _render_analyzer_prompt(blocks, schema_hint)
-    truncation_priority = _select_analyzer_truncation_priority(pre_type)
+    truncation_priority = _select_analyzer_truncation_priority(pre_type, prompt_profile)
     prompt = _enforce_prompt_budget(
         prompt,
         label="question_analysis",
