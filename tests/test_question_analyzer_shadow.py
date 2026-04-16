@@ -147,6 +147,37 @@ def test_planner_shadow_records_analysis(monkeypatch):
     assert out.question_analysis_source == "llm_shadow"
 
 
+def test_planner_shadow_logs_prompt_validation_artifact(monkeypatch):
+    expected = QuestionAnalysis.model_validate(_valid_payload())
+    captured = {}
+
+    monkeypatch.setattr(planner, "ENABLE_TRACE_DEBUG_ARTIFACTS", True)
+    monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: expected)
+    monkeypatch.setattr(
+        planner,
+        "build_question_analyzer_prompt_validation_artifacts",
+        lambda *_args, **_kwargs: {
+            "current_prompt_chars": 1200,
+            "legacy_prompt_chars": 2400,
+            "chars_saved_vs_legacy": 1200,
+        },
+    )
+
+    def _capture_trace(_log, _ctx, _stage, event, *, debug=False, **extra):
+        if event == "artifact":
+            captured["debug"] = debug
+            captured["extra"] = extra
+
+    monkeypatch.setattr(planner, "trace_detail", _capture_trace)
+
+    ctx = QueryContext(query="what is genex?")
+    out = planner.analyze_question_shadow(ctx)
+
+    assert out.question_analysis_source == "llm_shadow"
+    assert captured["debug"] is True
+    assert captured["extra"]["prompt_validation"]["chars_saved_vs_legacy"] == 1200
+
+
 def test_planner_shadow_records_error_without_raising(monkeypatch):
     monkeypatch.setattr(planner, "llm_analyze_question", lambda **_kwargs: (_ for _ in ()).throw(ValueError("bad-json")))
 

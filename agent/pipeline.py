@@ -33,6 +33,7 @@ from config import (
     ENABLE_QUESTION_ANALYZER_SHADOW,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
+    PIPELINE_MODE,
 )
 from analysis.shares import compute_entity_price_contributions
 from core.query_executor import ENGINE
@@ -48,7 +49,7 @@ from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from analysis.system_quantities import normalize_tool_dataframe
 from contracts.question_analysis import AnswerKind, PreferredPath, RenderStyle, _SCENARIO_METRIC_NAMES
-from contracts.vector_knowledge import VectorKnowledgeMode
+from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
@@ -233,6 +234,141 @@ def _derive_answer_kind_from_query_type(ctx) -> AnswerKind | None:
         return None
     qa_type = ctx.question_analysis.classification.query_type.value
     return _QUERY_TYPE_TO_ANSWER_KIND.get(qa_type)
+
+
+# Keyword signals for the analyzer-absent fallback.  Kept aligned with
+# `_EXPLANATION_ROUTING_SIGNALS` at line ~60 and `_has_comparison_signal` at
+# line ~467.  See F1 in the Phase-A/B/C audit plan: when the analyzer is
+# shadow/failed we must still route Stage 3 enrichments (share / forecast /
+# why) via `ctx.effective_answer_kind` instead of silently degrading.
+_FORECAST_ROUTING_SIGNALS = (
+    "forecast",
+    "predict",
+    "projection",
+    "will be",
+    "next month",
+    "next year",
+    "estimate",
+    "პროგნოზ",
+    "прогноз",
+)
+_SHARE_ROUTING_SIGNALS = (
+    "share",
+    "composition",
+    "contribute",
+    "contribution",
+    "breakdown",
+    "структур",
+    "сост",
+    "წილ",
+)
+
+
+def _resolve_effective_answer_kind(ctx) -> AnswerKind | None:
+    """Resolve answer_kind for Stage 3 routing regardless of analyzer state.
+
+    When the analyzer is authoritative, prefer its emitted `answer_kind`.
+    Otherwise deterministically derive one from the raw query so Stage 3
+    enrichments (share composition, forecast, driver/why, etc.) still fire on
+    analyzer failure or when shadow-mode is active.  This is the single
+    source of truth consumed by analyzer.py's shape-gated branches.
+    """
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        if qa is not None and qa.answer_kind is not None:
+            return qa.answer_kind
+
+    # Keyword-based fallback.  Mirrors the legacy routing fallback at
+    # pipeline.py:706 so enrichment and routing stay in lockstep.
+    query_lower = str(ctx.query or "").strip().lower()
+    if not query_lower:
+        return None
+
+    if any(signal in query_lower for signal in _FORECAST_ROUTING_SIGNALS):
+        return AnswerKind.FORECAST
+
+    # Comparison must win over explanation for phrases like "why did X
+    # compared to Y" — COMPARISON shape carries more downstream semantics.
+    if _has_comparison_signal(ctx.query):
+        return AnswerKind.COMPARISON
+
+    if any(signal in query_lower for signal in _EXPLANATION_ROUTING_SIGNALS):
+        return AnswerKind.EXPLANATION
+
+    if any(signal in query_lower for signal in _SHARE_ROUTING_SIGNALS):
+        # Share/composition queries render best as COMPARISON shape — they
+        # need entity rows and secondary framing (contribution columns).
+        return AnswerKind.COMPARISON
+
+    # classify_query_type gives a coarse routing signal aligned with
+    # deterministic fallbacks used elsewhere in the pipeline.
+    try:
+        from core.llm import classify_query_type
+        qtype = classify_query_type(ctx.query or "")
+    except Exception:
+        qtype = "unknown"
+
+    if qtype == "comparison":
+        return AnswerKind.COMPARISON
+    if qtype == "list":
+        return AnswerKind.LIST
+    if qtype == "single_value":
+        return AnswerKind.SCALAR
+    if qtype == "trend" or qtype == "table":
+        return AnswerKind.TIMESERIES
+    if qtype == "regulatory_procedure":
+        return AnswerKind.KNOWLEDGE
+
+    # Heuristic conceptual classifier already ran in prepare_context().
+    if ctx.is_conceptual:
+        return AnswerKind.KNOWLEDGE
+
+    return None
+
+
+def _resolve_vector_retrieval_tier(
+    answer_kind: AnswerKind | None,
+    render_style: RenderStyle | None,
+    *,
+    is_conceptual: bool = False,
+) -> VectorRetrievalTier:
+    """Decide how much vector-retrieval effort a query warrants.
+
+    Policy (see Phase D spec §15):
+
+    * KNOWLEDGE / EXPLANATION → ``FULL`` — the retrieved passages *are*
+      the answer (knowledge) or the primary explanatory backing.
+    * CLARIFY → ``SKIP`` — no data to ground, no knowledge to cite.
+    * Data shapes (SCALAR / LIST / TIMESERIES / COMPARISON / FORECAST /
+      SCENARIO) with ``DETERMINISTIC`` render → ``SKIP`` — the generic
+      renderer bypasses the LLM and never consumes the vector prompt.
+    * Data shapes with ``NARRATIVE`` render → ``LIGHT`` — the summarizer
+      may sprinkle in background context, but ``top_k=6`` + re-rank is
+      wasted work for a one-or-two-passage sprinkle.
+    * No authoritative answer_kind (analyzer absent / failed): fall back
+      on ``is_conceptual`` — True → ``FULL``, False → ``LIGHT`` (keep
+      retrieval warm for narrative answers, but avoid the full-K cost
+      when we don't even know the shape).
+    """
+    if PIPELINE_MODE == "fast":
+        return VectorRetrievalTier.SKIP
+
+    if answer_kind == AnswerKind.CLARIFY:
+        return VectorRetrievalTier.SKIP
+
+    if answer_kind in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION):
+        return VectorRetrievalTier.FULL
+
+    if answer_kind is not None:
+        # All remaining AnswerKind members are data shapes.
+        if render_style == RenderStyle.DETERMINISTIC:
+            return VectorRetrievalTier.SKIP
+        return VectorRetrievalTier.LIGHT
+
+    # --- Analyzer-absent fallback ---
+    if is_conceptual:
+        return VectorRetrievalTier.FULL
+    return VectorRetrievalTier.LIGHT
 
 
 def _cross_check_answer_kind(ctx) -> None:
@@ -1076,25 +1212,40 @@ def process_query(
             ctx.query,
         )
 
-    # Determine whether vector retrieval can be skipped: deterministic data paths
-    # (answer_kind not in {KNOWLEDGE, EXPLANATION, CLARIFY} + DETERMINISTIC render_style)
-    # never use the vector knowledge prompt, so retrieval is wasted work.
-    _skip_vector_retrieval = False
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        if (
-            qa.answer_kind is not None
-            and qa.answer_kind not in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION, AnswerKind.CLARIFY)
-            and qa.render_style == RenderStyle.DETERMINISTIC
-        ):
-            _skip_vector_retrieval = True
-            log.info(
-                "Skipping vector retrieval: answer_kind=%s render_style=%s (deterministic data path)",
-                qa.answer_kind.value, qa.render_style.value,
-            )
+    # Populate ctx.effective_answer_kind once so Stage 3 enrichment dispatch
+    # works whether the analyzer was authoritative, shadow, or failed.  This
+    # restores forecast/why/share behaviors on analyzer failure (F1).
+    ctx.effective_answer_kind = _resolve_effective_answer_kind(ctx)
+
+    # Three-tier vector retrieval policy (Phase D):
+    #   FULL  → knowledge / explanation answers that consume passages directly
+    #   LIGHT → narrative data answers that sprinkle in background
+    #   SKIP  → deterministic data paths, clarify, etc.
+    _qa_for_tier = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
+    _retrieval_tier = _resolve_vector_retrieval_tier(
+        answer_kind=ctx.effective_answer_kind,
+        render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
+        is_conceptual=bool(ctx.is_conceptual),
+    )
+    ctx.vector_retrieval_tier = _retrieval_tier
+    if _retrieval_tier == VectorRetrievalTier.SKIP:
+        log.info(
+            "Skipping vector retrieval: tier=SKIP (answer_kind=%s render_style=%s)",
+            getattr(ctx.effective_answer_kind, "value", None),
+            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
+        )
+    elif _retrieval_tier == VectorRetrievalTier.LIGHT:
+        log.info(
+            "Vector retrieval: tier=LIGHT (answer_kind=%s render_style=%s)",
+            getattr(ctx.effective_answer_kind, "value", None),
+            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
+        )
 
     # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
-    if (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS) and not _skip_vector_retrieval:
+    if (
+        (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS)
+        and _retrieval_tier != VectorRetrievalTier.SKIP
+    ):
         t_stage = time.time()
         retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
         bundle = retrieve_vector_knowledge(
@@ -1105,6 +1256,7 @@ def process_query(
                 else VectorKnowledgeMode.shadow
             ),
             question_analysis=ctx.question_analysis,
+            tier=_retrieval_tier,
         )
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
@@ -1130,6 +1282,7 @@ def process_query(
             "stage_0_3_vector_knowledge",
             "validated",
             mode=retrieval_mode,
+            tier=_retrieval_tier.value,
             chunk_count=bundle.chunk_count,
             strategy=bundle.strategy.value,
             preferred_topics=bundle.filters.preferred_topics,
@@ -1144,6 +1297,7 @@ def process_query(
             "stage_0_3_vector_knowledge",
             t_stage,
             mode=retrieval_mode,
+            tier=_retrieval_tier.value,
             chunk_count=bundle.chunk_count,
             error=bool(bundle.error),
             strategy=bundle.strategy.value,

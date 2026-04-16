@@ -17,6 +17,7 @@ from contracts.vector_knowledge import (
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
     VectorRetrievalFilters,
+    VectorRetrievalTier,
 )
 
 if TYPE_CHECKING:
@@ -359,6 +360,9 @@ def _sparse_corpus_relaxed_similarity(
     return max(0.0, relaxed)
 
 
+_LIGHT_TIER_TOP_K = 2
+
+
 def retrieve_vector_knowledge(
     query_text: str,
     *,
@@ -366,14 +370,47 @@ def retrieve_vector_knowledge(
     question_analysis: Optional[QuestionAnalysis] = None,
     store: "KnowledgeVectorStore" | None = None,
     embedding_provider: "EmbeddingProvider" | None = None,
+    tier: VectorRetrievalTier = VectorRetrievalTier.FULL,
 ) -> VectorKnowledgeBundle:
-    """Fetch top vector chunks for a user query."""
+    """Fetch top vector chunks for a user query.
+
+    ``tier`` (Phase D) lets callers shrink or skip the search for query
+    shapes that won't consume the retrieved passages:
+
+    * ``FULL`` — default top-K + over-fetch multiplier (~top_k * 3).
+    * ``LIGHT`` — ``top_k=2`` and a tighter candidate pool (boost_terms
+      no longer expand the candidate_k to ``top_k * 6``).  Skips the
+      sparse-corpus similarity relaxation too — narrative data answers
+      only sprinkle in context, so pulling noisy low-similarity chunks
+      costs more prompt budget than it buys.
+    * ``SKIP`` — returns an empty bundle immediately without touching
+      the store or the embedder.
+    """
 
     filters = build_vector_filters(question_analysis, query_text=query_text)
-    top_k = _int_env("VECTOR_KNOWLEDGE_TOP_K", 6)
-    candidate_k = top_k * _int_env("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", 3)
-    if filters.boost_terms:
-        candidate_k = max(candidate_k, top_k * 6)
+
+    if tier == VectorRetrievalTier.SKIP:
+        return VectorKnowledgeBundle(
+            query=query_text,
+            retrieval_mode=retrieval_mode,
+            strategy=RetrievalStrategy.hybrid,
+            top_k=0,
+            chunk_count=0,
+            chunks=[],
+            filters=filters,
+        )
+
+    if tier == VectorRetrievalTier.LIGHT:
+        top_k = _LIGHT_TIER_TOP_K
+        candidate_k = top_k * _int_env("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", 3)
+        # Intentionally do NOT expand candidate_k on boost_terms at LIGHT —
+        # narrative data answers need a small, on-topic slice, not a noisy
+        # deep pull.
+    else:
+        top_k = _int_env("VECTOR_KNOWLEDGE_TOP_K", 6)
+        candidate_k = top_k * _int_env("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", 3)
+        if filters.boost_terms:
+            candidate_k = max(candidate_k, top_k * 6)
     min_similarity = _float_env("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
     try:
         if store is None:
@@ -416,7 +453,10 @@ def retrieve_vector_knowledge(
                 min_similarity=min_similarity,
             )
             filters = relaxed_filters
-        if not chunks:
+        # Sparse-corpus similarity relaxation: only at FULL tier. LIGHT skips
+        # the fallback — a narrative data answer would rather have no extra
+        # context than low-similarity noise in its summarizer prompt.
+        if not chunks and tier == VectorRetrievalTier.FULL:
             relaxed_similarity = _sparse_corpus_relaxed_similarity(
                 store,
                 current_min_similarity=min_similarity,

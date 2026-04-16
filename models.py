@@ -132,6 +132,19 @@ class QueryContext:
     add_trendlines: bool = False
     trendline_extend_to: Optional[str] = None
 
+    # --- shape routing (populated after Stage 0.2 regardless of analyzer state) ---
+    # Resolved answer shape for Stage 3 enrichment: authoritative analyzer value
+    # when present, deterministic fallback when the analyzer is absent/shadow/
+    # failed.  Stored as the enum ``AnswerKind`` (or ``None`` when even the
+    # fallback cannot decide).
+    effective_answer_kind: Optional[Any] = None
+
+    # Phase D: three-tier vector retrieval policy.  Set in Stage 0.3 from
+    # ``effective_answer_kind`` + ``render_style``.  ``VectorRetrievalTier``
+    # enum (FULL / LIGHT / SKIP).  Stored as ``Any`` to avoid a hard import
+    # cycle; pipeline owns the write, downstream stages can read.
+    vector_retrieval_tier: Optional[Any] = None
+
     # --- summarizer outputs ---
     summary: str = ""
     summary_source: str = ""

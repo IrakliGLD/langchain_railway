@@ -127,6 +127,64 @@ class TestBuildEvidencePlan:
         assert ctx.evidence_plan[0]["satisfied"] is False
         assert ctx.evidence_plan_source == "deterministic"
 
+    def test_list_tariffs_injects_regulated_plants_alias_from_entity_scope(self):
+        """F5: LIST+get_tariffs with empty entities must expand entity_scope alias."""
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            tools=[{"name": "get_tariffs", "score": 0.9, "reason": "tariff data"}],
+        )
+        payload["answer_kind"] = "list"
+        payload["entity_scope"] = "regulated_plants"
+        payload["raw_query"] = "which plants are regulated?"
+        payload["canonical_query_en"] = "Which plants are under tariff regulation?"
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        assert len(ctx.evidence_plan) == 1
+        primary = ctx.evidence_plan[0]
+        assert primary["tool_name"] == "get_tariffs"
+        assert primary["params"].get("entities") == ["regulated_plants"]
+
+    def test_list_tariffs_without_entity_scope_leaves_entities_empty(self):
+        """F5 guard: no entity_scope ⇒ no injection (validator will warn instead)."""
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            tools=[{"name": "get_tariffs", "score": 0.9, "reason": "tariff data"}],
+        )
+        payload["answer_kind"] = "list"
+        # entity_scope deliberately absent
+        payload["raw_query"] = "tariffs please"
+        payload["canonical_query_en"] = "Show tariffs."
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        primary = ctx.evidence_plan[0]
+        # No injection, still a single-tool plan; warning logged by validator.
+        assert not primary["params"].get("entities")
+
+    def test_comparison_answer_kind_blocks_single_tool_fast_path(self):
+        """F4: answer_kind=COMPARISON forces multi-evidence expansion even when query_type=data_retrieval."""
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            tools=[{"name": "get_prices", "score": 0.9, "reason": "price data"}],
+        )
+        payload["answer_kind"] = "comparison"
+        payload["raw_query"] = "compare balancing price in May 2024 vs May 2023"
+        payload["canonical_query_en"] = "Compare balancing price between May 2024 and May 2023."
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        # Without the gate, a data_retrieval query with no driver/correlation flags
+        # and a single tool candidate would short-circuit to one step.  The
+        # answer_kind=COMPARISON signal must promote it into the multi-step path.
+        assert len(ctx.evidence_plan) >= 1
+        # Validator runs only on the multi-evidence branch; plan is still valid
+        # even if only primary resolves (comparison strategy adds nothing when
+        # only one candidate is present) -- the important thing is we did NOT
+        # return early via the fast path.  Assert we went through validation by
+        # confirming the plan includes the primary step with source="planner".
+        assert ctx.evidence_plan[0]["source"] == "planner"
+
 
 class TestResolveToolParams:
     def test_expands_single_month_explanation_window_for_derived_metrics(self):

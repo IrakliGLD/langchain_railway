@@ -20,6 +20,7 @@ from core.llm import (
     llm_summarize_structured,
     SummaryEnvelope,
     classify_query_type,
+    get_query_focus,
     get_relevant_domain_knowledge,
 )
 from contracts.question_analysis import AnswerKind, RenderStyle
@@ -27,7 +28,7 @@ from contracts.evidence_frames import ForecastFrame, ScenarioFrame
 from agent.analyzer import _extract_forecast_horizon
 from agent.generic_renderer import render as generic_render
 from context import scrub_schema_mentions
-from config import PROVENANCE_MIN_COVERAGE
+from config import PIPELINE_MODE, PROVENANCE_MIN_COVERAGE
 from utils.metrics import metrics
 from utils.trace_logging import trace_detail
 
@@ -38,6 +39,7 @@ _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "seg
 _MAX_REFS_PER_TOKEN = 4
 _MAX_REFS_PER_CLAIM = 12
 _MAX_PROVENANCE_CITATIONS = 30
+_SUMMARY_ENERGY_DOMAIN_FOCUSES = {"balancing", "generation", "trade", "energy_security"}
 _REGULATED_TARIFF_ALIAS_COLUMN_PREFIXES = {
     "regulated_hpp": ("regulated_hpp_tariff_",),
     "regulated_new_tpp": ("regulated_new_tpp_tariff_", "gardabani_tpp_tariff_"),
@@ -737,6 +739,58 @@ def _build_data_summary_topic_preferences(ctx: QueryContext) -> Optional[List[st
     )
 
 
+def _resolve_summary_answer_kind(ctx: QueryContext) -> Optional[AnswerKind]:
+    """Return the authoritative answer_kind for Stage 4 policy decisions."""
+
+    if (
+        ctx.question_analysis is not None
+        and ctx.question_analysis_source == "llm_active"
+        and ctx.question_analysis.answer_kind is not None
+    ):
+        return ctx.question_analysis.answer_kind
+    return getattr(ctx, "effective_answer_kind", None)
+
+
+def _select_data_summary_domain_topics(
+    ctx: QueryContext,
+    answer_kind: Optional[AnswerKind],
+) -> Optional[List[str]]:
+    """Choose the narrowest topic slice that still matches the answer shape."""
+
+    if answer_kind in (AnswerKind.FORECAST, AnswerKind.SCENARIO):
+        return ["seasonal_patterns"]
+    return _build_data_summary_topic_preferences(ctx)
+
+
+def _should_load_data_summary_domain_knowledge(
+    ctx: QueryContext,
+    *,
+    routing_query: str,
+    answer_kind: Optional[AnswerKind],
+    query_type: str,
+    render_deterministic: bool,
+) -> bool:
+    """Apply the Chapter 14.7 Stage 4 domain-knowledge policy."""
+
+    if PIPELINE_MODE == "fast" or render_deterministic:
+        return False
+    if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
+        return False
+    if answer_kind == AnswerKind.CLARIFY:
+        return False
+    if answer_kind in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION):
+        return True
+    if answer_kind in (AnswerKind.FORECAST, AnswerKind.SCENARIO):
+        return True
+    if answer_kind in (AnswerKind.SCALAR, AnswerKind.LIST):
+        return False
+    if query_type in ("single_value", "list"):
+        return False
+
+    focus = get_query_focus(routing_query)
+    return focus in _SUMMARY_ENERGY_DOMAIN_FOCUSES or bool(_build_data_summary_topic_preferences(ctx))
+
+
 def _derive_data_summary_grounding_policy(ctx: QueryContext, query_type: str) -> str:
     """Choose the appropriate grounding policy for Stage 4 summaries."""
 
@@ -893,6 +947,8 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         and ctx.vector_knowledge_source == "vector_active"
         and ctx.vector_knowledge.chunk_count > 0
     )
+    if PIPELINE_MODE == "fast":
+        vector_evidence_active = False
     vector_preferred_topics = (
         list(ctx.vector_knowledge.filters.preferred_topics)
         if vector_evidence_active and ctx.vector_knowledge is not None
@@ -900,11 +956,13 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     )
     domain_background_topics = _merge_topic_preferences(vector_preferred_topics, preferred_topics)
     query_lower = routing_query.lower()
-    domain_knowledge = get_relevant_domain_knowledge(
-        routing_query,
-        use_cache=False,
-        preferred_topics=domain_background_topics if vector_evidence_active else preferred_topics,
-    )
+    domain_knowledge = ""
+    if PIPELINE_MODE != "fast":
+        domain_knowledge = get_relevant_domain_knowledge(
+            routing_query,
+            use_cache=False,
+            preferred_topics=domain_background_topics if vector_evidence_active else preferred_topics,
+        )
     if analyzer_active and preferred_topics:
         log.info("Using active question-analyzer topics for conceptual answer: %s", preferred_topics)
     if vector_evidence_active and vector_preferred_topics:
@@ -994,7 +1052,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             "Active vector evidence present for conceptual answer; preserving topic-filtered domain knowledge as secondary background"
         )
 
-    vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active else ""
+    vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active and PIPELINE_MODE != "fast" else ""
     domain_knowledge_for_summary = domain_knowledge
     if vector_evidence_active and len(domain_knowledge_for_summary) > 4000:
         domain_knowledge_for_summary = domain_knowledge_for_summary[:4000]
@@ -1759,9 +1817,16 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             and ctx.question_analysis_source == "llm_active"
             and ctx.question_analysis.render_style == RenderStyle.DETERMINISTIC
         )
+        answer_kind = _resolve_summary_answer_kind(ctx)
         domain_knowledge = ""
-        if not render_deterministic and query_type not in ("single_value", "list"):
-            preferred_topics = _build_data_summary_topic_preferences(ctx)
+        if _should_load_data_summary_domain_knowledge(
+            ctx,
+            routing_query=routing_query,
+            answer_kind=answer_kind,
+            query_type=query_type,
+            render_deterministic=render_deterministic,
+        ):
+            preferred_topics = _select_data_summary_domain_topics(ctx, answer_kind)
             domain_knowledge = get_relevant_domain_knowledge(
                 routing_query, use_cache=False, preferred_topics=preferred_topics,
             )
@@ -1770,7 +1835,9 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_domain_knowledge = domain_knowledge
         vector_knowledge = (
             ctx.vector_knowledge_prompt
-            if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
+            if PIPELINE_MODE != "fast"
+            and ctx.vector_knowledge is not None
+            and ctx.vector_knowledge_source == "vector_active"
             else ""
         )
 

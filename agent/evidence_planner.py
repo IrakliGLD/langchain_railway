@@ -25,6 +25,7 @@ from contracts.question_analysis import (
 from models import QueryContext
 from agent.planner import resolve_tool_params
 from agent.tools import execute_tool
+from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
 from agent.tools.types import ToolInvocation
 from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
 from analysis.system_quantities import normalize_tool_dataframe
@@ -33,6 +34,15 @@ log = logging.getLogger("Enai")
 
 # Score threshold for a secondary candidate tool to be included in the plan.
 _SECONDARY_TOOL_MIN_SCORE = 0.50
+
+# Answer shapes that inherently need multi-source or enumerated evidence.
+# These block the single-tool fast path regardless of query_type, because the
+# shape signal (COMPARISON etc.) is a stronger commitment than query_type.
+_SHAPE_BLOCKS_FAST_PATH = frozenset({
+    AnswerKind.COMPARISON,
+    AnswerKind.FORECAST,
+    AnswerKind.SCENARIO,
+})
 
 _SHARE_THRESHOLD_PATTERNS = (
     r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+\d+(?:\.\d+)?\s*%",
@@ -116,6 +126,39 @@ def _correlation_needs_generation_mix(
     return False
 
 
+def _repair_list_tariff_entities(
+    qa: QuestionAnalysis,
+    primary_tool: str,
+    primary_params: Dict[str, Any],
+) -> None:
+    """Inject the entity alias from entity_scope when a LIST plan would otherwise run empty.
+
+    ``get_tariffs`` falls back to ``DEFAULT_TARIFF_ENTITY_ALIASES`` (a narrow
+    12-plant subset) when called with no entities.  For a LIST question such
+    as "which plants are regulated?" that default silently omits three regulated
+    plants.  If the analyzer emitted an ``entity_scope`` that matches a known
+    alias (e.g. ``regulated_plants``), promote it into ``params.entities`` so
+    the tool returns the complete enumeration.
+    """
+    if qa.answer_kind != AnswerKind.LIST:
+        return
+    if primary_tool != ToolName.GET_TARIFFS.value:
+        return
+    existing = primary_params.get("entities") or []
+    if existing:
+        return
+    scope = (qa.entity_scope or "").strip().lower()
+    if not scope:
+        return
+    if scope not in TARIFF_ENTITY_ALIASES:
+        return
+    primary_params["entities"] = [scope]
+    log.info(
+        "LIST plan repair: injected entities=[%s] for get_tariffs (entity_scope alias).",
+        scope,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 0.4: Build evidence plan
 # ---------------------------------------------------------------------------
@@ -176,6 +219,11 @@ def _expand_evidence_steps(
     if primary_params is None:
         return []
 
+    # Repair LIST-shape plans whose primary params lack the full entity set.
+    # Without this, "which plants are regulated?" would run get_tariffs with
+    # DEFAULT_TARIFF_ENTITY_ALIASES (12 plants) and silently omit three.
+    _repair_list_tariff_entities(qa, top_name, primary_params)
+
     primary_step: Dict[str, Any] = {
         "role": EvidenceRole.PRIMARY_DATA.value,
         "tool_name": top_name,
@@ -185,12 +233,16 @@ def _expand_evidence_steps(
     }
 
     # --- Single-tool fast path ---
+    # Shape signals (answer_kind COMPARISON/FORECAST/SCENARIO) inherently need
+    # richer evidence than a single primary tool, so they force the multi-step
+    # expansion even when query_type and driver/correlation flags say otherwise.
     if (
         not explicit_multi
         and not needs_driver
         and not needs_correlation
         and query_type != QueryType.COMPARISON
         and not threshold_share_with_prices
+        and qa.answer_kind not in _SHAPE_BLOCKS_FAST_PATH
     ):
         return [primary_step]
 
@@ -504,6 +556,17 @@ def _validate_plan_against_answer_kind(
 
     elif answer_kind == AnswerKind.LIST:
         entities = primary_params.get("entities") or []
+        # ``get_tariffs`` is only "inherently enumerated" when called with an
+        # explicit entity set; with an empty list it falls back to a narrow
+        # default that silently omits some regulated plants.  Flag that case
+        # so the planner's LIST-repair (or missing entity_scope) is visible.
+        if primary_tool == ToolName.GET_TARIFFS.value and not entities:
+            log.warning(
+                "Plan validation: answer_kind=LIST, tool=get_tariffs, no entities "
+                "and no entity_scope alias to expand. Result will use default "
+                "subset. query=%.80s",
+                raw_query,
+            )
         # These tools naturally produce entity-enumerated rows.
         inherently_enumerated = primary_tool in {
             ToolName.GET_BALANCING_COMPOSITION.value,

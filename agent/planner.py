@@ -21,10 +21,12 @@ from core.llm import (
     llm_generate_plan_and_sql,
     get_relevant_domain_knowledge,
     llm_analyze_question,
+    build_question_analyzer_prompt_validation_artifacts,
 )
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
 from utils.trace_logging import trace_detail
+from config import ENABLE_TRACE_DEBUG_ARTIFACTS
 from agent.aggregation import detect_aggregation_intent
 from agent.tools.types import ToolInvocation
 from agent.router import (
@@ -1780,6 +1782,13 @@ def prepare_context(ctx: QueryContext) -> QueryContext:
 def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
     """Stage 0.2: Run structured question analysis and stamp its source."""
 
+    prompt_validation = None
+    if source == "llm_shadow" and ENABLE_TRACE_DEBUG_ARTIFACTS:
+        prompt_validation = build_question_analyzer_prompt_validation_artifacts(
+            ctx.query,
+            ctx.conversation_history,
+        )
+
     try:
         # Run the structured analyzer once, then patch obvious misroutes with deterministic guardrails.
         analyzed = llm_analyze_question(
@@ -1892,6 +1901,7 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             "artifact",
             debug=True,
             question_analysis=ctx.question_analysis,
+            prompt_validation=prompt_validation,
         )
     except Exception as exc:
         ctx.question_analysis = None
@@ -1905,6 +1915,7 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             "error",
             source=source,
             error=str(exc),
+            prompt_validation=prompt_validation,
         )
     return ctx
 

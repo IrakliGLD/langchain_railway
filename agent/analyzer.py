@@ -1816,15 +1816,24 @@ def enrich(ctx: QueryContext) -> QueryContext:
             ctx.correlation_results, ctx.df (possibly enriched), ctx.add_trendlines,
             ctx.trendline_extend_to
     """
+    # Defensive backfill of `effective_answer_kind` so enrich() stays robust
+    # when invoked outside the pipeline orchestrator (tests, tool-runner
+    # entry points, etc.).  Pipeline.py populates this authoritatively after
+    # Stage 0.2; here we fall back to the active analyzer's emitted value if
+    # it's still unset.
+    if ctx.effective_answer_kind is None and ctx.has_authoritative_question_analysis:
+        ctx.effective_answer_kind = ctx.question_analysis.answer_kind
+
     # --- Share resolution ---
-    # Structural signal: analyzer indicates share/composition intent or tool is get_balancing_composition.
-    if ctx.has_authoritative_question_analysis:
-        share_query_detected = (
-            ctx.analyzer_indicates_share_intent
-            or ctx.tool_name == "get_balancing_composition"
-        )
-    else:
-        share_query_detected = False
+    # Structural signal: analyzer indicates share/composition intent or tool is
+    # get_balancing_composition.  `analyzer_indicates_share_intent` internally
+    # gates on authoritative QA, so the tool_name branch remains the analyzer-
+    # absent fallback path (router / evidence planner may still pick the
+    # composition tool via keyword heuristics — F1).
+    share_query_detected = (
+        ctx.analyzer_indicates_share_intent
+        or ctx.tool_name == "get_balancing_composition"
+    )
     share_df_for_summary = ctx.df
 
     if share_query_detected:
@@ -1971,10 +1980,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"⚠️ Correlation analysis failed: {e}")
 
     # --- Forecast mode (CAGR) ---
-    _forecast_detected = (
-        ctx.has_authoritative_question_analysis
-        and ctx.question_analysis.answer_kind == AnswerKind.FORECAST
-    )
+    # Shape-gated on the single source of truth `ctx.effective_answer_kind`
+    # populated in pipeline.py after Stage 0.2.  This keeps forecast
+    # enrichment alive when the analyzer is shadow/failed (F1).
+    _forecast_detected = ctx.effective_answer_kind == AnswerKind.FORECAST
     if _forecast_detected and not ctx.df.empty:
         try:
             ctx.df, _forecast_note = _generate_cagr_forecast(ctx.df, ctx.query)
@@ -1984,10 +1993,9 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Forecast generation failed: {_e}")
 
     # --- Why mode (causal reasoning) ---
-    _why_detected = (
-        ctx.has_authoritative_question_analysis
-        and ctx.question_analysis.answer_kind == AnswerKind.EXPLANATION
-    )
+    # Uses `ctx.effective_answer_kind` so shadow/failed analyzer runs still
+    # fire explanation enrichment via keyword-derived fallback (F1).
+    _why_detected = ctx.effective_answer_kind == AnswerKind.EXPLANATION
     if _why_detected and not ctx.df.empty:
         try:
             _build_why_context(ctx)
@@ -2009,10 +2017,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
-    ctx.add_trendlines = (
-        ctx.has_authoritative_question_analysis
-        and ctx.question_analysis.answer_kind == AnswerKind.FORECAST
-    )
+    # Mirrors the forecast branch above: gates on `effective_answer_kind` so
+    # keyword-derived forecast queries also get trendline extension on
+    # analyzer failure (F1).
+    ctx.add_trendlines = ctx.effective_answer_kind == AnswerKind.FORECAST
 
     if ctx.add_trendlines:
         year_matches = re.findall(r'\b(20[2-9][0-9])\b', ctx.query)

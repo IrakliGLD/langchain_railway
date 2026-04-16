@@ -76,6 +76,13 @@ SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "").strip() or None
 _raw_tb = os.getenv("ROUTER_THINKING_BUDGET", "2048").strip()
 ROUTER_THINKING_BUDGET: int | None = int(_raw_tb) if _raw_tb else None
 
+# Pipeline effort mode (Phase E / 14.9 steps 9-10).
+# ``deep`` preserves the current high-quality defaults.
+# ``fast`` keeps the same contract shape but reduces prompt/retrieval effort.
+PIPELINE_MODE = (os.getenv("PIPELINE_MODE", "deep").strip().lower() or "deep")
+if PIPELINE_MODE not in {"deep", "fast"}:
+    raise RuntimeError("Invalid PIPELINE_MODE. Expected one of: deep, fast")
+
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
@@ -98,6 +105,8 @@ AGENT_TOOL_PREVIEW_MAX_CHARS = max(200, int(os.getenv("AGENT_TOOL_PREVIEW_MAX_CH
 AGENT_TOOL_TIMEOUT_SECONDS = max(1, int(os.getenv("AGENT_TOOL_TIMEOUT_SECONDS", "15")))
 AGENT_TOOL_RETRY_ATTEMPTS = max(1, int(os.getenv("AGENT_TOOL_RETRY_ATTEMPTS", "2")))
 PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "45000")))
+FAST_MODE_ANALYZER_BUDGET = max(1500, int(os.getenv("FAST_MODE_ANALYZER_BUDGET", "20000")))
+FAST_MODE_SUMMARIZER_BUDGET = max(1500, int(os.getenv("FAST_MODE_SUMMARIZER_BUDGET", "15000")))
 ROUTER_ENABLE_SEMANTIC_FALLBACK = os.getenv("ROUTER_ENABLE_SEMANTIC_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
 ROUTER_SEMANTIC_MIN_SCORE = min(
     1.0,

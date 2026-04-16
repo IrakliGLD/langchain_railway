@@ -88,6 +88,27 @@ _FILTER_OPS = {
     FilterOperator.EQ: lambda v, t: v == t,
 }
 
+# Contract-vocabulary metric names (analyzer emits these in filter.metric) mapped
+# to the set of frame-row metrics they match.  Frame rows use display-oriented
+# names like "balancing_price"; the analyzer emits tool params vocabulary
+# ("balancing").  Without this mapping, exact-equality comparison silently
+# drops every threshold filter.
+_CONTRACT_METRIC_ALIASES = {
+    "balancing": {"balancing_price"},
+    "deregulated": {"deregulated_price"},
+    "guaranteed_capacity": {"guaranteed_capacity_price"},
+    "exchange_rate": {"exchange_rate"},
+}
+
+
+def _metric_matches(row_metric: str, contract_metric: str) -> bool:
+    """Return True if row_metric matches contract_metric (empty key matches all)."""
+    if not contract_metric:
+        return True
+    if row_metric == contract_metric:
+        return True
+    return row_metric in _CONTRACT_METRIC_ALIASES.get(contract_metric, set())
+
 
 def _apply_filter(rows: list[dict], filter_cond: Optional[FilterCondition]) -> list[dict]:
     """Apply a value-based filter to observation rows (after fetch, before framing)."""
@@ -102,11 +123,11 @@ def _apply_filter(rows: list[dict], filter_cond: Optional[FilterCondition]) -> l
     for row in rows:
         val = row.get("value")
         row_metric = row.get("metric", "")
-        if val is not None and (row_metric == metric_key or not metric_key):
-            if op_fn(val, threshold):
+        if _metric_matches(row_metric, metric_key):
+            if val is not None and op_fn(val, threshold):
                 filtered.append(row)
-        elif row_metric != metric_key:
-            # Keep rows for other metrics (filter applies only to specified metric)
+        else:
+            # Keep rows for other metrics (filter applies only to specified metric).
             filtered.append(row)
     return filtered
 

@@ -24,6 +24,27 @@ class RetrievalStrategy(str, Enum):
     hybrid = "hybrid"
 
 
+class VectorRetrievalTier(str, Enum):
+    """Retrieval effort tier — how aggressively to search vector knowledge.
+
+    Chosen upstream from ``answer_kind`` + ``render_style`` so the retrieval
+    cost tracks what the final answer will actually use:
+
+    * ``FULL`` — default top-K + full candidate pool. For knowledge and
+      explanation answers that consume the retrieved passages directly.
+    * ``LIGHT`` — ``top_k=2``, reduced candidate pool, no re-rank.  Enough
+      context for narrative data answers that only sprinkle in background
+      definitions.
+    * ``SKIP`` — do not call the vector store at all.  Deterministic data
+      paths bypass the LLM summarizer, and clarify paths have no data to
+      ground.
+    """
+
+    FULL = "full"
+    LIGHT = "light"
+    SKIP = "skip"
+
+
 # Stored document and chunk records mirror the Supabase persistence model.
 class VectorDocumentRecord(BaseModel):
     """Metadata for a source document stored in Supabase."""

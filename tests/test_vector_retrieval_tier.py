@@ -92,6 +92,16 @@ def test_tier_fallback_non_conceptual_without_qa_is_light():
     assert _resolve(None, None, is_conceptual=False) == VectorRetrievalTier.LIGHT
 
 
+def test_fast_mode_forces_skip_regardless_of_answer_kind(monkeypatch):
+    from agent import pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "PIPELINE_MODE", "fast")
+
+    assert _resolve(AnswerKind.KNOWLEDGE, RenderStyle.NARRATIVE) == VectorRetrievalTier.SKIP
+    assert _resolve(AnswerKind.EXPLANATION, RenderStyle.NARRATIVE) == VectorRetrievalTier.SKIP
+    assert _resolve(AnswerKind.SCALAR, RenderStyle.NARRATIVE) == VectorRetrievalTier.SKIP
+
+
 # ---------------------------------------------------------------------------
 # retrieve_vector_knowledge(tier=...) — runtime behavior
 # ---------------------------------------------------------------------------
