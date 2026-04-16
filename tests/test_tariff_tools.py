@@ -103,6 +103,28 @@ def test_get_tariffs_defaults_to_exact_plant_aliases(monkeypatch):
     assert "grouped_old_tpp_tariff_gel" not in captured["sql"]
 
 
+def test_get_tariffs_uses_limited_date_spine_and_filtered_tariff_cte(monkeypatch):
+    captured = {}
+
+    def _fake_run_text_query(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return None, [], []
+
+    monkeypatch.setattr(tariff_tools, "run_text_query", _fake_run_text_query)
+
+    tariff_tools.get_tariffs(currency="both")
+
+    assert "WITH dates AS (" in captured["sql"]
+    assert "filtered_tariffs AS (" in captured["sql"]
+    assert "JOIN dates d ON d.date = src.date" in captured["sql"]
+    assert "LEFT JOIN filtered_tariffs t ON t.date = d.date" in captured["sql"]
+    assert "GROUP BY d.date" in captured["sql"]
+    assert "WHERE t.date = d.date AND t.entity =" not in captured["sql"]
+    assert "LIMIT :limit" in captured["sql"]
+    assert any(key.startswith("selected_entity_") for key in captured["params"])
+
+
 def test_get_tariffs_uses_exact_entity_names_for_regulated_hpp(monkeypatch):
     captured = {}
 

@@ -186,14 +186,26 @@ def get_tariffs(
     direction = get_sort_direction(start_date, end_date)
     requested_currencies = ("gel", "usd") if currency == "both" else (currency,)
 
-    # Each selected alias expands into a correlated subquery against the per-date tariff table.
-    def _in_clause(param_prefix: str, entities: List[str]) -> str:
+    # Build bind-friendly predicates once so the SQL can scan the tariff view
+    # once per request instead of issuing one correlated lookup per alias/date.
+    def _bind_entities(param_prefix: str, entities: List[str]) -> List[str]:
         bind_names = []
         for index, entity in enumerate(entities, start=1):
             bind_name = f"{param_prefix}_{index}"
             params[bind_name] = entity
-            bind_names.append(f":{bind_name}")
-        return ", ".join(bind_names)
+            bind_names.append(bind_name)
+        return bind_names
+
+    def _in_predicate(
+        param_prefix: str,
+        entities: List[str],
+        *,
+        entity_col: str = "t.entity",
+    ) -> str:
+        bind_names = _bind_entities(param_prefix, entities)
+        if not bind_names:
+            return "1 = 0"
+        return f"{entity_col} IN ({', '.join(f':{bind_name}' for bind_name in bind_names)})"
 
     def _dated_entity_predicate(param_prefix: str, entities: List[str]) -> str:
         clauses = []
@@ -215,6 +227,13 @@ def get_tariffs(
         "end_date": end_date,
         "limit": limit,
     }
+    relevant_entities = list(
+        dict.fromkeys(
+            entity
+            for alias in selected
+            for entity in TARIFF_ENTITY_ALIASES[alias]
+        )
+    )
 
     for alias, column_alias in _SINGLE_TARIFF_ALIAS_COLUMNS.items():
         if alias not in selected:
@@ -222,68 +241,56 @@ def get_tariffs(
         bind_name = f"{column_alias}_entity"
         params[bind_name] = TARIFF_ENTITY_ALIASES[alias][0]
         for selected_currency in requested_currencies:
-            tariff_col = f"tariff_{selected_currency}"
             select_parts.append(
-                f"""(SELECT t.{tariff_col}
-     FROM tariff_with_usd t
-     WHERE t.date = d.date AND t.entity = :{bind_name}
-     LIMIT 1) AS {column_alias}_tariff_{selected_currency}"""
+                f"""MAX(CASE
+        WHEN t.entity = :{bind_name} THEN t.tariff_{selected_currency}
+    END) AS {column_alias}_tariff_{selected_currency}"""
             )
     if "old_tpp_group" in selected:
-        old_tpp_in_clause = _in_clause("old_tpp_entity", TARIFF_ENTITY_ALIASES["old_tpp_group"])
+        old_tpp_predicate = _in_predicate("old_tpp_entity", TARIFF_ENTITY_ALIASES["old_tpp_group"])
         for selected_currency in requested_currencies:
-            tariff_col = f"tariff_{selected_currency}"
             select_parts.append(
-                f"""(SELECT AVG(t.{tariff_col})
-     FROM tariff_with_usd t
-     WHERE t.date = d.date
-       AND t.entity IN ({old_tpp_in_clause})) AS grouped_old_tpp_tariff_{selected_currency}"""
+                f"""AVG(CASE
+        WHEN {old_tpp_predicate} THEN t.tariff_{selected_currency}
+    END) AS grouped_old_tpp_tariff_{selected_currency}"""
             )
     if "regulated_hpp" in selected:
         regulated_hpp_predicate = _dated_entity_predicate("regulated_hpp_entity", TARIFF_ENTITY_ALIASES["regulated_hpp"])
         for selected_currency in requested_currencies:
-            tariff_col = f"tariff_{selected_currency}"
             select_parts.append(
-                f"""(SELECT AVG(t.{tariff_col})
-     FROM tariff_with_usd t
-     WHERE t.date = d.date
-       AND ({regulated_hpp_predicate})) AS regulated_hpp_tariff_{selected_currency}"""
+                f"""AVG(CASE
+        WHEN {regulated_hpp_predicate} THEN t.tariff_{selected_currency}
+    END) AS regulated_hpp_tariff_{selected_currency}"""
             )
     if "regulated_new_tpp" in selected:
         params["gardabani_entity"] = GARDABANI_ENTITY
         for selected_currency in requested_currencies:
-            tariff_col = f"tariff_{selected_currency}"
             select_parts.append(
-                f"""(SELECT t.{tariff_col}
-     FROM tariff_with_usd t
-     WHERE t.date = d.date AND t.entity = :gardabani_entity
-     LIMIT 1) AS regulated_new_tpp_tariff_{selected_currency}"""
+                f"""MAX(CASE
+        WHEN t.entity = :gardabani_entity THEN t.tariff_{selected_currency}
+    END) AS regulated_new_tpp_tariff_{selected_currency}"""
             )
     if "regulated_old_tpp" in selected:
-        regulated_old_tpp_in_clause = _in_clause("regulated_old_tpp_entity", TARIFF_ENTITY_ALIASES["regulated_old_tpp"])
+        regulated_old_tpp_predicate = _in_predicate("regulated_old_tpp_entity", TARIFF_ENTITY_ALIASES["regulated_old_tpp"])
         for selected_currency in requested_currencies:
-            tariff_col = f"tariff_{selected_currency}"
             select_parts.append(
-                f"""(SELECT AVG(t.{tariff_col})
-     FROM tariff_with_usd t
-     WHERE t.date = d.date
-       AND t.entity IN ({regulated_old_tpp_in_clause})) AS regulated_old_tpp_tariff_{selected_currency}"""
+                f"""AVG(CASE
+        WHEN {regulated_old_tpp_predicate} THEN t.tariff_{selected_currency}
+    END) AS regulated_old_tpp_tariff_{selected_currency}"""
             )
     if "regulated_plants" in selected:
         regulated_plants_predicate = _dated_entity_predicate("regulated_plants_entity", TARIFF_ENTITY_ALIASES["regulated_plants"])
         for selected_currency in requested_currencies:
-            tariff_col = f"tariff_{selected_currency}"
             select_parts.append(
-                f"""(SELECT AVG(t.{tariff_col})
-     FROM tariff_with_usd t
-     WHERE t.date = d.date
-       AND ({regulated_plants_predicate})) AS regulated_plants_tariff_{selected_currency}"""
+                f"""AVG(CASE
+        WHEN {regulated_plants_predicate} THEN t.tariff_{selected_currency}
+    END) AS regulated_plants_tariff_{selected_currency}"""
             )
 
     if not select_parts:
         raise ValueError("No tariff entities selected")
 
-    # The outer date spine keeps all requested tariff groups aligned on one timeline.
+    # Limit the date spine first, then read only the entities needed for this request.
     select_clause = ",\n    ".join(select_parts)
     where_parts = []
     if start_date:
@@ -291,19 +298,36 @@ def get_tariffs(
     if end_date:
         where_parts.append("date <= :end_date")
     where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    filtered_entity_predicate = _in_predicate("selected_entity", relevant_entities, entity_col="src.entity")
+    projected_tariff_cols = ",\n        ".join(
+        f"src.tariff_{selected_currency}"
+        for selected_currency in requested_currencies
+    )
 
     sql = f"""
 WITH dates AS (
     SELECT DISTINCT date
     FROM tariff_with_usd
     {where_clause}
+    ORDER BY date {direction}
+    LIMIT :limit
+),
+filtered_tariffs AS (
+    SELECT
+        src.date,
+        src.entity,
+        {projected_tariff_cols}
+    FROM tariff_with_usd src
+    JOIN dates d ON d.date = src.date
+    WHERE {filtered_entity_predicate}
 )
 SELECT
     d.date,
     {select_clause}
 FROM dates d
+LEFT JOIN filtered_tariffs t ON t.date = d.date
+GROUP BY d.date
 ORDER BY d.date {direction}
-LIMIT :limit
 """.strip()
 
     return run_text_query(sql, params)
