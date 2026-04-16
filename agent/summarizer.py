@@ -24,7 +24,7 @@ from core.llm import (
     get_relevant_domain_knowledge,
 )
 from contracts.question_analysis import AnswerKind, RenderStyle
-from contracts.evidence_frames import ForecastFrame, ScenarioFrame
+from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ScenarioFrame
 from agent.analyzer import _extract_forecast_horizon
 from agent.generic_renderer import render as generic_render
 from context import scrub_schema_mentions
@@ -92,6 +92,13 @@ _REGULATED_TARIFF_ALIAS_GROUP_LABELS = {
     "gpower_tpp": "G-POWER",
     "old_tpp_group": "Old TPP Group",
 }
+_AGGREGATE_TARIFF_LIST_ALIASES = frozenset({
+    "regulated_hpp",
+    "regulated_new_tpp",
+    "regulated_old_tpp",
+    "regulated_plants",
+    "old_tpp_group",
+})
 _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES = {
     "enguri hpp": "Enguri HPP",
     "vardnili hpp": "Vardnili HPP",
@@ -136,6 +143,20 @@ _ANALYTICAL_ANSWER_KINDS = frozenset({
     AnswerKind.SCENARIO,
     AnswerKind.COMPARISON,
 })
+_UNSUPPORTED_ABSENCE_PATTERNS = (
+    re.compile(r"\bdid not have\b[^.\n]{0,120}\b(?:recorded|available|present)\b", re.IGNORECASE),
+    re.compile(r"\bwere not\b[^.\n]{0,80}\b(?:recorded|available|present)\b", re.IGNORECASE),
+    re.compile(r"\bno\b[^.\n]{0,80}\b(?:recorded|available|present)\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+(?:recorded|available|present)\b", re.IGNORECASE),
+)
+_SAFE_LIMITED_AVAILABILITY_PHRASES = (
+    "not established from the provided data",
+    "not shown in the provided data",
+    "not visible in the provided data",
+    "the provided data does not establish",
+    "the retrieved rows do not establish",
+    "this result set does not establish",
+)
 
 
 # Numeric grounding helpers normalize every number before provenance matching.
@@ -303,6 +324,47 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     # that legitimately extend beyond raw data; use a lower threshold.
     min_ratio = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE else 0.9
     return match_ratio >= min_ratio
+
+
+def _has_unsupported_absence_claims(summary: str) -> bool:
+    text = str(summary or "").strip()
+    if not text:
+        return False
+
+    text_lower = text.lower()
+    if any(phrase in text_lower for phrase in _SAFE_LIMITED_AVAILABILITY_PHRASES):
+        return False
+
+    return any(pattern.search(text) for pattern in _UNSUPPORTED_ABSENCE_PATTERNS)
+
+
+def _apply_absence_claim_guardrail(ctx: QueryContext) -> None:
+    """Replace unsupported absence claims with a conservative fallback.
+
+    Blank or omitted cells in a non-empty result set do not prove that an
+    entity-period truly lacked a value. This guardrail only applies to LLM
+    narrative outputs; deterministic renderers already preserve the evidence
+    shape directly.
+    """
+    if ctx.summary_source not in {"structured_summary", "legacy_text_fallback"}:
+        return
+    if not ((ctx.df is not None and not ctx.df.empty) or ctx.rows):
+        return
+    if not _has_unsupported_absence_claims(ctx.summary):
+        return
+
+    log.warning(
+        "Summary contained unsupported absence claims; replacing with conservative fallback."
+    )
+    ctx.summary = (
+        "I could not safely determine from the provided table whether omitted or blank values "
+        "indicate true absence or incomplete evidence coverage. Please narrow the period or ask "
+        "for a specific entity/date slice for a fully grounded answer."
+    )
+    ctx.summary_source = "absence_claim_guardrail"
+    ctx.summary_claims = []
+    ctx.summary_citations = ["absence_claim_guardrail"]
+    ctx.summary_confidence = 0.2
 
 
 def _serialize_scalar(value: Any) -> Any:
@@ -1683,10 +1745,34 @@ def _try_generic_renderer(ctx: QueryContext) -> str | None:
     if qa.answer_kind is None:
         return None
 
+    selected_tariff_aliases = {
+        str(alias).strip()
+        for alias in (ctx.tool_params.get("entities") or [])
+        if str(alias).strip()
+    }
+    evidence_frame = getattr(ctx, "evidence_frame", None)
+    if isinstance(evidence_frame, EntitySetFrame):
+        selected_tariff_aliases.update(
+            str(row.get("entity_id") or "").strip()
+            for row in evidence_frame.rows
+            if str(row.get("entity_id") or "").strip()
+        )
+
+    if (
+        qa.answer_kind == AnswerKind.LIST
+        and (ctx.tool_name or "").strip() == "get_tariffs"
+        and any(alias in _AGGREGATE_TARIFF_LIST_ALIASES for alias in selected_tariff_aliases)
+    ):
+        # Keep the existing regulated-plant expansion path for grouped tariff
+        # aliases. The generic renderer is used for exact-entity snapshot lists,
+        # while aggregated aliases still need the domain mapping in the direct
+        # regulated-tariff formatter.
+        return None
+
     # For SCENARIO and FORECAST, build typed frames from Stage 3 enrichment
     # data.  These answer_kinds are inherently deterministic when evidence is
     # available, so they bypass the render_style gate.
-    frame = getattr(ctx, "evidence_frame", None)
+    frame = evidence_frame
     if qa.answer_kind == AnswerKind.SCENARIO:
         scenario_frame = _build_scenario_frame(ctx)
         if scenario_frame is not None and not scenario_frame.is_empty():
@@ -1764,14 +1850,10 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     if _generic_answer is not None:
         ctx.summary = _generic_answer
         ctx.summary_source = "generic_renderer"
-        # SCENARIO/FORECAST values are computed by Stage 3 enrichment, not
-        # present in provenance rows.  Skip claim extraction so the
-        # provenance gate doesn't reject derived values.
-        ak = ctx.question_analysis.answer_kind if ctx.question_analysis else None
-        if ak in (AnswerKind.SCENARIO, AnswerKind.FORECAST):
-            ctx.summary_claims = []
-        else:
-            ctx.summary_claims = _derive_claims_from_text(ctx.summary)
+        # The generic renderer is already deterministic over the evidence frame.
+        # Treat it as a direct-evidence answer, not as narrative prose that must
+        # pass the LLM claim/provenance gate.
+        ctx.summary_claims = []
         ctx.summary_citations = ["generic_renderer"]
         ctx.summary_confidence = 0.97
         metrics.log_deterministic_skip("generic_renderer")
@@ -1924,6 +2006,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             ctx.summary_confidence = 0.5
 
     ctx.summary = scrub_schema_mentions(ctx.summary)
+    _apply_absence_claim_guardrail(ctx)
     trace_detail(
         log,
         ctx,

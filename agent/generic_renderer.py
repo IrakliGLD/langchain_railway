@@ -7,6 +7,7 @@ specialized.
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from typing import Optional
 
@@ -108,6 +109,9 @@ def _render_entity_set_list(frame: EntitySetFrame, entity_scope: Optional[str] =
     if frame.is_empty():
         return None
 
+    if any((row.get("attributes") or {}).get("values") for row in frame.rows):
+        return _render_entity_set_snapshot_list(frame, entity_scope)
+
     # Group by membership_reason
     groups: dict[str, list[str]] = {}
     for row in frame.rows:
@@ -128,10 +132,75 @@ def _render_entity_set_list(frame: EntitySetFrame, entity_scope: Optional[str] =
     return "\n".join(lines)
 
 
+def _render_entity_set_snapshot_list(frame: EntitySetFrame, entity_scope: Optional[str] = None) -> str | None:
+    lines = []
+    if entity_scope:
+        lines.append(f"**{entity_scope.replace('_', ' ').title()}:**")
+
+    periods = []
+    for row in frame.rows:
+        attrs = row.get("attributes") or {}
+        period = attrs.get("period")
+        if period and period not in periods:
+            periods.append(period)
+    if len(periods) == 1:
+        lines.append(f"**Period:** {_format_period_label(periods[0])}")
+
+    for row in frame.rows:
+        label = row.get("entity_label", row.get("entity_id", "?"))
+        attrs = row.get("attributes") or {}
+        values = attrs.get("values") or []
+        if values:
+            lines.append(f"- {label}: {_format_entity_values(values)}")
+        else:
+            lines.append(f"- {label}")
+
+    return "\n".join(lines)
+
+
+def _format_entity_values(values: list[dict]) -> str:
+    formatted = []
+    distinct_labels = {str(v.get("label") or "").strip() for v in values if v.get("label")}
+    show_metric_label = len(distinct_labels) > 1
+    for entry in values:
+        val = _fmt_number(entry.get("value"))
+        unit = str(entry.get("unit") or "").strip()
+        label = str(entry.get("label") or "").strip().replace("_", " ")
+        sub_period = _format_period_label(str(entry.get("sub_period") or "").strip())
+        value_text = " ".join(part for part in (val, unit) if part).strip()
+        if sub_period:
+            value_text = f"{sub_period}: {value_text}" if value_text else sub_period
+        if label and show_metric_label:
+            formatted.append(f"{label.title()}: {value_text}")
+        else:
+            formatted.append(value_text)
+    return "; ".join(part for part in formatted if part)
+
+
+def _format_period_label(raw_period: str) -> str:
+    period = str(raw_period or "").strip()
+    if not period:
+        return ""
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m", "%Y"):
+        try:
+            dt = datetime.strptime(period, fmt)
+            if fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+                return f"{dt.strftime('%B')} {dt.day}, {dt.year}"
+            if fmt == "%Y":
+                return dt.strftime("%Y")
+            return dt.strftime("%B %Y")
+        except ValueError:
+            continue
+    return period
+
+
 def _render_observation_as_list(frame: ObservationFrame) -> str | None:
-    """Render unique entities from an ObservationFrame as a list."""
+    """Render unique entities from an ObservationFrame as a list or snapshot."""
     if frame.is_empty():
         return None
+
+    if len(frame.periods) == 1:
+        return _render_observation_snapshot_list(frame)
 
     seen: dict[str, str] = {}
     for row in frame.rows:
@@ -143,6 +212,45 @@ def _render_observation_as_list(frame: ObservationFrame) -> str | None:
         return None
 
     lines = [f"- {label}" for label in seen.values()]
+    return "\n".join(lines)
+
+
+def _render_observation_snapshot_list(frame: ObservationFrame) -> str | None:
+    if frame.is_empty():
+        return None
+
+    shared_metric = frame.metrics[0] if len(frame.metrics) == 1 else ""
+    period = frame.periods[0] if frame.periods else ""
+    grouped: dict[str, dict[str, object]] = {}
+    for row in frame.rows:
+        entity_id = row.get("entity_id")
+        if not entity_id:
+            continue
+        group = grouped.setdefault(
+            entity_id,
+            {
+                "label": row.get("entity_label", entity_id),
+                "values": [],
+            },
+        )
+        value_text = " ".join(
+            part for part in (_fmt_number(row.get("value")), str(row.get("unit") or "").strip()) if part
+        ).strip()
+        metric = str(row.get("metric") or "").strip().replace("_", " ")
+        if metric and shared_metric == "":
+            value_text = f"{metric.title()}: {value_text}"
+        if value_text:
+            group["values"].append(value_text)
+
+    if not grouped:
+        return None
+
+    lines = []
+    if period:
+        lines.append(f"**Period:** {_format_period_label(period)}")
+    for entity in grouped.values():
+        joined_values = "; ".join(entity["values"])
+        lines.append(f"- {entity['label']}: {joined_values}" if joined_values else f"- {entity['label']}")
     return "\n".join(lines)
 
 

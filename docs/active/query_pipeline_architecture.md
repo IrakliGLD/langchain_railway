@@ -109,7 +109,10 @@ HTTP /ask
 │       → no analysis; heuristic fallback for everything downstream
 │
 ├─ answer_kind cross-check (always, even when analyzer succeeds)
-│   → derive answer_kind from query_type mapping
+│   → derive answer_kind only for query_types with an unambiguous shape
+│     (e.g. conceptual_definition→KNOWLEDGE, comparison→COMPARISON)
+│   → do NOT coerce broad families like data_retrieval into TIMESERIES:
+│     single-period snapshot lookups may still be LIST or SCALAR
 │   → if LLM-emitted and derived disagree, prefer the safer option
 │     (TIMESERIES, EXPLANATION, KNOWLEDGE are considered "safe")
 │
@@ -362,12 +365,14 @@ HTTP /ask
 │   │     (today: _EXPLANATION_ROUTING_SIGNALS regex checked in 3 different places)
 │   │
 │   │ Fallback when analyzer is disabled/fails:
-│   │   → derive answer_kind from query_type mapping + keyword heuristics
+│   │   → derive answer_kind from query_type mapping where unambiguous
+│   │   → for broad families like data_retrieval, rely on keyword/evidence heuristics
 │   │   → derive tool from keyword router (existing match_tool logic)
 │   │   → render_style defaults to narrative (safer)
 │   │
 │   │ Active cross-check (always, even when analyzer succeeds):
-│   │   → also derive answer_kind from query_type mapping
+│   │   → also derive answer_kind from query_type mapping where the shape is unambiguous
+│   │   → skip coercive derivation for data_retrieval because it is too broad
 │   │   → if LLM-emitted and derived answer_kind disagree, log warning
 │   │   → prefer the safer option (see Section 8.7)
 │   │

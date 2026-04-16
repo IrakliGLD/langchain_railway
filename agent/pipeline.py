@@ -216,13 +216,19 @@ _QUERY_TYPE_TO_ANSWER_KIND: dict[str, AnswerKind] = {
     "conceptual_definition": AnswerKind.KNOWLEDGE,
     "regulatory_procedure": AnswerKind.KNOWLEDGE,
     "factual_lookup": AnswerKind.SCALAR,
-    "data_retrieval": AnswerKind.TIMESERIES,  # conservative default
     "data_explanation": AnswerKind.EXPLANATION,
     "comparison": AnswerKind.COMPARISON,
     "forecast": AnswerKind.FORECAST,
     "ambiguous": AnswerKind.CLARIFY,
     "unsupported": AnswerKind.CLARIFY,
 }
+
+# `data_retrieval` is intentionally omitted: the query_type is too coarse to
+# safely infer whether the answer shape should be SCALAR, LIST, or TIMESERIES.
+# Overriding an authoritative LIST/SCALAR answer_kind to TIMESERIES corrupts the
+# deterministic path for single-period snapshot questions such as "which
+# entities had tariffs in July 2023 and what were they?".
+_AMBIGUOUS_QUERY_TYPES_FOR_ANSWER_KIND = frozenset({"data_retrieval"})
 
 # answer_kind values considered "safe" — can display any shape without data loss.
 _SAFE_ANSWER_KINDS = frozenset({AnswerKind.TIMESERIES, AnswerKind.EXPLANATION, AnswerKind.KNOWLEDGE})
@@ -233,6 +239,8 @@ def _derive_answer_kind_from_query_type(ctx) -> AnswerKind | None:
     if not ctx.has_authoritative_question_analysis:
         return None
     qa_type = ctx.question_analysis.classification.query_type.value
+    if qa_type in _AMBIGUOUS_QUERY_TYPES_FOR_ANSWER_KIND:
+        return None
     return _QUERY_TYPE_TO_ANSWER_KIND.get(qa_type)
 
 
