@@ -126,8 +126,8 @@ def test_get_tariffs_uses_exact_entity_names_for_regulated_hpp(monkeypatch):
     assert captured["params"]["regulated_hpp_entity_7"] == "lajanuri hpp"
     assert captured["params"]["regulated_hpp_entity_8"] == "zhinvali hpp"
     assert captured["params"]["regulated_hpp_entity_9"] == "vartsikhe hpp"
-    assert captured["params"]["regulated_hpp_entity_10"] == "khramhesi i"
-    assert captured["params"]["regulated_hpp_entity_11"] == "khramhesi ii"
+    assert captured["params"]["regulated_hpp_entity_10"] == "khramhesi I"
+    assert captured["params"]["regulated_hpp_entity_11"] == "khramhesi II"
     assert captured["params"]["regulated_hpp_entity_3_dereg_start"] == "2026-05-01"
     assert captured["params"]["regulated_hpp_entity_4_dereg_start"] == "2024-05-01"
     assert captured["params"]["regulated_hpp_entity_5_dereg_start"] == "2021-01-01"
@@ -147,8 +147,8 @@ def test_resolve_tariff_alias_entities_filters_by_deregulation_date():
         "lajanuri hpp",
         "zhinvali hpp",
         "vartsikhe hpp",
-        "khramhesi i",
-        "khramhesi ii",
+        "khramhesi I",
+        "khramhesi II",
     ]
     assert tariff_tools.resolve_tariff_alias_entities("regulated_hpp", as_of="2026-06-01") == [
         "enguri hpp",
@@ -156,6 +156,6 @@ def test_resolve_tariff_alias_entities_filters_by_deregulation_date():
         "lajanuri hpp",
         "zhinvali hpp",
         "vartsikhe hpp",
-        "khramhesi i",
-        "khramhesi ii",
+        "khramhesi I",
+        "khramhesi II",
     ]

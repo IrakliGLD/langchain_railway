@@ -14,6 +14,7 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from agent import pipeline, summarizer  # noqa: E402
+from agent.evidence_validator import validate_evidence  # noqa: E402
 from agent.frame_adapters import adapt_tool_result  # noqa: E402
 from contracts.question_analysis import (  # noqa: E402
     AnalysisMode,
@@ -211,3 +212,48 @@ def test_tariff_snapshot_same_month_multiple_dates_preserves_subperiod_values(mo
     assert "Enguri" in out.summary
     assert "July 1, 2023: 18.57 GEL/MWh" in out.summary
     assert "July 15, 2023: 19.10 GEL/MWh" in out.summary
+
+
+def test_single_period_tariff_snapshot_timeseries_misclassification_still_renders_directly(monkeypatch):
+    def _unexpected_structured(*_args, **_kwargs):
+        raise AssertionError("LLM summarization should not run for single-period tariff snapshots")
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
+
+    qa = _make_tariff_snapshot_qa()
+    qa.answer_kind = AnswerKind.TIMESERIES
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2021-06-01"]),
+            "enguri_hpp_tariff_gel": [18.57],
+            "khramhesi_i_tariff_gel": [108.37],
+            "khramhesi_ii_tariff_gel": [123.04],
+            "gpower_tpp_tariff_gel": [141.06],
+        }
+    )
+
+    ctx = QueryContext(
+        query="for which entities tariff was set in june 2021 and what were those tariffs?",
+        trace_id="tariff-snapshot-timeseries-1",
+        session_id="tariff-snapshot-timeseries-1",
+        df=df,
+        cols=list(df.columns),
+        rows=[tuple(r) for r in df.itertuples(index=False, name=None)],
+        used_tool=True,
+        tool_name="get_tariffs",
+        tool_params={"currency": "gel"},
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    ctx.evidence_frame = adapt_tool_result("get_tariffs", df, answer_kind=AnswerKind.TIMESERIES)
+    ctx.evidence_gap = validate_evidence(ctx.evidence_frame, qa.answer_kind)
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "generic_renderer"
+    assert "Khrami I Hydropower Plant" in out.summary
+    assert "Khrami II Hydropower Plant" in out.summary
+    assert "108.37" in out.summary
+    assert "123.04" in out.summary
+    assert "does not establish" not in out.summary.lower()

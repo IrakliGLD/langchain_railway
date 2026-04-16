@@ -24,7 +24,7 @@ from core.llm import (
     get_relevant_domain_knowledge,
 )
 from contracts.question_analysis import AnswerKind, RenderStyle
-from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ScenarioFrame
+from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ObservationFrame, ScenarioFrame
 from agent.analyzer import _extract_forecast_horizon
 from agent.generic_renderer import render as generic_render
 from context import scrub_schema_mentions
@@ -109,8 +109,8 @@ _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES = {
     "lajanuri hpp": "Lajanuri HPP",
     "zhinvali hpp": "Zhinvali HPP",
     "vartsikhe hpp": "Vartsikhe HPP",
-    "khramhesi i": "Khrami I HPP",
-    "khramhesi ii": "Khrami II HPP",
+    "khramhesi I": "Khrami I HPP",
+    "khramhesi II": "Khrami II HPP",
     "gardabani tpp": "Gardabani TPP",
     "gpower tpp": "G-POWER",
     "mktvari tpp": "Mtkvari Energy",
@@ -1732,6 +1732,25 @@ def _build_forecast_frame(ctx: QueryContext) -> ForecastFrame | None:
     return ForecastFrame(rows=entries, target_date=target_date)
 
 
+def _allow_single_period_tariff_snapshot_render(
+    ctx: QueryContext,
+    frame: ObservationFrame | EntitySetFrame | ForecastFrame | ScenarioFrame,
+) -> bool:
+    """Permit direct rendering when a tariff snapshot was misclassified as TIMESERIES."""
+    gap = getattr(ctx, "evidence_gap", None)
+    if gap is None or not getattr(gap, "correctable", False):
+        return False
+    if getattr(gap, "answer_kind", None) != AnswerKind.TIMESERIES:
+        return False
+    if (ctx.tool_name or "").strip() != "get_tariffs":
+        return False
+    if not isinstance(frame, ObservationFrame):
+        return False
+    if len(frame.periods) != 1 or len(frame.entities) == 0:
+        return False
+    return True
+
+
 def _try_generic_renderer(ctx: QueryContext) -> str | None:
     """Attempt the generic renderer when answer_kind + evidence frame are available.
 
@@ -1790,7 +1809,13 @@ def _try_generic_renderer(ctx: QueryContext) -> str | None:
     # paths that can handle partial data or re-plan.
     gap = getattr(ctx, "evidence_gap", None)
     if gap is not None and getattr(gap, "correctable", False):
-        return None
+        if _allow_single_period_tariff_snapshot_render(ctx, frame):
+            log.info(
+                "Allowing generic renderer for single-period tariff snapshot despite "
+                "TIMESERIES evidence gap."
+            )
+        else:
+            return None
 
     if frame is None or frame.is_empty():
         return None
