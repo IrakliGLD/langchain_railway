@@ -1880,6 +1880,17 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"⚠️ Seasonal stats calculation failed: {e}")
 
     # --- Share summary override ---
+    # NOTE: `share_summary_override` is a *permanent* specialized LIST/SCALAR
+    # formatter for share-intent queries, analogous to how §3.4 treats
+    # SCENARIO and FORECAST as specialized formatters for domain-specific
+    # decomposition. It is NOT legacy regex-based dispatch — the decision
+    # to build it is gated on the structured analyzer signal
+    # `ctx.analyzer_indicates_share_intent` (see §3.4 "Specialized formatters
+    # — only for domain-specific decomposition"). The artifact decomposes
+    # `share_all_ppa` into its renewable/thermal components and joins
+    # per-period prices, which the domain-agnostic generic renderer
+    # intentionally does not know about.
+    #
     # Evidence precedence: do not generate share override if a non-share tool result
     # already exists. A get_prices result aligned with a price-comparison semantic
     # target should not be displaced by a share override.
@@ -1979,12 +1990,24 @@ def enrich(ctx: QueryContext) -> QueryContext:
         except Exception as e:
             log.warning(f"⚠️ Correlation analysis failed: {e}")
 
-    # --- Forecast mode (CAGR) ---
-    # Shape-gated on the single source of truth `ctx.effective_answer_kind`
-    # populated in pipeline.py after Stage 0.2.  This keeps forecast
-    # enrichment alive when the analyzer is shadow/failed (F1).
-    _forecast_detected = ctx.effective_answer_kind == AnswerKind.FORECAST
-    if _forecast_detected and not ctx.df.empty:
+    # --- Stage 3 per-answer_kind enrichment switch (§3.4 alignment) ---
+    # All per-kind enrichment dispatches from the single source of truth
+    # `ctx.effective_answer_kind` (populated by pipeline.py after Stage 0.2;
+    # falls back to analyzer's emitted value for shadow/failed runs — F1).
+    #
+    # Structure:
+    #   * FORECAST — CAGR enrichment runs independently of the analytical
+    #     branch below, so "forecast + MoM/YoY" queries get both forecast
+    #     projection AND derived-metric evidence.
+    #   * EXPLANATION vs standalone analysis are mutually exclusive: causal
+    #     reasoning (_build_why_context) owns the full enrichment path for
+    #     why/how queries; standalone analysis computes MoM/YoY/scenario for
+    #     every other analytical kind that still requests derived metrics.
+    #   * LIST / KNOWLEDGE / CLARIFY / SCALAR-without-derived-metrics: no
+    #     Stage 3 enrichment — they route straight to the generic renderer.
+    answer_kind = ctx.effective_answer_kind
+
+    if answer_kind == AnswerKind.FORECAST and not ctx.df.empty:
         try:
             ctx.df, _forecast_note = _generate_cagr_forecast(ctx.df, ctx.query)
             ctx.stats_hint += f"\n\n--- FORECAST NOTE ---\n{_forecast_note}"
@@ -1992,17 +2015,11 @@ def enrich(ctx: QueryContext) -> QueryContext:
         except Exception as _e:
             log.warning(f"Forecast generation failed: {_e}")
 
-    # --- Why mode (causal reasoning) ---
-    # Uses `ctx.effective_answer_kind` so shadow/failed analyzer runs still
-    # fire explanation enrichment via keyword-derived fallback (F1).
-    _why_detected = ctx.effective_answer_kind == AnswerKind.EXPLANATION
-    if _why_detected and not ctx.df.empty:
+    if answer_kind == AnswerKind.EXPLANATION and not ctx.df.empty:
         try:
             _build_why_context(ctx)
         except Exception as _e:
             log.warning(f"'Why' reasoning context build failed: {_e}")
-
-    # --- Analyst-mode derived metrics (MoM/YoY without full causal context) ---
     elif not ctx.df.empty and _needs_standalone_analysis(ctx):
         try:
             _build_standalone_analysis_evidence(ctx)
@@ -2017,10 +2034,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             log.warning(f"Chart override materialization failed: {_e}")
 
     # --- Trendline detection ---
-    # Mirrors the forecast branch above: gates on `effective_answer_kind` so
-    # keyword-derived forecast queries also get trendline extension on
-    # analyzer failure (F1).
-    ctx.add_trendlines = ctx.effective_answer_kind == AnswerKind.FORECAST
+    # Mirrors the FORECAST branch of the switch above — reuses the local
+    # `answer_kind` so keyword-derived forecast queries also get trendline
+    # extension on analyzer failure (F1).
+    ctx.add_trendlines = answer_kind == AnswerKind.FORECAST
 
     if ctx.add_trendlines:
         year_matches = re.findall(r'\b(20[2-9][0-9])\b', ctx.query)
@@ -2129,6 +2146,28 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
         log.info("Added column aggregates to stats_hint for %d numeric columns", len(numeric_cols))
 
 
+# Scenario metric registry keys (kept as strings to mirror METRIC_REGISTRY).
+# Scenario math operates on the whole series, so these requests do not need
+# the MoM/YoY current/previous row prep and must survive when
+# `_prepare_timeseries_rows()` fails to resolve a target period.
+_SCENARIO_METRIC_NAME_STRINGS = frozenset({
+    "scenario_scale",
+    "scenario_offset",
+    "scenario_payoff",
+})
+
+
+def _has_active_scenario_request(ctx: QueryContext) -> bool:
+    """Return True when any active derived-metric request is a scenario metric."""
+    try:
+        return any(
+            str(req.get("metric_name", "")) in _SCENARIO_METRIC_NAME_STRINGS
+            for req in _active_analysis_requests(ctx)
+        )
+    except Exception:
+        return False
+
+
 def _needs_standalone_analysis(ctx: QueryContext) -> bool:
     """Return True when derived metrics should be computed outside why-mode."""
     qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
@@ -2141,19 +2180,46 @@ def _needs_standalone_analysis(ctx: QueryContext) -> bool:
     # even when question_analysis failed validation.
     if ctx.mode == "analyst":
         return True
+    # Scenario fallback requests (heuristic scenario extraction) must also
+    # trigger standalone enrichment so scenario answers survive when the
+    # analyzer produced no structured derived_metrics.
+    if _has_active_scenario_request(ctx):
+        return True
     return False
 
 
 def _build_standalone_analysis_evidence(ctx: QueryContext) -> None:
-    """Compute derived metrics (MoM/YoY) for non-why analyst-mode queries.
+    """Compute derived metrics (MoM/YoY/scenario) for non-why analyst-mode queries.
 
     Populates ``ctx.analysis_evidence`` and appends the evidence block to
     ``ctx.stats_hint`` so that computed values enter the grounding corpus.
+
+    Scenario metrics operate on the whole series and do not require
+    MoM/YoY current/previous row prep. When ``_prepare_timeseries_rows()``
+    cannot resolve a target period (e.g. no explicit year in the query,
+    or the DataFrame lacks a recognised time column), we still run scenario
+    dispatch against the full frame so payoff / scale / offset answers
+    do not silently drop.
     """
     setup = _prepare_timeseries_rows(ctx)
-    if setup is None:
+    if setup is not None:
+        df, time_col, current_ts, current_row, previous_ts, previous_row = setup
+    elif _has_active_scenario_request(ctx) and ctx.df is not None and not ctx.df.empty:
+        # Degraded fallback for scenario-only enrichment: no current/previous
+        # rows, but the scenario compute function only needs `df` and
+        # `time_col`. MoM/YoY requests in this mode will return None
+        # gracefully and be dropped from the evidence rows.
+        df = ctx.df.copy()
+        time_col = _find_time_series_column(df) or ""
+        if time_col and time_col in df.columns:
+            df[time_col] = normalize_period_series(df[time_col])
+            df = df.dropna(subset=[time_col]).sort_values(time_col)
+        current_ts = None
+        current_row = pd.DataFrame()
+        previous_ts = None
+        previous_row = pd.DataFrame()
+    else:
         return
-    df, time_col, current_ts, current_row, previous_ts, previous_row = setup
     evidence_df = _build_requested_analysis_evidence(
         ctx, df, time_col, current_ts, current_row,
         previous_ts, previous_row,

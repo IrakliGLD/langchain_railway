@@ -1732,3 +1732,280 @@ Phases A → B → E are sequential (each depends on the previous). Phases C and
 | D | — | ~200-400ms (light retrieval) | ~2,000-6,000 chars saved per query | Medium |
 | E | — | ~1,200-2,500ms for simple queries in fast mode | 50% budget reduction in fast mode | Medium |
 | F | Eliminates edge cases from legacy paths | Marginal (fewer stages) | — | Large |
+
+---
+
+## 16. Chart-Building Logic Assessment
+
+This section reviews the current visualization path end-to-end: how the system decides to draw a chart, which data it selects, how much transformation it applies before rendering, and where the current design fails to match user intent.
+
+### 16.1 Current Runtime Behavior
+
+Today, chart building is largely a post-processing side path, not a first-class part of the answer contract:
+
+- Stage 5 runs after Stage 4 summary generation and independently decides whether to build a chart (`agent/pipeline.py`, `agent/chart_pipeline.py`).
+- The main chart input is still `ctx.df` / `ctx.rows` / `ctx.cols`, meaning the chart usually reflects the raw post-tool or post-SQL table rather than a chart-specific evidence frame.
+- The main chart gate, `visualization/chart_selector.py::should_generate_chart()`, uses `query_type`, row count, and query-word heuristics. It does not consume `visualization.chart_recommended`, `visualization.chart_confidence`, or `visualization.preferred_chart_family`.
+- The analyzer's semantic chart hints (`chart_intent`, `target_series`) are only used in the narrow scenario override path in `agent/analyzer.py`; ordinary trend, comparison, and composition charts do not use them.
+- Legacy SQL planning can emit `chart_strategy` and `chart_groups`, but Stage 5 only reads the first group and only uses its `metrics`. The planned `type`, `title`, `y_axis_label`, and any additional groups are ignored.
+- Data transformation inside Stage 5 is minimal: type coercion, label renaming, metric filtering, series limiting, dimension limiting, and one special-case yearly rollup for long share series. The final payload is usually just `df_labeled.to_dict("records")`.
+
+The net effect is that text rendering is increasingly answer-shape-aware, but chart rendering is still mostly heuristic and table-driven.
+
+### 16.2 Key Issues and Failure Modes
+
+#### 16.2.1 Charts often reflect raw output instead of the metric the user actually asked about
+
+For most queries, the chart shows raw observed values from `ctx.df`, while derived metrics live elsewhere:
+
+- Stage 3 computes MoM/YoY deltas, correlation context, CAGR forecasts, scenario payoffs, and other analysis evidence.
+- Those derived values primarily feed `ctx.analysis_evidence`, `ctx.stats_hint`, or deterministic text answers.
+- Outside the scenario-specific override path, Stage 5 does not chart that derived evidence; it charts the base frame.
+
+Failure mode examples:
+
+- "Why did balancing price rise in May 2024?" can produce a chart of raw price/share series instead of a decomposition of the change drivers.
+- "What is the demand growth rate?" can yield a raw demand line when the user is really asking for growth, CAGR, or indexed change.
+- "Compare summer and winter balancing prices in 2023" may visualize monthly rows if the upstream data was not explicitly aggregated by season, even though the semantic answer is a two-bucket seasonal comparison.
+
+Impact:
+
+- The chart becomes descriptive rather than explanatory.
+- The visual repeats the table instead of surfacing the computed answer.
+- Users can easily misread the chart as "the answer" even when the real answer was produced by later analytical logic.
+
+#### 16.2.2 The chart/no-chart decision is not aligned with the answer contract
+
+The pipeline now has `answer_kind`, `render_style`, `grouping`, and `entity_scope`, but Stage 5 still decides mostly from `query_type`, row count, and keyword heuristics.
+
+Current consequences:
+
+- `single_value` and `list` are suppressed correctly in many cases, but that is driven by heuristic query typing rather than the final answer contract.
+- `unknown` / `table` with 10+ rows defaults to "time series assumed", which can generate charts for ranked lists, snapshots, or wide comparison tables that should stay tabular.
+- Explanation queries can still get charts if the result set is large enough, even when the explanation is narrative and the chart adds little value.
+- The analyzer can say a chart is not recommended, or recommend a specific chart family, but Stage 5 ignores those signals.
+
+Impact:
+
+- Chart presence is inconsistent with the final answer style.
+- Visualization becomes a side effect of row count instead of a deliberate response-mode choice.
+- The system does not reliably distinguish between "a chart is possible" and "a chart is the best representation".
+
+#### 16.2.3 Chart selection is only weakly semantic
+
+Stage 5 infers chart type from:
+
+- whether a time column exists
+- whether a categorical column exists
+- rough dimension labels inferred from column names (`price_tariff`, `share`, `energy_qty`, `xrate`, `index`)
+
+This is useful as a fallback, but it is too weak to carry the full decision:
+
+- all price/xrate charts are pushed toward line charts, even for discrete category comparisons
+- share time series become `stackedbar`, even when a continuous stacked area chart would better communicate evolving composition
+- mixed-dimension queries may be forced into a dual-axis chart or truncated to two dimensions instead of being split into multiple panels
+- the "no time, no category" fallback is still `line`, which is semantically poor for unordered or irregular data
+
+Impact:
+
+- Some charts are merely syntactically valid, not semantically appropriate.
+- Dual-axis charts can imply relationships that should instead be shown as separate panels.
+- Visual form is chosen from schema shape rather than user intent.
+
+#### 16.2.4 Planned multi-chart structure is silently collapsed
+
+The SQL planner supports `chart_strategy` and multiple `chart_groups`, but `agent/chart_pipeline.py` only reads `chart_groups[0]` and only consumes `metrics`.
+
+This creates a structural mismatch:
+
+- the planner can reason that multiple charts are needed
+- Stage 5 renders only one chart
+- chart titles, axis labels, and group-specific types from the plan are dropped
+
+Impact:
+
+- multi-dimension questions lose important context
+- mixed-unit queries are squeezed into one chart or pruned down instead of being shown as separate coordinated visuals
+- the runtime discards upstream reasoning that already identified the right grouping
+
+#### 16.2.5 Aggregation and normalization are ad hoc, not intent-driven
+
+The only notable chart-time aggregation is a yearly mean rollup for long share-heavy timelines. That improves readability in some cases, but it is not governed by user intent or semantic requirements.
+
+Current gaps:
+
+- no general chart transform layer for seasonal aggregation, entity ranking, top-N plus "Other", indexed-to-100 normalization, or contribution decomposition
+- no distinction between "observed value", "change", "share of total", "cumulative total", and "forecasted value" as separate visual measures
+- no chart-time check that the SQL/tool output is already at the right grain for the intended visual
+
+Impact:
+
+- the system may overplot too many periods or too many series
+- coarse yearly averaging can hide the exact within-year pattern the user asked about
+- charts can be technically readable but analytically wrong for the question
+
+#### 16.2.6 Context awareness is still too shallow
+
+The current visualization path does not adequately incorporate:
+
+- whether the final answer is SCALAR, LIST, TIMESERIES, COMPARISON, EXPLANATION, FORECAST, or SCENARIO
+- whether exact values matter more than trend shape
+- whether the user asked for explanation, lookup, ranking, decomposition, threshold detection, or part-to-whole structure
+
+As a result, the system lacks a strong rule such as:
+
+- chart only if it improves comprehension over text/table
+- use text/table if exact values or enumerations are primary
+- use a derived chart only when derived evidence exists and is central to the answer
+
+### 16.3 Root Causes By Pipeline Layer
+
+| Layer | Current behavior | Root cause | Effect on charts |
+|---|---|---|---|
+| Stage 0.2 reasoning / analyzer contract | Visualization contract is intentionally lightweight: chart request/recommendation, confidence, preferred family, and a very small semantic-hint surface | The contract does not express visualization necessity, aggregation grain, measure transform, or multi-panel structure in a runtime-consumable way | Downstream charting falls back to heuristics instead of following an explicit visualization plan |
+| Chart policy in analyzer prompt | Policy says things like "trend -> line" and "shares -> composition-style chart" | Good as a hint catalog, but too coarse to drive the actual render choice | Analyzer can classify broadly, but cannot specify when table/text should win, or what transformation is required first |
+| Legacy SQL planning | Planner can emit `chart_strategy` / `chart_groups` with type/title/axis labels | Those fields are legacy metadata and are only partially consumed | Multi-chart intent is lost; only first-group metrics survive |
+| Evidence planner / tool path | Planner validates answer shape, not visualization shape | There is no validation that the chosen evidence supports the chart semantics | The system can answer correctly in text while still building a poor chart from the same data |
+| Stage 3 enrichment | Derived metrics are computed into `analysis_evidence`, `stats_hint`, and scenario overrides | Only scenario overrides are materialized into chart-ready series | MoM/YoY/CAGR/correlation-style outputs are mostly chart-invisible |
+| Stage 5 post-processing | Charts are built from `ctx.df`, with light coercion and column-name heuristics | There is no intermediate chart-specific semantic frame | Raw table structure dominates chart structure |
+| Rendering policy | `should_generate_chart()` uses query_type + row_count + keywords | It ignores `chart_recommended`, `chart_confidence`, `preferred_chart_family`, and most of `answer_kind` | Chart presence is loosely coupled to the actual answer mode |
+
+### 16.4 Concrete, Implementable Improvements
+
+#### 16.4.1 Introduce a first-class visualization plan
+
+Add a new contract object, for example `VisualizationPlan`, produced by Stage 0.2 and consumed directly by Stage 5. It should be more explicit than today's lightweight hints.
+
+Recommended fields:
+
+- `should_visualize: bool`
+- `primary_presentation: chart | table | text | chart_plus_table`
+- `visual_goal: trend | compare | composition | decomposition | ranking | relationship | threshold_scan`
+- `chart_family: line | area | stacked_area | bar | stacked_bar | scatter | heatmap | none`
+- `measure_transform: raw | sum | avg | weighted_avg | share_of_total | mom_delta | mom_pct | yoy_delta | yoy_pct | cagr | index_100`
+- `time_grain: raw | day | month | quarter | season | year`
+- `series_split_mode: single_chart | multi_panel`
+- `max_series`
+- `sort_rule`
+- `top_n`
+- `include_reference_lines`
+
+Why this matters:
+
+- It gives downstream code a concrete answer to "what should be visualized?" before Stage 5 sees a DataFrame.
+- It lets the analyzer say "table, not chart" for exact-value comparisons or enumerations.
+- It removes the need to infer high-level intent from column names after the fact.
+
+#### 16.4.2 Build chart data from a chart-specific frame, not directly from `ctx.df`
+
+Add a chart materialization step after Stage 3, for example `ChartFrame` or `VisualizationFrame`, with a normalized long-form schema such as:
+
+```text
+period | series | value | unit | role | transform | source_metric | is_derived
+```
+
+This frame should be produced from:
+
+- canonical evidence frames for ordinary scalar/list/timeseries/comparison outputs
+- `analysis_evidence` for MoM/YoY/CAGR/scenario/correlation/decomposition outputs
+- optional plan-driven aggregation rules
+
+Key transform helpers to add:
+
+- aggregate by season / year / quarter
+- normalize to indexed base 100
+- compute share of total
+- compute top-N plus "Other"
+- convert wide tables to long form
+- emit comparison buckets directly (for Jan vs Feb, summer vs winter, entity A vs entity B)
+- emit decomposition frames from driver analysis when available
+
+This is the cleanest way to stop charting raw query output by default.
+
+#### 16.4.3 Make chart triggering answer-kind-aware
+
+Replace the current row-count-heavy gating with a decision matrix centered on `answer_kind` and `VisualizationPlan.primary_presentation`.
+
+Recommended defaults:
+
+- `SCALAR`: no chart unless the user explicitly asks and there are multiple comparable values behind the scalar summary.
+- `LIST`: prefer table/text; chart only for ranking or grouped counts.
+- `TIMESERIES`: chart if there are at least 3 ordered periods and the user is asking for trend/history.
+- `COMPARISON`: use chart only when shape matters more than exact values; otherwise return a compact table.
+- `EXPLANATION`: chart only when a derived visual exists (decomposition, driver ranking, before/after comparison); otherwise keep the response narrative.
+- `FORECAST`: chart observed vs forecast series, not raw historical rows alone.
+- `SCENARIO`: chart observed vs reference vs derived, or component decomposition, not only the underlying observed input series.
+
+This keeps visualization aligned with how the answer is actually being rendered.
+
+#### 16.4.4 Prefer semantic chart families over structural fallbacks
+
+Refine chart-family selection around user intent:
+
+- trend over continuous time -> `line`
+- composition over continuous time -> `stacked_area`
+- composition over discrete periods -> `stacked_bar`
+- snapshot ranking / entity comparison -> sorted `bar`
+- small part-to-whole snapshot -> `pie` only when category count is very small and the intent is explicitly compositional
+- relationship / correlation -> `scatter`, but only when the query is about relationship between two numeric measures
+- mixed-unit queries -> separate panels by default; only allow dual-axis on explicit request or a narrow allowlist
+
+Examples:
+
+- "Show renewable PPA share trends" -> stacked area by month, not stacked bar unless the x-axis is a short discrete period set.
+- "Compare summer and winter balancing prices in 2023" -> two-bar seasonal comparison, not a monthly line chart.
+- "Demand growth rate 2020-2023" -> indexed line or CAGR summary with optional table, not just raw demand values.
+
+#### 16.4.5 Generalize derived-chart overrides beyond scenarios
+
+The scenario override path in `agent/analyzer.py` is proof that the system can already build chart-ready derived series deterministically. That pattern should be generalized.
+
+Add derived override builders for:
+
+- MoM / YoY change charts
+- seasonal bucket comparison charts
+- indexed growth charts
+- decomposition / contribution charts from explanation-mode evidence
+- forecast observed-vs-projected charts
+
+This keeps the strongest analytical answers from collapsing back to raw table visuals in Stage 5.
+
+#### 16.4.6 Preserve and execute multi-chart plans
+
+Update Stage 5 so it can emit multiple coordinated chart payloads when the plan or visualization contract says the metrics should be split.
+
+At minimum:
+
+- consume all `chart_groups`, not just the first
+- respect group `type`, `title`, and `y_axis_label`
+- keep groups separated by unit and semantic goal
+- expose a chart collection payload to the frontend instead of a single chart slot
+
+This is especially important for:
+
+- price + share queries
+- price + exchange rate queries
+- quantity + price queries
+- any 3+ metric request where each series does not belong on the same axes
+
+#### 16.4.7 File-level implementation path
+
+| Task | Suggested file(s) |
+|---|---|
+| Add `VisualizationPlan` / richer visualization contract | `contracts/question_analysis.py`, `schemas/question_analysis.schema.json` |
+| Expand analyzer prompt rules to emit visualization necessity, transform, and grain | `core/llm.py`, `contracts/question_analysis_catalogs.py` |
+| Validate visualization plan against answer shape and evidence availability | `agent/evidence_planner.py` |
+| Materialize a chart-specific semantic frame from evidence + analysis outputs | new module such as `agent/chart_frame_builder.py` or `agent/visualization_transformer.py` |
+| Refactor Stage 5 into `decide -> transform -> select chart -> render payload` | `agent/chart_pipeline.py` |
+| Replace heuristic-only chart selection with goal-aware rules | `visualization/chart_selector.py` |
+| Add coverage for multi-chart, derived-chart, and table-vs-chart decisions | `tests/`, `evaluation/test_suite.py` |
+
+### 16.5 Recommended Priority Order
+
+1. Stop ignoring the analyzer/runtime visualization contract.
+2. Introduce a chart-specific transformed frame so Stage 5 no longer defaults to raw `ctx.df`.
+3. Make chart triggering answer-kind-aware and presentation-aware.
+4. Support multiple charts/panels so mixed-unit queries are not collapsed.
+5. Expand derived override builders beyond scenario-only support.
+
+If only one near-term change is possible, the highest-leverage fix is to insert a deterministic chart-transform layer between Stage 3 and Stage 5. That single move would address the biggest current weakness: charts are usually visualizing whatever raw rows happened to come back, not the analytical quantity the user actually asked to understand.

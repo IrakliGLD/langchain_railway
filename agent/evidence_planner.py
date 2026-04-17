@@ -19,11 +19,13 @@ from contracts.question_analysis import (
     EvidenceRole,
     QuestionAnalysis,
     QueryType,
+    RenderStyle,
     ToolName,
     _SCENARIO_METRIC_NAMES,
 )
 from models import QueryContext
 from agent.planner import resolve_tool_params
+from agent.shape_requirements import get_requirement
 from agent.tools import execute_tool
 from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
 from agent.tools.types import ToolInvocation
@@ -490,21 +492,42 @@ def _validate_plan_against_answer_kind(
 
     Logs warnings for mismatches so they are visible in shadow-mode before any
     plans are actually rejected.  Does NOT remove or reject steps — only
-    augments or warns.  This keeps the change safe for incremental rollout.
+    augments or warns.  This keeps the change safe for incremental rollout,
+    matches the pipeline's graceful-degradation philosophy, and leaves final
+    shape enforcement to ``evidence_validator.py`` (post-execution) and the
+    generic renderer (which returns None when an evidence frame can't satisfy
+    the answer contract).
 
     Rules checked:
-    - COMPARISON → at least two evidence sources, or single source with
-      multi-entity params (comparison can be intra-dataset).
-    - TIMESERIES → primary step has a date range (start_date + end_date).
+    - COMPARISON → multiple evidence sources, multi-entity primary params,
+      an inherently multi-entity tool, OR a primary step whose date range
+      spans more than one period (e.g. "Jan vs Feb" fetched as a single
+      get_prices call with start_date=2025-01-01, end_date=2025-02-28).
+    - TIMESERIES → primary step has a non-degenerate date range
+      (start_date + end_date, AND start_date != end_date so the series
+      contains more than a single point).
+    - FORECAST → primary step has a date range (historical basis for
+      trendline extrapolation).
     - SCENARIO → analysis_requirements contains at least one scenario-family
-      derived metric.
+      derived metric.  (The request-level contract validator in
+      ``contracts/question_analysis.py`` already enforces that any scenario
+      metric request has a populated ``scenario_factor``, so a planner-level
+      param check would be redundant.)
     - LIST → primary step's entities param is non-empty or tool naturally
       returns entity-enumerated rows (get_balancing_composition,
       get_generation_mix).
+    - render_style → if DETERMINISTIC, narrative-augmentation steps
+      (CORRELATION_DRIVER / COMPOSITION_CONTEXT / TARIFF_CONTEXT) are
+      suspicious — a deterministic data lookup should usually not need
+      narrative context.  If NARRATIVE with an inherently narrative
+      answer_kind (EXPLANATION / FORECAST / SCENARIO), a single-step
+      plan is likewise suspicious — narrative answers typically need
+      supporting context beyond the primary dataset.
     """
     answer_kind = qa.answer_kind
     if answer_kind is None or not steps:
         return
+    render_style = qa.render_style
 
     primary = steps[0]
     primary_params = primary.get("params") or {}
@@ -519,25 +542,51 @@ def _validate_plan_against_answer_kind(
             ToolName.GET_BALANCING_COMPOSITION.value,
             ToolName.GET_GENERATION_MIX.value,
         }
-        if not has_multi_source and not has_multi_entity and not inherently_multi:
+        # A single-source single-entity plan is still comparison-capable if
+        # the date range spans more than one period — the tool produces a
+        # multi-row frame that ``compute_mom`` / generic renderer can
+        # compare across periods.
+        start_date = primary_params.get("start_date")
+        end_date = primary_params.get("end_date")
+        has_multi_period = bool(start_date and end_date and start_date != end_date)
+        if (
+            not has_multi_source
+            and not has_multi_entity
+            and not inherently_multi
+            and not has_multi_period
+        ):
             log.warning(
                 "Plan validation: answer_kind=COMPARISON but plan has single "
-                "source with single/no entity. query=%.80s",
+                "source with single/no entity and no multi-period range. "
+                "query=%.80s",
                 raw_query,
             )
 
     elif answer_kind == AnswerKind.TIMESERIES:
-        has_date_range = bool(primary_params.get("start_date") and primary_params.get("end_date"))
-        if not has_date_range:
+        requirement = get_requirement(AnswerKind.TIMESERIES)
+        start_date = primary_params.get("start_date")
+        end_date = primary_params.get("end_date")
+        has_date_range = bool(start_date and end_date)
+        if requirement.requires_date_range and not has_date_range:
             log.warning(
                 "Plan validation: answer_kind=TIMESERIES but primary step "
                 "lacks date range. query=%.80s",
                 raw_query,
             )
+        elif requirement.requires_multi_period_range and start_date == end_date:
+            # A single-point "range" is a SCALAR, not a TIMESERIES — flag it
+            # so downstream callers know the answer kind may be mis-shaped.
+            log.warning(
+                "Plan validation: answer_kind=TIMESERIES but primary step "
+                "range is a single point (start_date == end_date). "
+                "query=%.80s",
+                raw_query,
+            )
 
     elif answer_kind == AnswerKind.FORECAST:
+        requirement = get_requirement(AnswerKind.FORECAST)
         has_date_range = bool(primary_params.get("start_date") and primary_params.get("end_date"))
-        if not has_date_range:
+        if requirement.requires_date_range and not has_date_range:
             log.warning(
                 "Plan validation: answer_kind=FORECAST but primary step "
                 "lacks date range. query=%.80s",
@@ -545,6 +594,10 @@ def _validate_plan_against_answer_kind(
             )
 
     elif answer_kind == AnswerKind.SCENARIO:
+        # `DerivedMetricRequest` at contracts/question_analysis.py:397-408
+        # already enforces `scenario_factor is not None` on any scenario-family
+        # metric request, so we only need to verify at least one such request
+        # is present.  Missing `scenario_factor` cannot reach this point.
         derived = qa.analysis_requirements.derived_metrics or []
         has_scenario = any(m.metric_name in _SCENARIO_METRIC_NAMES for m in derived)
         if not has_scenario:
@@ -578,6 +631,46 @@ def _validate_plan_against_answer_kind(
                 "Plan validation: answer_kind=LIST but primary step has no "
                 "entities and tool is not inherently entity-enumerated. "
                 "query=%.80s",
+                raw_query,
+            )
+
+    # --- render_style cross-check ------------------------------------------
+    # Independent of answer_kind, surface plans whose evidence shape does not
+    # match the stated rendering mode.  Still warning-only (see top-level
+    # docstring) — final enforcement is the job of the summarizer / generic
+    # renderer, which can opt-out of narrative context when it sees
+    # render_style=DETERMINISTIC.
+    if render_style == RenderStyle.DETERMINISTIC and len(steps) > 1:
+        _NARRATIVE_AUGMENTATION_ROLES = {
+            EvidenceRole.CORRELATION_DRIVER.value,
+            EvidenceRole.COMPOSITION_CONTEXT.value,
+            EvidenceRole.TARIFF_CONTEXT.value,
+        }
+        narrative_steps = [
+            step.get("role")
+            for step in steps[1:]
+            if step.get("role") in _NARRATIVE_AUGMENTATION_ROLES
+        ]
+        if narrative_steps:
+            log.warning(
+                "Plan validation: render_style=DETERMINISTIC but plan has "
+                "%d narrative-augmentation step(s) (%s). query=%.80s",
+                len(narrative_steps),
+                sorted(set(narrative_steps)),
+                raw_query,
+            )
+    elif render_style == RenderStyle.NARRATIVE:
+        _NARRATIVE_ANSWER_KINDS = {
+            AnswerKind.EXPLANATION,
+            AnswerKind.FORECAST,
+            AnswerKind.SCENARIO,
+        }
+        if answer_kind in _NARRATIVE_ANSWER_KINDS and len(steps) == 1:
+            log.warning(
+                "Plan validation: render_style=NARRATIVE and "
+                "answer_kind=%s but plan has only primary data "
+                "(no context/driver). query=%.80s",
+                answer_kind.value,
                 raw_query,
             )
 

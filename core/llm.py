@@ -2278,7 +2278,12 @@ _ANALYTICAL_QUERY_SIGNALS = (
     "why",
     "change",
     "changed",
+    "delta",
+    "difference",
+    "movement",
+    "shift",
     "trend",
+    "variation",
     "compare",
     "comparison",
     "forecast",
@@ -2635,7 +2640,6 @@ def _build_analyzer_prompt_blocks(
     prompt_family = prompt_context.prompt_family
 
     knowledge_only = prompt_family == "knowledge"
-    simple_scalar = effective_pre_type == "single_value"
     has_anaphoric = _has_history_reference_signal(current_query_lower)
     needs_history = bool(prompt_context.history_str) and (
         prompt_context.prompt_profile == "clarify" or has_anaphoric
@@ -2649,9 +2653,17 @@ def _build_analyzer_prompt_blocks(
             or _has_chart_request_signal(query_lower)
         )
     )
+    # Derived-metric catalog is needed whenever the question implies an
+    # analytical calculation (change, scenario, what-if, trend, comparison,
+    # forecast, explanation) — even when the query pre-classifies as
+    # ``single_value``.  Example: "how much did the balancing price CHANGE
+    # from January to February 2024?" is a single_value lookup that still
+    # needs ``mom_absolute_change`` from the derived-metric catalog.  The
+    # ``_has_analytical_signal`` check is the gate; simple scalar look-ups
+    # with no analytical signal (e.g. "what was the price in November?")
+    # still naturally fall through to the False branch and omit the catalog.
     include_derived_metrics = (
         not knowledge_only
-        and not simple_scalar
         and (
             prompt_family in {"data_explanation", "forecast_scenario"}
             or effective_pre_type == "comparison"

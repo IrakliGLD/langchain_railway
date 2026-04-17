@@ -16,6 +16,7 @@ from contracts.evidence_frames import (
     ObservationFrame,
 )
 from contracts.question_analysis import AnswerKind
+from agent.shape_requirements import get_requirement
 
 log = logging.getLogger("Enai")
 
@@ -90,10 +91,11 @@ def _validate_list(frame: CanonicalFrame) -> EvidenceGap | None:
 def _validate_timeseries(frame: CanonicalFrame) -> EvidenceGap | None:
     if not isinstance(frame, ObservationFrame):
         return EvidenceGap(AnswerKind.TIMESERIES, f"Expected ObservationFrame, got {type(frame).__name__}")
-    if len(frame.periods) < 2:
+    min_periods = get_requirement(AnswerKind.TIMESERIES).min_periods
+    if len(frame.periods) < min_periods:
         return EvidenceGap(
             AnswerKind.TIMESERIES,
-            f"Only {len(frame.periods)} period(s) — need at least 2 for timeseries",
+            f"Only {len(frame.periods)} period(s) — need at least {min_periods} for timeseries",
             correctable=True,
         )
     return None
@@ -105,7 +107,8 @@ def _validate_comparison(frame: CanonicalFrame) -> EvidenceGap | None:
             return EvidenceGap(AnswerKind.COMPARISON, "ComparisonFrame is empty", correctable=True)
         return None
     if isinstance(frame, ObservationFrame):
-        # Comparison from observations needs at least 2 periods or 2 entities.
+        # COMPARISON shape: ≥2 periods OR ≥2 entities (see ShapeRequirement
+        # ``accepts_multi_period_or_entity``).
         if len(frame.periods) < 2 and len(frame.entities) < 2:
             return EvidenceGap(
                 AnswerKind.COMPARISON,
@@ -119,11 +122,12 @@ def _validate_comparison(frame: CanonicalFrame) -> EvidenceGap | None:
 def _validate_forecast(frame: CanonicalFrame) -> EvidenceGap | None:
     if not isinstance(frame, ObservationFrame):
         return EvidenceGap(AnswerKind.FORECAST, f"Expected ObservationFrame, got {type(frame).__name__}")
-    # Forecast needs enough history for trend calculation (at least 3 periods).
-    if len(frame.periods) < 3:
+    # Forecast needs enough history for trend calculation (see ShapeRequirement).
+    min_periods = get_requirement(AnswerKind.FORECAST).min_periods
+    if len(frame.periods) < min_periods:
         return EvidenceGap(
             AnswerKind.FORECAST,
-            f"Only {len(frame.periods)} period(s) — need at least 3 for forecast trend",
+            f"Only {len(frame.periods)} period(s) — need at least {min_periods} for forecast trend",
             correctable=True,
         )
     return None

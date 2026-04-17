@@ -357,6 +357,10 @@ def _resolve_vector_retrieval_tier(
       on ``is_conceptual`` — True → ``FULL``, False → ``LIGHT`` (keep
       retrieval warm for narrative answers, but avoid the full-K cost
       when we don't even know the shape).
+    * A data-shape ``answer_kind`` with ``render_style=None`` (keyword-
+      derived answer_kind but analyzer non-authoritative, so no render
+      hint) → ``LIGHT``.  Treated explicitly so a future edit to the
+      DETERMINISTIC branch can't silently degrade this path.
     """
     if PIPELINE_MODE == "fast":
         return VectorRetrievalTier.SKIP
@@ -371,6 +375,13 @@ def _resolve_vector_retrieval_tier(
         # All remaining AnswerKind members are data shapes.
         if render_style == RenderStyle.DETERMINISTIC:
             return VectorRetrievalTier.SKIP
+        if render_style == RenderStyle.NARRATIVE:
+            return VectorRetrievalTier.LIGHT
+        # render_style is None: authoritative analyzer always populates
+        # render_style (pipeline.py defaults it to NARRATIVE before calling
+        # this function), so a None here means the answer_kind was derived
+        # from keyword fallback.  Keep retrieval warm (LIGHT) — same as
+        # the NARRATIVE default, but expressed explicitly.
         return VectorRetrievalTier.LIGHT
 
     # --- Analyzer-absent fallback ---

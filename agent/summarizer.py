@@ -1885,6 +1885,13 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         log.info("Generic renderer produced answer (answer_kind=%s); skipping legacy dispatch.",
                  ctx.question_analysis.answer_kind.value if ctx.question_analysis and ctx.question_analysis.answer_kind else "?")
     elif ctx.share_summary_override:
+        # Permanent specialized formatter for share-intent LIST/SCALAR queries
+        # (renewable vs thermal PPA decomposition + per-period price join).
+        # Sits in the dispatch chain AFTER the generic renderer so that a
+        # canonical ObservationFrame/EntitySetFrame is preferred when it can
+        # satisfy the answer shape; the override only fires when the generic
+        # renderer cannot produce a domain-decomposed answer.
+        # Analogous to SCENARIO/FORECAST specialized formatters per §3.4.
         ctx.summary = ctx.share_summary_override
         ctx.summary_source = "deterministic_share_summary"
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
