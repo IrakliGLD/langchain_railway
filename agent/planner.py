@@ -100,6 +100,98 @@ def _expand_single_month_explanation_window(
     return expanded_start, end_date
 
 
+def _extract_forecast_horizon_years(query: str) -> int:
+    """Extract the requested forecast horizon in years from free text."""
+
+    if not query:
+        return 3
+
+    match = re.search(r"(\d+)\s*-?year", query)
+    if match:
+        return min(max(int(match.group(1)), 1), 20)
+    if "decade" in query:
+        return 10
+    return 3
+
+
+def _extract_excluded_years(query: str) -> set[int]:
+    """Return calendar years the user explicitly asked to exclude from modeling."""
+
+    if not query:
+        return set()
+
+    years: set[int] = set()
+    pattern = re.compile(
+        r"(?:exclude|excluding|without|except|omit|omitting|do not use|don't use|not use)"
+        r"[^0-9]{0,30}"
+        r"((?:19|20)\d{2}(?:[^0-9]+(?:19|20)\d{2})*)",
+        re.IGNORECASE,
+    )
+    for block in pattern.findall(query):
+        years.update(int(year) for year in re.findall(r"(?:19|20)\d{2}", block))
+    return years
+
+
+def _last_completed_month_end(today: date) -> date:
+    """Return the final day of the most recently completed month."""
+
+    if today.month == 1:
+        return date(today.year - 1, 12, 31)
+    prev_month = today.month - 1
+    return date(today.year, prev_month, monthrange(today.year, prev_month)[1])
+
+
+def _expand_forecast_history_window(
+    qa: QuestionAnalysis,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    *,
+    tool_name: str = "",
+    granularity: str = "monthly",
+    raw_query: str = "",
+) -> tuple[Optional[str], Optional[str]]:
+    """Ensure forecast tool fetches include enough historical source periods."""
+
+    if qa.classification.query_type != QueryType.FORECAST or tool_name != ToolName.GET_PRICES.value:
+        return start_date, end_date
+
+    query_text = (qa.canonical_query_en or raw_query or "").lower()
+    horizon_years = _extract_forecast_horizon_years(query_text)
+    excluded_years = _extract_excluded_years(query_text)
+    desired_history_years = max(5, min(8, horizon_years + 2))
+    if excluded_years:
+        desired_history_years = min(10, max(8, desired_history_years + len(excluded_years)))
+
+    today = date.today()
+    yearly_mode = str(granularity).lower() == "yearly"
+    resolved_end = _parse_iso_date(end_date)
+    if resolved_end is None:
+        resolved_end = date(today.year - 1, 12, 31) if yearly_mode else _last_completed_month_end(today)
+        end_date = resolved_end.isoformat()
+
+    resolved_start = _parse_iso_date(start_date)
+    if yearly_mode:
+        widened_start = date(resolved_end.year - desired_history_years + 1, 1, 1)
+    else:
+        widened_start = date(resolved_end.year - desired_history_years + 1, resolved_end.month, 1)
+
+    if resolved_start is None or resolved_start > widened_start:
+        log.info(
+            "Expanding forecast source history window for %s: %s-%s -> %s-%s (horizon=%sy, excluded_years=%s, granularity=%s)",
+            tool_name or "unknown",
+            start_date,
+            end_date,
+            widened_start.isoformat(),
+            end_date,
+            horizon_years,
+            sorted(excluded_years),
+            granularity,
+        )
+        start_date = widened_start.isoformat()
+
+    return start_date, end_date
+
+
 # Token vocabularies below power deterministic planner guardrails before any SQL is generated.
 _BALANCING_PRICE_EXPLANATION_TOKENS = (
     "why",
@@ -2190,12 +2282,6 @@ def resolve_tool_params(
         qa, start_date, end_date, tool_name=tool_name,
     )
 
-    params: dict = {}
-    if start_date:
-        params["start_date"] = start_date
-    if end_date:
-        params["end_date"] = end_date
-
     # --- Tool-specific parameter resolution ---
     if tool_name == ToolName.GET_PRICES.value:
         hint_metric = hint.metric if hint and getattr(hint, "metric", None) else None
@@ -2215,6 +2301,22 @@ def resolve_tool_params(
         if not raw_gran and qa.sql_hints.period and qa.sql_hints.period.granularity:
             raw_gran = qa.sql_hints.period.granularity.value
         granularity = normalize_tool_granularity_hint(raw_gran) or "monthly"
+        start_date, end_date = _expand_forecast_history_window(
+            qa,
+            start_date,
+            end_date,
+            tool_name=tool_name,
+            granularity=granularity,
+            raw_query=effective_query,
+        )
+
+    params: dict = {}
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+
+    if tool_name == ToolName.GET_PRICES.value:
         params.update({"metric": metric, "currency": currency, "granularity": granularity})
 
     elif tool_name == ToolName.GET_TARIFFS.value:

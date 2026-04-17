@@ -177,3 +177,43 @@ def test_analyzer_enrich_timeseries_does_not_activate_forecast_trendlines(monkey
     assert ctx.add_trendlines is False
     assert ctx.trendline_extend_to is None
     assert "TRENDLINE FORECASTS" not in ctx.stats_hint
+
+
+def test_generate_cagr_forecast_supports_yearly_integer_price_history():
+    from agent import analyzer
+
+    df = pd.DataFrame({
+        "year": [2021, 2022, 2023, 2024, 2025],
+        "p_bal_gel": [90.0, 100.0, 110.0, 121.0, 133.1],
+    })
+
+    out, note = analyzer._generate_cagr_forecast(
+        df,
+        "Forecast balancing electricity price for the next 5 years, but do not use 2020 data.",
+    )
+
+    forecast_rows = out[out["is_forecast"]]
+
+    assert "Forecast skipped" not in note
+    assert "yearly averages" in note
+    assert len(forecast_rows) == 5
+    assert set(forecast_rows["year"].dt.year.tolist()) == {2026, 2027, 2028, 2029, 2030}
+    assert forecast_rows["year"].dt.year.min() == 2026
+    assert "season" not in forecast_rows.columns or forecast_rows["season"].isna().all()
+
+
+def test_generate_cagr_forecast_reports_usable_yearly_point_count():
+    from agent import analyzer
+
+    df = pd.DataFrame({
+        "year": [2025],
+        "p_bal_gel": [133.1],
+    })
+
+    out, note = analyzer._generate_cagr_forecast(
+        df,
+        "Forecast balancing electricity price for the next 5 years, but do not use 2020 data.",
+    )
+
+    assert out.equals(df)
+    assert note == "Forecast skipped: only 1 usable yearly point after normalization/filtering."

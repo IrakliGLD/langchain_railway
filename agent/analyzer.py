@@ -22,7 +22,10 @@ from analysis.seasonal_stats import (
     calculate_seasonal_stats,
     format_seasonal_stats,
 )
-from analysis.system_quantities import normalize_period_series
+from analysis.system_quantities import (
+    normalize_period_series,
+    normalize_period_series_with_granularity,
+)
 from analysis.shares import build_balancing_correlation_df, compute_regulated_plant_sales
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
@@ -1709,7 +1712,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
     if not time_col or not value_col:
         return df_in, "Forecast skipped: no clear time/value columns."
 
-    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+    df[time_col], time_granularity = normalize_period_series_with_granularity(df[time_col])
     df = df.dropna(subset=[time_col, value_col])
     df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
     df = df.dropna(subset=[value_col])
@@ -1719,20 +1722,36 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
     data_type = _detect_data_type(value_col)
     note_parts = []
 
+    def _usable_yearly_points_message(yearly_count: int) -> str:
+        noun = "point" if yearly_count == 1 else "points"
+        return f"Forecast skipped: only {yearly_count} usable yearly {noun} after normalization/filtering."
+
+    def _resolve_target_years(last_year: int) -> list[int]:
+        horizon = _extract_forecast_horizon(user_query)
+        yrs_in_q = re.findall(r"(20\d{2})", user_query)
+        return sorted({int(y) for y in yrs_in_q if int(y) > last_year}) or [
+            int(last_year) + i for i in range(1, horizon + 1)
+        ]
+
     if data_type == "quantity":
-        df["year"] = df[time_col].dt.year
-        df_y = df.groupby("year")[value_col].sum().reset_index()
+        df["__forecast_year"] = df[time_col].dt.year
+        df_y = (
+            df.groupby("__forecast_year")[value_col]
+            .sum()
+            .dropna()
+            .sort_index()
+            .reset_index()
+            .rename(columns={"__forecast_year": "year"})
+        )
         if len(df_y) < 2:
-            return df_in, "Forecast skipped: insufficient yearly data."
+            return df_in, _usable_yearly_points_message(len(df_y))
         first, last = df_y.iloc[0], df_y.iloc[-1]
         span = last["year"] - first["year"]
         if span <= 0 or first[value_col] <= 0:
             return df_in, "Invalid data for CAGR."
         cagr = (last[value_col] / first[value_col]) ** (1 / span) - 1
         note_parts.append(f"Yearly CAGR={cagr*100:.2f}% ({int(first['year'])}→{int(last['year'])}).")
-        horizon = _extract_forecast_horizon(user_query)
-        yrs_in_q = re.findall(r"(20\d{2})", user_query)
-        target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [int(last["year"]) + i for i in range(1, horizon + 1)]
+        target_years = _resolve_target_years(int(last["year"]))
         f_rows = []
         for y in target_years:
             val = last[value_col] * ((1 + cagr) ** (y - last["year"]))
@@ -1745,11 +1764,20 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         return df_f, " ".join(note_parts)
 
     elif data_type == "price":
-        df["year"] = df[time_col].dt.year
-        df["month"] = df[time_col].dt.month
-        df["season"] = np.where(df["month"].isin(SUMMER_MONTHS), "summer", "winter")
+        df["__forecast_year"] = df[time_col].dt.year
+        df["__forecast_month"] = df[time_col].dt.month
+        df["__forecast_season"] = np.where(df["__forecast_month"].isin(SUMMER_MONTHS), "summer", "winter")
 
-        df_y = df.groupby("year")[value_col].mean().reset_index()
+        df_y = (
+            df.groupby("__forecast_year")[value_col]
+            .mean()
+            .dropna()
+            .sort_index()
+            .reset_index()
+            .rename(columns={"__forecast_year": "year"})
+        )
+        if len(df_y) < 2:
+            return df_in, _usable_yearly_points_message(len(df_y))
         first, last = df_y.iloc[0], df_y.iloc[-1]
         span = last["year"] - first["year"]
 
@@ -1758,7 +1786,31 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         else:
             cagr_y = 0
 
-        df_s = df.groupby(["year", "season"])[value_col].mean().reset_index()
+        def format_cagr(cagr_val):
+            return f"{cagr_val*100:.2f}" if not np.isnan(cagr_val) else "N/A"
+
+        target_years = _resolve_target_years(int(last["year"]))
+
+        if time_granularity == "year":
+            note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}% using yearly averages.")
+            f_rows = []
+            for y in target_years:
+                val_y = last[value_col] * ((1 + cagr_y) ** (y - last["year"]))
+                f_rows.append({time_col: pd.to_datetime(f"{int(y)}-01-01"), value_col: val_y, "is_forecast": True})
+
+            if "is_forecast" not in df.columns:
+                df["is_forecast"] = False
+            df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
+            note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
+            return df_f, " ".join(note_parts)
+
+        df_s = (
+            df.groupby(["__forecast_year", "__forecast_season"])[value_col]
+            .mean()
+            .dropna()
+            .reset_index()
+            .rename(columns={"__forecast_year": "year", "__forecast_season": "season"})
+        )
         summer = df_s[df_s["season"] == "summer"]
         winter = df_s[df_s["season"] == "winter"]
 
@@ -1776,14 +1828,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         else:
             cagr_w = np.nan
 
-        def format_cagr(cagr_val):
-            return f"{cagr_val*100:.2f}" if not np.isnan(cagr_val) else "N/A"
-
         note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_w)}%.")
-
-        horizon = _extract_forecast_horizon(user_query)
-        yrs_in_q = re.findall(r"(20\d{2})", user_query)
-        target_years = sorted({int(y) for y in yrs_in_q if int(y) > last["year"]}) or [int(last["year"]) + i for i in range(1, horizon + 1)]
 
         f_rows = []
         for y in target_years:
@@ -1791,12 +1836,16 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             val_s = last[value_col] * ((1 + cagr_s) ** (y - last["year"])) if not np.isnan(cagr_s) else val_y
             val_w = last[value_col] * ((1 + cagr_w) ** (y - last["year"])) if not np.isnan(cagr_w) else val_y
             # Force year to int
-            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-04-01"), "season": "summer", value_col: val_s, "is_forecast": True})
-            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-12-01"), "season": "winter", value_col: val_w, "is_forecast": True})
+            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-04-01"), "__forecast_season": "summer", value_col: val_s, "is_forecast": True})
+            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-12-01"), "__forecast_season": "winter", value_col: val_w, "is_forecast": True})
 
         if "is_forecast" not in df.columns:
             df["is_forecast"] = False
+        if "season" not in df.columns and "__forecast_season" in df.columns:
+            df["season"] = df["__forecast_season"]
         df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
+        if "__forecast_season" in df_f.columns:
+            df_f["season"] = df_f.get("season").fillna(df_f["__forecast_season"])
         note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
         return df_f, " ".join(note_parts)
 

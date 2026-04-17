@@ -13,6 +13,8 @@ from typing import List, Tuple
 import pandas as pd
 import numpy as np
 
+from analysis.system_quantities import normalize_period_series_with_granularity
+
 log = logging.getLogger("Enai")
 
 
@@ -91,24 +93,24 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
         return "0 rows."
 
     df = pd.DataFrame(rows, columns=cols).copy()  # Protect original data
-    numeric = df.select_dtypes(include=[np.number])
     out = [f"Rows: {len(df)}"]
 
     # 1. Detect date/year column
     _time_kws = ("date", "year", "month", "period")
     date_cols = [c for c in df.columns if any(kw in c.lower() for kw in _time_kws)]
-    if not date_cols or numeric.empty:
+    if not date_cols:
         # Fallback to simple stats if no date or numeric data
         return "\n".join(out)
 
     time_col = date_cols[0]
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != time_col]
+    if not numeric_cols:
+        return "\n".join(out)
+    time_granularity = None
 
     # --- Trend Calculation: Compare First Full Year vs Last Full Year ---
     try:
-        # Ensure the time column is datetime, then extract year/month
-        if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
-            # Attempt to coerce strings/objects to datetime
-            df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+        df[time_col], time_granularity = normalize_period_series_with_granularity(df[time_col])
 
         # Verify conversion worked before using .dt accessors
         if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
@@ -118,19 +120,24 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 
         df['__year'] = df[time_col].dt.year
 
-        # --- Detect and exclude incomplete final year ---
-        # Applies to all time columns, even if already datetime
-        try:
-            df['_year_month'] = df[time_col].dt.to_period('M')
-            # Count how many records (months) exist for each year
-            months_per_year = df.groupby(df['_year_month'].dt.year).size().sort_index()
-            # Mark as incomplete if less than 10 months (not a full year of data)
-            incomplete_years = months_per_year[months_per_year < 10].index.tolist()
-            if incomplete_years:
-                log.info(f"🧩 Excluding incomplete years from trend calculation: {incomplete_years}")
-                df = df[~df['__year'].isin(incomplete_years)]
-        except Exception as e:
-            log.warning(f"⚠️ Failed to filter incomplete years: {e}")
+        if time_granularity != "year":
+            try:
+                months_per_year = (
+                    df.assign(_year_month=df[time_col].dt.to_period("M"))
+                    .groupby("__year")["_year_month"]
+                    .nunique()
+                    .sort_index()
+                )
+                incomplete_years = months_per_year[months_per_year < 10].index.tolist()
+                if incomplete_years:
+                    log.info(
+                        "Excluding incomplete years from trend calculation (granularity=%s): %s",
+                        time_granularity or "unknown",
+                        incomplete_years,
+                    )
+                    df = df[~df['__year'].isin(incomplete_years)]
+            except Exception as e:
+                log.warning(f"⚠️ Failed to filter incomplete years: {e}")
 
         valid_years = df['__year'].dropna().unique()
         if len(valid_years) >= 2:
@@ -146,8 +153,8 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
 
                 # Get the mean of all numeric values for these years
                 # Using .values.mean() to get single average across all values
-                mean_first_year = df_first[numeric.columns].values.mean()
-                mean_last_year = df_last[numeric.columns].values.mean()
+                mean_first_year = df_first[numeric_cols].values.mean()
+                mean_last_year = df_last[numeric_cols].values.mean()
 
                 # Express the overall change relative to the first comparable full year.
                 change = ((mean_last_year - mean_first_year) / mean_first_year * 100) if mean_first_year != 0 else 0
@@ -173,7 +180,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                             return ((last / first) ** (1 / n) - 1) * 100 if first > 0 else np.nan
                         return np.nan
 
-                    for col in numeric.columns:
+                    for col in numeric_cols:
                         if 'p_bal' in col.lower() or 'price' in col.lower():
                             summer_first = seasonal_avg(df.loc[summer_mask], col, first_full_year)
                             summer_last = seasonal_avg(df.loc[summer_mask], col, last_full_year)
@@ -207,11 +214,16 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
     # Date range display
     first = df[time_col].min()
     last = df[time_col].max()
-    out.append(f"Period: {first} → {last}")
+    if pd.isna(first) or pd.isna(last):
+        out.append("Period: unavailable")
+    elif time_granularity == "year":
+        out.append(f"Period: {int(first.year)} → {int(last.year)}")
+    else:
+        out.append(f"Period: {first.date()} → {last.date()}")
 
     # Numeric summary
-    if not numeric.empty:
-        desc = numeric.describe().round(3)
+    if numeric_cols:
+        desc = df[numeric_cols].describe().round(3)
         out.append("Numeric summary:")
         out.append(desc.to_string())
 

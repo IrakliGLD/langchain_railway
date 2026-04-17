@@ -4428,6 +4428,42 @@ def test_quick_stats_no_date_column():
     assert "Rows: 3" in result
 
 
+def test_quick_stats_treats_integer_years_as_yearly_periods():
+    """Year integers should stay yearly, not collapse into 1970 timestamps."""
+    from analysis.stats import quick_stats
+
+    rows = [
+        (2021, 100.0),
+        (2022, 110.0),
+        (2023, 130.0),
+    ]
+    cols = ["year", "price"]
+
+    result = quick_stats(rows, cols)
+
+    assert "1970" not in result
+    assert "Trend (Yearly Avg, 2021→2023): increasing" in result
+    assert "Period: 2021 → 2023" in result
+
+
+def test_quick_stats_keeps_one_row_per_year_yearly_aggregates():
+    """Yearly aggregate rows should not be discarded by the monthly completeness rule."""
+    from analysis.stats import quick_stats
+
+    rows = [
+        (2021, 95.0),
+        (2022, 100.0),
+        (2023, 112.0),
+        (2024, 120.0),
+    ]
+    cols = ["year", "p_bal_gel"]
+
+    result = quick_stats(rows, cols)
+
+    assert "Trend (Yearly Avg, 2021→2024): increasing" in result
+    assert "Insufficient data" not in result
+
+
 # ---------------------------------------------------------------------------
 # summarize_data domain_knowledge threading tests
 # ---------------------------------------------------------------------------

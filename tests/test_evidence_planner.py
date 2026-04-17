@@ -187,6 +187,37 @@ class TestBuildEvidencePlan:
 
 
 class TestResolveToolParams:
+    def test_forecast_prices_get_explicit_historical_year_window(self, monkeypatch):
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 17)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
+        payload = _make_qa_payload(
+            query_type="forecast",
+            period={
+                "kind": "year",
+                "start_date": "2030-01-01",
+                "end_date": "2030-12-31",
+                "granularity": "year",
+                "raw_text": "2030",
+            },
+        )
+        payload["raw_query"] = "Forecast balancing electricity price for 2030."
+        payload["canonical_query_en"] = "Forecast the balancing electricity price for the year 2030."
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["granularity"] == "yearly"
+        assert params["start_date"] == "2021-01-01"
+        assert params["end_date"] == "2025-12-31"
+
     def test_expands_single_month_explanation_window_for_derived_metrics(self):
         payload = _make_qa_payload(
             query_type="data_explanation",
@@ -212,6 +243,39 @@ class TestResolveToolParams:
         assert params is not None
         assert params["start_date"] == "2019-05-01"
         assert params["end_date"] == "2024-05-31"
+
+    def test_forecast_excluded_years_expand_history_further(self, monkeypatch):
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 17)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
+        payload = _make_qa_payload(
+            query_type="forecast",
+            period={
+                "kind": "year",
+                "start_date": "2030-01-01",
+                "end_date": "2030-12-31",
+                "granularity": "year",
+                "raw_text": "2030",
+            },
+        )
+        payload["raw_query"] = "Forecast balancing electricity price for the next 5 years, but do not use 2020 data."
+        payload["canonical_query_en"] = (
+            "Forecast the balancing electricity price for the next 5 years, but do not use 2020 data."
+        )
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["granularity"] == "yearly"
+        assert params["start_date"] == "2018-01-01"
+        assert params["end_date"] == "2025-12-31"
 
     def test_expands_single_month_range_window_for_derived_metrics(self):
         payload = _make_qa_payload(
@@ -372,7 +436,16 @@ class TestResolveToolParams:
         assert tool_names == ["get_prices", "get_generation_mix"]
         assert ctx.evidence_plan[1]["role"] == "correlation_driver"
 
-    def test_forecast_resolve_tool_params_does_not_fetch_future_source_window(self):
+    def test_forecast_resolve_tool_params_expands_future_only_query_to_monthly_source_window(self, monkeypatch):
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 17)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
         payload = _make_qa_payload(
             query_type="forecast",
             derived_metrics=[],
@@ -384,10 +457,20 @@ class TestResolveToolParams:
         params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
 
         assert params is not None
-        assert "start_date" not in params
-        assert "end_date" not in params
+        assert params["granularity"] == "monthly"
+        assert params["start_date"] == "2022-03-01"
+        assert params["end_date"] == "2026-03-31"
 
-    def test_forecast_resolve_tool_params_ignores_future_structured_period_for_source_window(self):
+    def test_forecast_resolve_tool_params_ignores_future_structured_period_for_source_window(self, monkeypatch):
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 4, 17)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
         payload = _make_qa_payload(
             query_type="forecast",
             derived_metrics=[],
@@ -406,8 +489,9 @@ class TestResolveToolParams:
         params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
 
         assert params is not None
-        assert "start_date" not in params
-        assert "end_date" not in params
+        assert params["granularity"] == "yearly"
+        assert params["start_date"] == "2021-01-01"
+        assert params["end_date"] == "2025-12-31"
 
     def test_yearly_generation_secondary_inherits_primary_granularity(self):
         payload = _make_qa_payload(

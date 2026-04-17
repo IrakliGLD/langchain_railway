@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional, Tuple
 
 import pandas as pd
 
@@ -13,24 +13,58 @@ _LOCAL_GENERATION_TYPES = ("hydro", "wind", "solar")
 _IMPORT_DEPENDENT_TYPES = ("thermal", "import")
 
 
-def normalize_period_series(series: pd.Series) -> pd.Series:
-    """Coerce year-like and date-like series into timestamps."""
+def infer_period_granularity(series: pd.Series) -> Optional[str]:
+    """Infer whether a normalized timestamp series is yearly, monthly, or finer."""
 
     if series is None:
-        return series
+        return None
+
+    timestamps = pd.to_datetime(series, errors="coerce")
+    non_null = timestamps.dropna()
+    if non_null.empty:
+        return None
+
+    if non_null.dt.month.eq(1).all() and non_null.dt.day.eq(1).all():
+        rows_per_year = non_null.dt.year.value_counts(dropna=True)
+        if not rows_per_year.empty and int(rows_per_year.max()) == 1:
+            return "year"
+
+    if non_null.dt.day.eq(1).all():
+        rows_per_month = non_null.dt.to_period("M").value_counts()
+        if not rows_per_month.empty and int(rows_per_month.max()) == 1:
+            return "month"
+
+    return "day"
+
+
+def normalize_period_series_with_granularity(series: pd.Series) -> Tuple[pd.Series, Optional[str]]:
+    """Coerce year-like and date-like series into timestamps plus inferred granularity."""
+
+    if series is None:
+        return series, None
 
     numeric = pd.to_numeric(series, errors="coerce")
     if numeric.notna().any():
         non_null = numeric.dropna()
         if not non_null.empty and non_null.between(1900, 2100).all():
             year_strings = numeric.round().astype("Int64").astype(str)
-            return pd.to_datetime(year_strings, format="%Y", errors="coerce")
+            return pd.to_datetime(year_strings, format="%Y", errors="coerce"), "year"
 
     text = series.astype(str).str.strip()
-    if not text.empty and text.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA}).dropna().str.fullmatch(r"20\d{2}").all():
-        return pd.to_datetime(text, format="%Y", errors="coerce")
+    cleaned = text.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA, "<NA>": pd.NA})
+    non_null_text = cleaned.dropna()
+    if not non_null_text.empty and non_null_text.str.fullmatch(r"(19|20)\d{2}").all():
+        return pd.to_datetime(cleaned, format="%Y", errors="coerce"), "year"
 
-    return pd.to_datetime(series, errors="coerce")
+    timestamps = pd.to_datetime(series, errors="coerce")
+    return timestamps, infer_period_granularity(timestamps)
+
+
+def normalize_period_series(series: pd.Series) -> pd.Series:
+    """Coerce year-like and date-like series into timestamps."""
+
+    normalized, _granularity = normalize_period_series_with_granularity(series)
+    return normalized
 
 
 def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
