@@ -381,6 +381,23 @@
       "title": "LanguageInfo",
       "type": "object"
     },
+    "MeasureTransform": {
+      "enum": [
+        "raw",
+        "sum",
+        "avg",
+        "weighted_avg",
+        "share_of_total",
+        "mom_delta",
+        "mom_pct",
+        "yoy_delta",
+        "yoy_pct",
+        "cagr",
+        "index_100"
+      ],
+      "title": "MeasureTransform",
+      "type": "string"
+    },
     "PeriodGranularity": {
       "enum": [
         "day",
@@ -456,6 +473,16 @@
         "reject"
       ],
       "title": "PreferredPath",
+      "type": "string"
+    },
+    "PresentationMode": {
+      "enum": [
+        "chart",
+        "table",
+        "text",
+        "chart_plus_table"
+      ],
+      "title": "PresentationMode",
       "type": "string"
     },
     "QueryType": {
@@ -551,6 +578,14 @@
         "component_secondary"
       ],
       "title": "SemanticRole",
+      "type": "string"
+    },
+    "SeriesSplitMode": {
+      "enum": [
+        "single_chart",
+        "multi_panel"
+      ],
+      "title": "SeriesSplitMode",
       "type": "string"
     },
     "SqlAggregation": {
@@ -834,6 +869,19 @@
       "title": "TopicCandidate",
       "type": "object"
     },
+    "VisualGoal": {
+      "enum": [
+        "trend",
+        "compare",
+        "composition",
+        "decomposition",
+        "ranking",
+        "relationship",
+        "threshold_scan"
+      ],
+      "title": "VisualGoal",
+      "type": "string"
+    },
     "VisualizationInfo": {
       "additionalProperties": false,
       "properties": {
@@ -862,6 +910,66 @@
           ],
           "default": null
         },
+        "primary_presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PresentationMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "visual_goal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualGoal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "measure_transform": {
+          "$ref": "#/$defs/MeasureTransform",
+          "default": "raw"
+        },
+        "time_grain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualizationTimeGrain"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "series_split_mode": {
+          "$ref": "#/$defs/SeriesSplitMode",
+          "default": "single_chart"
+        },
+        "max_series": {
+          "anyOf": [
+            {
+              "maximum": 8,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Series"
+        },
+        "include_reference_lines": {
+          "default": false,
+          "title": "Include Reference Lines",
+          "type": "boolean"
+        },
         "chart_intent": {
           "anyOf": [
             {
@@ -889,6 +997,18 @@
       ],
       "title": "VisualizationInfo",
       "type": "object"
+    },
+    "VisualizationTimeGrain": {
+      "enum": [
+        "raw",
+        "day",
+        "month",
+        "quarter",
+        "season",
+        "year"
+      ],
+      "title": "VisualizationTimeGrain",
+      "type": "string"
     }
   },
   "additionalProperties": false,

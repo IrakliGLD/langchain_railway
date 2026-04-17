@@ -83,6 +83,7 @@ TEST_BEARER_SUBJECT = "00000000-0000-0000-0000-000000000123"
 def _fake_query_context():
     return SimpleNamespace(
         summary="ok",
+        charts=None,
         chart_data=None,
         chart_type=None,
         chart_meta={},
@@ -394,6 +395,38 @@ def test_ask_accepts_valid_public_bearer(monkeypatch):
     assert response.headers.get("X-LLM-Total-Tokens") is None
     assert response.headers.get("X-LLM-Estimated-Cost-USD") is None
     _clear_rate_limit_buckets()
+
+
+def test_ask_response_includes_chart_collection(monkeypatch):
+    ctx = _fake_query_context()
+    ctx.charts = [
+        {
+            "data": [{"date": "2024-01", "Balancing Electricity Price": 10.0}],
+            "type": "line",
+            "metadata": {"title": "Balancing Price"},
+        }
+    ]
+    ctx.chart_data = ctx.charts[0]["data"]
+    ctx.chart_type = ctx.charts[0]["type"]
+    ctx.chart_meta = ctx.charts[0]["metadata"]
+
+    monkeypatch.setattr(main_module, "process_query", lambda **_kwargs: ctx)
+    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"X-App-Key": "test-gateway-key"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["charts"] == ctx.charts
+    assert body["chart_type"] == "line"
+    assert body["chart_data"] == ctx.chart_data
 
 
 def test_public_bearer_rate_limit_returns_429(monkeypatch):

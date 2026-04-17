@@ -944,6 +944,7 @@ def ask_post(
             req_usage = _finalize_request_telemetry()
             return APIResponse(
                 answer=build_safe_refusal_message(firewall_decision),
+                charts=None,
                 chart_data=None,
                 chart_type=None,
                 chart_metadata={
@@ -1023,6 +1024,7 @@ def ask_post(
 
         return APIResponse(
             answer=ctx.summary,
+            charts=(getattr(ctx, "charts", None) or None),
             chart_data=ctx.chart_data,
             chart_type=ctx.chart_type,
             chart_metadata=response_chart_meta,

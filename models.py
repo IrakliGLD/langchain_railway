@@ -160,6 +160,7 @@ class QueryContext:
     chart_override_data: Optional[List[Dict[str, Any]]] = None
     chart_override_type: Optional[str] = None
     chart_override_meta: Optional[Dict[str, Any]] = None
+    charts: List[Dict[str, Any]] = dc_field(default_factory=list)
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None
     chart_meta: Optional[Dict[str, Any]] = None
@@ -266,6 +267,7 @@ class APIResponse(BaseModel):
         execution_time: Total execution time in seconds
     """
     answer: str
+    charts: Optional[List[Dict[str, Any]]] = None
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None
     chart_metadata: Optional[Dict[str, Any]] = None

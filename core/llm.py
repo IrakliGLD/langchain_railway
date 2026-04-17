@@ -55,11 +55,17 @@ from utils.resilience import get_llm_breaker
 import knowledge as knowledge_module
 from contracts.question_analysis import (
     AnswerKind,
+    ChartFamily,
     ChartIntent,
+    MeasureTransform,
     PeriodInfo,
+    PresentationMode,
     QuestionAnalysis,
     RenderStyle,
     SemanticRole,
+    SeriesSplitMode,
+    VisualGoal,
+    VisualizationTimeGrain,
     _VALID_ROLES_BY_INTENT,
 )
 from skills.loader import (
@@ -895,6 +901,25 @@ def _question_analysis_hint_payload(question_analysis: Optional[QuestionAnalysis
                 if question_analysis.visualization.preferred_chart_family is not None
                 else None
             ),
+            "primary_presentation": (
+                question_analysis.visualization.primary_presentation.value
+                if question_analysis.visualization.primary_presentation is not None
+                else None
+            ),
+            "visual_goal": (
+                question_analysis.visualization.visual_goal.value
+                if question_analysis.visualization.visual_goal is not None
+                else None
+            ),
+            "measure_transform": question_analysis.visualization.measure_transform.value,
+            "time_grain": (
+                question_analysis.visualization.time_grain.value
+                if question_analysis.visualization.time_grain is not None
+                else None
+            ),
+            "series_split_mode": question_analysis.visualization.series_split_mode.value,
+            "max_series": question_analysis.visualization.max_series,
+            "include_reference_lines": bool(question_analysis.visualization.include_reference_lines),
         },
         "analysis_requirements": question_analysis.analysis_requirements.model_dump(mode="json"),
     }
@@ -2033,8 +2058,70 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
     if not isinstance(vis, dict):
         return payload
 
+    raw_family = vis.get("preferred_chart_family")
+    if isinstance(raw_family, str):
+        try:
+            vis["preferred_chart_family"] = ChartFamily(raw_family).value
+        except ValueError:
+            vis.pop("preferred_chart_family", None)
+
+    raw_presentation = vis.get("primary_presentation")
+    if isinstance(raw_presentation, str):
+        try:
+            vis["primary_presentation"] = PresentationMode(raw_presentation).value
+        except ValueError:
+            vis.pop("primary_presentation", None)
+
+    raw_goal = vis.get("visual_goal")
+    if isinstance(raw_goal, str):
+        try:
+            vis["visual_goal"] = VisualGoal(raw_goal).value
+        except ValueError:
+            vis.pop("visual_goal", None)
+
+    raw_transform = vis.get("measure_transform")
+    if isinstance(raw_transform, str):
+        try:
+            vis["measure_transform"] = MeasureTransform(raw_transform).value
+        except ValueError:
+            vis.pop("measure_transform", None)
+
+    raw_time_grain = vis.get("time_grain")
+    if isinstance(raw_time_grain, str):
+        try:
+            vis["time_grain"] = VisualizationTimeGrain(raw_time_grain).value
+        except ValueError:
+            vis.pop("time_grain", None)
+
+    raw_split_mode = vis.get("series_split_mode")
+    if isinstance(raw_split_mode, str):
+        try:
+            vis["series_split_mode"] = SeriesSplitMode(raw_split_mode).value
+        except ValueError:
+            vis.pop("series_split_mode", None)
+
+    raw_max_series = vis.get("max_series")
+    if raw_max_series is not None:
+        try:
+            max_series = int(raw_max_series)
+        except (TypeError, ValueError):
+            vis.pop("max_series", None)
+        else:
+            if 1 <= max_series <= 8:
+                vis["max_series"] = max_series
+            else:
+                vis.pop("max_series", None)
+
     chart_requested = bool(vis.get("chart_requested_by_user"))
     chart_recommended = bool(vis.get("chart_recommended"))
+    if (
+        vis.get("primary_presentation")
+        in {PresentationMode.CHART.value, PresentationMode.CHART_PLUS_TABLE.value}
+        and not chart_requested
+        and not chart_recommended
+    ):
+        chart_recommended = True
+        vis["chart_recommended"] = True
     if not chart_requested and not chart_recommended:
         vis.pop("chart_intent", None)
         vis.pop("target_series", None)
@@ -2160,6 +2247,17 @@ _ANALYZER_SCENARIO_RULES = """\
 # Conditional: include when the question involves chart/visualization signals.
 _ANALYZER_CHART_RULES = """\
 - `chart_requested_by_user` and `chart_recommended` must be booleans.
+- `primary_presentation`: optional, one of `chart`, `table`, `text`, `chart_plus_table`.
+- `visual_goal`: optional, one of `trend`, `compare`, `composition`, `decomposition`, `ranking`, `relationship`, `threshold_scan`.
+- `measure_transform`: optional. Prefer:
+  - `raw` for direct historical values
+  - `share_of_total` for part-to-whole
+  - `mom_delta` / `mom_pct` / `yoy_delta` / `yoy_pct` for change-focused visuals
+  - `index_100` for normalized growth comparison
+  - `cagr` only when the user explicitly asks for growth rate / CAGR style visual
+- `time_grain`: optional, one of `raw`, `day`, `month`, `quarter`, `season`, `year`.
+- `series_split_mode`: optional, `single_chart` or `multi_panel`. Use `multi_panel` when units or semantics differ.
+- `max_series`: optional integer 1-8. Use lower values for readability when many series are possible.
 - `chart_intent` and `target_series` are optional semantic hints; emit them only when a chart is requested or clearly recommended.
 - Valid `chart_intent` values:
   - `trend_compare`

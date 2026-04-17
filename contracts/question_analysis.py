@@ -155,6 +155,51 @@ class ChartFamily(str, Enum):
     DUALAXIS = "dualaxis"
 
 
+class PresentationMode(str, Enum):
+    CHART = "chart"
+    TABLE = "table"
+    TEXT = "text"
+    CHART_PLUS_TABLE = "chart_plus_table"
+
+
+class VisualGoal(str, Enum):
+    TREND = "trend"
+    COMPARE = "compare"
+    COMPOSITION = "composition"
+    DECOMPOSITION = "decomposition"
+    RANKING = "ranking"
+    RELATIONSHIP = "relationship"
+    THRESHOLD_SCAN = "threshold_scan"
+
+
+class MeasureTransform(str, Enum):
+    RAW = "raw"
+    SUM = "sum"
+    AVG = "avg"
+    WEIGHTED_AVG = "weighted_avg"
+    SHARE_OF_TOTAL = "share_of_total"
+    MOM_DELTA = "mom_delta"
+    MOM_PCT = "mom_pct"
+    YOY_DELTA = "yoy_delta"
+    YOY_PCT = "yoy_pct"
+    CAGR = "cagr"
+    INDEX_100 = "index_100"
+
+
+class VisualizationTimeGrain(str, Enum):
+    RAW = "raw"
+    DAY = "day"
+    MONTH = "month"
+    QUARTER = "quarter"
+    SEASON = "season"
+    YEAR = "year"
+
+
+class SeriesSplitMode(str, Enum):
+    SINGLE_CHART = "single_chart"
+    MULTI_PANEL = "multi_panel"
+
+
 class ChartIntent(str, Enum):
     TREND_COMPARE = "trend_compare"
     DECOMPOSITION = "decomposition"
@@ -331,11 +376,27 @@ class VisualizationInfo(BaseModel):
     chart_recommended: bool
     chart_confidence: float = Field(ge=0.0, le=1.0)
     preferred_chart_family: Optional[ChartFamily] = None
+    primary_presentation: Optional[PresentationMode] = None
+    visual_goal: Optional[VisualGoal] = None
+    measure_transform: MeasureTransform = MeasureTransform.RAW
+    time_grain: Optional[VisualizationTimeGrain] = None
+    series_split_mode: SeriesSplitMode = SeriesSplitMode.SINGLE_CHART
+    max_series: Optional[int] = Field(default=None, ge=1, le=8)
+    include_reference_lines: bool = False
     chart_intent: Optional[ChartIntent] = None
     target_series: List[SemanticRole] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode="after")
     def _validate_semantic_chart_hints(self) -> "VisualizationInfo":
+        if (
+            self.primary_presentation in {PresentationMode.CHART, PresentationMode.CHART_PLUS_TABLE}
+            and not self.chart_requested_by_user
+            and not self.chart_recommended
+        ):
+            # A first-class chart presentation implies that visualization is
+            # relevant even if the analyzer forgot to set chart_recommended.
+            self.chart_recommended = True
+
         if not self.chart_requested_by_user and not self.chart_recommended:
             self.chart_intent = None
             self.target_series = []

@@ -3413,6 +3413,35 @@ def _make_chart_ctx(df, query="What is a trend of balancing electricity price? W
     return ctx
 
 
+def _make_chart_stage_question_analysis(
+    *,
+    answer_kind: str = "timeseries",
+    primary_presentation: str = "chart",
+    chart_recommended: bool = True,
+    chart_requested_by_user: bool = False,
+    measure_transform: str = "raw",
+    time_grain: str | None = None,
+    series_split_mode: str = "single_chart",
+    preferred_chart_family: str = "line",
+):
+    payload = _make_analyzer_payload("data_retrieval", "sql", confidence=0.95)
+    payload["answer_kind"] = answer_kind
+    payload["visualization"].update(
+        {
+            "chart_requested_by_user": chart_requested_by_user,
+            "chart_recommended": chart_recommended,
+            "chart_confidence": 0.9 if chart_recommended else 0.0,
+            "preferred_chart_family": preferred_chart_family,
+            "primary_presentation": primary_presentation,
+            "measure_transform": measure_transform,
+            "series_split_mode": series_split_mode,
+        }
+    )
+    if time_grain is not None:
+        payload["visualization"]["time_grain"] = time_grain
+    return QuestionAnalysis.model_validate(payload)
+
+
 def test_chart_column_leak_fix():
     """build_chart must only include selected series (<=3) + time column in chart_data records."""
     import numpy as np
@@ -3677,6 +3706,169 @@ def test_chart_dates_yearly_format():
     assert ctx.chart_data is not None
     first_date = ctx.chart_data[0]["date"]
     assert first_date == "2020", f"Expected '2020', got '{first_date}'"
+
+
+def test_build_chart_executes_all_chart_groups_and_backfills_primary_payload():
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "p_bal_gel": [10, 12, 11, 13, 14, 15],
+            "share_import": [0.2, 0.25, 0.22, 0.3, 0.28, 0.26],
+        }
+    )
+    ctx = _make_chart_ctx(df, query="Show a chart of prices and import shares")
+    ctx.plan["chart_groups"] = [
+        {
+            "type": "line",
+            "metrics": ["p_bal_gel"],
+            "title": "Balancing Price",
+            "y_axis_label": "GEL/MWh",
+        },
+        {
+            "type": "stacked_bar",
+            "metrics": ["share_import"],
+            "title": "Import Share",
+            "y_axis_label": "Share (0-1)",
+        },
+    ]
+    ctx.question_analysis = _make_chart_stage_question_analysis(primary_presentation="chart_plus_table")
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert len(out.charts) == 2
+    assert out.charts[0]["type"] == "line"
+    assert out.charts[0]["metadata"]["title"] == "Balancing Price"
+    assert out.charts[1]["type"] == "stackedbar"
+    assert out.charts[1]["metadata"]["title"] == "Import Share"
+    assert out.chart_data == out.charts[0]["data"]
+    assert out.chart_type == out.charts[0]["type"]
+    assert out.chart_meta == out.charts[0]["metadata"]
+
+
+def test_build_chart_auto_splits_multi_panel_by_dimension():
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "p_bal_gel": [10, 12, 11, 13, 14, 15],
+            "xrate": [2.6, 2.61, 2.58, 2.62, 2.64, 2.63],
+            "share_import": [0.2, 0.25, 0.22, 0.3, 0.28, 0.26],
+        }
+    )
+    ctx = _make_chart_ctx(df, query="Show charts for price, xrate, and import share")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        series_split_mode="multi_panel",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert len(out.charts) == 3
+    assert [chart["metadata"]["title"] for chart in out.charts] == [
+        "Price Trend",
+        "Exchange Rate Trend",
+        "Composition Trend",
+    ]
+    assert out.chart_type == "line"
+
+
+def test_build_chart_applies_index_transform_to_chart_frame():
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=3, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10.0, 20.0, 30.0]})
+    ctx = _make_chart_ctx(df, query="Show indexed balancing price chart")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        measure_transform="index_100",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.chart_data is not None
+    label = out.chart_meta["labels"][0]
+    assert out.chart_meta["measureTransform"] == "index_100"
+    assert out.chart_meta["yAxisTitle"] == "Index (base=100)"
+    assert out.chart_data[0][label] == pytest.approx(100.0, rel=1e-6)
+    assert out.chart_data[1][label] == pytest.approx(200.0, rel=1e-6)
+    assert out.chart_data[2][label] == pytest.approx(300.0, rel=1e-6)
+
+
+def test_build_chart_applies_explicit_time_grain():
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2023-01-01", periods=24, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": list(range(24))})
+    ctx = _make_chart_ctx(df, query="Show annual price trend chart")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        time_grain="year",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.chart_data is not None
+    assert len(out.chart_data) == 2
+    assert out.chart_meta["aggregation"] == "year"
+
+
+def test_build_chart_applies_share_of_total_transform():
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=2, freq="MS")
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "quantity_import": [20.0, 10.0],
+            "quantity_domestic": [80.0, 30.0],
+        }
+    )
+    ctx = _make_chart_ctx(df, query="Show composition chart of import and domestic quantities")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        measure_transform="share_of_total",
+        preferred_chart_family="bar",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.chart_data is not None
+    labels = out.chart_meta["labels"]
+    assert out.chart_meta["measureTransform"] == "share_of_total"
+    assert out.chart_meta["yAxisTitle"] == "Share of total (%)"
+    assert out.chart_data[0][labels[0]] == pytest.approx(20.0, rel=1e-6)
+    assert out.chart_data[0][labels[1]] == pytest.approx(80.0, rel=1e-6)
+    assert out.chart_data[1][labels[0]] == pytest.approx(25.0, rel=1e-6)
+    assert out.chart_data[1][labels[1]] == pytest.approx(75.0, rel=1e-6)
+
+
+def test_build_chart_respects_table_primary_presentation():
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10, 12, 11, 13, 14, 15]})
+    ctx = _make_chart_ctx(df, query="Show balancing prices")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="table",
+        chart_recommended=True,
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.charts == []
+    assert out.chart_data is None
+    assert out.chart_type is None
 
 
 # ---------------------------------------------------------------------------
