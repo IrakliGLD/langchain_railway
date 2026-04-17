@@ -24,6 +24,7 @@ from core.llm import (
     build_question_analyzer_prompt_validation_artifacts,
 )
 from utils.language import detect_language, get_language_instruction
+from utils.forecasting import extract_excluded_years, extract_forecast_horizon_years
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
 from utils.trace_logging import trace_detail
 from config import ENABLE_TRACE_DEBUG_ARTIFACTS
@@ -100,38 +101,6 @@ def _expand_single_month_explanation_window(
     return expanded_start, end_date
 
 
-def _extract_forecast_horizon_years(query: str) -> int:
-    """Extract the requested forecast horizon in years from free text."""
-
-    if not query:
-        return 3
-
-    match = re.search(r"(\d+)\s*-?year", query)
-    if match:
-        return min(max(int(match.group(1)), 1), 20)
-    if "decade" in query:
-        return 10
-    return 3
-
-
-def _extract_excluded_years(query: str) -> set[int]:
-    """Return calendar years the user explicitly asked to exclude from modeling."""
-
-    if not query:
-        return set()
-
-    years: set[int] = set()
-    pattern = re.compile(
-        r"(?:exclude|excluding|without|except|omit|omitting|do not use|don't use|not use)"
-        r"[^0-9]{0,30}"
-        r"((?:19|20)\d{2}(?:[^0-9]+(?:19|20)\d{2})*)",
-        re.IGNORECASE,
-    )
-    for block in pattern.findall(query):
-        years.update(int(year) for year in re.findall(r"(?:19|20)\d{2}", block))
-    return years
-
-
 def _last_completed_month_end(today: date) -> date:
     """Return the final day of the most recently completed month."""
 
@@ -156,8 +125,8 @@ def _expand_forecast_history_window(
         return start_date, end_date
 
     query_text = (qa.canonical_query_en or raw_query or "").lower()
-    horizon_years = _extract_forecast_horizon_years(query_text)
-    excluded_years = _extract_excluded_years(query_text)
+    horizon_years = extract_forecast_horizon_years(query_text)
+    excluded_years = extract_excluded_years(query_text)
     desired_history_years = max(5, min(8, horizon_years + 2))
     if excluded_years:
         desired_history_years = min(10, max(8, desired_history_years + len(excluded_years)))

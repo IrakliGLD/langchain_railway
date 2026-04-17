@@ -183,8 +183,8 @@ def test_generate_cagr_forecast_supports_yearly_integer_price_history():
     from agent import analyzer
 
     df = pd.DataFrame({
-        "year": [2021, 2022, 2023, 2024, 2025],
-        "p_bal_gel": [90.0, 100.0, 110.0, 121.0, 133.1],
+        "year": [2020, 2021, 2022, 2023, 2024, 2025],
+        "p_bal_gel": [70.0, 90.0, 100.0, 110.0, 121.0, 133.1],
     })
 
     out, note = analyzer._generate_cagr_forecast(
@@ -192,10 +192,13 @@ def test_generate_cagr_forecast_supports_yearly_integer_price_history():
         "Forecast balancing electricity price for the next 5 years, but do not use 2020 data.",
     )
 
+    observed_rows = out[~out["is_forecast"]]
     forecast_rows = out[out["is_forecast"]]
 
     assert "Forecast skipped" not in note
+    assert "Excluded years from model fit: 2020." in note
     assert "yearly averages" in note
+    assert set(observed_rows["year"].dt.year.tolist()) == {2021, 2022, 2023, 2024, 2025}
     assert len(forecast_rows) == 5
     assert set(forecast_rows["year"].dt.year.tolist()) == {2026, 2027, 2028, 2029, 2030}
     assert forecast_rows["year"].dt.year.min() == 2026
@@ -217,3 +220,23 @@ def test_generate_cagr_forecast_reports_usable_yearly_point_count():
 
     assert out.equals(df)
     assert note == "Forecast skipped: only 1 usable yearly point after normalization/filtering."
+
+
+def test_generate_cagr_forecast_reports_exclusion_when_it_removes_usable_history():
+    from agent import analyzer
+
+    df = pd.DataFrame({
+        "year": [2024, 2025],
+        "p_bal_gel": [121.0, 133.1],
+    })
+
+    out, note = analyzer._generate_cagr_forecast(
+        df,
+        "Forecast balancing electricity price for the next 5 years, but do not use 2024 data.",
+    )
+
+    assert out.equals(df)
+    assert note == (
+        "Excluded years from model fit: 2024. "
+        "Forecast skipped: only 1 usable yearly point after normalization/filtering."
+    )

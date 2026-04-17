@@ -30,6 +30,7 @@ from analysis.shares import build_balancing_correlation_df, compute_regulated_pl
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
 from agent.router import extract_balancing_entities
+from utils.forecasting import extract_excluded_years, extract_forecast_horizon_years
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -1642,19 +1643,7 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
 
 def _extract_forecast_horizon(query: str) -> int:
     """Extract forecast duration (in years) from user query."""
-    q = query.lower()
-    # Handle patterns like "10 year", "10-year", "10 years"
-    match = re.search(r"(\d+)\s*-?year", q)
-    if match:
-        val = int(match.group(1))
-        return min(max(val, 1), 20)  # Clamp between 1 and 20 years
-
-    # Handle "next decade"
-    if "decade" in q:
-        return 10
-
-    # Default to 3 years if not specified
-    return 3
+    return extract_forecast_horizon_years(query)
 
 
 def _month_from_text(s: str) -> Optional[int]:
@@ -1733,6 +1722,16 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             int(last_year) + i for i in range(1, horizon + 1)
         ]
 
+    excluded_years = extract_excluded_years(user_query)
+    if excluded_years:
+        observed_years = set(df[time_col].dt.year.dropna().astype(int).tolist())
+        applied_exclusions = sorted(observed_years & excluded_years)
+        if applied_exclusions:
+            note_parts.append(
+                f"Excluded years from model fit: {', '.join(map(str, applied_exclusions))}."
+            )
+            df = df[~df[time_col].dt.year.isin(applied_exclusions)].copy()
+
     if data_type == "quantity":
         df["__forecast_year"] = df[time_col].dt.year
         df_y = (
@@ -1744,7 +1743,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             .rename(columns={"__forecast_year": "year"})
         )
         if len(df_y) < 2:
-            return df_in, _usable_yearly_points_message(len(df_y))
+            return df_in, " ".join(note_parts + [_usable_yearly_points_message(len(df_y))]).strip()
         first, last = df_y.iloc[0], df_y.iloc[-1]
         span = last["year"] - first["year"]
         if span <= 0 or first[value_col] <= 0:
@@ -1777,7 +1776,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             .rename(columns={"__forecast_year": "year"})
         )
         if len(df_y) < 2:
-            return df_in, _usable_yearly_points_message(len(df_y))
+            return df_in, " ".join(note_parts + [_usable_yearly_points_message(len(df_y))]).strip()
         first, last = df_y.iloc[0], df_y.iloc[-1]
         span = last["year"] - first["year"]
 
