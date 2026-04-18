@@ -236,8 +236,23 @@ def test_seasonal_returns_none_for_short_series():
 # ---------------------------------------------------------------------------
 
 
-def _make_ctx_with_qa(df, measure_transform=None, time_grain=None, answer_kind=None, chart_intent=None):
-    """Build a minimal QueryContext with authoritative question_analysis."""
+def _make_ctx_with_qa(
+    df,
+    measure_transform=None,
+    time_grain=None,
+    answer_kind=None,
+    chart_intent=None,
+    derived_metrics=None,
+):
+    """Build a minimal QueryContext with authoritative question_analysis.
+
+    Parameters
+    ----------
+    derived_metrics:
+        Optional list of SimpleNamespace / DerivedMetricRequest stubs to place
+        in ``question_analysis.analysis_requirements.derived_metrics``.  Used
+        by Phase 17 tests that exercise the derived-metrics fallback path.
+    """
     from types import SimpleNamespace
     from models import QueryContext
 
@@ -255,14 +270,15 @@ def _make_ctx_with_qa(df, measure_transform=None, time_grain=None, answer_kind=N
     )
     qa = SimpleNamespace(
         visualization=vis,
-        analysis_requirements=SimpleNamespace(derived_metrics=[]),
+        analysis_requirements=SimpleNamespace(derived_metrics=derived_metrics or []),
     )
 
     # Patch has_authoritative_question_analysis via property bypass.
     ctx.question_analysis = qa
     from contracts.question_analysis import AnswerKind
     if answer_kind:
-        ctx._effective_answer_kind_override = AnswerKind(answer_kind)
+        # Set the plain field that dispatch_derived_chart reads.
+        ctx.effective_answer_kind = AnswerKind(answer_kind)
 
     return ctx
 
@@ -313,3 +329,65 @@ def test_dispatcher_returns_none_for_raw_transform():
     ctx = _make_ctx_with_qa(df, measure_transform="raw")
     result = dispatch_derived_chart(ctx)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher — derived_metrics fallback (Phase 17)
+#
+# For EXPLANATION and plain data queries the analyzer fills
+# analysis_requirements.derived_metrics but leaves visualization.measure_transform
+# unset.  The fallback bridges these two fields inside the dispatcher.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_fallback_mom_absolute_change():
+    """When visualization.measure_transform is unset but derived_metrics
+    contains mom_absolute_change, the MoM dual-panel builder must fire."""
+    from types import SimpleNamespace
+    from contracts.question_analysis import DerivedMetricName, AnswerKind
+
+    # 6 months is enough for mom_delta (lag=1 → 5 non-NaN delta rows).
+    df = _ts_df(6)
+    dm = SimpleNamespace(metric_name=DerivedMetricName.MOM_ABSOLUTE_CHANGE)
+    ctx = _make_ctx_with_qa(df, derived_metrics=[dm], answer_kind="explanation")
+    result = dispatch_derived_chart(ctx)
+    assert result is not None, "Fallback should fire for mom_absolute_change"
+    assert len(result) >= 1  # at least the observed panel
+    # Second spec (delta) is a bar chart with role=derived.
+    if len(result) >= 2:
+        assert result[1]["type"] == "bar"
+        assert result[1]["metadata"].get("role") == "derived"
+
+
+def test_dispatcher_fallback_yoy_percent_change():
+    """yoy_percent_change in derived_metrics → yoy_pct transform → dual-panel builder."""
+    from types import SimpleNamespace
+    from contracts.question_analysis import DerivedMetricName
+
+    # 24 months so YoY lag=12 yields 12 non-NaN delta rows.
+    df = _ts_df(24)
+    dm = SimpleNamespace(metric_name=DerivedMetricName.YOY_PERCENT_CHANGE)
+    ctx = _make_ctx_with_qa(df, derived_metrics=[dm])
+    result = dispatch_derived_chart(ctx)
+    assert result is not None
+    assert len(result) == 2, "Should produce observed + delta panels"
+    assert result[1]["metadata"]["measureTransform"] == "yoy_pct"
+    assert result[1]["type"] == "bar"
+
+
+def test_dispatcher_fallback_skipped_when_explicit_transform():
+    """When visualization.measure_transform is already explicitly set, the
+    derived_metrics fallback must NOT override the explicit routing — the
+    explicit branch fires first and the fallback section is never reached."""
+    from types import SimpleNamespace
+    from contracts.question_analysis import DerivedMetricName
+
+    df = _ts_df(24)
+    # Explicit transform = mom_pct; derived_metrics has yoy_percent_change.
+    # The explicit branch must win: result should carry mom_pct, not yoy_pct.
+    dm = SimpleNamespace(metric_name=DerivedMetricName.YOY_PERCENT_CHANGE)
+    ctx = _make_ctx_with_qa(df, measure_transform="mom_pct", derived_metrics=[dm])
+    result = dispatch_derived_chart(ctx)
+    assert result is not None
+    # The delta spec (index 1) was built by the explicit mom_pct branch.
+    assert result[-1]["metadata"]["measureTransform"] == "mom_pct"

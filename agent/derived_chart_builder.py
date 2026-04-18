@@ -49,6 +49,59 @@ _INDEX_TRANSFORMS = {
     MeasureTransform.CAGR.value,
 }
 
+# ---------------------------------------------------------------------------
+# Derived-metrics → MeasureTransform fallback mapping
+#
+# When visualization.measure_transform is unset (common for EXPLANATION and
+# plain data queries), the analyzer LLM may still populate
+# analysis_requirements.derived_metrics.  This mapping bridges those
+# DerivedMetricName values to the MeasureTransform strings understood by the
+# existing builders so that the dispatcher can fire the correct builder
+# without requiring the analyzer to explicitly set visualization fields.
+# ---------------------------------------------------------------------------
+
+# Maps DerivedMetricName.value → MeasureTransform.value
+_DERIVED_METRIC_TO_TRANSFORM: Dict[str, str] = {
+    "yoy_percent_change": MeasureTransform.YOY_PCT.value,
+    "yoy_absolute_change": MeasureTransform.YOY_DELTA.value,
+    "mom_percent_change": MeasureTransform.MOM_PCT.value,
+    "mom_absolute_change": MeasureTransform.MOM_DELTA.value,
+    # share_delta_mom is a MoM absolute change applied to share columns;
+    # reuse the mom_delta builder which handles all numeric columns including shares.
+    "share_delta_mom": MeasureTransform.MOM_DELTA.value,
+}
+
+# When multiple derived metrics are present, prefer YoY over MoM, pct over delta.
+_TRANSFORM_PRIORITY: Tuple[str, ...] = (
+    MeasureTransform.YOY_PCT.value,
+    MeasureTransform.YOY_DELTA.value,
+    MeasureTransform.MOM_PCT.value,
+    MeasureTransform.MOM_DELTA.value,
+)
+
+
+def _infer_transform_from_derived_metrics(dm_requests) -> Optional[str]:
+    """Inspect a list of DerivedMetricRequest objects and return the
+    highest-priority MeasureTransform string, or None when none match.
+
+    Tolerates both real ``DerivedMetricRequest`` instances and SimpleNamespace
+    stubs used in unit tests.
+    """
+    found: set = set()
+    for req in dm_requests:
+        mn = getattr(req, "metric_name", None)
+        if mn is None:
+            continue
+        # metric_name may be a DerivedMetricName enum or a plain string.
+        mn_str = mn.value if hasattr(mn, "value") else str(mn)
+        t = _DERIVED_METRIC_TO_TRANSFORM.get(mn_str)
+        if t:
+            found.add(t)
+    for t in _TRANSFORM_PRIORITY:
+        if t in found:
+            return t
+    return None
+
 
 def _label(col: str) -> str:
     return COLUMN_LABELS.get(col, col.replace("_", " ").title())
@@ -603,5 +656,33 @@ def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]
     if answer_kind == AnswerKind.FORECAST:
         log.info("dispatch_derived_chart: forecast observed-vs-projected override")
         return _build_forecast_spec(df, time_key, num_cols, label_map)
+
+    # ---- Derived-metrics fallback ----
+    # When visualization.measure_transform is unset or raw (the common case for
+    # EXPLANATION and plain data queries), the analyzer still populates
+    # analysis_requirements.derived_metrics.  Inspect those entries and derive
+    # the best transform so the correct builder fires without requiring the LLM
+    # to explicitly set visualization.measure_transform.
+    if not measure_transform or measure_transform == MeasureTransform.RAW.value:
+        dm_requests = (
+            getattr(
+                getattr(ctx.question_analysis, "analysis_requirements", None),
+                "derived_metrics",
+                [],
+            )
+            or []
+        )
+        inferred = _infer_transform_from_derived_metrics(dm_requests)
+        if inferred:
+            log.info(
+                "dispatch_derived_chart: derived_metrics fallback → inferred transform=%s "
+                "(analysis_requirements.derived_metrics had %d entries)",
+                inferred,
+                len(dm_requests),
+            )
+            if inferred in _MOM_YOY_TRANSFORMS:
+                return _build_mom_yoy_specs(df, time_key, num_cols, label_map, inferred)
+            if inferred in _INDEX_TRANSFORMS:
+                return _build_index_growth_spec(df, time_key, num_cols, label_map)
 
     return None
