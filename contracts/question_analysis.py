@@ -200,6 +200,22 @@ class SeriesSplitMode(str, Enum):
     MULTI_PANEL = "multi_panel"
 
 
+class SortRule(str, Enum):
+    """How chart series / rows should be ordered before rendering.
+
+    Introduced in Phase 11 of the chart pipeline overhaul to replace the
+    heuristic ``relevance_score`` path in ``chart_pipeline._limit_series``.
+    Consumed by Phase 14 runtime.
+    """
+
+    VALUE_DESC = "value_desc"
+    VALUE_ASC = "value_asc"
+    TIME_ASC = "time_asc"
+    TIME_DESC = "time_desc"
+    CATEGORY_ALPHA = "category_alpha"
+    RELEVANCE = "relevance"
+
+
 class ChartIntent(str, Enum):
     TREND_COMPARE = "trend_compare"
     DECOMPOSITION = "decomposition"
@@ -382,12 +398,31 @@ class VisualizationInfo(BaseModel):
     time_grain: Optional[VisualizationTimeGrain] = None
     series_split_mode: SeriesSplitMode = SeriesSplitMode.SINGLE_CHART
     max_series: Optional[int] = Field(default=None, ge=1, le=8)
-    include_reference_lines: bool = False
+    # Phase 11: planner-driven series ordering and top-N. Consumed by
+    # ``chart_pipeline._limit_series`` in Phase 14; added to the contract
+    # now so analyzer prompts can emit them and downstream wiring lands
+    # without a second contract bump.
+    sort_rule: Optional[SortRule] = None
+    top_n: Optional[int] = Field(default=None, ge=1, le=50)
+    # NOTE: `include_reference_lines` was dropped in Phase 10 of the chart
+    # pipeline overhaul. A bare bool cannot carry which axis/value/label to
+    # draw; reference series are now expressed via `SemanticRole.REFERENCE`
+    # on `target_series`. If reference-line drawing becomes needed,
+    # introduce a concrete `ReferenceLineSpec` dataclass first.
     chart_intent: Optional[ChartIntent] = None
     target_series: List[SemanticRole] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode="after")
     def _validate_semantic_chart_hints(self) -> "VisualizationInfo":
+        # Phase 11 soft-warn rollout: the mutations below still happen (so
+        # existing tests and callers don't regress in one release), but any
+        # LLM drift that the validator silently repairs is now logged for
+        # telemetry. Phase 11b flips these log.warning calls to `raise
+        # ValueError` once the drift rate is near zero in shadow.
+        import logging as _log
+
+        _logger = _log.getLogger("Enai.contracts.visualization")
+
         if (
             self.primary_presentation in {PresentationMode.CHART, PresentationMode.CHART_PLUS_TABLE}
             and not self.chart_requested_by_user
@@ -395,19 +430,40 @@ class VisualizationInfo(BaseModel):
         ):
             # A first-class chart presentation implies that visualization is
             # relevant even if the analyzer forgot to set chart_recommended.
+            _logger.warning(
+                "Visualization drift: primary_presentation=%s with chart_recommended=False — "
+                "forcing chart_recommended=True. Analyzer should set it explicitly.",
+                self.primary_presentation.value if self.primary_presentation else None,
+            )
             self.chart_recommended = True
 
         if not self.chart_requested_by_user and not self.chart_recommended:
+            if self.chart_intent is not None or self.target_series:
+                _logger.warning(
+                    "Visualization drift: chart_intent/target_series set but neither chart_requested_by_user "
+                    "nor chart_recommended is true — clearing semantic chart hints."
+                )
             self.chart_intent = None
             self.target_series = []
             return self
 
         if self.chart_intent is None:
+            if self.target_series:
+                _logger.warning(
+                    "Visualization drift: target_series set but chart_intent is None — clearing target_series."
+                )
             self.target_series = []
             return self
 
         allowed_roles = _VALID_ROLES_BY_INTENT.get(self.chart_intent, frozenset())
         if not self.target_series or any(role not in allowed_roles for role in self.target_series):
+            _logger.warning(
+                "Visualization drift: chart_intent=%s paired with invalid target_series=%s (allowed=%s) — "
+                "clearing chart_intent and target_series.",
+                self.chart_intent.value,
+                [role.value for role in self.target_series],
+                sorted(r.value for r in allowed_roles),
+            )
             self.chart_intent = None
             self.target_series = []
         return self

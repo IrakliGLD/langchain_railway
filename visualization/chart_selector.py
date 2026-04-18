@@ -42,8 +42,6 @@ def should_generate_chart(
     if question_analysis is not None:
         vis = getattr(question_analysis, "visualization", None)
         answer_kind = getattr(getattr(question_analysis, "answer_kind", None), "value", None)
-        query_type = getattr(getattr(question_analysis, "classification", None), "query_type", None)
-        query_type = getattr(query_type, "value", query_type)
 
         chart_requested = bool(getattr(vis, "chart_requested_by_user", False))
         chart_recommended = bool(getattr(vis, "chart_recommended", False))

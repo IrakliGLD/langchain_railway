@@ -674,6 +674,100 @@ def _validate_plan_against_answer_kind(
                 raw_query,
             )
 
+    # Phase 16 (§16.4.7): visualization cross-check.  Runs after all
+    # answer_kind checks so it always fires when a visualization contract
+    # is present.
+    _cross_check_visualization(steps, qa, raw_query)
+
+
+def _cross_check_visualization(
+    steps: List[Dict[str, Any]],
+    qa: QuestionAnalysis,
+    raw_query: str,
+) -> None:
+    """Warn when the visualization contract cannot be satisfied by the evidence plan.
+
+    Phase 16 (§16.4.7) — warn-only for first release.  Enforcement (downgrade
+    ``primary_presentation`` to ``"table"``) is behind a future policy flag.
+
+    Three checks:
+    1. ``primary_presentation ∈ {chart, chart_plus_table}`` but no evidence
+       step carries date params → the result will be a static table, not a
+       time-series chart.  Renderer will silently fall back.
+    2. ``visual_goal ∈ {trend, relationship}`` but the plan has no date range
+       → trend/relationship charts require a time axis; single-point evidence
+       cannot produce one.
+    3. ``time_grain == "season"`` but the evidence date range is shorter than
+       2 years → summer and winter buckets will be identical or missing;
+       a seasonal chart will be misleading.
+    """
+    visualization = getattr(qa, "visualization", None)
+    if visualization is None:
+        return
+
+    primary_presentation = getattr(
+        getattr(visualization, "primary_presentation", None), "value", None
+    )
+    visual_goal = getattr(
+        getattr(visualization, "visual_goal", None), "value", None
+    )
+    time_grain = getattr(
+        getattr(visualization, "time_grain", None), "value", None
+    )
+
+    # Determine whether any step has a date range — a proxy for "will return
+    # time-series rows".  At planning time we only have params; the actual
+    # column types are unknown until execution.
+    def _has_date_params(step: Dict[str, Any]) -> bool:
+        params = step.get("params") or {}
+        return bool(params.get("start_date") or params.get("end_date"))
+
+    any_date_params = any(_has_date_params(step) for step in steps)
+
+    # --- Check 1: chart requested but no time-series evidence ---
+    _CHART_PRESENTATIONS = {"chart", "chart_plus_table"}
+    if primary_presentation in _CHART_PRESENTATIONS and not any_date_params:
+        log.warning(
+            "Visualization cross-check: primary_presentation=%s but no evidence "
+            "step has date params — result will be tabular, not time-series. "
+            "Chart rendering may fall back to table. query=%.80s",
+            primary_presentation,
+            raw_query,
+        )
+
+    # --- Check 2: trend/relationship visual_goal with no time axis ---
+    _TEMPORAL_GOALS = {"trend", "relationship"}
+    if visual_goal in _TEMPORAL_GOALS and not any_date_params:
+        log.warning(
+            "Visualization cross-check: visual_goal=%s requires a time axis "
+            "but no evidence step has date params. Single-point data cannot "
+            "produce a meaningful trend. query=%.80s",
+            visual_goal,
+            raw_query,
+        )
+
+    # --- Check 3: season grain needs ≥ 2 years of history ---
+    if time_grain == "season" and steps:
+        primary_params = steps[0].get("params") or {}
+        start_date = primary_params.get("start_date")
+        end_date = primary_params.get("end_date")
+        if start_date and end_date:
+            try:
+                from datetime import date as _date
+                _start = _date.fromisoformat(str(start_date)[:10])
+                _end = _date.fromisoformat(str(end_date)[:10])
+                span_years = (_end - _start).days / 365.25
+                if span_years < 2.0:
+                    log.warning(
+                        "Visualization cross-check: time_grain=season but "
+                        "evidence span is %.1f years (< 2). Summer and winter "
+                        "buckets may be missing or identical. query=%.80s",
+                        span_years,
+                        raw_query,
+                    )
+            except Exception:
+                pass  # malformed dates — skip the check silently
+
 
 # ---------------------------------------------------------------------------
 # Helpers

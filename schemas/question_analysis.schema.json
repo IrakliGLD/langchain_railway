@@ -588,6 +588,18 @@
       "title": "SeriesSplitMode",
       "type": "string"
     },
+    "SortRule": {
+      "enum": [
+        "value_desc",
+        "value_asc",
+        "time_asc",
+        "time_desc",
+        "category_alpha",
+        "relevance"
+      ],
+      "title": "SortRule",
+      "type": "string"
+    },
     "SqlAggregation": {
       "enum": [
         "none",
@@ -965,10 +977,30 @@
           "default": null,
           "title": "Max Series"
         },
-        "include_reference_lines": {
-          "default": false,
-          "title": "Include Reference Lines",
-          "type": "boolean"
+        "sort_rule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SortRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "top_n": {
+          "anyOf": [
+            {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Top N"
         },
         "chart_intent": {
           "anyOf": [

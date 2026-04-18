@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from agent.analyzer import METRIC_VALUE_ALIASES
-from agent.chart_frame_builder import build_chart_frame
+from agent.chart_frame_builder import build_chart_frame, from_wide
+from config import ENAI_CHART_LONGFORM
 from context import COLUMN_LABELS
 from models import QueryContext
 from utils.trace_logging import trace_detail
@@ -150,12 +151,18 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     """Stage 5: Build chart data from query results."""
     _reset_chart_outputs(ctx)
 
-    if ctx.chart_override_data:
-        log.info(
-            "Using derived chart override (type=%s, rows=%d)",
-            ctx.chart_override_type,
-            len(ctx.chart_override_data),
-        )
+    if ctx.chart_override_specs or ctx.chart_override_data:
+        if ctx.chart_override_specs:
+            log.info(
+                "Using derived chart override (multi-spec, count=%d)",
+                len(ctx.chart_override_specs),
+            )
+        else:
+            log.info(
+                "Using derived chart override (type=%s, rows=%d)",
+                ctx.chart_override_type,
+                len(ctx.chart_override_data or []),
+            )
         return _apply_chart_override(ctx)
 
     if not ctx.rows or not ctx.cols:
@@ -211,6 +218,18 @@ def build_chart(ctx: QueryContext) -> QueryContext:
 
     _apply_chart_collection(ctx, charts)
 
+    # Phase 12: when the analyzer asks for chart_plus_table, attach a
+    # companion table so the renderer can show the underlying observed
+    # values next to any derived chart. Uses the pre-transform frame (df)
+    # so exact numeric lookups are preserved regardless of measure_transform.
+    presentation = getattr(getattr(vis, "primary_presentation", None), "value", None)
+    if presentation == "chart_plus_table":
+        ctx.companion_table = _build_companion_table(df, label_map_all)
+        # Surface on primary chart metadata so a single-payload consumer
+        # sees the companion without reaching into a separate field.
+        if ctx.chart_meta is not None:
+            ctx.chart_meta["companionTable"] = ctx.companion_table
+
     trace_detail(
         log,
         ctx,
@@ -237,16 +256,23 @@ def _reset_chart_outputs(ctx: QueryContext) -> None:
 
 
 def _apply_chart_override(ctx: QueryContext) -> QueryContext:
+    # Multi-spec override takes precedence so derived-chart builders (scenario
+    # multi-panel, MoM/YoY observed+delta, seasonal, forecast observed-vs-projected)
+    # can surface multiple coordinated charts. Fall back to the legacy
+    # single-spec shape (chart_override_data/_type/_meta) when no list is set.
+    if ctx.chart_override_specs:
+        charts = [dict(spec) for spec in ctx.chart_override_specs if spec]
+        if charts:
+            _apply_chart_collection(ctx, charts)
+            return ctx
+
     metadata = dict(ctx.chart_override_meta or {})
     chart_spec = {
         "data": list(ctx.chart_override_data or []),
         "type": ctx.chart_override_type,
         "metadata": metadata,
     }
-    ctx.charts = [chart_spec]
-    ctx.chart_data = chart_spec["data"]
-    ctx.chart_type = chart_spec["type"]
-    ctx.chart_meta = chart_spec["metadata"]
+    _apply_chart_collection(ctx, [chart_spec])
     return ctx
 
 
@@ -404,16 +430,34 @@ def _resolve_chart_groups(
             groups.append({"metrics": list(num_cols), "source": "auto"})
 
     max_series = getattr(visualization, "max_series", None) or _DEFAULT_MAX_SERIES
+    sort_rule = getattr(getattr(visualization, "sort_rule", None), "value", None)
+    top_n = getattr(visualization, "top_n", None)
     query_lower = ctx.query.lower()
     normalized_groups: List[Dict[str, Any]] = []
-    seen_signatures: set[Tuple[str, ...]] = set()
+    # Dedup key includes title and type so planner-authored groups that share
+    # the same metric list but render as distinct panels (e.g., two bars
+    # differing only in title/type) are not silently collapsed. Previously
+    # the key was `tuple(metrics)` alone, which dropped legitimate planner
+    # groups whose `title`/`type` were the differentiator.
+    seen_signatures: set[Tuple[str, str, Tuple[str, ...]]] = set()
     for group in groups:
         metrics = list(group.get("metrics", []))
         preserve_order = group.get("source") == "plan"
-        metrics = _limit_series(metrics, query_lower, max_series, preserve_order=preserve_order)
+        metrics = _limit_series(
+            metrics,
+            query_lower,
+            max_series,
+            preserve_order=preserve_order,
+            sort_rule=sort_rule,
+            top_n=top_n,
+        )
         if not metrics:
             continue
-        signature = tuple(metrics)
+        signature = (
+            str(group.get("title") or ""),
+            str(group.get("type") or ""),
+            tuple(metrics),
+        )
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
@@ -477,19 +521,120 @@ def _limit_series(
     max_series: int,
     *,
     preserve_order: bool,
+    sort_rule: Optional[str] = None,
+    top_n: Optional[int] = None,
 ) -> List[str]:
-    if len(metrics) <= max_series:
+    """Cap a chart group's metric list to an effective series budget.
+
+    Phase 14 (§16.4.1 consumer): consumes ``sort_rule`` / ``top_n`` from the
+    visualization plan when present. The effective cap is
+    ``min(top_n, max_series)`` when ``top_n`` is set, otherwise ``max_series``.
+
+    Pre-transform context — we only have column *names* here, not values.
+    Value-based sort rules (``value_desc``/``value_asc``) therefore fall
+    through to the preserve-order path at this stage; the actual value-aware
+    reorder happens post-transform in :func:`_reorder_metrics_by_value`.
+    """
+
+    effective_cap = max_series
+    if top_n is not None and top_n > 0:
+        effective_cap = min(int(top_n), max_series)
+
+    if effective_cap <= 0 or len(metrics) <= effective_cap:
         return list(metrics)
 
-    if preserve_order:
-        trimmed = list(metrics[:max_series])
-        log.info("Trimmed explicit chart group to %d series: %s", max_series, trimmed)
+    # Alphabetic ordering is purely name-based — safe to apply pre-transform.
+    if sort_rule == "category_alpha":
+        trimmed = sorted(metrics)[:effective_cap]
+        log.info("Limited to %d series via category_alpha: %s", effective_cap, trimmed)
         return trimmed
 
+    # Time-based sort rules describe the x-axis, not series selection. When
+    # they are active we want to preserve the caller's column order so the
+    # time axis is not reshuffled by a name-based fallback.
+    if sort_rule in {"time_asc", "time_desc"} or preserve_order:
+        trimmed = list(metrics[:effective_cap])
+        log.info("Trimmed chart group to %d series (preserve_order): %s", effective_cap, trimmed)
+        return trimmed
+
+    # Value-based sort rules require transformed data — reorder post-transform.
+    # For the pre-transform cap we keep the explicit column order so the
+    # post-transform step has a deterministic starting set.
+    if sort_rule in {"value_desc", "value_asc"}:
+        trimmed = list(metrics[:effective_cap])
+        log.info(
+            "Pre-transform cap for %s keeps first %d metrics; value-aware reorder "
+            "happens post-transform: %s",
+            sort_rule,
+            effective_cap,
+            trimmed,
+        )
+        return trimmed
+
+    # Default ("relevance" or unspecified) → keyword heuristic against the
+    # user query. This is the legacy path, retained for backward compat when
+    # analyzer has not emitted a sort_rule.
     scored_cols = [(col, relevance_score(col, query_lower)) for col in metrics]
     scored_cols.sort(key=lambda item: item[1], reverse=True)
-    trimmed = [col for col, _ in scored_cols[:max_series]]
-    log.info("Limited to %d series: %s", max_series, trimmed)
+    trimmed = [col for col, _ in scored_cols[:effective_cap]]
+    log.info("Limited to %d series via relevance heuristic: %s", effective_cap, trimmed)
+    return trimmed
+
+
+def _reorder_metrics_by_value(
+    transformed_df: pd.DataFrame,
+    metrics: List[str],
+    *,
+    sort_rule: Optional[str],
+    top_n: Optional[int],
+    max_series: int,
+) -> List[str]:
+    """Reorder (and optionally re-cap) ``metrics`` using aggregated values.
+
+    Only active when ``sort_rule`` ∈ ``{value_desc, value_asc}`` and the
+    transformed frame actually contains the columns. Pure function — does
+    not mutate ``transformed_df``.
+    """
+
+    if sort_rule not in {"value_desc", "value_asc"}:
+        return metrics
+    if transformed_df is None or transformed_df.empty:
+        return metrics
+
+    effective_cap = max_series
+    if top_n is not None and top_n > 0:
+        effective_cap = min(int(top_n), max_series)
+    if effective_cap <= 0:
+        return metrics
+
+    present = [col for col in metrics if col in transformed_df.columns]
+    if not present:
+        return metrics
+
+    aggregates: Dict[str, float] = {}
+    for col in present:
+        series = pd.to_numeric(transformed_df[col], errors="coerce")
+        if series.notna().any():
+            aggregates[col] = float(series.sum(skipna=True))
+        else:
+            aggregates[col] = float("nan")
+
+    reverse = sort_rule == "value_desc"
+    # NaN aggregates sort to the end regardless of direction.
+    def _sort_key(col: str) -> Tuple[int, float]:
+        value = aggregates.get(col, float("nan"))
+        if pd.isna(value):
+            return (1, 0.0)
+        return (0, -value if reverse else value)
+
+    ordered = sorted(present, key=_sort_key)
+    trimmed = ordered[:effective_cap]
+    log.info(
+        "Post-transform reorder via %s (top %d): %s",
+        sort_rule,
+        effective_cap,
+        trimmed,
+    )
     return trimmed
 
 
@@ -510,7 +655,13 @@ def _build_chart_spec(
 
     dim_map = {col: infer_dimension(col) for col in metrics}
     dims = set(dim_map.values())
-    metrics, dim_map, dims = _cap_dimensions(metrics, dim_map, dims, ctx.query.lower())
+    metrics, dim_map, dims = _cap_dimensions(
+        metrics,
+        dim_map,
+        dims,
+        ctx.query.lower(),
+        source=group.get("source"),
+    )
 
     columns_to_keep = []
     if time_key and time_key in source_df.columns:
@@ -527,6 +678,12 @@ def _build_chart_spec(
         "value",
         "raw",
     )
+    # Phase 12: the auto-yearly-rollup heuristic (share + >24 rows → year)
+    # is deprecated in favor of analyzer-emitted `time_grain`. During
+    # rollout we still apply the rollup to protect legacy payloads, but
+    # log a deprecation warning so we can confirm analyzer coverage via
+    # shadow telemetry. Remove the auto-rollup entirely once the warning
+    # rate drops to near zero.
     auto_yearly_rollup = False
     if (
         effective_time_grain in {None, "", "raw"}
@@ -535,6 +692,12 @@ def _build_chart_spec(
         and "share" in dims
         and len(working) > 24
     ):
+        log.warning(
+            "Deprecated auto_yearly_rollup fired: share dim + %d rows with no explicit "
+            "time_grain. Analyzer should emit visualization.time_grain='year'. "
+            "This heuristic will be removed after analyzer coverage reaches 100%%.",
+            len(working),
+        )
         effective_time_grain = "year"
         auto_yearly_rollup = True
 
@@ -549,6 +712,28 @@ def _build_chart_spec(
     )
     if transformed_df.empty:
         return None
+
+    # Phase 14 (§16.4.1 runtime): value-aware reorder using the contract's
+    # ``sort_rule`` / ``top_n`` now that values exist on the transformed frame.
+    # No-op when sort_rule is not a value rule or top_n is unset.
+    sort_rule_value = getattr(getattr(visualization, "sort_rule", None), "value", None)
+    top_n_value = getattr(visualization, "top_n", None)
+    max_series_cap = getattr(visualization, "max_series", None) or _DEFAULT_MAX_SERIES
+    metrics = _reorder_metrics_by_value(
+        transformed_df,
+        metrics,
+        sort_rule=sort_rule_value,
+        top_n=top_n_value,
+        max_series=max_series_cap,
+    )
+    if not metrics:
+        return None
+    # Drop any columns that the reorder cut so the rendered frame only
+    # carries the kept series.
+    keep_columns = [time_key] if time_key and time_key in transformed_df.columns else []
+    keep_columns += [col for col in categorical_cols if col in transformed_df.columns]
+    keep_columns += [col for col in metrics if col in transformed_df.columns]
+    transformed_df = transformed_df[[c for c in keep_columns if c in transformed_df.columns]].copy()
 
     has_time = bool(time_key and time_key in transformed_df.columns)
     category_cols_in_df = [col for col in categorical_cols if col in transformed_df.columns]
@@ -625,6 +810,33 @@ def _build_chart_spec(
         if chart_type != "line" or "share" in dims:
             chart_type = "dualaxis"
 
+    # Phase 13 (§16.4.2): shadow-mode long-form ChartFrame. The wire payload
+    # stays wide for backward compatibility; when ``ENAI_CHART_LONGFORM`` is
+    # enabled the long-form records are attached under ``chart_meta["longFrame"]``
+    # so frontend / override builders can opt in without a breaking change.
+    if ENAI_CHART_LONGFORM:
+        try:
+            chart_frame = from_wide(
+                transformed_df,
+                time_key=time_key,
+                num_cols=list(metrics),
+                dim_map=dim_map,
+                label_map=label_map_all,
+                measure_transform=effective_measure_transform,
+                meta={},
+                unit_map={col: dim_map.get(col, "") for col in metrics},
+            )
+            if not chart_frame.is_empty():
+                # Serialise period as ISO string so the payload is JSON-safe.
+                long_payload = chart_frame.long_df.copy()
+                long_payload["period"] = long_payload["period"].apply(
+                    lambda v: v.isoformat() if pd.notna(v) else None
+                )
+                chart_meta["longFrame"] = long_payload.to_dict("records")
+                chart_meta["longFrameColumns"] = list(chart_frame.long_df.columns)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("ENAI_CHART_LONGFORM payload failed: %s", exc)
+
     return {
         "data": chart_data,
         "type": chart_type,
@@ -637,8 +849,23 @@ def _cap_dimensions(
     dim_map: Dict[str, str],
     dims: set[str],
     query_lower: str,
+    *,
+    source: Optional[str] = None,
 ) -> Tuple[List[str], Dict[str, str], set[str]]:
     if len(dims) <= 2:
+        return metrics, dim_map, dims
+
+    # Planner-authored chart groups express explicit multi-dimension intent
+    # (e.g., price + share + xrate panels). Silently trimming them would
+    # discard upstream reasoning that already identified the right grouping.
+    # Log a warning so the drift is visible but preserve all dimensions.
+    if source == "plan":
+        log.warning(
+            "Dimension cap skipped for planner-authored group: kept all %d dims %s "
+            "(would have trimmed to top 2 by relevance)",
+            len(dims),
+            dims,
+        )
         return metrics, dim_map, dims
 
     dim_best: Dict[str, int] = {}
@@ -721,7 +948,19 @@ def _chart_type_for_visual_goal(
         if has_categories and category_count <= 8 and dimensions == {"share"}:
             return "pie"
         return "bar"
-    if visual_goal in {"ranking", "compare", "threshold_scan"}:
+    if visual_goal == "ranking":
+        # Ranking is always a bar (or horizontal bar) view — even when a time
+        # column is present the user intent is to compare series magnitudes,
+        # not to trace a trend over time. Previously mapped to "line" when
+        # has_time, which produced semantically wrong charts for queries like
+        # "rank generators by average output in 2024".
+        return "bar"
+    if visual_goal == "compare":
+        return "line" if has_time else "bar"
+    if visual_goal == "threshold_scan":
+        # Threshold scans inspect whether/when a series crosses a level — a
+        # line with a reference marker is the natural representation over
+        # time; without time, a sorted bar works better than a line segment.
         return "line" if has_time else "bar"
     return None
 
@@ -756,6 +995,23 @@ def _apply_chart_collection(ctx: QueryContext, charts: List[Dict[str, Any]]) -> 
     ctx.chart_data = primary.get("data")
     ctx.chart_type = primary.get("type")
     ctx.chart_meta = primary.get("metadata")
+
+
+def _build_companion_table(
+    df: pd.DataFrame,
+    label_map: Dict[str, str],
+) -> Dict[str, Any]:
+    """Phase 12: build a compact table payload to accompany chart_plus_table
+    presentations. Uses the *pre-transform* frame so the companion shows the
+    raw observed values even when the chart visualizes a derived measure
+    (e.g., MoM %, index_100, share_of_total).
+    """
+    labeled = df.rename(columns=label_map) if label_map else df
+    columns = list(labeled.columns)
+    return {
+        "columns": columns,
+        "rows": labeled.to_dict("records"),
+    }
 
 
 def _build_series_config(

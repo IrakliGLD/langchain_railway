@@ -45,6 +45,11 @@ SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSIO
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "auto").strip().lower() or "auto")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
+# Phase 13 rollout flag. When "1"/"true", chart_pipeline attaches a long-form
+# ChartFrame payload under chart_meta["longFrame"] for frontend consumers.
+# Default off so wire format stays wide until the frontend renderer
+# adopts the new shape.
+ENAI_CHART_LONGFORM = os.getenv("ENAI_CHART_LONGFORM", "0").strip().lower() in ("1", "true", "yes", "on")
 # Supabase JWT secret for local bearer-token verification.
 # Explicit bearer mode requires ENAI_AUTH_MODE=gateway_and_bearer.
 # Compatibility mode ENAI_AUTH_MODE=auto keeps bearer auth enabled when

@@ -2081,6 +2081,24 @@ def enrich(ctx: QueryContext) -> QueryContext:
         except Exception as _e:
             log.warning(f"Chart override materialization failed: {_e}")
 
+    # --- Phase 15 (§16.4.5): generalized derived-chart overrides ---
+    # Only fires when Stage 0.2 is authoritative and the contract indicates a
+    # derived view (MoM/YoY, indexed growth, decomposition, seasonal, forecast).
+    # Writes to ``ctx.chart_override_specs`` which takes precedence over the
+    # legacy single-spec path in ``_apply_chart_override`` (Phase 10).
+    if not ctx.df.empty and ctx.has_authoritative_question_analysis:
+        try:
+            from agent.derived_chart_builder import dispatch_derived_chart
+            derived_specs = dispatch_derived_chart(ctx)
+            if derived_specs:
+                ctx.chart_override_specs = derived_specs
+                log.info(
+                    "📊 Derived chart override assigned (%d specs) via dispatch_derived_chart",
+                    len(derived_specs),
+                )
+        except Exception as _e:
+            log.warning("Derived chart dispatch failed: %s", _e)
+
     # --- Trendline detection ---
     # Mirrors the FORECAST branch of the switch above — reuses the local
     # `answer_kind` so keyword-derived forecast queries also get trendline

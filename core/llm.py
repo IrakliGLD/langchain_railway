@@ -919,7 +919,12 @@ def _question_analysis_hint_payload(question_analysis: Optional[QuestionAnalysis
             ),
             "series_split_mode": question_analysis.visualization.series_split_mode.value,
             "max_series": question_analysis.visualization.max_series,
-            "include_reference_lines": bool(question_analysis.visualization.include_reference_lines),
+            "sort_rule": (
+                question_analysis.visualization.sort_rule.value
+                if question_analysis.visualization.sort_rule is not None
+                else None
+            ),
+            "top_n": question_analysis.visualization.top_n,
         },
         "analysis_requirements": question_analysis.analysis_requirements.model_dump(mode="json"),
     }
@@ -2258,6 +2263,8 @@ _ANALYZER_CHART_RULES = """\
 - `time_grain`: optional, one of `raw`, `day`, `month`, `quarter`, `season`, `year`.
 - `series_split_mode`: optional, `single_chart` or `multi_panel`. Use `multi_panel` when units or semantics differ.
 - `max_series`: optional integer 1-8. Use lower values for readability when many series are possible.
+- `sort_rule`: optional, one of `value_desc`, `value_asc`, `time_asc`, `time_desc`, `category_alpha`, `relevance`. Use `value_desc` for ranking questions; `time_asc` for timeseries/forecast; omit when the question is not sensitive to order.
+- `top_n`: optional integer 1-50. REQUIRED when `visual_goal` is `ranking` (e.g. "top 5 generators"); set to the user-requested cutoff or a readable default (5-10).
 - `chart_intent` and `target_series` are optional semantic hints; emit them only when a chart is requested or clearly recommended.
 - Valid `chart_intent` values:
   - `trend_compare`

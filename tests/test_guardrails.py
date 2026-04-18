@@ -3423,6 +3423,9 @@ def _make_chart_stage_question_analysis(
     time_grain: str | None = None,
     series_split_mode: str = "single_chart",
     preferred_chart_family: str = "line",
+    sort_rule: str | None = None,
+    top_n: int | None = None,
+    max_series: int | None = None,
 ):
     payload = _make_analyzer_payload("data_retrieval", "sql", confidence=0.95)
     payload["answer_kind"] = answer_kind
@@ -3439,6 +3442,12 @@ def _make_chart_stage_question_analysis(
     )
     if time_grain is not None:
         payload["visualization"]["time_grain"] = time_grain
+    if sort_rule is not None:
+        payload["visualization"]["sort_rule"] = sort_rule
+    if top_n is not None:
+        payload["visualization"]["top_n"] = top_n
+    if max_series is not None:
+        payload["visualization"]["max_series"] = max_series
     return QuestionAnalysis.model_validate(payload)
 
 
@@ -3869,6 +3878,667 @@ def test_build_chart_respects_table_primary_presentation():
     assert out.charts == []
     assert out.chart_data is None
     assert out.chart_type is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 — surgical bug cluster
+# ---------------------------------------------------------------------------
+
+
+def test_ranking_visual_goal_uses_bar_even_with_time():
+    """Bug fix: visual_goal=ranking must always map to bar, never line,
+    even when a time column is present. Ranking compares series magnitudes,
+    not trends."""
+    from agent.chart_pipeline import _chart_type_for_visual_goal
+
+    assert _chart_type_for_visual_goal(
+        visual_goal="ranking",
+        has_time=True,
+        has_categories=True,
+        dimensions={"price_tariff"},
+        category_count=5,
+    ) == "bar"
+
+    assert _chart_type_for_visual_goal(
+        visual_goal="ranking",
+        has_time=False,
+        has_categories=True,
+        dimensions={"price_tariff"},
+        category_count=5,
+    ) == "bar"
+
+
+def test_cap_dimensions_respects_planner_source():
+    """Bug fix: _cap_dimensions must NOT silently trim planner-authored groups."""
+    from agent.chart_pipeline import _cap_dimensions
+
+    metrics = ["p_bal_gel", "xrate", "share_import"]
+    dim_map = {"p_bal_gel": "price_tariff", "xrate": "xrate", "share_import": "share"}
+    dims = {"price_tariff", "xrate", "share"}
+
+    # Auto group: trimmed to 2 dims.
+    auto_metrics, auto_map, auto_dims = _cap_dimensions(
+        metrics, dim_map, dims, "balancing price", source="auto",
+    )
+    assert len(auto_dims) == 2
+
+    # Planner group: all 3 dims preserved.
+    plan_metrics, plan_map, plan_dims = _cap_dimensions(
+        metrics, dim_map, dims, "balancing price", source="plan",
+    )
+    assert plan_dims == dims
+    assert plan_metrics == metrics
+
+
+def test_chart_override_preserves_multiple_specs():
+    """Bug fix: chart_override_specs (multi-spec list) must route through
+    _apply_chart_collection and not collapse to a single chart."""
+    from agent.chart_pipeline import build_chart
+    from models import QueryContext
+
+    ctx = QueryContext(query="Scenario view")
+    ctx.chart_override_specs = [
+        {"data": [{"x": 1}], "type": "line", "metadata": {"title": "Observed"}},
+        {"data": [{"x": 2}], "type": "bar", "metadata": {"title": "Derived"}},
+    ]
+
+    out = build_chart(ctx)
+
+    assert len(out.charts) == 2
+    assert out.charts[0]["metadata"]["title"] == "Observed"
+    assert out.charts[1]["metadata"]["title"] == "Derived"
+    # Legacy fields backfilled from the first spec.
+    assert out.chart_type == "line"
+    assert out.chart_meta["title"] == "Observed"
+
+
+def test_chart_override_single_spec_still_works():
+    """Regression guard: the legacy single-spec chart_override_data path must
+    still produce exactly one chart when chart_override_specs is unset."""
+    from agent.chart_pipeline import build_chart
+    from models import QueryContext
+
+    ctx = QueryContext(query="Legacy override")
+    ctx.chart_override_data = [{"x": 1}]
+    ctx.chart_override_type = "line"
+    ctx.chart_override_meta = {"title": "Legacy"}
+
+    out = build_chart(ctx)
+
+    assert len(out.charts) == 1
+    assert out.chart_type == "line"
+    assert out.chart_meta["title"] == "Legacy"
+
+
+def test_duplicate_planner_groups_differentiated_by_title():
+    """Bug fix: planner groups with identical metrics but different titles
+    must not be silently deduped."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10, 12, 11, 13, 14, 15]})
+    ctx = _make_chart_ctx(df, query="Show two price views")
+    ctx.plan["chart_groups"] = [
+        {"type": "line", "metrics": ["p_bal_gel"], "title": "Observed Price"},
+        {"type": "bar", "metrics": ["p_bal_gel"], "title": "Price Comparison"},
+    ]
+    ctx.question_analysis = _make_chart_stage_question_analysis(primary_presentation="chart")
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    titles = [chart["metadata"].get("title") for chart in out.charts]
+    assert titles == ["Observed Price", "Price Comparison"]
+
+
+def test_visualization_info_no_include_reference_lines_field():
+    """Phase 10 decision: include_reference_lines was dropped from the contract
+    because a bare bool cannot carry which-axis/what-value to draw."""
+    from contracts.question_analysis import VisualizationInfo
+
+    fields = set(VisualizationInfo.model_fields.keys())
+    assert "include_reference_lines" not in fields
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — contract hygiene + sort_rule / top_n
+# ---------------------------------------------------------------------------
+
+
+def test_visualization_info_accepts_sort_rule_and_top_n():
+    """Phase 11: sort_rule (SortRule enum) and top_n (int 1-50) are
+    part of VisualizationInfo and validate via Pydantic."""
+    from contracts.question_analysis import VisualizationInfo, SortRule
+
+    vis = VisualizationInfo(
+        chart_requested_by_user=False,
+        chart_recommended=True,
+        chart_confidence=0.9,
+        sort_rule="value_desc",
+        top_n=5,
+    )
+    assert vis.sort_rule == SortRule.VALUE_DESC
+    assert vis.top_n == 5
+
+
+def test_visualization_info_rejects_top_n_out_of_range():
+    """Phase 11: top_n must be within 1-50 inclusive."""
+    import pytest
+    from pydantic import ValidationError
+    from contracts.question_analysis import VisualizationInfo
+
+    with pytest.raises(ValidationError):
+        VisualizationInfo(
+            chart_requested_by_user=False,
+            chart_recommended=True,
+            chart_confidence=0.9,
+            top_n=0,
+        )
+
+    with pytest.raises(ValidationError):
+        VisualizationInfo(
+            chart_requested_by_user=False,
+            chart_recommended=True,
+            chart_confidence=0.9,
+            top_n=51,
+        )
+
+
+def test_visualization_info_rejects_invalid_sort_rule():
+    """Phase 11: sort_rule must be a valid SortRule enum value."""
+    import pytest
+    from pydantic import ValidationError
+    from contracts.question_analysis import VisualizationInfo
+
+    with pytest.raises(ValidationError):
+        VisualizationInfo(
+            chart_requested_by_user=False,
+            chart_recommended=True,
+            chart_confidence=0.9,
+            sort_rule="not_a_real_rule",
+        )
+
+
+def test_visualization_validator_logs_drift_warnings(caplog):
+    """Phase 11 soft-warn rollout: silently-repaired drift must now be
+    logged as a warning so shadow telemetry can surface it."""
+    import logging
+    from contracts.question_analysis import VisualizationInfo
+
+    with caplog.at_level(logging.WARNING, logger="Enai.contracts.visualization"):
+        VisualizationInfo(
+            chart_requested_by_user=False,
+            chart_recommended=False,
+            chart_confidence=0.0,
+            primary_presentation="chart",  # drift: should force chart_recommended
+        )
+
+    warnings = [
+        rec.message
+        for rec in caplog.records
+        if rec.name == "Enai.contracts.visualization"
+    ]
+    assert any("drift" in msg for msg in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 — plan-driven time_grain, season dtype, chart_plus_table companion
+# ---------------------------------------------------------------------------
+
+
+def test_season_grain_keeps_datetime_time_key_and_emits_labels():
+    """Phase 12 fix: when time_grain=season, the grouped frame's time_key
+    column must remain a true datetime (not a string like '2023-summer')."""
+    from agent.chart_frame_builder import build_chart_frame
+
+    # 12 months spanning 2 years so both summer and winter buckets exist.
+    dates = pd.date_range("2023-01-01", periods=24, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": list(range(24))})
+
+    grouped, meta = build_chart_frame(
+        df,
+        time_key="date",
+        category_cols=[],
+        num_cols=["p_bal_gel"],
+        dim_map={"p_bal_gel": "price_tariff"},
+        time_grain="season",
+        measure_transform="raw",
+    )
+
+    # Datetime invariant.
+    assert pd.api.types.is_datetime64_any_dtype(grouped["date"]), (
+        f"season-grain time_key must be datetime, got {grouped['date'].dtype}"
+    )
+    # No season strings leaked into the time column.
+    assert not any(isinstance(v, str) for v in grouped["date"].tolist())
+    # Season labels surfaced via meta map keyed by ISO timestamp.
+    assert "seasonLabels" in meta
+    assert all(
+        label.endswith("-summer") or label.endswith("-winter")
+        for label in meta["seasonLabels"].values()
+    )
+
+
+def test_auto_yearly_rollup_logs_deprecation_warning(caplog):
+    """Phase 12: the share+>24 rows auto-yearly-rollup heuristic is deprecated.
+    The heuristic still fires during rollout to avoid regressions, but a
+    warning must be logged so analyzer coverage can be measured."""
+    import logging
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2021-01-01", periods=36, freq="MS")
+    df = pd.DataFrame({"date": dates, "share_import": [0.2] * 36})
+    ctx = _make_chart_ctx(df, query="Show long horizon import share")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        time_grain=None,  # analyzer did not set it — heuristic should fire
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    with caplog.at_level(logging.WARNING, logger="Enai"):
+        build_chart(ctx)
+
+    assert any(
+        "Deprecated auto_yearly_rollup" in rec.message for rec in caplog.records
+    )
+
+
+def test_chart_plus_table_emits_companion_table():
+    """Phase 12: primary_presentation=chart_plus_table must produce
+    ctx.companion_table and chart_meta['companionTable']."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10, 12, 11, 13, 14, 15]})
+    ctx = _make_chart_ctx(df, query="Show price chart with table")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart_plus_table",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.companion_table is not None
+    assert "columns" in out.companion_table
+    assert "rows" in out.companion_table
+    assert len(out.companion_table["rows"]) == 6
+    assert out.chart_meta is not None
+    assert out.chart_meta.get("companionTable") is out.companion_table
+
+
+def test_chart_presentation_does_not_emit_companion_table():
+    """Phase 12 negative case: primary_presentation=chart alone must NOT
+    populate companion_table (only chart_plus_table does)."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10, 12, 11, 13, 14, 15]})
+    ctx = _make_chart_ctx(df, query="Show price chart")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.companion_table is None
+
+
+def test_long_form_payload_attached_when_flag_enabled(monkeypatch):
+    """Phase 13 wiring: when ENAI_CHART_LONGFORM is on, chart_meta must
+    carry ``longFrame`` records and ``longFrameColumns``."""
+    from agent import chart_pipeline
+
+    monkeypatch.setattr(chart_pipeline, "ENAI_CHART_LONGFORM", True)
+
+    dates = pd.date_range("2024-01-01", periods=4, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10.0, 12.0, 11.0, 13.0]})
+    ctx = _make_chart_ctx(df, query="Show balancing price trend")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = chart_pipeline.build_chart(ctx)
+
+    assert out.chart_meta is not None
+    long_rows = out.chart_meta.get("longFrame")
+    assert long_rows, "longFrame must be populated when ENAI_CHART_LONGFORM=1"
+    # One row per (period × series). One series here → one row per period.
+    assert len(long_rows) == 4
+    sample = long_rows[0]
+    assert {"period", "series", "value", "role", "transform"}.issubset(sample.keys())
+    # Period must be ISO string on the wire — never a pandas Timestamp.
+    assert isinstance(sample["period"], str)
+    assert sample["role"] == "observed"
+    assert sample["transform"] == "raw"
+    assert out.chart_meta.get("longFrameColumns")
+
+
+def test_long_form_payload_absent_when_flag_disabled(monkeypatch):
+    """Phase 13 negative case: default flag state must not leak the long
+    frame into the wire payload (backward compatibility)."""
+    from agent import chart_pipeline
+
+    monkeypatch.setattr(chart_pipeline, "ENAI_CHART_LONGFORM", False)
+
+    dates = pd.date_range("2024-01-01", periods=4, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10.0, 12.0, 11.0, 13.0]})
+    ctx = _make_chart_ctx(df, query="Show balancing price trend")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = chart_pipeline.build_chart(ctx)
+
+    assert out.chart_meta is not None
+    assert "longFrame" not in out.chart_meta
+    assert "longFrameColumns" not in out.chart_meta
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 — planner-driven _limit_series (sort_rule + top_n consumption)
+# ---------------------------------------------------------------------------
+
+
+def test_limit_series_sort_rule_category_alpha():
+    """sort_rule=category_alpha trims by alphabet, not relevance."""
+    from agent.chart_pipeline import _limit_series
+
+    metrics = ["share_c", "price_a", "xrate_b"]
+    result = _limit_series(
+        metrics, "price trend", max_series=2, preserve_order=False,
+        sort_rule="category_alpha",
+    )
+    assert result == ["price_a", "share_c"]
+
+
+def test_limit_series_top_n_caps_below_max_series():
+    """top_n=1 overrides default max_series when smaller."""
+    from agent.chart_pipeline import _limit_series
+
+    metrics = ["col_a", "col_b", "col_c"]
+    result = _limit_series(
+        metrics, "", max_series=3, preserve_order=False, top_n=1,
+    )
+    assert len(result) == 1
+    assert result == ["col_a"]
+
+
+def test_limit_series_top_n_floored_by_max_series():
+    """top_n=50 but max_series=2 → effective cap is 2."""
+    from agent.chart_pipeline import _limit_series
+
+    metrics = ["col_a", "col_b", "col_c", "col_d"]
+    result = _limit_series(
+        metrics, "", max_series=2, preserve_order=False, top_n=50,
+    )
+    assert len(result) == 2
+
+
+def test_limit_series_value_sort_rule_defers_to_preserve_order():
+    """value_desc pre-transform defers to order-preserving cap.
+    The actual value sort happens post-transform via _reorder_metrics_by_value."""
+    from agent.chart_pipeline import _limit_series
+
+    metrics = ["col_a", "col_b", "col_c", "col_d"]
+    result = _limit_series(
+        metrics, "", max_series=3, preserve_order=False, sort_rule="value_desc",
+    )
+    # Pre-transform: first 3 kept in original order (value sort deferred)
+    assert result == ["col_a", "col_b", "col_c"]
+
+
+def test_reorder_metrics_by_value_desc():
+    """Post-transform reorder by value_desc puts highest-sum series first."""
+    from agent.chart_pipeline import _reorder_metrics_by_value
+
+    df = pd.DataFrame({
+        "col_a": [1.0, 2.0, 3.0],   # sum=6
+        "col_b": [10.0, 10.0, 10.0], # sum=30
+        "col_c": [5.0, 5.0, 5.0],   # sum=15
+    })
+    result = _reorder_metrics_by_value(
+        df, ["col_a", "col_b", "col_c"],
+        sort_rule="value_desc", top_n=None, max_series=3,
+    )
+    assert result == ["col_b", "col_c", "col_a"]
+
+
+def test_reorder_metrics_by_value_asc():
+    """Post-transform reorder by value_asc puts lowest-sum series first."""
+    from agent.chart_pipeline import _reorder_metrics_by_value
+
+    df = pd.DataFrame({
+        "col_a": [1.0, 2.0, 3.0],   # sum=6
+        "col_b": [10.0, 10.0, 10.0], # sum=30
+        "col_c": [5.0, 5.0, 5.0],   # sum=15
+    })
+    result = _reorder_metrics_by_value(
+        df, ["col_a", "col_b", "col_c"],
+        sort_rule="value_asc", top_n=None, max_series=3,
+    )
+    assert result == ["col_a", "col_c", "col_b"]
+
+
+def test_reorder_metrics_by_value_top_n():
+    """top_n=2 from contract should reduce series after value-based reorder."""
+    from agent.chart_pipeline import _reorder_metrics_by_value
+
+    df = pd.DataFrame({
+        "col_a": [1.0, 1.0],   # sum=2
+        "col_b": [10.0, 10.0], # sum=20
+        "col_c": [5.0, 5.0],   # sum=10
+    })
+    result = _reorder_metrics_by_value(
+        df, ["col_a", "col_b", "col_c"],
+        sort_rule="value_desc", top_n=2, max_series=3,
+    )
+    assert result == ["col_b", "col_c"]
+
+
+def test_reorder_metrics_noop_for_non_value_sort_rule():
+    """sort_rule=time_asc must not reorder series (only affects x-axis)."""
+    from agent.chart_pipeline import _reorder_metrics_by_value
+
+    df = pd.DataFrame({"col_a": [1.0], "col_b": [100.0]})
+    result = _reorder_metrics_by_value(
+        df, ["col_a", "col_b"],
+        sort_rule="time_asc", top_n=None, max_series=3,
+    )
+    # Unchanged list returned.
+    assert result == ["col_a", "col_b"]
+
+
+def test_sort_rule_value_desc_wired_end_to_end():
+    """Integration: sort_rule=value_desc + top_n=2 → only 2 highest-sum
+    series appear in chart_data, ordered by aggregate value descending."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=3, freq="MS")
+    df = pd.DataFrame({
+        "date": dates,
+        "p_low": [1.0, 2.0, 3.0],    # sum=6
+        "p_high": [100.0, 100.0, 100.0], # sum=300
+        "p_mid": [50.0, 50.0, 50.0],  # sum=150
+    })
+    ctx = _make_chart_ctx(df, query="top series by value")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        preferred_chart_family="bar",
+        sort_rule="value_desc",
+        top_n=2,
+        max_series=3,
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.chart_data is not None
+    keys = set(out.chart_data[0].keys()) - {"date"}
+    # Only the 2 highest-sum series should be present.
+    assert len(keys) == 2
+    # Highest-sum series (p_high, then p_mid) must be present; p_low dropped.
+    assert "p_low" not in keys
+
+
+def test_sort_rule_time_asc_preserves_series_order():
+    """sort_rule=time_asc affects x-axis sort only; series list is unchanged
+    (no value-based reordering, all metrics kept)."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=3, freq="MS")
+    df = pd.DataFrame({
+        "date": dates,
+        "p_a": [10.0, 20.0, 30.0],
+        "p_b": [5.0, 6.0, 7.0],
+    })
+    ctx = _make_chart_ctx(df, query="price over time")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        primary_presentation="chart",
+        sort_rule="time_asc",
+        max_series=3,
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.chart_data is not None
+    # chart_data keys are display labels; get them from chart_meta["labels"].
+    labels = out.chart_meta.get("labels", [])
+    # Both series kept — time_asc doesn't drop columns.
+    assert len(labels) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 16 — evidence-planner visualization cross-check (warn-only)
+# ---------------------------------------------------------------------------
+
+
+def _make_viz_cross_check_qa(
+    *,
+    primary_presentation: str | None = None,
+    visual_goal: str | None = None,
+    time_grain: str | None = None,
+):
+    """Build a minimal QuestionAnalysis stub for visualization cross-check tests.
+    Reuses the module-level ``_make_analyzer_payload`` helper."""
+    from contracts.question_analysis import QuestionAnalysis
+
+    # _make_analyzer_payload is defined as a module-level helper in this file.
+    payload = _make_analyzer_payload("data_retrieval", "sql", confidence=0.95)
+    payload["answer_kind"] = "timeseries"
+    vis: dict = payload.setdefault("visualization", {})
+    vis["chart_recommended"] = True
+    vis["chart_confidence"] = 0.9
+    if primary_presentation is not None:
+        vis["primary_presentation"] = primary_presentation
+    if visual_goal is not None:
+        vis["visual_goal"] = visual_goal
+    if time_grain is not None:
+        vis["time_grain"] = time_grain
+    return QuestionAnalysis.model_validate(payload)
+
+
+def test_cross_check_warns_chart_with_no_date_params(caplog):
+    """Phase 16 check 1: chart primary_presentation + no date params → warning."""
+    import logging
+    from agent.evidence_planner import _cross_check_visualization
+
+    qa = _make_viz_cross_check_qa(primary_presentation="chart")
+    steps = [{"tool_name": "get_tariffs", "params": {"entities": ["PPAs"]}}]  # no dates
+
+    with caplog.at_level(logging.WARNING, logger="Enai"):
+        _cross_check_visualization(steps, qa, "show tariff chart")
+
+    assert any(
+        "primary_presentation=chart" in r.message and "date params" in r.message
+        for r in caplog.records
+    )
+
+
+def test_cross_check_warns_trend_goal_with_no_date_params(caplog):
+    """Phase 16 check 2: visual_goal=trend + no date params → warning."""
+    import logging
+    from agent.evidence_planner import _cross_check_visualization
+
+    qa = _make_viz_cross_check_qa(primary_presentation="chart", visual_goal="trend")
+    steps = [{"tool_name": "get_tariffs", "params": {}}]  # no dates
+
+    with caplog.at_level(logging.WARNING, logger="Enai"):
+        _cross_check_visualization(steps, qa, "show trend")
+
+    assert any(
+        "visual_goal=trend" in r.message and "time axis" in r.message
+        for r in caplog.records
+    )
+
+
+def test_cross_check_warns_season_grain_with_short_range(caplog):
+    """Phase 16 check 3: time_grain=season + < 2 year span → warning."""
+    import logging
+    from agent.evidence_planner import _cross_check_visualization
+
+    qa = _make_viz_cross_check_qa(primary_presentation="chart", time_grain="season")
+    steps = [
+        {
+            "tool_name": "get_prices",
+            "params": {"start_date": "2024-01-01", "end_date": "2024-06-01"},
+        }
+    ]  # only 5 months
+
+    with caplog.at_level(logging.WARNING, logger="Enai"):
+        _cross_check_visualization(steps, qa, "seasonal price chart")
+
+    assert any(
+        "time_grain=season" in r.message and "< 2" in r.message
+        for r in caplog.records
+    )
+
+
+def test_cross_check_no_warning_when_chart_has_date_params(caplog):
+    """Phase 16 negative: chart + date params → no warning for check 1."""
+    import logging
+    from agent.evidence_planner import _cross_check_visualization
+
+    qa = _make_viz_cross_check_qa(primary_presentation="chart")
+    steps = [
+        {
+            "tool_name": "get_prices",
+            "params": {"start_date": "2023-01-01", "end_date": "2024-12-01"},
+        }
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="Enai"):
+        _cross_check_visualization(steps, qa, "price chart")
+
+    # No "date params" warning expected.
+    assert not any(
+        "date params" in r.message for r in caplog.records
+    )
+
+
+def test_cross_check_no_warning_for_season_over_two_years(caplog):
+    """Phase 16 negative: time_grain=season + 3 year span → no warning."""
+    import logging
+    from agent.evidence_planner import _cross_check_visualization
+
+    qa = _make_viz_cross_check_qa(primary_presentation="chart", time_grain="season")
+    steps = [
+        {
+            "tool_name": "get_prices",
+            "params": {"start_date": "2021-01-01", "end_date": "2024-01-01"},
+        }
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="Enai"):
+        _cross_check_visualization(steps, qa, "seasonal chart 3yr")
+
+    assert not any(
+        "time_grain=season" in r.message and "< 2" in r.message
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

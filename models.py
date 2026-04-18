@@ -160,10 +160,22 @@ class QueryContext:
     chart_override_data: Optional[List[Dict[str, Any]]] = None
     chart_override_type: Optional[str] = None
     chart_override_meta: Optional[Dict[str, Any]] = None
+    # Optional multi-spec override. When set, takes precedence over the
+    # single-spec (chart_override_data/_type/_meta) path. Each entry is a
+    # full chart_spec dict of shape {"data": [...], "type": str, "metadata": {...}}.
+    # Introduced to let derived-chart builders (scenario, MoM/YoY, seasonal,
+    # forecast observed-vs-projected) emit multi-panel overrides.
+    chart_override_specs: Optional[List[Dict[str, Any]]] = None
     charts: List[Dict[str, Any]] = dc_field(default_factory=list)
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None
     chart_meta: Optional[Dict[str, Any]] = None
+    # Phase 12: companion table payload emitted for
+    # ``primary_presentation == "chart_plus_table"``. Populated from the
+    # source frame before chart-time transforms so the user sees the raw
+    # observed values alongside a derived chart. Renderer is responsible
+    # for deciding whether/how to display it.
+    companion_table: Optional[Dict[str, Any]] = None
 
     # --- timing ---
     exec_time: float = 0.0
