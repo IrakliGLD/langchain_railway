@@ -168,3 +168,144 @@ p_bal_usd (winter):
     assert "Summer (USD): 55.80 USD/MWh" in ctx.summary
     assert "Winter (GEL): 208.46 GEL/MWh" in ctx.summary
     assert "Winter (USD): 62.59 USD/MWh" in ctx.summary
+
+
+# ---------------------------------------------------------------------------
+# Phase 20 — CAGR-backed generic renderer fallback
+#
+# When Stage 3 runs ``_generate_cagr_forecast`` it suppresses the linear
+# trendline pre-calc (Phase 18 visual-conflict rule), so ``stats_hint`` no
+# longer carries a ``--- TRENDLINE FORECASTS ---`` block. Before Phase 20
+# the generic renderer's FORECAST path then returned None and the pipeline
+# fell through to the LLM summarizer, which routinely failed the strict
+# grounding check and emitted the "could not ground a detailed narrative"
+# fallback answer. These tests pin the fallback open so that regression
+# can't return.
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_generic_renderer_falls_back_to_cagr_rows(monkeypatch):
+    """No TRENDLINE FORECASTS block, but ctx.df has is_forecast=True CAGR
+    rows — the generic renderer must still produce a deterministic answer."""
+    import pandas as pd
+
+    def _unexpected_structured(*_args, **_kwargs):
+        raise AssertionError(
+            "llm_summarize_structured should not be called when CAGR rows "
+            "provide a deterministic forecast"
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
+
+    # stats_hint only has the CAGR note (no TRENDLINE FORECASTS marker).
+    stats_hint = "Yearly CAGR=5.08% using yearly averages. Forecast years: 2035."
+
+    df = pd.DataFrame({
+        "date": pd.to_datetime([
+            "2023-06-01", "2024-06-01", "2025-06-01", "2035-01-01",
+        ]),
+        "p_bal_gel": [100.0, 105.0, 110.0, 190.25],
+        "is_forecast": [False, False, False, True],
+    })
+
+    qa = _make_forecast_qa("forecast balancing electricity price until 2035")
+    ctx = QueryContext(
+        query="forecast balancing electricity price until 2035",
+        preview="date,p_bal_gel\n2025-06-01,110.0",
+        stats_hint=stats_hint,
+        provenance_cols=["date", "p_bal_gel"],
+        provenance_rows=[("2025-06-01", 110.0)],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    ctx.df = df
+
+    summarizer.summarize_data(ctx)
+
+    assert ctx.summary_source == "generic_renderer"
+    # The CAGR-projected 2035 value must appear in the answer.
+    assert "190.25" in ctx.summary
+    # No misleading R²=0.000 display when r_squared is unknown.
+    assert "R\u00b2=0.000" not in ctx.summary
+    # Method phrase should reflect CAGR, not linear regression.
+    assert "compound annual growth rate" in ctx.summary.lower()
+
+
+def test_forecast_generic_renderer_seasonal_cagr_rows(monkeypatch):
+    """Seasonal CAGR — ``season`` column present on is_forecast rows.
+    Renderer must emit a Summer/Winter breakdown."""
+    import pandas as pd
+
+    def _unexpected_structured(*_args, **_kwargs):
+        raise AssertionError(
+            "llm_summarize_structured should not be called when CAGR rows "
+            "provide a deterministic forecast"
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
+
+    stats_hint = (
+        "Yearly CAGR=5.08%, Summer=4.13%, Winter=7.08%. Forecast years: 2035."
+    )
+
+    df = pd.DataFrame({
+        "date": pd.to_datetime([
+            "2023-06-01", "2023-12-01", "2024-06-01", "2024-12-01",
+            "2035-04-01", "2035-12-01",
+        ]),
+        "p_bal_gel": [100.0, 120.0, 105.0, 128.0, 175.50, 260.75],
+        "season": ["summer", "winter", "summer", "winter", "summer", "winter"],
+        "is_forecast": [False, False, False, False, True, True],
+    })
+
+    qa = _make_forecast_qa("forecast balancing electricity price until 2035")
+    ctx = QueryContext(
+        query="forecast balancing electricity price until 2035",
+        preview="date,p_bal_gel\n2024-12-01,128.0",
+        stats_hint=stats_hint,
+        provenance_cols=["date", "p_bal_gel", "season"],
+        provenance_rows=[("2024-12-01", 128.0, "winter")],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    ctx.df = df
+
+    summarizer.summarize_data(ctx)
+
+    assert ctx.summary_source == "generic_renderer"
+    assert "175.50" in ctx.summary
+    assert "260.75" in ctx.summary
+    # Seasonal breakdown must appear.
+    assert "Summer" in ctx.summary
+    assert "Winter" in ctx.summary
+    assert "R\u00b2=0.000" not in ctx.summary
+
+
+def test_forecast_generic_renderer_ignores_scratch_and_reference_cols():
+    """The CAGR-row extractor must pick the real metric column and ignore
+    ``is_forecast``, ``xrate``, and any ``__forecast_*`` leftover."""
+    import pandas as pd
+    from agent.summarizer import _build_forecast_frame_from_cagr_rows
+
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2024-06-01", "2035-06-01"]),
+        "p_bal_gel": [110.0, 190.0],
+        "xrate": [2.7, 3.1],
+        "is_forecast": [False, True],
+        "__forecast_year": [2024, 2035],
+    })
+
+    qa = _make_forecast_qa("forecast balancing price until 2035")
+    ctx = QueryContext(
+        query="forecast balancing price until 2035",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    ctx.df = df
+
+    target_date, entries = _build_forecast_frame_from_cagr_rows(ctx)
+    assert target_date is not None and "2035" in target_date
+    assert len(entries) == 1
+    assert entries[0]["metric"] == "p_bal_gel"
+    assert entries[0]["forecast_value"] == 190.0
+    assert entries[0]["r_squared"] is None

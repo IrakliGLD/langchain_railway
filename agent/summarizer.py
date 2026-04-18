@@ -1721,9 +1721,150 @@ def _build_scenario_frame(ctx: QueryContext) -> ScenarioFrame | None:
     return ScenarioFrame(rows=rows) if rows else None
 
 
+def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None, list[dict[str, Any]]]:
+    """Extract forecast entries from CAGR-projected ``is_forecast=True`` rows
+    in ``ctx.df``.
+
+    Used when ``_generate_cagr_forecast`` produced forecast rows but
+    ``_precalculate_trendlines`` was skipped (Phase 18 behaviour — linear
+    trendlines are suppressed to avoid visual conflict with the CAGR-driven
+    forecast series). Without this bridge the generic renderer's FORECAST
+    path would see no frame, fall through to the LLM summarizer, and fail
+    grounding because the LLM has no deterministic anchor for projected
+    values.
+
+    Returns ``(target_date_iso, entries)`` where ``entries`` matches the
+    ``ForecastFrame.rows`` schema: ``metric``, ``forecast_value``,
+    ``r_squared`` (None for CAGR), ``equation`` (CAGR % if parsable),
+    ``season`` (summer/winter/None).
+    """
+    import pandas as pd  # local to avoid import-order issues
+    df = getattr(ctx, "df", None)
+    if df is None or df.empty or "is_forecast" not in df.columns:
+        return None, []
+    fc_mask = df["is_forecast"].fillna(False).astype(bool)
+    if not fc_mask.any():
+        return None, []
+    forecast_rows = df.loc[fc_mask].copy()
+
+    # Resolve time column: prefer a datetime-like column with a clear name.
+    time_col = None
+    for col in forecast_rows.columns:
+        if str(col).lower() in {"date", "period", "time"} or "date" in str(col).lower():
+            time_col = col
+            break
+    if time_col is None:
+        for col in forecast_rows.columns:
+            if pd.api.types.is_datetime64_any_dtype(forecast_rows[col]):
+                time_col = col
+                break
+    if time_col is None:
+        return None, []
+    forecast_rows[time_col] = pd.to_datetime(forecast_rows[time_col], errors="coerce")
+    forecast_rows = forecast_rows.dropna(subset=[time_col])
+    if forecast_rows.empty:
+        return None, []
+
+    # Pick the metric column: first numeric col that isn't a marker /
+    # scratch / reference / year-month integer.
+    def _is_candidate_metric(col_name: str) -> bool:
+        lower = str(col_name).lower()
+        if lower in {"is_forecast", "xrate"}:
+            return False
+        if str(col_name).startswith("__"):
+            return False
+        if lower in {"year", "month"} or re.search(r"\b(year|month)\b", lower):
+            return False
+        return True
+
+    metric_col = None
+    for col in forecast_rows.columns:
+        if col == time_col:
+            continue
+        if not _is_candidate_metric(str(col)):
+            continue
+        if pd.api.types.is_numeric_dtype(forecast_rows[col]):
+            metric_col = col
+            break
+    if metric_col is None:
+        return None, []
+
+    # Target date = latest forecast date.
+    target_ts = forecast_rows[time_col].max()
+    target_date = target_ts.strftime("%Y-%m-%d") if pd.notna(target_ts) else None
+
+    # Parse CAGR% from stats_hint note, if present, for a human-readable
+    # ``equation`` field. Best-effort — absence does not block the frame.
+    stats_hint = str(getattr(ctx, "stats_hint", "") or "")
+    cagr_match = re.search(r"Yearly CAGR=([-0-9.]+)%", stats_hint)
+    summer_cagr = re.search(r"Summer=([-0-9.]+)%", stats_hint)
+    winter_cagr = re.search(r"Winter=([-0-9.]+)%", stats_hint)
+    yearly_equation = (
+        f"CAGR={cagr_match.group(1)}% per year" if cagr_match else None
+    )
+
+    # Restrict to the target year so we emit one entry per metric/season,
+    # not every forecast year.
+    target_year = target_ts.year
+    target_year_rows = forecast_rows[forecast_rows[time_col].dt.year == target_year]
+
+    entries: list[dict[str, Any]] = []
+    if "season" in target_year_rows.columns:
+        season_series = target_year_rows["season"].astype("object").fillna("").str.lower()
+        for season_label, season_tag in (("summer", "summer"), ("winter", "winter")):
+            season_rows = target_year_rows[season_series == season_label]
+            if season_rows.empty:
+                continue
+            val = pd.to_numeric(season_rows[metric_col], errors="coerce").dropna()
+            if val.empty:
+                continue
+            match = summer_cagr if season_tag == "summer" else winter_cagr
+            entries.append(
+                {
+                    "metric": str(metric_col),
+                    "forecast_value": float(val.iloc[-1]),
+                    "r_squared": None,
+                    "equation": f"CAGR={match.group(1)}% per year" if match else yearly_equation,
+                    "season": season_tag,
+                }
+            )
+
+    if not entries:
+        # Non-seasonal (quantity / yearly-price) path — single overall entry.
+        val = pd.to_numeric(target_year_rows[metric_col], errors="coerce").dropna()
+        if not val.empty:
+            entries.append(
+                {
+                    "metric": str(metric_col),
+                    "forecast_value": float(val.iloc[-1]),
+                    "r_squared": None,
+                    "equation": yearly_equation,
+                    "season": None,
+                }
+            )
+
+    return target_date, entries
+
+
 def _build_forecast_frame(ctx: QueryContext) -> ForecastFrame | None:
-    """Build a ForecastFrame from Stage 3 trendline forecast data in stats_hint."""
+    """Build a ForecastFrame for the generic renderer.
+
+    Two sources, tried in order:
+    1. ``_precalculate_trendlines`` output embedded in ``stats_hint`` (legacy
+       linear-regression path — still used when CAGR produced nothing and
+       trendlines ran).
+    2. CAGR-projected ``is_forecast=True`` rows in ``ctx.df`` (current path
+       whenever ``_generate_cagr_forecast`` succeeded — Phase 18 suppresses
+       the trendline pre-calc in this case).
+
+    Having both sources ensures the deterministic FORECAST path in the
+    generic renderer always has a frame to render, which keeps the
+    summarizer off the LLM retry + grounding-fallback path.
+    """
     target_date, entries = _parse_trendline_forecasts(ctx.stats_hint or "")
+    if not entries:
+        # Fallback: extract CAGR forecast rows from ctx.df.
+        target_date, entries = _build_forecast_frame_from_cagr_rows(ctx)
     if not entries:
         return None
     entries = _filter_relevant_forecast_entries(ctx, entries)

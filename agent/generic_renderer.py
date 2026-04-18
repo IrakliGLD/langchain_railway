@@ -716,6 +716,19 @@ def _render_forecast(frame: CanonicalFrame) -> str | None:
         primary_metric, primary_metric.replace("_", " ").title()
     )
 
+    # Entries with ``r_squared=None`` come from the CAGR-projected fallback
+    # (no regression fit), not linear regression. Swap the headline wording
+    # and suppress the ``(R²=…)`` annotation so we don't show a bogus
+    # ``R²=0.000`` to the user.
+    has_r_squared = any(e.get("r_squared") is not None for e in entries)
+    method_phrase = "linear regression" if has_r_squared else "compound annual growth rate"
+
+    def _r2_suffix(entry: dict) -> str:
+        r2 = entry.get("r_squared")
+        if r2 is None:
+            return ""
+        return f" (R\u00b2={float(r2):.3f})"
+
     # Format target date for display.
     target_label = target_date or "the requested forecast horizon"
     try:
@@ -746,19 +759,19 @@ def _render_forecast(frame: CanonicalFrame) -> str | None:
         lines = [
             f"**{metric_label} Forecast**",
             "",
-            f"Based on linear regression to {target_label}:",
+            f"Based on {method_phrase} to {target_label}:",
         ]
         if gel_entry is not None:
             lines.append(
                 f"- Overall (GEL): {float(gel_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))} "
-                f"(R\u00b2={float(gel_entry.get('r_squared') or 0.0):.3f})"
+                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))}"
+                f"{_r2_suffix(gel_entry)}"
             )
         if usd_entry is not None:
             lines.append(
                 f"- Overall (USD): {float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))} "
-                f"(R\u00b2={float(usd_entry.get('r_squared') or 0.0):.3f})"
+                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}"
+                f"{_r2_suffix(usd_entry)}"
             )
         for entry in sorted(
             season_entries,
@@ -785,8 +798,8 @@ def _render_forecast(frame: CanonicalFrame) -> str | None:
             season = f"{season} ({currency_label})"
             unit = _price_unit_for_metric(str(entry.get("metric", "")))
             lines.append(
-                f"- {season}: {float(entry['forecast_value']):.2f} {unit} "
-                f"(R\u00b2={float(entry.get('r_squared') or 0.0):.3f})"
+                f"- {season}: {float(entry['forecast_value']):.2f} {unit}"
+                f"{_r2_suffix(entry)}"
             )
         lines.append("")
         lines.append(
@@ -801,15 +814,15 @@ def _render_forecast(frame: CanonicalFrame) -> str | None:
     # Non-seasonal path.
     if gel_entry is not None:
         answer = (
-            f"Based on linear regression, **{metric_label}** is forecast to reach "
+            f"Based on {method_phrase}, **{metric_label}** is forecast to reach "
             f"**{float(gel_entry['forecast_value']):.2f} {_price_unit_for_metric(str(gel_entry.get('metric', '')))}** "
-            f"by **{target_label}** (R\u00b2={float(gel_entry.get('r_squared') or 0.0):.3f})."
+            f"by **{target_label}**{_r2_suffix(gel_entry)}."
         )
         if usd_entry is not None:
             answer += (
                 f" The parallel USD series points to **{float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}** "
-                f"(R\u00b2={float(usd_entry.get('r_squared') or 0.0):.3f})."
+                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}**"
+                f"{_r2_suffix(usd_entry)}."
             )
         answer += f"\n\n{_forecast_caveat_for_r_squared(gel_entry.get('r_squared'))}"
         answer += regime_warning
@@ -817,9 +830,9 @@ def _render_forecast(frame: CanonicalFrame) -> str | None:
 
     first_entry = entries[0]
     return (
-        f"Based on linear regression, **{metric_label}** is forecast to reach "
+        f"Based on {method_phrase}, **{metric_label}** is forecast to reach "
         f"**{float(first_entry['forecast_value']):.2f} {_price_unit_for_metric(str(first_entry.get('metric', '')))}** "
-        f"by **{target_label}** (R\u00b2={float(first_entry.get('r_squared') or 0.0):.3f}).\n\n"
+        f"by **{target_label}**{_r2_suffix(first_entry)}.\n\n"
         f"{_forecast_caveat_for_r_squared(first_entry.get('r_squared'))}"
         f"{regime_warning}"
     )
