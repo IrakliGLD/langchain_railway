@@ -479,3 +479,82 @@ def test_build_forecast_spec_filters_series_via_helper():
     # Only GEL labels should appear; USD series dropped by the filter.
     assert any("GEL" in l for l in labels)
     assert not any("USD" in l for l in labels), f"USD must be filtered out but got: {labels}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 — Regression guards
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_num_cols_filters_scratch_and_reference_cols():
+    """`_resolve_num_cols` must exclude ``__forecast_*`` scratch columns,
+    ``is_forecast`` marker, and known reference columns like ``xrate``.
+
+    Prior to Phase 19, ``__forecast_year`` survived the filter (the regex
+    ``\\b(month|year)\\b`` misses ``__forecast_year`` because ``_`` is a word
+    character) and was charted as a forecast series.
+    """
+    from agent.derived_chart_builder import _resolve_num_cols
+    df = pd.DataFrame({
+        "date": pd.date_range("2023-01-01", periods=4, freq="MS"),
+        "p_bal_gel": [100.0, 105.0, 110.0, 115.0],
+        "p_bal_usd": [40.0, 41.0, 42.0, 43.0],
+        "xrate": [2.5, 2.55, 2.6, 2.65],
+        "is_forecast": [False, False, False, True],
+        "__forecast_year": [2023, 2023, 2023, 2024],
+        "__forecast_month": [1, 2, 3, 4],
+    })
+    num_cols = _resolve_num_cols(df, "date")
+    assert "p_bal_gel" in num_cols
+    assert "p_bal_usd" in num_cols
+    assert "xrate" not in num_cols, "xrate is a reference column, not a metric"
+    assert "is_forecast" not in num_cols, "is_forecast is a marker, not a metric"
+    assert "__forecast_year" not in num_cols, "__forecast_year is a scratch column"
+    assert "__forecast_month" not in num_cols, "__forecast_month is a scratch column"
+
+
+def test_robust_endpoint_value_falls_back_on_short_series():
+    """When the series has fewer than 2*window points, the leading and
+    trailing windows would overlap and collapse to identical means, which
+    would zero-out any CAGR. The helper must fall back to raw endpoints.
+
+    This is the regression the user hit on a 2-row yearly aggregate —
+    Phase 18 Fix 5 caused first_val == last_val → CAGR=0% → flat forecast.
+    """
+    from agent.analyzer import _robust_endpoint_value
+    s = pd.Series([100.0, 200.0])  # len=2, window=3 → 2 < 6 → fallback
+    first = _robust_endpoint_value(s, window=3, which="first")
+    last = _robust_endpoint_value(s, window=3, which="last")
+    assert first == 100.0, "First must fall back to raw iloc[0] on short series"
+    assert last == 200.0, "Last must fall back to raw iloc[-1] on short series"
+    assert first != last, "Short-series endpoints must not collapse to the same value"
+
+
+def test_robust_endpoint_value_damps_on_long_series():
+    """Once the series is long enough for disjoint windows (len >= 2*window),
+    damping re-engages and the endpoint is the trailing-window mean."""
+    from agent.analyzer import _robust_endpoint_value
+    # 6 points, window=3 → disjoint windows (first 3, last 3).
+    s = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+    first = _robust_endpoint_value(s, window=3, which="first")
+    last = _robust_endpoint_value(s, window=3, which="last")
+    assert first == pytest.approx(20.0), "First must be mean of [10,20,30]"
+    assert last == pytest.approx(50.0), "Last must be mean of [40,50,60]"
+
+
+def test_generate_cagr_forecast_drops_scratch_columns():
+    """After `_generate_cagr_forecast` returns, the DataFrame must not
+    expose ``__forecast_*`` scratch columns to downstream consumers.
+    ``is_forecast`` marker and ``season`` (when populated) remain."""
+    from agent.analyzer import _generate_cagr_forecast
+    # Build a minimal yearly price series spanning >= 2 years so the yearly
+    # branch fires and appends a forecast row.
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2022-06-01", "2023-06-01", "2024-06-01"]),
+        "p_bal_gel": [100.0, 110.0, 120.0],
+    })
+    out, _note = _generate_cagr_forecast(df, user_query="forecast balancing price until 2030")
+    scratch = [c for c in out.columns if str(c).startswith("__forecast_")]
+    assert scratch == [], f"Scratch columns leaked: {scratch}"
+    # is_forecast marker is expected to remain.
+    assert "is_forecast" in out.columns

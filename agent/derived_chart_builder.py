@@ -115,15 +115,27 @@ def _resolve_time_key(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+# Columns that never represent a primary metric on a forecast/derived chart.
+# ``is_forecast`` is a boolean marker emitted by ``_generate_cagr_forecast``.
+# ``xrate`` is an FX reference column, not a measurement.
+# Anything prefixed with ``__`` is a private scratch column used during
+# intermediate computation (e.g. ``__forecast_year``/``__forecast_month``/
+# ``__forecast_season``) and must not be plotted.
+_NON_METRIC_COLS: frozenset = frozenset({"is_forecast", "xrate"})
+
+
 def _resolve_num_cols(df: pd.DataFrame, time_key: Optional[str]) -> List[str]:
-    """Return numeric columns in ``df``, excluding the time key and
-    bare year/month integer columns."""
+    """Return numeric columns in ``df``, excluding the time key, bare
+    year/month integer columns, internal scratch columns, and known
+    non-metric reference columns (``is_forecast``, ``xrate``)."""
     return [
         col
         for col in df.columns
         if col != time_key
         and pd.api.types.is_numeric_dtype(df[col])
         and not re.search(r"\b(month|year)\b", col.lower())
+        and not str(col).startswith("__")
+        and str(col).lower() not in _NON_METRIC_COLS
     ]
 
 

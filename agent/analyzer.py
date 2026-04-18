@@ -1703,9 +1703,19 @@ def _robust_endpoint_value(series: "pd.Series", *, window: int = 3, which: str) 
     """Return an endpoint value damped against single-year noise.
 
     Instead of using the raw first or last observation, average the first or
-    last ``window`` observations (or fewer when the series is short).  Used by
-    :func:`_generate_cagr_forecast` so that a single anomalous edge year does
-    not distort a multi-decade CAGR projection.
+    last ``window`` observations.  Used by :func:`_generate_cagr_forecast` so
+    that a single anomalous edge year does not distort a multi-decade CAGR
+    projection.
+
+    Important short-series behaviour
+    --------------------------------
+    When the series has fewer than ``2 * window`` observations, the leading
+    and trailing windows would overlap and collapse to the same mean, which
+    forces any CAGR computed from them to zero (flat forecast).  In that
+    regime we intentionally fall back to the raw first/last value so the
+    forecast still reflects the observed endpoint movement.  Damping only
+    kicks in once the series is long enough for the two windows to be
+    disjoint.
 
     Parameters
     ----------
@@ -1718,7 +1728,17 @@ def _robust_endpoint_value(series: "pd.Series", *, window: int = 3, which: str) 
     """
     if series is None or len(series) == 0:
         return float("nan")
-    w = max(1, min(int(window), len(series)))
+    n = len(series)
+    w = max(1, int(window))
+    # Short-series guard: if leading+trailing windows would overlap, fall
+    # back to the raw endpoint to avoid a degenerate first_val == last_val
+    # collapse that would zero out the CAGR.
+    if n < 2 * w:
+        if which == "first":
+            return float(series.iloc[0])
+        if which == "last":
+            return float(series.iloc[-1])
+        raise ValueError(f"Unknown endpoint selector: {which!r}")
     if which == "first":
         return float(series.iloc[:w].mean())
     if which == "last":
@@ -1742,6 +1762,18 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
 
     data_type = _detect_data_type(value_col)
     note_parts = []
+
+    def _strip_scratch(df_out: pd.DataFrame) -> pd.DataFrame:
+        """Drop internal ``__forecast_*`` scratch columns before returning.
+
+        ``is_forecast`` (marker) and ``season`` (user-visible dimension) are
+        preserved. Defence-in-depth against these columns leaking downstream
+        into chart builders / num-col resolvers.
+        """
+        drop_cols = [c for c in df_out.columns if str(c).startswith("__forecast_")]
+        if drop_cols:
+            return df_out.drop(columns=drop_cols)
+        return df_out
 
     def _usable_yearly_points_message(yearly_count: int) -> str:
         noun = "point" if yearly_count == 1 else "points"
@@ -1798,7 +1830,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             df["is_forecast"] = False
         df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
         note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
-        return df_f, " ".join(note_parts)
+        return _strip_scratch(df_f), " ".join(note_parts)
 
     elif data_type == "price":
         df["__forecast_year"] = df[time_col].dt.year
@@ -1843,7 +1875,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
                 df["is_forecast"] = False
             df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
             note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
-            return df_f, " ".join(note_parts)
+            return _strip_scratch(df_f), " ".join(note_parts)
 
         df_s = (
             df.groupby(["__forecast_year", "__forecast_season"])[value_col]
@@ -1904,7 +1936,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         if "__forecast_season" in df_f.columns:
             df_f["season"] = df_f.get("season").fillna(df_f["__forecast_season"])
         note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
-        return df_f, " ".join(note_parts)
+        return _strip_scratch(df_f), " ".join(note_parts)
 
     else:
         return df_in, "Forecast skipped: unrecognized data type."
