@@ -148,6 +148,98 @@ def _infer_dim_map(num_cols: List[str]) -> Dict[str, str]:
     return {col: infer_dimension(col) for col in num_cols}
 
 
+# ---------------------------------------------------------------------------
+# Forecast-chart series selection (Fix 1 + Fix 6)
+# ---------------------------------------------------------------------------
+
+# Known metric aliases.  When both alias members appear in ``num_cols`` the
+# canonical form wins so the chart does not double-plot the same series under
+# two names.  Extend this map as new aliases surface.
+_METRIC_ALIAS_CANONICAL: Dict[str, str] = {
+    "balancing_price_gel": "p_bal_gel",
+    "balancing_price_usd": "p_bal_usd",
+}
+
+# Tokens in the user query that flip the default currency from GEL to USD.
+_USD_QUERY_TOKENS: Tuple[str, ...] = ("usd", "dollar", "dollars", "us dollar", "$")
+
+
+def _prefers_usd(user_query: Optional[str]) -> bool:
+    """Return True when the user's query mentions USD/dollar/$ — otherwise the
+    forecast chart defaults to the local currency (GEL for Georgia)."""
+    if not user_query:
+        return False
+    q = user_query.lower()
+    return any(tok in q for tok in _USD_QUERY_TOKENS)
+
+
+def _select_forecast_series(
+    df: pd.DataFrame,
+    num_cols: List[str],
+    user_query: Optional[str],
+    *,
+    max_series: int = 2,
+) -> List[str]:
+    """Filter the candidate forecast columns to a readable set.
+
+    Applies three passes:
+
+    1. **Alias dedup.**  If a canonical name and its alias both appear
+       (e.g. ``p_bal_gel`` and ``balancing_price_gel``), drop the alias.
+    2. **Currency preference.**  If columns exist for multiple currencies,
+       keep only the currency requested by the query (USD if the query
+       mentions USD/dollar/$; otherwise GEL as the local default).  The
+       filter is applied per-base-metric so unrelated non-currency columns
+       (e.g. shares, volumes) are unaffected.
+    3. **Series cap.**  If more than ``max_series`` columns remain, keep the
+       top-``max_series`` by non-null numeric variance — this is a safety
+       net for unusual schemas.
+
+    Returns the filtered, ordered column list.  Empty input → empty output.
+    """
+    if not num_cols:
+        return []
+
+    # --- Pass 1: alias dedup ---
+    names = set(num_cols)
+    deduped: List[str] = []
+    for col in num_cols:
+        canonical = _METRIC_ALIAS_CANONICAL.get(col)
+        if canonical and canonical in names and canonical != col:
+            # This column is an alias whose canonical form is also present — skip it.
+            continue
+        deduped.append(col)
+
+    # --- Pass 2: currency preference ---
+    prefer_usd = _prefers_usd(user_query)
+    gel_cols = [c for c in deduped if c.lower().endswith("_gel")]
+    usd_cols = [c for c in deduped if c.lower().endswith("_usd")]
+    if gel_cols and usd_cols:
+        keep_suffix = "_usd" if prefer_usd else "_gel"
+        filtered = [
+            c for c in deduped
+            if (c.lower().endswith(keep_suffix))
+            or (not c.lower().endswith("_gel") and not c.lower().endswith("_usd"))
+        ]
+    else:
+        filtered = deduped
+
+    # --- Pass 3: series cap by variance ---
+    if len(filtered) <= max_series:
+        return filtered
+
+    variances: List[Tuple[str, float]] = []
+    for col in filtered:
+        try:
+            series = pd.to_numeric(df[col], errors="coerce").dropna()
+            var = float(series.var()) if len(series) > 1 else 0.0
+        except Exception:
+            var = 0.0
+        variances.append((col, var))
+    variances.sort(key=lambda kv: kv[1], reverse=True)
+    return [c for c, _ in variances[:max_series]]
+
+
 def _spec_from_wide(
     wide_df: pd.DataFrame,
     *,
@@ -435,15 +527,31 @@ def _build_forecast_spec(
     time_key: Optional[str],
     num_cols: List[str],
     label_map: Dict[str, str],
+    user_query: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Emit a chart spec that distinguishes observed (historical) rows from
     projected (forecast) rows. The ``_generate_cagr_forecast`` function in
     ``analyzer.py`` marks projected rows with a ``is_projected`` boolean
     column; we respect that when present and fall back to a date cutoff
     (projection = any row after the last observed row with a non-null value).
+
+    ``user_query`` steers currency preference: queries mentioning USD/dollar/$
+    keep USD columns, otherwise the local currency (GEL) wins.
     """
     if not num_cols or not time_key or df.empty:
         return None
+
+    # Fix 1 + 6: collapse alias duplicates, prefer the relevant currency, and
+    # cap total series so the chart stays readable.
+    selected_cols = _select_forecast_series(df, num_cols, user_query)
+    if not selected_cols:
+        return None
+    if selected_cols != num_cols:
+        log.info(
+            "dispatch_derived_chart: forecast series filtered %s → %s (query=%r)",
+            num_cols, selected_cols, (user_query or "")[:80],
+        )
+    num_cols = selected_cols
 
     prepared = df.copy()
     prepared[time_key] = pd.to_datetime(prepared[time_key], errors="coerce")
@@ -655,7 +763,9 @@ def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]
     # ---- Forecast observed vs projected ----
     if answer_kind == AnswerKind.FORECAST:
         log.info("dispatch_derived_chart: forecast observed-vs-projected override")
-        return _build_forecast_spec(df, time_key, num_cols, label_map)
+        return _build_forecast_spec(
+            df, time_key, num_cols, label_map, user_query=getattr(ctx, "query", None)
+        )
 
     # ---- Derived-metrics fallback ----
     # When visualization.measure_transform is unset or raw (the common case for

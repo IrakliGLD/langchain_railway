@@ -22,6 +22,7 @@ from agent.derived_chart_builder import (  # noqa: E402
     _build_index_growth_spec,
     _build_mom_yoy_specs,
     _build_seasonal_spec,
+    _select_forecast_series,
     dispatch_derived_chart,
 )
 
@@ -391,3 +392,90 @@ def test_dispatcher_fallback_skipped_when_explicit_transform():
     assert result is not None
     # The delta spec (index 1) was built by the explicit mom_pct branch.
     assert result[-1]["metadata"]["measureTransform"] == "mom_pct"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Forecast-chart series selection (currency, alias dedup, series cap)
+# ---------------------------------------------------------------------------
+
+
+def _forecast_df(cols_and_vals: dict, n: int = 12) -> pd.DataFrame:
+    """Build a monthly forecast-shaped DataFrame with an ``is_forecast`` flag."""
+    base = {"date": pd.date_range("2023-01-01", periods=n, freq="MS")}
+    base.update(cols_and_vals)
+    base["is_forecast"] = [False] * (n - 2) + [True] * 2
+    return pd.DataFrame(base)
+
+
+def test_select_forecast_series_prefers_gel_by_default():
+    df = pd.DataFrame({
+        "date": pd.date_range("2023-01-01", periods=6, freq="MS"),
+        "p_bal_gel": [100.0, 110.0, 105.0, 120.0, 115.0, 130.0],
+        "p_bal_usd": [40.0, 44.0, 42.0, 48.0, 46.0, 52.0],
+    })
+    out = _select_forecast_series(df, ["p_bal_gel", "p_bal_usd"], user_query="forecast price to 2035")
+    assert out == ["p_bal_gel"]
+
+
+def test_select_forecast_series_prefers_usd_when_query_asks():
+    df = pd.DataFrame({
+        "date": pd.date_range("2023-01-01", periods=6, freq="MS"),
+        "p_bal_gel": [100.0, 110.0, 105.0, 120.0, 115.0, 130.0],
+        "p_bal_usd": [40.0, 44.0, 42.0, 48.0, 46.0, 52.0],
+    })
+    out = _select_forecast_series(df, ["p_bal_gel", "p_bal_usd"], user_query="forecast price in USD to 2035")
+    assert out == ["p_bal_usd"]
+
+
+def test_select_forecast_series_drops_alias_duplicate():
+    df = pd.DataFrame({
+        "date": pd.date_range("2023-01-01", periods=6, freq="MS"),
+        "p_bal_gel": [100.0, 110.0, 105.0, 120.0, 115.0, 130.0],
+        "balancing_price_gel": [100.0, 110.0, 105.0, 120.0, 115.0, 130.0],
+    })
+    out = _select_forecast_series(df, ["p_bal_gel", "balancing_price_gel"], user_query="forecast")
+    assert out == ["p_bal_gel"], "alias balancing_price_gel must be dropped in favour of canonical"
+
+
+def test_select_forecast_series_caps_at_two_by_variance():
+    """When >2 columns remain after currency/alias filtering, keep the two
+    with the highest variance (more informative for a forecast)."""
+    df = pd.DataFrame({
+        "date": pd.date_range("2023-01-01", periods=10, freq="MS"),
+        "flat_col": [100.0] * 10,                       # variance 0
+        "tiny_slope": [100.0 + i * 0.01 for i in range(10)],   # tiny variance
+        "steep_slope": [100.0 + i * 5.0 for i in range(10)],   # big variance
+        "noisy_series": [100.0, 200.0, 80.0, 250.0, 70.0, 300.0, 60.0, 320.0, 50.0, 340.0],  # huge variance
+    })
+    out = _select_forecast_series(
+        df,
+        ["flat_col", "tiny_slope", "steep_slope", "noisy_series"],
+        user_query="",
+        max_series=2,
+    )
+    assert set(out) == {"steep_slope", "noisy_series"}
+
+
+def test_select_forecast_series_empty_input_safe():
+    assert _select_forecast_series(pd.DataFrame(), [], user_query=None) == []
+
+
+def test_build_forecast_spec_filters_series_via_helper():
+    """End-to-end: forecast builder receives [gel, usd] and only charts gel
+    when no USD hint in the query."""
+    df = pd.DataFrame({
+        "date": pd.date_range("2023-01-01", periods=6, freq="MS"),
+        "p_bal_gel": [100.0, 105.0, 102.0, 108.0, 110.0, 115.0],
+        "p_bal_usd": [40.0, 41.0, 39.0, 42.0, 43.0, 44.0],
+        "is_forecast": [False, False, False, False, True, True],
+    })
+    label_map = {"p_bal_gel": "Balancing GEL", "p_bal_usd": "Balancing USD"}
+    specs = _build_forecast_spec(
+        df, "date", ["p_bal_gel", "p_bal_usd"], label_map,
+        user_query="forecast balancing price until 2035",
+    )
+    assert specs is not None and len(specs) == 1
+    labels = specs[0]["metadata"]["labels"]
+    # Only GEL labels should appear; USD series dropped by the filter.
+    assert any("GEL" in l for l in labels)
+    assert not any("USD" in l for l in labels), f"USD must be filtered out but got: {labels}"

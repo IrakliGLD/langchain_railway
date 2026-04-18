@@ -59,6 +59,11 @@ MONTH_NAME_TO_NUMBER = {
     "december": 12, "dec": 12,
 }
 
+# Minimum R² required to keep a linear-regression trendline in the forecast
+# summary / chart.  Below this the fit explains too little variance to be
+# useful (common case: USD prices driven by FX noise rather than a time trend).
+_TRENDLINE_MIN_R_SQUARED = 0.30
+
 _SCENARIO_TOTAL_INCOME_QUERY_SIGNALS = (
     "total income",
     "total revenue",
@@ -1694,6 +1699,33 @@ def _detect_data_type(value_col: str) -> str:
     return "other"
 
 
+def _robust_endpoint_value(series: "pd.Series", *, window: int = 3, which: str) -> float:
+    """Return an endpoint value damped against single-year noise.
+
+    Instead of using the raw first or last observation, average the first or
+    last ``window`` observations (or fewer when the series is short).  Used by
+    :func:`_generate_cagr_forecast` so that a single anomalous edge year does
+    not distort a multi-decade CAGR projection.
+
+    Parameters
+    ----------
+    series:
+        Numeric pandas Series, ordered chronologically (oldest first).
+    window:
+        Maximum number of observations to average at the chosen endpoint.
+    which:
+        ``"first"`` for the leading window, ``"last"`` for the trailing window.
+    """
+    if series is None or len(series) == 0:
+        return float("nan")
+    w = max(1, min(int(window), len(series)))
+    if which == "first":
+        return float(series.iloc[:w].mean())
+    if which == "last":
+        return float(series.iloc[-w:].mean())
+    raise ValueError(f"Unknown endpoint selector: {which!r}")
+
+
 def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.DataFrame, str]:
     """Generate CAGR-based forecast for price or quantity data."""
     df = df_in.copy()
@@ -1748,12 +1780,18 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         span = last["year"] - first["year"]
         if span <= 0 or first[value_col] <= 0:
             return df_in, "Invalid data for CAGR."
-        cagr = (last[value_col] / first[value_col]) ** (1 / span) - 1
+        # Fix 5: damp endpoint noise with a 3-year trailing average at both ends.
+        first_val = _robust_endpoint_value(df_y[value_col], window=3, which="first")
+        last_val = _robust_endpoint_value(df_y[value_col], window=3, which="last")
+        if first_val <= 0 or last_val <= 0 or np.isnan(first_val) or np.isnan(last_val):
+            return df_in, "Invalid data for CAGR."
+        cagr = (last_val / first_val) ** (1 / span) - 1
         note_parts.append(f"Yearly CAGR={cagr*100:.2f}% ({int(first['year'])}→{int(last['year'])}).")
         target_years = _resolve_target_years(int(last["year"]))
         f_rows = []
         for y in target_years:
-            val = last[value_col] * ((1 + cagr) ** (y - last["year"]))
+            # Project from the damped last value to match the CAGR formula above.
+            val = last_val * ((1 + cagr) ** (y - last["year"]))
             # Force year to int to avoid 2026.0-01-01 errors
             f_rows.append({time_col: pd.to_datetime(f"{int(y)}-01-01"), value_col: val, "is_forecast": True})
         if "is_forecast" not in df.columns:
@@ -1780,8 +1818,12 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         first, last = df_y.iloc[0], df_y.iloc[-1]
         span = last["year"] - first["year"]
 
-        if span > 0 and first[value_col] > 0 and last[value_col] > 0:
-            cagr_y = (last[value_col] / first[value_col]) ** (1 / span) - 1
+        # Fix 5: damped endpoints (3-year trailing averages).
+        first_val = _robust_endpoint_value(df_y[value_col], window=3, which="first")
+        last_val = _robust_endpoint_value(df_y[value_col], window=3, which="last")
+
+        if span > 0 and first_val > 0 and last_val > 0 and not np.isnan(first_val) and not np.isnan(last_val):
+            cagr_y = (last_val / first_val) ** (1 / span) - 1
         else:
             cagr_y = 0
 
@@ -1794,7 +1836,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}% using yearly averages.")
             f_rows = []
             for y in target_years:
-                val_y = last[value_col] * ((1 + cagr_y) ** (y - last["year"]))
+                val_y = last_val * ((1 + cagr_y) ** (y - last["year"]))
                 f_rows.append({time_col: pd.to_datetime(f"{int(y)}-01-01"), value_col: val_y, "is_forecast": True})
 
             if "is_forecast" not in df.columns:
@@ -1810,30 +1852,46 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             .reset_index()
             .rename(columns={"__forecast_year": "year", "__forecast_season": "season"})
         )
-        summer = df_s[df_s["season"] == "summer"]
-        winter = df_s[df_s["season"] == "winter"]
+        summer = df_s[df_s["season"] == "summer"].sort_values("year")
+        winter = df_s[df_s["season"] == "winter"].sort_values("year")
 
+        # Fix 5: damped endpoints for seasonal CAGR too.
         if len(summer) >= 2:
-            s_first, s_last = summer[value_col].iloc[0], summer[value_col].iloc[-1]
+            s_first = _robust_endpoint_value(summer[value_col], window=3, which="first")
+            s_last = _robust_endpoint_value(summer[value_col], window=3, which="last")
             s_span = summer["year"].iloc[-1] - summer["year"].iloc[0]
-            cagr_s = (s_last / s_first) ** (1 / s_span) - 1 if s_span > 0 and s_first > 0 and s_last > 0 else np.nan
+            cagr_s = (
+                (s_last / s_first) ** (1 / s_span) - 1
+                if s_span > 0 and s_first > 0 and s_last > 0 and not np.isnan(s_first) and not np.isnan(s_last)
+                else np.nan
+            )
         else:
+            s_last = float("nan")
             cagr_s = np.nan
 
         if len(winter) >= 2:
-            w_first, w_last = winter[value_col].iloc[0], winter[value_col].iloc[-1]
+            w_first = _robust_endpoint_value(winter[value_col], window=3, which="first")
+            w_last = _robust_endpoint_value(winter[value_col], window=3, which="last")
             w_span = winter["year"].iloc[-1] - winter["year"].iloc[0]
-            cagr_w = (w_last / w_first) ** (1 / w_span) - 1 if w_span > 0 and w_first > 0 and w_last > 0 else np.nan
+            cagr_w = (
+                (w_last / w_first) ** (1 / w_span) - 1
+                if w_span > 0 and w_first > 0 and w_last > 0 and not np.isnan(w_first) and not np.isnan(w_last)
+                else np.nan
+            )
         else:
+            w_last = float("nan")
             cagr_w = np.nan
 
         note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_w)}%.")
 
         f_rows = []
         for y in target_years:
-            val_y = last[value_col] * ((1 + cagr_y) ** (y - last["year"]))
-            val_s = last[value_col] * ((1 + cagr_s) ** (y - last["year"])) if not np.isnan(cagr_s) else val_y
-            val_w = last[value_col] * ((1 + cagr_w) ** (y - last["year"])) if not np.isnan(cagr_w) else val_y
+            val_y = last_val * ((1 + cagr_y) ** (y - last["year"]))
+            # Fix 4: compound summer from last summer base, winter from last winter base.
+            summer_base = s_last if not np.isnan(s_last) and s_last > 0 else last_val
+            winter_base = w_last if not np.isnan(w_last) and w_last > 0 else last_val
+            val_s = summer_base * ((1 + cagr_s) ** (y - last["year"])) if not np.isnan(cagr_s) else val_y
+            val_w = winter_base * ((1 + cagr_w) ** (y - last["year"])) if not np.isnan(cagr_w) else val_y
             # Force year to int
             f_rows.append({time_col: pd.to_datetime(f"{int(y)}-04-01"), "__forecast_season": "summer", value_col: val_s, "is_forecast": True})
             f_rows.append({time_col: pd.to_datetime(f"{int(y)}-12-01"), "__forecast_season": "winter", value_col: val_w, "is_forecast": True})
@@ -2103,7 +2161,24 @@ def enrich(ctx: QueryContext) -> QueryContext:
     # Mirrors the FORECAST branch of the switch above — reuses the local
     # `answer_kind` so keyword-derived forecast queries also get trendline
     # extension on analyzer failure (F1).
-    ctx.add_trendlines = answer_kind == AnswerKind.FORECAST
+    #
+    # Fix 3: if `_generate_cagr_forecast` already produced `is_forecast=True`
+    # projection rows, skip trendline calculation entirely — those projection
+    # rows already drive the chart's forecast line and overlaying linear
+    # trendlines on top creates redundant / conflicting visuals.  Trendlines
+    # remain as a fallback when CAGR produced nothing.
+    _cagr_produced_rows = bool(
+        answer_kind == AnswerKind.FORECAST
+        and "is_forecast" in getattr(ctx.df, "columns", [])
+        and bool(ctx.df["is_forecast"].fillna(False).any())
+    )
+    ctx.add_trendlines = (answer_kind == AnswerKind.FORECAST) and not _cagr_produced_rows
+    if answer_kind == AnswerKind.FORECAST and _cagr_produced_rows:
+        log.info(
+            "📈 Skipping trendline extension: CAGR forecast rows already present "
+            "(%d is_forecast=True rows).",
+            int(ctx.df["is_forecast"].fillna(False).sum()),
+        )
 
     if ctx.add_trendlines:
         year_matches = re.findall(r'\b(20[2-9][0-9])\b', ctx.query)
@@ -2791,6 +2866,12 @@ def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
 
         trendline_forecasts = {}
 
+        def _accept_trendline(td: Optional[Dict[str, Any]]) -> bool:
+            """R² gate — reject trendlines whose fit explains < 30% of variance."""
+            if not td or not td.get("dates") or not td.get("values"):
+                return False
+            return float(td.get("r_squared", 0.0)) >= _TRENDLINE_MIN_R_SQUARED
+
         if season_col and season_col in df_calc.columns:
             log.info("📈 Seasonal forecast detected - calculating separate trendlines")
             seasons = df_calc[season_col].dropna().unique()
@@ -2798,26 +2879,38 @@ def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
                 season_df = df_calc[df_calc[season_col] == season].copy()
                 for col in num_cols:
                     td = calculate_trendline(season_df, time_key, col, extend_to_date=ctx.trendline_extend_to)
-                    if td and td["dates"] and td["values"]:
-                        forecast_key = f"{col}_{season}"
-                        trendline_forecasts[forecast_key] = {
-                            "target_date": td["dates"][-1],
-                            "forecast_value": round(td["values"][-1], 2),
-                            "equation": td["equation"],
-                            "r_squared": round(td["r_squared"], 3),
-                            "season": season,
-                        }
-        else:
-            # Overall (non-seasonal) trendlines
-            for col in num_cols:
-                td = calculate_trendline(df_calc, time_key, col, extend_to_date=ctx.trendline_extend_to)
-                if td and td["dates"] and td["values"]:
-                    trendline_forecasts[col] = {
+                    if not _accept_trendline(td):
+                        if td is not None:
+                            log.info(
+                                "📈 Skipping trendline %s (%s): R²=%.3f < %.2f threshold",
+                                col, season, float(td.get("r_squared", 0.0)), _TRENDLINE_MIN_R_SQUARED,
+                            )
+                        continue
+                    forecast_key = f"{col}_{season}"
+                    trendline_forecasts[forecast_key] = {
                         "target_date": td["dates"][-1],
                         "forecast_value": round(td["values"][-1], 2),
                         "equation": td["equation"],
                         "r_squared": round(td["r_squared"], 3),
+                        "season": season,
                     }
+        else:
+            # Overall (non-seasonal) trendlines
+            for col in num_cols:
+                td = calculate_trendline(df_calc, time_key, col, extend_to_date=ctx.trendline_extend_to)
+                if not _accept_trendline(td):
+                    if td is not None:
+                        log.info(
+                            "📈 Skipping trendline %s (overall): R²=%.3f < %.2f threshold",
+                            col, float(td.get("r_squared", 0.0)), _TRENDLINE_MIN_R_SQUARED,
+                        )
+                    continue
+                trendline_forecasts[col] = {
+                    "target_date": td["dates"][-1],
+                    "forecast_value": round(td["values"][-1], 2),
+                    "equation": td["equation"],
+                    "r_squared": round(td["r_squared"], 3),
+                }
 
             # Derive seasonal split from month when no explicit season column
             try:
@@ -2831,15 +2924,22 @@ def _precalculate_trendlines(ctx: QueryContext, cols_labeled: list) -> None:
                             continue
                         for col in num_cols:
                             td = calculate_trendline(s_df, time_key, col, extend_to_date=ctx.trendline_extend_to)
-                            if td and td["dates"] and td["values"]:
-                                forecast_key = f"{col}_{season_label}"
-                                trendline_forecasts[forecast_key] = {
-                                    "target_date": td["dates"][-1],
-                                    "forecast_value": round(td["values"][-1], 2),
-                                    "equation": td["equation"],
-                                    "r_squared": round(td["r_squared"], 3),
-                                    "season": season_label,
-                                }
+                            if not _accept_trendline(td):
+                                if td is not None:
+                                    log.info(
+                                        "📈 Skipping trendline %s (%s): R²=%.3f < %.2f threshold",
+                                        col, season_label, float(td.get("r_squared", 0.0)),
+                                        _TRENDLINE_MIN_R_SQUARED,
+                                    )
+                                continue
+                            forecast_key = f"{col}_{season_label}"
+                            trendline_forecasts[forecast_key] = {
+                                "target_date": td["dates"][-1],
+                                "forecast_value": round(td["values"][-1], 2),
+                                "equation": td["equation"],
+                                "r_squared": round(td["r_squared"], 3),
+                                "season": season_label,
+                            }
                     if any(fi.get("season") for fi in trendline_forecasts.values()):
                         log.info("📈 Derived seasonal trendlines from month-based split")
             except Exception as seasonal_err:
