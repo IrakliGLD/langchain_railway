@@ -3593,15 +3593,15 @@ _TRUNCATION_PRIORITY_KNOWLEDGE = [
     "UNTRUSTED_DOMAIN_KNOWLEDGE",
     "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
 ]
-# Phase D: explanation answers weigh data + knowledge about equally but can
-# shed pre-computed statistics first (the model re-derives pressure/direction
-# from the raw preview and the background prose).
+# Phase D: explanation answers rely on strict grounding against derived metrics
+# (correlations, mom, yoy). Shed knowledge before shedding the statistics,
+# to ensure the grounding checks don't fail when the budget is squeezed.
 _TRUNCATION_PRIORITY_EXPLANATION = [
     "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_STATISTICS",
     "UNTRUSTED_DOMAIN_KNOWLEDGE",
     "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
     "UNTRUSTED_DATA_PREVIEW",
+    "UNTRUSTED_STATISTICS",
 ]
 # Phase D: forecast / scenario answers MUST keep the stats + data preview
 # (the projection or payoff is computed against those rows).  Sacrifice

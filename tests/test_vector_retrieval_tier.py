@@ -225,7 +225,7 @@ def test_summarizer_profile_scenario_matches_forecast():
     )
 
 
-def test_summarizer_profile_explanation_sheds_stats_first():
+def test_summarizer_profile_explanation_preserves_stats():
     from core.llm import (
         _TRUNCATION_PRIORITY_EXPLANATION,
         _select_summarizer_truncation_priority,
@@ -235,9 +235,9 @@ def test_summarizer_profile_explanation_sheds_stats_first():
         question_analysis=_qa(AnswerKind.EXPLANATION)
     )
     assert profile is _TRUNCATION_PRIORITY_EXPLANATION
-    # Stats are shed before domain / external passages.
-    assert profile.index("UNTRUSTED_STATISTICS") < profile.index("UNTRUSTED_DOMAIN_KNOWLEDGE")
-    assert profile.index("UNTRUSTED_STATISTICS") < profile.index(
+    # Stats are heavily protected to ensure math grounding doesn't fail.
+    assert profile.index("UNTRUSTED_STATISTICS") > profile.index("UNTRUSTED_DOMAIN_KNOWLEDGE")
+    assert profile.index("UNTRUSTED_STATISTICS") > profile.index(
         "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES"
     )
 

@@ -908,6 +908,10 @@ def _apply_balancing_month_explanation_guardrail(
         0.95,
     )
 
+    # Force downstream stages to recognize this as an analytical EXPLANATION.
+    payload["answer_kind"] = AnswerKind.EXPLANATION.value
+    payload["render_style"] = RenderStyle.NARRATIVE.value
+
     payload["routing"].update({
         "preferred_path": PreferredPath.TOOL.value,
         "needs_sql": False,
