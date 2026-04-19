@@ -5,12 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.parse
 from functools import lru_cache
 from typing import List
 
-from sqlalchemy import bindparam, create_engine, text
-from sqlalchemy.pool import QueuePool
+from sqlalchemy import bindparam, text
 from contracts.vector_knowledge import (
     ChunkIngestRecord,
     DocumentRegistration,
@@ -45,37 +43,19 @@ VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE = _env_float(
 )
 
 
-def _coerce_to_psycopg_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme in ("postgres", "postgresql"):
-        return url.replace(parsed.scheme, "postgresql+psycopg", 1)
-    if not parsed.scheme.startswith("postgresql+"):
-        return "postgresql+psycopg://" + url.split("://", 1)[-1]
-    return url
-
 
 @lru_cache(maxsize=1)
 def _get_engine():
-    db_url = os.getenv("SUPABASE_DB_URL", "").strip()
-    if not db_url:
-        raise RuntimeError("Missing SUPABASE_DB_URL")
-    return create_engine(
-        _coerce_to_psycopg_url(db_url),
-        poolclass=QueuePool,
-        pool_size=5,
-        max_overflow=2,
-        pool_timeout=30,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        connect_args={
-            "connect_timeout": 30,
-            "options": "-c statement_timeout=30000",
-            # Supabase commonly fronts Postgres with PgBouncer; disable
-            # psycopg auto-prepared statements to avoid duplicate statement
-            # errors during repeated inserts in transaction-pooled sessions.
-            "prepare_threshold": None,
-        },
-    )
+    # Reuse the main query_executor ENGINE to avoid dual-pool competition
+    # against Supabase PgBouncer's limited connection slots.
+    # The main engine now carries prepare_threshold=None for PgBouncer
+    # compatibility, making a separate engine unnecessary.
+    #
+    # Previously this created an independent pool (pool_size=5, max_overflow=2)
+    # which, combined with the main engine's pool, could exceed PgBouncer limits
+    # and cause cascading ConnectionTimeout errors across all pipeline stages.
+    from core.query_executor import ENGINE as _main_engine
+    return _main_engine
 
 
 ENGINE = None

@@ -9,7 +9,9 @@ Gated by ``ENABLE_EVIDENCE_PLANNER``.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -868,9 +870,10 @@ def has_unsatisfied_steps(plan: List[Dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 
 _EVIDENCE_LOOP_MAX_STEPS = 3
+EVIDENCE_LOOP_BUDGET_SECONDS = float(os.getenv("EVIDENCE_LOOP_BUDGET_SECONDS", "30"))
 
 
-def execute_remaining_evidence(ctx: QueryContext) -> QueryContext:
+def execute_remaining_evidence(ctx: QueryContext, timeout_seconds: Optional[float] = None) -> QueryContext:
     """Execute unsatisfied evidence plan steps after tool routing.
 
     Iterates remaining plan steps, executes each tool, stores results in
@@ -883,7 +886,19 @@ def execute_remaining_evidence(ctx: QueryContext) -> QueryContext:
     remaining = [s for s in ctx.evidence_plan if not s.get("satisfied") and not s.get("error")]
     cap = min(len(remaining), _EVIDENCE_LOOP_MAX_STEPS)
 
+    budget = timeout_seconds or EVIDENCE_LOOP_BUDGET_SECONDS
+    deadline = time.time() + budget
+
     for step in remaining[:cap]:
+        if time.time() > deadline:
+            step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
+            log.warning(
+                "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
+                budget, step["tool_name"], step.get("role")
+            )
+            continue
+
+
         invocation = ToolInvocation(
             name=step["tool_name"],
             params=step["params"],

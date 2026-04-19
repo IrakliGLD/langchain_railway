@@ -1280,6 +1280,27 @@ def process_query(
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
         ctx.vector_knowledge_error = bundle.error
+        
+        # Cross-notify circuit breaker on DB-layer failures from vector store.
+        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
+        # may surface "OperationalError" with varied messages like "timeout expired",
+        # "connection timed out", "could not connect", etc.
+        if bundle.error:
+            _err_lower = str(bundle.error).lower()
+            _is_db_failure = any(kw in _err_lower for kw in (
+                "connectiontimeout", "operationalerror", "timeout",
+                "could not connect", "connection refused", "connection reset",
+            ))
+            if _is_db_failure:
+                from utils.resilience import db_circuit_breaker
+                db_circuit_breaker.record_failure()
+                log.warning(
+                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
+                    db_circuit_breaker._failure_count,
+                    db_circuit_breaker.failure_threshold,
+                    bundle.error,
+                )
+
         packed_vector_knowledge = (
             pack_vector_knowledge_for_prompt(bundle)
             if not bundle.error
@@ -1389,7 +1410,17 @@ def process_query(
         )
 
     # Stage 0.5: prefer deterministic tool execution before falling back to heavier planners.
-    if ENABLE_TYPED_TOOLS:
+    # PRE-FLIGHT: check circuit breaker before attempting tools
+    from utils.resilience import db_circuit_breaker
+    _cb_allowed, _cb_reason = db_circuit_breaker.allow_request()
+    if not _cb_allowed:
+        log.warning(
+            "Skipping tool execution: circuit breaker is %s (%s). "
+            "Pipeline will fall through to Stage 1/2 or CLARIFY.",
+            db_circuit_breaker._state, _cb_reason,
+        )
+
+    if ENABLE_TYPED_TOOLS and _cb_allowed:
         t_stage = time.time()
 
         is_exp = _should_route_tool_as_explanation(ctx)
