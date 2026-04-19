@@ -199,65 +199,166 @@ def _invoke_with_resilience(llm, messages, model_name: str):
 
 
 # -----------------------------
-# LLM Response Cache (Phase 1 Optimization)
+# LLM Response Cache (Phase 1 Optimization + Request Coalescing)
 # -----------------------------
 
+import threading as _threading
+
+
 class LLMResponseCache:
-    """Simple in-memory cache for LLM responses.
+    """Thread-safe in-memory cache with request coalescing for LLM responses.
 
     Phase 1 optimization: Cache identical prompts to avoid repeated LLM calls.
-    Future: Migrate to Redis for persistence across restarts.
+    Phase 2 optimization: Request coalescing ("singleflight") prevents stampeding
+    herd cache misses.  When multiple threads request the same prompt concurrently,
+    only one thread calls the LLM.  The remaining threads block on a
+    ``threading.Event`` until the leader finishes, then read from the cache.
+
+    The public API (``get`` / ``set``) is fully backward-compatible.  The
+    coalescing lifecycle is:
+      1. ``get()`` → cache miss → returns ``None``
+      2. Caller calls ``mark_in_flight(prompt)``
+      3. Caller calls the LLM
+      4. Caller calls ``set(prompt, response)`` on success (or
+         ``cancel_in_flight(prompt)`` on failure)
+
+    If a concurrent thread calls ``get()`` while a key is in-flight, the get
+    blocks up to ``coalesce_timeout`` seconds waiting for the leader.
     """
 
-    def __init__(self, max_size: int = 1000):
-        self._cache = {}
+    def __init__(
+        self,
+        max_size: int = 1000,
+        coalesce_timeout: float = 180.0,
+    ):
+        self._cache: dict[str, str] = {}
         self._max_size = max_size
         self._hits = 0
         self._misses = 0
+        self._coalesce_hits = 0
+        self._coalesce_timeout = coalesce_timeout
+        # Guards both _cache and _in_flight mutations.
+        self._lock = _threading.Lock()
+        # key → Event; set when the leader finishes (success or failure).
+        self._in_flight: dict[str, _threading.Event] = {}
 
     def _make_key(self, prompt: str) -> str:
         """Generate cache key from prompt hash."""
         return hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]
 
+    # --- core API (backward-compatible) ---
+
     def get(self, prompt: str) -> Optional[str]:
-        """Get cached response if exists."""
+        """Return cached response, or ``None`` on a true miss.
+
+        If another thread is currently computing the same key (in-flight), this
+        method blocks until the leader finishes, then returns the cached value
+        (or ``None`` if the leader failed).
+        """
         key = self._make_key(prompt)
-        if key in self._cache:
-            self._hits += 1
-            log.info(f"✅ LLM cache HIT (hit rate: {self.hit_rate():.1%})")
-            return self._cache[key]
+
+        with self._lock:
+            if key in self._cache:
+                self._hits += 1
+                log.info("✅ LLM cache HIT (hit rate: %.1f%%)", self.hit_rate() * 100)
+                return self._cache[key]
+
+            event = self._in_flight.get(key)
+            if event is None:
+                # True miss — no cached value, nobody computing it.
+                self._misses += 1
+                return None
+
+        # Another thread is computing this key — wait for it.
+        log.info("⏳ LLM cache: waiting for in-flight result (key=%.8s…)", key)
+        signaled = event.wait(timeout=self._coalesce_timeout)
+
+        with self._lock:
+            result = self._cache.get(key)
+
+        if result is not None:
+            self._coalesce_hits += 1
+            log.info(
+                "✅ LLM cache COALESCE HIT (waited=%.0fs, hit rate: %.1f%%)",
+                0 if signaled else self._coalesce_timeout,
+                self.hit_rate() * 100,
+            )
+            return result
+
+        # Leader failed — caller should proceed as a fresh miss.
         self._misses += 1
         return None
 
     def set(self, prompt: str, response: str):
-        """Cache response for prompt."""
-        if len(self._cache) >= self._max_size:
-            # Simple LRU: Remove oldest 10% when full
-            remove_count = self._max_size // 10
-            for _ in range(remove_count):
-                self._cache.pop(next(iter(self._cache)))
-            log.info(f"🗑️ Cache eviction: removed {remove_count} oldest entries")
-
+        """Cache response for prompt and wake any waiting threads."""
         key = self._make_key(prompt)
-        self._cache[key] = response
+
+        with self._lock:
+            if len(self._cache) >= self._max_size:
+                remove_count = max(1, self._max_size // 10)
+                for _ in range(remove_count):
+                    self._cache.pop(next(iter(self._cache)), None)
+                log.info("🗑️ Cache eviction: removed %d oldest entries", remove_count)
+            self._cache[key] = response
+            event = self._in_flight.pop(key, None)
+
+        if event is not None:
+            event.set()  # Wake all waiters.
+
+    # --- coalescing lifecycle ---
+
+    def mark_in_flight(self, prompt: str):
+        """Mark *prompt* as being computed.  Must be followed by ``set()`` or
+        ``cancel_in_flight()`` (use try/finally)."""
+        key = self._make_key(prompt)
+        with self._lock:
+            if key not in self._in_flight:
+                self._in_flight[key] = _threading.Event()
+
+    def cancel_in_flight(self, prompt: str):
+        """Remove the in-flight marker without caching a value.  Wakes any
+        waiting threads so they can retry independently."""
+        key = self._make_key(prompt)
+        with self._lock:
+            event = self._in_flight.pop(key, None)
+        if event is not None:
+            event.set()
+
+    # --- stats ---
 
     def hit_rate(self) -> float:
-        """Calculate cache hit rate."""
-        total = self._hits + self._misses
-        return self._hits / total if total > 0 else 0.0
+        """Calculate cache hit rate (includes coalesce hits)."""
+        total = self._hits + self._coalesce_hits + self._misses
+        return (self._hits + self._coalesce_hits) / total if total > 0 else 0.0
 
     def stats(self) -> dict:
         """Get cache statistics."""
         return {
             "size": len(self._cache),
             "hits": self._hits,
+            "coalesce_hits": self._coalesce_hits,
             "misses": self._misses,
             "hit_rate": self.hit_rate(),
+            "in_flight": len(self._in_flight),
         }
 
 
 # Global cache instance
 llm_cache = LLMResponseCache(max_size=1000)
+
+
+def _cache_mark_in_flight(cache_input: str):
+    """Safely call mark_in_flight — no-op if cache is a test mock without it."""
+    fn = getattr(llm_cache, "mark_in_flight", None)
+    if fn is not None:
+        fn(cache_input)
+
+
+def _cache_cancel_in_flight(cache_input: str):
+    """Safely call cancel_in_flight — no-op if cache is a test mock without it."""
+    fn = getattr(llm_cache, "cancel_in_flight", None)
+    if fn is not None:
+        fn(cache_input)
 
 
 # -----------------------------
@@ -1008,6 +1109,8 @@ def llm_generate_plan_and_sql(
         log.info("📝 Plan/SQL: (cached)")
         return cached_response
 
+    _cache_mark_in_flight(cache_input)
+
     # Phase 1C: Include domain reasoning as internal step
     system = (
         "You are an analytical PostgreSQL generator for Georgian energy market data. "
@@ -1283,32 +1386,36 @@ SELECT ...
     prompt = _enforce_prompt_budget(prompt, label="plan_and_sql")
     llm_start = time.time()
     try:
-        llm = get_llm_for_stage(PLANNER_MODEL)
-        primary_model_name = PLANNER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
-        message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
-        combined_output = message.content.strip()
-        _log_usage_for_message(message, model_name=primary_model_name)
-        metrics.log_llm_call(time.time() - llm_start)
-    except Exception as e:
-        log.warning(f"Combined generation failed: {e}")
-        # Fallback to OpenAI only when primary was Gemini
-        if MODEL_TYPE != "openai":
-            try:
-                llm = make_openai()
-                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-                combined_output = message.content.strip()
-                _log_usage_for_message(message, model_name=OPENAI_MODEL)
-                metrics.log_llm_call(time.time() - llm_start)
-            except Exception as e_f:
-                log.warning(f"Combined generation failed with fallback: {e_f}")
+        try:
+            llm = get_llm_for_stage(PLANNER_MODEL)
+            primary_model_name = PLANNER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
+            combined_output = message.content.strip()
+            _log_usage_for_message(message, model_name=primary_model_name)
+            metrics.log_llm_call(time.time() - llm_start)
+        except Exception as e:
+            log.warning(f"Combined generation failed: {e}")
+            # Fallback to OpenAI only when primary was Gemini
+            if MODEL_TYPE != "openai":
+                try:
+                    llm = make_openai()
+                    message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+                    combined_output = message.content.strip()
+                    _log_usage_for_message(message, model_name=OPENAI_MODEL)
+                    metrics.log_llm_call(time.time() - llm_start)
+                except Exception as e_f:
+                    log.warning(f"Combined generation failed with fallback: {e_f}")
+                    metrics.log_error()
+                    raise e_f  # Re-raise final exception
+            else:
                 metrics.log_error()
-                raise e_f  # Re-raise final exception
-        else:
-            metrics.log_error()
-            raise
+                raise
 
-    # Phase 1B Optimization: Cache the response
-    llm_cache.set(cache_input, combined_output)
+        # Phase 1B Optimization: Cache the response
+        llm_cache.set(cache_input, combined_output)
+    except Exception:
+        _cache_cancel_in_flight(cache_input)
+        raise
 
     return combined_output
 
@@ -1356,6 +1463,8 @@ def llm_summarize(
     cached_response = llm_cache.get(cache_input)
     if cached_response:
         return cached_response
+
+    _cache_mark_in_flight(cache_input)
 
     system = (
         "Provide a DETAILED analytical answer based on the data preview and statistics. "
@@ -1802,26 +1911,30 @@ SYSTEM_GUIDANCE (authoritative rules):
 
     llm_start = time.time()
     try:
-        llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
-        primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
-        message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
-        out = message.content.strip()
-        _log_usage_for_message(message, model_name=primary_model_name)
-        metrics.log_llm_call(time.time() - llm_start)
-    except Exception as e:
-        log.warning(f"Summarize failed with Gemini, fallback: {e}")
-        if MODEL_TYPE != "openai":
-            llm = make_openai()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+        try:
+            llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
+            primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             out = message.content.strip()
-            _log_usage_for_message(message, model_name=OPENAI_MODEL)
+            _log_usage_for_message(message, model_name=primary_model_name)
             metrics.log_llm_call(time.time() - llm_start)
-        else:
-            metrics.log_error()
-            raise
+        except Exception as e:
+            log.warning(f"Summarize failed with Gemini, fallback: {e}")
+            if MODEL_TYPE != "openai":
+                llm = make_openai()
+                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+                out = message.content.strip()
+                _log_usage_for_message(message, model_name=OPENAI_MODEL)
+                metrics.log_llm_call(time.time() - llm_start)
+            else:
+                metrics.log_error()
+                raise
 
-    # Phase 1 Optimization: Cache the response for future identical requests
-    llm_cache.set(cache_input, out)
+        # Phase 1 Optimization: Cache the response for future identical requests
+        llm_cache.set(cache_input, out)
+    except Exception:
+        _cache_cancel_in_flight(cache_input)
+        raise
 
     return out
 
@@ -3001,6 +3114,8 @@ def llm_analyze_question(
         payload = _sanitize_question_analysis_payload(_extract_json_payload(cached_response))
         return QuestionAnalysis.model_validate(payload)
 
+    _cache_mark_in_flight(cache_input)
+
     system = (
         "You are a question analyzer for a Georgian energy market assistant. "
         "INSTRUCTION HIERARCHY: (1) follow this system message, (2) follow the JSON schema exactly, "
@@ -3062,13 +3177,17 @@ def llm_analyze_question(
             metrics.log_error()
             raise
 
-    payload = _sanitize_question_analysis_payload(_extract_json_payload(raw_output))
     try:
-        result = QuestionAnalysis.model_validate(payload)
-    except ValidationError as exc:
-        raise ValueError(f"Question-analysis schema validation failed: {exc}") from exc
+        payload = _sanitize_question_analysis_payload(_extract_json_payload(raw_output))
+        try:
+            result = QuestionAnalysis.model_validate(payload)
+        except ValidationError as exc:
+            raise ValueError(f"Question-analysis schema validation failed: {exc}") from exc
 
-    llm_cache.set(cache_input, result.model_dump_json())
+        llm_cache.set(cache_input, result.model_dump_json())
+    except Exception:
+        _cache_cancel_in_flight(cache_input)
+        raise
     return result
 
 
@@ -3129,6 +3248,8 @@ def llm_summarize_structured(
     if cached_response:
         payload = _extract_json_payload(cached_response)
         return SummaryEnvelope.model_validate(payload)
+
+    _cache_mark_in_flight(cache_input)
 
     grounding_rule = (
         "STRICT GROUNDING: Every numeric value in answer/claims must appear verbatim in DATA_PREVIEW or STATISTICS. "
@@ -3433,13 +3554,17 @@ Citation format rules:
             metrics.log_error()
             raise last_exc
 
-    payload = _extract_json_payload(raw_output)
     try:
-        envelope = SummaryEnvelope.model_validate(payload)
-    except ValidationError as exc:
-        raise ValueError(f"Structured summary schema validation failed: {exc}") from exc
+        payload = _extract_json_payload(raw_output)
+        try:
+            envelope = SummaryEnvelope.model_validate(payload)
+        except ValidationError as exc:
+            raise ValueError(f"Structured summary schema validation failed: {exc}") from exc
 
-    llm_cache.set(cache_input, envelope.model_dump_json())
+        llm_cache.set(cache_input, envelope.model_dump_json())
+    except Exception:
+        _cache_cancel_in_flight(cache_input)
+        raise
     return envelope
 
 
