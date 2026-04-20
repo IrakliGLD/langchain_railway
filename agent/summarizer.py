@@ -1100,25 +1100,23 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
 
     if vector_evidence_active:
         conceptual_hint = (
-            "NOTE: This question is answered from OFFICIAL REGULATORY SOURCE PASSAGES. "
-            "No database query was executed. "
-            "EXTERNAL_SOURCE_PASSAGES contain the primary evidence retrieved from official regulations.\n\n"
-            "PRIMARY EVIDENCE RULES (MANDATORY):\n"
-            "- Build the answer PRIMARILY from EXTERNAL_SOURCE_PASSAGES content.\n"
-            "- Use DOMAIN_KNOWLEDGE only as secondary background to clarify terms or provide brief Georgia-specific context.\n"
-            "- If EXTERNAL_SOURCE_PASSAGES do not contain a procedural or regulatory detail, say that directly instead of filling the gap from background knowledge.\n"
-            "- For eligibility, registration, compliance, and process questions, extract the wording and constraints from EXTERNAL_SOURCE_PASSAGES, then use DOMAIN_KNOWLEDGE only to synthesize the answer clearly.\n"
-            "- DO NOT give a generic answer when specific regulatory content is available in EXTERNAL_SOURCE_PASSAGES."
+            "NOTE: This question is answered using both official regulations and curated market insights. "
+            "No database query was executed.\n\n"
+            "SOURCE INTEGRATION RULES:\n"
+            "- EXTERNAL_SOURCE_PASSAGES contain primary evidence from official regulations (best for procedural rules and registration steps).\n"
+            "- DOMAIN_KNOWLEDGE contains curated market context and analytical insights (best for factors, drivers, and practical trends).\n"
+            "- Synthesize the final answer by integrating both sources. If they cover different aspects (e.g., regulatory mechanics vs. real-world factors), explain both clearly.\n"
+            "- Use DOMAIN_KNOWLEDGE as a peer source to provide a complete analytical picture alongside the regulatory requirements."
         )
         log.info(
-            "Active vector evidence present for conceptual answer; preserving topic-filtered domain knowledge as secondary background"
+            "Active vector evidence present for conceptual answer; synthesizing peer domain knowledge"
         )
 
     vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active and PIPELINE_MODE != "fast" else ""
     domain_knowledge_for_summary = domain_knowledge
-    if vector_evidence_active and len(domain_knowledge_for_summary) > 4000:
-        domain_knowledge_for_summary = domain_knowledge_for_summary[:4000]
-        log.info("Capped domain_knowledge to 4000 chars (vector evidence is primary)")
+    if vector_evidence_active and len(domain_knowledge_for_summary) > 12000:
+        domain_knowledge_for_summary = domain_knowledge_for_summary[:12000]
+        log.info("Capped domain_knowledge to 12000 chars (synthesizing with vector evidence)")
     try:
         envelope = llm_summarize_structured(
             ctx.effective_query,
