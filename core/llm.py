@@ -385,10 +385,10 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
             convert_system_message_to_human=True,
-            max_retries=0,  # Disable library-level retries for faster app-level fallback
+            max_retries=2,  # Limit retries to prevent quota exhaustion
             timeout=120     # Allow up to 120s for large prompts (default is 60s)
         )
-        log.info("✅ Gemini LLM instance cached (max_retries=0, timeout=120s)")
+        log.info("✅ Gemini LLM instance cached (max_retries=2, timeout=120s)")
     return _gemini_llm
 
 
@@ -467,10 +467,10 @@ def get_llm_for_stage(
                 google_api_key=GOOGLE_API_KEY,
                 temperature=0,
                 convert_system_message_to_human=True,
-                max_retries=0,
+                max_retries=2,
                 timeout=120,
             )
-            log.info("Stage-specific LLM cached: model=%s (max_retries=0)", stage_model)
+            log.info("Stage-specific LLM cached: model=%s", stage_model)
         return _stage_model_cache[stage_model]
 
     # Dedicated instance with overrides (thinking_budget and/or max_retries).
@@ -491,7 +491,7 @@ def get_llm_for_stage(
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
             convert_system_message_to_human=True,
-            max_retries=max_retries if max_retries is not None else 0,
+            max_retries=max_retries if max_retries is not None else 2,
             timeout=120,
         )
         if thinking_budget is not None:
@@ -501,7 +501,7 @@ def get_llm_for_stage(
             "Stage-specific LLM cached: model=%s thinking_budget=%s max_retries=%s",
             effective_model,
             thinking_budget,
-            kwargs.get("max_retries"),
+            max_retries,
         )
     return _stage_model_cache[cache_key]
 
