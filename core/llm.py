@@ -3164,7 +3164,7 @@ def llm_analyze_question(
                 router_thinking_budget = 512
             else:
                 router_thinking_budget = min(router_thinking_budget, 512)
-        llm = get_llm_for_stage(ROUTER_MODEL, thinking_budget=router_thinking_budget)
+        llm = get_llm_for_stage(ROUTER_MODEL, thinking_budget=router_thinking_budget, max_retries=2)
         primary_model_name = ROUTER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
         message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
         raw_output = message.content.strip()

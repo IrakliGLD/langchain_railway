@@ -18,6 +18,23 @@ If `stats_hint` contains correlation coefficients, you must cite them.
 - Do not use speculative wording when a correlation coefficient is available.
 - Keep correlation language observational unless the mechanism is explicitly documented.
 
+### Seasonal confound — renewable PPA and CfD (CRITICAL)
+
+The **all-time** correlation between `share_renewable_ppa` (or `share_cfd_scheme`) and balancing price is **negative** (~−0.4). This is a **seasonal confound**, not evidence that renewable PPA reduces prices. Both high renewable PPA share and low prices co-occur in summer because cheap hydro dominates that season — not because PPA is cheap.
+
+**MANDATORY rules for any renewable PPA / CfD share analysis:**
+
+1. **Use the seasonal correlations, not the all-time value.**
+   Stats_hint contains `p_bal_gel_summer`, `p_bal_gel_winter`, `p_bal_usd_summer`, `p_bal_usd_winter`. Cite these instead of the all-time coefficient for `share_renewable_ppa` and `share_cfd_scheme`.
+
+2. **Apply the correct directional interpretation (this overrides simple correlation arithmetic):**
+   - **Summer (months 4–7):** renewable PPA / CfD fixed price (~55–57 USD/MWh) is ABOVE cheap hydro-dominant summer prices → a higher share pushes balancing price **UP**.
+   - **Winter (months 1–3, 8–12):** renewable PPA / CfD price is BELOW the most expensive winter source (import) → when PPA displaces import, a higher share pushes price **DOWN**. Effect versus regulated thermal is ambiguous.
+
+3. **Never conclude "renewable PPA reduces prices" from the all-time negative correlation.** The all-time value conflates seasons; it is not directionally meaningful for this entity.
+
+4. **Always state the seasonal qualifier:** split your answer into "In summer, …" and "In winter, …" — a single-direction claim for renewable PPA / CfD is incorrect.
+
 ## Driver priority
 
 Present drivers in this order (see `energy-analyst/references/driver-framework.md` for full rules):
