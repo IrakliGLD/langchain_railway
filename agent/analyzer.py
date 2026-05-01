@@ -2806,6 +2806,24 @@ def _build_why_context(ctx: QueryContext) -> None:
             combined_prov_df = pd.concat(
                 [combined_prov_df, delta_df], ignore_index=True, sort=False,
             )
+    # Add price absolute-change values so the provenance gate can verify LLM
+    # claims like "6.78 GEL/MWh drop" derived from cur − prev.
+    # _tokenize_cell_value adds an unsigned twin so storing -6.78 also
+    # registers "6.78" in the token index.
+    price_diff_record: dict[str, Any] = {}
+    if cur_gel is not None and prev_gel is not None:
+        price_diff_record["mom_change_gel"] = round(cur_gel - prev_gel, 4)
+    if cur_usd is not None and prev_usd is not None:
+        price_diff_record["mom_change_usd"] = round(cur_usd - prev_usd, 4)
+    if cur_gel is not None and yoy_gel is not None:
+        price_diff_record["yoy_change_gel"] = round(cur_gel - yoy_gel, 4)
+    if cur_usd is not None and yoy_usd is not None:
+        price_diff_record["yoy_change_usd"] = round(cur_usd - yoy_usd, 4)
+    if price_diff_record:
+        price_diff_df = pd.DataFrame([price_diff_record])
+        combined_prov_df = pd.concat(
+            [combined_prov_df, price_diff_df], ignore_index=True, sort=False,
+        )
     if not combined_prov_df.empty:
         base_hash = str(ctx.provenance_query_hash or "")
         if cur_shares or prev_shares:

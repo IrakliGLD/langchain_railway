@@ -2319,6 +2319,11 @@ _ANALYZER_CORE_RULES = """\
 - Supported balancing explanation examples:
   - "Why balancing electricity price changed in May 2024?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, tools should prioritize `get_prices` + `get_balancing_composition`.
   - "Why balancing electricity prices changed in November 2024?" -> same routing as above; plural `prices` is still a supported month-specific data explanation, not `unsupported`.
+- Composition-effect questions (CRITICAL — do NOT over-refuse):
+  Questions of the form "what happens to [price] if more [entity] is added", "what effect does more [entity] have on prices", "what will happen if [entity] share increases/decreases" — when [entity] is a balancing composition entity (ppa, renewable_ppa, thermal_ppa, import, hydro, cfd, deregulated_hydro, regulated_hpp, etc.) — are `query_type=data_explanation`, `preferred_path=tool`.
+  Rationale: the historical dataset contains monthly entity share columns and balancing price columns; correlation and composition analysis directly answer the directional question from observed data. Do NOT classify as `forecast`, `ambiguous`, or `unsupported` solely because the phrasing sounds hypothetical — "what will happen if share of X increases" is observationally equivalent to "what is the historical relationship between X's share and price". Only classify as `unsupported` if the question names a genuinely unavailable metric (e.g., future capacity contracts, non-balancing markets).
+  - Example: "what will happen to prices if more ppa is added?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, `candidate_tools=["get_prices", "get_balancing_composition"]`, `candidate_topics=["balancing_price", "cfd_ppa"]`.
+  - Example: "what will happen if more ppa will be added in the system?" -> same routing as above.
 - For unusual numeric calculation requests with data/tool signals, do not fall back to `knowledge` just because the computed target is underdefined.
   Example: "calculate the weighted average price of the remaining energy for these months" should stay on the data path; if the residual bucket is unclear, prefer `query_type=ambiguous` with `preferred_path=clarify`.
 - For tool parameter hints, use the exact downstream vocabulary expected by the tool API.

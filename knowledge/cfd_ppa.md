@@ -171,11 +171,12 @@ Contracts for Difference are introduced for new renewable power plant projects u
 
 ## 5. Renewable Integration
 
-- Renewable PPAs are fixed-price and USD-indexed
-- This reduces residual balancing liquidity
-- Increasing renewable share:
-  - reduces hydro flexibility
-  - increases balancing volatility
+- Renewable PPAs are fixed-price and USD-indexed (approximate benchmark: 55–57 USD/MWh)
+- Their impact on balancing price is **season-dependent**:
+  - **Summer:** fixed price is ABOVE the hydro-dominant summer price level → increasing renewable PPA share pushes balancing price UP
+  - **Winter:** fixed price is BELOW the most expensive winter source (import); when PPA displaces import, its higher share pushes balancing price DOWN. Effect versus regulated thermals is ambiguous and gas-price-dependent.
+- **RULE:** Never assess the impact of adding more renewable PPA with a single directional claim. Always specify summer vs winter separately.
+- Additionally, increasing renewable share reduces free hydro flexibility in the balancing segment and creates a composition lock-in around a fixed USD price floor.
 
 ---
 

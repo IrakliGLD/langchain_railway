@@ -117,11 +117,16 @@ Price changes are driven by deviations from this baseline:
 - Adding more expensive sources → increases average price  
 
 - Higher share of cheap sources (`regulated_hpp`, `deregulated_hydro`) → lower price  
-- Higher share of expensive sources (`import`, `regulated_old_tpp`, `thermal_ppa`, `renewable_ppa`, `CfD_scheme`) → higher price  
+- Higher share of always-expensive sources (`import`, `regulated_old_tpp`, `thermal_ppa`) → higher price  
+- **`renewable_ppa` and `CfD_scheme` — SEASON-DEPENDENT direction (CRITICAL):**
+  - Their price is approximately 55–57 USD/MWh (fixed, USD-indexed contract)
+  - **Summer:** this is ABOVE the typical hydro-dominant summer price level → higher share pushes balancing price UP
+  - **Winter:** this is BELOW the most expensive winter source (import, position #7 in the price hierarchy); when PPA/CfD displaces import, their higher share pushes balancing price DOWN. The effect versus regulated thermals is ambiguous and gas-price-dependent.
+  - **RULE:** Never state a general directional claim for renewable PPA/CfD without specifying the season. A general "impact on prices" question MUST be answered separately for summer and winter.
 
 **Seasonal Effect:**
-- Summer → high hydro and renewable → lower price
-- Winter → balancing mix dominated by PPA/CfD (baseline), regulated thermal, and imports → higher price
+- Summer → free hydro (`regulated_hpp`, `deregulated_hydro`) abundant → lower price; BUT `renewable_ppa`/`CfD_scheme` push price UP relative to free-hydro baseline
+- Winter → balancing mix dominated by PPA/CfD (baseline), regulated thermal, and imports → higher price; `renewable_ppa`/`CfD_scheme` are relatively cheaper than import/old thermals → they moderate (lower) winter price
   - Higher-cost sources have limited ability to displace this mix because buyers prefer the cheapest available balancing supply
 
 **Balancing vs Total Generation (CRITICAL DISTINCTION):**
@@ -280,8 +285,11 @@ Do not disclose specific PPA/import prices.
 ---
 
 ### For Seasonal Analysis
-- Summer → hydro/renewable → lower price  
+- Summer → free hydro (`regulated_hpp`, `deregulated_hydro`) → lower price  
+- Summer → `renewable_ppa` / `CfD_scheme` → HIGHER price (fixed ~55–57 USD/MWh exceeds cheap summer hydro levels)
 - Winter → thermal/import → higher price  
+- Winter → `renewable_ppa` / `CfD_scheme` → LOWER price when displacing import; ambiguous when displacing regulated thermal (depends on gas prices)
+- NEVER state a single directional claim for renewable PPA/CfD without seasonal qualification
 - Use MoM and YoY comparisons  
 
 ---
