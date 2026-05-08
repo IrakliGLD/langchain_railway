@@ -127,6 +127,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("Enai")
 
+
+class _DropUvicornAccess404(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return int(record.args[4]) != 404  # type: ignore[index]
+        except (TypeError, ValueError, IndexError):
+            return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_DropUvicornAccess404())
+
 # Load knowledge files from knowledge/ directory at startup
 knowledge_module.load_knowledge()
 
@@ -368,18 +379,17 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         request_id = str(uuid.uuid4())
         request_id_var.set(request_id)
 
-        # Log request start
-        log.info(f"[{request_id}] {request.method} {request.url.path}")
-
         try:
             response = await call_next(request)
-            # Add request ID to response headers
-            response.headers["X-Request-ID"] = request_id
-            log.info(f"[{request_id}] Response: {response.status_code}")
-            return response
         except Exception as e:
-            log.error(f"[{request_id}] Error: {e}")
+            log.error(f"[{request_id}] {request.method} {request.url.path} error: {e}")
             raise
+
+        response.headers["X-Request-ID"] = request_id
+        matched = request.scope.get("route") is not None
+        level = logging.INFO if matched else logging.DEBUG
+        log.log(level, f"[{request_id}] {request.method} {request.url.path} → {response.status_code}")
+        return response
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
