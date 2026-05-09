@@ -276,7 +276,7 @@ Older parallel path that runs free-form SQL when no typed tool matches. Pending 
 
 ### 4.11 Stage 4: Generic Renderer + LLM Summariser
 
-`agent/summarizer.py::summarize_data` first calls `_try_generic_renderer` (`agent/generic_renderer.py`). The renderer handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from canonical evidence frames. `share_summary_override` remains as a deterministic pass-through for share answers. When the renderer returns None or `render_style=NARRATIVE`, control passes to `llm_summarize_structured` with a focus-aware prompt assembled from `skills/answer-composer/`.
+`agent/summarizer.py::summarize_data` first calls `_try_generic_renderer` (`agent/generic_renderer.py`). The renderer handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from canonical evidence frames. `share_summary_override` is a deterministic specialized formatter for share-intent queries (alongside SCENARIO and FORECAST in the §3.4 Ideal Tree's "specialized formatters" category — see §6.3). When neither produces output and `render_style=NARRATIVE`, control passes to `llm_summarize_structured` with a focus-aware prompt assembled from `skills/answer-composer/`.
 
 The five regex eligibility detectors that previously gated SCENARIO / FORECAST / TARIFF-LIST / RESIDUAL-WEIGHTED-PRICE / FORECAST-DIRECT have been removed. New question families that produce one of the six handled shapes need zero Stage 4 code.
 
@@ -318,7 +318,7 @@ Inline validation of evidence frames against `answer_kind`.
 
 ### `agent/summarizer.py`
 
-Stage 4 entry point. Tries the generic renderer first; otherwise calls `llm_summarize_structured` with focus-aware prompts. `share_summary_override` is a deterministic pass-through. Conceptual answers go to `answer_conceptual`.
+Stage 4 entry point. Tries the generic renderer first; otherwise calls `llm_summarize_structured` with focus-aware prompts. `share_summary_override` is a deliberate specialized formatter for share-intent queries (see §6.3). Conceptual answers go to `answer_conceptual`.
 
 ### `agent/chart_pipeline.py`, `agent/chart_frame_builder.py`, `agent/derived_chart_builder.py`
 
@@ -369,9 +369,13 @@ The 2026-05-09 fix series is illustrative: a regulatory-eligibility question was
 
 This area will keep producing per-question reports. The diagnostic playbook is in `skills/pipeline-failure-diagnostics/`; the fix layering principle is "prompt vs cross-check vs runtime skill — pick one layer based on where the contract was actually wrong, not where the symptom appeared."
 
-### 6.3 `share_summary_override` Pass-Through
+### 6.3 `share_summary_override` Is A Specialized Formatter, Not Legacy Debt
 
-The deterministic share-summary path remains as a pass-through in `summarize_data` rather than being absorbed into the generic renderer's LIST/SCALAR path. Behavioural impact is small; structural impact is one extra branch in Stage 4. Folding it in finishes the original Phase B of the prior plan.
+Earlier versions of this document listed `share_summary_override` as legacy debt to be absorbed into the generic renderer. A 2026-05-10 audit (Phase F.1) determined this was a misclassification: `share_summary_override` is a deliberate **specialized formatter** for share-intent queries, in the same category as the SCENARIO and FORECAST specialized formatters that the §3.4 Ideal Decision Tree explicitly preserves alongside the generic renderer.
+
+The artifact decomposes `share_all_ppa` into its renewable/thermal components and joins per-period prices — domain-specific knowledge that the generic renderer intentionally does not have. The decision to build it is gated on the structured analyzer signal `ctx.analyzer_indicates_share_intent`, not on regex. See the inline comment at [agent/analyzer.py:2020-2030](D:\Enaiapp\langchain_railway\agent\analyzer.py#L2020) for the design rationale.
+
+No action required. This is not a Phase F item.
 
 ### 6.4 Filter Field — Implemented But Worth Auditing
 
@@ -436,7 +440,6 @@ One phase, plus ongoing quality work. Phases A–E from the prior plan are compl
 | 3 | Remove the post-hoc provenance gate. Provenance is already bound at frame construction. | `agent/pipeline.py`, `agent/summarizer.py` |
 | 4 | Fold Stages 1 / 2 (legacy SQL) into the tool execution failure path: attempt SQL only when typed tools fail inside the execution loop. | `agent/pipeline.py` |
 | 5 | Merge Stages 0.5 / 0.6 / 0.7 / 0.8 into a single execution loop iterating over evidence plan steps with inline frame construction and validation. | `agent/pipeline.py`, `agent/evidence_planner.py` |
-| 6 | Absorb `share_summary_override` into the generic renderer LIST/SCALAR path (closes the last open item from prior Phase B). | `agent/summarizer.py`, `agent/generic_renderer.py` |
 
 **What to expect after:**
 
