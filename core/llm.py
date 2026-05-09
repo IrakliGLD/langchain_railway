@@ -2298,11 +2298,19 @@ def _sanitize_chart_hints(payload: dict) -> dict:
 # Core rules always present regardless of question type.
 _ANALYZER_CORE_RULES = """\
 - `answer_kind` must be set: choose the answer shape the user expects from ANSWER_KIND_GUIDE.
+  - VOCABULARY: `answer_kind` and `query_type` are DIFFERENT fields with DIFFERENT enums. Do not reuse a `query_type` value (e.g. `data_explanation`, `data_retrieval`, `factual_lookup`, `regulatory_procedure`, `conceptual_definition`) for `answer_kind`.
+  - Allowed `answer_kind` values are exactly: `scalar`, `list`, `timeseries`, `comparison`, `explanation`, `forecast`, `scenario`, `knowledge`, `clarify`. Any other value will fail validation.
   - `scalar`: single value/fact. `list`: entity enumeration. `timeseries`: period-indexed data.
   - `comparison`: side-by-side periods/entities. `explanation`: why/how causal reasoning.
   - `forecast`: explicit forward-looking projection or trendline extension beyond observed data.
     Historical trend summaries stay `timeseries`, not `forecast`.
   - `scenario`: what-if/CfD. `knowledge`: conceptual/regulatory. `clarify`: ambiguous.
+  - Mapping from `query_type` to typical `answer_kind` (use as defaults, override only with reason):
+    `data_explanation` → `explanation`; `data_retrieval` → `timeseries` or `list` depending on shape;
+    `factual_lookup` → `scalar`; `comparison` (query_type) → `comparison` (answer_kind);
+    `forecast` (query_type) → `forecast` (answer_kind); `conceptual_definition` → `knowledge`;
+    `regulatory_procedure` → `list` when the source enumerates items (eligible parties, requirements,
+    documents, obligations, steps), else `knowledge`; `ambiguous`/`unsupported` → `clarify`.
   - When in doubt between `scalar` and `timeseries`, prefer `timeseries` (safer shape).
   - When in doubt between `list` and `timeseries`, check if the user wants entities enumerated or data over time.
 - `render_style` must be set: `deterministic` for data lookups/tables, `narrative` for explanations/causal reasoning.
