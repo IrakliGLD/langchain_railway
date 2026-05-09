@@ -2334,6 +2334,16 @@ _ANALYZER_CORE_RULES = """\
   - Example: "what will happen if more ppa will be added in the system?" -> same routing as above.
 - For unusual numeric calculation requests with data/tool signals, do not fall back to `knowledge` just because the computed target is underdefined.
   Example: "calculate the weighted average price of the remaining energy for these months" should stay on the data path; if the residual bucket is unclear, prefer `query_type=ambiguous` with `preferred_path=clarify`.
+- Eligibility / participation / requirements questions (legal-list pattern):
+  Questions of the form "who can / who may / who is eligible to [participate|trade|register|supply]", "what are the requirements to [register|participate]", "what documents are required", "what conditions must be met" — when the answer comes from a legal/regulatory text — are `query_type=regulatory_procedure`, `preferred_path=knowledge`, `answer_kind=list`. The expected answer is an enumeration of the categories from the source, not a paraphrased narrative.
+  - Example: "who can trade on the exchange during the transitory market model?" -> `query_type=regulatory_procedure`, `preferred_path=knowledge`, `answer_kind=list`, `candidate_topics=["eligible_participants", "exchange_participation"]`.
+  - Example: "what documents are required to register as a wholesale market participant?" -> same routing.
+  - Example: "what conditions must a generator meet to participate in the day-ahead market?" -> same routing.
+- Generation/supply trend + structure questions (data, not legal):
+  Questions of the form "trend and structure of [power supply|generation|generation mix|electricity supply]", "evolution and composition of [supply|generation]", "show how [supply|generation mix] changed over time" are `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `candidate_tools=["get_balancing_composition"]`, `candidate_topics=["generation_mix", "market_structure"]`. The user wants the actual time-series data with composition, not a regulatory definition. Do NOT classify as `conceptual_definition` solely because the phrasing is general.
+  - Example: "what is the trend and structure of power supply?" -> `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `candidate_tools=["get_balancing_composition"]`.
+  - Example: "show generation mix evolution over time" -> same routing.
+  - Example: "how has the structure of electricity supply changed?" -> same routing.
 - For tool parameter hints, use the exact downstream vocabulary expected by the tool API.
 - For `get_prices`, valid `params_hint.metric` values are only:
   - `balancing`
