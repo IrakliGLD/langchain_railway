@@ -233,6 +233,15 @@ _AMBIGUOUS_QUERY_TYPES_FOR_ANSWER_KIND = frozenset({"data_retrieval"})
 # answer_kind values considered "safe" — can display any shape without data loss.
 _SAFE_ANSWER_KINDS = frozenset({AnswerKind.TIMESERIES, AnswerKind.EXPLANATION, AnswerKind.KNOWLEDGE})
 
+# Query types where the source is typically a legal/regulatory text and an
+# answer_kind=LIST should be trusted over the deterministic KNOWLEDGE fallback.
+# Narrative summarisation of an enumerated legal source (eligible parties,
+# requirements, documents) tends to drop or merge items; LIST forces complete
+# enumeration. Gated on high confidence to avoid clobbering low-quality LLM
+# guesses.
+_LEGAL_LIST_QUERY_TYPES = frozenset({"regulatory_procedure", "conceptual_definition"})
+_LEGAL_LIST_MIN_CONFIDENCE = 0.85
+
 
 def _derive_answer_kind_from_query_type(ctx) -> AnswerKind | None:
     """Deterministic answer_kind derivation from query_type (fallback + cross-check)."""
@@ -406,6 +415,27 @@ def _cross_check_answer_kind(ctx) -> None:
         return
 
     if llm_kind == derived_kind:
+        return
+
+    # Legal-list exception: when the LLM emits LIST with high confidence for a
+    # regulatory or conceptual question, the source is almost always a legal
+    # text that enumerates items (eligible parties, requirements, documents).
+    # Forcing such answers into KNOWLEDGE narrative loses items to paraphrase.
+    # See skills/pipeline-failure-diagnostics/references/failure-taxonomy.md
+    # Pattern B for the post-mortem.
+    if (
+        llm_kind == AnswerKind.LIST
+        and qa.classification.query_type.value in _LEGAL_LIST_QUERY_TYPES
+        and qa.classification.confidence >= _LEGAL_LIST_MIN_CONFIDENCE
+    ):
+        log.info(
+            "answer_kind cross-check: trusting LLM list shape for legal/conceptual question "
+            "(llm=list derived=%s confidence=%.2f query_type=%s, query=%.80s)",
+            derived_kind.value,
+            qa.classification.confidence,
+            qa.classification.query_type.value,
+            ctx.query,
+        )
         return
 
     # Disagreement detected — prefer the safer option.
