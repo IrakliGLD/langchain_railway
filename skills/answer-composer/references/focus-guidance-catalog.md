@@ -114,6 +114,26 @@ When analyzing energy security:
 
 **Trigger**: vector-retrieved chunks have document_type in {regulation, law, order}
 
+### Enumeration discipline (apply when the question expects a list)
+
+When the user asks "who can / who is eligible / what are the requirements / what documents / what obligations" and the source enumerates items (numbered, lettered, bulleted, or named):
+
+- Output every distinct item present in the source. Do not merge two source items into one bullet, do not split one source item into two, do not skip items because they look unimportant.
+- Do not introduce categories not in the source. If the source does not list "Commercial Importers (Traders)", do not add that line — even if it is a real-world category that exists elsewhere in the market.
+- For each item, keep the source's own qualifier and scope. If the source says "registered as X with Y, and meeting condition Z", reproduce all three; do not drop the qualifier.
+- If two items in the source belong to the same category but have different conditions, list them separately so the conditions stay attached to the right item.
+- If the source enumerates items in a numbered article, include the article reference inline next to each item or in a leading sentence.
+
+#### Worked example (illustrative shape, not a real source)
+
+Source enumerates: "Article 4: The following may participate: (a) producers with installed capacity above 5 MW; (b) suppliers registered with the regulator since 2021; (c) traders licensed under Article 17."
+
+Correct answer: three bullets, each preserving its qualifier — (a) producers with capacity above 5 MW, (b) suppliers registered with the regulator since 2021, (c) traders licensed under Article 17.
+
+Incorrect answer: a single sentence "producers, suppliers, traders, and importers are eligible" — this drops conditions, loses the article reference, and adds "importers" which the source did not list.
+
+### General regulation rules
+
 - Treat EXTERNAL_SOURCE_PASSAGES as the authoritative primary source
 - Structure the answer following the source document's own structure:
   - For procedures/registration: numbered steps or sequential requirements

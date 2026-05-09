@@ -76,6 +76,8 @@ NO LENGTH RESTRICTION for analytical queries — provide comprehensive insights.
 - Georgia-specific context (2-3 sentences)
 - Use domain knowledge; if topic is not covered, acknowledge the limitation and suggest external sources
 
+**Eligibility/list branch**: if the question is actually about *who can*, *who is eligible*, *who may participate*, *what are the requirements/documents/obligations* — even though it was classified as a definition — switch to enumeration mode regardless of the "definition" label. Apply the same enumeration discipline as the `regulatory_procedure` template: list every distinct item from the source, do not merge or paraphrase, do not introduce categories not in the source. Length cap is lifted (target 200-500 words) when enumerating from a legal source.
+
 ## Template: regulatory_procedure
 
 **When**: User asks about a regulatory process, registration steps, eligibility, required documents, participation conditions, or deadlines
@@ -87,6 +89,8 @@ NO LENGTH RESTRICTION for analytical queries — provide comprehensive insights.
 - For required documents: provide the complete list and mention deadlines or format requirements when the source includes them
 - Cite article or section references when they appear in source passages
 - If source passages are incomplete, say so explicitly instead of filling gaps with assumptions
+
+**Enumeration completeness**: when the source enumerates items (eligible parties, required documents, obligations, conditions), the answer must contain a bullet or numbered line per source item. Do not collapse multiple source items into a single sentence; the user cannot tell two items have been merged. Do not introduce items that are real-world plausible but not in the source — verify each line against the source passages. See the "Enumeration discipline" subsection in `focus-guidance-catalog.md` Focus: Regulation for the worked example.
 
 ## Missing domain knowledge response
 
