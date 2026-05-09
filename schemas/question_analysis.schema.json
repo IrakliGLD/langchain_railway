@@ -589,6 +589,7 @@
       "type": "string"
     },
     "SortRule": {
+      "description": "How chart series / rows should be ordered before rendering.\n\nIntroduced in Phase 11 of the chart pipeline overhaul to replace the\nheuristic ``relevance_score`` path in ``chart_pipeline._limit_series``.\nConsumed by Phase 14 runtime.",
       "enum": [
         "value_desc",
         "value_asc",
@@ -898,14 +899,17 @@
       "additionalProperties": false,
       "properties": {
         "chart_requested_by_user": {
+          "default": false,
           "title": "Chart Requested By User",
           "type": "boolean"
         },
         "chart_recommended": {
+          "default": false,
           "title": "Chart Recommended",
           "type": "boolean"
         },
         "chart_confidence": {
+          "default": 0.0,
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Chart Confidence",
@@ -1022,11 +1026,6 @@
           "type": "array"
         }
       },
-      "required": [
-        "chart_requested_by_user",
-        "chart_recommended",
-        "chart_confidence"
-      ],
       "title": "VisualizationInfo",
       "type": "object"
     },

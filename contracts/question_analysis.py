@@ -388,9 +388,16 @@ class SqlHints(BaseModel):
 class VisualizationInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    chart_requested_by_user: bool
-    chart_recommended: bool
-    chart_confidence: float = Field(ge=0.0, le=1.0)
+    # Defaults so an empty visualization object validates as "no chart wanted".
+    # Without defaults, the analyzer must remember to emit these on every
+    # response — including non-chart questions where they are irrelevant —
+    # and any miss crashes the entire QuestionAnalysis with a Pydantic
+    # validation error, forcing a heuristic fallback that bypasses the
+    # contract-driven path. See skills/pipeline-failure-diagnostics/
+    # references/failure-taxonomy.md Pattern A.
+    chart_requested_by_user: bool = False
+    chart_recommended: bool = False
+    chart_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     preferred_chart_family: Optional[ChartFamily] = None
     primary_presentation: Optional[PresentationMode] = None
     visual_goal: Optional[VisualGoal] = None

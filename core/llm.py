@@ -2317,6 +2317,7 @@ _ANALYZER_CORE_RULES = """\
   - Use the `render_style_hint` from ANSWER_KIND_GUIDE as default, but override when the user explicitly asks for explanation of data.
 - `grouping`: `none` for single-entity/single-metric, `by_entity` for multi-entity, `by_period` for time comparison, `by_metric` for multi-metric.
 - `entity_scope`: set when the question targets a specific subset (e.g., `regulated_plants`, `thermal`, entity names). Null for broad/unscoped queries.
+- `visualization` must always be present and must always include `chart_requested_by_user` (boolean), `chart_recommended` (boolean), and `chart_confidence` (number between 0 and 1). For questions with no visualization signal (e.g. conceptual definitions, regulatory procedures, factual lookups answered as a single value), set `chart_requested_by_user=false`, `chart_recommended=false`, `chart_confidence=0.0` and leave the optional fields (`primary_presentation`, `visual_goal`, etc.) null. Emitting an empty `visualization: {}` will fail validation.
 - `filter` in `params_hint`: set when the question includes a numeric threshold (e.g., "price above 15", "tariff exceeding 10"). Use FILTER_GUIDE for patterns. Null when no threshold is mentioned.
 - `canonical_query_en` must preserve the meaning, not answer the question.
 - `preferred_path` must be one of the allowed enum values.
@@ -2340,10 +2341,10 @@ _ANALYZER_CORE_RULES = """\
   - Example: "what documents are required to register as a wholesale market participant?" -> same routing.
   - Example: "what conditions must a generator meet to participate in the day-ahead market?" -> same routing.
 - Generation/supply trend + structure questions (data, not legal):
-  Questions of the form "trend and structure of [power supply|generation|generation mix|electricity supply]", "evolution and composition of [supply|generation]", "show how [supply|generation mix] changed over time" are `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `candidate_tools=["get_balancing_composition"]`, `candidate_topics=["generation_mix", "market_structure"]`. The user wants the actual time-series data with composition, not a regulatory definition. Do NOT classify as `conceptual_definition` solely because the phrasing is general.
-  - Example: "what is the trend and structure of power supply?" -> `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `candidate_tools=["get_balancing_composition"]`.
-  - Example: "show generation mix evolution over time" -> same routing.
-  - Example: "how has the structure of electricity supply changed?" -> same routing.
+  Questions of the form "trend and structure of [power supply|generation|generation mix|electricity supply]", "evolution and composition of [supply|generation]", "show how [supply|generation mix] changed over time" are `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `render_style=deterministic`, `candidate_tools=["get_balancing_composition"]`, `candidate_topics=["generation_mix", "market_structure"]`. The user wants the actual time-series data with composition, not a regulatory definition. Do NOT classify as `conceptual_definition` solely because the phrasing is general. Keep `render_style=deterministic` so vector retrieval is skipped and the summarizer grounds in the data preview, not in unrelated regulatory passages.
+  - Example: "what is the trend and structure of power supply?" -> `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `render_style=deterministic`, `candidate_tools=["get_balancing_composition"]`.
+  - Example: "show generation mix evolution over time" -> same routing, `render_style=deterministic`.
+  - Example: "how has the structure of electricity supply changed?" -> same routing, `render_style=deterministic`.
 - For tool parameter hints, use the exact downstream vocabulary expected by the tool API.
 - For `get_prices`, valid `params_hint.metric` values are only:
   - `balancing`

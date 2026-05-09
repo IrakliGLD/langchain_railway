@@ -13,7 +13,14 @@ from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from contracts.question_analysis import QuestionAnalysis, PreferredPath, QueryType, ToolName
+from contracts.question_analysis import (
+    AnswerKind,
+    PreferredPath,
+    QueryType,
+    QuestionAnalysis,
+    RenderStyle,
+    ToolName,
+)
 from models import QueryContext
 from core.llm import (
     llm_cache,
