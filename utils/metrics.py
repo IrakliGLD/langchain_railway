@@ -46,6 +46,13 @@ class Metrics:
         self.router_deterministic_match_count = 0
         self.router_semantic_match_count = 0
         self.router_miss_count = 0
+        # Stage 0.7 (analyzer tool route fallback) hit-rate counters.
+        # Used to decide whether the legacy fallback can be removed (Phase F.6
+        # of the architecture refactor). entered / used >> request_count means
+        # the fallback is paying its keep; near-zero means it can be removed.
+        self.stage_0_7_entered_count = 0
+        self.stage_0_7_invocation_built_count = 0
+        self.stage_0_7_used_result_count = 0
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -254,6 +261,25 @@ class Metrics:
             self.deterministic_summary_skips_by_source.get(key, 0) + 1
         )
 
+    def log_stage_0_7(self, event: str) -> None:
+        """Track Stage 0.7 (analyzer tool route fallback) hit rate.
+
+        Three events per Stage 0.7 invocation, in order:
+          - "entered"           : Stage 0.5 missed and Stage 0.7 ran
+          - "invocation_built"  : analyzer or match_tool produced a tool
+          - "used_result"       : the tool ran, relevance passed, result consumed
+
+        used_result / request_count is the "Stage 0.7 is paying its keep" rate.
+        Phase F.6 (removal) is safe when this rate is consistently <5%.
+        """
+        normalized = (event or "").strip().lower()
+        if normalized == "entered":
+            self.stage_0_7_entered_count += 1
+        elif normalized == "invocation_built":
+            self.stage_0_7_invocation_built_count += 1
+        elif normalized == "used_result":
+            self.stage_0_7_used_result_count += 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -339,6 +365,9 @@ class Metrics:
             "router_deterministic_matches": self.router_deterministic_match_count,
             "router_semantic_matches": self.router_semantic_match_count,
             "router_misses": self.router_miss_count,
+            "stage_0_7_entered": self.stage_0_7_entered_count,
+            "stage_0_7_invocation_built": self.stage_0_7_invocation_built_count,
+            "stage_0_7_used_result": self.stage_0_7_used_result_count,
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

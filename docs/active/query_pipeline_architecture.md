@@ -435,7 +435,7 @@ One phase, plus ongoing quality work. Phases A–E from the prior plan are compl
 
 | # | Task | File |
 |---|------|------|
-| 1 | Track Stage 0.7 hit rate for two weeks. If <5% of queries and the evidence planner handles those cases, proceed with removal. If meaningful traffic, investigate why the evidence planner misses those cases first. | `agent/pipeline.py` |
+| 1 | Track Stage 0.7 hit rate for two weeks. If <5% of queries and the evidence planner handles those cases, proceed with removal. If meaningful traffic, investigate why the evidence planner misses those cases first. **Done (Phase F.2, 2026-05-10)**: counters `stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result` exposed in `/metrics`. `used_result / requests` is the "paying its keep" rate; <5% is the cutoff for proceeding with task 2. | `agent/pipeline.py`, `utils/metrics.py` |
 | 2 | Remove Stage 0.7: drop the `match_tool` fallback invocation, the recovery branch, and the associated stage tracing. | `agent/pipeline.py`, `agent/router.py` |
 | 3 | Remove the post-hoc provenance gate. Provenance is already bound at frame construction. | `agent/pipeline.py`, `agent/summarizer.py` |
 | 4 | Fold Stages 1 / 2 (legacy SQL) into the tool execution failure path: attempt SQL only when typed tools fail inside the execution loop. | `agent/pipeline.py` |

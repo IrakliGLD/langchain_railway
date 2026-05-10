@@ -1606,6 +1606,10 @@ def process_query(
             # has no actionable steps remaining (all satisfied or errored).
             # Only use analyzer output when running in active/hints mode —
             # shadow mode must never influence routing decisions.
+            #
+            # Phase F.2 observability: count entries / invocations built /
+            # results actually used so Phase F.6 (removal) can be data-driven.
+            metrics.log_stage_0_7("entered")
             t_stage = time.time()
             analyzer_invocation = None
             analyzer_build_error = ""
@@ -1644,6 +1648,7 @@ def process_query(
             )
 
             if analyzer_invocation:
+                metrics.log_stage_0_7("invocation_built")
                 _trace_stage(
                     "stage_0_7_analyzer_route", t_stage,
                     tool=analyzer_invocation.name,
@@ -1691,6 +1696,7 @@ def process_query(
                         clear_provenance(ctx)
                         log.warning("Analyzer tool relevance blocked. reason=%s", tool_reason)
                     else:
+                        metrics.log_stage_0_7("used_result")
                         log.info(
                             "Analyzer tool route hit: tool=%s confidence=%.2f reason=%s",
                             analyzer_invocation.name,
