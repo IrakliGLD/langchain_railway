@@ -354,12 +354,16 @@ Six structural gaps remain. None block correctness today; they are maintenance /
 
 The runtime still carries pre-contract structural artefacts:
 
-- **Stage 0.7 — analyzer route fallback.** `router.match_tool()` runs after the evidence planner already selected a tool. When `candidate_tools[0]` is sound the call is a no-op; when the planner errored it can paper over the bug. Tracking its hit rate is the prerequisite for removal.
-- **Stages 1 / 2 — legacy SQL.** Free-form SQL planning + execution as separate pipeline stages. Should be folded into the tool-execution failure path so SQL is attempted only when typed tools fail inside the execution loop.
-- **Post-hoc provenance gate.** Provenance is now bound at frame construction. The post-hoc gate at the end of Stage 4 still runs — it is redundant for paths that go through canonical frames but still catches numeric hallucinations on legacy paths.
-- **Four-stage tool execution split (0.5 / 0.6 / 0.7 / 0.8).** The Ideal Decision Tree calls for one execution loop. Today these are separate stages with their own tracing and fallback branches; merging them is the single largest simplification of `agent/pipeline.py`.
+- **Stage 0.7 — analyzer route fallback.** `router.match_tool()` runs after the evidence planner already selected a tool. When `candidate_tools[0]` is sound the call is a no-op; when the planner errored it can paper over the bug. Hit-rate counters are now exposed in `/metrics` (Phase F.2 instrumentation, 2026-05-10); two-week observation gates removal.
+- **Stages 1 / 2 — legacy SQL, behaviourally folded but structurally post-loop.** SQL is already gated on `not ctx.used_tool` at [pipeline.py:1861](D:\Enaiapp\langchain_railway\agent\pipeline.py#L1861) — it only fires when typed tools didn't produce a result. The §3.4 ideal places this branch *inside* the per-step execution loop's failure handler rather than as a post-loop stage. Cosmetic / structural, not behavioural.
+- **Four-stage tool execution split (0.5 / 0.6 / 0.7 / 0.8).** The Ideal Decision Tree calls for one execution loop. Five separate `_trace_stage` calls confirm the split is real. Merging them is the single largest simplification of `agent/pipeline.py` and is the same refactor that absorbs Stages 1/2 into the loop's failure branch.
 
 These items are low-correctness-risk because the contract-driven path produces the same outcome whether the legacy stages exist or not. They are high-clarity-impact because debugging today requires understanding four stages and their interactions instead of one loop.
+
+**Not on this list, despite earlier versions of the doc claiming so:**
+
+- The **post-hoc provenance gate** is *not* a removable artefact. It is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `no_claims` immediately at [summarizer.py:663](D:\Enaiapp\langchain_railway\agent\summarizer.py#L663)). For narrative LLM summaries it is the safety net against numeric hallucination — exactly what fired on the 2026-05-09 verification log when an ungrounded narrative produced `summary_source=structured_summary_grounding_fallback`. Frame-construction provenance binding cannot replace it.
+- The **`share_summary_override` deterministic path** is a specialized formatter (see §6.3), not legacy debt.
 
 ### 6.2 Analyzer Misclassification — Quality, Not Architecture
 
@@ -429,17 +433,20 @@ One phase, plus ongoing quality work. Phases A–E from the prior plan are compl
 
 ### Phase F: Pipeline Consolidation — Remove Legacy Stages
 
-**Problem being solved:** Stage 0.7, Stages 1/2, the post-hoc provenance gate, and the four-stage tool execution split are pre-contract artefacts that add maintenance surface and create occasional edge cases where legacy paths bypass frame construction. The Ideal Decision Tree calls for a single execution loop and folded-in SQL escape hatch.
+**Problem being solved:** Stage 0.7 and the four-stage tool execution split (0.5 / 0.6 / 0.7 / 0.8 / 1 / 2) are pre-contract artefacts that add maintenance surface and create occasional edge cases where legacy paths bypass frame construction. The Ideal Decision Tree calls for a single execution loop with SQL as a within-loop escape hatch.
 
 **What to do:**
 
-| # | Task | File |
-|---|------|------|
-| 1 | Track Stage 0.7 hit rate for two weeks. If <5% of queries and the evidence planner handles those cases, proceed with removal. If meaningful traffic, investigate why the evidence planner misses those cases first. **Done (Phase F.2, 2026-05-10)**: counters `stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result` exposed in `/metrics`. `used_result / requests` is the "paying its keep" rate; <5% is the cutoff for proceeding with task 2. | `agent/pipeline.py`, `utils/metrics.py` |
-| 2 | Remove Stage 0.7: drop the `match_tool` fallback invocation, the recovery branch, and the associated stage tracing. | `agent/pipeline.py`, `agent/router.py` |
-| 3 | Remove the post-hoc provenance gate. Provenance is already bound at frame construction. | `agent/pipeline.py`, `agent/summarizer.py` |
-| 4 | Fold Stages 1 / 2 (legacy SQL) into the tool execution failure path: attempt SQL only when typed tools fail inside the execution loop. | `agent/pipeline.py` |
-| 5 | Merge Stages 0.5 / 0.6 / 0.7 / 0.8 into a single execution loop iterating over evidence plan steps with inline frame construction and validation. | `agent/pipeline.py`, `agent/evidence_planner.py` |
+| # | Task | File | Status |
+|---|------|------|--------|
+| 1 | Track Stage 0.7 hit rate for two weeks. If <5% of queries and the evidence planner handles those cases, proceed with removal. | `agent/pipeline.py`, `utils/metrics.py` | **Done (Phase F.2, 2026-05-10)**: counters `stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result` exposed in `/metrics`. `used_result / requests` is the "paying its keep" rate; <5% is the cutoff. |
+| 2 | Merge Stages 0.5 / 0.6 / 0.7 / 0.8 / 1 / 2 into a single execution loop iterating over evidence plan steps with inline frame construction, validation, and an in-loop SQL escape-hatch branch on tool failure. (Tasks 4+5 of the prior plan are the same refactor — F.4's "fold SQL into failure path" cannot be done before the loop exists.) | `agent/pipeline.py`, `agent/evidence_planner.py` | Open. |
+| 3 | Remove Stage 0.7 once the F.1 hit-rate data confirms `used_result / requests < 5%` over a two-week window. Becomes a small change inside the loop after task 2 lands. | `agent/pipeline.py`, `agent/router.py` | Blocked on task 1 data + task 2. |
+
+**Removed from this list** (audit findings, 2026-05-10):
+
+- *"Absorb `share_summary_override` into the generic renderer LIST/SCALAR path."* The override is a deliberate specialized formatter for share-intent queries (renewable/thermal PPA decomposition + per-period price join), in the same category as SCENARIO and FORECAST per §3.4. Forcing it into the domain-agnostic generic renderer would either pollute the renderer with domain-specific knowledge or lose the decomposition. See §6.3.
+- *"Remove the post-hoc provenance gate."* The gate is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `gate_passed=True, reason="no_claims"` immediately). For narrative LLM summaries the gate is the safety net against numeric hallucination — frame-construction provenance binding cannot replace it. Keep the gate.
 
 **What to expect after:**
 
@@ -493,7 +500,7 @@ Workflow: confirm the analyzer emitted `VisualizationInfo` correctly. If yes, th
 
 The pipeline is now contract-driven end to end. Stage 0.2 emits the answer contract, evidence frames + the generic renderer cover the six standard answer shapes, the evidence planner validates plan shape, vector retrieval is three-tier, and the visualisation plan flows through to Stage 5.
 
-The remaining structural work is Phase F — collapsing legacy parallel stages into the eight-step ideal. None of it changes behaviour; it changes maintenance surface. The remaining quality work is in the analyzer prompt, runtime skills, and cross-check policy — guided by the `pipeline-failure-diagnostics` developer skill.
+The remaining structural work is the Phase F single-loop refactor (collapsing Stages 0.5 / 0.6 / 0.7 / 0.8 / 1 / 2 into one execution loop with an in-loop SQL escape hatch and an in-loop Stage 0.7 fallback branch) plus removing Stage 0.7 once two-week hit-rate data confirms it can go. Earlier versions of this doc also listed the post-hoc provenance gate and `share_summary_override` as removable; both are kept by design (see §6.1, §6.3). The remaining quality work is in the analyzer prompt, runtime skills, and cross-check policy — guided by the `pipeline-failure-diagnostics` developer skill.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 
