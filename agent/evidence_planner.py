@@ -874,78 +874,27 @@ EVIDENCE_LOOP_BUDGET_SECONDS = float(os.getenv("EVIDENCE_LOOP_BUDGET_SECONDS", "
 
 
 def execute_remaining_evidence(ctx: QueryContext, timeout_seconds: Optional[float] = None) -> QueryContext:
-    """Execute unsatisfied evidence plan steps after tool routing.
+    """Stage 0.8 entry: execute unsatisfied evidence plan steps after tool routing.
 
-    Iterates remaining plan steps, executes each tool, stores results in
-    ``ctx.evidence_collected``, then merges secondary datasets into
-    ``ctx.df`` via date-aligned joins.
+    Thin delegate to ``pipeline._run_secondary_evidence_loop``. The body
+    moved to ``pipeline.py`` in Phase F.5.1.a to remove the circular-import
+    workaround that previously forced a lazy import. The delegate stays
+    here so that tests that monkey-patch ``agent.evidence_planner.execute_tool``
+    continue to intercept the tool calls — this function passes its local
+    ``execute_tool`` binding down to the moved loop body via ``executor=``.
 
-    Max iterations: ``min(len(remaining), 3)``.
-    Failed steps are logged and skipped, not retried.
+    External callers (only ``pipeline.process_query`` today, via this name)
+    keep their import path; internal logic lives next to the helper it
+    uses.
     """
-    # Lazy import to avoid circular dependency: pipeline.py imports
-    # evidence_planner at module load, so evidence_planner cannot import
-    # pipeline at module level. The structural collapse in Phase F.5d/e
-    # will rationalise this module layout.
-    from agent.pipeline import _execute_evidence_step
-
-    remaining = [s for s in ctx.evidence_plan if not s.get("satisfied") and not s.get("error")]
-    cap = min(len(remaining), _EVIDENCE_LOOP_MAX_STEPS)
-
-    budget = timeout_seconds or EVIDENCE_LOOP_BUDGET_SECONDS
-    deadline = time.time() + budget
-
-    for step in remaining[:cap]:
-        if time.time() > deadline:
-            step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
-            log.warning(
-                "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
-                budget, step["tool_name"], step.get("role")
-            )
-            continue
-
-        invocation = ToolInvocation(
-            name=step["tool_name"],
-            params=step["params"],
-            confidence=0.85,
-            reason=f"evidence_plan:{step['role']}",
-        )
-        try:
-            _execute_evidence_step(
-                ctx,
-                invocation,
-                plan_step=step,
-                is_primary=False,
-                is_explanation=False,
-                stage_label="stage_0_8",
-                validate_relevance=False,
-                emit_tool_call_metric=False,
-                emit_tool_execute_trace=False,
-                # Pass evidence_planner's local `execute_tool` binding so
-                # tests that monkeypatch `agent.evidence_planner.execute_tool`
-                # continue to take effect after F.5c rewired the loop body
-                # through the pipeline-level helper.
-                executor=execute_tool,
-            )
-            # Preserve the operator-facing "Evidence loop: fetched ..." log
-            # that downstream dashboards may grep for. Row count read from the
-            # stored evidence frame.
-            stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
-            log.info(
-                "Evidence loop: fetched %s via %s (%d rows)",
-                step["role"], invocation.name, stored_rows,
-            )
-        except Exception as exc:
-            step["error"] = str(exc)
-            log.warning(
-                "Evidence loop: step failed. role=%s tool=%s err=%s",
-                step["role"], step["tool_name"], exc,
-            )
-
-    # Merge secondary evidence into the primary DataFrame once all available steps have run.
-    ctx = merge_evidence_into_context(ctx)
-    ctx.evidence_plan_complete = all(s.get("satisfied") for s in ctx.evidence_plan)
-    return ctx
+    # Lazy import here to avoid module-load-time circular import; safe at
+    # call time because pipeline.py has finished initialising by then.
+    from agent.pipeline import _run_secondary_evidence_loop
+    return _run_secondary_evidence_loop(
+        ctx,
+        executor=execute_tool,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:

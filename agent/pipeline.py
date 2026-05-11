@@ -1433,6 +1433,84 @@ def _execute_evidence_step(
     return True
 
 
+def _run_secondary_evidence_loop(
+    ctx: QueryContext,
+    *,
+    executor: callable,
+    timeout_seconds: float | None = None,
+) -> QueryContext:
+    """Run Stage 0.8 secondary evidence loop.
+
+    Iterates remaining unsatisfied plan steps (capped at
+    ``_EVIDENCE_LOOP_MAX_STEPS`` and ``EVIDENCE_LOOP_BUDGET_SECONDS``),
+    executes each via the shared ``_execute_evidence_step`` helper with
+    secondary semantics (``is_primary=False``; no relevance validation;
+    no per-step tool-call metric or trace; result merged into
+    ``ctx.evidence_collected`` only), and finally joins secondary frames
+    into ``ctx.df`` via ``merge_evidence_into_context``.
+
+    Phase F.5.1.a moved this body out of ``evidence_planner`` into
+    pipeline.py to remove the circular-import workaround that previously
+    forced a lazy ``from agent.pipeline import _execute_evidence_step``
+    inside the loop. ``evidence_planner.execute_remaining_evidence`` is
+    preserved as a thin delegate that calls this function and passes its
+    local ``execute_tool`` binding, so tests that monkey-patch
+    ``agent.evidence_planner.execute_tool`` continue to work.
+    """
+    remaining = [
+        s for s in ctx.evidence_plan
+        if not s.get("satisfied") and not s.get("error")
+    ]
+    cap = min(len(remaining), evidence_planner._EVIDENCE_LOOP_MAX_STEPS)
+
+    budget = timeout_seconds or evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS
+    deadline = time.time() + budget
+
+    for step in remaining[:cap]:
+        if time.time() > deadline:
+            step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
+            log.warning(
+                "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
+                budget, step["tool_name"], step.get("role"),
+            )
+            continue
+
+        invocation = ToolInvocation(
+            name=step["tool_name"],
+            params=step["params"],
+            confidence=0.85,
+            reason=f"evidence_plan:{step['role']}",
+        )
+        try:
+            _execute_evidence_step(
+                ctx,
+                invocation,
+                plan_step=step,
+                is_primary=False,
+                is_explanation=False,
+                stage_label="stage_0_8",
+                validate_relevance=False,
+                emit_tool_call_metric=False,
+                emit_tool_execute_trace=False,
+                executor=executor,
+            )
+            stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
+            log.info(
+                "Evidence loop: fetched %s via %s (%d rows)",
+                step["role"], invocation.name, stored_rows,
+            )
+        except Exception as exc:
+            step["error"] = str(exc)
+            log.warning(
+                "Evidence loop: step failed. role=%s tool=%s err=%s",
+                step["role"], step["tool_name"], exc,
+            )
+
+    ctx = evidence_planner.merge_evidence_into_context(ctx)
+    ctx.evidence_plan_complete = all(s.get("satisfied") for s in ctx.evidence_plan)
+    return ctx
+
+
 def process_query(
     query: str,
     conversation_history=None,
