@@ -348,17 +348,20 @@ Runtime skills loaded into LLM prompts: `question-analyzer`, `sql-planner`, `ans
 
 ## 6. Remaining Architectural Gaps
 
-Six structural gaps remain. None block correctness today; they are maintenance / clarity / latency improvements and an open quality area.
+A handful of structural gaps remain. None block correctness today; they are maintenance / clarity / latency improvements and an open quality area.
 
 ### 6.1 Pipeline Consolidation (Phase F)
 
-The runtime still carries pre-contract structural artefacts:
+The Phase F.5a–d series (2026-05-10) extracted the execute / frame / validate / store sequence into one helper (`_execute_evidence_step`) used by all three former call sites, and collapsed the Stage 0.5 + 0.7 strategy-picker split into one `_pick_primary_invocation` chain with one orchestration block. What remains:
 
-- **Stage 0.7 — analyzer route fallback.** `router.match_tool()` runs after the evidence planner already selected a tool. When `candidate_tools[0]` is sound the call is a no-op; when the planner errored it can paper over the bug. Hit-rate counters are now exposed in `/metrics` (Phase F.2 instrumentation, 2026-05-10); two-week observation gates removal.
-- **Stages 1 / 2 — legacy SQL, behaviourally folded but structurally post-loop.** SQL is already gated on `not ctx.used_tool` at [pipeline.py:1861](D:\Enaiapp\langchain_railway\agent\pipeline.py#L1861) — it only fires when typed tools didn't produce a result. The §3.4 ideal places this branch *inside* the per-step execution loop's failure handler rather than as a post-loop stage. Cosmetic / structural, not behavioural.
-- **Four-stage tool execution split (0.5 / 0.6 / 0.7 / 0.8).** The Ideal Decision Tree calls for one execution loop. Five separate `_trace_stage` calls confirm the split is real. Merging them is the single largest simplification of `agent/pipeline.py` and is the same refactor that absorbs Stages 1/2 into the loop's failure branch.
+- **Stage 0.7 strategies (analyzer-built + authoritative router fallback) inside `_pick_primary_invocation`.** Hit-rate counters are exposed in `/metrics` (Phase F.2 instrumentation, 2026-05-10). Two-week observation gates F.6 removal: once `used_result / requests < 5%`, the analyzer-built and router-fallback strategies become a small deletion from the chain.
+- **Primary execution + Stage 0.8 secondary loop still separate.** After F.5d, primary execution is one block and Stage 0.8 is a delegate to `evidence_planner.execute_remaining_evidence`. The §3.4 ideal merges them into one `for step in evidence_plan` loop where the first step uses the four-strategy chain and subsequent steps use plan-only. Open. Substantial refactor; warrants its own session.
 
-These items are low-correctness-risk because the contract-driven path produces the same outcome whether the legacy stages exist or not. They are high-clarity-impact because debugging today requires understanding four stages and their interactions instead of one loop.
+**Not removable, despite earlier versions of the doc claiming so:**
+
+- The **post-hoc provenance gate** is *not* a removable artefact. It is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `no_claims` immediately at [summarizer.py:663](D:\Enaiapp\langchain_railway\agent\summarizer.py#L663)). For narrative LLM summaries it is the safety net against numeric hallucination — exactly what fired on the 2026-05-09 verification log when an ungrounded narrative produced `summary_source=structured_summary_grounding_fallback`. Frame-construction provenance binding cannot replace it.
+- The **`share_summary_override` deterministic path** is a specialized formatter (see §6.3), not legacy debt.
+- **Legacy SQL is already at the right boundary.** `if not ctx.used_tool` at [pipeline.py:~2039](D:\Enaiapp\langchain_railway\agent\pipeline.py#L2039) is the §3.4 failure-path condition. Moving SQL earlier would skip Stage 0.8 + agent loop — a behavioural change, not a cosmetic one.
 
 **Not on this list, despite earlier versions of the doc claiming so:**
 
@@ -435,30 +438,33 @@ One phase, plus ongoing quality work. Phases A–E from the prior plan are compl
 
 **Problem being solved:** Stage 0.7 and the four-stage tool execution split (0.5 / 0.6 / 0.7 / 0.8 / 1 / 2) are pre-contract artefacts that add maintenance surface and create occasional edge cases where legacy paths bypass frame construction. The Ideal Decision Tree calls for a single execution loop with SQL as a within-loop escape hatch.
 
-**What to do:**
+**What was done (2026-05-10 series):**
 
-| # | Task | File | Status |
-|---|------|------|--------|
-| 1 | Track Stage 0.7 hit rate for two weeks. If <5% of queries and the evidence planner handles those cases, proceed with removal. | `agent/pipeline.py`, `utils/metrics.py` | **Done (Phase F.2, 2026-05-10)**: counters `stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result` exposed in `/metrics`. `used_result / requests` is the "paying its keep" rate; <5% is the cutoff. |
-| 2 | Merge Stages 0.5 / 0.6 / 0.7 / 0.8 / 1 / 2 into a single execution loop iterating over evidence plan steps with inline frame construction, validation, and an in-loop SQL escape-hatch branch on tool failure. (Tasks 4+5 of the prior plan are the same refactor — F.4's "fold SQL into failure path" cannot be done before the loop exists.) | `agent/pipeline.py`, `agent/evidence_planner.py` | Open. |
-| 3 | Remove Stage 0.7 once the F.1 hit-rate data confirms `used_result / requests < 5%` over a two-week window. Becomes a small change inside the loop after task 2 lands. | `agent/pipeline.py`, `agent/router.py` | Blocked on task 1 data + task 2. |
+| Sub | Scope | Status |
+|---|---|---|
+| F.1 | Reclassify `share_summary_override` as a specialized formatter (audit-only). | **Done** (commit `2a7fa41`). See §6.3. |
+| F.2 | Stage 0.7 hit-rate observability — counters `stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result` exposed in `/metrics`. `used_result / requests` is the "paying its keep" rate. | **Done** (commit `a17f3f2`). Two-week observation gates F.6 removal. |
+| F.3 | Post-hoc provenance gate (audit-only). | **Done — kept.** The gate is already a no-op for canonical-frame paths and is the safety net for narrative LLM summaries. Not removable. See §6.1. |
+| F.5a | Extract `_execute_evidence_step` helper from the duplicated execute/frame/validate/store sequence; wire Stage 0.5 first. | **Done** (commit `d138a22`). |
+| F.5b | Wire Stage 0.7 to the same helper; promote `_trace_stage` to module-level `_emit_trace_stage` so the helper can use it without falling out of the closure. | **Done** (commit `4a5b63e`). |
+| F.5c | Wire Stage 0.8 (`evidence_planner.execute_remaining_evidence`) to the helper; helper accepts an `executor` callable so test patches on the caller's local `execute_tool` binding continue to work. | **Done** (commit `ac61ce4`). |
+| F.5d | Collapse Stages 0.5 and 0.7 into one strategy chain. New `_pick_primary_invocation` returns `(invocation, plan_step, source, build_error)` for the four primary strategies (plan-driven, keyword-router, analyzer-built, authoritative router fallback). One orchestration block emits source-specific metrics/traces. | **Done** (commit `d601571`). |
+| F.5e | Fold legacy SQL (Stages 1/2) into the tool-execution failure path. | **Done by gating** — audit-only close. The current `if not ctx.used_tool` gate at [pipeline.py:2039](../../agent/pipeline.py#L2039) is already the §3.4 "no typed tool produced primary data" failure-path condition. Moving SQL earlier in the function would skip Stage 0.8 and the agent loop, which would weaken behaviour. |
+| F.5f | Drop empty trace calls and clean comments after the F.5 collapse. | **Done by audit** — no trace events became empty after F.5d; all carry useful payloads. Comments updated in F.5d's diff. |
+
+**What remains open:**
+
+| Sub | Scope | Blocked on |
+|---|---|---|
+| F.5 (full) | Merge primary execution + Stage 0.8 into a single `for step in evidence_plan: ...` loop where the first step uses the four-strategy chain and subsequent steps use plan-only. | Substantial refactor; warrants its own session with full attention to per-step trace shapes, the secondary-loop budget/timeout in `evidence_planner.execute_remaining_evidence`, and `merge_evidence_into_context`. The pieces that would feed it (the helper, the strategy chain) are now in place. |
+| F.6 | Remove Stage 0.7 (the analyzer-built and authoritative router-fallback strategies in `_pick_primary_invocation`). | Two-week F.2 hit-rate data showing `used_result / requests < 5%`. Becomes a small change to `_pick_primary_invocation` plus removal of the Stage 0.7-source orchestration branch. |
 
 **Removed from this list** (audit findings, 2026-05-10):
 
 - *"Absorb `share_summary_override` into the generic renderer LIST/SCALAR path."* The override is a deliberate specialized formatter for share-intent queries (renewable/thermal PPA decomposition + per-period price join), in the same category as SCENARIO and FORECAST per §3.4. Forcing it into the domain-agnostic generic renderer would either pollute the renderer with domain-specific knowledge or lose the decomposition. See §6.3.
 - *"Remove the post-hoc provenance gate."* The gate is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `gate_passed=True, reason="no_claims"` immediately). For narrative LLM summaries the gate is the safety net against numeric hallucination — frame-construction provenance binding cannot replace it. Keep the gate.
 
-**What to expect after:**
-
-- Pipeline step count drops from ~10 to the eight-step ideal.
-- No more edge cases where legacy paths bypass frame construction or evidence validation.
-- `agent/pipeline.py` becomes significantly shorter and easier to reason about.
-- Debugging is simpler: one execution loop instead of four stages with fallback branches.
-- The Ideal Decision Tree (§3.4) becomes a literal description of the runtime, not an aspirational target.
-
-**Validation:**
-
-This phase is purely structural — behaviour should not change. Verify by running the full test suite and comparing outputs on a large query batch before and after. Any output difference indicates a case where the legacy path was producing different results than the new architecture, which should be investigated (it's likely a bug in one path or the other).
+**Validation summary:** every F.5 sub-commit was tested against the targeted suite (analyzer contract, question analyzer, vector retrieval, chart frame, guardrails, derived chart, evidence planner, evidence joins). 459 tests pass on the wide suite at every step. Two pre-existing failures unrelated to this work persist.
 
 **Sequencing:**
 
@@ -500,7 +506,7 @@ Workflow: confirm the analyzer emitted `VisualizationInfo` correctly. If yes, th
 
 The pipeline is now contract-driven end to end. Stage 0.2 emits the answer contract, evidence frames + the generic renderer cover the six standard answer shapes, the evidence planner validates plan shape, vector retrieval is three-tier, and the visualisation plan flows through to Stage 5.
 
-The remaining structural work is the Phase F single-loop refactor (collapsing Stages 0.5 / 0.6 / 0.7 / 0.8 / 1 / 2 into one execution loop with an in-loop SQL escape hatch and an in-loop Stage 0.7 fallback branch) plus removing Stage 0.7 once two-week hit-rate data confirms it can go. Earlier versions of this doc also listed the post-hoc provenance gate and `share_summary_override` as removable; both are kept by design (see §6.1, §6.3). The remaining quality work is in the analyzer prompt, runtime skills, and cross-check policy — guided by the `pipeline-failure-diagnostics` developer skill.
+After the 2026-05-10 F.5a–d series, the primary tool-execution code is a single helper called from three places (Stages 0.5 / 0.7 / 0.8) and the primary strategy chain is one function (`_pick_primary_invocation`) instead of two separate stage blocks. The remaining structural work: merge primary execution + Stage 0.8 into one `for step in evidence_plan` loop where the first step uses the four-strategy chain and subsequent steps use plan-only — substantial refactor warranting its own session. Plus F.6: remove the analyzer-built + router-fallback strategies from `_pick_primary_invocation` once two-week hit-rate data confirms `used_result / requests < 5%`. Earlier versions of this doc also listed the post-hoc provenance gate, `share_summary_override`, and an SQL "fold-in" as removable; the F.5 audit determined all three are correctly in place by design (see §6.1, §6.3). The remaining quality work is in the analyzer prompt, runtime skills, and cross-check policy — guided by the `pipeline-failure-diagnostics` developer skill.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 
