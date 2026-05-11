@@ -11,9 +11,9 @@ Technical reference for the `langchain_railway` query pipeline. Describes the cu
 
 Stage 0.2 is the one LLM call that interprets the user question. It emits a full answer contract — `answer_kind`, `render_style`, `grouping`, `entity_scope`, `candidate_tools`, `params_hint`, `evidence_roles`, `derived_metrics`, `visualization` — and downstream stages execute it without re-interpretation.
 
-After the 2026-05-10 F.5 refactor series, the primary tool-execution code is one helper (`_execute_evidence_step`) called from three sites, and the primary-routing strategy chain is one function (`_pick_primary_invocation`) covering plan-driven, keyword-router, analyzer-built, and authoritative router-fallback strategies. Evidence frames + the generic renderer cover six answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO, FORECAST) deterministically; narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
+After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function (`_execute_evidence_plan`) called once from `process_query`. It contains the four-strategy primary invocation picker (`_pick_primary_invocation`), the shared executor (`_execute_evidence_step`), the secondary evidence loop, and the post-loop driver-context enrichment. Evidence frames + the generic renderer cover six answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO, FORECAST) deterministically; narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
 
-The remaining structural work is the merge of primary execution and the Stage 0.8 secondary evidence loop into one `for step in evidence_plan` loop, plus removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go. Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
+The remaining structural work is removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go (F.6). Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
 
 ---
 
@@ -183,18 +183,20 @@ Derived inline from the analyzer contract — no separate stage. `KNOWLEDGE_PRIM
 
 Reads `answer_kind`, `render_style`, `candidate_tools`, `evidence_roles`. `_validate_plan_against_answer_kind` ensures planned steps will produce evidence matching the answer shape (LIST → entity-enumeration step; COMPARISON → two-period; TIMESERIES → period range; SCENARIO → scenario params). Mismatches are flagged at planning time, not after wasted tool calls.
 
-### 3.6 Stage 0.5/0.7 — Primary Tool Execution
+### 3.6 Stages 0.5–0.8 — Evidence-Plan Execution
 
-After F.5d (commit `d601571`) this is **one orchestration block**. The strategy picker `_pick_primary_invocation` returns the first non-None invocation from a four-step chain:
+After §5.1 (commits `ea677dc`, `f55d18b`) the entire tool-execution surface is one function: `_execute_evidence_plan` in [`agent/pipeline.py`](../../agent/pipeline.py). `process_query` calls it once. The function runs three logical passes:
+
+#### Pass 1 — Primary execution (strategy chain)
+
+The strategy picker `_pick_primary_invocation` returns the first non-None invocation from a four-step chain:
 
 1. **Plan-driven** — first unsatisfied step in `ctx.evidence_plan`.
 2. **Keyword router** — `match_tool` on raw query (only when no authoritative analyzer).
 3. **Analyzer-built** — `planner.build_tool_invocation_from_analysis` from the QuestionAnalysis.
 4. **Authoritative router fallback** — `match_tool` reused, gated on `_should_attempt_authoritative_router_fallback`.
 
-The split between "Stage 0.5" and "Stage 0.7" survives only as observability: strategies 1–2 fire under `stage_0_5_*` trace shapes, strategies 3–4 fire under `stage_0_7_*` shapes with `metrics.log_stage_0_7("entered" | "invocation_built" | "used_result")` counters. The actual execution body is the same helper either way.
-
-Execution is delegated to `_execute_evidence_step` which performs:
+The historical split between "Stage 0.5" and "Stage 0.7" survives only as observability: strategies 1–2 fire under `stage_0_5_*` trace shapes, strategies 3–4 fire under `stage_0_7_*` shapes with `metrics.log_stage_0_7("entered" | "invocation_built" | "used_result")` counters. The execution body is the same `_execute_evidence_step` helper either way:
 
 1. Execute tool (using a caller-supplied executor binding for testability).
 2. Optionally emit `stage_0_6_tool_execute` trace + `metrics.log_tool_call`.
@@ -204,27 +206,33 @@ Execution is delegated to `_execute_evidence_step` which performs:
 6. On block: clear ctx and mark `tool_fallback_reason`; on pass: log "Typed/Analyzer tool relevance validated".
 7. Store result in `ctx.evidence_collected[step.role]`; mark plan step satisfied.
 
-Failure handling is source-aware: analyzer-source failures route to `_attempt_analyzer_tool_recovery`; plan/keyword-router failures fall through to the legacy SQL escape hatch.
+Failure handling is source-aware: analyzer-source failures route to `_attempt_analyzer_tool_recovery`; plan/keyword-router failures mark the plan step and fall through to the legacy SQL escape hatch.
 
-### 3.7 Stage 0.8 — Secondary Evidence Loop
+#### Pass 2 — Secondary evidence loop (was Stage 0.8)
 
-`evidence_planner.execute_remaining_evidence` iterates over plan steps not satisfied during primary execution, executing each via the same `_execute_evidence_step` helper (lazy-imported to avoid a circular dependency). Secondary execution is configured differently from primary: `validate_relevance=False`, `emit_tool_call_metric=False`, `emit_tool_execute_trace=False` — preserves Stage 0.8's historical observability (one outer `stage_0_8_evidence_loop` trace, not per-step). Has a per-loop deadline (`EVIDENCE_LOOP_BUDGET_SECONDS`). After the loop, `merge_evidence_into_context` joins secondary frames into `ctx.df` via date-aligned joins.
+When the evidence plan still has unsatisfied steps, the loop iterates over them with a per-loop budget (`EVIDENCE_LOOP_BUDGET_SECONDS`) and capped iterations (`_EVIDENCE_LOOP_MAX_STEPS=3`). Each step calls the same `_execute_evidence_step` helper with secondary semantics (`is_primary=False`, `validate_relevance=False`, no per-step trace or `log_tool_call`) — preserves the historical observability of one outer `stage_0_8_evidence_loop` trace rather than per-step.
 
-After Stage 0.8, when `ctx.used_tool` is set, `_enrich_prices_with_balancing_driver_context` adds source-price and contribution columns for balancing-price answers.
+The loop body lives in `_run_secondary_evidence_loop` in `pipeline.py` (moved out of `evidence_planner.py` in §5.1.a, commit `ea677dc`). `evidence_planner.execute_remaining_evidence` remains as a thin delegate so tests that monkey-patch `agent.evidence_planner.execute_tool` continue to intercept tool calls — the delegate passes its local `execute_tool` binding to the helper via the `executor=` parameter.
 
-### 3.8 Stage agent_loop, Stages 1/2 — Legacy Fallbacks
+After the loop, `merge_evidence_into_context` joins secondary frames into `ctx.df` via date-aligned joins.
+
+#### Pass 3 — Driver-context enrichment
+
+When primary execution produced a usable result (`ctx.used_tool` and `ctx.tool_name` set), `_enrich_prices_with_balancing_driver_context` attaches source-price and contribution columns for balancing-price answers.
+
+### 3.7 Stage agent_loop, Stages 1/2 — Legacy Fallbacks
 
 The agent loop (`orchestrator.run_agent_loop`) is gated on `ENABLE_AGENT_LOOP and not ctx.has_authoritative_question_analysis and not analyzer_tool_failed` — it fires only when there is no firm Stage 0.2 contract. May set `ctx.used_tool=True` and exit early as `conceptual_exit` or `data_exit`.
 
 Stages 1/2 (`planner.generate_plan` + `sql_executor.validate_and_execute`) fire when `not ctx.used_tool` after the above. The condition is the §2.3 ideal's "SQL escape hatch when no typed tool produced primary data". Conceptual or `skip_sql` paths route to `summarizer.answer_conceptual` and return.
 
-### 3.9 Stage 3 — Analyzer Enrichment
+### 3.8 Stage 3 — Analyzer Enrichment
 
 `analyzer.enrich` dispatches on analyzer-emitted contract flags (`needs_correlation_context`, `needs_driver_analysis`, requested `derived_metrics`, `analyzer_indicates_share_intent`). Computes correlation, MoM/YoY, share decomposition, scenario evidence, forecast trendlines. No regex-based eligibility detection. Outputs become `ctx.analysis_evidence` and feed both the LLM summarizer and the derived chart builders.
 
 A "missing requested evidence" check after Stage 3 can CLARIFY if the analyzer asked for derived metrics that Stage 3 couldn't produce, unless partial evidence is available.
 
-### 3.10 Stage 4 — Generic Renderer + Specialized Formatter + LLM Summarizer
+### 3.9 Stage 4 — Generic Renderer + Specialized Formatter + LLM Summarizer
 
 `summarizer.summarize_data` dispatch order:
 
@@ -235,7 +243,7 @@ A "missing requested evidence" check after Stage 3 can CLARIFY if the analyzer a
 
 A post-hoc provenance gate runs after the summary. It is a no-op for canonical-frame paths (claims list is empty → `gate_passed=True, reason="no_claims"`); for narrative LLM summaries it catches numeric hallucinations and replaces the answer with a `citation_gate_fallback` on coverage failure.
 
-### 3.11 Stage 5 — Chart Pipeline
+### 3.10 Stage 5 — Chart Pipeline
 
 `chart_pipeline.build_chart` consumes the analyzer's `VisualizationInfo` directly. The chart frame source is selected first: derived chart builders produce specs for MoM/YoY, index growth, decomposition, forecast, and seasonal answers; otherwise canonical evidence frames feed `chart_frame_builder`. Multi-group plans are iterated — `chart_groups` produces one chart per group, with per-group `type`, `title`, `y_axis_label`, and `metrics` honoured.
 
@@ -247,7 +255,7 @@ Runtime modules and the files they live in. If this list disagrees with the code
 
 ### Orchestration
 
-- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline: stage tracing via `_emit_trace_stage` + local `_trace_stage` closure, response-mode derivation, `_cross_check_answer_kind` with the legal-list exception, `_pick_primary_invocation` four-strategy chain, `_execute_evidence_step` helper, post-loop driver enrichment, legacy SQL fallback gate. Holds the `_attempt_analyzer_tool_recovery` analyzer-source recovery candidate.
+- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline. Stage tracing via `_emit_trace_stage` + local `_trace_stage` closure. Holds: `_cross_check_answer_kind` (with the legal-list exception), `_pick_primary_invocation` (the four-strategy chain), `_execute_evidence_step` (the shared tool executor), `_run_secondary_evidence_loop` (the Stage 0.8 body, moved from `evidence_planner.py` in §5.1.a), `_execute_evidence_plan` (the §5.1.b consolidated function combining primary execution + secondary loop + driver enrichment), `_attempt_analyzer_tool_recovery` (analyzer-source recovery candidate). After §5.1 the function `process_query` calls one line for the entire tool-execution surface: `ctx = _execute_evidence_plan(ctx)`.
 
 ### Analyzer + Routing
 
@@ -259,7 +267,7 @@ Runtime modules and the files they live in. If this list disagrees with the code
 
 ### Evidence Collection
 
-- **[`agent/evidence_planner.py`](../../agent/evidence_planner.py)** — builds and validates the evidence plan (`_validate_plan_against_answer_kind`), iterates remaining plan steps in `execute_remaining_evidence` (Stage 0.8), joins secondary frames in `merge_evidence_into_context`.
+- **[`agent/evidence_planner.py`](../../agent/evidence_planner.py)** — builds and validates the evidence plan (`_validate_plan_against_answer_kind`); holds `merge_evidence_into_context` (date-aligned joins of secondary frames into `ctx.df`). `execute_remaining_evidence` is a thin delegate after §5.1.a — the secondary loop body itself lives in `pipeline.py` as `_run_secondary_evidence_loop`; the delegate stays so tests that monkey-patch `agent.evidence_planner.execute_tool` keep working.
 - **[`agent/evidence_validator.py`](../../agent/evidence_validator.py)** — `validate_evidence` runs inline during frame attachment; checks frames against `answer_kind` shape requirements (shared with the planner via [`agent/shape_requirements.py`](../../agent/shape_requirements.py)).
 - **[`agent/frame_adapters.py`](../../agent/frame_adapters.py)** — per-tool adapters that normalise raw tool output into `ObservationFrame` / `EntitySetFrame` / `ComparisonFrame`.
 - **[`agent/tools/`](../../agent/tools/)** — typed tool implementations.
@@ -309,15 +317,19 @@ Developer-only (NOT loaded into prompts):
 
 Priority-sorted. Each item is paired with the verification needed before removal/refactor.
 
-### 5.1 Pipeline Consolidation — Single Execution Loop (open)
+### 5.1 Pipeline Consolidation — Single Execution Loop (DONE)
 
-**What:** Merge primary execution (the single block built by F.5d) with the Stage 0.8 secondary evidence loop into one `for step in evidence_plan: ...` loop. First step uses the four-strategy chain in `_pick_primary_invocation`; subsequent steps use plan-only.
+**What was done (2026-05-10):** Merged primary execution + secondary evidence loop + driver-context enrichment into one `_execute_evidence_plan` function in `pipeline.py`. `process_query` calls it once.
 
-**Why:** Today the primary block is one orchestration with strategies, and Stage 0.8 is a separate function in `evidence_planner.py` (via lazy import). The §2.3 ideal calls for one loop. The pieces that feed it — `_execute_evidence_step` with `is_primary` and `executor` parameters — are already in place.
+| Sub-phase | Scope | Commit |
+|---|---|---|
+| §5.1.a | Move `execute_remaining_evidence` body from `evidence_planner.py` into `_run_secondary_evidence_loop` in `pipeline.py`; remove the F.5c circular-import workaround. `evidence_planner.execute_remaining_evidence` becomes a thin delegate so tests that monkey-patch `agent.evidence_planner.execute_tool` keep working via the helper's `executor=` parameter. | `ea677dc` |
+| §5.1.b | Introduce `_execute_evidence_plan(ctx)` containing the three passes (primary strategy chain + secondary loop + driver enrichment) + circuit-breaker preflight. Replace the corresponding ~245-line block in `process_query` with one call. | `f55d18b` |
+| §5.1.c | Doc update describing the unified function; §3.6 absorbs the former §3.7 since Stages 0.5–0.8 are now one function. | this commit |
 
-**Risk:** Substantial. Touches the hot path. Per-step trace shapes (`stage_0_5_*` vs `stage_0_6_*` vs `stage_0_8_*`) need a versioning decision; the Stage 0.8 timeout/budget logic needs preserving; `merge_evidence_into_context` needs to keep running after the loop.
+**Verification:** 459 tests pass on the wide targeted suite at every sub-phase. Diff symmetry inspection confirms every `metrics.log_*` line and every `_trace_stage`/`_emit_trace_stage` call from the old block has a matching counterpart in the new function — pure structural move with no logic change. Trace shapes (`stage_0_5_plan_driven`, `stage_0_5_router_match`, `stage_0_6_tool_execute`, `stage_0_7_analyzer_route`, `stage_0_7_analyzer_tool_execute`, `stage_0_8_evidence_loop`) and metric counters fire under identical conditions to the pre-§5.1 form.
 
-**Files:** [`agent/pipeline.py`](../../agent/pipeline.py), [`agent/evidence_planner.py`](../../agent/evidence_planner.py).
+After §5.1, the §2.3 Ideal Decision Tree's "Tool execution + evidence collection (single loop — TARGET)" is no longer aspirational — it is the structure `_execute_evidence_plan` implements.
 
 ### 5.2 Stage 0.7 Removal (F.6, gated)
 
@@ -373,7 +385,7 @@ For triaging Q&A failures — latency spikes, grounding failures, schema validat
 
 The pipeline is contract-driven end to end. Stage 0.2 emits the answer contract; evidence frames + the generic renderer cover six standard answer shapes deterministically; narrative shapes go to a focus-aware LLM summarizer; the visualization plan flows to Stage 5 without re-interpretation.
 
-After the 2026-05-10 F.5 series the primary execution code is one helper called from three sites, and the primary-routing strategy chain is one function instead of two separate stage blocks. The remaining structural work — merging primary execution and Stage 0.8 into one for-loop, plus removing Stage 0.7 strategies once F.2 hit-rate data clears — is the path to making §2.3's Ideal Decision Tree a literal description of the runtime rather than an aspirational target.
+After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function `_execute_evidence_plan` called once from `process_query`. The §2.3 Ideal Decision Tree's "Tool execution + evidence collection (single loop — TARGET)" is no longer aspirational — it is the structure that function implements. The remaining structural work is removing Stage 0.7 strategies once F.2 hit-rate data clears.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 
