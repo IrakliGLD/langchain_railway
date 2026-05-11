@@ -883,6 +883,12 @@ def execute_remaining_evidence(ctx: QueryContext, timeout_seconds: Optional[floa
     Max iterations: ``min(len(remaining), 3)``.
     Failed steps are logged and skipped, not retried.
     """
+    # Lazy import to avoid circular dependency: pipeline.py imports
+    # evidence_planner at module load, so evidence_planner cannot import
+    # pipeline at module level. The structural collapse in Phase F.5d/e
+    # will rationalise this module layout.
+    from agent.pipeline import _execute_evidence_step
+
     remaining = [s for s in ctx.evidence_plan if not s.get("satisfied") and not s.get("error")]
     cap = min(len(remaining), _EVIDENCE_LOOP_MAX_STEPS)
 
@@ -898,7 +904,6 @@ def execute_remaining_evidence(ctx: QueryContext, timeout_seconds: Optional[floa
             )
             continue
 
-
         invocation = ToolInvocation(
             name=step["tool_name"],
             params=step["params"],
@@ -906,19 +911,29 @@ def execute_remaining_evidence(ctx: QueryContext, timeout_seconds: Optional[floa
             reason=f"evidence_plan:{step['role']}",
         )
         try:
-            df, cols, rows = execute_tool(invocation)
-            df = normalize_tool_dataframe(invocation.name, df)
-            ctx.evidence_collected[step["role"]] = {
-                "tool": invocation.name,
-                "params": dict(invocation.params),
-                "df": df,
-                "cols": list(df.columns),
-                "rows": [tuple(r) for r in df.itertuples(index=False, name=None)],
-            }
-            step["satisfied"] = True
+            _execute_evidence_step(
+                ctx,
+                invocation,
+                plan_step=step,
+                is_primary=False,
+                is_explanation=False,
+                stage_label="stage_0_8",
+                validate_relevance=False,
+                emit_tool_call_metric=False,
+                emit_tool_execute_trace=False,
+                # Pass evidence_planner's local `execute_tool` binding so
+                # tests that monkeypatch `agent.evidence_planner.execute_tool`
+                # continue to take effect after F.5c rewired the loop body
+                # through the pipeline-level helper.
+                executor=execute_tool,
+            )
+            # Preserve the operator-facing "Evidence loop: fetched ..." log
+            # that downstream dashboards may grep for. Row count read from the
+            # stored evidence frame.
+            stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
             log.info(
                 "Evidence loop: fetched %s via %s (%d rows)",
-                step["role"], invocation.name, len(rows),
+                step["role"], invocation.name, stored_rows,
             )
         except Exception as exc:
             step["error"] = str(exc)

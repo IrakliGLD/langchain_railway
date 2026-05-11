@@ -1173,6 +1173,10 @@ def _execute_evidence_step(
     relevance_log_prefix: str = "Typed",
     relevance_fallback_reason_prefix: str = "tool",
     emit_fallback_intent_on_relevance_block: bool = True,
+    validate_relevance: bool = True,
+    emit_tool_call_metric: bool = True,
+    emit_tool_execute_trace: bool = True,
+    executor: callable = None,
 ) -> bool:
     """Execute one evidence step end-to-end and store the result.
 
@@ -1228,6 +1232,21 @@ def _execute_evidence_step(
             True for Stage 0.5 (current behaviour); False for Stage 0.7
             (which historically did not emit this counter on its own
             relevance block).
+        validate_relevance: Whether to run `validate_tool_relevance` and
+            its short-circuit on block. True for primary executions
+            (Stage 0.5 / 0.7); False for Stage 0.8 secondary loop, which
+            historically trusted the evidence planner's tool choices
+            without re-validating relevance per step.
+        emit_tool_call_metric: Whether to call `metrics.log_tool_call`
+            with the tool execution duration. True for primary
+            executions (Stage 0.5 / 0.7); False for Stage 0.8 to avoid
+            double-counting secondary loop tool calls in current
+            dashboards.
+        emit_tool_execute_trace: Whether to emit a per-step
+            `_trace_stage(tool_execute_trace, ...)` event. True for
+            primary executions; False for Stage 0.8 which currently
+            only emits the outer `stage_0_8_evidence_loop` aggregate
+            trace.
 
     Returns:
         True  - the tool ran, relevance passed, the result was stored.
@@ -1239,9 +1258,16 @@ def _execute_evidence_step(
         whether to fall through to SQL or attempt a recovery candidate.
     """
     t_tool = time.time()
-    df, cols, rows = execute_tool(invocation)
-    metrics.log_tool_call(time.time() - t_tool)
-    _emit_trace_stage(ctx, tool_execute_trace, t_tool, tool=invocation.name, rows=len(rows))
+    # `executor` lets a caller substitute its own binding of `execute_tool` so
+    # tests that patch `<caller_module>.execute_tool` still take effect; this
+    # is how `evidence_planner.execute_remaining_evidence` preserves
+    # backward-compatibility with its monkeypatched test suite.
+    _execute = executor or execute_tool
+    df, cols, rows = _execute(invocation)
+    if emit_tool_call_metric:
+        metrics.log_tool_call(time.time() - t_tool)
+    if emit_tool_execute_trace:
+        _emit_trace_stage(ctx, tool_execute_trace, t_tool, tool=invocation.name, rows=len(rows))
 
     df = normalize_tool_dataframe(invocation.name, df)
 
@@ -1260,29 +1286,30 @@ def _execute_evidence_step(
             ctx.plan.setdefault("intent", "tool_query")
             ctx.plan.setdefault("target", invocation.name)
 
-    _relevance_q = ctx.resolved_query or ctx.query
-    tool_relevant, tool_reason = validate_tool_relevance(
-        _relevance_q,
-        invocation.name,
-        question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
-    )
+    if validate_relevance:
+        _relevance_q = ctx.resolved_query or ctx.query
+        tool_relevant, tool_reason = validate_tool_relevance(
+            _relevance_q,
+            invocation.name,
+            question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+        )
 
-    if not tool_relevant:
-        metrics.log_relevance_block()
-        _block_reason_tag = f"{relevance_fallback_reason_prefix}_relevance_blocked"
-        if is_primary:
-            ctx.used_tool = False
-            ctx.tool_fallback_reason = f"{_block_reason_tag}:{tool_reason}"
-            if emit_fallback_intent_on_relevance_block:
-                metrics.log_tool_fallback_intent(ctx.query, _block_reason_tag)
-            ctx.df = ctx.df.iloc[0:0]
-            ctx.cols = []
-            ctx.rows = []
-            clear_provenance(ctx)
-        log.warning("%s tool relevance blocked. reason=%s", relevance_log_prefix, tool_reason)
-        return False
+        if not tool_relevant:
+            metrics.log_relevance_block()
+            _block_reason_tag = f"{relevance_fallback_reason_prefix}_relevance_blocked"
+            if is_primary:
+                ctx.used_tool = False
+                ctx.tool_fallback_reason = f"{_block_reason_tag}:{tool_reason}"
+                if emit_fallback_intent_on_relevance_block:
+                    metrics.log_tool_fallback_intent(ctx.query, _block_reason_tag)
+                ctx.df = ctx.df.iloc[0:0]
+                ctx.cols = []
+                ctx.rows = []
+                clear_provenance(ctx)
+            log.warning("%s tool relevance blocked. reason=%s", relevance_log_prefix, tool_reason)
+            return False
 
-    log.info("%s tool relevance validated. reason=%s", relevance_log_prefix, tool_reason)
+        log.info("%s tool relevance validated. reason=%s", relevance_log_prefix, tool_reason)
 
     if is_primary and not ENABLE_EVIDENCE_PLANNER:
         # Legacy driver-context enrichment runs immediately when the
