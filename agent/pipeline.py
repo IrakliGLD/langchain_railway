@@ -1138,6 +1138,29 @@ def _attempt_analyzer_tool_recovery(
     return ctx, False
 
 
+def _emit_trace_stage(ctx: QueryContext, stage_name: str, started_at: float, **extra) -> None:
+    """Module-level stage-trace emitter.
+
+    Encapsulates the trace emission logic used by `_trace_stage` (the local
+    closure inside `process_query`) and `_execute_evidence_step` (the
+    extracted helper at module scope). The closure version remains so that
+    every existing call site inside `process_query` keeps its current
+    signature; this function is what both wrappers ultimately call.
+    """
+    elapsed_ms = max(0.0, (time.time() - started_at) * 1000.0)
+    ctx.stage_timings_ms[stage_name] = round(elapsed_ms, 2)
+    metrics.log_stage(stage_name, elapsed_ms)
+    payload = {
+        "trace_id": ctx.trace_id,
+        "session_id": ctx.session_id,
+        "stage": stage_name,
+        "duration_ms": round(elapsed_ms, 2),
+    }
+    if extra:
+        payload["extra"] = extra
+    log.info("TRACE %s", json.dumps(payload, ensure_ascii=True, sort_keys=True))
+
+
 def _execute_evidence_step(
     ctx: QueryContext,
     invocation: ToolInvocation,
@@ -1146,6 +1169,10 @@ def _execute_evidence_step(
     is_primary: bool,
     is_explanation: bool,
     stage_label: str,
+    tool_execute_trace: str = "stage_0_6_tool_execute",
+    relevance_log_prefix: str = "Typed",
+    relevance_fallback_reason_prefix: str = "tool",
+    emit_fallback_intent_on_relevance_block: bool = True,
 ) -> bool:
     """Execute one evidence step end-to-end and store the result.
 
@@ -1185,6 +1212,22 @@ def _execute_evidence_step(
         stage_label: Tag included in fallback reasons and log lines (e.g.
             "stage_0_5") so events from different call sites stay
             distinguishable in traces.
+        tool_execute_trace: Name of the `_trace_stage` event emitted right
+            after the tool runs. Defaults to "stage_0_6_tool_execute"
+            (Stage 0.5's name); Stage 0.7 passes
+            "stage_0_7_analyzer_tool_execute" to preserve its trace shape.
+        relevance_log_prefix: Word prefixing relevance-validation log lines
+            ("Typed tool relevance validated/blocked" by default, vs
+            "Analyzer tool relevance ..." for Stage 0.7).
+        relevance_fallback_reason_prefix: Prefix for the relevance-block
+            fallback reason string. "tool" → "tool_relevance_blocked" by
+            default; Stage 0.7 passes "analyzer_tool" →
+            "analyzer_tool_relevance_blocked".
+        emit_fallback_intent_on_relevance_block: Whether to call
+            `metrics.log_tool_fallback_intent` when relevance is blocked.
+            True for Stage 0.5 (current behaviour); False for Stage 0.7
+            (which historically did not emit this counter on its own
+            relevance block).
 
     Returns:
         True  - the tool ran, relevance passed, the result was stored.
@@ -1198,7 +1241,7 @@ def _execute_evidence_step(
     t_tool = time.time()
     df, cols, rows = execute_tool(invocation)
     metrics.log_tool_call(time.time() - t_tool)
-    _trace_stage("stage_0_6_tool_execute", t_tool, tool=invocation.name, rows=len(rows))
+    _emit_trace_stage(ctx, tool_execute_trace, t_tool, tool=invocation.name, rows=len(rows))
 
     df = normalize_tool_dataframe(invocation.name, df)
 
@@ -1226,18 +1269,20 @@ def _execute_evidence_step(
 
     if not tool_relevant:
         metrics.log_relevance_block()
+        _block_reason_tag = f"{relevance_fallback_reason_prefix}_relevance_blocked"
         if is_primary:
             ctx.used_tool = False
-            ctx.tool_fallback_reason = f"tool_relevance_blocked:{tool_reason}"
-            metrics.log_tool_fallback_intent(ctx.query, "tool_relevance_blocked")
+            ctx.tool_fallback_reason = f"{_block_reason_tag}:{tool_reason}"
+            if emit_fallback_intent_on_relevance_block:
+                metrics.log_tool_fallback_intent(ctx.query, _block_reason_tag)
             ctx.df = ctx.df.iloc[0:0]
             ctx.cols = []
             ctx.rows = []
             clear_provenance(ctx)
-        log.warning("Typed tool relevance blocked. reason=%s", tool_reason)
+        log.warning("%s tool relevance blocked. reason=%s", relevance_log_prefix, tool_reason)
         return False
 
-    log.info("Typed tool relevance validated. reason=%s", tool_reason)
+    log.info("%s tool relevance validated. reason=%s", relevance_log_prefix, tool_reason)
 
     if is_primary and not ENABLE_EVIDENCE_PLANNER:
         # Legacy driver-context enrichment runs immediately when the
@@ -1300,19 +1345,13 @@ def process_query(
         clarify_selection_override=selected is not None,
     )
 
+    # `_trace_stage` is a thin wrapper around the module-level helper that
+    # implicitly passes the current ctx. Keeping it as a local closure
+    # preserves every call site inside this function without needing a
+    # `ctx` argument; the module-level `_emit_trace_stage` is what the
+    # extracted `_execute_evidence_step` helper uses.
     def _trace_stage(stage_name: str, started_at: float, **extra):
-        elapsed_ms = max(0.0, (time.time() - started_at) * 1000.0)
-        ctx.stage_timings_ms[stage_name] = round(elapsed_ms, 2)
-        metrics.log_stage(stage_name, elapsed_ms)
-        payload = {
-            "trace_id": ctx.trace_id,
-            "session_id": ctx.session_id,
-            "stage": stage_name,
-            "duration_ms": round(elapsed_ms, 2),
-        }
-        if extra:
-            payload["extra"] = extra
-        log.info("TRACE %s", json.dumps(payload, ensure_ascii=True, sort_keys=True))
+        _emit_trace_stage(ctx, stage_name, started_at, **extra)
 
     # Stage 0: cheap preparation
     t_stage = time.time()
@@ -1741,40 +1780,19 @@ def process_query(
                 ctx.tool_confidence = analyzer_invocation.confidence
 
                 try:
-                    t_tool = time.time()
-                    df, cols, rows = execute_tool(analyzer_invocation)
-                    metrics.log_tool_call(time.time() - t_tool)
-                    _trace_stage(
-                        "stage_0_7_analyzer_tool_execute", t_tool,
-                        tool=analyzer_invocation.name, rows=len(rows),
+                    _stage_0_7_used = _execute_evidence_step(
+                        ctx,
+                        analyzer_invocation,
+                        plan_step=None,  # Stage 0.7 falls back to name-match on the plan
+                        is_primary=True,
+                        is_explanation=is_exp,
+                        stage_label="stage_0_7",
+                        tool_execute_trace="stage_0_7_analyzer_tool_execute",
+                        relevance_log_prefix="Analyzer",
+                        relevance_fallback_reason_prefix="analyzer_tool",
+                        emit_fallback_intent_on_relevance_block=False,
                     )
-                    df = normalize_tool_dataframe(analyzer_invocation.name, df)
-                    ctx.df = df
-                    ctx.cols = list(df.columns)
-                    ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
-                    stamp_provenance(
-                        ctx, ctx.cols, ctx.rows, source="tool",
-                        query_hash=tool_invocation_hash(analyzer_invocation.name, analyzer_invocation.params),
-                    )
-                    if not ctx.has_authoritative_question_analysis:
-                        ctx.plan.setdefault("intent", "tool_query")
-                        ctx.plan.setdefault("target", analyzer_invocation.name)
-                    _relevance_q = ctx.resolved_query or ctx.query
-                    tool_relevant, tool_reason = validate_tool_relevance(
-                        _relevance_q,
-                        analyzer_invocation.name,
-                        question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
-                    )
-                    if not tool_relevant:
-                        metrics.log_relevance_block()
-                        ctx.used_tool = False
-                        ctx.tool_fallback_reason = f"analyzer_tool_relevance_blocked:{tool_reason}"
-                        ctx.df = ctx.df.iloc[0:0]
-                        ctx.cols = []
-                        ctx.rows = []
-                        clear_provenance(ctx)
-                        log.warning("Analyzer tool relevance blocked. reason=%s", tool_reason)
-                    else:
+                    if _stage_0_7_used:
                         metrics.log_stage_0_7("used_result")
                         log.info(
                             "Analyzer tool route hit: tool=%s confidence=%.2f reason=%s",
@@ -1782,27 +1800,6 @@ def process_query(
                             analyzer_invocation.confidence,
                             analyzer_invocation.reason,
                         )
-                        if not ENABLE_EVIDENCE_PLANNER:
-                            ctx = _enrich_prices_with_balancing_driver_context(
-                                ctx, analyzer_invocation, is_exp,
-                            )
-
-                        # Multi-evidence: store result under matching plan step
-                        if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
-                            _matched_step = next(
-                                (s for s in ctx.evidence_plan
-                                 if s["tool_name"] == analyzer_invocation.name and not s.get("satisfied")),
-                                None,
-                            )
-                            if _matched_step:
-                                ctx.evidence_collected[_matched_step["role"]] = {
-                                    "tool": analyzer_invocation.name,
-                                    "params": dict(analyzer_invocation.params),
-                                    "df": ctx.df.copy(),
-                                    "cols": list(ctx.cols),
-                                    "rows": list(ctx.rows),
-                                }
-                                _matched_step["satisfied"] = True
                 except Exception as exc:
                     # --- Fallback: when evidence planner is on, Stage 0.8
                     # handles remaining steps; skip ad-hoc recovery.  When
