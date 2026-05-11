@@ -1,136 +1,62 @@
 # Query Pipeline Architecture
 
-Current technical reference for the `langchain_railway` query pipeline, with the Ideal Decision Tree as a reference contract and an explicit list of remaining structural work.
+Technical reference for the `langchain_railway` query pipeline. Describes the current runtime, the Ideal Decision Tree it targets, and the structural work that is still open.
 
-**Last updated:** 2026-05-09
-**Status:** Active. The runtime now closely matches the Ideal Decision Tree (§3.4): Stage 0.2 emits a full answer contract, evidence frames + generic renderer cover the four standard data shapes plus SCENARIO and FORECAST, evidence planner validates plans against `answer_kind`, vector retrieval is three-tier, and analyzer + summarizer prompts are question-type-aware with section-aware truncation. Remaining gap is Phase F (legacy stage consolidation).
+**Last updated:** 2026-05-10
+**Source of truth:** the code referenced inline below. When this document and the code disagree, the code wins — update this document.
 
 ---
 
 ## 1. Executive Summary
 
-Stage 0.2 is one LLM call that emits the full answer contract. The runtime then executes that contract:
+Stage 0.2 is the one LLM call that interprets the user question. It emits a full answer contract — `answer_kind`, `render_style`, `grouping`, `entity_scope`, `candidate_tools`, `params_hint`, `evidence_roles`, `derived_metrics`, `visualization` — and downstream stages execute it without re-interpretation.
 
-1. prepare context
-2. structured question analyzer — emits `answer_kind`, `render_style`, `grouping`, `entity_scope`, `candidate_tools`, `evidence_roles`, `derived_metrics`, `visualization`
-3. cross-check `answer_kind` against `query_type`-derived value, with a legal-list exception for high-confidence regulatory questions
-4. conditionally retrieve vector knowledge — three tiers (FULL / LIGHT / SKIP) selected from `answer_kind` + `render_style`
-5. derive response mode and resolution policy inline from the contract
-6. evidence planner builds plan + validates it against `answer_kind` (LIST → entity step, COMPARISON → two-period evidence, etc.)
-7. tool execution → canonical evidence frames (`ObservationFrame`, `EntitySetFrame`, `ComparisonFrame`) → inline validation
-8. Stage 3 enrichment dispatches on `answer_kind` and emitted contract flags
-9. generic renderer first (handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from frames); falls back to LLM summarizer for narrative `render_style`
-10. chart pipeline consumes the analyzer's `VisualizationInfo` (presentation, visual goal, measure transform, chart family, time grain, series split, sort/top-N) and renders multi-group plans
+After the 2026-05-10 F.5 refactor series, the primary tool-execution code is one helper (`_execute_evidence_step`) called from three sites, and the primary-routing strategy chain is one function (`_pick_primary_invocation`) covering plan-driven, keyword-router, analyzer-built, and authoritative router-fallback strategies. Evidence frames + the generic renderer cover six answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO, FORECAST) deterministically; narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
 
-The remaining structural gap is Phase F: legacy parallel paths (Stage 0.7 keyword router fallback, Stages 1/2 SQL as separate stages, post-hoc provenance gate, the four-stage tool execution split) have not yet been collapsed into the eight-step ideal. They cause no observable bugs today but add maintenance surface and create occasional edge cases where legacy paths bypass frame construction.
+The remaining structural work is the merge of primary execution and the Stage 0.8 secondary evidence loop into one `for step in evidence_plan` loop, plus removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go. Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
 
 ---
 
-## 2. What Changed Since 2026-04-12
+## 2. Current Runtime Flow
 
-- **Phases A through E of the prior phased plan are now landed.** Evidence planner reads `answer_kind` and validates plan shape; generic renderer covers SCENARIO and FORECAST with the five regex eligibility detectors removed; analyzer prompt is dynamically assembled with question-type-ordered blocks and section-aware truncation; vector retrieval has three tiers; fast/deep mode is configurable.
-- **Visualization contract is fully implemented.** `VisualizationInfo` carries `primary_presentation`, `visual_goal`, `measure_transform`, `time_grain`, `series_split_mode`, `max_series`, `sort_rule`, `top_n`, `chart_intent`, `target_series`. Stage 5 consumes them via `agent/chart_pipeline.py` and `agent/chart_frame_builder.py`. Derived chart builders cover MoM/YoY, index growth, decomposition, forecast, and seasonal.
-- **Cross-check policy refinement (2026-05-09).** Added an exception in `_cross_check_answer_kind`: when the LLM emits `answer_kind=LIST` with confidence ≥ 0.85 for a `regulatory_procedure` or `conceptual_definition` query, the LLM's LIST shape is trusted instead of being clobbered to KNOWLEDGE. Closes a quality regression where legal enumerations (eligible parties, requirements, documents) were paraphrased by narrative rendering.
-- **Analyzer prompt vocabulary clarification (2026-05-09).** The `_ANALYZER_CORE_RULES` block explicitly lists the AnswerKind enum values, prohibits reusing `query_type` values for `answer_kind`, and adds a `query_type → answer_kind` default mapping. Eliminates a Pydantic validation crash where the LLM emitted `answer_kind=data_explanation` (a query_type value).
-- **Answer-composer enumeration discipline (2026-05-09).** `Focus: Regulation` in the answer-composer skill gained an "Enumeration discipline" subsection with a worked example. The `conceptual_definition` and `regulatory_procedure` templates now require complete item-by-item rendering when the source enumerates items.
-- **Router few-shot coverage (2026-05-09).** Added eligibility/participation example block (routes "who can …", "what documents …", "what conditions …" to `regulatory_procedure` + `answer_kind=list`) and supply-structure example block (routes "trend and structure of [supply | generation | mix]" to `data_retrieval` + `answer_kind=timeseries` + `preferred_path=tool`).
-- **New developer-side skill** `skills/pipeline-failure-diagnostics` documents how to triage Q&A failures (latency log reading, failure taxonomy, fix layering principles). Not loaded into LLM prompts; it guides the developer when changes follow from a real failure.
-
----
-
-## 3. Current Runtime Flow
-
-### 3.1 High-Level Pipeline
+### 2.1 High-Level Pipeline
 
 ```text
 HTTP /ask
-  -> Stage 0     prepare_context
-  -> Stage 0.2   question analyzer (LLM) -> full contract
-  -> answer_kind cross-check (with legal-list exception)
-  -> Stage 0.3   vector knowledge retrieval (three-tier: FULL / LIGHT / SKIP)
-  -> response_mode + resolution_policy derivation (inline from contract)
-  -> Stage 0.4   evidence planner (validates plan against answer_kind)
-  -> Stage 0.5/0.6 primary tool execution + canonical evidence frame construction + inline validation
-  -> Stage 0.7   analyzer tool route fallback (legacy, pending removal in Phase F)
-  -> Stage 0.8   evidence loop + evidence merge
-  -> Stage 1/2   legacy planner + SQL fallback (pending fold-in in Phase F)
-  -> Stage 3     analyzer enrichment (dispatches on answer_kind + contract flags)
-  -> Stage 4     generic renderer (SCALAR/LIST/TIMESERIES/COMPARISON/SCENARIO/FORECAST) OR LLM structured summary
-  -> Stage 5     chart pipeline (consumes VisualizationInfo, builds chart frames, multi-group)
+  → Stage 0       prepare_context
+  → Stage 0.2     question analyzer (LLM) → full answer contract
+                  answer_kind cross-check (with legal-list exception)
+  → Stage 0.3     vector knowledge retrieval (three-tier FULL/LIGHT/SKIP)
+                  response_mode + resolution_policy derivation (inline)
+  → Stage 0.4     evidence planner (validates plan against answer_kind)
+  → Stage 0.5/0.7 primary tool execution
+                  (four-strategy chain via _pick_primary_invocation;
+                  the Stage 0.5 / Stage 0.7 split is a trace-shape concern
+                  inside one orchestration block)
+  → Stage 0.8     secondary evidence loop (additional plan steps)
+                  → balancing driver-context enrichment (post-loop, conditional)
+  → Stage agent   legacy agent loop (only when no authoritative analyzer)
+  → Stages 1/2    legacy SQL fallback (only when typed tools didn't produce
+                  primary data)
+  → Stage 3       analyzer enrichment (dispatches on contract flags)
+  → Stage 4       generic renderer OR specialized formatter OR LLM summarizer
+  → Stage 5       chart pipeline (consumes VisualizationInfo, multi-group)
 ```
 
-### 3.2 Short-Circuit Paths
+### 2.2 Short-Circuit Paths
 
-- `ResolutionPolicy.CLARIFY` → `summarizer.answer_clarify()`
-- `ResponseMode.KNOWLEDGE_PRIMARY` → `summarizer.answer_conceptual()`
-- Generic renderer succeeds (any of the six handled `answer_kind` shapes) → skip LLM summarizer
-- Derived chart builder produces an answer-mode chart spec → preserved through Stage 5 instead of falling back to `ctx.df`
+- `ResolutionPolicy.CLARIFY` → `summarizer.answer_clarify()` and return.
+- `ResponseMode.KNOWLEDGE_PRIMARY` → `summarizer.answer_conceptual()` and return.
+- Generic renderer succeeds → skip LLM summarizer.
+- `share_summary_override` (deterministic share-composition formatter) → skip LLM summarizer.
+- Derived chart builder produces a chart spec → preserved through Stage 5 instead of falling back to `ctx.df`.
+- Missing-derived-evidence check before Stage 4 → may CLARIFY if no usable analysis evidence exists.
 
-### 3.3 Current Decision Tree (Actual Runtime)
-
-```text
-HTTP /ask
-│
-├─ Stage 0: prepare_context
-│   ├─ detect language, select light/analyst mode
-│   ├─ heuristic conceptual classifier (fallback signal)
-│   └─ initialize QueryContext
-│
-├─ Stage 0.2: question analyzer (LLM) — emits full contract
-│   ├─ answer_kind, render_style, grouping, entity_scope
-│   ├─ candidate_tools (ranked), candidate_topics, params_hint, filter
-│   ├─ evidence_roles, needs_multi_tool, derived_metrics
-│   ├─ visualization (primary_presentation, visual_goal, measure_transform,
-│   │   time_grain, series_split_mode, max_series, sort_rule, top_n,
-│   │   chart_intent, target_series)
-│   └─ canonical_query_en, confidence
-│
-├─ Cross-check answer_kind (LLM-emitted vs query_type-derived)
-│   ├─ legal-list exception: trust llm=LIST when query_type ∈
-│   │   {regulatory_procedure, conceptual_definition} and confidence ≥ 0.85
-│   ├─ otherwise prefer the safer of {TIMESERIES, EXPLANATION, KNOWLEDGE}
-│   └─ log INFO when exception fires; WARNING on other disagreements
-│
-├─ Stage 0.3: vector knowledge retrieval (three-tier)
-│   ├─ KNOWLEDGE / EXPLANATION → FULL (top-K=6, re-ranked)
-│   ├─ data shape + NARRATIVE → LIGHT (top-K=2, no re-rank)
-│   ├─ data shape + DETERMINISTIC → SKIP
-│   └─ CLARIFY → SKIP
-│
-├─ Stage 0.4: evidence planner
-│   ├─ reads answer_kind / render_style / candidate_tools
-│   └─ validates plan: LIST → entity-enumeration, COMPARISON → two-period,
-│       TIMESERIES → period range, SCENARIO → scenario params
-│
-├─ Tool execution + framing + inline validation
-│   ├─ run tool; adapt result to ObservationFrame / EntitySetFrame / ComparisonFrame
-│   ├─ bind provenance refs at construction time
-│   └─ validate frame against answer_kind requirement
-│
-├─ Stage 3: analyzer enrichment
-│   ├─ dispatches on contract flags (needs_correlation_context,
-│   │   needs_driver_analysis, requested_derived_metrics)
-│   └─ emits: MoM/YoY, correlation, scenario evidence, forecast trendline,
-│       seasonal decomposition — all consumable by derived chart builders
-│
-├─ Stage 4: generic renderer first
-│   ├─ SCALAR / LIST / TIMESERIES / COMPARISON → tabular
-│   ├─ SCENARIO → payoff breakdown
-│   ├─ FORECAST → trendline + R² caveat + seasonal
-│   └─ on render_style=NARRATIVE → LLM structured summarizer
-│
-└─ Stage 5: chart pipeline
-    ├─ consume VisualizationInfo
-    ├─ choose chart frame source: derived chart builder OR canonical evidence frames
-    ├─ apply measure_transform / time_grain
-    └─ produce one chart per chart_group (multi-panel for split units)
-```
-
-### 3.4 Ideal Decision Tree
+### 2.3 Ideal Decision Tree
 
 **Design principle: Stage 0.2 is the one LLM call. Make it emit the full contract. Everything after just executes — no re-interpretation.**
 
-The current pipeline matches this tree closely. The main remaining mismatch is the persistence of legacy fallback stages (0.7, 1, 2) as parallel paths instead of being folded into the tool execution failure path.
+The current pipeline matches this tree closely. The main remaining mismatch is that primary execution (one block) and the Stage 0.8 secondary loop are still separate code paths instead of one iteration over `evidence_plan`.
 
 ```text
 HTTP /ask
@@ -139,63 +65,62 @@ HTTP /ask
 │   → detect language, select light/analyst mode, init context
 │   → cheap, no LLM
 │
-├─ Stage 0.2: question analyzer (THE LLM call — firm contract, no questioning after)
-│   │
-│   │ This is the single point where the question is interpreted.
-│   │ Every field needed by downstream stages is emitted here.
+├─ Stage 0.2: question analyzer (THE LLM call — firm contract)
+│   │ Single point where the question is interpreted. Every field
+│   │ downstream stages need is emitted here.
 │   │
 │   │ Emitted fields:
 │   │   query_type, preferred_path, candidate_tools, params_hint,
 │   │   evidence_roles, derived_metrics, canonical_query_en,
 │   │   answer_kind, render_style, grouping, entity_scope,
-│   │   visualization (full)
+│   │   visualization (full).
 │   │
-│   │ NOTE: primary_tool is NOT emitted by the LLM. Tool selection
-│   │ remains deterministic: candidate_tools[0] + evidence planner.
+│   │ NOTE: primary_tool is NOT emitted. Tool selection is deterministic
+│   │ via candidate_tools[0] + evidence planner.
 │   │
 │   │ Active cross-check: LLM-emitted vs query_type-derived answer_kind.
-│   │ Disagreement is logged; safer option preferred unless the
-│   │ legal-list exception applies (LIST + regulatory/conceptual + high confidence).
+│   │ Disagreement is logged; the safer option is preferred unless the
+│   │ legal-list exception applies (LIST + regulatory/conceptual +
+│   │ confidence ≥ 0.85).
 │   │
-│   │ Fallback when analyzer is disabled/fails:
-│   │   → derive answer_kind from query_type mapping where unambiguous
-│   │   → derive tool from keyword router (legacy)
+│   │ Fallback when the analyzer is disabled/fails: derive answer_kind
+│   │ from query_type mapping where unambiguous; derive tool from the
+│   │ keyword router (legacy).
 │   │
 │   → The analyzer's output is the contract. Downstream stages trust it.
 │
 ├─ Stage 0.3: vector knowledge retrieval (three-tier)
-│   ├─ KNOWLEDGE / EXPLANATION → FULL retrieval
-│   ├─ data + NARRATIVE → LIGHT retrieval
+│   ├─ KNOWLEDGE / EXPLANATION → FULL (top-K=6, re-ranked)
+│   ├─ data + NARRATIVE → LIGHT (top-K=2, no re-rank)
 │   └─ data + DETERMINISTIC, or CLARIFY → SKIP
 │
 ├─ Stage 0.4: evidence planner
-│   │ Reads the analyzer contract; validates plan against answer_kind.
-│   │   answer_kind = LIST → planner ensures entity-enumeration step
-│   │   answer_kind = COMPARISON → two periods or two entities
-│   │   answer_kind = TIMESERIES → period range
-│   │   answer_kind = SCENARIO → scenario params available
-│   │ Tool selected from candidate_tools[0]; evidence roles known from 0.2.
-│   → Ordered list of tool steps, validated against the answer contract
+│   │ Reads the analyzer contract; validates plan against answer_kind:
+│   │   LIST → entity-enumeration step present
+│   │   COMPARISON → two periods or two entities
+│   │   TIMESERIES → period range
+│   │   SCENARIO → scenario params available
+│   → Ordered list of tool steps, validated against the answer contract.
 │
 ├─ Tool execution + evidence collection (single loop — TARGET)
-│   │ Currently split across Stage 0.5 / 0.6 / 0.7 / 0.8; Phase F merges these.
+│   │ Today: primary execution (one orchestration block over the
+│   │ first plan step, with four strategies) + Stage 0.8 secondary
+│   │ loop (over remaining steps). The merge into one for-loop is open.
 │   │
 │   │ for each evidence step:
-│   │   1. execute tool (params from analyzer / planner)
-│   │   2. validate relevance
-│   │   3. normalize output into canonical evidence frame
-│   │   4. validate frame against answer_kind requirements
-│   │   5. store evidence by role, bind provenance refs at construction time
+│   │   1. pick invocation (plan-driven; for the primary step also
+│   │      try keyword router / analyzer-built / router fallback)
+│   │   2. execute tool (caller passes its local execute_tool binding
+│   │      so test patches still apply)
+│   │   3. normalise output into canonical evidence frame
+│   │   4. validate relevance (primary only today; secondary trusts
+│   │      the planner's tool choice)
+│   │   5. store evidence by role; bind provenance refs at construction
 │   │
-│   │ On tool failure:
-│   │   ├─ [other plan steps remain] → continue, mark step failed
-│   │   ├─ [no plan steps + SQL fallback possible] → try SQL escape hatch
-│   │   └─ [nothing works] → downgrade to CLARIFY
-│   │
-│   │ Stage 0.7 (analyzer fallback) and Stages 1/2 (legacy SQL) are
-│   │ pending fold-in via Phase F.
-│   │
-│   → Evidence frames collected, validated, provenance-bound
+│   │ On primary failure:
+│   │   ├─ analyzer-source → _attempt_analyzer_tool_recovery
+│   │   ├─ otherwise → mark fallback reason; fall through to SQL
+│   │   └─ no plan steps + SQL fallback possible → SQL escape hatch
 │
 ├─ Stage 3: analyzer enrichment — dispatches on answer_kind + contract flags
 │   │ answer_kind = SCALAR/TIMESERIES + share signal → share enrichment
@@ -203,313 +128,256 @@ HTTP /ask
 │   │ answer_kind = FORECAST → trendline pre-calculation
 │   │ answer_kind = EXPLANATION → causal reasoning + correlation
 │   │ answer_kind = COMPARISON → MoM/YoY derived metrics
-│   │ Outputs written as canonical evidence frames consumable by
-│   │ derived chart builders.
+│   │ Outputs are canonical evidence frames consumable by derived
+│   │ chart builders.
 │
 ├─ Stage 4: answer rendering — switch on answer_kind
 │   │
 │   ├─ [render_style = DETERMINISTIC]
-│   │   │ Generic renderer over evidence frames
-│   │   ├─ SCALAR   → extract value + unit + period
-│   │   ├─ LIST     → enumerate entities, group by reason
+│   │   Generic renderer over evidence frames:
+│   │   ├─ SCALAR     → value + unit + period
+│   │   ├─ LIST       → enumerate entities, group by reason
 │   │   ├─ TIMESERIES → format period-indexed rows
 │   │   ├─ COMPARISON → subject vs baseline + delta
-│   │   ├─ SCENARIO → payoff breakdown (positive/negative, market vs combined)
-│   │   └─ FORECAST → trendline + R² caveat + seasonal + assumptions
-│   │   Provenance refs already bound from evidence collection.
+│   │   ├─ SCENARIO   → payoff breakdown
+│   │   └─ FORECAST   → trendline + R² caveat + seasonal + assumptions
+│   │   Specialized formatter:
+│   │   └─ share_summary_override (renewable/thermal PPA decomposition)
 │   │
 │   └─ [render_style = NARRATIVE]
-│       → LLM receives pre-structured evidence frames
-│       → focused on explanation quality, not schema recovery
-│       → provenance refs pre-bound
+│       → LLM summarizer receives pre-structured evidence frames
+│       → focused on explanation quality; provenance refs pre-bound
+│       → post-hoc provenance gate catches hallucinated numbers
 │
 └─ Stage 5: chart pipeline — consumes VisualizationInfo, multi-group
-    → Built from derived chart builder frames or canonical evidence frames
-    → Not from raw ctx.df by default
+    → Built from derived chart builder specs (MoM/YoY, index growth,
+      decomposition, forecast, seasonal) OR canonical evidence frames.
+    → Not from raw ctx.df by default.
 ```
 
 ---
 
-## 4. Current Stage Semantics
+## 3. Current Stage Semantics
 
-### 4.1 Stage 0: Prepare Context
+Per-stage description of what the runtime does today.
 
-`agent/planner.py`. Detects language, picks light/analyst mode, runs heuristic conceptual classifier as a fallback signal, initialises `QueryContext`. Cheap, no LLM.
+### 3.1 Stage 0 — Prepare Context
 
-### 4.2 Stage 0.2: Structured Question Analyzer
+Detects language, picks light/analyst mode, runs the heuristic conceptual classifier as a fallback signal, initialises `QueryContext`. Cheap, no LLM. Also detects clarification-selection replies ("1", "option 2") and rewrites the query to the picked option before analysis.
 
-`core/llm.py::llm_analyze_question()`. The semantic centre of the pipeline. Emits the full contract — `query_type`, `preferred_path`, `candidate_tools`, `params_hint`, `evidence_roles`, `derived_metrics`, `analysis_requirements`, `canonical_query_en`, `answer_kind`, `render_style`, `grouping`, `entity_scope`, `visualization`. Active cross-check against `query_type`-derived `answer_kind` runs every call (`agent/pipeline.py::_cross_check_answer_kind`); legal-list exception trusts high-confidence LIST for regulatory/conceptual queries.
+### 3.2 Stage 0.2 — Structured Question Analyzer
 
-Prompt assembly is dynamic: `_classify_analyzer_prompt_profile` + `_build_analyzer_prompt_blocks` choose ordered blocks per question family; section-aware truncation drops the least-relevant blocks first per `_ANALYZER_TRUNCATION_DATA` / `_ANALYZER_TRUNCATION_KNOWLEDGE`. Fast mode swaps the budget for `FAST_MODE_ANALYZER_BUDGET`.
+The semantic centre of the pipeline. Emits the full contract listed in §2.3. Prompt assembly is dynamic: `_classify_analyzer_prompt_profile` + `_build_analyzer_prompt_blocks` choose ordered blocks per question family, and section-aware truncation drops the least-relevant blocks first per `_ANALYZER_TRUNCATION_DATA` / `_ANALYZER_TRUNCATION_KNOWLEDGE`. Fast mode swaps the budget for `FAST_MODE_ANALYZER_BUDGET`.
 
-### 4.3 Stage 0.3: Vector Knowledge Retrieval
+Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer_kind` against a `query_type`-derived value every call. On disagreement the safer option is preferred unless the legal-list exception fires (LIST + regulatory/conceptual + confidence ≥ 0.85).
 
-Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, no re-rank) for narrative data shapes, SKIP for deterministic data and CLARIFY. Selected in `agent/pipeline.py` from `answer_kind` + `render_style`.
+### 3.3 Stage 0.3 — Vector Knowledge Retrieval
 
-### 4.4 Response Mode + Resolution Policy (Inline)
+Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, no re-rank) for narrative data, SKIP for deterministic data and CLARIFY. The tier is computed by `_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`.
 
-Derived inline from the contract — no separate stage. KNOWLEDGE / CLARIFY short-circuits; everything else continues to evidence planning.
+### 3.4 Response Mode + Resolution Policy (Inline)
 
-### 4.5 Stage 0.4: Evidence Planner
+Derived inline from the analyzer contract — no separate stage. `KNOWLEDGE_PRIMARY` and `CLARIFY` short-circuit to the relevant summarizer entry point. Everything else continues to evidence planning.
 
-`agent/evidence_planner.py`. Reads `answer_kind`, `render_style`, `candidate_tools`, `evidence_roles`. `_validate_plan_against_answer_kind` ensures planned steps will produce evidence matching the answer shape (LIST → entity-enumeration step; COMPARISON → two-period; TIMESERIES → period range; SCENARIO → scenario params). Mismatches are flagged at planning time, not after wasted tool calls.
+### 3.5 Stage 0.4 — Evidence Planner
 
-### 4.6 Stage 0.5 / 0.6: Tool Execution + Evidence Frame Construction
+Reads `answer_kind`, `render_style`, `candidate_tools`, `evidence_roles`. `_validate_plan_against_answer_kind` ensures planned steps will produce evidence matching the answer shape (LIST → entity-enumeration step; COMPARISON → two-period; TIMESERIES → period range; SCENARIO → scenario params). Mismatches are flagged at planning time, not after wasted tool calls.
 
-Tool runs, output is adapted by `agent/frame_adapters.py` into one of `ObservationFrame`, `EntitySetFrame`, `ComparisonFrame`. Frames carry provenance refs bound at construction time. `agent/evidence_validator.py::validate_evidence` runs inline — correctable gaps are corrected; uncorrectable gaps surface to the planner.
+### 3.6 Stage 0.5/0.7 — Primary Tool Execution
 
-### 4.7 Stage 0.7: Analyzer Tool Route Fallback (Legacy, Pending Removal)
+After F.5d (commit `d601571`) this is **one orchestration block**. The strategy picker `_pick_primary_invocation` returns the first non-None invocation from a four-step chain:
 
-`router.py::match_tool` runs as a final fallback when the evidence plan didn't yield a tool. `candidate_tools[0]` + evidence planner makes this redundant in principle. Pending Phase F removal (track hit rate first; remove if <5% of queries).
+1. **Plan-driven** — first unsatisfied step in `ctx.evidence_plan`.
+2. **Keyword router** — `match_tool` on raw query (only when no authoritative analyzer).
+3. **Analyzer-built** — `planner.build_tool_invocation_from_analysis` from the QuestionAnalysis.
+4. **Authoritative router fallback** — `match_tool` reused, gated on `_should_attempt_authoritative_router_fallback`.
 
-### 4.8 Stage 0.8: Evidence Loop And Merge
+The split between "Stage 0.5" and "Stage 0.7" survives only as observability: strategies 1–2 fire under `stage_0_5_*` trace shapes, strategies 3–4 fire under `stage_0_7_*` shapes with `metrics.log_stage_0_7("entered" | "invocation_built" | "used_result")` counters. The actual execution body is the same helper either way.
 
-Iterates over remaining plan steps, framing and merging results. Pending fold-in into the single execution loop in Phase F.
+Execution is delegated to `_execute_evidence_step` which performs:
 
-### 4.9 Stage 1 / 2: Legacy Planner And SQL Fallback
+1. Execute tool (using a caller-supplied executor binding for testability).
+2. Optionally emit `stage_0_6_tool_execute` trace + `metrics.log_tool_call`.
+3. Normalise the DataFrame.
+4. (Primary only) Stamp `ctx.df`, `ctx.cols`, `ctx.rows`, provenance refs, plan defaults.
+5. Validate tool relevance (primary only).
+6. On block: clear ctx and mark `tool_fallback_reason`; on pass: log "Typed/Analyzer tool relevance validated".
+7. Store result in `ctx.evidence_collected[step.role]`; mark plan step satisfied.
 
-Older parallel path that runs free-form SQL when no typed tool matches. Pending fold-in into the tool-execution failure path in Phase F.
+Failure handling is source-aware: analyzer-source failures route to `_attempt_analyzer_tool_recovery`; plan/keyword-router failures fall through to the legacy SQL escape hatch.
 
-### 4.10 Stage 3: Analyzer Enrichment
+### 3.7 Stage 0.8 — Secondary Evidence Loop
 
-`agent/analyzer.py`. Dispatches on the analyzer-emitted contract flags (`needs_correlation_context`, `needs_driver_analysis`, requested `derived_metrics`, share-intent emitted by Stage 0.2). No regex eligibility detection. Outputs become `analysis_evidence` consumable by both the LLM summariser and the derived chart builders.
+`evidence_planner.execute_remaining_evidence` iterates over plan steps not satisfied during primary execution, executing each via the same `_execute_evidence_step` helper (lazy-imported to avoid a circular dependency). Secondary execution is configured differently from primary: `validate_relevance=False`, `emit_tool_call_metric=False`, `emit_tool_execute_trace=False` — preserves Stage 0.8's historical observability (one outer `stage_0_8_evidence_loop` trace, not per-step). Has a per-loop deadline (`EVIDENCE_LOOP_BUDGET_SECONDS`). After the loop, `merge_evidence_into_context` joins secondary frames into `ctx.df` via date-aligned joins.
 
-### 4.11 Stage 4: Generic Renderer + LLM Summariser
+After Stage 0.8, when `ctx.used_tool` is set, `_enrich_prices_with_balancing_driver_context` adds source-price and contribution columns for balancing-price answers.
 
-`agent/summarizer.py::summarize_data` first calls `_try_generic_renderer` (`agent/generic_renderer.py`). The renderer handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from canonical evidence frames. `share_summary_override` is a deterministic specialized formatter for share-intent queries (alongside SCENARIO and FORECAST in the §3.4 Ideal Tree's "specialized formatters" category — see §6.3). When neither produces output and `render_style=NARRATIVE`, control passes to `llm_summarize_structured` with a focus-aware prompt assembled from `skills/answer-composer/`.
+### 3.8 Stage agent_loop, Stages 1/2 — Legacy Fallbacks
 
-The five regex eligibility detectors that previously gated SCENARIO / FORECAST / TARIFF-LIST / RESIDUAL-WEIGHTED-PRICE / FORECAST-DIRECT have been removed. New question families that produce one of the six handled shapes need zero Stage 4 code.
+The agent loop (`orchestrator.run_agent_loop`) is gated on `ENABLE_AGENT_LOOP and not ctx.has_authoritative_question_analysis and not analyzer_tool_failed` — it fires only when there is no firm Stage 0.2 contract. May set `ctx.used_tool=True` and exit early as `conceptual_exit` or `data_exit`.
 
-### 4.12 Stage 5: Chart Pipeline
+Stages 1/2 (`planner.generate_plan` + `sql_executor.validate_and_execute`) fire when `not ctx.used_tool` after the above. The condition is the §2.3 ideal's "SQL escape hatch when no typed tool produced primary data". Conceptual or `skip_sql` paths route to `summarizer.answer_conceptual` and return.
 
-`agent/chart_pipeline.py` consumes `VisualizationInfo` directly. Chart-frame source is selected first: derived chart builders (`agent/derived_chart_builder.py`) produce specs for MoM/YoY, index growth, decomposition, forecast, and seasonal answers; otherwise canonical evidence frames feed `agent/chart_frame_builder.py`. Multi-group plans are preserved — `chart_groups` is iterated, with per-group `type`, `title`, `y_axis_label`, and `metrics` honoured.
+### 3.9 Stage 3 — Analyzer Enrichment
 
----
+`analyzer.enrich` dispatches on analyzer-emitted contract flags (`needs_correlation_context`, `needs_driver_analysis`, requested `derived_metrics`, `analyzer_indicates_share_intent`). Computes correlation, MoM/YoY, share decomposition, scenario evidence, forecast trendlines. No regex-based eligibility detection. Outputs become `ctx.analysis_evidence` and feed both the LLM summarizer and the derived chart builders.
 
-## 5. Module Responsibilities
+A "missing requested evidence" check after Stage 3 can CLARIFY if the analyzer asked for derived metrics that Stage 3 couldn't produce, unless partial evidence is available.
 
-### `agent/pipeline.py`
+### 3.10 Stage 4 — Generic Renderer + Specialized Formatter + LLM Summarizer
 
-Orchestrates the full pipeline. Owns: stage tracing, response-mode derivation, cross-check, evidence loop, error/fallback policy. Holds the legal-list cross-check exception.
+`summarizer.summarize_data` dispatch order:
 
-### `agent/router.py`
+1. **Generic renderer** (`generic_renderer.render`) — handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from canonical evidence frames. Returns None when the shape isn't covered or evidence isn't suitable.
+2. **share_summary_override** — deterministic specialized formatter for share-intent queries (renewable/thermal PPA decomposition + per-period price join). Sits alongside SCENARIO/FORECAST as a permanent specialized formatter per §2.3 (see §5.3 for why it's not legacy debt).
+3. **Other specialized direct answers** — regulated-tariff-list, residual-weighted-price.
+4. **LLM `llm_summarize_structured`** — for `render_style=NARRATIVE` shapes. Receives focus-aware prompts assembled from [`skills/answer-composer/`](../../skills/answer-composer/SKILL.md). Truncation profile selected by `answer_kind`: `_TRUNCATION_PRIORITY_DATA` / `_KNOWLEDGE` / `_EXPLANATION` / `_FORECAST_SCENARIO`.
 
-Keyword + semantic tool router. Active only as a fallback when the evidence plan doesn't yield a tool (Stage 0.7) and as a tool-name resolver during recovery. Pending removal of the parallel Stage 0.7 invocation in Phase F.
+A post-hoc provenance gate runs after the summary. It is a no-op for canonical-frame paths (claims list is empty → `gate_passed=True, reason="no_claims"`); for narrative LLM summaries it catches numeric hallucinations and replaces the answer with a `citation_gate_fallback` on coverage failure.
 
-### `agent/evidence_planner.py`
+### 3.11 Stage 5 — Chart Pipeline
 
-Builds and validates the evidence plan against the analyzer contract — including `answer_kind`-shape validation (`_validate_plan_against_answer_kind`).
-
-### `agent/analyzer.py`
-
-Stage 3 enrichment. Contract-driven dispatch on emitted flags and derived-metric requests. No regex eligibility detection.
-
-### `agent/generic_renderer.py`
-
-Stage 4 deterministic rendering for SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST.
-
-### `agent/frame_adapters.py`
-
-Per-tool adapters that normalise raw tool output into `ObservationFrame` / `EntitySetFrame` / `ComparisonFrame`.
-
-### `agent/evidence_validator.py`
-
-Inline validation of evidence frames against `answer_kind`.
-
-### `agent/summarizer.py`
-
-Stage 4 entry point. Tries the generic renderer first; otherwise calls `llm_summarize_structured` with focus-aware prompts. `share_summary_override` is a deliberate specialized formatter for share-intent queries (see §6.3). Conceptual answers go to `answer_conceptual`.
-
-### `agent/chart_pipeline.py`, `agent/chart_frame_builder.py`, `agent/derived_chart_builder.py`
-
-Stage 5. Visualization plan → chart frame → render. Derived chart builders cover MoM/YoY, index growth, decomposition, forecast, seasonal.
-
-### `core/llm.py`
-
-LLM call sites and prompt assembly. Owns: dynamic analyzer prompt blocks, `_classify_analyzer_prompt_profile`, `_build_analyzer_prompt_blocks`, `_ANALYZER_TRUNCATION_*` priorities, `_TRUNCATION_PRIORITY_*` summarizer profiles by `answer_kind`, fast-mode budget overrides, OpenAI fallback on Gemini failure.
-
-### `contracts/question_analysis.py`, `question_analysis_catalogs.py`
-
-The Stage 0.2 contract: `QuestionAnalysis` Pydantic model with `AnswerKind`, `RenderStyle`, `Grouping`, `VisualizationInfo`, `FilterCondition`, `MeasureTransform`, `VisualizationTimeGrain`, `SeriesSplitMode`, `SortRule`, `ChartFamily`, `VisualGoal`, `PresentationMode`, `SemanticRole`, `ChartIntent`. Catalogs supply the LLM-facing JSON that explains each enum.
-
-### `contracts/evidence_frames.py`, `contracts/vector_knowledge.py`
-
-`ObservationFrame`, `EntitySetFrame`, `ComparisonFrame`; `VectorRetrievalTier`.
-
-### `knowledge/vector_retrieval.py`
-
-Three-tier retrieval implementation.
-
-### `skills/`
-
-Runtime skills loaded into LLM prompts: `question-analyzer`, `sql-planner`, `answer-composer`, `energy-analyst`. Plus developer-only skills (NOT loaded into prompts): `developer-phased-audit`, `pipeline-failure-diagnostics`.
+`chart_pipeline.build_chart` consumes the analyzer's `VisualizationInfo` directly. The chart frame source is selected first: derived chart builders produce specs for MoM/YoY, index growth, decomposition, forecast, and seasonal answers; otherwise canonical evidence frames feed `chart_frame_builder`. Multi-group plans are iterated — `chart_groups` produces one chart per group, with per-group `type`, `title`, `y_axis_label`, and `metrics` honoured.
 
 ---
 
-## 6. Remaining Architectural Gaps
+## 4. Module Responsibilities & Source of Truth
 
-A handful of structural gaps remain. None block correctness today; they are maintenance / clarity / latency improvements and an open quality area.
+Runtime modules and the files they live in. If this list disagrees with the codebase, the codebase wins.
 
-### 6.1 Pipeline Consolidation (Phase F)
+### Orchestration
 
-The Phase F.5a–d series (2026-05-10) extracted the execute / frame / validate / store sequence into one helper (`_execute_evidence_step`) used by all three former call sites, and collapsed the Stage 0.5 + 0.7 strategy-picker split into one `_pick_primary_invocation` chain with one orchestration block. What remains:
+- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline: stage tracing via `_emit_trace_stage` + local `_trace_stage` closure, response-mode derivation, `_cross_check_answer_kind` with the legal-list exception, `_pick_primary_invocation` four-strategy chain, `_execute_evidence_step` helper, post-loop driver enrichment, legacy SQL fallback gate. Holds the `_attempt_analyzer_tool_recovery` analyzer-source recovery candidate.
 
-- **Stage 0.7 strategies (analyzer-built + authoritative router fallback) inside `_pick_primary_invocation`.** Hit-rate counters are exposed in `/metrics` (Phase F.2 instrumentation, 2026-05-10). Two-week observation gates F.6 removal: once `used_result / requests < 5%`, the analyzer-built and router-fallback strategies become a small deletion from the chain.
-- **Primary execution + Stage 0.8 secondary loop still separate.** After F.5d, primary execution is one block and Stage 0.8 is a delegate to `evidence_planner.execute_remaining_evidence`. The §3.4 ideal merges them into one `for step in evidence_plan` loop where the first step uses the four-strategy chain and subsequent steps use plan-only. Open. Substantial refactor; warrants its own session.
+### Analyzer + Routing
 
-**Not removable, despite earlier versions of the doc claiming so:**
+- **[`core/llm.py`](../../core/llm.py)** — All LLM call sites and prompt assembly. Owns `_classify_analyzer_prompt_profile`, `_build_analyzer_prompt_blocks`, the catalogue JSON cached at module load, `_ANALYZER_TRUNCATION_*` priorities, `_TRUNCATION_PRIORITY_*` summarizer profiles by `answer_kind`, fast-mode budget overrides, OpenAI fallback on Gemini failure.
+- **[`agent/planner.py`](../../agent/planner.py)** — `prepare_context`, language detection, mode selection, heuristic conceptual classifier, `build_tool_invocation_from_analysis` (strategy 3 in the primary picker), legacy `generate_plan` for SQL fallback.
+- **[`agent/router.py`](../../agent/router.py)** — `match_tool` keyword+semantic tool router (strategies 2 and 4 in the primary picker).
+- **[`contracts/question_analysis.py`](../../contracts/question_analysis.py)**, **[`question_analysis_catalogs.py`](../../contracts/question_analysis_catalogs.py)** — the Stage 0.2 contract: `QuestionAnalysis` Pydantic model with `AnswerKind`, `RenderStyle`, `Grouping`, `VisualizationInfo`, `FilterCondition`, `MeasureTransform`, `VisualizationTimeGrain`, `SeriesSplitMode`, `SortRule`, `ChartFamily`, `VisualGoal`, `PresentationMode`, `SemanticRole`, `ChartIntent`. Catalogs supply the LLM-facing JSON that explains each enum.
+- **[`schemas/question_analysis.schema.json`](../../schemas/question_analysis.schema.json)** — JSON-schema snapshot of the Pydantic model, asserted by `test_question_analysis_contract.py::test_schema_snapshot_matches_runtime_model`.
 
-- The **post-hoc provenance gate** is *not* a removable artefact. It is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `no_claims` immediately at [summarizer.py:663](D:\Enaiapp\langchain_railway\agent\summarizer.py#L663)). For narrative LLM summaries it is the safety net against numeric hallucination — exactly what fired on the 2026-05-09 verification log when an ungrounded narrative produced `summary_source=structured_summary_grounding_fallback`. Frame-construction provenance binding cannot replace it.
-- The **`share_summary_override` deterministic path** is a specialized formatter (see §6.3), not legacy debt.
-- **Legacy SQL is already at the right boundary.** `if not ctx.used_tool` at [pipeline.py:~2039](D:\Enaiapp\langchain_railway\agent\pipeline.py#L2039) is the §3.4 failure-path condition. Moving SQL earlier would skip Stage 0.8 + agent loop — a behavioural change, not a cosmetic one.
+### Evidence Collection
 
-**Not on this list, despite earlier versions of the doc claiming so:**
+- **[`agent/evidence_planner.py`](../../agent/evidence_planner.py)** — builds and validates the evidence plan (`_validate_plan_against_answer_kind`), iterates remaining plan steps in `execute_remaining_evidence` (Stage 0.8), joins secondary frames in `merge_evidence_into_context`.
+- **[`agent/evidence_validator.py`](../../agent/evidence_validator.py)** — `validate_evidence` runs inline during frame attachment; checks frames against `answer_kind` shape requirements (shared with the planner via [`agent/shape_requirements.py`](../../agent/shape_requirements.py)).
+- **[`agent/frame_adapters.py`](../../agent/frame_adapters.py)** — per-tool adapters that normalise raw tool output into `ObservationFrame` / `EntitySetFrame` / `ComparisonFrame`.
+- **[`agent/tools/`](../../agent/tools/)** — typed tool implementations.
+- **[`agent/tool_adapter.py`](../../agent/tool_adapter.py)** — runs typed tools with timeouts; produces compact preview text for LLM contexts.
+- **[`contracts/evidence_frames.py`](../../contracts/evidence_frames.py)** — `ObservationFrame`, `EntitySetFrame`, `ComparisonFrame` definitions.
+- **[`contracts/vector_knowledge.py`](../../contracts/vector_knowledge.py)** — `VectorRetrievalTier` enum + vector-knowledge bundle types.
+- **[`knowledge/vector_retrieval.py`](../../knowledge/vector_retrieval.py)** — three-tier retrieval implementation.
+- **[`agent/provenance.py`](../../agent/provenance.py)** — `stamp_provenance`, `clear_provenance`, `tool_invocation_hash`, `sql_query_hash`.
 
-- The **post-hoc provenance gate** is *not* a removable artefact. It is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `no_claims` immediately at [summarizer.py:663](D:\Enaiapp\langchain_railway\agent\summarizer.py#L663)). For narrative LLM summaries it is the safety net against numeric hallucination — exactly what fired on the 2026-05-09 verification log when an ungrounded narrative produced `summary_source=structured_summary_grounding_fallback`. Frame-construction provenance binding cannot replace it.
-- The **`share_summary_override` deterministic path** is a specialized formatter (see §6.3), not legacy debt.
+### Analysis & Enrichment
 
-### 6.2 Analyzer Misclassification — Quality, Not Architecture
+- **[`agent/analyzer.py`](../../agent/analyzer.py)** — `enrich` runs Stage 3. Contract-driven dispatch on emitted flags and derived-metric requests.
+- **[`agent/metric_registry.py`](../../agent/metric_registry.py)** — per-metric computation registry (MoM, YoY, CAGR, share-decomposition, correlation). `analyzer.py` dispatches to these instead of a monolithic if/elif chain.
+- **[`agent/aggregation.py`](../../agent/aggregation.py)** — aggregation-intent detection + SQL guard helpers.
 
-The architecture trades regex brittleness for LLM non-determinism. The cross-check + evidence validator + legal-list exception are mitigations, not eliminations. The quality work happens in the analyzer prompt, the runtime skills, and the few-shot examples — not in additional pipeline stages.
+### Rendering
 
-The 2026-05-09 fix series is illustrative: a regulatory-eligibility question was mis-routed (`conceptual_definition` vs `regulatory_procedure`), the cross-check overrode the LLM's correct LIST shape, and the narrative template merged enumerated items. The fix was four small edits across the analyzer prompt, the cross-check policy, and the answer-composer skill — no new stage.
+- **[`agent/summarizer.py`](../../agent/summarizer.py)** — Stage 4 entry. Tries the generic renderer first; otherwise calls `llm_summarize_structured` with focus-aware prompts. `share_summary_override` is a deliberate specialized formatter (see §5.3). Conceptual answers go to `answer_conceptual`. Owns `_enforce_provenance_gate` (the post-hoc grounding check).
+- **[`agent/generic_renderer.py`](../../agent/generic_renderer.py)** — deterministic rendering for SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from evidence frames.
+- **[`agent/chart_pipeline.py`](../../agent/chart_pipeline.py)** — Stage 5 entry. Selects chart frame source, applies `measure_transform` / `time_grain`, iterates `chart_groups`.
+- **[`agent/chart_frame_builder.py`](../../agent/chart_frame_builder.py)** — builds chart-shaped frames from canonical evidence frames.
+- **[`agent/derived_chart_builder.py`](../../agent/derived_chart_builder.py)** — specs for MoM/YoY, index growth, decomposition, forecast, seasonal charts.
+- **[`visualization/chart_selector.py`](../../visualization/chart_selector.py)** — `should_generate_chart` gate (consults `VisualizationInfo` + row count + answer_kind).
 
-This area will keep producing per-question reports. The diagnostic playbook is in `skills/pipeline-failure-diagnostics/`; the fix layering principle is "prompt vs cross-check vs runtime skill — pick one layer based on where the contract was actually wrong, not where the symptom appeared."
+### Skills
 
-### 6.3 `share_summary_override` Is A Specialized Formatter, Not Legacy Debt
+Loaded into LLM prompts at request time:
 
-Earlier versions of this document listed `share_summary_override` as legacy debt to be absorbed into the generic renderer. A 2026-05-10 audit (Phase F.1) determined this was a misclassification: `share_summary_override` is a deliberate **specialized formatter** for share-intent queries, in the same category as the SCENARIO and FORECAST specialized formatters that the §3.4 Ideal Decision Tree explicitly preserves alongside the generic renderer.
+- **[`skills/question-analyzer/`](../../skills/question-analyzer/)** — JSON-contract guidance for the Stage 0.2 prompt.
+- **[`skills/sql-planner/`](../../skills/sql-planner/)** — chart-strategy rules, focus guidance, SQL patterns for the legacy planner.
+- **[`skills/answer-composer/`](../../skills/answer-composer/)** — Stage 4 narrative templates and focus catalogs (Focus: Regulation, Focus: Balancing, etc.).
+- **[`skills/energy-analyst/`](../../skills/energy-analyst/)** — domain reasoning references (entity taxonomy, driver framework, seasonal rules) for energy-domain summaries.
 
-The artifact decomposes `share_all_ppa` into its renewable/thermal components and joins per-period prices — domain-specific knowledge that the generic renderer intentionally does not have. The decision to build it is gated on the structured analyzer signal `ctx.analyzer_indicates_share_intent`, not on regex. See the inline comment at [agent/analyzer.py:2020-2030](D:\Enaiapp\langchain_railway\agent\analyzer.py#L2020) for the design rationale.
+Developer-only (NOT loaded into prompts):
 
-No action required. This is not a Phase F item.
+- **[`skills/developer-phased-audit/`](../../skills/developer-phased-audit/)** — workflow for phased implementation.
+- **[`skills/pipeline-failure-diagnostics/`](../../skills/pipeline-failure-diagnostics/)** — log-reading playbook and failure taxonomy for triaging Q&A failures.
 
-### 6.4 Filter Field — Implemented But Worth Auditing
+### Legacy / Fallback
 
-`FilterCondition` (`metric / operator / value / unit`) exists on `ToolParamsHint` and is consumed by tool executors. Audit periodically that new threshold-style queries route through the structured filter rather than ad-hoc post-fetch filtering inside summarisers.
+- **[`agent/orchestrator.py`](../../agent/orchestrator.py)** — legacy agent loop. Fires only when there is no authoritative analyzer.
+- **[`agent/sql_executor.py`](../../agent/sql_executor.py)** — Stage 2 SQL execution + safety checks for the legacy SQL escape hatch.
 
-### 6.5 Cross-Tool Computation Patterns
+---
 
-The default for cross-tool computational questions ("weighted average price excluding regulated entities") is narrative rendering — let the LLM synthesise from pre-structured evidence. If a repeating pattern emerges, add a `derived_metric` type and let Stage 3 compute it from multi-tool evidence (same shape as MoM / YoY / correlation). Principle: narrative as default, derived metric only when the pattern repeats. No structural change required.
+## 5. What Still Needs to Be Fixed
 
-### 6.6 Chart-Building Polish
+Priority-sorted. Each item is paired with the verification needed before removal/refactor.
 
-The visualisation contract is fully implemented and Stage 5 consumes it. Two remaining observations:
+### 5.1 Pipeline Consolidation — Single Execution Loop (open)
 
-- **Decision rule for chart vs table on borderline `answer_kind=COMPARISON` questions.** Today `primary_presentation` is consulted, but when the analyzer leaves it null the code falls back to row-count heuristics. The right move when uncertain is `chart_plus_table` rather than chart-only.
+**What:** Merge primary execution (the single block built by F.5d) with the Stage 0.8 secondary evidence loop into one `for step in evidence_plan: ...` loop. First step uses the four-strategy chain in `_pick_primary_invocation`; subsequent steps use plan-only.
+
+**Why:** Today the primary block is one orchestration with strategies, and Stage 0.8 is a separate function in `evidence_planner.py` (via lazy import). The §2.3 ideal calls for one loop. The pieces that feed it — `_execute_evidence_step` with `is_primary` and `executor` parameters — are already in place.
+
+**Risk:** Substantial. Touches the hot path. Per-step trace shapes (`stage_0_5_*` vs `stage_0_6_*` vs `stage_0_8_*`) need a versioning decision; the Stage 0.8 timeout/budget logic needs preserving; `merge_evidence_into_context` needs to keep running after the loop.
+
+**Files:** [`agent/pipeline.py`](../../agent/pipeline.py), [`agent/evidence_planner.py`](../../agent/evidence_planner.py).
+
+### 5.2 Stage 0.7 Removal (F.6, gated)
+
+**What:** Remove the analyzer-built (strategy 3) and authoritative router-fallback (strategy 4) branches from `_pick_primary_invocation`. With them gone, Stage 0.7 disappears entirely; the strategy chain becomes plan-driven + keyword-router (the latter only when no authoritative analyzer).
+
+**Gate:** Two-week production data from the F.2 hit-rate counters (`stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result`) showing `used_result / requests < 5%`. Until that is observed, removal is premature.
+
+**Risk:** Small once the data clears. The change is deletion + a few related metric/trace removals.
+
+**Files:** [`agent/pipeline.py`](../../agent/pipeline.py), [`agent/router.py`](../../agent/router.py).
+
+### 5.3 Analyzer Misclassification — Standing Quality Area
+
+The architecture trades regex brittleness for LLM non-determinism. Cross-check, evidence validator, and the legal-list exception are mitigations, not eliminations. Mis-routing surfaces as wrong `query_type`, wrong `answer_kind`, or a confidence flag mismatch, and the fix layer depends on which contract was actually wrong.
+
+**Where the work lives:** analyzer prompt (few-shot examples, vocabulary), `_cross_check_answer_kind` policy, runtime skills (`answer-composer`, `energy-analyst`).
+
+**Playbook:** [`skills/pipeline-failure-diagnostics/references/failure-taxonomy.md`](../../skills/pipeline-failure-diagnostics/references/failure-taxonomy.md) Pattern A (schema crash → cascade), Pattern B (cross-check override), Pattern C (router misclassification), Pattern D (heuristic disagreement). The 2026-05-09 fix series ("who can trade…", "why did price change…", "trend and structure of supply") is the canonical worked example: four edits across prompt + cross-check + answer-composer skill, no new stage.
+
+This is ongoing — every new failure report potentially adds a few-shot example, a cross-check refinement, or an answer-composer rule.
+
+### 5.4 `share_summary_override` Is A Specialized Formatter — Not Removable
+
+Earlier versions of this document listed `share_summary_override` as legacy debt to be absorbed into the generic renderer. A 2026-05-10 audit determined this was a misclassification: it is a deliberate **specialized formatter** for share-intent queries, in the same category as SCENARIO and FORECAST per §2.3.
+
+The artifact decomposes `share_all_ppa` into its renewable/thermal components and joins per-period prices — domain-specific knowledge that the generic renderer intentionally does not have. The decision to build it is gated on the structured analyzer signal `ctx.analyzer_indicates_share_intent`, not on regex. See the inline comment at [`agent/analyzer.py`](../../agent/analyzer.py) §"Share summary override" for the design rationale.
+
+**No action required.**
+
+### 5.5 Post-Hoc Provenance Gate Is The Narrative Safety Net — Not Removable
+
+Earlier versions of this document proposed removing the post-hoc provenance gate as redundant after frame-construction-time provenance binding. The 2026-05-10 audit determined this is wrong:
+
+- For **canonical-frame paths** (generic renderer output) the gate is already a no-op — `summary_claims=[]` makes it return `gate_passed=True, reason="no_claims"` immediately.
+- For **narrative LLM summaries** the gate is the safety net against numeric hallucination — it fired on the 2026-05-09 verification log when an ungrounded narrative produced `summary_source=structured_summary_grounding_fallback`. Frame-construction provenance binding cannot replace it because the narrative content is LLM-generated, not extracted.
+
+**No action required.**
+
+### 5.6 Small Open Items
+
+- **`FilterCondition` audit.** The contract exists on `ToolParamsHint` and is consumed by tool executors. Audit periodically that new threshold-style queries route through the structured filter rather than ad-hoc post-fetch filtering inside summarizers. ([`contracts/question_analysis.py`](../../contracts/question_analysis.py))
+- **Cross-tool computational queries.** Default is narrative rendering — let the LLM synthesise from pre-structured evidence. If a repeating pattern emerges, add a `derived_metric` type and let Stage 3 compute it (same shape as MoM/YoY/correlation). Principle: narrative as default, derived metric only when the pattern repeats. No structural change required.
+- **Borderline `answer_kind=COMPARISON` chart vs table.** Today `primary_presentation` is consulted, but when the analyzer leaves it null the code falls back to row-count heuristics. The right move when uncertain is `chart_plus_table` rather than chart-only. ([`agent/chart_pipeline.py`](../../agent/chart_pipeline.py))
 - **Reference lines.** `include_reference_lines` was dropped because a bare bool can't carry which axis/value/label. If reference-line rendering becomes needed, introduce a concrete `ReferenceLineSpec` dataclass first.
 
----
+### 5.7 Triage Playbook (operational, not architectural)
 
-## 7. Source Of Truth
-
-Runtime behaviour described above is implemented in:
-
-- `agent/pipeline.py`
-- `agent/router.py`
-- `agent/evidence_planner.py`
-- `agent/evidence_validator.py`
-- `agent/frame_adapters.py`
-- `agent/analyzer.py`
-- `agent/summarizer.py`
-- `agent/generic_renderer.py`
-- `agent/chart_pipeline.py`
-- `agent/chart_frame_builder.py`
-- `agent/derived_chart_builder.py`
-- `core/llm.py`
-- `knowledge/vector_retrieval.py`
-- `contracts/question_analysis.py`
-- `contracts/question_analysis_catalogs.py`
-- `contracts/evidence_frames.py`
-- `contracts/vector_knowledge.py`
-- `schemas/question_analysis.schema.json`
-- `skills/answer-composer/`, `skills/energy-analyst/`, `skills/question-analyzer/`, `skills/sql-planner/`
-- `skills/developer-phased-audit/`, `skills/pipeline-failure-diagnostics/` (developer-only)
-
-If this document and the code disagree, the code wins. Update this document.
+For triaging Q&A failures — latency spikes, grounding failures, schema validation crashes, routing misclassification — consult [`skills/pipeline-failure-diagnostics/`](../../skills/pipeline-failure-diagnostics/). The skill is the source of truth for failure patterns and fix-layer selection; this architecture document deliberately does not duplicate that content.
 
 ---
 
-## 8. Remaining Phased Plan
+## 6. Practical Conclusion
 
-One phase, plus ongoing quality work. Phases A–E from the prior plan are complete and have been removed from this document.
+The pipeline is contract-driven end to end. Stage 0.2 emits the answer contract; evidence frames + the generic renderer cover six standard answer shapes deterministically; narrative shapes go to a focus-aware LLM summarizer; the visualization plan flows to Stage 5 without re-interpretation.
 
-### Phase F: Pipeline Consolidation — Remove Legacy Stages
-
-**Problem being solved:** Stage 0.7 and the four-stage tool execution split (0.5 / 0.6 / 0.7 / 0.8 / 1 / 2) are pre-contract artefacts that add maintenance surface and create occasional edge cases where legacy paths bypass frame construction. The Ideal Decision Tree calls for a single execution loop with SQL as a within-loop escape hatch.
-
-**What was done (2026-05-10 series):**
-
-| Sub | Scope | Status |
-|---|---|---|
-| F.1 | Reclassify `share_summary_override` as a specialized formatter (audit-only). | **Done** (commit `2a7fa41`). See §6.3. |
-| F.2 | Stage 0.7 hit-rate observability — counters `stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result` exposed in `/metrics`. `used_result / requests` is the "paying its keep" rate. | **Done** (commit `a17f3f2`). Two-week observation gates F.6 removal. |
-| F.3 | Post-hoc provenance gate (audit-only). | **Done — kept.** The gate is already a no-op for canonical-frame paths and is the safety net for narrative LLM summaries. Not removable. See §6.1. |
-| F.5a | Extract `_execute_evidence_step` helper from the duplicated execute/frame/validate/store sequence; wire Stage 0.5 first. | **Done** (commit `d138a22`). |
-| F.5b | Wire Stage 0.7 to the same helper; promote `_trace_stage` to module-level `_emit_trace_stage` so the helper can use it without falling out of the closure. | **Done** (commit `4a5b63e`). |
-| F.5c | Wire Stage 0.8 (`evidence_planner.execute_remaining_evidence`) to the helper; helper accepts an `executor` callable so test patches on the caller's local `execute_tool` binding continue to work. | **Done** (commit `ac61ce4`). |
-| F.5d | Collapse Stages 0.5 and 0.7 into one strategy chain. New `_pick_primary_invocation` returns `(invocation, plan_step, source, build_error)` for the four primary strategies (plan-driven, keyword-router, analyzer-built, authoritative router fallback). One orchestration block emits source-specific metrics/traces. | **Done** (commit `d601571`). |
-| F.5e | Fold legacy SQL (Stages 1/2) into the tool-execution failure path. | **Done by gating** — audit-only close. The current `if not ctx.used_tool` gate at [pipeline.py:2039](../../agent/pipeline.py#L2039) is already the §3.4 "no typed tool produced primary data" failure-path condition. Moving SQL earlier in the function would skip Stage 0.8 and the agent loop, which would weaken behaviour. |
-| F.5f | Drop empty trace calls and clean comments after the F.5 collapse. | **Done by audit** — no trace events became empty after F.5d; all carry useful payloads. Comments updated in F.5d's diff. |
-
-**What remains open:**
-
-| Sub | Scope | Blocked on |
-|---|---|---|
-| F.5 (full) | Merge primary execution + Stage 0.8 into a single `for step in evidence_plan: ...` loop where the first step uses the four-strategy chain and subsequent steps use plan-only. | Substantial refactor; warrants its own session with full attention to per-step trace shapes, the secondary-loop budget/timeout in `evidence_planner.execute_remaining_evidence`, and `merge_evidence_into_context`. The pieces that would feed it (the helper, the strategy chain) are now in place. |
-| F.6 | Remove Stage 0.7 (the analyzer-built and authoritative router-fallback strategies in `_pick_primary_invocation`). | Two-week F.2 hit-rate data showing `used_result / requests < 5%`. Becomes a small change to `_pick_primary_invocation` plus removal of the Stage 0.7-source orchestration branch. |
-
-**Removed from this list** (audit findings, 2026-05-10):
-
-- *"Absorb `share_summary_override` into the generic renderer LIST/SCALAR path."* The override is a deliberate specialized formatter for share-intent queries (renewable/thermal PPA decomposition + per-period price join), in the same category as SCENARIO and FORECAST per §3.4. Forcing it into the domain-agnostic generic renderer would either pollute the renderer with domain-specific knowledge or lose the decomposition. See §6.3.
-- *"Remove the post-hoc provenance gate."* The gate is already a no-op for canonical-frame paths (generic renderer sets `summary_claims=[]`, gate returns `gate_passed=True, reason="no_claims"` immediately). For narrative LLM summaries the gate is the safety net against numeric hallucination — frame-construction provenance binding cannot replace it. Keep the gate.
-
-**Validation summary:** every F.5 sub-commit was tested against the targeted suite (analyzer contract, question analyzer, vector retrieval, chart frame, guardrails, derived chart, evidence planner, evidence joins). 459 tests pass on the wide suite at every step. Two pre-existing failures unrelated to this work persist.
-
-**Sequencing:**
-
-The hit-rate tracking from item 1 can start in parallel with the analyzer-quality work in §6.2. Items 2 and 3 are independent. Items 4 and 5 are best done together because they affect the same call sites. Item 6 is independent and can land any time.
-
----
-
-## 9. Standing Quality Workstreams
-
-These are not phases — they are ongoing commitments triggered by failure reports.
-
-### 9.1 Analyzer Routing Quality
-
-Symptom class: a query is mis-routed at Stage 0.2 (wrong `query_type`, wrong `answer_kind`, low confidence on a question the human would answer easily).
-
-Workflow: open `skills/pipeline-failure-diagnostics/references/log-reading.md`, classify the failure (Pattern C router misclassification, Pattern D heuristic disagreement), and propose a fix at the right layer per `fix-principles.md`. Few-shot example expansion in `core/llm.py::_ANALYZER_CORE_RULES` is usually correct; cross-check policy changes are rarer; runtime skill changes (answer-composer / energy-analyst) only when the analyzer was right but rendering lost information.
-
-### 9.2 Summarizer Latency on Long Prompts
-
-Symptom class: 504 retry on the summarizer call, total request time > 60s, prompt > 50 K chars.
-
-Workflow: `pipeline-failure-diagnostics` Pattern E. Prefer reducing prompt size (`PROMPT_BUDGET_MAX_CHARS`, domain-knowledge cap, vector top-K) before changing model or retry count. Switching summarizer to `gemini-2.5-flash` is the safest single-knob latency win when quality measurements support it.
-
-### 9.3 Grounding Failures
-
-Symptom class: `provenance_gate gate_passed=false`, `summary_source=citation_gate_fallback`, the user gets a generic apology instead of the analytical answer.
-
-Workflow: `pipeline-failure-diagnostics` Pattern F. Almost always one of: (1) `analyzer_available=false` from Pattern A, (2) data preview was truncated by the prompt budget and the LLM filled the gap with plausible-looking numbers, or (3) the LLM did arithmetic in its head instead of citing pre-computed `STATISTICS`. Fix at the right layer; do not lower the coverage threshold.
-
-### 9.4 Visualization Plan Misalignment
-
-Symptom class: chart contradicts the answer (chart shows raw rows when the answer discusses MoM change; chart present when the answer is a single number; multi-unit metrics squashed onto one axis).
-
-Workflow: confirm the analyzer emitted `VisualizationInfo` correctly. If yes, the bug is in `agent/chart_pipeline.py` or a missing derived chart builder. If no, the bug is in the analyzer prompt's chart-policy hints.
-
----
-
-## 10. Practical Conclusion
-
-The pipeline is now contract-driven end to end. Stage 0.2 emits the answer contract, evidence frames + the generic renderer cover the six standard answer shapes, the evidence planner validates plan shape, vector retrieval is three-tier, and the visualisation plan flows through to Stage 5.
-
-After the 2026-05-10 F.5a–d series, the primary tool-execution code is a single helper called from three places (Stages 0.5 / 0.7 / 0.8) and the primary strategy chain is one function (`_pick_primary_invocation`) instead of two separate stage blocks. The remaining structural work: merge primary execution + Stage 0.8 into one `for step in evidence_plan` loop where the first step uses the four-strategy chain and subsequent steps use plan-only — substantial refactor warranting its own session. Plus F.6: remove the analyzer-built + router-fallback strategies from `_pick_primary_invocation` once two-week hit-rate data confirms `used_result / requests < 5%`. Earlier versions of this doc also listed the post-hoc provenance gate, `share_summary_override`, and an SQL "fold-in" as removable; the F.5 audit determined all three are correctly in place by design (see §6.1, §6.3). The remaining quality work is in the analyzer prompt, runtime skills, and cross-check policy — guided by the `pipeline-failure-diagnostics` developer skill.
+After the 2026-05-10 F.5 series the primary execution code is one helper called from three sites, and the primary-routing strategy chain is one function instead of two separate stage blocks. The remaining structural work — merging primary execution and Stage 0.8 into one for-loop, plus removing Stage 0.7 strategies once F.2 hit-rate data clears — is the path to making §2.3's Ideal Decision Tree a literal description of the runtime rather than an aspirational target.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 
-- **For SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST:** no — the generic renderer handles it.
-- **For EXPLANATION / KNOWLEDGE / CLARIFY:** no — narrative LLM summariser, guided by skills.
-- **For the analyzer mis-routing the question entirely:** that is the live quality work — fixed by prompt few-shots and cross-check tuning, not new stages.
+- **SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST** → no, the generic renderer handles it.
+- **EXPLANATION / KNOWLEDGE / CLARIFY** → no, narrative LLM summarizer guided by skills.
+- **Share-composition queries** → no, `share_summary_override` (specialized formatter) handles it.
+- **Analyzer mis-routing the question entirely** → that's the live quality work in §5.3 — fixed by prompt few-shots, cross-check tuning, or runtime-skill edits, not new pipeline stages.
