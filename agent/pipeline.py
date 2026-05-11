@@ -1511,6 +1511,288 @@ def _run_secondary_evidence_loop(
     return ctx
 
 
+def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
+    """Run primary execution + secondary evidence loop + driver-context enrichment.
+
+    Phase §5.1.b. Consolidates the previously-separate Stages 0.5/0.6/0.7
+    (primary tool execution via the four-strategy chain in
+    ``_pick_primary_invocation``) and Stage 0.8 (secondary plan-step loop)
+    into one function with one entry point from ``process_query``.
+
+    Three logical passes, in order:
+
+    1. **Pass 1 - primary execution**: ``_pick_primary_invocation``
+       returns the first non-None invocation from the strategy chain;
+       per-source traces and metrics fire; ``_execute_evidence_step``
+       runs with ``is_primary=True``. On failure, recovery depends on
+       the source label (analyzer-built / router-fallback get
+       ``_attempt_analyzer_tool_recovery``; plan / keyword-router get
+       a log + fall-through to SQL).
+
+    2. **Pass 2 - secondary loop**: when the evidence plan still has
+       unsatisfied steps, ``execute_remaining_evidence`` (delegating
+       to ``_run_secondary_evidence_loop``) iterates over them.
+
+    3. **Driver-context enrichment**: when the primary execution
+       produced a usable result (``ctx.used_tool`` and
+       ``ctx.tool_name`` set), ``_enrich_prices_with_balancing_driver_context``
+       attaches balancing-specific contribution / source-price columns.
+
+    Behaviour preservation: every trace shape
+    (``stage_0_5_plan_driven``, ``stage_0_5_router_match``,
+    ``stage_0_5_router_match`` miss_detail, ``stage_0_6_tool_execute``,
+    ``stage_0_7_analyzer_route`` decision + timed,
+    ``stage_0_7_analyzer_tool_execute``, ``stage_0_8_evidence_loop``),
+    every metric counter (``log_router_match``, ``log_stage_0_7``,
+    ``log_tool_fallback_intent``, ``log_tool_error``,
+    ``log_relevance_block``), and every recovery path
+    (``_attempt_analyzer_tool_recovery`` for analyzer-source failures,
+    SQL fall-through for plan/router-source failures) fires under the
+    same conditions as before. Pure refactor.
+    """
+    from utils.resilience import db_circuit_breaker
+    _cb_allowed, _cb_reason = db_circuit_breaker.allow_request()
+    if not _cb_allowed:
+        log.warning(
+            "Skipping tool execution: circuit breaker is %s (%s). "
+            "Pipeline will fall through to Stage 1/2 or CLARIFY.",
+            db_circuit_breaker._state, _cb_reason,
+        )
+
+    # ---- Pass 1: primary execution via the strategy chain ----
+    if ENABLE_TYPED_TOOLS and _cb_allowed:
+        t_stage_primary = time.time()
+
+        is_exp = _should_route_tool_as_explanation(ctx)
+
+        primary_invocation, primary_plan_step, primary_source, primary_build_error = (
+            _pick_primary_invocation(ctx, is_exp)
+        )
+        primary_is_analyzer_source = primary_source in {"analyzer_built", "router_fallback"}
+        primary_is_plan_or_router_source = primary_source in {"plan_driven", "keyword_router"}
+
+        # Capture build error on ctx for downstream observability when the
+        # analyzer-built strategy raised (matches Stage 0.7's prior behaviour).
+        if primary_build_error:
+            ctx.tool_fallback_reason = f"analyzer_tool_build_error:{primary_build_error}"
+
+        # Stage 0.5 traces (always emitted — preserves backward compat)
+        if primary_source == "plan_driven":
+            _emit_trace_stage(
+                ctx, "stage_0_5_plan_driven", t_stage_primary,
+                plan_tool=primary_plan_step["tool_name"],
+                plan_role=primary_plan_step["role"],
+            )
+        _emit_trace_stage(
+            ctx, "stage_0_5_router_match", t_stage_primary,
+            matched=primary_is_plan_or_router_source,
+            plan_driven=(primary_source == "plan_driven"),
+        )
+
+        # Stage 0.7 begins whenever Stage 0.5's strategies (plan-driven,
+        # keyword router) did not produce an invocation — i.e. whenever
+        # we're in the analyzer-source half of the chain or we missed
+        # entirely.
+        primary_entered_stage_0_7 = not primary_is_plan_or_router_source
+
+        if primary_is_plan_or_router_source:
+            if primary_source == "plan_driven":
+                metrics.log_router_match("plan_driven")
+            elif "semantic fallback" in (primary_invocation.reason or "").lower():
+                metrics.log_router_match("semantic")
+            else:
+                metrics.log_router_match("deterministic")
+        else:
+            # Stage 0.5's strategies missed. The original code emitted miss +
+            # miss_detail unconditionally — even when Stage 0.7 later
+            # succeeded — so dashboards see the same "miss" count regardless
+            # of whether an analyzer-built strategy rescued the request.
+            metrics.log_router_match("miss")
+            trace_detail(
+                log, ctx, "stage_0_5_router_match", "miss_detail",
+                semantic_fallback_enabled=ROUTER_ENABLE_SEMANTIC_FALLBACK,
+                semantic_scores=_last_semantic_scores.copy(),
+            )
+
+        if primary_entered_stage_0_7:
+            metrics.log_stage_0_7("entered")
+            t_stage_0_7 = time.time()
+
+            qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
+            trace_detail(
+                log, ctx, "stage_0_7_analyzer_route", "decision",
+                invocation_built=primary_is_analyzer_source,
+                preferred_path=qa.routing.preferred_path.value if qa else "",
+                prefer_tool=qa.routing.prefer_tool if qa else False,
+                top_tool=primary_invocation.name if primary_is_analyzer_source else None,
+                top_score=primary_invocation.confidence if primary_is_analyzer_source else None,
+                build_error=primary_build_error,
+                analyzer_available=bool(qa),
+                hints_enabled=ENABLE_QUESTION_ANALYZER_HINTS,
+            )
+            if primary_is_analyzer_source:
+                metrics.log_stage_0_7("invocation_built")
+                _emit_trace_stage(
+                    ctx, "stage_0_7_analyzer_route", t_stage_0_7,
+                    tool=primary_invocation.name,
+                    confidence=primary_invocation.confidence,
+                )
+                metrics.log_router_match("analyzer")
+
+        if primary_invocation is not None:
+            ctx.used_tool = True
+            ctx.tool_name = primary_invocation.name
+            ctx.tool_params = dict(primary_invocation.params)
+            ctx.tool_match_reason = primary_invocation.reason
+            ctx.tool_confidence = primary_invocation.confidence
+
+            try:
+                if primary_is_analyzer_source:
+                    _primary_used = _execute_evidence_step(
+                        ctx,
+                        primary_invocation,
+                        plan_step=None,
+                        is_primary=True,
+                        is_explanation=is_exp,
+                        stage_label="stage_0_7",
+                        tool_execute_trace="stage_0_7_analyzer_tool_execute",
+                        relevance_log_prefix="Analyzer",
+                        relevance_fallback_reason_prefix="analyzer_tool",
+                        emit_fallback_intent_on_relevance_block=False,
+                    )
+                    if _primary_used:
+                        metrics.log_stage_0_7("used_result")
+                        log.info(
+                            "Analyzer tool route hit: tool=%s confidence=%.2f reason=%s",
+                            primary_invocation.name,
+                            primary_invocation.confidence,
+                            primary_invocation.reason,
+                        )
+                else:
+                    _execute_evidence_step(
+                        ctx,
+                        primary_invocation,
+                        plan_step=primary_plan_step,
+                        is_primary=True,
+                        is_explanation=is_exp,
+                        stage_label="stage_0_5",
+                    )
+                    log.info(
+                        "Typed tool route hit: tool=%s confidence=%.2f reason=%s",
+                        primary_invocation.name,
+                        primary_invocation.confidence,
+                        primary_invocation.reason,
+                    )
+            except Exception as exc:
+                if primary_is_analyzer_source:
+                    if (
+                        ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan
+                        and evidence_planner.has_unsatisfied_steps(ctx.evidence_plan)
+                    ):
+                        _failed_step = next(
+                            (s for s in ctx.evidence_plan
+                             if s["tool_name"] == primary_invocation.name
+                             and not s.get("satisfied")),
+                            None,
+                        )
+                        if _failed_step:
+                            _failed_step["error"] = f"stage_0_7:{exc}"
+                        log.info(
+                            "Analyzer tool failed; evidence plan has remaining steps. "
+                            "tool=%s err=%s",
+                            primary_invocation.name, exc,
+                        )
+                        ctx.used_tool = False
+                        ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
+                        clear_provenance(ctx)
+                    else:
+                        ctx, recovered = _attempt_analyzer_tool_recovery(
+                            ctx,
+                            failed_invocation=primary_invocation,
+                            is_explanation=is_exp,
+                        )
+                        if not recovered:
+                            metrics.log_tool_error()
+                            ctx.used_tool = False
+                            ctx.tool_fallback_reason = (
+                                f"analyzer_tool_execution_error:{exc}"
+                            )
+                            metrics.log_tool_fallback_intent(
+                                ctx.query, "analyzer_tool_execution_error"
+                            )
+                            clear_provenance(ctx)
+                            log.warning(
+                                "Analyzer tool failed; falling back. tool=%s err=%s",
+                                primary_invocation.name, exc,
+                            )
+                else:
+                    metrics.log_tool_error()
+                    ctx.used_tool = False
+                    ctx.tool_fallback_reason = str(exc)
+                    metrics.log_tool_fallback_intent(ctx.query, "tool_execution_error")
+                    clear_provenance(ctx)
+                    if primary_plan_step:
+                        primary_plan_step["error"] = f"stage_0_5:{exc}"
+                    log.warning(
+                        "Typed tool failed; falling back to SQL path. tool=%s err=%s",
+                        primary_invocation.name, exc,
+                    )
+        elif primary_entered_stage_0_7:
+            # No invocation from any strategy. Stage 0.7's miss handling
+            # decides whether to attempt the legacy recovery path.
+            if primary_build_error:
+                if (
+                    ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan
+                    and evidence_planner.has_unsatisfied_steps(ctx.evidence_plan)
+                ):
+                    log.info("Analyzer tool build failed; evidence plan has remaining steps.")
+                else:
+                    ctx, recovered = _attempt_analyzer_tool_recovery(
+                        ctx,
+                        failed_invocation=None,
+                        is_explanation=is_exp,
+                    )
+                    if recovered:
+                        log.info(
+                            "Analyzer tool build failure recovered via resolved-query fallback."
+                        )
+                    else:
+                        metrics.log_tool_fallback_intent(
+                            ctx.query, "analyzer_tool_build_error"
+                        )
+            else:
+                metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
+
+    # ---- Pass 2: secondary evidence loop (Stage 0.8) ----
+    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan and not all(
+        s.get("satisfied") for s in ctx.evidence_plan
+    ):
+        t_stage_0_8 = time.time()
+        ctx = evidence_planner.execute_remaining_evidence(ctx)
+        _emit_trace_stage(
+            ctx, "stage_0_8_evidence_loop", t_stage_0_8,
+            complete=ctx.evidence_plan_complete,
+            collected=len(ctx.evidence_collected),
+            satisfied=[s["tool_name"] for s in ctx.evidence_plan if s.get("satisfied")],
+        )
+
+    # ---- Post-loop: balancing driver-context enrichment ----
+    if ENABLE_EVIDENCE_PLANNER and ctx.used_tool and ctx.tool_name:
+        post_plan_invocation = ToolInvocation(
+            name=ctx.tool_name,
+            params=dict(ctx.tool_params),
+            confidence=ctx.tool_confidence,
+            reason=ctx.tool_match_reason,
+        )
+        ctx = _enrich_prices_with_balancing_driver_context(
+            ctx,
+            post_plan_invocation,
+            _should_route_tool_as_explanation(ctx),
+        )
+
+    return ctx
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -1806,260 +2088,12 @@ def process_query(
             tools=[s["tool_name"] for s in ctx.evidence_plan],
         )
 
-    # Stage 0.5: prefer deterministic tool execution before falling back to heavier planners.
-    # PRE-FLIGHT: check circuit breaker before attempting tools
-    from utils.resilience import db_circuit_breaker
-    _cb_allowed, _cb_reason = db_circuit_breaker.allow_request()
-    if not _cb_allowed:
-        log.warning(
-            "Skipping tool execution: circuit breaker is %s (%s). "
-            "Pipeline will fall through to Stage 1/2 or CLARIFY.",
-            db_circuit_breaker._state, _cb_reason,
-        )
-
-    if ENABLE_TYPED_TOOLS and _cb_allowed:
-        t_stage_primary = time.time()
-
-        is_exp = _should_route_tool_as_explanation(ctx)
-
-        # Primary tool routing — one strategy chain (Phase F.5d collapse).
-        # Previously this lived in Stages 0.5 and 0.7 as two separate
-        # blocks; the strategies they tried (plan-driven, keyword router,
-        # analyzer-built, authoritative router fallback) are now picked
-        # by _pick_primary_invocation in source order. All per-source
-        # observability still fires below so dashboards see the same
-        # trace and metric shapes as before.
-        primary_invocation, primary_plan_step, primary_source, primary_build_error = (
-            _pick_primary_invocation(ctx, is_exp)
-        )
-        primary_is_analyzer_source = primary_source in {"analyzer_built", "router_fallback"}
-        primary_is_plan_or_router_source = primary_source in {"plan_driven", "keyword_router"}
-
-        # Capture build error on ctx for downstream observability when the
-        # analyzer-built strategy raised (matches Stage 0.7's prior behaviour).
-        if primary_build_error:
-            ctx.tool_fallback_reason = f"analyzer_tool_build_error:{primary_build_error}"
-
-        # Stage 0.5 traces (always emitted — preserves backward compat)
-        if primary_source == "plan_driven":
-            _trace_stage(
-                "stage_0_5_plan_driven", t_stage_primary,
-                plan_tool=primary_plan_step["tool_name"],
-                plan_role=primary_plan_step["role"],
-            )
-        _trace_stage(
-            "stage_0_5_router_match", t_stage_primary,
-            matched=primary_is_plan_or_router_source,
-            plan_driven=(primary_source == "plan_driven"),
-        )
-
-        # Stage 0.7 begins whenever Stage 0.5's strategies (plan-driven,
-        # keyword router) did not produce an invocation — i.e. whenever
-        # we're in the analyzer-source half of the chain or we missed
-        # entirely. Equivalent to the original `if invocation is None`
-        # branch entering Stage 0.7.
-        primary_entered_stage_0_7 = not primary_is_plan_or_router_source
-
-        if primary_is_plan_or_router_source:
-            # Stage 0.5 routing matched — emit its metric and execute.
-            if primary_source == "plan_driven":
-                metrics.log_router_match("plan_driven")
-            elif "semantic fallback" in (primary_invocation.reason or "").lower():
-                metrics.log_router_match("semantic")
-            else:
-                metrics.log_router_match("deterministic")
-        else:
-            # Stage 0.5's strategies (plan-driven, keyword router) missed.
-            # The original code emitted miss + miss_detail unconditionally
-            # at this point — even when Stage 0.7 later succeeded — so
-            # dashboards see the same "miss" count regardless of whether
-            # an analyzer-built strategy rescued the request.
-            metrics.log_router_match("miss")
-            trace_detail(
-                log, ctx, "stage_0_5_router_match", "miss_detail",
-                semantic_fallback_enabled=ROUTER_ENABLE_SEMANTIC_FALLBACK,
-                semantic_scores=_last_semantic_scores.copy(),
-            )
-
-        if primary_entered_stage_0_7:
-            metrics.log_stage_0_7("entered")
-            t_stage_0_7 = time.time()
-
-            qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
-            trace_detail(
-                log, ctx, "stage_0_7_analyzer_route", "decision",
-                invocation_built=primary_is_analyzer_source,
-                preferred_path=qa.routing.preferred_path.value if qa else "",
-                prefer_tool=qa.routing.prefer_tool if qa else False,
-                top_tool=primary_invocation.name if primary_is_analyzer_source else None,
-                top_score=primary_invocation.confidence if primary_is_analyzer_source else None,
-                build_error=primary_build_error,
-                analyzer_available=bool(qa),
-                hints_enabled=ENABLE_QUESTION_ANALYZER_HINTS,
-            )
-            if primary_is_analyzer_source:
-                metrics.log_stage_0_7("invocation_built")
-                _trace_stage(
-                    "stage_0_7_analyzer_route", t_stage_0_7,
-                    tool=primary_invocation.name,
-                    confidence=primary_invocation.confidence,
-                )
-                metrics.log_router_match("analyzer")
-
-        if primary_invocation is not None:
-            ctx.used_tool = True
-            ctx.tool_name = primary_invocation.name
-            ctx.tool_params = dict(primary_invocation.params)
-            ctx.tool_match_reason = primary_invocation.reason
-            ctx.tool_confidence = primary_invocation.confidence
-
-            try:
-                if primary_is_analyzer_source:
-                    _primary_used = _execute_evidence_step(
-                        ctx,
-                        primary_invocation,
-                        plan_step=None,  # name-match against the plan
-                        is_primary=True,
-                        is_explanation=is_exp,
-                        stage_label="stage_0_7",
-                        tool_execute_trace="stage_0_7_analyzer_tool_execute",
-                        relevance_log_prefix="Analyzer",
-                        relevance_fallback_reason_prefix="analyzer_tool",
-                        emit_fallback_intent_on_relevance_block=False,
-                    )
-                    if _primary_used:
-                        metrics.log_stage_0_7("used_result")
-                        log.info(
-                            "Analyzer tool route hit: tool=%s confidence=%.2f reason=%s",
-                            primary_invocation.name,
-                            primary_invocation.confidence,
-                            primary_invocation.reason,
-                        )
-                else:
-                    _execute_evidence_step(
-                        ctx,
-                        primary_invocation,
-                        plan_step=primary_plan_step,
-                        is_primary=True,
-                        is_explanation=is_exp,
-                        stage_label="stage_0_5",
-                    )
-                    log.info(
-                        "Typed tool route hit: tool=%s confidence=%.2f reason=%s",
-                        primary_invocation.name,
-                        primary_invocation.confidence,
-                        primary_invocation.reason,
-                    )
-            except Exception as exc:
-                if primary_is_analyzer_source:
-                    # Stage 0.7-style recovery: when the evidence planner
-                    # still has work to do, defer to Stage 0.8; otherwise
-                    # try _attempt_analyzer_tool_recovery for a legacy
-                    # composition→prices candidate.
-                    if (
-                        ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan
-                        and evidence_planner.has_unsatisfied_steps(ctx.evidence_plan)
-                    ):
-                        _failed_step = next(
-                            (s for s in ctx.evidence_plan
-                             if s["tool_name"] == primary_invocation.name
-                             and not s.get("satisfied")),
-                            None,
-                        )
-                        if _failed_step:
-                            _failed_step["error"] = f"stage_0_7:{exc}"
-                        log.info(
-                            "Analyzer tool failed; evidence plan has remaining steps. "
-                            "tool=%s err=%s",
-                            primary_invocation.name, exc,
-                        )
-                        ctx.used_tool = False
-                        ctx.tool_fallback_reason = f"analyzer_tool_execution_error:{exc}"
-                        clear_provenance(ctx)
-                    else:
-                        ctx, recovered = _attempt_analyzer_tool_recovery(
-                            ctx,
-                            failed_invocation=primary_invocation,
-                            is_explanation=is_exp,
-                        )
-                        if not recovered:
-                            metrics.log_tool_error()
-                            ctx.used_tool = False
-                            ctx.tool_fallback_reason = (
-                                f"analyzer_tool_execution_error:{exc}"
-                            )
-                            metrics.log_tool_fallback_intent(
-                                ctx.query, "analyzer_tool_execution_error"
-                            )
-                            clear_provenance(ctx)
-                            log.warning(
-                                "Analyzer tool failed; falling back. tool=%s err=%s",
-                                primary_invocation.name, exc,
-                            )
-                else:
-                    # Stage 0.5-style failure: log and fall through to SQL.
-                    metrics.log_tool_error()
-                    ctx.used_tool = False
-                    ctx.tool_fallback_reason = str(exc)
-                    metrics.log_tool_fallback_intent(ctx.query, "tool_execution_error")
-                    clear_provenance(ctx)
-                    if primary_plan_step:
-                        primary_plan_step["error"] = f"stage_0_5:{exc}"
-                    log.warning(
-                        "Typed tool failed; falling back to SQL path. tool=%s err=%s",
-                        primary_invocation.name, exc,
-                    )
-        elif primary_entered_stage_0_7:
-            # No invocation from any strategy. Stage 0.7's miss handling
-            # decides whether to attempt the legacy recovery path.
-            if primary_build_error:
-                if (
-                    ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan
-                    and evidence_planner.has_unsatisfied_steps(ctx.evidence_plan)
-                ):
-                    log.info("Analyzer tool build failed; evidence plan has remaining steps.")
-                else:
-                    ctx, recovered = _attempt_analyzer_tool_recovery(
-                        ctx,
-                        failed_invocation=None,
-                        is_explanation=is_exp,
-                    )
-                    if recovered:
-                        log.info(
-                            "Analyzer tool build failure recovered via resolved-query fallback."
-                        )
-                    else:
-                        metrics.log_tool_fallback_intent(
-                            ctx.query, "analyzer_tool_build_error"
-                        )
-            else:
-                metrics.log_tool_fallback_intent(ctx.query, "router_no_match")
-
-    # Stage 0.8: finish any remaining evidence-plan steps and merge them into the main frame.
-    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan and not all(
-        s.get("satisfied") for s in ctx.evidence_plan
-    ):
-        t_stage = time.time()
-        ctx = evidence_planner.execute_remaining_evidence(ctx)
-        _trace_stage(
-            "stage_0_8_evidence_loop", t_stage,
-            complete=ctx.evidence_plan_complete,
-            collected=len(ctx.evidence_collected),
-            satisfied=[s["tool_name"] for s in ctx.evidence_plan if s.get("satisfied")],
-        )
-
-    if ENABLE_EVIDENCE_PLANNER and ctx.used_tool and ctx.tool_name:
-        post_plan_invocation = ToolInvocation(
-            name=ctx.tool_name,
-            params=dict(ctx.tool_params),
-            confidence=ctx.tool_confidence,
-            reason=ctx.tool_match_reason,
-        )
-        ctx = _enrich_prices_with_balancing_driver_context(
-            ctx,
-            post_plan_invocation,
-            _should_route_tool_as_explanation(ctx),
-        )
+    # Stage 0.5 / 0.6 / 0.7 / 0.8: primary execution (strategy chain) +
+    # secondary evidence loop + driver-context enrichment, all in one
+    # consolidated function. See _execute_evidence_plan above for the
+    # full body — every trace shape, metric counter, and recovery path
+    # is identical to the pre-§5.1.b form.
+    ctx = _execute_evidence_plan(ctx)
 
     # Stage 1/2: agent loop or SQL fallback only runs after deterministic tool paths are exhausted.
     # When Stage 0.2 is authoritative, it owns route selection, so the
