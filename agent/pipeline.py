@@ -1138,6 +1138,147 @@ def _attempt_analyzer_tool_recovery(
     return ctx, False
 
 
+def _execute_evidence_step(
+    ctx: QueryContext,
+    invocation: ToolInvocation,
+    *,
+    plan_step: dict | None,
+    is_primary: bool,
+    is_explanation: bool,
+    stage_label: str,
+) -> bool:
+    """Execute one evidence step end-to-end and store the result.
+
+    Common implementation across Stage 0.5 / 0.7 / 0.8 (see Phase F.5 in
+    docs/active/query_pipeline_architecture.md). Caller wraps in try/except
+    for stage-specific failure recovery; this helper handles the happy path
+    plus relevance-gate cleanup. Tool-execution exceptions bubble out.
+
+    Behaviour by mode:
+
+    ``is_primary=True`` (Stage 0.5/0.7 primary execution):
+      - Stamps ctx.df / cols / rows / provenance from the tool result.
+      - Optionally seeds ctx.plan defaults when the analyzer is absent.
+      - On relevance block: clears ctx.df / cols / rows + provenance,
+        sets ``ctx.used_tool=False`` with a fallback reason, and returns
+        ``False`` so the caller can fall through to the next strategy.
+
+    ``is_primary=False`` (Stage 0.8 secondary loop):
+      - Does not touch ctx.df / cols / rows.
+      - Only stores the fetched DataFrame in ``ctx.evidence_collected``.
+
+    For both modes, when a plan_step is supplied (or, for primary mode, when
+    the result name-matches an unsatisfied plan step), the result is recorded
+    in ``ctx.evidence_collected`` and the step is marked satisfied.
+
+    Args:
+        ctx: The query context being mutated.
+        invocation: The ToolInvocation to execute.
+        plan_step: The evidence plan step being satisfied. Required for
+            secondary executions; optional for primary (will fall back to
+            name-match on the plan).
+        is_primary: Whether to set ctx.df / tool_* / provenance from the
+            result. The first execution in a request is primary; secondary
+            evidence-loop steps are not.
+        is_explanation: Used for the legacy driver-context enrichment that
+            still runs when ``ENABLE_EVIDENCE_PLANNER`` is False.
+        stage_label: Tag included in fallback reasons and log lines (e.g.
+            "stage_0_5") so events from different call sites stay
+            distinguishable in traces.
+
+    Returns:
+        True  - the tool ran, relevance passed, the result was stored.
+        False - relevance was blocked. Caller should treat the step as
+                unsatisfied and try the next strategy.
+
+    Raises:
+        Any exception from ``execute_tool``. The caller catches and decides
+        whether to fall through to SQL or attempt a recovery candidate.
+    """
+    t_tool = time.time()
+    df, cols, rows = execute_tool(invocation)
+    metrics.log_tool_call(time.time() - t_tool)
+    _trace_stage("stage_0_6_tool_execute", t_tool, tool=invocation.name, rows=len(rows))
+
+    df = normalize_tool_dataframe(invocation.name, df)
+
+    if is_primary:
+        ctx.df = df
+        ctx.cols = list(df.columns)
+        ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
+        stamp_provenance(
+            ctx,
+            ctx.cols,
+            ctx.rows,
+            source="tool",
+            query_hash=tool_invocation_hash(invocation.name, invocation.params),
+        )
+        if not ctx.has_authoritative_question_analysis:
+            ctx.plan.setdefault("intent", "tool_query")
+            ctx.plan.setdefault("target", invocation.name)
+
+    _relevance_q = ctx.resolved_query or ctx.query
+    tool_relevant, tool_reason = validate_tool_relevance(
+        _relevance_q,
+        invocation.name,
+        question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+    )
+
+    if not tool_relevant:
+        metrics.log_relevance_block()
+        if is_primary:
+            ctx.used_tool = False
+            ctx.tool_fallback_reason = f"tool_relevance_blocked:{tool_reason}"
+            metrics.log_tool_fallback_intent(ctx.query, "tool_relevance_blocked")
+            ctx.df = ctx.df.iloc[0:0]
+            ctx.cols = []
+            ctx.rows = []
+            clear_provenance(ctx)
+        log.warning("Typed tool relevance blocked. reason=%s", tool_reason)
+        return False
+
+    log.info("Typed tool relevance validated. reason=%s", tool_reason)
+
+    if is_primary and not ENABLE_EVIDENCE_PLANNER:
+        # Legacy driver-context enrichment runs immediately when the
+        # evidence planner is disabled. With the planner on, enrichment
+        # runs in the post-loop step in process_query().
+        _enrich_prices_with_balancing_driver_context(ctx, invocation, is_explanation)
+
+    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
+        matched_step = plan_step
+        if matched_step is None and is_primary:
+            matched_step = next(
+                (s for s in ctx.evidence_plan
+                 if s["tool_name"] == invocation.name and not s.get("satisfied")),
+                None,
+            )
+        if matched_step:
+            ctx.evidence_collected[matched_step["role"]] = {
+                "tool": invocation.name,
+                "params": dict(invocation.params),
+                "df": (ctx.df.copy() if is_primary else df),
+                "cols": list(ctx.cols if is_primary else df.columns),
+                "rows": (
+                    list(ctx.rows) if is_primary
+                    else [tuple(r) for r in df.itertuples(index=False, name=None)]
+                ),
+            }
+            matched_step["satisfied"] = True
+            remaining = sum(1 for s in ctx.evidence_plan if not s.get("satisfied"))
+            log.info(
+                "Evidence plan: stored %s result as %s, %d steps remaining",
+                stage_label, matched_step["role"], remaining,
+            )
+        elif is_primary:
+            log.info(
+                "Evidence plan: %s tool %s not in plan; result stored on ctx.df only",
+                stage_label, invocation.name,
+            )
+
+    return True
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -1498,76 +1639,14 @@ def process_query(
             ctx.tool_confidence = invocation.confidence
 
             try:
-                t_tool = time.time()
-                df, cols, rows = execute_tool(invocation)
-                metrics.log_tool_call(time.time() - t_tool)
-                _trace_stage("stage_0_6_tool_execute", t_tool, tool=invocation.name, rows=len(rows))
-
-                df = normalize_tool_dataframe(invocation.name, df)
-                ctx.df = df
-                ctx.cols = list(df.columns)
-                ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
-                stamp_provenance(
+                _execute_evidence_step(
                     ctx,
-                    ctx.cols,
-                    ctx.rows,
-                    source="tool",
-                    query_hash=tool_invocation_hash(invocation.name, invocation.params),
+                    invocation,
+                    plan_step=_plan_step_used,
+                    is_primary=True,
+                    is_explanation=is_exp,
+                    stage_label="stage_0_5",
                 )
-                if not ctx.has_authoritative_question_analysis:
-                    ctx.plan.setdefault("intent", "tool_query")
-                    ctx.plan.setdefault("target", invocation.name)
-                _relevance_q = ctx.resolved_query or ctx.query
-                tool_relevant, tool_reason = validate_tool_relevance(
-                    _relevance_q,
-                    invocation.name,
-                    question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
-                )
-                if not tool_relevant:
-                    metrics.log_relevance_block()
-                    ctx.used_tool = False
-                    ctx.tool_fallback_reason = f"tool_relevance_blocked:{tool_reason}"
-                    metrics.log_tool_fallback_intent(ctx.query, "tool_relevance_blocked")
-                    ctx.df = ctx.df.iloc[0:0]
-                    ctx.cols = []
-                    ctx.rows = []
-                    clear_provenance(ctx)
-                    log.warning("Typed tool relevance blocked. reason=%s", tool_reason)
-                else:
-                    log.info("Typed tool relevance validated. reason=%s", tool_reason)
-                    if not ENABLE_EVIDENCE_PLANNER:
-                        ctx = _enrich_prices_with_balancing_driver_context(
-                            ctx, invocation, is_exp,
-                        )
-
-                    # Multi-evidence: store result under the matching plan step.
-                    # When plan-driven, _plan_step_used is the exact step;
-                    # otherwise fall back to name-based matching.
-                    if ENABLE_EVIDENCE_PLANNER and ctx.evidence_plan:
-                        _matched_step = _plan_step_used or next(
-                            (s for s in ctx.evidence_plan if s["tool_name"] == invocation.name and not s.get("satisfied")),
-                            None,
-                        )
-                        if _matched_step:
-                            ctx.evidence_collected[_matched_step["role"]] = {
-                                "tool": invocation.name,
-                                "params": dict(invocation.params),
-                                "df": ctx.df.copy(),
-                                "cols": list(ctx.cols),
-                                "rows": list(ctx.rows),
-                            }
-                            _matched_step["satisfied"] = True
-                            log.info(
-                                "Evidence plan: stored Stage 0.5 result as %s, %d steps remaining",
-                                _matched_step["role"],
-                                sum(1 for s in ctx.evidence_plan if not s.get("satisfied")),
-                            )
-                        else:
-                            log.info(
-                                "Evidence plan: Stage 0.5 tool %s not in plan; result stored on ctx.df only",
-                                invocation.name,
-                            )
-
                 log.info(
                     "Typed tool route hit: tool=%s confidence=%.2f reason=%s",
                     invocation.name,
