@@ -152,7 +152,14 @@ VALUE_LABELS = {
     "transit": "Transit Flows",
     "HPP": "Hydropower Plant",
     "TPP": "Thermal Power Plant",
-    "balancing": "Balancing Electricity",
+    # NOTE: "balancing" is intentionally omitted here.  scrub_schema_mentions
+    # does a case-insensitive \b{word}\b replace on LLM output; replacing the
+    # English participle "balancing" with the verbose label "Balancing
+    # Electricity" mangles narrative sentences (e.g. "the balancing price"
+    # → "the Balancing Electricity price", "for balancing purposes" → "for
+    # Balancing Electricity purposes").  The schema does not have a bare
+    # "balancing" column — SQL-side references use p_bal_*, bal_*, share_* —
+    # so removing this entry has no effect on schema scrubbing.
     "bilateral_exchange": "Bilateral Contracts & Exchange",
     "renewable_ppa": "Renewable PPA",
     "thermal_ppa": "Thermal PPA",

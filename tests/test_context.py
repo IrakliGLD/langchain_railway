@@ -111,5 +111,63 @@ class TestSchemaConsistency:
         )
 
 
+class TestScrubSchemaMentions:
+    """Pin the narrative-safety contract of ``scrub_schema_mentions``.
+
+    The scrubber's job is to mask SQL/schema tokens (column names, view
+    names, derived-share columns) leaking into LLM narrative output.  It
+    must NOT replace ordinary English words that happen to overlap with
+    a schema concept (e.g. the participle "balancing").  Regression
+    motivated by production output containing:
+
+        "the Balancing Electricity electricity price increased"
+        "sources used for Balancing Electricity the grid"
+        "for Balancing Electricity purposes"
+
+    caused by ``VALUE_LABELS["balancing"] = "Balancing Electricity"`` doing
+    a case-insensitive ``\\b{word}\\b`` replace on every natural-language
+    occurrence of "balancing".  That entry has been removed; the schema
+    has no bare ``balancing`` column (SQL uses ``p_bal_*``, ``bal_*``,
+    ``share_*``) so removal is loss-free for scrubbing purposes.
+    """
+
+    def test_narrative_word_balancing_unchanged(self):
+        """The participle 'balancing' must survive scrubbing intact."""
+        from context import scrub_schema_mentions
+
+        before = (
+            "The balancing price increased by 7.3% in December 2025. "
+            "Generation sources used for balancing the grid shifted, "
+            "and electricity purchased for balancing purposes rose."
+        )
+        after = scrub_schema_mentions(before)
+        assert "Balancing Electricity electricity" not in after
+        assert "Balancing Electricity the grid" not in after
+        assert "Balancing Electricity purposes" not in after
+        # The natural-language word itself should remain.
+        assert "balancing price" in after
+        assert "balancing the grid" in after
+        assert "balancing purposes" in after
+
+    def test_value_labels_does_not_have_bare_balancing_key(self):
+        """Guard the underlying VALUE_LABELS dict to prevent re-introduction."""
+        from context import VALUE_LABELS
+
+        assert "balancing" not in VALUE_LABELS, (
+            "VALUE_LABELS['balancing'] re-introduces the over-eager scrubber; "
+            "see the comment in context.py at the VALUE_LABELS definition."
+        )
+
+    def test_schema_columns_still_scrubbed(self):
+        """The fix must not regress scrubbing of actual schema tokens."""
+        from context import scrub_schema_mentions
+
+        # share_* derived columns must still be replaced with their labels.
+        out = scrub_schema_mentions("share_renewable_ppa rose 5%")
+        assert "share_renewable_ppa" not in out
+        # The label-replaced version must appear.
+        assert "Share of Renewable PPA" in out or "Renewable PPA" in out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
