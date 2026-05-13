@@ -505,31 +505,63 @@ def _cross_check_answer_kind(ctx) -> None:
         qa.answer_kind = chosen
 
 
+# Production trace 190c2893 (2026-05-13) showed a user reply of literally "1."
+# fall through to a full 25-second pipeline ending in a grounding-failure
+# fallback.  The previous regex ^(?:option\s+)?(\d)$ rejected trailing
+# punctuation, multi-digit options ("10"), and the marker check only
+# accepted one specific clarify phrasing.  Both are loosened below.
+_CLARIFY_OPTION_QUERY_RE = re.compile(
+    r"^\s*(?:option\s+)?(\d+)\s*[.)]?\s*$",
+    re.IGNORECASE,
+)
+# Matches lines like "1. text", "1) text", "**1.** text", "  1) **text**"
+# inside an assistant turn that already passed the clarify-marker check.
+_CLARIFY_OPTION_LINE_TEMPLATE = (
+    r"^\s*\**\s*{num}\s*[.)]\s*\**\s*(.+?)\s*\**\s*$"
+)
+
+
 def _detect_clarify_selection(query: str, conversation_history) -> str | None:
-    """If the query is a single digit or 'option N' and the last assistant
-    message was a clarification, return the selected option text. Otherwise None."""
+    """Detect a numeric reply ("1", "1.", "1)", "option 2", "10.") to a
+    prior clarification turn and return the selected option text.
+
+    Returns None if the query is not a numeric option, the history is
+    empty, the last assistant turn shows no clarify marker, or the
+    matching option line cannot be located.
+    """
     if not conversation_history:
         return None
-    q = query.strip()
-    m = re.match(r'^(?:option\s+)?(\d)$', q, re.IGNORECASE)
+    m = _CLARIFY_OPTION_QUERY_RE.match(query or "")
     if not m:
         return None
     option_num = int(m.group(1))
 
-    # Find the last assistant answer
+    # Find the last assistant answer.
     last_answer = None
     for turn in reversed(conversation_history):
         if turn.get("answer"):
             last_answer = turn["answer"]
             break
-    if not last_answer or "Please choose one of these directions:" not in last_answer:
+    if not last_answer:
         return None
 
-    # Extract option text
+    # Reuse the shared clarify-marker list from core.llm so this gate stays
+    # in sync with the other "is this a clarify turn?" check sites.  Lazy
+    # import to avoid a circular dependency at module load.
+    from core.llm import _CLARIFY_ASSISTANT_MARKERS
+
+    last_lower = last_answer.lower()
+    if not any(marker in last_lower for marker in _CLARIFY_ASSISTANT_MARKERS):
+        return None
+
+    # Extract option text — tolerant of "N.", "N)", and surrounding bold/whitespace.
+    option_line_re = re.compile(
+        _CLARIFY_OPTION_LINE_TEMPLATE.format(num=option_num)
+    )
     for line in last_answer.splitlines():
-        line = line.strip()
-        if line.startswith(f"{option_num}."):
-            return line[len(f"{option_num}."):].strip()
+        m_line = option_line_re.match(line)
+        if m_line:
+            return m_line.group(1).strip()
     return None
 
 

@@ -2643,6 +2643,135 @@ def test_clarify_selection_preserves_original_forecast_context():
     assert "cautious forward-looking view" in rewritten
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.c — loosen clarify-selection detector (2026-05-13 production logs)
+# ---------------------------------------------------------------------------
+#
+# Production trace 190c2893 (2026-05-13) showed a user reply of literally
+# "1." dropped into a full 25-second pipeline ending in a grounding-failure
+# fallback because the previous detector rejected trailing punctuation.
+# The detector now accepts "N", "N.", "N)", "option N", multi-digit "10."
+# AND uses the shared _CLARIFY_ASSISTANT_MARKERS marker list so a wider
+# range of clarify phrasings is recognised.
+
+def _clarify_history(answer: str, question: str = "the original question"):
+    """Minimal one-turn history fixture."""
+    return [{"question": question, "answer": answer}]
+
+
+_CANONICAL_CLARIFY_BODY = (
+    "I can answer this, but I want to make sure we take the right interpretation first.\n\n"
+    "Please choose one of these directions:\n"
+    "1. Cautious forward-looking view.\n"
+    "2. Historical trend summary.\n"
+)
+
+
+def test_clarify_selection_accepts_trailing_period():
+    """Production failure case: user sent literally '1.' — must be detected."""
+    from agent import pipeline
+
+    history = _clarify_history(_CANONICAL_CLARIFY_BODY)
+    selected = pipeline._detect_clarify_selection("1.", history)
+    assert selected == "Cautious forward-looking view."
+
+
+def test_clarify_selection_accepts_trailing_paren():
+    from agent import pipeline
+
+    history = _clarify_history(_CANONICAL_CLARIFY_BODY)
+    selected = pipeline._detect_clarify_selection("2)", history)
+    assert selected == "Historical trend summary."
+
+
+def test_clarify_selection_accepts_option_prefix():
+    from agent import pipeline
+
+    history = _clarify_history(_CANONICAL_CLARIFY_BODY)
+    assert (
+        pipeline._detect_clarify_selection("option 1", history)
+        == "Cautious forward-looking view."
+    )
+    assert (
+        pipeline._detect_clarify_selection("Option 2.", history)
+        == "Historical trend summary."
+    )
+
+
+def test_clarify_selection_accepts_multi_digit_options():
+    """'10.' must work just like '1.'."""
+    from agent import pipeline
+
+    body = (
+        "Please choose one of these directions:\n"
+        + "\n".join(f"{i}. Option {i} text" for i in range(1, 11))
+        + "\n"
+    )
+    history = _clarify_history(body)
+    assert pipeline._detect_clarify_selection("10", history) == "Option 10 text"
+    assert pipeline._detect_clarify_selection("10.", history) == "Option 10 text"
+
+
+def test_clarify_selection_tolerates_markdown_bold_option_lines():
+    """Some clarify variants emit '**1.**' for the option markers."""
+    from agent import pipeline
+
+    body = (
+        "Could you clarify what you mean?\n"
+        "**1.** Option one text\n"
+        "**2)** Option two text\n"
+    )
+    history = _clarify_history(body)
+    assert pipeline._detect_clarify_selection("1.", history) == "Option one text"
+    assert pipeline._detect_clarify_selection("2", history) == "Option two text"
+
+
+def test_clarify_selection_accepts_non_canonical_clarify_markers():
+    """Markers other than 'Please choose one of these directions:' should
+    also be recognised — _CLARIFY_ASSISTANT_MARKERS lists 10+ phrasings."""
+    from agent import pipeline
+
+    body = (
+        "Did you mean one of these?\n"
+        "1. Option A\n"
+        "2. Option B\n"
+    )
+    history = _clarify_history(body)
+    assert pipeline._detect_clarify_selection("1.", history) == "Option A"
+
+
+def test_clarify_selection_rejects_non_numeric_query():
+    """Free-form replies must NOT be intercepted."""
+    from agent import pipeline
+
+    history = _clarify_history(_CANONICAL_CLARIFY_BODY)
+    assert pipeline._detect_clarify_selection("no thanks", history) is None
+    assert pipeline._detect_clarify_selection("", history) is None
+    assert pipeline._detect_clarify_selection("1.5", history) is None
+    assert pipeline._detect_clarify_selection("1, please", history) is None
+
+
+def test_clarify_selection_rejects_when_no_clarify_marker():
+    """A numeric reply after a regular answer must NOT be intercepted."""
+    from agent import pipeline
+
+    regular_answer = (
+        "The balancing price was 150 GEL/MWh in May 2024.\n"
+        "1. This was driven by thermal share increase.\n"
+        "2. Imports declined.\n"
+    )
+    history = _clarify_history(regular_answer)
+    # No clarify marker → "1." stays a regular query, not a selection.
+    assert pipeline._detect_clarify_selection("1.", history) is None
+
+
+def test_clarify_selection_rejects_when_no_history():
+    from agent import pipeline
+
+    assert pipeline._detect_clarify_selection("1.", []) is None
+    assert pipeline._detect_clarify_selection("1.", None) is None
+
+
 def test_clarify_selection_override_forces_answer_policy():
     from agent import pipeline
 
