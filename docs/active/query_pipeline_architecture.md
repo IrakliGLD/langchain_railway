@@ -2,7 +2,7 @@
 
 Technical reference for the `langchain_railway` query pipeline. Describes the current runtime, the Ideal Decision Tree it targets, and the structural work that is still open.
 
-**Last updated:** 2026-05-10
+**Last updated:** 2026-05-13
 **Source of truth:** the code referenced inline below. When this document and the code disagree, the code wins — update this document.
 
 ---
@@ -167,9 +167,9 @@ Detects language, picks light/analyst mode, runs the heuristic conceptual classi
 
 ### 3.2 Stage 0.2 — Structured Question Analyzer
 
-The semantic centre of the pipeline. Emits the full contract listed in §2.3. Prompt assembly is dynamic: `_classify_analyzer_prompt_profile` + `_build_analyzer_prompt_blocks` choose ordered blocks per question family, and section-aware truncation drops the least-relevant blocks first per `_ANALYZER_TRUNCATION_DATA` / `_ANALYZER_TRUNCATION_KNOWLEDGE`. Fast mode swaps the budget for `FAST_MODE_ANALYZER_BUDGET`.
+The semantic centre of the pipeline. Emits the full contract listed in §2.3. Prompt assembly is dynamic: `_classify_analyzer_prompt_profile` + `_build_analyzer_prompt_blocks` choose ordered blocks per question family, and section-aware truncation drops the least-relevant blocks first per `_ANALYZER_TRUNCATION_DATA` / `_ANALYZER_TRUNCATION_KNOWLEDGE`. Fast mode swaps the budget for `FAST_MODE_ANALYZER_BUDGET`; deep mode reads `ANALYZER_PROMPT_BUDGET_MAX_CHARS` (separate from `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS`; both default to the legacy `PROMPT_BUDGET_MAX_CHARS`).
 
-Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer_kind` against a `query_type`-derived value every call. On disagreement the safer option is preferred unless the legal-list exception fires (LIST + regulatory/conceptual + confidence ≥ 0.85).
+Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer_kind` against a `query_type`-derived value every call. On disagreement the safer option is preferred unless the legal-list exception fires (LIST + regulatory/conceptual + confidence ≥ 0.85). The scenario-metric override (EXPLANATION/SCALAR/TIMESERIES → SCENARIO when the analyzer emits a scenario-family derived metric) is additionally gated on a quantitative anchor in the user query — a digit, percent, or multiplicative/directional word — to prevent garbage renderer output when the analyzer hallucinates a `scenario_factor` from an anchorless question (2026-05-13 fix).
 
 ### 3.3 Stage 0.3 — Vector Knowledge Retrieval
 
@@ -239,7 +239,7 @@ A "missing requested evidence" check after Stage 3 can CLARIFY if the analyzer a
 1. **Generic renderer** (`generic_renderer.render`) — handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from canonical evidence frames. Returns None when the shape isn't covered or evidence isn't suitable.
 2. **share_summary_override** — deterministic specialized formatter for share-intent queries (renewable/thermal PPA decomposition + per-period price join). Sits alongside SCENARIO/FORECAST as a permanent specialized formatter per §2.3 (see §5.3 for why it's not legacy debt).
 3. **Other specialized direct answers** — regulated-tariff-list, residual-weighted-price.
-4. **LLM `llm_summarize_structured`** — for `render_style=NARRATIVE` shapes. Receives focus-aware prompts assembled from [`skills/answer-composer/`](../../skills/answer-composer/SKILL.md). Truncation profile selected by `answer_kind`: `_TRUNCATION_PRIORITY_DATA` / `_KNOWLEDGE` / `_EXPLANATION` / `_FORECAST_SCENARIO`.
+4. **LLM `llm_summarize_structured`** — for `render_style=NARRATIVE` shapes. Receives focus-aware prompts assembled from [`skills/answer-composer/`](../../skills/answer-composer/SKILL.md). Prompt budget reads `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` (independent of the analyzer budget). Truncation profile selected by `answer_kind`: `_TRUNCATION_PRIORITY_DATA` / `_KNOWLEDGE` / `_EXPLANATION` / `_FORECAST_SCENARIO`; the profile ordering follows three invariants pinned by tests — `UNTRUSTED_CONVERSATION_HISTORY` dropped first in every profile, `UNTRUSTED_EXTERNAL_SOURCE_PASSAGES` preserved last for KNOWLEDGE, `UNTRUSTED_STATISTICS` preserved last for data-grounded profiles (see [`tests/test_vector_retrieval_tier.py`](../../tests/test_vector_retrieval_tier.py)).
 
 A post-hoc provenance gate runs after the summary. It is a no-op for canonical-frame paths (claims list is empty → `gate_passed=True, reason="no_claims"`); for narrative LLM summaries it catches numeric hallucinations and replaces the answer with a `citation_gate_fallback` on coverage failure.
 
@@ -347,7 +347,7 @@ The architecture trades regex brittleness for LLM non-determinism. Cross-check, 
 
 **Where the work lives:** analyzer prompt (few-shot examples, vocabulary), `_cross_check_answer_kind` policy, runtime skills (`answer-composer`, `energy-analyst`).
 
-**Playbook:** [`skills/pipeline-failure-diagnostics/references/failure-taxonomy.md`](../../skills/pipeline-failure-diagnostics/references/failure-taxonomy.md) Pattern A (schema crash → cascade), Pattern B (cross-check override), Pattern C (router misclassification), Pattern D (heuristic disagreement). The 2026-05-09 fix series ("who can trade…", "why did price change…", "trend and structure of supply") is the canonical worked example: four edits across prompt + cross-check + answer-composer skill, no new stage.
+**Playbook:** [`skills/pipeline-failure-diagnostics/references/failure-taxonomy.md`](../../skills/pipeline-failure-diagnostics/references/failure-taxonomy.md) Pattern A (schema crash → cascade), Pattern B (cross-check override), Pattern C (router misclassification), Pattern D (heuristic disagreement). The 2026-05-09 fix series ("who can trade…", "why did price change…", "trend and structure of supply") is the canonical worked example: four edits across prompt + cross-check + answer-composer skill, no new stage. The 2026-05-13 log-driven series is the second worked example: five edits across post-LLM narrative scrubbing, the SCENARIO override gate, clarify-selection detection, per-stage prompt budgets, and truncation-priority invariants — again no new stage.
 
 This is ongoing — every new failure report potentially adds a few-shot example, a cross-check refinement, or an answer-composer rule.
 
