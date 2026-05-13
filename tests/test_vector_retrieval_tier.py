@@ -325,3 +325,104 @@ def test_summarizer_profile_prefers_qa_over_effective_answer_kind():
         )
         is _TRUNCATION_PRIORITY_EXPLANATION
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.c — Truncation priority invariants (audit, 2026-05-13)
+#
+# Production logs (2026-05-13) showed 3 of 12 summarizer prompts hitting the
+# section-aware truncation, dropping UNTRUSTED_CONVERSATION_HISTORY,
+# UNTRUSTED_DOMAIN_KNOWLEDGE, and UNTRUSTED_EXTERNAL_SOURCE_PASSAGES.  The
+# truncation order is governed by per-profile priority lists in core/llm.py.
+# An audit confirmed the lists already follow the design invariants below;
+# these tests pin them so a future edit cannot silently regress them.
+#
+# Design invariants:
+#   1. UNTRUSTED_CONVERSATION_HISTORY is the FIRST section dropped in every
+#      summarizer profile.  After the analyzer canonicalises the question,
+#      history is mostly noise — its evidentiary value is lower than data,
+#      domain knowledge, or external passages.
+#
+#   2. For KNOWLEDGE-grounded answers (KNOWLEDGE / CLARIFY / REGULATORY_PROCEDURE)
+#      UNTRUSTED_EXTERNAL_SOURCE_PASSAGES is the LAST section dropped.  These
+#      passages are the primary evidence for procedural and regulatory content.
+#
+#   3. For DATA-grounded answers (SCALAR / LIST / TIMESERIES / COMPARISON /
+#      EXPLANATION / FORECAST / SCENARIO) UNTRUSTED_STATISTICS is the LAST
+#      section dropped.  Derived metrics + pre-computed stats are what the
+#      summarizer grounds its arithmetic claims against.
+# ---------------------------------------------------------------------------
+
+
+def _all_summarizer_profiles():
+    """Return (name, list) for every summarizer-side truncation profile."""
+    from core import llm as llm_core
+    return [
+        ("_TRUNCATION_PRIORITY", llm_core._TRUNCATION_PRIORITY),
+        ("_TRUNCATION_PRIORITY_DATA", llm_core._TRUNCATION_PRIORITY_DATA),
+        ("_TRUNCATION_PRIORITY_KNOWLEDGE", llm_core._TRUNCATION_PRIORITY_KNOWLEDGE),
+        ("_TRUNCATION_PRIORITY_EXPLANATION", llm_core._TRUNCATION_PRIORITY_EXPLANATION),
+        ("_TRUNCATION_PRIORITY_FORECAST_SCENARIO", llm_core._TRUNCATION_PRIORITY_FORECAST_SCENARIO),
+    ]
+
+
+def test_invariant_history_dropped_first_in_every_summarizer_profile():
+    """Invariant 1: UNTRUSTED_CONVERSATION_HISTORY is the FIRST section
+    dropped in every summarizer-side truncation profile.
+    """
+    for name, profile in _all_summarizer_profiles():
+        assert profile[0] == "UNTRUSTED_CONVERSATION_HISTORY", (
+            f"{name}[0] = {profile[0]!r} (expected 'UNTRUSTED_CONVERSATION_HISTORY'). "
+            "Phase 2.c invariant: history is the first section dropped in every "
+            "summarizer profile — see comment block in tests/test_vector_retrieval_tier.py."
+        )
+
+
+def test_invariant_knowledge_profile_preserves_external_passages_last():
+    """Invariant 2: for KNOWLEDGE answers the EXTERNAL_SOURCE_PASSAGES section
+    is the LAST section dropped — it carries the primary regulatory evidence.
+    """
+    from core.llm import _TRUNCATION_PRIORITY_KNOWLEDGE
+    assert _TRUNCATION_PRIORITY_KNOWLEDGE[-1] == "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES", (
+        "_TRUNCATION_PRIORITY_KNOWLEDGE[-1] must be 'UNTRUSTED_EXTERNAL_SOURCE_PASSAGES'. "
+        "Phase 2.c invariant: regulatory answers ground in external passages."
+    )
+    # And domain knowledge is the second-most protected (after passages).
+    assert _TRUNCATION_PRIORITY_KNOWLEDGE[-2] == "UNTRUSTED_DOMAIN_KNOWLEDGE", (
+        "_TRUNCATION_PRIORITY_KNOWLEDGE[-2] must be 'UNTRUSTED_DOMAIN_KNOWLEDGE'."
+    )
+
+
+def test_invariant_data_grounded_profiles_preserve_statistics_last():
+    """Invariant 3: for DATA-grounded answer kinds (SCALAR/LIST/TIMESERIES/
+    COMPARISON/EXPLANATION/FORECAST/SCENARIO) the STATISTICS section is the
+    LAST section dropped.
+    """
+    from core import llm as llm_core
+    data_grounded = [
+        ("_TRUNCATION_PRIORITY_DATA", llm_core._TRUNCATION_PRIORITY_DATA),
+        ("_TRUNCATION_PRIORITY_EXPLANATION", llm_core._TRUNCATION_PRIORITY_EXPLANATION),
+        ("_TRUNCATION_PRIORITY_FORECAST_SCENARIO", llm_core._TRUNCATION_PRIORITY_FORECAST_SCENARIO),
+    ]
+    for name, profile in data_grounded:
+        assert profile[-1] == "UNTRUSTED_STATISTICS", (
+            f"{name}[-1] = {profile[-1]!r} (expected 'UNTRUSTED_STATISTICS'). "
+            "Phase 2.c invariant: data-grounded answers ground in statistics."
+        )
+
+
+def test_invariant_no_profile_drops_data_preview_or_statistics_before_history():
+    """Defensive invariant: data preview and statistics must never come
+    before history in the drop order.  Catches a likely regression mode where
+    someone moves history later (e.g. clarify overlay leaking) without also
+    updating the summarizer-side profile.
+    """
+    for name, profile in _all_summarizer_profiles():
+        history_idx = profile.index("UNTRUSTED_CONVERSATION_HISTORY")
+        for protected in ("UNTRUSTED_DATA_PREVIEW", "UNTRUSTED_STATISTICS"):
+            if protected in profile:
+                assert profile.index(protected) > history_idx, (
+                    f"{name}: {protected} (idx {profile.index(protected)}) "
+                    f"is at or before HISTORY (idx {history_idx}). "
+                    "Phase 2.c defensive invariant."
+                )
