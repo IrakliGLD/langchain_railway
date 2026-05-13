@@ -180,7 +180,7 @@ Regulated tariffs are **NOT support schemes**.
 **Definition:** Composition of electricity supply by source.
 
 **Georgia Context:**
-- Hydro-dominated (~80% in good years)
+- Hydro-dominated by **annual energy generation** (~75–80% in high-hydrology years). Distinct from **installed capacity** share (~73% hydro, 23% thermal as of 2023 — see `seasonal_patterns.md`). When citing percentages, always clarify whether the figure is capacity (MW) or energy (MWh).
 - Thermal fills winter gaps
 - Wind/solar growing
 - No nuclear
@@ -206,7 +206,7 @@ Regulated tariffs are **NOT support schemes**.
 - Energy (MWh): output over time
 
 **Georgia Context:**
-- Installed capacity ~4,500 MW
+- Installed capacity ~4,621 MW (2023 figure, per TYNDP — see `seasonal_patterns.md` §"Generation Adequacy")
 - Actual generation depends on hydrology and dispatch
 - Capacity factors:
   - hydro: 30–50%

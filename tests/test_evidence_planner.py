@@ -162,6 +162,41 @@ class TestBuildEvidencePlan:
         # No injection, still a single-tool plan; warning logged by validator.
         assert not primary["params"].get("entities")
 
+    def test_balancing_forecast_narrative_adds_composition_step(self):
+        """Forecast narratives on balancing price must add a composition
+        step so the summarizer can cite share shifts and policy events.
+
+        Pins the fix for Defect C (forecast plan lacks context steps).
+        """
+        payload = _make_qa_payload(
+            query_type="forecast",
+            tools=[{"name": "get_prices", "score": 0.95, "reason": "balancing price history"}],
+            period={
+                "kind": "year",
+                "start_date": "2030-01-01",
+                "end_date": "2030-12-31",
+                "granularity": "year",
+                "raw_text": "next 5 years",
+            },
+        )
+        payload["answer_kind"] = "forecast"
+        payload["render_style"] = "narrative"
+        payload["raw_query"] = "forecast balancing prices for next 5 years"
+        payload["canonical_query_en"] = "forecast balancing prices for next 5 years"
+        ctx = _ctx_with_qa(payload)
+        ctx = build_evidence_plan(ctx)
+
+        tool_names = [step["tool_name"] for step in ctx.evidence_plan]
+        # Primary remains get_prices, but composition must be added so the
+        # narrative can discuss share shifts and policy events.
+        assert "get_prices" in tool_names
+        assert "get_balancing_composition" in tool_names
+        composition_step = next(
+            step for step in ctx.evidence_plan
+            if step["tool_name"] == "get_balancing_composition"
+        )
+        assert composition_step["role"] == "composition_context"
+
     def test_comparison_answer_kind_blocks_single_tool_fast_path(self):
         """F4: answer_kind=COMPARISON forces multi-evidence expansion even when query_type=data_retrieval."""
         payload = _make_qa_payload(
@@ -213,10 +248,17 @@ class TestResolveToolParams:
 
         params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
 
+        # Forecast queries are always coerced to monthly granularity so the
+        # analyzer's seasonal-CAGR branch in ``_generate_cagr_forecast`` has
+        # enough data to compute summer/winter projections (see
+        # ``knowledge/balancing_price.md`` "For Forecasting"). The hint
+        # ``period.granularity = "year"`` from the LLM analyzer is overridden.
         assert params is not None
-        assert params["granularity"] == "yearly"
-        assert params["start_date"] == "2021-01-01"
-        assert params["end_date"] == "2025-12-31"
+        assert params["granularity"] == "monthly"
+        # Monthly mode anchors the start date to the resolved_end month, not
+        # January, so the window expansion gives a wider monthly history.
+        assert params["start_date"] == "2022-03-01"
+        assert params["end_date"] == "2026-03-31"
 
     def test_expands_single_month_explanation_window_for_derived_metrics(self):
         payload = _make_qa_payload(
@@ -272,10 +314,14 @@ class TestResolveToolParams:
 
         params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
 
+        # Granularity is forced to monthly for forecasts (see the
+        # companion test above for the rationale). Excluded years still
+        # widen the history window — but now in monthly mode the start
+        # date anchors to the resolved_end month, not January.
         assert params is not None
-        assert params["granularity"] == "yearly"
-        assert params["start_date"] == "2018-01-01"
-        assert params["end_date"] == "2025-12-31"
+        assert params["granularity"] == "monthly"
+        assert params["start_date"] == "2019-03-01"
+        assert params["end_date"] == "2026-03-31"
 
     def test_expands_single_month_range_window_for_derived_metrics(self):
         payload = _make_qa_payload(
@@ -488,10 +534,14 @@ class TestResolveToolParams:
 
         params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
 
+        # Forecasts are coerced to monthly granularity for seasonal CAGR.
+        # The future structured period (2035) is still ignored as a source
+        # window — the planner widens history to monthly bars ending at the
+        # last completed month.
         assert params is not None
-        assert params["granularity"] == "yearly"
-        assert params["start_date"] == "2021-01-01"
-        assert params["end_date"] == "2025-12-31"
+        assert params["granularity"] == "monthly"
+        assert params["start_date"] == "2022-03-01"
+        assert params["end_date"] == "2026-03-31"
 
     def test_yearly_generation_secondary_inherits_primary_granularity(self):
         payload = _make_qa_payload(

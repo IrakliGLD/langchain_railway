@@ -51,10 +51,10 @@ Not all tariffs react to exchange rate in the same way.
 
 **Balancing Market Reference Mechanism:**
 - When electricity from deregulated hydro is sold on the balancing market, its remuneration is linked to reference generation sources:
-  - **May–August (summer months):**
+  - **Summer (April–July, the canonical SUMMER_MONTHS in code):**
     - price is referenced to the cheapest hydro generation
     - weaker direct link to USD
-  - **Other months (winter period):**
+  - **Winter (August–March, the canonical WINTER_MONTHS in code):**
     - price is referenced to thermal generation
     - thermal generation is gas-based and USD-linked
     - therefore, deregulated hydro becomes **effectively USD-indexed in winter**

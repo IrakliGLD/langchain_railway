@@ -240,3 +240,40 @@ def test_generate_cagr_forecast_reports_exclusion_when_it_removes_usable_history
         "Excluded years from model fit: 2024. "
         "Forecast skipped: only 1 usable yearly point after normalization/filtering."
     )
+
+
+def test_generate_cagr_forecast_emits_both_currencies_when_present():
+    """When both ``p_bal_gel`` and ``p_bal_usd`` columns are present the
+    seasonal CAGR branch must emit forecast rows with BOTH currencies
+    populated (per row, per season).  Pins the fix for Defect B
+    (single-currency forecast)."""
+    from agent import analyzer
+    import numpy as np
+
+    months = pd.date_range("2019-01-01", "2025-12-01", freq="MS")
+    # Build a synthetic monthly series so the seasonal branch fires.
+    base = np.linspace(80.0, 130.0, len(months))
+    seasonal = np.where(months.month.isin([4, 5, 6, 7]), -10.0, 10.0)
+    df = pd.DataFrame({
+        "date": months,
+        "p_bal_gel": base + seasonal,
+        "p_bal_usd": (base + seasonal) / 2.7,
+    })
+
+    out, note = analyzer._generate_cagr_forecast(
+        df, "forecast balancing prices for next 5 years"
+    )
+
+    assert "Forecast skipped" not in note
+    assert "GEL Yearly CAGR" in note
+    assert "USD Yearly CAGR" in note
+    assert "Summer" in note and "Winter" in note
+
+    fc = out[out["is_forecast"].fillna(False).astype(bool)]
+    # Both currencies must be populated on every forecast row, not NaN.
+    assert fc["p_bal_gel"].notna().all()
+    assert fc["p_bal_usd"].notna().all()
+    # Seasonal rows (summer/winter) must be present.
+    assert set(fc["season"].dropna().unique()) == {"summer", "winter"}
+    # Horizon: 5 years × 2 seasons = 10 forecast rows.
+    assert len(fc) == 10

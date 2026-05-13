@@ -2281,6 +2281,18 @@ def resolve_tool_params(
         if not raw_gran and qa.sql_hints.period and qa.sql_hints.period.granularity:
             raw_gran = qa.sql_hints.period.granularity.value
         granularity = normalize_tool_granularity_hint(raw_gran) or "monthly"
+        # Forecast queries must be monthly so the seasonal-CAGR branch in
+        # ``_generate_cagr_forecast`` can compute summer/winter projections.
+        # Yearly granularity collapses 12 months → 1 row per year and forces
+        # the analyzer into a single non-seasonal CAGR, violating the
+        # seasonal-split rule documented in ``knowledge/seasonal_patterns.md``
+        # and ``skills/answer-composer/references/forecast-caveats.md``.
+        if qa.classification.query_type == QueryType.FORECAST and granularity != "monthly":
+            log.info(
+                "Forecast granularity override: %s -> monthly (forecasts require monthly history for seasonal CAGR).",
+                granularity,
+            )
+            granularity = "monthly"
         start_date, end_date = _expand_forecast_history_window(
             qa,
             start_date,
@@ -2349,6 +2361,9 @@ def resolve_tool_params(
             and not _query_has_explicit_month_list(raw_query)
             and not _query_requests_correlation(qa, raw_query)
             and not _query_requests_trend(qa, raw_query)
+            # Forecast queries explicitly need monthly history for seasonal CAGR;
+            # the override above already enforced monthly. Do not re-promote.
+            and qa.classification.query_type != QueryType.FORECAST
         ):
             params["granularity"] = "yearly"
             log.info("Promoted granularity to yearly for annual-total query")

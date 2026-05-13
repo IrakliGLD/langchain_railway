@@ -1763,8 +1763,10 @@ def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None,
     if forecast_rows.empty:
         return None, []
 
-    # Pick the metric column: first numeric col that isn't a marker /
-    # scratch / reference / year-month integer.
+    # Pick the metric column(s): every numeric column that isn't a marker,
+    # scratch, reference, or year/month integer.  Multiple columns are
+    # expected for balancing-price forecasts (``p_bal_gel`` AND ``p_bal_usd``)
+    # so the renderer can show separate GEL and USD entries per season.
     def _is_candidate_metric(col_name: str) -> bool:
         lower = str(col_name).lower()
         if lower in {"is_forecast", "xrate"}:
@@ -1775,16 +1777,20 @@ def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None,
             return False
         return True
 
-    metric_col = None
+    metric_cols: list[str] = []
     for col in forecast_rows.columns:
         if col == time_col:
             continue
         if not _is_candidate_metric(str(col)):
             continue
-        if pd.api.types.is_numeric_dtype(forecast_rows[col]):
-            metric_col = col
-            break
-    if metric_col is None:
+        if not pd.api.types.is_numeric_dtype(forecast_rows[col]):
+            continue
+        # Skip columns that are all-NaN in forecast rows so we never emit
+        # an empty entry just because the column existed historically.
+        if pd.to_numeric(forecast_rows[col], errors="coerce").dropna().empty:
+            continue
+        metric_cols.append(col)
+    if not metric_cols:
         return None, []
 
     # Target date = latest forecast date.
@@ -1793,13 +1799,33 @@ def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None,
 
     # Parse CAGR% from stats_hint note, if present, for a human-readable
     # ``equation`` field. Best-effort — absence does not block the frame.
+    # For multi-currency notes (e.g. ``GEL Yearly CAGR=X%, Summer=Y%, ...;
+    # USD Yearly CAGR=A%, ...``) match per-currency labels; fall back to the
+    # legacy unlabeled form for single-currency notes.
     stats_hint = str(getattr(ctx, "stats_hint", "") or "")
-    cagr_match = re.search(r"Yearly CAGR=([-0-9.]+)%", stats_hint)
-    summer_cagr = re.search(r"Summer=([-0-9.]+)%", stats_hint)
-    winter_cagr = re.search(r"Winter=([-0-9.]+)%", stats_hint)
-    yearly_equation = (
-        f"CAGR={cagr_match.group(1)}% per year" if cagr_match else None
-    )
+
+    def _match_cagr_for_metric(metric_col_name: str, kind: str) -> re.Match[str] | None:
+        """``kind`` ∈ {"yearly", "summer", "winter"}.
+
+        Looks for a currency-prefixed match first (``GEL Yearly CAGR=…``) and
+        falls back to the legacy unprefixed form (``Yearly CAGR=…``).
+        """
+        currency_prefix = None
+        lower = metric_col_name.lower()
+        if lower.endswith("_gel"):
+            currency_prefix = "GEL"
+        elif lower.endswith("_usd"):
+            currency_prefix = "USD"
+        label_map = {"yearly": "Yearly CAGR", "summer": "Summer", "winter": "Winter"}
+        label = label_map[kind]
+        if currency_prefix:
+            prefixed = re.search(
+                rf"{currency_prefix}[^;]*?{label}=([-0-9.]+)%",
+                stats_hint,
+            )
+            if prefixed:
+                return prefixed
+        return re.search(rf"{label}=([-0-9.]+)%", stats_hint)
 
     # Restrict to the target year so we emit one entry per metric/season,
     # not every forecast year.
@@ -1807,30 +1833,45 @@ def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None,
     target_year_rows = forecast_rows[forecast_rows[time_col].dt.year == target_year]
 
     entries: list[dict[str, Any]] = []
+    season_attempt_made = False
     if "season" in target_year_rows.columns:
         season_series = target_year_rows["season"].astype("object").fillna("").str.lower()
         for season_label, season_tag in (("summer", "summer"), ("winter", "winter")):
             season_rows = target_year_rows[season_series == season_label]
             if season_rows.empty:
                 continue
-            val = pd.to_numeric(season_rows[metric_col], errors="coerce").dropna()
-            if val.empty:
-                continue
-            match = summer_cagr if season_tag == "summer" else winter_cagr
-            entries.append(
-                {
-                    "metric": str(metric_col),
-                    "forecast_value": float(val.iloc[-1]),
-                    "r_squared": None,
-                    "equation": f"CAGR={match.group(1)}% per year" if match else yearly_equation,
-                    "season": season_tag,
-                }
-            )
+            season_attempt_made = True
+            for metric_col in metric_cols:
+                val = pd.to_numeric(season_rows[metric_col], errors="coerce").dropna()
+                if val.empty:
+                    continue
+                match = _match_cagr_for_metric(metric_col, season_tag)
+                yearly_match = _match_cagr_for_metric(metric_col, "yearly")
+                yearly_equation = (
+                    f"CAGR={yearly_match.group(1)}% per year" if yearly_match else None
+                )
+                entries.append(
+                    {
+                        "metric": str(metric_col),
+                        "forecast_value": float(val.iloc[-1]),
+                        "r_squared": None,
+                        "equation": (
+                            f"CAGR={match.group(1)}% per year" if match else yearly_equation
+                        ),
+                        "season": season_tag,
+                    }
+                )
 
     if not entries:
-        # Non-seasonal (quantity / yearly-price) path — single overall entry.
-        val = pd.to_numeric(target_year_rows[metric_col], errors="coerce").dropna()
-        if not val.empty:
+        # Non-seasonal (quantity / yearly-price) path — one entry per metric.
+        for metric_col in metric_cols:
+            val = pd.to_numeric(target_year_rows[metric_col], errors="coerce").dropna()
+            if val.empty:
+                continue
+            yearly_match = _match_cagr_for_metric(metric_col, "yearly")
+            yearly_equation = (
+                f"CAGR={yearly_match.group(1)}% per year" if yearly_match else None
+            )
             entries.append(
                 {
                     "metric": str(metric_col),

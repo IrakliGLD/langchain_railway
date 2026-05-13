@@ -1671,22 +1671,50 @@ def _month_from_text(s: str) -> Optional[int]:
 
 
 def _choose_target_for_forecast(df_in: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
-    """Return (time_col, value_col) for forecasting."""
+    """Return (time_col, value_col) for forecasting.
+
+    Single-column legacy entry point retained for tests and callers that only
+    need one forecast target.  For balancing-price queries where both GEL and
+    USD are present, prefer :func:`_gather_forecast_value_cols` so the
+    forecast includes both currencies (the documented requirement in
+    ``knowledge/balancing_price.md`` "For Forecasting" and
+    ``skills/answer-composer/references/forecast-caveats.md``).
+    """
+    time_col, value_cols = _gather_forecast_value_cols(df_in)
+    return time_col, (value_cols[0] if value_cols else None)
+
+
+def _gather_forecast_value_cols(df_in: pd.DataFrame) -> Tuple[Optional[str], List[str]]:
+    """Return (time_col, [value_cols]) for multi-currency forecast support.
+
+    When both ``p_bal_gel`` and ``p_bal_usd`` are present, both are returned
+    so the seasonal-CAGR branch can produce a forecast row per (year, season)
+    with both currencies populated.  This matches the answer-composer rule
+    that forecast narratives must cover both GEL and USD: see
+    ``knowledge/balancing_price.md`` and
+    ``skills/answer-composer/references/forecast-caveats.md``.
+
+    Outside the balancing-price pair, the function falls back to legacy
+    single-column behaviour (price / tariff / quantity / first numeric).
+    """
     time_candidates = [c for c in df_in.columns if any(k in c.lower() for k in ["date", "year", "month"])]
     time_col = time_candidates[0] if time_candidates else None
-    for c in df_in.columns:
-        if c.lower() in ["p_bal_usd", "p_bal_gel"]:
-            return time_col, c
+
+    cols_lower = {c.lower(): c for c in df_in.columns}
+    balancing_pair = [cols_lower[name] for name in ("p_bal_gel", "p_bal_usd") if name in cols_lower]
+    if balancing_pair:
+        return time_col, balancing_pair
+
     for c in df_in.columns:
         if any(k in c.lower() for k in ["price", "tariff", "p_bal"]):
-            return time_col, c
+            return time_col, [c]
     for c in df_in.columns:
         if any(k in c.lower() for k in ["quantity_tech", "quantity", "volume_tj", "generation", "demand"]):
-            return time_col, c
+            return time_col, [c]
     for c in df_in.columns:
         if pd.api.types.is_numeric_dtype(df_in[c]):
-            return time_col, c
-    return time_col, None
+            return time_col, [c]
+    return time_col, []
 
 
 def _detect_data_type(value_col: str) -> str:
@@ -1747,16 +1775,31 @@ def _robust_endpoint_value(series: "pd.Series", *, window: int = 3, which: str) 
 
 
 def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.DataFrame, str]:
-    """Generate CAGR-based forecast for price or quantity data."""
+    """Generate CAGR-based forecast for price or quantity data.
+
+    When the input contains both ``p_bal_gel`` and ``p_bal_usd``, forecast
+    rows include both currencies on the same (year, season) line so the
+    summarizer's forecast frame can emit a GEL entry AND a USD entry per
+    season, satisfying the seasonal+currency split rule in
+    ``knowledge/balancing_price.md`` "For Forecasting".  Otherwise the
+    function uses the first available value column (legacy single-column
+    behaviour).
+    """
     df = df_in.copy()
-    time_col, value_col = _choose_target_for_forecast(df)
-    if not time_col or not value_col:
+    time_col, value_cols = _gather_forecast_value_cols(df)
+    if not time_col or not value_cols:
         return df_in, "Forecast skipped: no clear time/value columns."
+    # Legacy single-target reference kept for code paths and notes that use
+    # the "primary" value column.
+    value_col = value_cols[0]
 
     df[time_col], time_granularity = normalize_period_series_with_granularity(df[time_col])
-    df = df.dropna(subset=[time_col, value_col])
-    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
-    df = df.dropna(subset=[value_col])
+    df = df.dropna(subset=[time_col])
+    for vc in value_cols:
+        df[vc] = pd.to_numeric(df[vc], errors="coerce")
+    # Drop rows where ALL forecast value columns are NaN — keep partial rows so
+    # one currency missing for a month does not lose the other.
+    df = df.dropna(subset=value_cols, how="all")
     if df.empty:
         return df_in, "Forecast skipped: no numeric data."
 
@@ -1837,103 +1880,200 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         df["__forecast_month"] = df[time_col].dt.month
         df["__forecast_season"] = np.where(df["__forecast_month"].isin(SUMMER_MONTHS), "summer", "winter")
 
-        df_y = (
-            df.groupby("__forecast_year")[value_col]
-            .mean()
-            .dropna()
-            .sort_index()
-            .reset_index()
-            .rename(columns={"__forecast_year": "year"})
-        )
-        if len(df_y) < 2:
-            return df_in, " ".join(note_parts + [_usable_yearly_points_message(len(df_y))]).strip()
-        first, last = df_y.iloc[0], df_y.iloc[-1]
-        span = last["year"] - first["year"]
-
-        # Fix 5: damped endpoints (3-year trailing averages).
-        first_val = _robust_endpoint_value(df_y[value_col], window=3, which="first")
-        last_val = _robust_endpoint_value(df_y[value_col], window=3, which="last")
-
-        if span > 0 and first_val > 0 and last_val > 0 and not np.isnan(first_val) and not np.isnan(last_val):
-            cagr_y = (last_val / first_val) ** (1 / span) - 1
-        else:
-            cagr_y = 0
-
         def format_cagr(cagr_val):
             return f"{cagr_val*100:.2f}" if not np.isnan(cagr_val) else "N/A"
 
-        target_years = _resolve_target_years(int(last["year"]))
+        # Compute per-currency yearly + seasonal CAGRs.  Each currency is
+        # treated as an independent series; rows with NaN in that currency
+        # are dropped for that currency's CAGR computation only.
+        per_currency: dict[str, dict] = {}
+        for vc in value_cols:
+            sub = df.dropna(subset=[vc])
+            if sub.empty:
+                continue
+            df_y_vc = (
+                sub.groupby("__forecast_year")[vc]
+                .mean()
+                .dropna()
+                .sort_index()
+                .reset_index()
+                .rename(columns={"__forecast_year": "year"})
+            )
+            if len(df_y_vc) < 2:
+                continue
+            first_vc, last_vc = df_y_vc.iloc[0], df_y_vc.iloc[-1]
+            span_vc = last_vc["year"] - first_vc["year"]
+            first_val_vc = _robust_endpoint_value(df_y_vc[vc], window=3, which="first")
+            last_val_vc = _robust_endpoint_value(df_y_vc[vc], window=3, which="last")
+            cagr_y_vc = (
+                (last_val_vc / first_val_vc) ** (1 / span_vc) - 1
+                if span_vc > 0 and first_val_vc > 0 and last_val_vc > 0
+                and not np.isnan(first_val_vc) and not np.isnan(last_val_vc)
+                else 0
+            )
 
-        if time_granularity == "year":
-            note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}% using yearly averages.")
-            f_rows = []
-            for y in target_years:
-                val_y = last_val * ((1 + cagr_y) ** (y - last["year"]))
-                f_rows.append({time_col: pd.to_datetime(f"{int(y)}-01-01"), value_col: val_y, "is_forecast": True})
+            cagr_s_vc = np.nan
+            cagr_w_vc = np.nan
+            s_last_vc = float("nan")
+            w_last_vc = float("nan")
+            if time_granularity != "year":
+                df_s_vc = (
+                    sub.groupby(["__forecast_year", "__forecast_season"])[vc]
+                    .mean()
+                    .dropna()
+                    .reset_index()
+                    .rename(columns={"__forecast_year": "year", "__forecast_season": "season"})
+                )
+                summer_vc = df_s_vc[df_s_vc["season"] == "summer"].sort_values("year")
+                winter_vc = df_s_vc[df_s_vc["season"] == "winter"].sort_values("year")
+                if len(summer_vc) >= 2:
+                    s_first = _robust_endpoint_value(summer_vc[vc], window=3, which="first")
+                    s_last_vc = _robust_endpoint_value(summer_vc[vc], window=3, which="last")
+                    s_span = summer_vc["year"].iloc[-1] - summer_vc["year"].iloc[0]
+                    cagr_s_vc = (
+                        (s_last_vc / s_first) ** (1 / s_span) - 1
+                        if s_span > 0 and s_first > 0 and s_last_vc > 0
+                        and not np.isnan(s_first) and not np.isnan(s_last_vc)
+                        else np.nan
+                    )
+                if len(winter_vc) >= 2:
+                    w_first = _robust_endpoint_value(winter_vc[vc], window=3, which="first")
+                    w_last_vc = _robust_endpoint_value(winter_vc[vc], window=3, which="last")
+                    w_span = winter_vc["year"].iloc[-1] - winter_vc["year"].iloc[0]
+                    cagr_w_vc = (
+                        (w_last_vc / w_first) ** (1 / w_span) - 1
+                        if w_span > 0 and w_first > 0 and w_last_vc > 0
+                        and not np.isnan(w_first) and not np.isnan(w_last_vc)
+                        else np.nan
+                    )
 
-            if "is_forecast" not in df.columns:
-                df["is_forecast"] = False
-            df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
-            note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
-            return _strip_scratch(df_f), " ".join(note_parts)
+            per_currency[vc] = {
+                "last_val": last_val_vc,
+                "last_year": int(last_vc["year"]),
+                "cagr_y": cagr_y_vc,
+                "cagr_s": cagr_s_vc,
+                "cagr_w": cagr_w_vc,
+                "s_last": s_last_vc,
+                "w_last": w_last_vc,
+            }
 
-        df_s = (
-            df.groupby(["__forecast_year", "__forecast_season"])[value_col]
-            .mean()
-            .dropna()
-            .reset_index()
-            .rename(columns={"__forecast_year": "year", "__forecast_season": "season"})
+        if not per_currency:
+            # No currency had >=2 usable yearly points.  Mirror the legacy
+            # short-series early return so callers see the same note shape.
+            df_y_primary = (
+                df.dropna(subset=[value_col])
+                .groupby("__forecast_year")[value_col]
+                .mean()
+                .dropna()
+                .sort_index()
+            )
+            return df_in, " ".join(note_parts + [_usable_yearly_points_message(len(df_y_primary))]).strip()
+
+        # Legacy aliases (kept so any external reader sees primary-column
+        # values where the single-column form expects them).
+        primary_stats = per_currency.get(value_col) or next(iter(per_currency.values()))
+        last_val = primary_stats["last_val"]
+        primary_last_year = primary_stats["last_year"]
+
+        # Build per-currency CAGR note.  Single-currency cases preserve the
+        # legacy "Yearly CAGR=X%, Summer=Y%, Winter=Z%" line for downstream
+        # parsers (e.g. ``_build_forecast_frame_from_cagr_rows``).
+        if len(per_currency) == 1 and value_col in per_currency:
+            stats0 = per_currency[value_col]
+            if time_granularity == "year":
+                note_parts.append(
+                    f"Yearly CAGR={format_cagr(stats0['cagr_y'])}% using yearly averages."
+                )
+            else:
+                note_parts.append(
+                    f"Yearly CAGR={format_cagr(stats0['cagr_y'])}%, "
+                    f"Summer={format_cagr(stats0['cagr_s'])}%, "
+                    f"Winter={format_cagr(stats0['cagr_w'])}%."
+                )
+        else:
+            cagr_lines = []
+            for vc, stats in per_currency.items():
+                currency_label = (
+                    "GEL" if vc.lower().endswith("_gel")
+                    else "USD" if vc.lower().endswith("_usd")
+                    else vc
+                )
+                if time_granularity == "year" or (
+                    np.isnan(stats["cagr_s"]) and np.isnan(stats["cagr_w"])
+                ):
+                    cagr_lines.append(
+                        f"{currency_label} Yearly CAGR={format_cagr(stats['cagr_y'])}%"
+                    )
+                else:
+                    cagr_lines.append(
+                        f"{currency_label} Yearly CAGR={format_cagr(stats['cagr_y'])}%, "
+                        f"Summer={format_cagr(stats['cagr_s'])}%, "
+                        f"Winter={format_cagr(stats['cagr_w'])}%"
+                    )
+            note_parts.append("; ".join(cagr_lines) + ".")
+
+        # Use the latest historical year across currencies as the anchor for
+        # target-year resolution so forecast horizons stay aligned.
+        target_years = _resolve_target_years(
+            max(stats["last_year"] for stats in per_currency.values())
         )
-        summer = df_s[df_s["season"] == "summer"].sort_values("year")
-        winter = df_s[df_s["season"] == "winter"].sort_values("year")
 
-        # Fix 5: damped endpoints for seasonal CAGR too.
-        if len(summer) >= 2:
-            s_first = _robust_endpoint_value(summer[value_col], window=3, which="first")
-            s_last = _robust_endpoint_value(summer[value_col], window=3, which="last")
-            s_span = summer["year"].iloc[-1] - summer["year"].iloc[0]
-            cagr_s = (
-                (s_last / s_first) ** (1 / s_span) - 1
-                if s_span > 0 and s_first > 0 and s_last > 0 and not np.isnan(s_first) and not np.isnan(s_last)
-                else np.nan
-            )
+        f_rows: list[dict] = []
+        if time_granularity == "year":
+            for y in target_years:
+                row: dict = {
+                    time_col: pd.to_datetime(f"{int(y)}-01-01"),
+                    "is_forecast": True,
+                }
+                for vc, stats in per_currency.items():
+                    val = stats["last_val"] * (
+                        (1 + stats["cagr_y"]) ** (y - stats["last_year"])
+                    )
+                    row[vc] = val
+                f_rows.append(row)
         else:
-            s_last = float("nan")
-            cagr_s = np.nan
-
-        if len(winter) >= 2:
-            w_first = _robust_endpoint_value(winter[value_col], window=3, which="first")
-            w_last = _robust_endpoint_value(winter[value_col], window=3, which="last")
-            w_span = winter["year"].iloc[-1] - winter["year"].iloc[0]
-            cagr_w = (
-                (w_last / w_first) ** (1 / w_span) - 1
-                if w_span > 0 and w_first > 0 and w_last > 0 and not np.isnan(w_first) and not np.isnan(w_last)
-                else np.nan
-            )
-        else:
-            w_last = float("nan")
-            cagr_w = np.nan
-
-        note_parts.append(f"Yearly CAGR={format_cagr(cagr_y)}%, Summer={format_cagr(cagr_s)}%, Winter={format_cagr(cagr_w)}%.")
-
-        f_rows = []
-        for y in target_years:
-            val_y = last_val * ((1 + cagr_y) ** (y - last["year"]))
-            # Fix 4: compound summer from last summer base, winter from last winter base.
-            summer_base = s_last if not np.isnan(s_last) and s_last > 0 else last_val
-            winter_base = w_last if not np.isnan(w_last) and w_last > 0 else last_val
-            val_s = summer_base * ((1 + cagr_s) ** (y - last["year"])) if not np.isnan(cagr_s) else val_y
-            val_w = winter_base * ((1 + cagr_w) ** (y - last["year"])) if not np.isnan(cagr_w) else val_y
-            # Force year to int
-            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-04-01"), "__forecast_season": "summer", value_col: val_s, "is_forecast": True})
-            f_rows.append({time_col: pd.to_datetime(f"{int(y)}-12-01"), "__forecast_season": "winter", value_col: val_w, "is_forecast": True})
+            for y in target_years:
+                # One row per (year, season) with every currency populated so
+                # the forecast frame can emit a GEL entry AND a USD entry per
+                # season.
+                for season_tag, month in (("summer", 4), ("winter", 12)):
+                    row = {
+                        time_col: pd.to_datetime(f"{int(y)}-{month:02d}-01"),
+                        "__forecast_season": season_tag,
+                        "is_forecast": True,
+                    }
+                    for vc, stats in per_currency.items():
+                        if season_tag == "summer":
+                            base = (
+                                stats["s_last"]
+                                if not np.isnan(stats["s_last"]) and stats["s_last"] > 0
+                                else stats["last_val"]
+                            )
+                            cagr = (
+                                stats["cagr_s"]
+                                if not np.isnan(stats["cagr_s"])
+                                else stats["cagr_y"]
+                            )
+                        else:
+                            base = (
+                                stats["w_last"]
+                                if not np.isnan(stats["w_last"]) and stats["w_last"] > 0
+                                else stats["last_val"]
+                            )
+                            cagr = (
+                                stats["cagr_w"]
+                                if not np.isnan(stats["cagr_w"])
+                                else stats["cagr_y"]
+                            )
+                        row[vc] = base * ((1 + cagr) ** (y - stats["last_year"]))
+                    f_rows.append(row)
 
         if "is_forecast" not in df.columns:
             df["is_forecast"] = False
-        if "season" not in df.columns and "__forecast_season" in df.columns:
+        if time_granularity != "year" and "season" not in df.columns and "__forecast_season" in df.columns:
             df["season"] = df["__forecast_season"]
         df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
-        if "__forecast_season" in df_f.columns:
+        if time_granularity != "year" and "__forecast_season" in df_f.columns:
             df_f["season"] = df_f.get("season").fillna(df_f["__forecast_season"])
         note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
         return _strip_scratch(df_f), " ".join(note_parts)

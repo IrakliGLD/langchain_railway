@@ -141,9 +141,11 @@ Price changes are driven by deviations from this baseline:
   - balancing price does not decrease as strongly as in the past, even in high-hydro periods  
 
 **Deregulated Hydro Pricing (CRITICAL):**
-- May–Aug: price is low (~<50 GEL/MWh), referenced to cheapest regulated HPP  
-- Sep–Apr: price increases (>100 GEL/MWh), referenced to thermal tariffs  
+- Summer (Apr–Jul): price is low (~<50 GEL/MWh), referenced to cheapest regulated HPP
+- Winter (Aug–Mar): price increases (>100 GEL/MWh), referenced to thermal tariffs
 → In winter months, deregulated hydro becomes **indirectly USD-linked**
+
+**Note on month boundaries:** the canonical summer/winter split used in code (`config.SUMMER_MONTHS` = months 4–7; `config.WINTER_MONTHS` = months 1–3 and 8–12) is the source of truth for all seasonal calculations and forecasts. The Aug–Mar deregulated-hydro reference window aligns with this split.
 
 ---
 
@@ -256,13 +258,26 @@ Do not disclose specific PPA/import prices.
 
 ---
 
-## Key Events
+## Key Events (Policy & Structural)
 
-- **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.  
-- **Jul 2024:** Exchange launched (GENEX) — added new trading segment  
-- **2020 onwards:** Entity-level data available 
-- **May-June 2025:** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. Identical monthly balancing volumes do not look like random residual sales. This pattern suggests that cheap state-owned hydro may have been deliberately allocated to the balancing segment in those months to help push the balancing price downward. Treat this as a strong analytical inference, not a proven policy fact unless supported by direct operational evidence.
-- **Jan-Mar 2024:** the Electricity (Capacity) Market Rules were temporarily changed for three months. During **January-March 2024**, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
+This is the canonical timeline of policy decisions that have shifted balancing-price formation. Other files reference back here:
+- `market_structure.md` §9 covers the regulatory/market-design timeline (2006 balancing market, 2024 GENEX, 2027 target model).
+- `cfd_ppa.md` §6 covers CfD auction rounds.
+- `tariffs.md` covers individual-plant deregulation dates.
+
+### Composition-affecting policy events
+
+- **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.
+- **Jan–Mar 2024 (temporary rule):** the Electricity (Capacity) Market Rules were temporarily changed for three months. During Jan–Mar 2024, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
+- **Jul 2024:** Exchange launched (GENEX) — added a new trading segment alongside balancing.
+- **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. Identical monthly balancing volumes do not look like random residual sales. This pattern suggests that cheap state-owned hydro may have been deliberately allocated to the balancing segment in those months to help push the balancing price downward. Treat this as a strong analytical inference, not a proven policy fact unless supported by direct operational evidence.
+- **2020 onwards:** Entity-level data available (no composition-based driver evidence before 2020).
+- **From May 2025:** Enguri/Vardnili tariffs increased to cover Abkhazia supply costs (see `market_structure.md` §14).
+- **Jul 2027 (planned):** target market model launch (hourly marginal pricing under self-dispatch) — see `market_structure.md` §3 for the regime-break detail. Forecasts crossing this horizon must flag the structural break.
+
+### Why this matters for forecasting
+
+Balancing-price forecasts that ignore the policy lever set above will systematically miss inflection points. The dominant levers are: (1) gas-price decisions, (2) deregulated-hydro reference rules, (3) state-owned-hydro allocation choices, (4) CfD/PPA capacity additions (see `cfd_ppa.md` §6), (5) the 2027 regime break. Any 3+ year forecast narrative MUST mention which of these are assumed unchanged.
 
 ---
 
@@ -295,6 +310,11 @@ Do not disclose specific PPA/import prices.
 ---
 
 ### For Forecasting
+
+**Mandatory output shape:**
+- ALWAYS produce a **separate forecast for summer and winter** — never a single annual figure. Drivers differ across seasons (hydro share, PPA/CfD displacement, import reliance), so a single number masks the real dynamics.
+- ALWAYS produce **both GEL and USD forecasts** when both series are available. They diverge because GEL is exposed to xrate while USD is not; users analysing affordability or contract economics need both.
+- For a 5-year horizon, the minimum output is 4 forecast figures: (summer × GEL), (summer × USD), (winter × GEL), (winter × USD).
 
 **Core rule:** forecasting the balancing electricity price is inherently difficult because it is **not directly determined by supply-demand clearing**. Under the current transitional model, it is a **weighted-average price** of electricity actually sold on the balancing segment.
 

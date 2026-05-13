@@ -10,17 +10,25 @@ Materialized view: `tech_quantity_view`
   - `quantity` — thousand MWh
   - `time_month`
 
-### Technologies Included
-- hydro - generation
-- thermal - generation
-- wind - generation
-- solar - generation
-- import - import
-- export - export
-- supply-distribution -demand
-- direct customers - demand
-- losses - demand
-- abkhazeti - demand
+### Categories in `tech_quantity_view`
+
+The materialized view stores both physical-supply categories (generation, import/export) and demand categories under one `type_tech` column. **Generation** and **demand** entries must NOT be summed together; the categories below are split by role.
+
+**Generation (physical supply):**
+- hydro
+- thermal
+- wind
+- solar
+
+**Cross-border flows:**
+- import (supply-side, enters the system)
+- export (demand-side, leaves the system)
+
+**Demand categories (NOT generation):**
+- supply-distribution
+- direct customers
+- losses
+- abkhazeti
 
 ### Hydropower types matter:
 

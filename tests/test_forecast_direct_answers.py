@@ -281,6 +281,65 @@ def test_forecast_generic_renderer_seasonal_cagr_rows(monkeypatch):
     assert "R\u00b2=0.000" not in ctx.summary
 
 
+def test_forecast_generic_renderer_seasonal_multi_currency_cagr_rows(monkeypatch):
+    """Both ``p_bal_gel`` and ``p_bal_usd`` forecast values must surface as
+    separate per-season entries when both currencies are present.  Pins the
+    fix for Defect B (single-currency forecast).
+    """
+    import pandas as pd
+
+    def _unexpected_structured(*_args, **_kwargs):
+        raise AssertionError(
+            "llm_summarize_structured should not be called when CAGR rows "
+            "provide a deterministic forecast"
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
+
+    # Multi-currency note format produced by _generate_cagr_forecast when both
+    # p_bal_gel and p_bal_usd are present.
+    stats_hint = (
+        "GEL Yearly CAGR=5.08%, Summer=4.13%, Winter=7.08%; "
+        "USD Yearly CAGR=2.10%, Summer=1.80%, Winter=2.50%. "
+        "Forecast years: 2030."
+    )
+
+    df = pd.DataFrame({
+        "date": pd.to_datetime([
+            "2023-06-01", "2023-12-01", "2024-06-01", "2024-12-01",
+            "2030-04-01", "2030-12-01",
+        ]),
+        "p_bal_gel": [100.0, 120.0, 105.0, 128.0, 175.50, 260.75],
+        "p_bal_usd": [40.0,  44.0,  42.0,  47.5,  55.80,   62.59],
+        "season": ["summer", "winter", "summer", "winter", "summer", "winter"],
+        "is_forecast": [False, False, False, False, True, True],
+    })
+
+    qa = _make_forecast_qa("forecast balancing electricity price until 2030")
+    ctx = QueryContext(
+        query="forecast balancing electricity price until 2030",
+        preview="date,p_bal_gel,p_bal_usd\n2024-12-01,128.0,47.5",
+        stats_hint=stats_hint,
+        provenance_cols=["date", "p_bal_gel", "p_bal_usd", "season"],
+        provenance_rows=[("2024-12-01", 128.0, 47.5, "winter")],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+    )
+    ctx.df = df
+
+    summarizer.summarize_data(ctx)
+
+    assert ctx.summary_source == "generic_renderer"
+    # All four forecast values must appear: summer × GEL/USD, winter × GEL/USD.
+    assert "175.50" in ctx.summary
+    assert "260.75" in ctx.summary
+    assert "55.80" in ctx.summary
+    assert "62.59" in ctx.summary
+    assert "Summer" in ctx.summary and "Winter" in ctx.summary
+    # Both currency labels must be present.
+    assert "GEL" in ctx.summary and "USD" in ctx.summary
+
+
 def test_forecast_generic_renderer_ignores_scratch_and_reference_cols():
     """The CAGR-row extractor must pick the real metric column and ignore
     ``is_forecast``, ``xrate``, and any ``__forecast_*`` leftover."""

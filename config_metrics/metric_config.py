@@ -84,8 +84,13 @@ DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
 # Seasonal month definitions
 # ---------------------------------------------------------------------------
 
+# Canonical definition lives in ``config.SUMMER_MONTHS`` /
+# ``config.WINTER_MONTHS``.  Kept here as a tuple alias for callers that
+# import from ``config_metrics``.  Winter must cover months 1-3 AND 8-12 so
+# the two halves of the calendar add up to 12 months — the previous
+# definition silently dropped August and September.
 SUMMER_MONTHS = (4, 5, 6, 7)
-WINTER_MONTHS = (1, 2, 3, 10, 11, 12)
+WINTER_MONTHS = (1, 2, 3, 8, 9, 10, 11, 12)
 
 
 # ---------------------------------------------------------------------------

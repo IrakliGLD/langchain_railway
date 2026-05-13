@@ -335,9 +335,24 @@ def _add_steps_from_rules(
     )
     threshold_share_with_prices = _share_query_requests_price_context(raw_query, primary_tool)
     needs_generation_mix = _correlation_needs_generation_mix(qa, raw_query, primary_tool)
+    # Forecast narratives on balancing price must cite composition shifts and
+    # policy events (see ``knowledge/balancing_price.md`` "For Forecasting"
+    # and ``skills/answer-composer/references/forecast-caveats.md``).  A
+    # primary-only plan leaves the summarizer with nothing but the CAGR
+    # number — the same defect surfaced by the ``Plan validation`` warning
+    # in production traces for forecast queries.
+    forecast_narrative_needs_composition = (
+        is_balancing_prices_primary
+        and qa.answer_kind == AnswerKind.FORECAST
+        and qa.render_style == RenderStyle.NARRATIVE
+    )
 
     # get_prices + driver analysis → add composition
-    if primary_tool == ToolName.GET_PRICES.value and needs_driver:
+    # Also: balancing-price forecast narratives unconditionally need
+    # composition context, even when ``needs_driver`` is False.
+    if primary_tool == ToolName.GET_PRICES.value and (
+        needs_driver or forecast_narrative_needs_composition
+    ):
         if ToolName.GET_BALANCING_COMPOSITION.value not in added_tools:
             params = _resolve_secondary_params(
                 qa, ToolName.GET_BALANCING_COMPOSITION.value, raw_query, candidates, primary_params,

@@ -61,7 +61,7 @@ Contracts for Difference are introduced for new renewable power plant projects u
 
 ### Transitional Market Model (Current)
 - Dispatch: **central dispatch by GSE**
-- Market access: **no  participation in exchange**
+- Market access: **no participation in exchange**
 - Sales: electricity sold to ESCO as balancing electricity. generation quantity = quantity sold to ESCO.
 - Risk profile:
   - **No price risk**
@@ -119,7 +119,7 @@ Contracts for Difference are introduced for new renewable power plant projects u
 
 - Risk differentiation:
   - Transitional model → **quantity risk (curtailment)**
-  - Target model → **imbalance risk** - still in quantity risk group
+  - Target model → **imbalance risk** — operationally a quantity-side risk, not price risk
 
 
 
@@ -278,8 +278,8 @@ Support schemes are not directly stored as tariffs but can be observed indirectl
 #### Target Market Model (Future)
 
 - CfD/PPA electricity:
-  - ESCO, on behaldof the state, still has obligation to buy electricity form PPA plant at PPA price. it will become ESCO responsibility to market the procured electricity as it does not need itself. So, ESCO should act as a trader in this regard. w
-  - CfD electricity will be sold on the Exchange and only price difference will be compensated under support scheme.
+  - ESCO, on behalf of the state, still has the obligation to buy electricity from PPA plants at the PPA price. It then becomes ESCO's responsibility to market this procured electricity, because ESCO does not consume it itself. So ESCO acts as a trader in this regard.
+  - CfD electricity will be sold on the Exchange and only the price difference will be compensated under the support scheme.
 
 - Risk shift:
   - reduced curtailment exposure
