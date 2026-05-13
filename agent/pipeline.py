@@ -84,6 +84,49 @@ _SCENARIO_OVERRIDE_ELIGIBLE = frozenset({
     AnswerKind.TIMESERIES,
 })
 
+# --- Scenario quantitative-anchor gate ---
+# Production logs (2026-05-13) showed a query "if more ppa will be signed, how
+# this will affect the price?" routed to SCENARIO because the analyzer emitted
+# a fabricated scenario_factor=1.34 from a query containing no number.  The
+# generic renderer then produced a meaningless "Result: 24511.48 (× 1.34)"
+# from summing 132 historical balancing prices and scaling.
+#
+# The override now requires the user query to contain an explicit quantitative
+# anchor — a digit, a percentage, or a multiplicative/directional word — before
+# upgrading EXPLANATION/SCALAR/TIMESERIES → SCENARIO.  When the anchor is
+# absent, the request stays on the narrative path (LLM summarizer with full
+# evidence frames), which is the safer fallback.
+#
+# Conservative by design: any digit anywhere in the query counts, even dates,
+# to avoid false-positives suppressing legitimate scenario queries.  Multilingual
+# support is digit-based today; non-Latin multiplicative vocabulary can be
+# added when a real failure case emerges.
+_QUANTITATIVE_ANCHOR_RE = re.compile(
+    r"\b("
+    r"\d+(?:[.,]\d+)?\s*(?:%|percent|gel|usd|eur|mwh|gwh|mw|gw|kwh)?"
+    r"|double|doubles|doubling"
+    r"|halve|halves|halving|half"
+    r"|triple|triples|tripling"
+    r"|quadruple|twice"
+    r"|(?:increases?|increasing|decreases?|decreasing"
+    r"|raises?|raising|cuts?|cutting"
+    r"|grows?|growing|shrinks?|shrinking"
+    r"|rises?|rising|falls?|falling"
+    r"|drops?|dropping)\s+by\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _query_has_quantitative_anchor(query: str) -> bool:
+    """Return True iff *query* contains a numeric or multiplicative anchor.
+
+    Used as the SCENARIO override gate at the answer_kind derivation site.
+    See ``_QUANTITATIVE_ANCHOR_RE`` for the failure case that motivated it.
+    """
+    return bool(_QUANTITATIVE_ANCHOR_RE.search(query or ""))
+
+
 # --- Response-mode derivation constants ---
 # Types where the answer mode is unambiguous regardless of preferred_path.
 _ALWAYS_KNOWLEDGE_TYPES = {"conceptual_definition", "regulatory_procedure"}
@@ -1890,14 +1933,29 @@ def process_query(
         # LLM misclassified a scenario query as data_explanation or similar.
         # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
         # are never overridden — they represent a deliberate shape choice.
+        #
+        # Gated on a quantitative anchor in the user query: see comment near
+        # ``_QUANTITATIVE_ANCHOR_RE``.  Without an anchor, the analyzer is
+        # likely hallucinating ``scenario_factor`` (production log 2026-05-13);
+        # we stay on the narrative path instead of computing a garbage number.
         if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
             derived = qa.analysis_requirements.derived_metrics or []
-            if any(m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived):
+            has_scenario_metric = any(
+                m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
+            )
+            if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
                 log.info(
                     "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
                     qa.answer_kind.value if qa.answer_kind else None,
                 )
                 qa.answer_kind = AnswerKind.SCENARIO
+            elif has_scenario_metric:
+                log.info(
+                    "answer_kind override suppressed: scenario derived metrics present "
+                    "but no quantitative anchor in query (kind=%s, query=%.80s)",
+                    qa.answer_kind.value if qa.answer_kind else None,
+                    ctx.query,
+                )
         # Fallback: if LLM did not emit render_style, default to narrative (safer).
         if qa.render_style is None:
             qa.render_style = RenderStyle.NARRATIVE

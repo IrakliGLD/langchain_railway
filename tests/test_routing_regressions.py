@@ -397,3 +397,180 @@ class TestAnalyzerPromptContent:
             "render_style=deterministic — Q3 grounding-fallback bug will "
             "regress on typo'd phrasings"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.a — SCENARIO override quantitative-anchor gate (2026-05-13 logs)
+# ---------------------------------------------------------------------------
+
+
+def _make_qa_with_scenario_metric(
+    *, raw_query: str, scenario_factor: float = 1.34
+) -> QuestionAnalysis:
+    """Build a QA where the analyzer emits a scenario derived metric on top
+    of an EXPLANATION answer_kind — the configuration that triggered the
+    failing override in production (request 5, trace 968cf082).
+    """
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": raw_query,
+        "canonical_query_en": raw_query,
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_explanation",
+            "analysis_mode": "analyst",
+            "intent": "scenario_anchor_gate_fixture",
+            "needs_clarification": False,
+            "confidence": 0.8,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {
+            "metric": None,
+            "entities": [],
+            "aggregation": None,
+            "dimensions": [],
+            "period": None,
+        },
+        "visualization": {},
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [
+                {
+                    "metric": "balancing",
+                    "metric_name": "scenario_scale",
+                    "target_metric": "balancing",
+                    "rank_limit": None,
+                    "scenario_factor": scenario_factor,
+                    "scenario_volume": 1.0,
+                    "scenario_aggregation": None,
+                    "season": None,
+                }
+            ],
+        },
+        "answer_kind": "explanation",
+        "render_style": "narrative",
+        "grouping": "none",
+    }
+    return QuestionAnalysis.model_validate(payload)
+
+
+def _simulate_scenario_override_block(ctx: QueryContext) -> AnswerKind | None:
+    """Run the exact override logic from process_query around line 1893
+    against the supplied context, then return the resulting answer_kind.
+
+    The function in pipeline.py mutates ``ctx.question_analysis.answer_kind``
+    in place; we mirror that here so the test pins observable behaviour.
+    """
+    from agent import pipeline
+
+    qa = ctx.question_analysis
+    assert qa is not None, "fixture must supply question_analysis"
+    if qa.answer_kind in pipeline._SCENARIO_OVERRIDE_ELIGIBLE:
+        derived = qa.analysis_requirements.derived_metrics or []
+        has_scenario_metric = any(
+            m.metric_name in pipeline._SCENARIO_DERIVED_METRICS for m in derived
+        )
+        if has_scenario_metric and pipeline._query_has_quantitative_anchor(ctx.query):
+            qa.answer_kind = AnswerKind.SCENARIO
+    return qa.answer_kind
+
+
+class TestScenarioOverrideAnchorGate:
+    """Pin the 2026-05-13 fix that prevents SCENARIO override from firing
+    on queries lacking a quantitative anchor.
+
+    Production trace 968cf082 saw analyzer emit scenario_factor=1.34 from
+    "if more ppa will be signed, how this will affect the price?" — a
+    fabricated number with no source in the query — and the generic
+    renderer produced a meaningless "Result: 24511.48 (× 1.34)". The
+    gate suppresses the override and lets the request fall back to the
+    narrative LLM path.
+    """
+
+    def test_anchorless_ppa_query_does_not_override_to_scenario(self):
+        """The exact production failure: no number, no multiplicative word."""
+        qa = _make_qa_with_scenario_metric(
+            raw_query="if more ppa will be signed, how this will affect the price?",
+            scenario_factor=1.34,
+        )
+        ctx = _make_ctx(qa)
+        result = _simulate_scenario_override_block(ctx)
+        assert result == AnswerKind.EXPLANATION, (
+            "Anchorless query routed to SCENARIO — regression of Phase 1.a "
+            "production fix (2026-05-13)"
+        )
+
+    def test_explicit_percent_anchor_does_override_to_scenario(self):
+        """Real scenario queries with a percent must still route to SCENARIO."""
+        qa = _make_qa_with_scenario_metric(
+            raw_query="if PPA share rises by 20%, how will the balancing price change?",
+            scenario_factor=1.20,
+        )
+        ctx = _make_ctx(qa)
+        result = _simulate_scenario_override_block(ctx)
+        assert result == AnswerKind.SCENARIO
+
+    def test_double_keyword_anchors_override(self):
+        """Multiplicative words (double / halve / triple) count as anchors."""
+        qa = _make_qa_with_scenario_metric(
+            raw_query="what if we double imports?",
+            scenario_factor=2.0,
+        )
+        ctx = _make_ctx(qa)
+        result = _simulate_scenario_override_block(ctx)
+        assert result == AnswerKind.SCENARIO
+
+    def test_increase_by_anchors_override(self):
+        """Directional verbs followed by 'by' count as anchors."""
+        qa = _make_qa_with_scenario_metric(
+            raw_query="if thermal generation increases by 30 GEL/MWh, what happens?",
+            scenario_factor=1.3,
+        )
+        ctx = _make_ctx(qa)
+        result = _simulate_scenario_override_block(ctx)
+        assert result == AnswerKind.SCENARIO
+
+    def test_no_scenario_metric_means_no_override_regardless_of_anchor(self):
+        """If the analyzer didn't emit a scenario metric, the override path
+        is skipped entirely — even when the query contains numbers."""
+        from agent import pipeline
+
+        # Re-use the fixture but strip the scenario metric.
+        qa = _make_qa_with_scenario_metric(
+            raw_query="the price was 150 GEL/MWh in May",
+            scenario_factor=1.0,
+        )
+        qa.analysis_requirements.derived_metrics = []
+        ctx = _make_ctx(qa)
+        result = _simulate_scenario_override_block(ctx)
+        assert result == AnswerKind.EXPLANATION
+        # Sanity: the anchor helper is independent of this path.
+        assert pipeline._query_has_quantitative_anchor(ctx.query)
+
+    def test_quantitative_anchor_helper_unit_cases(self):
+        """Direct unit tests on the helper for regex-edge confidence."""
+        from agent.pipeline import _query_has_quantitative_anchor as has_anchor
+
+        # Negative cases — the failure modes from production
+        assert not has_anchor("if more ppa will be signed, how will it affect price?")
+        assert not has_anchor("what if rules change in the future?")
+        assert not has_anchor("")
+        assert not has_anchor(None)  # type: ignore[arg-type]
+
+        # Positive cases — real scenario queries
+        assert has_anchor("if price rises by 30%")
+        assert has_anchor("what if we double thermal output")
+        assert has_anchor("halve the import share and recompute")
+        assert has_anchor("price increases by 20 GEL")
+        assert has_anchor("100 MW added scenario")
+        assert has_anchor("scenario where imports triple")
