@@ -216,7 +216,13 @@ def test_conceptual_summary_uses_vector_as_primary_evidence(monkeypatch):
     out = summarizer.answer_conceptual(ctx)
 
     assert out.summary == "Export answer"
-    assert "PRIMARY EVIDENCE RULES" in captured["stats_hint"]
+    # Pin the post-`29f79d7` "SOURCE INTEGRATION RULES" prompt rather than the
+    # earlier "PRIMARY EVIDENCE RULES (MANDATORY)" wording.  The current prompt
+    # still designates external_source_passages as primary evidence for
+    # regulatory/procedural content; DOMAIN_KNOWLEDGE is now a peer source
+    # rather than strictly secondary background.  Both invariants must hold.
+    assert "SOURCE INTEGRATION RULES" in captured["stats_hint"]
+    assert "EXTERNAL_SOURCE_PASSAGES contain primary evidence" in captured["stats_hint"]
     assert captured["preferred_topics"] == ["eligible_participants", "exchange_participation"]
     assert json.loads(captured["domain_knowledge"]) == {
         "eligible_participants": "Eligible participants are listed in the market rules.",

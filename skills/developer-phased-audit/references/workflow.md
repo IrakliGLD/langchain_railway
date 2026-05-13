@@ -7,13 +7,16 @@ Use this sequence for multi-phase work:
 3. State the expected artifact for the phase.
 4. Implement only that artifact.
 5. Verify mechanically where possible.
-6. Audit independently:
+6. Run the [targeted test suite](targeted-suite.md) — it must be green before
+   the audit step. "Green on the modules I changed" is not sufficient; the
+   targeted suite catches cross-module regressions that single-module runs miss.
+7. Audit independently:
    - compare against the phase goal,
    - look for regressions,
    - look for hidden scope expansion,
    - look for contract drift.
-7. Fix findings before continuing.
-8. Re-state the updated plan before the next phase.
+8. Fix findings before continuing.
+9. Re-state the updated plan before the next phase.
 
 ## Extra rules for LLM and analytics tasks
 
