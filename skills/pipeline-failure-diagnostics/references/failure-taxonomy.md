@@ -84,7 +84,12 @@ The retry succeeds but the request took ~2× normal latency.
 **Don't**: increase `max_retries` (each retry hits the same wall).
 
 **Do (in order of leverage)**:
-1. Trim the prompt (`PROMPT_BUDGET_MAX_CHARS` env var, currently 63000 in user's env).
+1. Trim the prompt. The per-stage budget envs (Phase 2.b, 2026-05-13):
+   - `ANALYZER_PROMPT_BUDGET_MAX_CHARS` — analyzer-only.
+   - `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` — summarizer-only.
+   - `PROMPT_BUDGET_MAX_CHARS` — legacy default used as the fallback for both
+     when the per-stage var is unset, and used by legacy `llm_summarize` /
+     `llm_generate_plan_and_sql` paths.
 2. Switch `SUMMARIZER_MODEL` to `gemini-2.5-flash` for queries where pro quality isn't measurably better.
 3. Set `max_retries=0` and let the OpenAI fallback at [core/llm.py:1924](../../../core/llm.py) handle 504s — caps worst-case at single-call deadline.
 
@@ -148,6 +153,11 @@ Followed by a pre_gate event with claims that don't match anything in the data �
 **Do**:
 1. Reduce upstream bloat — domain knowledge cap, conversation history truncation, vector knowledge top_k.
 2. Re-rank: data preview should be the LAST thing dropped, not the first. Check `truncation_priority` in `_enforce_prompt_budget`.
+3. Raise the summarizer-specific budget without bloating the analyzer: set
+   `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` higher than `ANALYZER_PROMPT_BUDGET_MAX_CHARS`
+   (Phase 2.b split env vars).  Summarizer prompts routinely hit 90–110k chars
+   in deep mode because DOMAIN_KNOWLEDGE + EXTERNAL_SOURCE_PASSAGES expand;
+   the analyzer prompt does not.
 
 ## I. Heuristic vs analyzer mode disagreement
 

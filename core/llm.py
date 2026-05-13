@@ -26,6 +26,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from pydantic import BaseModel, Field, ValidationError
 
 from config import (
+    ANALYZER_PROMPT_BUDGET_MAX_CHARS,
     FAST_MODE_ANALYZER_BUDGET,
     FAST_MODE_SUMMARIZER_BUDGET,
     GOOGLE_API_KEY,
@@ -43,6 +44,7 @@ from config import (
     ROUTER_THINKING_BUDGET,
     PLANNER_MODEL,
     SUMMARIZER_MODEL,
+    SUMMARIZER_PROMPT_BUDGET_MAX_CHARS,
     ENABLE_SKILL_PROMPTS_SUMMARIZER,
     ENABLE_SKILL_PROMPTS_PLANNER,
     SESSION_HISTORY_MAX_TURNS,
@@ -3171,7 +3173,11 @@ def llm_analyze_question(
     prompt = _enforce_prompt_budget(
         prompt,
         label="question_analysis",
-        budget_override=(FAST_MODE_ANALYZER_BUDGET if _is_fast_pipeline_mode() else None),
+        budget_override=(
+            FAST_MODE_ANALYZER_BUDGET
+            if _is_fast_pipeline_mode()
+            else ANALYZER_PROMPT_BUDGET_MAX_CHARS
+        ),
         truncation_priority=truncation_priority,
     )
 
@@ -3521,7 +3527,11 @@ Citation format rules:
         response_mode=response_mode,
         resolution_policy=resolution_policy,
     )
-    _summary_budget = FAST_MODE_SUMMARIZER_BUDGET if _fast_pipeline else None
+    _summary_budget = (
+        FAST_MODE_SUMMARIZER_BUDGET
+        if _fast_pipeline
+        else SUMMARIZER_PROMPT_BUDGET_MAX_CHARS
+    )
     prompt = _enforce_prompt_budget(
         prompt, label="summarize_structured",
         budget_override=_summary_budget,
@@ -3535,7 +3545,11 @@ Citation format rules:
     llm_start = time.time()
     for attempt in range(max_attempts):
         if attempt > 0:
-            _base_budget = FAST_MODE_SUMMARIZER_BUDGET if _fast_pipeline else PROMPT_BUDGET_MAX_CHARS
+            _base_budget = (
+                FAST_MODE_SUMMARIZER_BUDGET
+                if _fast_pipeline
+                else SUMMARIZER_PROMPT_BUDGET_MAX_CHARS
+            )
             reduced = int(_base_budget * _RETRY_BUDGET_FRACTION)
             prompt = _enforce_prompt_budget(
                 prompt_original, label="summarize_structured_retry",

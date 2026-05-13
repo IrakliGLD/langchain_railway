@@ -1762,6 +1762,86 @@ def test_llm_analyze_question_fast_mode_uses_budget_override_and_capped_thinking
     assert captured["thinking_budget"] == 512
 
 
+def test_llm_analyze_question_deep_mode_uses_analyzer_prompt_budget(monkeypatch):
+    """Phase 2.b: in deep mode the analyzer uses ANALYZER_PROMPT_BUDGET_MAX_CHARS
+    rather than the previous ``None`` (which fell through to the generic
+    PROMPT_BUDGET_MAX_CHARS via _enforce_prompt_budget's internal default).
+    """
+    monkeypatch.setattr(llm_core, "PIPELINE_MODE", "deep")
+    monkeypatch.setattr(llm_core, "ANALYZER_PROMPT_BUDGET_MAX_CHARS", 33333)
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    captured = {}
+
+    def _capture_budget(prompt, label, *, budget_override=None, truncation_priority=None):
+        captured["label"] = label
+        captured["budget_override"] = budget_override
+        return prompt
+
+    def _capture_invoke(_llm, _messages, _model_name):
+        return _DummyMessage(json.dumps(_conceptual_payload().model_dump(mode="json")))
+
+    monkeypatch.setattr(llm_core, "_enforce_prompt_budget", _capture_budget)
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_a, **_k: object())
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+
+    llm_core.llm_analyze_question("What is balancing price?")
+
+    assert captured["label"] == "question_analysis"
+    assert captured["budget_override"] == 33333, (
+        "Analyzer must respect ANALYZER_PROMPT_BUDGET_MAX_CHARS in deep mode "
+        "(Phase 2.b per-stage budget split)"
+    )
+
+
+def test_llm_summarize_structured_deep_mode_uses_summarizer_prompt_budget(monkeypatch):
+    """Phase 2.b: in deep mode the structured summarizer uses
+    SUMMARIZER_PROMPT_BUDGET_MAX_CHARS rather than falling through to the
+    generic PROMPT_BUDGET_MAX_CHARS.
+    """
+    monkeypatch.setattr(llm_core, "PIPELINE_MODE", "deep")
+    monkeypatch.setattr(llm_core, "SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", 77777)
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    captured = {}
+
+    def _capture_budget(prompt, label, *, budget_override=None, truncation_priority=None):
+        captured.setdefault("calls", []).append({
+            "label": label,
+            "budget_override": budget_override,
+        })
+        return prompt
+
+    class _DummyMessageJSON:
+        content = '{"answer":"ok","claims":[],"citations":["statistics"],"confidence":0.9}'
+        response_metadata = {}
+
+    def _capture_invoke(_llm, _messages, _model_name):
+        return _DummyMessageJSON()
+
+    monkeypatch.setattr(llm_core, "_enforce_prompt_budget", _capture_budget)
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_a, **_k: object())
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+
+    llm_core.llm_summarize_structured(
+        user_query="why did balancing price change?",
+        data_preview="date p_bal_gel\n2025-12-01 150.0",
+        stats_hint="",
+        lang_instruction="Respond in English.",
+    )
+
+    first_call = captured["calls"][0]
+    assert first_call["label"] == "summarize_structured"
+    assert first_call["budget_override"] == 77777, (
+        "Summarizer must respect SUMMARIZER_PROMPT_BUDGET_MAX_CHARS in deep mode "
+        "(Phase 2.b per-stage budget split)"
+    )
+
+
 def test_classify_query_type_monthly_year_returns_trend():
     assert llm_core.classify_query_type("Show monthly prices for 2025") == "trend"
     assert llm_core.classify_query_type("Show the monthly report") == "unknown"

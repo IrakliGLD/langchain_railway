@@ -110,6 +110,20 @@ AGENT_TOOL_PREVIEW_MAX_CHARS = max(200, int(os.getenv("AGENT_TOOL_PREVIEW_MAX_CH
 AGENT_TOOL_TIMEOUT_SECONDS = max(1, int(os.getenv("AGENT_TOOL_TIMEOUT_SECONDS", "15")))
 AGENT_TOOL_RETRY_ATTEMPTS = max(1, int(os.getenv("AGENT_TOOL_RETRY_ATTEMPTS", "2")))
 PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "45000")))
+# Per-stage prompt budgets (Phase 2.b, 2026-05-13).  Both default to the
+# legacy single-knob PROMPT_BUDGET_MAX_CHARS so existing deployments keep
+# their current behaviour; operators raise SUMMARIZER_PROMPT_BUDGET_MAX_CHARS
+# independently when the summarizer prompt routinely exceeds the analyzer
+# budget (typical in deep mode where DOMAIN_KNOWLEDGE + EXTERNAL_SOURCE_PASSAGES
+# expand the prompt past 90k chars before truncation kicks in).
+ANALYZER_PROMPT_BUDGET_MAX_CHARS = max(
+    1500,
+    int(os.getenv("ANALYZER_PROMPT_BUDGET_MAX_CHARS", str(PROMPT_BUDGET_MAX_CHARS))),
+)
+SUMMARIZER_PROMPT_BUDGET_MAX_CHARS = max(
+    1500,
+    int(os.getenv("SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", str(PROMPT_BUDGET_MAX_CHARS))),
+)
 FAST_MODE_ANALYZER_BUDGET = max(1500, int(os.getenv("FAST_MODE_ANALYZER_BUDGET", "20000")))
 FAST_MODE_SUMMARIZER_BUDGET = max(1500, int(os.getenv("FAST_MODE_SUMMARIZER_BUDGET", "15000")))
 ROUTER_ENABLE_SEMANTIC_FALLBACK = os.getenv("ROUTER_ENABLE_SEMANTIC_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
