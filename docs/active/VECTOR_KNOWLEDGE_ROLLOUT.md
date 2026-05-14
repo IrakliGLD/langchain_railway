@@ -131,7 +131,27 @@ $env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "text-embedding-3-small"
 $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
 ```
 
+```powershell
+# Gemini (alternative)
+$env:SUPABASE_DB_URL = "postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:5432/postgres"
+$env:GOOGLE_API_KEY = "..."
+$env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+```
+
 `SUPABASE_DB_URL` must point to the same Postgres database where `knowledge_vector.sql` has been applied.
+
+**CRITICAL — provider must match deployment.** The query path calls
+`get_embedding_provider()` at runtime against the **deployed app's** env,
+not the local ingest env. If Railway has
+`VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER=gemini` and you ingest locally with
+`openai` (or vice versa), every search returns noise — the two providers
+produce vectors in different latent spaces. Before re-ingesting:
+1. Check Railway env vars match what you'll use locally for ingest.
+2. If you change provider, truncate `knowledge.document_chunks` and
+   re-ingest everything. Mixed providers in the same table are a silent
+   correctness bug.
 
 ### 3. Write the registration script
 
@@ -230,3 +250,281 @@ Send a query that should hit the new document and inspect the `stage_0_3_vector_
 - Prompt usage is bounded by `VECTOR_KNOWLEDGE_MAX_CHARS` (default 9000).
 - Retrieval failures degrade safely to non-vector behaviour — the pipeline does not abort the request.
 - No cross-encoder reranker today; retrieval quality depends on chunking + embeddings + topic/keyword boosts. See the architecture doc §5.x for the open improvement items.
+
+## Appendix: Batch Re-ingest All Documents
+
+When you need to re-ingest every file in `docs_to_ingest/` (for example after
+applying the Phase B schema migration so that `outgoing_refs` populates), use
+the script below.  One `VectorKnowledgeIngestor` instance is reused across
+all documents — the embedding client (Gemini or OpenAI) initialises once.
+
+**Prerequisites** (same as single-document ingest):
+1. `schemas/knowledge_vector.sql` applied to the target DB.
+2. Local env vars set per the Gemini or OpenAI block in [§2](#2-set-local-environment).
+   The provider you choose here MUST match `VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER`
+   on the deployed app (see the CRITICAL note in that section).
+3. (Optional) `truncate table knowledge.document_chunks;` if you want a clean
+   slate.  Otherwise the per-document `delete-then-insert` is enough — but
+   any documents you don't re-ingest will still carry their old rows.
+
+**Before running:** review each `DocSpec` entry below.  `source_key` is the
+stable identity used to dedupe across re-ingests — keep it unchanged, or you
+will create duplicate documents.  `title`, `published_date`, `effective_date`,
+`version_label`, `issuer`, `topics`, and `metadata` should match what you set
+during the previous ingest (or your best current understanding); a fresh
+re-ingest is a good moment to correct any wrong values.
+
+Save this as `ingest_all_documents.py` (a copy is already checked in at the
+repo root for convenience), edit the metadata, then `python ingest_all_documents.py`.
+
+```python
+"""Batch ingestion driver: re-embed every file in ``docs_to_ingest/``."""
+
+from __future__ import annotations
+
+import os
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List
+
+# --- Import-time config validation ---
+# The deployed app validates auth/session/evaluate secrets and a default
+# model type at module import.  Ingest doesn't use any of these values,
+# but the imports below trigger the same validation.  Use ``setdefault``
+# so real values you export in PowerShell ($env:SUPABASE_DB_URL etc.)
+# win; placeholders only fill the gaps.  Must run BEFORE the
+# ``from contracts...`` / ``from knowledge...`` imports below.
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "ingest-script-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "ingest-script-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "ingest-script-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "ingest-script-openai-placeholder")
+
+from contracts.vector_knowledge import DocumentRegistration  # noqa: E402
+from knowledge.vector_ingestion import VectorKnowledgeIngestor  # noqa: E402
+
+
+DOCS_DIR = Path(__file__).parent / "docs_to_ingest"
+
+
+@dataclass
+class DocSpec:
+    """Per-document metadata + topics, paired with the source filename."""
+
+    filename: str
+    source_key: str
+    title: str
+    issuer: str
+    language: str
+    published_date: str | None
+    effective_date: str | None
+    version_label: str | None
+    topics: List[str]
+    metadata: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Per-document metadata.  REVIEW these before running — title / dates /
+# issuer / topics must match what was set during the previous ingest
+# (otherwise downstream traces and filters drift silently).  source_key
+# is the stable identity used by ``replace_document_chunks``; keep it
+# unchanged across re-ingests or you will create duplicate documents.
+# ---------------------------------------------------------------------------
+
+DOCUMENTS: List[DocSpec] = [
+    DocSpec(
+        filename="electricity_retail_market_rules.md",
+        source_key=(
+            "Electricity_retail_market_runes_______only_net_metering_"
+            "and_net_billing_sections_20250731"
+        ),
+        title=(
+            "Exctract about net metering and net billing from the "
+            "'Electricity Retail Market Rules'"
+        ),
+        issuer="GNERC",
+        language="ka",
+        published_date="2020-08-14",
+        effective_date="2020-08-14",
+        version_label="2025-07-31",
+        topics=[
+            "net_metering",
+            "net_billing",
+            "microgeneration",
+            "consumer_engagement",
+            "renewable_energy_integration",
+            "renewable_energy_communities",
+        ],
+        metadata={
+            "country": "georgia",
+            "city": "tbilisi",
+            "resolution_number": "47",
+            "annex_number": "NA",
+            "notes": "Excerpt focused on net metering and net billing",
+        },
+    ),
+    DocSpec(
+        filename="gnerc_electricity_market_rules_excerpt_ka.md",
+        source_key="GNERC_electricity_market_rules_excerpt_ka",
+        # TODO: confirm title/dates from prior ingest record.
+        title="GNERC Electricity Market Rules (excerpt, Georgian)",
+        issuer="GNERC",
+        language="ka",
+        published_date=None,
+        effective_date=None,
+        version_label=None,
+        topics=["market_structure", "balancing_price"],
+        metadata={"country": "georgia"},
+    ),
+    DocSpec(
+        filename="law_on_energy_and_water_supply.md",
+        source_key="law_on_energy_and_water_supply",
+        title="Law of Georgia on Energy and Water Supply",
+        issuer="Parliament of Georgia",
+        language="ka",
+        published_date=None,
+        effective_date=None,
+        version_label=None,
+        topics=["market_structure", "general_definitions"],
+        metadata={"country": "georgia"},
+    ),
+    DocSpec(
+        filename="market_concept_design.md",
+        source_key="market_concept_design",
+        title="Electricity Market Concept Design",
+        issuer="MEPA",  # TODO: confirm issuer
+        language="ka",
+        published_date=None,
+        effective_date=None,
+        version_label=None,
+        topics=["market_structure", "general_definitions"],
+        metadata={"country": "georgia"},
+    ),
+    DocSpec(
+        filename="transitory_market_rules.md",
+        source_key="transitory_market_rules",
+        title="Transitory Electricity Market Rules",
+        issuer="GNERC",
+        language="ka",
+        published_date=None,
+        effective_date=None,
+        version_label=None,
+        topics=["market_structure", "balancing_price", "general_definitions"],
+        metadata={"country": "georgia"},
+    ),
+]
+
+
+def _build_registration(spec: DocSpec) -> DocumentRegistration:
+    return DocumentRegistration(
+        source_key=spec.source_key,
+        title=spec.title,
+        issuer=spec.issuer,
+        language=spec.language,
+        source_url=None,
+        storage_path=None,
+        logical_key=spec.source_key,
+        published_date=spec.published_date,
+        effective_date=spec.effective_date,
+        effective_end_date=None,
+        version_label=spec.version_label,
+        is_latest=True,
+        is_active=True,
+        abolished=False,
+        supersedes_document_id=None,
+        metadata=spec.metadata,
+    )
+
+
+def main() -> None:
+    ingestor = VectorKnowledgeIngestor()
+
+    successes: list[tuple[str, dict]] = []
+    failures: list[tuple[str, str]] = []
+
+    for spec in DOCUMENTS:
+        path = DOCS_DIR / spec.filename
+        if not path.exists():
+            failures.append((spec.filename, f"file not found: {path}"))
+            continue
+        print(f"\n>>> Ingesting {spec.filename} (source_key={spec.source_key})")
+        try:
+            text_content = path.read_text(encoding="utf-8")
+            result = ingestor.ingest_text_document(
+                document=_build_registration(spec),
+                text_content=text_content,
+                topics=spec.topics,
+            )
+            payload = result.model_dump()
+            successes.append((spec.filename, payload))
+            print(f"    ok -> {payload}")
+        except Exception as exc:  # batch driver, report-and-continue
+            tb = traceback.format_exc()
+            failures.append((spec.filename, f"{exc.__class__.__name__}: {exc}"))
+            print(f"    FAILED: {exc.__class__.__name__}: {exc}")
+            print(tb)
+
+    print("\n" + "=" * 70)
+    print(f"Done. {len(successes)} succeeded, {len(failures)} failed.")
+    for fname, payload in successes:
+        print(f"  ok  {fname}: chunks={payload.get('chunk_count')}")
+    for fname, msg in failures:
+        print(f"  ERR {fname}: {msg}")
+    if failures:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**Expected output** (one block per document, then a summary):
+
+```text
+>>> Ingesting electricity_retail_market_rules.md (source_key=Electricity_retail_market_runes_...)
+    ok -> {'document_id': '...', 'chunk_count': 12, 'embedding_dimension': 1536, 'source_key': '...'}
+>>> Ingesting gnerc_electricity_market_rules_excerpt_ka.md (source_key=GNERC_electricity_market_rules_excerpt_ka)
+    ok -> {'document_id': '...', 'chunk_count': 25, 'embedding_dimension': 1536, 'source_key': '...'}
+...
+======================================================================
+Done. 6 succeeded, 0 failed.
+  ok  electricity_retail_market_rules.md: chunks=12
+  ok  gnerc_electricity_market_rules_excerpt_ka.md: chunks=25
+  ...
+```
+
+**Post-ingest verification** (run in Supabase SQL editor):
+
+```sql
+-- (a) Phase B structural fields populated?
+select count(*) filter (where article_number <> '') as with_article,
+       count(*) filter (where outgoing_refs <> '[]'::jsonb) as with_refs,
+       count(*) as total
+from knowledge.document_chunks;
+
+-- (b) Article 14 of transitory_market_rules indexed and resolvable?
+select c.id, c.section_title, c.article_number, c.parent_chapter,
+       jsonb_array_length(c.outgoing_refs) as ref_count
+from knowledge.document_chunks c
+join knowledge.documents d on d.id = c.document_id
+where c.article_number = '14'
+  and d.source_key = 'transitory_market_rules'
+order by c.chunk_index
+limit 5;
+
+-- (c) Chunks that cite article 14 (these pull article 14 in via expansion):
+select c.id, d.title, c.section_title
+from knowledge.document_chunks c
+join knowledge.documents d on d.id = c.document_id
+where c.outgoing_refs @> '[{"kind":"article","number":"14"}]'::jsonb
+limit 10;
+
+-- (d) Confirm embedding dimension is uniform (1536):
+select vector_dims(embedding) as dim, count(*)
+from knowledge.document_chunks
+group by 1;
+```
+
+If (a) shows `with_refs = 0`, the chunker ran against unmigrated schema or with stale code — investigate before retrying the affected queries.  If (d) returns more than one row, embedding-provider drift happened somewhere; truncate and re-ingest the affected documents under a single provider.

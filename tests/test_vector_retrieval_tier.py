@@ -70,6 +70,30 @@ def test_tier_deterministic_data_shapes_skip():
         assert _resolve(ak, RenderStyle.DETERMINISTIC) == VectorRetrievalTier.SKIP, ak
 
 
+def test_tier_deterministic_data_shape_with_conceptual_disagreement_is_light():
+    """Disagreement-rescue: heuristic says conceptual, analyzer says
+    deterministic data shape.  Keep retrieval warm at LIGHT so the
+    summarizer has regulatory context if the question is ambiguous.
+
+    Regression for 2026-05-14 incident on
+        "what is a price of electricity esco paying to sellers of
+         balancing electricity?"
+    where SCALAR+DETERMINISTIC bypassed the regulation corpus entirely.
+    """
+    for ak in (
+        AnswerKind.SCALAR,
+        AnswerKind.LIST,
+        AnswerKind.TIMESERIES,
+        AnswerKind.COMPARISON,
+        AnswerKind.FORECAST,
+        AnswerKind.SCENARIO,
+    ):
+        assert (
+            _resolve(ak, RenderStyle.DETERMINISTIC, is_conceptual=True)
+            == VectorRetrievalTier.LIGHT
+        ), ak
+
+
 def test_tier_narrative_data_shapes_light():
     for ak in (
         AnswerKind.SCALAR,

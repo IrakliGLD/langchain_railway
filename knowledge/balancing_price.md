@@ -12,6 +12,52 @@ However, this document applies ONLY to the current model.
 
 ---
 
+## ESCO Buy vs. Sell Asymmetry (CRITICAL)
+
+The "balancing price" defined above is the price ESCO **SELLS** balancing
+electricity at — a single weighted-average price applied to all buyers
+of balancing electricity in a given month.
+
+ESCO **PAYS DIFFERENT PRICES** to each seller. The procurement (buy-side)
+price is **per seller category**, not a single value:
+
+- `regulated_hpp` → regulated tariff per plant (GEL)
+- `regulated_new_tpp` (Gardabani) → regulated tariff (GEL, gas-cost linked)
+- `regulated_old_tpp` → regulated tariff (GEL, gas-cost linked)
+- `deregulated_hydro` → reference price `p_dereg_gel`
+  (summer: cheapest-regulated-HPP-referenced; winter: thermal-tariff-referenced)
+- `renewable_ppa`, `thermal_ppa`, `CfD_scheme` → contract price (USD, support-scheme)
+- `import` → import contract price (USD)
+
+The regulatory source for ESCO's procurement pricing is
+**`transitory_market_rules.md`, Article 14** — *"მუხლი 14. სისტემის
+კომერციული ოპერატორის მიერ შესყიდული და გაყიდული საბალანსო
+ელექტროენერგიის ფასის ფორმირება"* (formation of the price of
+balancing electricity **purchased and sold** by the system commercial
+operator).
+
+**Disambiguation rules:**
+
+- Question asks *"what is THE balancing electricity price"* /
+  *"what does ESCO sell at"* / *"what is `p_bal_gel`"* →
+  answer the **single weighted-average sell-side price**
+  from `price_with_usd.p_bal_gel` / `p_bal_usd`.
+
+- Question asks *"what price does ESCO PAY to sellers"* /
+  *"how much do producers RECEIVE for balancing electricity"* /
+  *"price of balancing electricity ESCO is paying"* →
+  answer is **per seller category** from the list above.
+  Cite Article 14 of the transitory market rules; do NOT
+  quote a single number for `p_bal_gel` — that is the sell
+  side, not the buy side.
+
+- Ambiguous phrasing (e.g. *"price of balancing electricity"* with
+  no buy/sell anchor) → present both sides briefly and ask the user
+  which they meant, OR lead with the per-category buy-side list
+  (more informative) and then note the aggregate sell-side number.
+
+---
+
 **CRITICAL TERMINOLOGY:** when talking about balancing electricity price or balancing electricity, ALWAYS say "balancing market" or "balancing segment" — NEVER shorten to just "market". "market" is general term which includes "balancing market", "bilateral market" and "exchange" segments.
 
 ### Terminology in All Languages

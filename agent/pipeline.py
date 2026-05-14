@@ -426,6 +426,19 @@ def _resolve_vector_retrieval_tier(
     if answer_kind is not None:
         # All remaining AnswerKind members are data shapes.
         if render_style == RenderStyle.DETERMINISTIC:
+            # Disagreement rescue: if the heuristic flagged the query as
+            # conceptual but the analyzer landed on a deterministic data
+            # shape, keep retrieval warm at LIGHT.  The analyzer still wins
+            # on answer shape (we render deterministically), but a few
+            # regulation chunks reach the summarizer so it can ground the
+            # answer in the law when the question is genuinely ambiguous
+            # between "what's the current value" and "how is this defined".
+            # Trace: 2026-05-14 incident on
+            # "what is a price of electricity esco paying to sellers of
+            # balancing electricity?" — SCALAR+DETERMINISTIC bypassed
+            # transitory_market_rules.md Article 14 entirely.
+            if is_conceptual:
+                return VectorRetrievalTier.LIGHT
             return VectorRetrievalTier.SKIP
         if render_style == RenderStyle.NARRATIVE:
             return VectorRetrievalTier.LIGHT
