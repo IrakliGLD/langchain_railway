@@ -665,3 +665,204 @@ def test_search_chunks_reranks_market_concept_reference_for_market_design_querie
     )
 
     assert results[0].document_id == "doc-rules"
+
+
+# ---------------------------------------------------------------------------
+# Phase B.1 — cross-reference contract + row materialiser
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_reference_validates_minimum_fields():
+    """``ChunkReference`` is strict: empty number rejected, unknown kinds
+    rejected. The parser (Phase B.2) is the only intended producer; the
+    contract pin protects against silent corruption from other writers."""
+    from contracts.vector_knowledge import ChunkReference, ChunkReferenceKind
+
+    ok = ChunkReference(
+        kind=ChunkReferenceKind.article,
+        number="14",
+        sub_kind="paragraph",
+        sub_number="7",
+        raw_text="მე-14 მუხლის მე-7 პუნქტი",
+    )
+    assert ok.kind == ChunkReferenceKind.article
+    assert ok.number == "14"
+
+    # Empty number is rejected.
+    with pytest.raises(ValueError):
+        ChunkReference(kind=ChunkReferenceKind.article, number="")
+
+    # Unknown kind is rejected (pydantic enum coercion).
+    with pytest.raises(ValueError):
+        ChunkReference(kind="paragraph", number="7")  # type: ignore[arg-type]
+
+
+def test_chunk_reference_serialises_to_json_safe_dict():
+    """``outgoing_refs`` is stored as JSONB; the round-trip via
+    ``model_dump(mode="json")`` must produce dicts the store can write
+    with ``json.dumps``."""
+    import json as _json
+
+    from contracts.vector_knowledge import ChunkReference, ChunkReferenceKind
+
+    ref = ChunkReference(
+        kind=ChunkReferenceKind.article,
+        number="14.7",
+        raw_text="14.7 მუხლი",
+    )
+    dumped = ref.model_dump(mode="json")
+    # Must serialise without raising.
+    _json.dumps([dumped])
+    assert dumped["kind"] == "article"
+    assert dumped["number"] == "14.7"
+
+
+def test_row_to_chunk_record_populates_new_fields():
+    """The helper that materialises SELECT rows must surface the Phase B.1
+    columns onto the record. Without this, downstream consumers (Phase B.3
+    resolver) can't see article_number / outgoing_refs."""
+    row = {
+        "id": "c-1",
+        "document_id": "doc-A",
+        "document_title": "Electricity (Capacity) Market Rules",
+        "document_type": "regulation",
+        "document_issuer": "GNERC",
+        "source_key": "ecmr",
+        "chunk_index": 5,
+        "section_title": "მუხლი 14",
+        "section_path": "თავი IV / მუხლი 14",
+        "article_number": "14",
+        "chapter_number": "IV",
+        "parent_chapter": "IV",
+        "section_kind": "article",
+        "outgoing_refs": [
+            {"kind": "article", "number": "8.1", "raw_text": "მე-8.1 მუხლი"},
+        ],
+        "page_start": None,
+        "page_end": None,
+        "text_content": "Body of article 14.",
+        "token_count": 12,
+        "language": "ka",
+        "topics": ["market_structure"],
+        "metadata": {},
+    }
+    out = vector_store._row_to_chunk_record(row, similarity_score=0.87)
+
+    assert out.article_number == "14"
+    assert out.chapter_number == "IV"
+    assert out.parent_chapter == "IV"
+    assert out.section_kind == "article"
+    assert len(out.outgoing_refs) == 1
+    assert out.outgoing_refs[0].number == "8.1"
+    assert out.similarity_score == 0.87
+
+
+def test_row_to_chunk_record_tolerates_legacy_pre_migration_rows():
+    """Rows produced before the B.1 ALTER TABLE landed will not have the new
+    keys. The materialiser must produce a valid record with empty defaults
+    — never raise — so existing deployments keep retrieving while the
+    migration rolls out."""
+    legacy_row = {
+        "id": "c-legacy",
+        "document_id": "doc-A",
+        "document_title": "Old Doc",
+        "document_type": "regulation",
+        "document_issuer": "",
+        "source_key": "old",
+        "chunk_index": 0,
+        "section_title": "Intro",
+        "section_path": "Intro",
+        # article_number, chapter_number, parent_chapter, section_kind,
+        # outgoing_refs all absent.
+        "page_start": None,
+        "page_end": None,
+        "text_content": "Pre-migration chunk text.",
+        "token_count": 5,
+        "language": "ka",
+        "topics": [],
+        "metadata": {},
+    }
+    out = vector_store._row_to_chunk_record(legacy_row, similarity_score=None)
+
+    assert out.article_number == ""
+    assert out.chapter_number == ""
+    assert out.parent_chapter == ""
+    assert out.section_kind == ""
+    assert out.outgoing_refs == []
+    assert out.similarity_score is None
+
+
+def test_parse_outgoing_refs_handles_none_string_and_malformed():
+    """The JSONB column may arrive as None (legacy), a JSON string (some
+    drivers), or a malformed list (operator error in a manual update).
+    Round-trip semantics must stay forgiving — drop bad entries, return
+    the good ones."""
+    from contracts.vector_knowledge import ChunkReferenceKind
+
+    assert vector_store._parse_outgoing_refs(None) == []
+    assert vector_store._parse_outgoing_refs([]) == []
+    # JSON-string form (some drivers return this for jsonb columns).
+    refs = vector_store._parse_outgoing_refs(
+        '[{"kind": "article", "number": "14", "raw_text": "მუხლი 14"}]'
+    )
+    assert len(refs) == 1
+    assert refs[0].kind == ChunkReferenceKind.article
+    # Malformed entry mixed with a valid one — drop the bad, keep the good.
+    refs = vector_store._parse_outgoing_refs(
+        [
+            {"this": "is", "garbage": True},  # missing required fields
+            {"kind": "chapter", "number": "IV", "raw_text": "თავი IV"},
+        ]
+    )
+    assert len(refs) == 1
+    assert refs[0].kind == ChunkReferenceKind.chapter
+    assert refs[0].number == "IV"
+
+
+def test_replace_document_chunks_emits_new_columns_in_insert(monkeypatch):
+    """The INSERT path must wire the new Phase B.1 columns through with the
+    structural defaults filled in. Capturing the SQL statement and one set
+    of params is enough — the rest is plain templating."""
+    captured = {"sql": "", "params": {}}
+
+    class _CapturingConnection(_FakeConnection):
+        def execute(self, sql, params):
+            # First call is the DELETE (no params dict for our purposes),
+            # second is the first INSERT. We capture the INSERT.
+            if "insert into" in str(sql).lower():
+                captured["sql"] = str(sql)
+                captured["params"] = dict(params)
+            return _FakeMappingResult([])
+
+    class _CapturingEngine(_FakeEngine):
+        def begin(self):
+            return _CapturingConnection(rows=self._rows, captured=self._captured)
+
+    monkeypatch.setattr(vector_store, "ENGINE", _CapturingEngine(rows=[], captured=captured))
+
+    store = vector_store.KnowledgeVectorStore()
+    chunk = vector_store.ChunkIngestRecord(
+        chunk_index=0,
+        text_content="Article 14 body.",
+        section_title="მუხლი 14",
+        article_number="14",
+        chapter_number="IV",
+        parent_chapter="IV",
+        section_kind="article",
+        outgoing_refs=[],
+    )
+    store.replace_document_chunks(
+        document_id="11111111-1111-1111-1111-111111111111",
+        source_key="src",
+        chunks=[chunk],
+        embeddings=[[0.0] * 1536],
+    )
+
+    assert "article_number" in captured["sql"]
+    assert "chapter_number" in captured["sql"]
+    assert "outgoing_refs" in captured["sql"]
+    assert captured["params"]["article_number"] == "14"
+    assert captured["params"]["chapter_number"] == "IV"
+    assert captured["params"]["section_kind"] == "article"
+    # outgoing_refs serialised as a JSON string (cast(:outgoing_refs as jsonb)).
+    assert captured["params"]["outgoing_refs"] == "[]"

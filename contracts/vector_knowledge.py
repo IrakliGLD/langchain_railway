@@ -79,6 +79,58 @@ class VectorDocumentRecord(BaseModel):
         return self
 
 
+class ChunkReferenceKind(str, Enum):
+    """The kind of cross-reference a chunk emits to another section.
+
+    Phase B.1 of the cross-reference rollout. ``article`` is the dominant
+    kind in Georgian regulations (``მუხლი``); ``chapter`` covers
+    Roman-numeral chapter refs (``თავი IV``); ``self_article`` marks
+    references to the citing article itself (``ამ მუხლის``,
+    ``წინამდებარე მუხლის``) so the resolver can skip them instead of
+    looping back to the source chunk.
+    """
+
+    article = "article"
+    chapter = "chapter"
+    self_article = "self_article"
+
+
+class ChunkReference(BaseModel):
+    """One outbound cross-reference emitted by a chunk.
+
+    The parser (Phase B.2) collapses morphological surface forms — Georgian
+    suffix-ordinal ``14-ე მუხლის``, prefix-ordinal ``მე-14 მუხლის``,
+    decimal ``14.7 მუხლი``, ordinal-word ``პირველი პუნქტი``, English
+    ``Article 14``, Russian ``Статья 14`` — into one canonical tuple
+    keyed by ``(kind, number, sub_kind, sub_number)``. The resolver
+    (Phase B.3) matches that tuple against the citing chunk's same
+    document.
+
+    The doc-hint / external-doc-resolution fields are intentionally
+    absent: per the validated corpus audit, ``კოდექსი`` references are
+    rejected at parse time (external codes are not in our corpus and
+    would generate false positives if resolved against the citing
+    document), and ``ბაზრის წესების`` is treated as a same-document
+    anchor equivalent to ``ამ წესების``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ChunkReferenceKind
+    number: str
+    sub_kind: Optional[str] = None
+    sub_number: Optional[str] = None
+    raw_text: str = ""
+
+    @field_validator("number")
+    @classmethod
+    def _validate_number(cls, value: str) -> str:
+        s = str(value or "").strip()
+        if not s:
+            raise ValueError("ChunkReference.number cannot be empty")
+        return s
+
+
 class VectorChunkRecord(BaseModel):
     """A vector-searchable text chunk plus source metadata."""
 
@@ -101,6 +153,16 @@ class VectorChunkRecord(BaseModel):
     topics: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     similarity_score: Optional[float] = None
+    # Phase B.1: canonical heading fields populated by the chunker. Empty
+    # strings on non-article sections (chapter intros, free-form bodies).
+    article_number: str = ""
+    chapter_number: str = ""
+    parent_chapter: str = ""
+    section_kind: str = ""
+    # Phase B.1: outbound cross-references parsed from this chunk's text.
+    # Populated at ingest by the parser; consumed at retrieval by the
+    # one-hop expander (Phase B.3).
+    outgoing_refs: List["ChunkReference"] = Field(default_factory=list)
 
     @field_validator("text_content")
     @classmethod
@@ -137,6 +199,16 @@ class VectorKnowledgeBundle(BaseModel):
     chunks: List[VectorChunkRecord] = Field(default_factory=list)
     filters: VectorRetrievalFilters = Field(default_factory=VectorRetrievalFilters)
     error: str = ""
+    # Phase A.2 of the cross-reference plan: chunks fetched via adjacency
+    # expansion (preceding/following section by ``chunk_index`` within the
+    # same document). Populated when ``VECTOR_ADJACENCY_MODE != "off"``.
+    # Pack consumers ignore this field until A.3 cutover.
+    adjacent_chunks: List[VectorChunkRecord] = Field(default_factory=list)
+    # Phase B.3 of the cross-reference plan: chunks resolved by following
+    # each top-K chunk's ``outgoing_refs``.  Populated when
+    # ``VECTOR_REFERENCE_EXPANSION_MODE != "off"``.  Pack consumers ignore
+    # this field until B.4 cutover.
+    reference_chunks: List[VectorChunkRecord] = Field(default_factory=list)
 
 
 # Registration and ingestion payloads define the write-side contract for new sources.
@@ -187,6 +259,15 @@ class ChunkIngestRecord(BaseModel):
     language: str = "en"
     topics: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    # Phase B.1 of the cross-reference rollout. Populated by the chunker
+    # (Phase B.2) and the parser; round-tripped through the store INSERT
+    # so existing chunks gain the structural fields on re-ingest. All
+    # default to empty so callers that pre-date Phase B keep working.
+    article_number: str = ""
+    chapter_number: str = ""
+    parent_chapter: str = ""
+    section_kind: str = ""
+    outgoing_refs: List[ChunkReference] = Field(default_factory=list)
 
     @field_validator("text_content")
     @classmethod

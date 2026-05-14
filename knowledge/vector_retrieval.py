@@ -39,6 +39,41 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+_ADJACENCY_MODE_VALUES = frozenset({"off", "shadow", "on"})
+
+
+def get_adjacency_mode() -> str:
+    """Return the adjacency-expansion mode: 'off' (default), 'shadow', 'on'.
+
+    Defaults to ``off`` so Phase A.2 is dark in production until the operator
+    opts in. Unknown values fall back to ``off`` to avoid silent rollouts on
+    typos. Exposed as public so trace emitters (pipeline.py) can include the
+    mode in observability events without re-reading the env directly.
+    """
+    raw = str(os.getenv("VECTOR_ADJACENCY_MODE", "off")).strip().lower()
+    return raw if raw in _ADJACENCY_MODE_VALUES else "off"
+
+
+# Internal alias retained for the few call sites inside this module — keeping
+# them consistent with the public name avoids drift if the policy changes.
+_adjacency_mode = get_adjacency_mode
+
+
+_REFERENCE_EXPANSION_MODE_VALUES = frozenset({"off", "shadow", "on"})
+
+
+def get_reference_expansion_mode() -> str:
+    """Return the reference-expansion mode: 'off' (default), 'shadow', 'on'.
+
+    Defaults to ``off`` so Phase B.3 is dark in production until the
+    operator opts in.  Unknown values fall back to ``off`` to prevent
+    silent rollouts on typos.  Independent of ``VECTOR_ADJACENCY_MODE``
+    — the two expansion strategies can be flipped separately.
+    """
+    raw = str(os.getenv("VECTOR_REFERENCE_EXPANSION_MODE", "off")).strip().lower()
+    return raw if raw in _REFERENCE_EXPANSION_MODE_VALUES else "off"
+
+
 _GENERIC_BOOST_STOPWORDS = {
     "a",
     "an",
@@ -469,7 +504,7 @@ def retrieve_vector_knowledge(
                     candidate_k=candidate_k,
                     min_similarity=relaxed_similarity,
                 )
-        return VectorKnowledgeBundle(
+        bundle = VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
             strategy=RetrievalStrategy.hybrid,
@@ -478,6 +513,19 @@ def retrieve_vector_knowledge(
             chunks=chunks,
             filters=filters,
         )
+        # Phase A.2: adjacency expansion. When mode != "off", fetch preceding
+        # and following section chunks and stash them on ``bundle.adjacent_chunks``.
+        # The pack function ignores this field until A.3 cutover, so behaviour
+        # in shadow mode is byte-identical to today's prompt content.
+        if _adjacency_mode() != "off" and bundle.chunks:
+            bundle.adjacent_chunks = resolve_adjacent_chunks(bundle, store=store)
+        # Phase B.3: reference expansion.  Same shadow/on/off pattern as
+        # adjacency, independent env flag so the two expansion strategies
+        # can be rolled out separately.  Pack function ignores
+        # ``reference_chunks`` until B.4 cutover.
+        if get_reference_expansion_mode() != "off" and bundle.chunks:
+            bundle.reference_chunks = resolve_reference_chunks(bundle, store=store)
+        return bundle
     except Exception as exc:
         return VectorKnowledgeBundle(
             query=query_text,
@@ -491,12 +539,313 @@ def retrieve_vector_knowledge(
         )
 
 
+def resolve_adjacent_chunks(
+    bundle: Optional[VectorKnowledgeBundle],
+    *,
+    store: "KnowledgeVectorStore" | None = None,
+) -> list:
+    """Return chunks immediately before and after each chunk in ``bundle``.
+
+    Phase A.1 of the cross-reference plan: a pure adjacency lookup that does
+    not yet feed packing. ``resolve_adjacent_chunks`` is called separately
+    from the main retrieve path so the existing top-K result remains
+    byte-identical until the env flag flips in A.2/A.3.
+
+    Behaviour contract:
+    - For each chunk in ``bundle``, fetch ``(document_id, chunk_index - 1)``
+      and ``(document_id, chunk_index + 1)``.
+    - ``chunk_index <= 0`` skips the preceding neighbour.
+    - Chunks already in ``bundle`` are NOT returned (no self-shadow).
+    - Duplicates across the input set are collapsed.
+    - Returns an empty list if ``bundle`` is None / empty / errored.
+    - Cross-document leakage is impossible — adjacency is keyed on
+      ``(document_id, chunk_index)`` and the store query is exact-match.
+    """
+
+    if bundle is None or not bundle.chunks:
+        return []
+    if bundle.error:
+        # When the underlying retrieval errored we already returned an empty
+        # bundle; adjacency is meaningless. Stay silent.
+        return []
+
+    seen_chunks: set[tuple[str, int]] = set()
+    pairs: list[tuple[str, int]] = []
+    for chunk in bundle.chunks:
+        doc_id = str(chunk.document_id or "").strip()
+        if not doc_id:
+            continue
+        idx = int(chunk.chunk_index or 0)
+        seen_chunks.add((doc_id, idx))
+
+    for chunk in bundle.chunks:
+        doc_id = str(chunk.document_id or "").strip()
+        if not doc_id:
+            continue
+        idx = int(chunk.chunk_index or 0)
+        for neighbour in (idx - 1, idx + 1):
+            if neighbour < 0:
+                continue
+            key = (doc_id, neighbour)
+            if key in seen_chunks:
+                continue
+            seen_chunks.add(key)
+            pairs.append(key)
+
+    if not pairs:
+        return []
+
+    if store is None:
+        from knowledge.vector_store import KnowledgeVectorStore
+
+        store = KnowledgeVectorStore()
+    try:
+        return store.fetch_chunks_by_index(pairs)
+    except Exception as exc:
+        log.warning(
+            "Adjacency expansion failed; continuing without it: %s", exc
+        )
+        return []
+
+
+# Budgets for reference expansion.  Conservative defaults — sensible
+# regulatory chunks rarely have more than a few outbound refs; chunks
+# with dozens (long enumeration sections) would otherwise create
+# expansion avalanches that bust the pack budget.  Tune in Phase B.5
+# once production data is in.
+REFERENCE_EXPANSION_PER_CHUNK_BUDGET = 3
+REFERENCE_EXPANSION_TOTAL_BUDGET = 10
+
+
+def resolve_reference_chunks(
+    bundle: Optional[VectorKnowledgeBundle],
+    *,
+    store: "KnowledgeVectorStore" | None = None,
+) -> list:
+    """Resolve each top-K chunk's ``outgoing_refs`` to actual chunks.
+
+    Phase B.3 of the cross-reference plan: one-hop, same-document
+    expansion via the canonical ``(document_id, article_number)``
+    lookup.  Self-article refs are skipped (they resolve to the citing
+    chunk itself).  Chapter refs are deferred to B.5 — the store
+    method for ``(document_id, chapter_number)`` lookup isn't built
+    yet, and chapter cross-references account for only 13 of the 506
+    refs across the live corpus.
+
+    Behaviour contract:
+    - Iterate ``bundle.chunks`` and collect article-kind outgoing
+      references, applying a per-chunk budget so a single chunk with
+      many refs can't blow the pack alone.
+    - Apply a total request budget across all top-K chunks combined.
+    - Drop pairs whose resolved chunk is already present in
+      ``bundle.chunks`` (no self-shadow).
+    - Deduplicate ``(document_id, article_number)`` pairs across the
+      input set so multiple primaries that cite the same article only
+      trigger one DB hit.
+    - Swallow store errors with a warning so the main retrieval path
+      stays usable even if the expander breaks.
+    """
+
+    if bundle is None or not bundle.chunks or bundle.error:
+        return []
+
+    # Build the set of already-known chunks so we never echo them back.
+    seen_chunks: set[tuple[str, int]] = set()
+    for chunk in bundle.chunks:
+        doc_id = str(chunk.document_id or "").strip()
+        if not doc_id:
+            continue
+        seen_chunks.add((doc_id, int(chunk.chunk_index or 0)))
+
+    pairs: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    # Walk chunks in their retrieval order so per-chunk budgets apply
+    # to the highest-scoring chunks first.
+    for chunk in bundle.chunks:
+        if len(pairs) >= REFERENCE_EXPANSION_TOTAL_BUDGET:
+            break
+        doc_id = str(chunk.document_id or "").strip()
+        if not doc_id:
+            continue
+        per_chunk_count = 0
+        for ref in chunk.outgoing_refs or []:
+            if per_chunk_count >= REFERENCE_EXPANSION_PER_CHUNK_BUDGET:
+                break
+            if len(pairs) >= REFERENCE_EXPANSION_TOTAL_BUDGET:
+                break
+            # Skip self-article — would loop the chunk back to itself.
+            # Skip chapter for now — handled separately in Phase B.5
+            # once the chapter-resolver SQL lands.
+            kind_value = getattr(ref.kind, "value", str(ref.kind or ""))
+            if kind_value != "article":
+                continue
+            number = str(ref.number or "").strip()
+            if not number:
+                continue
+            key = (doc_id, number)
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            pairs.append(key)
+            per_chunk_count += 1
+
+    if not pairs:
+        return []
+
+    if store is None:
+        from knowledge.vector_store import KnowledgeVectorStore
+
+        store = KnowledgeVectorStore()
+    try:
+        resolved = store.fetch_chunks_by_article(pairs)
+    except Exception as exc:
+        log.warning(
+            "Reference expansion failed; continuing without it: %s", exc
+        )
+        return []
+
+    # Drop chunks that are already in the primary bundle — adjacency
+    # and reference expansion can legitimately collide with the top-K
+    # set when the same article was directly matched and also cited.
+    filtered: list = []
+    for chunk in resolved:
+        doc_id = str(chunk.document_id or "").strip()
+        key = (doc_id, int(chunk.chunk_index or 0))
+        if key in seen_chunks:
+            continue
+        filtered.append(chunk)
+    return filtered
+
+
+def _format_chunk_header(
+    chunk,
+    *,
+    index: int,
+    tag: str = "",
+) -> str:
+    """Build the ``[N] doc | type: … | section: …`` header used by the
+    packer.  ``tag`` (when non-empty) is appended as ``| {tag}`` so
+    expansion chunks can flag context-vs-match for the LLM
+    (``adjacent`` for Phase A.3, ``referenced`` for Phase B.4).
+    """
+    header = f"[{index}] {chunk.document_title or chunk.source_key}"
+    if chunk.document_type:
+        header += f" | type: {chunk.document_type}"
+    section_label = chunk.section_title or chunk.section_path
+    if section_label:
+        header += f" | section: {section_label}"
+    if (
+        chunk.section_path
+        and _normalized_text(chunk.section_path) != _normalized_text(section_label)
+    ):
+        header += f" | locator: {chunk.section_path}"
+    if chunk.page_start is not None:
+        header += f" | page: {chunk.page_start}"
+    if tag:
+        header += f" | {tag}"
+    return header
+
+
+def _sort_adjacent_by_parent_score(
+    primary_chunks: list,
+    adjacent_chunks: list,
+) -> list:
+    """Order adjacency chunks by the similarity score of the primary chunk
+    they neighbour, descending. When budget is tight the highest-priority
+    adjacency packs first.
+
+    A chunk in ``adjacent_chunks`` is considered the neighbour of any
+    primary chunk in the same document with ``chunk_index`` differing by 1.
+    A chunk that neighbours multiple primaries takes the highest score.
+    """
+    if not adjacent_chunks:
+        return []
+    scored = []
+    for adj in adjacent_chunks:
+        best_score = 0.0
+        for primary in primary_chunks:
+            if primary.document_id != adj.document_id:
+                continue
+            if abs(int(primary.chunk_index or 0) - int(adj.chunk_index or 0)) != 1:
+                continue
+            score = float(primary.similarity_score or 0.0)
+            if score > best_score:
+                best_score = score
+        scored.append((best_score, adj))
+    # Stable sort: ties keep original order, which matches DB return order
+    # — irrelevant for correctness, helpful for trace reproducibility.
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [adj for _, adj in scored]
+
+
+def _sort_references_by_parent_score(
+    primary_chunks: list,
+    reference_chunks: list,
+) -> list:
+    """Order reference chunks by the similarity score of the primary chunk
+    that cited them, descending.  Same rationale as adjacency: when the
+    pack budget is tight the highest-priority reference packs first.
+
+    A reference chunk is considered the target of any primary chunk in
+    the same document whose ``outgoing_refs`` includes an article
+    reference with matching ``number``.  A reference cited by multiple
+    primaries takes the highest score.
+    """
+    if not reference_chunks:
+        return []
+    scored = []
+    for ref_chunk in reference_chunks:
+        best_score = 0.0
+        ref_article = str(ref_chunk.article_number or "").strip()
+        for primary in primary_chunks:
+            if primary.document_id != ref_chunk.document_id:
+                continue
+            score = float(primary.similarity_score or 0.0)
+            # Match by article number on any of the primary's outgoing
+            # article-kind refs.
+            for outgoing in primary.outgoing_refs or []:
+                kind_value = getattr(outgoing.kind, "value", str(outgoing.kind or ""))
+                if kind_value != "article":
+                    continue
+                if str(outgoing.number or "").strip() != ref_article:
+                    continue
+                if score > best_score:
+                    best_score = score
+                break
+        scored.append((best_score, ref_chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [ref for _, ref in scored]
+
+
 def pack_vector_knowledge_for_prompt(
     bundle: Optional[VectorKnowledgeBundle],
     *,
     max_chars: int | None = None,
 ) -> PackedVectorPrompt:
-    """Pack retrieved chunks as prompt-safe context and expose included headers."""
+    """Pack retrieved chunks as prompt-safe context and expose included headers.
+
+    Pack order (Phase B.4):
+
+    1. **Primary** (``bundle.chunks``) — direct semantic matches. Always
+       packs first; never displaced by expansion chunks. Truncating a
+       primary sets ``truncated=True`` AND aborts the expansion passes
+       (no point fitting a low-signal expansion when a higher-signal
+       primary already didn't fit).
+    2. **References** (``bundle.reference_chunks``) — chunks the
+       primary cited explicitly via ``outgoing_refs``. Packed under the
+       remaining budget when ``VECTOR_REFERENCE_EXPANSION_MODE == "on"``.
+       Higher signal than adjacency because the citing chunk
+       *deliberately* referred to them. Tagged ``| referenced``.
+    3. **Adjacency** (``bundle.adjacent_chunks``) — siblings by
+       ``chunk_index``. Packed last because they're "context bleed"
+       rather than an intentional cross-reference. Packed under the
+       remaining budget when ``VECTOR_ADJACENCY_MODE == "on"``. Tagged
+       ``| adjacent``.
+
+    Either expansion list is independently env-gated; either can be
+    "off" while the other is "on". Both gated off → byte-identical to
+    the pre-A.3/B.4 packer.
+    """
 
     if bundle is None or not bundle.chunks:
         return PackedVectorPrompt(prompt="", headers=[], truncated=False)
@@ -505,17 +854,9 @@ def pack_vector_knowledge_for_prompt(
     total_chars = len(parts[0])
     headers: list[str] = []
     truncated = False
-    for idx, chunk in enumerate(bundle.chunks, start=1):
-        header = f"[{idx}] {chunk.document_title or chunk.source_key}"
-        if chunk.document_type:
-            header += f" | type: {chunk.document_type}"
-        section_label = chunk.section_title or chunk.section_path
-        if section_label:
-            header += f" | section: {section_label}"
-        if chunk.section_path and _normalized_text(chunk.section_path) != _normalized_text(section_label):
-            header += f" | locator: {chunk.section_path}"
-        if chunk.page_start is not None:
-            header += f" | page: {chunk.page_start}"
+    next_index = 1
+    for chunk in bundle.chunks:
+        header = _format_chunk_header(chunk, index=next_index)
         body = chunk.text_content.strip()
         entry = f"{header}\n{body}"
         if total_chars + len(entry) + 2 > max_chars:
@@ -524,6 +865,43 @@ def pack_vector_knowledge_for_prompt(
         parts.append(entry)
         headers.append(header)
         total_chars += len(entry) + 2
+        next_index += 1
+
+    def _try_pack_expansion(chunks_to_pack, *, tag: str) -> None:
+        """Pack each expansion chunk under remaining budget. Individual
+        entries that don't fit are skipped (``continue``, not ``break``)
+        so smaller later entries still get a chance to fit. Mutates the
+        outer ``parts``, ``headers``, ``total_chars``, ``next_index``,
+        ``truncated`` via nonlocal."""
+        nonlocal total_chars, next_index, truncated
+        for chunk in chunks_to_pack:
+            header = _format_chunk_header(chunk, index=next_index, tag=tag)
+            body = chunk.text_content.strip()
+            entry = f"{header}\n{body}"
+            if total_chars + len(entry) + 2 > max_chars:
+                truncated = True
+                continue
+            parts.append(entry)
+            headers.append(header)
+            total_chars += len(entry) + 2
+            next_index += 1
+
+    # Phase B.4 cutover: pack reference chunks before adjacency. References
+    # carry higher signal — the citing chunk explicitly cited them — so
+    # they earn the remaining budget first when both expansion lists are on.
+    if not truncated and get_reference_expansion_mode() == "on" and bundle.reference_chunks:
+        ordered_refs = _sort_references_by_parent_score(
+            list(bundle.chunks), list(bundle.reference_chunks)
+        )
+        _try_pack_expansion(ordered_refs, tag="referenced")
+
+    # Phase A.3 cutover: pack adjacency chunks last under remaining budget.
+    if not truncated and get_adjacency_mode() == "on" and bundle.adjacent_chunks:
+        ordered_adj = _sort_adjacent_by_parent_score(
+            list(bundle.chunks), list(bundle.adjacent_chunks)
+        )
+        _try_pack_expansion(ordered_adj, tag="adjacent")
+
     return PackedVectorPrompt(
         prompt="\n\n".join(parts),
         headers=headers,

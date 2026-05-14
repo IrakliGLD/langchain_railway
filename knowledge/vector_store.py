@@ -6,11 +6,12 @@ import json
 import os
 import re
 from functools import lru_cache
-from typing import List
+from typing import List, Optional, Tuple
 
 from sqlalchemy import bindparam, text
 from contracts.vector_knowledge import (
     ChunkIngestRecord,
+    ChunkReference,
     DocumentRegistration,
     IngestionResult,
     VectorChunkRecord,
@@ -81,6 +82,74 @@ def _normalize_match_text(value: object) -> str:
     normalized = str(value or "").strip().lower()
     normalized = re.sub(r"[_/\-]+", " ", normalized)
     return re.sub(r"\s+", " ", normalized)
+
+
+def _parse_outgoing_refs(raw: object) -> List[ChunkReference]:
+    """Deserialise the ``outgoing_refs`` JSONB column into structured refs.
+
+    Phase B.1: the column may be ``None`` (legacy rows pre-migration),
+    an empty list, or a list of dicts (post-Phase-B.2 ingest). Garbage
+    entries are silently skipped — the parser is the source of truth
+    for schema, but the store stays robust if anything else writes there.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    refs: List[ChunkReference] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            refs.append(ChunkReference(**entry))
+        except (TypeError, ValueError):
+            # Drop malformed entries rather than failing the whole row;
+            # operator can re-run the backfill to repair them.
+            continue
+    return refs
+
+
+def _row_to_chunk_record(
+    row,
+    *,
+    similarity_score: Optional[float],
+) -> VectorChunkRecord:
+    """Materialise a SELECT row into a :class:`VectorChunkRecord`.
+
+    Centralised so ``search_chunks`` and ``fetch_chunks_by_index`` stay in
+    sync as Phase B columns land. Adding a column means one site to edit.
+    """
+    topics = row.get("topics") or []
+    metadata = row.get("metadata") or {}
+    return VectorChunkRecord(
+        id=str(row["id"]),
+        document_id=str(row["document_id"]),
+        document_title=str(row.get("document_title") or ""),
+        document_type=str(row.get("document_type") or ""),
+        document_issuer=str(row.get("document_issuer") or ""),
+        source_key=str(row.get("source_key") or ""),
+        chunk_index=int(row.get("chunk_index") or 0),
+        section_title=str(row.get("section_title") or ""),
+        section_path=str(row.get("section_path") or ""),
+        article_number=str(row.get("article_number") or ""),
+        chapter_number=str(row.get("chapter_number") or ""),
+        parent_chapter=str(row.get("parent_chapter") or ""),
+        section_kind=str(row.get("section_kind") or ""),
+        outgoing_refs=_parse_outgoing_refs(row.get("outgoing_refs")),
+        page_start=row.get("page_start"),
+        page_end=row.get("page_end"),
+        text_content=str(row.get("text_content") or ""),
+        token_count=int(row.get("token_count") or 0),
+        language=str(row.get("language") or ""),
+        topics=list(topics),
+        metadata=dict(metadata),
+        similarity_score=similarity_score,
+    )
 
 
 def _topic_overlap_boost(
@@ -347,10 +416,16 @@ class KnowledgeVectorStore:
             insert_sql = text(
                 f"""
                 insert into {self.schema}.document_chunks (
-                    document_id, chunk_index, section_title, section_path, page_start, page_end,
+                    document_id, chunk_index, section_title, section_path,
+                    article_number, chapter_number, parent_chapter, section_kind,
+                    outgoing_refs,
+                    page_start, page_end,
                     text_content, token_count, language, topics, metadata, embedding
                 ) values (
-                    :document_id, :chunk_index, :section_title, :section_path, :page_start, :page_end,
+                    :document_id, :chunk_index, :section_title, :section_path,
+                    :article_number, :chapter_number, :parent_chapter, :section_kind,
+                    cast(:outgoing_refs as jsonb),
+                    :page_start, :page_end,
                     :text_content, :token_count, :language, cast(:topics as jsonb),
                     cast(:metadata as jsonb), cast(:embedding as vector)
                 )
@@ -363,9 +438,17 @@ class KnowledgeVectorStore:
                         "document_id": document_id,
                         "topics": json.dumps(params["topics"]),
                         "metadata": json.dumps(params["metadata"]),
+                        "outgoing_refs": json.dumps(params.get("outgoing_refs") or []),
                         "embedding": _vector_literal(embedding),
                     }
                 )
+                # Defensive defaults for callers that pre-date Phase B and may
+                # not yet emit the structural fields. The ingest contract has
+                # defaults so missing keys are unusual; this is belt-and-braces.
+                params.setdefault("article_number", "")
+                params.setdefault("chapter_number", "")
+                params.setdefault("parent_chapter", "")
+                params.setdefault("section_kind", "")
                 conn.execute(insert_sql, params)
         return IngestionResult(
             document_id=document_id,
@@ -425,6 +508,11 @@ class KnowledgeVectorStore:
                 c.chunk_index,
                 c.section_title,
                 c.section_path,
+                c.article_number,
+                c.chapter_number,
+                c.parent_chapter,
+                c.section_kind,
+                c.outgoing_refs,
                 c.page_start,
                 c.page_end,
                 c.text_content,
@@ -456,29 +544,7 @@ class KnowledgeVectorStore:
             score = float(row.get("similarity_score") or 0.0)
             if score < candidate_floor:
                 continue
-            topics = row.get("topics") or []
-            metadata = row.get("metadata") or {}
-            candidates.append(
-                VectorChunkRecord(
-                    id=str(row["id"]),
-                    document_id=str(row["document_id"]),
-                    document_title=str(row.get("document_title") or ""),
-                    document_type=str(row.get("document_type") or ""),
-                    document_issuer=str(row.get("document_issuer") or ""),
-                    source_key=str(row.get("source_key") or ""),
-                    chunk_index=int(row.get("chunk_index") or 0),
-                    section_title=str(row.get("section_title") or ""),
-                    section_path=str(row.get("section_path") or ""),
-                    page_start=row.get("page_start"),
-                    page_end=row.get("page_end"),
-                    text_content=str(row.get("text_content") or ""),
-                    token_count=int(row.get("token_count") or 0),
-                    language=str(row.get("language") or ""),
-                    topics=list(topics),
-                    metadata=dict(metadata),
-                    similarity_score=score,
-                )
-            )
+            candidates.append(_row_to_chunk_record(row, similarity_score=score))
         candidates.sort(
             key=lambda candidate: (
                 _candidate_retrieval_score(candidate, filters=filters),
@@ -494,3 +560,157 @@ class KnowledgeVectorStore:
             if _candidate_retrieval_score(c, filters=filters) >= float(min_similarity)
         ]
         return _apply_document_diversity(candidates, top_k=top_k, filters=filters)
+
+    def fetch_chunks_by_index(
+        self,
+        pairs: List[Tuple[str, int]],
+    ) -> List[VectorChunkRecord]:
+        """Fetch chunks by (document_id, chunk_index) — used for adjacency
+        expansion at retrieval (Phase A.1 of the cross-reference plan).
+
+        Embedding/similarity are NOT computed for adjacency hits; the caller
+        decides how to score them.  ``similarity_score`` is therefore left
+        at ``None`` on the returned records.
+        """
+        # Deduplicate, drop invalid pairs, and short-circuit empty input.
+        unique_pairs = []
+        seen: set[Tuple[str, int]] = set()
+        for doc_id, chunk_idx in pairs:
+            if doc_id is None or chunk_idx is None or chunk_idx < 0:
+                continue
+            key = (str(doc_id), int(chunk_idx))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_pairs.append(key)
+        if not unique_pairs:
+            return []
+
+        # Postgres ``in (values, ...)`` over composite keys via a VALUES join.
+        values_clause = ",".join(
+            f"(:doc_id_{i}, :chunk_idx_{i})" for i in range(len(unique_pairs))
+        )
+        params: dict = {}
+        for i, (doc_id, chunk_idx) in enumerate(unique_pairs):
+            params[f"doc_id_{i}"] = doc_id
+            params[f"chunk_idx_{i}"] = chunk_idx
+
+        sql = text(
+            f"""
+            with wanted (document_id, chunk_index) as (
+                values {values_clause}
+            )
+            select
+                c.id::text as id,
+                c.document_id::text as document_id,
+                d.title as document_title,
+                d.document_type as document_type,
+                d.issuer as document_issuer,
+                d.source_key as source_key,
+                c.chunk_index,
+                c.section_title,
+                c.section_path,
+                c.article_number,
+                c.chapter_number,
+                c.parent_chapter,
+                c.section_kind,
+                c.outgoing_refs,
+                c.page_start,
+                c.page_end,
+                c.text_content,
+                c.token_count,
+                c.language,
+                c.topics,
+                c.metadata
+            from {self.schema}.document_chunks c
+            join {self.schema}.documents d on d.id = c.document_id
+            join wanted w
+              on cast(w.document_id as uuid) = c.document_id
+             and w.chunk_index = c.chunk_index
+            where d.is_active = true
+            """
+        )
+        with _resolve_engine().begin() as conn:
+            rows = conn.execute(sql, params).mappings().all()
+
+        return [_row_to_chunk_record(row, similarity_score=None) for row in rows]
+
+    def fetch_chunks_by_article(
+        self,
+        pairs: List[Tuple[str, str]],
+    ) -> List[VectorChunkRecord]:
+        """Fetch chunks by ``(document_id, article_number)`` — used for
+        one-hop reference expansion (Phase B.3 of the cross-reference
+        plan).
+
+        Backed by ``idx_knowledge_chunks_article`` (partial index over
+        non-empty ``article_number``) so the lookup is O(log n) regardless
+        of corpus size.  Embeddings are not computed for resolved chunks;
+        ``similarity_score`` stays ``None`` so packing can score them
+        against their parent.
+        """
+        # Deduplicate and drop invalid pairs.
+        unique_pairs: list[Tuple[str, str]] = []
+        seen: set[Tuple[str, str]] = set()
+        for doc_id, article_number in pairs:
+            if not doc_id or not article_number:
+                continue
+            article = str(article_number).strip()
+            if not article:
+                continue
+            key = (str(doc_id), article)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_pairs.append(key)
+        if not unique_pairs:
+            return []
+
+        values_clause = ",".join(
+            f"(:doc_id_{i}, :article_{i})" for i in range(len(unique_pairs))
+        )
+        params: dict = {}
+        for i, (doc_id, article_number) in enumerate(unique_pairs):
+            params[f"doc_id_{i}"] = doc_id
+            params[f"article_{i}"] = article_number
+
+        sql = text(
+            f"""
+            with wanted (document_id, article_number) as (
+                values {values_clause}
+            )
+            select
+                c.id::text as id,
+                c.document_id::text as document_id,
+                d.title as document_title,
+                d.document_type as document_type,
+                d.issuer as document_issuer,
+                d.source_key as source_key,
+                c.chunk_index,
+                c.section_title,
+                c.section_path,
+                c.article_number,
+                c.chapter_number,
+                c.parent_chapter,
+                c.section_kind,
+                c.outgoing_refs,
+                c.page_start,
+                c.page_end,
+                c.text_content,
+                c.token_count,
+                c.language,
+                c.topics,
+                c.metadata
+            from {self.schema}.document_chunks c
+            join {self.schema}.documents d on d.id = c.document_id
+            join wanted w
+              on cast(w.document_id as uuid) = c.document_id
+             and w.article_number = c.article_number
+            where d.is_active = true
+              and c.article_number <> ''
+            """
+        )
+        with _resolve_engine().begin() as conn:
+            rows = conn.execute(sql, params).mappings().all()
+
+        return [_row_to_chunk_record(row, similarity_score=None) for row in rows]

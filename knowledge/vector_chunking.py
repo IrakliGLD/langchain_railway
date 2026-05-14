@@ -7,6 +7,10 @@ import re
 from typing import Iterable, List, Tuple
 
 from contracts.vector_knowledge import ChunkIngestRecord
+from knowledge.vector_reference_parser import (
+    parse_outgoing_references,
+    parse_section_heading,
+)
 
 DEFAULT_TARGET_TOKENS = 650
 DEFAULT_OVERLAP_TOKENS = 100
@@ -47,8 +51,13 @@ def _iter_sections(text: str) -> Iterable[Tuple[str, str]]:
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         body = text[start:end].strip()
-        if body:
-            sections.append((title, body))
+        # Phase B.2 fix: yield empty-body sections too. The chunker still
+        # produces no chunks for them (``_split_section_text`` returns []),
+        # but the heading-stack ancestry state in ``chunk_markdown_text``
+        # needs to advance through chapter headings even when the chapter
+        # has no body of its own — common in Georgian regulations where
+        # ``## თავი I`` immediately precedes ``### მუხლი 1``.
+        sections.append((title, body))
     return sections
 
 
@@ -94,7 +103,14 @@ def chunk_markdown_text(
     metadata: dict | None = None,
     config: ChunkingConfig | None = None,
 ) -> List[ChunkIngestRecord]:
-    """Split markdown/text into heading-aware chunks for embedding."""
+    """Split markdown/text into heading-aware chunks for embedding.
+
+    Phase B.2: every chunk carries the structural fields the resolver
+    needs — ``article_number``, ``chapter_number``, ``parent_chapter``,
+    ``section_kind`` — plus a parsed list of outbound references in
+    ``outgoing_refs``. Chunks that don't sit under a recognised heading
+    leave those fields empty and behave exactly like pre-Phase-B chunks.
+    """
 
     chunking = config or ChunkingConfig()
     topics = list(topics or [])
@@ -102,9 +118,33 @@ def chunk_markdown_text(
     chunks: List[ChunkIngestRecord] = []
     chunk_index = 0
 
+    # Heading-stack ancestry. As we walk the document in reading order,
+    # any chapter heading becomes the current "parent chapter" until a
+    # later heading overrides it. Chunks emitted while a chapter is
+    # current inherit that chapter as ``parent_chapter`` so the
+    # resolver can answer "what chapter is article 14 in?" without
+    # joining back to a separate table.
+    current_chapter: str = ""
+
     for section_title, body in _iter_sections(text):
+        heading = parse_section_heading(section_title)
+        # The chunk itself owns its article_number/chapter_number — but
+        # the parent_chapter is the chapter that ENCLOSES it, captured
+        # from the running context before this section updates it.
+        chunk_article_number = heading.article_number
+        chunk_chapter_number = heading.chapter_number
+        chunk_section_kind = heading.section_kind
+        chunk_parent_chapter = current_chapter
+
+        # Update the running chapter context AFTER capturing parent for
+        # this section. A chapter heading's own parent is the chapter
+        # that came before it (if any), not itself.
+        if heading.section_kind == "chapter" and heading.chapter_number:
+            current_chapter = heading.chapter_number
+
         section_chunks = _split_section_text(body, chunking)
         for body_chunk in section_chunks:
+            outgoing_refs = parse_outgoing_references(body_chunk)
             chunks.append(
                 ChunkIngestRecord(
                     chunk_index=chunk_index,
@@ -112,6 +152,11 @@ def chunk_markdown_text(
                     token_count=estimate_token_count(body_chunk),
                     section_title=section_title,
                     section_path=section_title,
+                    article_number=chunk_article_number,
+                    chapter_number=chunk_chapter_number,
+                    parent_chapter=chunk_parent_chapter,
+                    section_kind=chunk_section_kind,
+                    outgoing_refs=outgoing_refs,
                     language=language,
                     topics=topics,
                     metadata=metadata,

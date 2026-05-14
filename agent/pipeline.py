@@ -2111,6 +2111,70 @@ def process_query(
             error=bool(bundle.error),
             strategy=bundle.strategy.value,
         )
+        # Phase A.2: adjacency observability. When
+        # ``VECTOR_ADJACENCY_MODE != "off"``, the bundle carries any
+        # adjacent chunks the retriever fetched. Emit a separate trace
+        # event so the hit rate is visible in production logs without
+        # changing the prompt content (A.3 owns the pack cutover).
+        if bundle.adjacent_chunks:
+            from knowledge.vector_retrieval import get_adjacency_mode
+
+            _adj_sections = [
+                f"{c.document_title or c.source_key} | "
+                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
+                for c in bundle.adjacent_chunks[:6]
+            ]
+            # Estimate the pack cost an A.3 cutover would incur — text + header.
+            _adj_packed_chars = sum(
+                len(c.text_content or "") + 80 for c in bundle.adjacent_chunks
+            )
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_adjacency",
+                "validated",
+                adjacency_mode=get_adjacency_mode(),
+                adjacent_chunk_count=len(bundle.adjacent_chunks),
+                adjacent_sections=_adj_sections,
+                would_be_packed_chars=_adj_packed_chars,
+            )
+
+        # Phase B.3: reference-expansion observability. Same shadow pattern
+        # as adjacency — emit the resolved-chunk metadata so the operator
+        # can observe hit rate before flipping to "on" in B.4.
+        if bundle.reference_chunks:
+            from knowledge.vector_retrieval import get_reference_expansion_mode
+
+            _ref_sections = [
+                f"{c.document_title or c.source_key} | "
+                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
+                for c in bundle.reference_chunks[:6]
+            ]
+            _ref_packed_chars = sum(
+                len(c.text_content or "") + 80 for c in bundle.reference_chunks
+            )
+            # Also surface the union of outgoing-ref article numbers across
+            # the primary set, so an operator can spot when the resolver
+            # silently dropped refs (e.g. budget cap, missing target).
+            _attempted_article_numbers: set[str] = set()
+            for c in bundle.chunks:
+                for ref in c.outgoing_refs or []:
+                    kind_value = getattr(ref.kind, "value", str(ref.kind or ""))
+                    if kind_value == "article":
+                        num = str(ref.number or "").strip()
+                        if num:
+                            _attempted_article_numbers.add(num)
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_references",
+                "validated",
+                reference_mode=get_reference_expansion_mode(),
+                reference_chunk_count=len(bundle.reference_chunks),
+                reference_sections=_ref_sections,
+                attempted_article_numbers=sorted(_attempted_article_numbers),
+                would_be_packed_chars=_ref_packed_chars,
+            )
 
     # --- Derive response_mode (single source of truth for answer mode) ---
     ctx.response_mode = _derive_response_mode(ctx)

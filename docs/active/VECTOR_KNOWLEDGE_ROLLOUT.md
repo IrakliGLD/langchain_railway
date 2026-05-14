@@ -35,6 +35,78 @@ Other env vars relevant to retrieval:
 - `VECTOR_KNOWLEDGE_MAX_CHARS=9000` — packing cap on the prompt section.
 - `VECTOR_KNOWLEDGE_MIN_SIMILARITY=0.2` — base similarity threshold.
 
+### Adjacency expansion (Phase A of the cross-reference rollout)
+
+- `VECTOR_ADJACENCY_MODE` — three-state env controlling whether neighbouring chunks (preceding and following by `chunk_index` within the same document) are pulled at retrieval time. Defaults to `off`.
+  - `off` (default) — no adjacency fetch, no trace event, no prompt change. The safe state for rollback at any time.
+  - `shadow` — adjacency IS fetched and attached to the bundle's `adjacent_chunks` field. A `stage_0_3_vector_knowledge_adjacency` trace event is emitted with `adjacency_mode`, `adjacent_chunk_count`, `adjacent_sections`, and `would_be_packed_chars`. **Pack output remains byte-identical to `off`** — adjacency does NOT enter the prompt. Use this state to observe hit rate before cutover.
+  - `on` — adjacency packs into the prompt after the primary chunks, within the same `VECTOR_KNOWLEDGE_MAX_CHARS` budget. Adjacency entries are tagged `| adjacent` in their header so the LLM can tell direct matches from contextual siblings. Primary chunks always pack first; adjacency only fills remaining budget. If primary truncates, adjacency is not attempted.
+  - **Unknown values** (typos like `true`, `1`, `enabled`) are treated as `off` — defensive default to prevent silent rollouts on operator error.
+
+#### Safe rollout path
+
+1. Deploy with `VECTOR_ADJACENCY_MODE` unset (default `off`). No behaviour change.
+2. Flip to `shadow` in staging. Inspect `stage_0_3_vector_knowledge_adjacency` trace events on a representative query set. Expected signal: ≥25% of regulation queries pull at least one meaningful adjacent chunk.
+3. Flip to `shadow` in production. Observe for ≥1 week. Pack output is unchanged, so no answer-quality regression risk during this window.
+4. Flip to `on`. Adjacency now packs. Inspect trace events for `packed_truncated=true` rate — if it climbs noticeably, the score multiplier in `_sort_adjacent_by_parent_score` is too generous or `VECTOR_KNOWLEDGE_MAX_CHARS` needs to grow.
+5. Rollback at any step: set `VECTOR_ADJACENCY_MODE=off`. Pack output reverts to byte-identical to pre-rollout.
+
+Phase B of the cross-reference plan (explicit `მუხლი`-style reference extraction + one-hop resolution) is independent of this knob and tracked separately.
+
+### Reference expansion (Phase B of the cross-reference rollout)
+
+Phase B follows each top-K chunk's parsed cross-references (`მე-14 მუხლის მე-7 პუნქტი` and similar morphological variants — see `knowledge/vector_reference_parser.py` for the full catalog) and resolves them to the actual referenced chunks via the canonical `(document_id, article_number)` lookup. Same-document only; external-code references (`კოდექსი`) are rejected at parse time.
+
+**Schema prerequisite.** Phase B requires the additive columns from `schemas/knowledge_vector.sql` (`article_number`, `chapter_number`, `parent_chapter`, `section_kind`, `outgoing_refs jsonb`) plus their indexes (`idx_knowledge_chunks_article`, `idx_knowledge_chunks_outgoing_refs`). The migration is idempotent (`add column if not exists`) and defaults to safe empties for legacy rows; apply it before deploying Phase B code:
+
+```powershell
+psql "$env:SUPABASE_DB_URL" -f schemas/knowledge_vector.sql
+```
+
+**Ingestion-side dependency.** The structural fields and `outgoing_refs` are populated by the chunker at ingest time. **Re-ingest any document that needs reference resolution** — legacy chunks pre-dating Phase B have empty `outgoing_refs` and won't participate in expansion (they still serve as primary matches). Re-ingestion uses the standard runbook above; nothing special.
+
+**Env knob.** `VECTOR_REFERENCE_EXPANSION_MODE` — same three-state shape as `VECTOR_ADJACENCY_MODE`, independent default:
+- `off` (default) — no resolution, no trace event, no prompt change. The safe state for rollback.
+- `shadow` — references resolved and exposed on `bundle.reference_chunks`. A `stage_0_3_vector_knowledge_references` trace event is emitted with `reference_mode`, `reference_chunk_count`, `reference_sections`, `attempted_article_numbers`, and `would_be_packed_chars`. **Pack output remains byte-identical to `off`.** Use this state to observe hit rate before cutover.
+- `on` — resolved reference chunks pack into the prompt after the primary chunks, **before** any adjacency. Reference entries are tagged `| referenced` in their header. Reference chunks earn priority over adjacency under budget pressure because the citing chunk explicitly cited them.
+- **Unknown values** treated as `off` defensively.
+
+**Pack order under any combination of modes:**
+
+```
+primary chunks (always packed first; budget exhaustion truncates here)
+  ↓ if VECTOR_REFERENCE_EXPANSION_MODE == "on" and budget remains
+references (tagged | referenced)
+  ↓ if VECTOR_ADJACENCY_MODE == "on" and budget remains
+adjacency (tagged | adjacent)
+```
+
+Either expansion list is independently env-gated. Setting only references to `on` (with adjacency `off`) packs references but no adjacency, and vice versa.
+
+**Expansion budgets** (in `knowledge/vector_retrieval.py`):
+
+- `REFERENCE_EXPANSION_PER_CHUNK_BUDGET = 3` — a single primary chunk with many cross-references cannot pull more than 3 of them. Caps the impact of long enumeration sections that cite a dozen articles.
+- `REFERENCE_EXPANSION_TOTAL_BUDGET = 10` — across all primaries in a single request, at most 10 article lookups are issued. Caps the worst-case fan-out.
+
+The resolver respects the `VECTOR_KNOWLEDGE_MAX_CHARS` pack budget on top of these — even if the request budget allows 10 lookups, the pack function will drop individual resolved chunks that don't fit.
+
+#### Safe rollout path for reference expansion
+
+1. **Schema migration.** Apply `schemas/knowledge_vector.sql` to the target DB. Idempotent; safe to re-run.
+2. **Re-ingest documents.** Run the existing ingestion runbook (`ingest_one_document.py`) for each document in `docs_to_ingest/` that needs reference resolution. New chunks carry `outgoing_refs`; legacy chunks keep empty refs and behave like pre-Phase-B chunks.
+3. **Deploy code with `VECTOR_REFERENCE_EXPANSION_MODE` unset.** Default `off`. No behaviour change.
+4. **Flip to `shadow` in staging.** Inspect `stage_0_3_vector_knowledge_references` trace events. The `attempted_article_numbers` field shows which refs the primary set carried; `reference_chunk_count` shows how many resolved. A large gap means the targets are not in the corpus (expected for cross-document refs to uningested external codes — they should already be filtered as `კოდექსი` rejections, but plain mismatches surface here).
+5. **Flip to `shadow` in production.** Observe ≥1 week. Pack output unchanged.
+6. **Flip to `on`.** References now pack. Inspect `packed_truncated=true` rate. If it climbs noticeably, either narrow the `REFERENCE_EXPANSION_PER_CHUNK_BUDGET` / `REFERENCE_EXPANSION_TOTAL_BUDGET`, raise `VECTOR_KNOWLEDGE_MAX_CHARS`, or examine the top-K query type — `LIGHT` tier already does only top-K=2 and may not need expansion at all.
+7. **Rollback at any step.** Set `VECTOR_REFERENCE_EXPANSION_MODE=off`. Pack output reverts to byte-identical to pre-rollout. The `outgoing_refs` data stays in the DB — no destructive change.
+
+#### Known limitations (acceptable miss rate, will revisit if data warrants)
+
+- **Chapter references are not yet resolved.** The parser captures Roman-numeral chapter refs (`თავი XI`) and emits `ChunkReferenceKind.chapter`, but the resolver currently skips them — only article-kind refs go through expansion. The 13 chapter references across the live corpus are surfaced via trace `attempted_article_numbers` not being populated for them; if production data shows chapter resolution would help, add a `fetch_chunks_by_chapter` companion to the store.
+- **Plural-conjoined refs** like `მე-3 და მე-4 პუნქტებში` ("paragraphs 3 AND 4") may emit only the first paragraph number, not both. Estimated ~5–10% of compound refs in the corpus.
+- **Decimal-article paragraph refs are not bound** — `14.7 მუხლის მე-2 პუნქტი` emits a reference to article `14.7` but loses the paragraph qualifier. Decimal articles are short in practice; the body of the resolved chunk usually contains the paragraph text anyway.
+- **External-document references with quoted full titles** (e.g., `„ენერგეტიკისა და წყალმომარაგების შესახებ" საქართველოს კანონის X-ე მუხლის`) are NOT resolved cross-document — Phase B is strictly same-document. Per the audit, these are rare (<5 corpus-wide) and the citing chunk's body already references the right context.
+
 ## Step-By-Step: Ingest One Document
 
 ### 1. Prepare extracted text

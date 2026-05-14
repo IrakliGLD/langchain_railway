@@ -81,3 +81,32 @@ create index if not exists idx_knowledge_chunks_metadata
 create index if not exists idx_knowledge_chunks_embedding
     on knowledge.document_chunks
     using hnsw (embedding vector_cosine_ops);
+
+-- Phase B.1 of the cross-reference rollout: structural columns derived from
+-- chunk headings (``### მუხლი 14``, ``## თავი IV``) plus outbound-reference
+-- storage so retrieval can do one-hop expansion (``Article 30 cites Article
+-- 14`` → fetch Article 14 too).  All columns are additive with safe defaults
+-- so applying this migration does NOT require data backfill before deploy.
+-- The chunker (Phase B.2) populates them at ingest time; a backfill script
+-- re-runs the parser over existing chunks once it lands.
+alter table if exists knowledge.document_chunks
+    add column if not exists article_number text not null default '';
+alter table if exists knowledge.document_chunks
+    add column if not exists chapter_number text not null default '';
+alter table if exists knowledge.document_chunks
+    add column if not exists parent_chapter text not null default '';
+alter table if exists knowledge.document_chunks
+    add column if not exists section_kind text not null default '';
+alter table if exists knowledge.document_chunks
+    add column if not exists outgoing_refs jsonb not null default '[]'::jsonb;
+
+-- Fast intra-document lookup by article number — the dominant Phase B
+-- resolver query is ``WHERE document_id = ? AND article_number = ?``.
+-- Empty strings are excluded so non-article sections (intros, chapter
+-- headings) don't bloat the index.
+create index if not exists idx_knowledge_chunks_article
+    on knowledge.document_chunks (document_id, article_number)
+    where article_number <> '';
+
+create index if not exists idx_knowledge_chunks_outgoing_refs
+    on knowledge.document_chunks using gin (outgoing_refs);
