@@ -1024,6 +1024,18 @@
           "maxItems": 5,
           "title": "Target Series",
           "type": "array"
+        },
+        "chart_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chart Type"
         }
       },
       "title": "VisualizationInfo",

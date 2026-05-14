@@ -84,6 +84,53 @@ def _normalize_match_text(value: object) -> str:
     return re.sub(r"\s+", " ", normalized)
 
 
+# Phase B.1 columns. When the schema migration has NOT been applied (or
+# the deployed code arrived ahead of the migration), the SELECT statement
+# crashes with ``column c.article_number does not exist`` and every
+# vector retrieval call returns an empty error bundle. The flag below
+# caches a column-existence probe so the store can fall back to the
+# pre-Phase-B SELECT shape until the migration lands.
+_PHASE_B1_COLUMNS = (
+    "article_number",
+    "chapter_number",
+    "parent_chapter",
+    "section_kind",
+    "outgoing_refs",
+)
+_phase_b1_columns_present: Optional[bool] = None
+
+
+def _check_phase_b1_columns_present() -> bool:
+    """Return True iff every Phase B.1 column exists on
+    ``knowledge.document_chunks``. Cached after the first call.
+
+    Defaults to False on probe failure — safer to use the old SELECT
+    shape than to crash the whole retrieval path.
+    """
+    global _phase_b1_columns_present
+    if _phase_b1_columns_present is not None:
+        return _phase_b1_columns_present
+    try:
+        with _resolve_engine().begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    select column_name
+                    from information_schema.columns
+                    where table_schema = :schema
+                      and table_name = 'document_chunks'
+                      and column_name = any(:names)
+                    """
+                ),
+                {"schema": VECTOR_KNOWLEDGE_SCHEMA, "names": list(_PHASE_B1_COLUMNS)},
+            ).mappings().all()
+        found = {row["column_name"] for row in rows}
+        _phase_b1_columns_present = all(col in found for col in _PHASE_B1_COLUMNS)
+    except Exception:
+        _phase_b1_columns_present = False
+    return _phase_b1_columns_present
+
+
 def _parse_outgoing_refs(raw: object) -> List[ChunkReference]:
     """Deserialise the ``outgoing_refs`` JSONB column into structured refs.
 
@@ -413,24 +460,46 @@ class KnowledgeVectorStore:
                 text(f"delete from {self.schema}.document_chunks where document_id = :document_id"),
                 {"document_id": document_id},
             )
-            insert_sql = text(
-                f"""
-                insert into {self.schema}.document_chunks (
-                    document_id, chunk_index, section_title, section_path,
-                    article_number, chapter_number, parent_chapter, section_kind,
-                    outgoing_refs,
-                    page_start, page_end,
-                    text_content, token_count, language, topics, metadata, embedding
-                ) values (
-                    :document_id, :chunk_index, :section_title, :section_path,
-                    :article_number, :chapter_number, :parent_chapter, :section_kind,
-                    cast(:outgoing_refs as jsonb),
-                    :page_start, :page_end,
-                    :text_content, :token_count, :language, cast(:topics as jsonb),
-                    cast(:metadata as jsonb), cast(:embedding as vector)
+            # Phase B.1 gate: when the new columns don't exist, write the
+            # pre-Phase-B shape so re-ingestion against a not-yet-migrated
+            # DB still succeeds.  The Phase B.2 structural fields will not
+            # be persisted in that case — but the chunk is still searchable
+            # via the legacy SELECT path, which is the correct degraded
+            # behaviour during a partial rollout.
+            if _check_phase_b1_columns_present():
+                insert_sql = text(
+                    f"""
+                    insert into {self.schema}.document_chunks (
+                        document_id, chunk_index, section_title, section_path,
+                        article_number, chapter_number, parent_chapter, section_kind,
+                        outgoing_refs,
+                        page_start, page_end,
+                        text_content, token_count, language, topics, metadata, embedding
+                    ) values (
+                        :document_id, :chunk_index, :section_title, :section_path,
+                        :article_number, :chapter_number, :parent_chapter, :section_kind,
+                        cast(:outgoing_refs as jsonb),
+                        :page_start, :page_end,
+                        :text_content, :token_count, :language, cast(:topics as jsonb),
+                        cast(:metadata as jsonb), cast(:embedding as vector)
+                    )
+                    """
                 )
-                """
-            )
+            else:
+                insert_sql = text(
+                    f"""
+                    insert into {self.schema}.document_chunks (
+                        document_id, chunk_index, section_title, section_path,
+                        page_start, page_end,
+                        text_content, token_count, language, topics, metadata, embedding
+                    ) values (
+                        :document_id, :chunk_index, :section_title, :section_path,
+                        :page_start, :page_end,
+                        :text_content, :token_count, :language, cast(:topics as jsonb),
+                        cast(:metadata as jsonb), cast(:embedding as vector)
+                    )
+                    """
+                )
             for chunk, embedding in zip(chunks, embeddings):
                 params = chunk.model_dump(mode="json")
                 params.update(
@@ -496,6 +565,12 @@ class KnowledgeVectorStore:
             params["issuers"] = issuers
             bind_params.append(bindparam("issuers", expanding=True))
 
+        phase_b1_cols = (
+            ",\n                ".join(f"c.{col}" for col in _PHASE_B1_COLUMNS)
+            if _check_phase_b1_columns_present()
+            else ""
+        )
+        phase_b1_select = (f"\n                {phase_b1_cols}," if phase_b1_cols else "")
         sql = text(
             f"""
             select
@@ -507,12 +582,7 @@ class KnowledgeVectorStore:
                 d.source_key as source_key,
                 c.chunk_index,
                 c.section_title,
-                c.section_path,
-                c.article_number,
-                c.chapter_number,
-                c.parent_chapter,
-                c.section_kind,
-                c.outgoing_refs,
+                c.section_path,{phase_b1_select}
                 c.page_start,
                 c.page_end,
                 c.text_content,
@@ -595,6 +665,12 @@ class KnowledgeVectorStore:
             params[f"doc_id_{i}"] = doc_id
             params[f"chunk_idx_{i}"] = chunk_idx
 
+        phase_b1_cols = (
+            ",\n                ".join(f"c.{col}" for col in _PHASE_B1_COLUMNS)
+            if _check_phase_b1_columns_present()
+            else ""
+        )
+        phase_b1_select = (f"\n                {phase_b1_cols}," if phase_b1_cols else "")
         sql = text(
             f"""
             with wanted (document_id, chunk_index) as (
@@ -609,12 +685,7 @@ class KnowledgeVectorStore:
                 d.source_key as source_key,
                 c.chunk_index,
                 c.section_title,
-                c.section_path,
-                c.article_number,
-                c.chapter_number,
-                c.parent_chapter,
-                c.section_kind,
-                c.outgoing_refs,
+                c.section_path,{phase_b1_select}
                 c.page_start,
                 c.page_end,
                 c.text_content,
@@ -649,6 +720,13 @@ class KnowledgeVectorStore:
         ``similarity_score`` stays ``None`` so packing can score them
         against their parent.
         """
+        # Phase B.3 cannot run before the Phase B.1 schema migration —
+        # the ``article_number`` column it queries on does not exist.
+        # Return an empty result so callers (the resolver, the pack
+        # function) degrade gracefully to pre-Phase-B behaviour rather
+        # than SQL-crashing the entire retrieval call.
+        if not _check_phase_b1_columns_present():
+            return []
         # Deduplicate and drop invalid pairs.
         unique_pairs: list[Tuple[str, str]] = []
         seen: set[Tuple[str, str]] = set()

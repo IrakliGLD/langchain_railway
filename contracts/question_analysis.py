@@ -418,6 +418,16 @@ class VisualizationInfo(BaseModel):
     # introduce a concrete `ReferenceLineSpec` dataclass first.
     chart_intent: Optional[ChartIntent] = None
     target_series: List[SemanticRole] = Field(default_factory=list, max_length=5)
+    # Absorbing field for analyzer-prompt drift: the LLM has been observed
+    # to emit ``chart_type: null`` even though no prompt instructs it to
+    # (see production trace 90c0358d-a02f-4362-a97c-e47d4317d9ff). With
+    # ``extra="forbid"`` on this model, that one stray key fails the entire
+    # ``QuestionAnalysis`` validation and forces the heuristic fallback,
+    # which then routes simple lookups to ``KNOWLEDGE_PRIMARY`` mode and
+    # bypasses vector retrieval. Accept the field, ignore its value —
+    # ``preferred_chart_family`` is the canonical channel for chart-type
+    # hints. Remove once analyzer prompts converge.
+    chart_type: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_semantic_chart_hints(self) -> "VisualizationInfo":

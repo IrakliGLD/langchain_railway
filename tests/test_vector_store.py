@@ -839,6 +839,10 @@ def test_replace_document_chunks_emits_new_columns_in_insert(monkeypatch):
             return _CapturingConnection(rows=self._rows, captured=self._captured)
 
     monkeypatch.setattr(vector_store, "ENGINE", _CapturingEngine(rows=[], captured=captured))
+    # Force the column-presence probe to True so the test exercises the
+    # post-migration INSERT shape. (Tests for the legacy-shape fallback
+    # live below.)
+    monkeypatch.setattr(vector_store, "_phase_b1_columns_present", True)
 
     store = vector_store.KnowledgeVectorStore()
     chunk = vector_store.ChunkIngestRecord(
@@ -866,3 +870,101 @@ def test_replace_document_chunks_emits_new_columns_in_insert(monkeypatch):
     assert captured["params"]["section_kind"] == "article"
     # outgoing_refs serialised as a JSON string (cast(:outgoing_refs as jsonb)).
     assert captured["params"]["outgoing_refs"] == "[]"
+
+
+def test_select_omits_phase_b1_columns_when_migration_not_applied(monkeypatch):
+    """When the Phase B.1 columns are absent (migration not yet applied),
+    the SELECT must NOT reference them — otherwise the SQL crashes with
+    ``column c.article_number does not exist`` and every vector retrieval
+    returns an empty error bundle.  Regression pin for the 2026-05-14
+    production incident."""
+    captured = {"sql": "", "params": {}}
+
+    class _CapturingConnection(_FakeConnection):
+        def execute(self, sql, params):
+            captured["sql"] = str(sql)
+            captured["params"] = dict(params)
+            return _FakeMappingResult([])
+
+    class _CapturingEngine(_FakeEngine):
+        def begin(self):
+            return _CapturingConnection(rows=self._rows, captured=self._captured)
+
+    monkeypatch.setattr(vector_store, "ENGINE", _CapturingEngine(rows=[], captured=captured))
+    # Force the column-presence cache to False (simulating an un-migrated DB).
+    monkeypatch.setattr(vector_store, "_phase_b1_columns_present", False)
+
+    store = vector_store.KnowledgeVectorStore()
+    store.search_chunks(
+        query_embedding=[0.1] * 1536,
+        filters=VectorRetrievalFilters(),
+        top_k=2,
+        candidate_k=4,
+    )
+
+    # None of the Phase B.1 columns appear in the SELECT.
+    assert "article_number" not in captured["sql"]
+    assert "chapter_number" not in captured["sql"]
+    assert "parent_chapter" not in captured["sql"]
+    assert "section_kind" not in captured["sql"]
+    assert "outgoing_refs" not in captured["sql"]
+    # Existing columns still selected.
+    assert "section_title" in captured["sql"]
+    assert "embedding <=> cast" in captured["sql"]
+
+
+def test_fetch_chunks_by_article_returns_empty_when_migration_not_applied(monkeypatch):
+    """``fetch_chunks_by_article`` is meaningless without the article_number
+    column.  Must short-circuit to ``[]`` so the Phase B.3 resolver
+    degrades gracefully to pre-Phase-B behaviour."""
+    monkeypatch.setattr(vector_store, "_phase_b1_columns_present", False)
+
+    store = vector_store.KnowledgeVectorStore()
+    result = store.fetch_chunks_by_article([("doc-A", "14")])
+    assert result == []
+
+
+def test_insert_uses_legacy_shape_when_migration_not_applied(monkeypatch):
+    """Re-ingestion against an un-migrated DB must use the pre-Phase-B
+    INSERT shape so the chunk lands without crashing.  Phase B.2
+    structural fields aren't persisted in this case — acceptable degraded
+    behaviour while the migration is still pending."""
+    captured = {"sql": "", "params": {}}
+
+    class _CapturingConnection(_FakeConnection):
+        def execute(self, sql, params):
+            sql_str = str(sql)
+            if "insert into" in sql_str.lower():
+                captured["sql"] = sql_str
+                captured["params"] = dict(params)
+            return _FakeMappingResult([])
+
+    class _CapturingEngine(_FakeEngine):
+        def begin(self):
+            return _CapturingConnection(rows=self._rows, captured=self._captured)
+
+    monkeypatch.setattr(vector_store, "ENGINE", _CapturingEngine(rows=[], captured=captured))
+    monkeypatch.setattr(vector_store, "_phase_b1_columns_present", False)
+
+    store = vector_store.KnowledgeVectorStore()
+    chunk = vector_store.ChunkIngestRecord(
+        chunk_index=0,
+        text_content="Body of article 14.",
+        section_title="მუხლი 14",
+        article_number="14",
+        outgoing_refs=[],
+    )
+    store.replace_document_chunks(
+        document_id="11111111-1111-1111-1111-111111111111",
+        source_key="src",
+        chunks=[chunk],
+        embeddings=[[0.0] * 1536],
+    )
+
+    # New columns absent from the INSERT.
+    assert "article_number" not in captured["sql"]
+    assert "outgoing_refs" not in captured["sql"]
+    # Required pre-Phase-B fields still present.
+    assert "chunk_index" in captured["sql"]
+    assert "text_content" in captured["sql"]
+    assert "embedding" in captured["sql"]
