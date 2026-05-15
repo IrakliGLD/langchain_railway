@@ -6,6 +6,7 @@ or from SQL query results (data summarization).
 """
 import json
 import logging
+import os
 import re
 import hashlib
 from decimal import Decimal, InvalidOperation
@@ -1114,9 +1115,26 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
 
     vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active and PIPELINE_MODE != "fast" else ""
     domain_knowledge_for_summary = domain_knowledge
-    if vector_evidence_active and len(domain_knowledge_for_summary) > 12000:
-        domain_knowledge_for_summary = domain_knowledge_for_summary[:12000]
-        log.info("Capped domain_knowledge to 12000 chars (synthesizing with vector evidence)")
+    if vector_evidence_active:
+        # When vector evidence is present, the inline domain-knowledge layer
+        # is treated as a "peer source" and capped to avoid prompt bloat.
+        # Default 12000 chars; configurable via env so deployments with
+        # expanded inline knowledge (e.g. detailed Articles-13/14/36 rule
+        # sets in balancing_price.md) can lift the cap without a code change.
+        # See 2026-05-15 trace 1b132a9b: at 12000 cap, sections F (LLM
+        # disambiguation rules + mandatory completeness checklist) got
+        # truncated, producing a shallow answer despite full retrieval.
+        _dk_cap_raw = os.getenv("DOMAIN_KNOWLEDGE_MAX_CHARS_WITH_VECTOR", "12000").strip()
+        try:
+            _dk_cap = max(1000, int(_dk_cap_raw))
+        except ValueError:
+            _dk_cap = 12000
+        if len(domain_knowledge_for_summary) > _dk_cap:
+            domain_knowledge_for_summary = domain_knowledge_for_summary[:_dk_cap]
+            log.info(
+                "Capped domain_knowledge to %d chars (synthesizing with vector evidence)",
+                _dk_cap,
+            )
     try:
         envelope = llm_summarize_structured(
             ctx.effective_query,
