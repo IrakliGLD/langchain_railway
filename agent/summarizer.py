@@ -317,6 +317,13 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
 
     source_tokens = _build_grounding_tokens(ctx)
     if not source_tokens:
+        log.warning(
+            "🔬 Grounding fail (no source tokens): answer has %d number tokens but evidence "
+            "corpus is empty. policy=%s answer_tokens_preview=%s",
+            len(answer_tokens),
+            grounding_policy,
+            sorted(answer_tokens)[:20],
+        )
         return False
 
     matched = sum(1 for t in answer_tokens if t in source_tokens)
@@ -324,7 +331,26 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     # Evidence-aware queries produce derived values (percentages, deltas)
     # that legitimately extend beyond raw data; use a lower threshold.
     min_ratio = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE else 0.9
-    return match_ratio >= min_ratio
+    passed = match_ratio >= min_ratio
+    if not passed:
+        # Diagnostic: when grounding fails, log the matched vs missing tokens
+        # so we can distinguish hallucination from derivation from rounding.
+        # Triggered only on failures (not on every pass) to keep logs quiet.
+        # The first 20 missing tokens (sorted) usually reveal the pattern —
+        # rounded values, percentages computed from ratios, hallucinated
+        # absolute numbers, or year/date strings outside the data window.
+        missing = [t for t in answer_tokens if t not in source_tokens]
+        log.warning(
+            "🔬 Grounding fail: matched %d/%d tokens (ratio=%.2f, threshold=%.2f, policy=%s). "
+            "Missing tokens (first 20 sorted): %s",
+            matched,
+            len(answer_tokens),
+            match_ratio,
+            min_ratio,
+            grounding_policy,
+            sorted(missing)[:20],
+        )
+    return passed
 
 
 def _has_unsupported_absence_claims(summary: str) -> bool:
