@@ -3563,8 +3563,8 @@ UNTRUSTED_CONVERSATION_HISTORY:
 
 Citation format rules:
 - cite source anchors like \"data_preview\", \"statistics\", \"domain_knowledge\", \"external_source_passages\", or \"conversation_history\"
-- when using retrieved regulation or procedure details, prefer citing \"external_source_passages\"
-- use \"domain_knowledge\" citations mainly for background definitions or secondary context
+- when a specific article/clause appears verbatim in EXTERNAL_SOURCE_PASSAGES, cite \"external_source_passages\" for that quote
+- when applying a structural rule, completeness requirement, or curated synthesis from DOMAIN_KNOWLEDGE, cite \"domain_knowledge\" — DOMAIN_KNOWLEDGE is a peer authoritative source, not secondary background; follow its enumeration rules and completeness requirements
 - write generated section headers and labels in the response language; do not reuse source headings in another language unless directly quoting them as source text
 - when referencing a regulation, procedure, article, clause, or section from EXTERNAL_SOURCE_PASSAGES, include the regulation/document title together with the article/section identifier when available
 - if only a section heading or locator is available, include the regulation/document title with that section heading or locator; do not say \"Article 14\" or \"Section 8\" alone
@@ -3617,8 +3617,36 @@ Citation format rules:
         try:
             llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
             primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            # Diagnostic: log prompt composition + system message preview right
+            # before the LLM call.  Without this we can't tell whether the LLM
+            # actually saw the comprehensive guidance — the difference between
+            # "the rescue layers fired" (visible in upstream traces) and "the
+            # comprehensive content reached Gemini in the system+user messages"
+            # (visible only here).  See 2026-05-15 trace 226a56ef for the
+            # all-five-rescue-layers-correct-but-output-still-terse symptom.
+            if attempt == 0:
+                log.info(
+                    "🔬 LLM prompt composition: system=%d chars, user=%d chars, "
+                    "domain_knowledge_in_prompt=%d chars, vector_knowledge_in_prompt=%d chars",
+                    len(system),
+                    len(prompt),
+                    len(domain_knowledge),
+                    len(vector_knowledge),
+                )
+                log.info(
+                    "🔬 LLM system-message preview (first 800 chars): %s",
+                    system[:800].replace("\n", " | "),
+                )
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             raw_output = message.content.strip()
+            # Diagnostic: log the raw LLM response preview so we can see what
+            # the model actually said vs. what we expected.  Useful for
+            # distinguishing "model ignored guidance" from "model produced
+            # good answer but downstream parsing/JSON extraction trimmed it."
+            log.info(
+                "🔬 LLM raw response preview (first 600 chars): %s",
+                raw_output[:600].replace("\n", " | "),
+            )
             _log_usage_for_message(message, model_name=primary_model_name)
             metrics.log_llm_call(time.time() - llm_start)
             last_exc = None

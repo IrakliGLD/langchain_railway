@@ -1135,6 +1135,24 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
                 "Capped domain_knowledge to %d chars (synthesizing with vector evidence)",
                 _dk_cap,
             )
+    # Diagnostic: log prompt composition BEFORE the LLM call so we can correlate
+    # input volume / shape with output quality.  Critical for debugging
+    # "answer is shallow despite all rescue layers" cases like trace 226a56ef
+    # (2026-05-15) — without this we can't tell whether the LLM saw the full
+    # comprehensive content or whether something truncated upstream.
+    log.info(
+        "🔬 LLM input composition (conceptual): domain_kb=%d chars, vector_passages=%d chars, "
+        "history_turns=%d, response_mode=%s, query_type=%s",
+        len(domain_knowledge_for_summary),
+        len(vector_knowledge),
+        len(ctx.conversation_history or []),
+        ctx.response_mode,
+        (
+            ctx.question_analysis.classification.query_type.value
+            if ctx.question_analysis is not None
+            else "none"
+        ),
+    )
     try:
         envelope = llm_summarize_structured(
             ctx.effective_query,
@@ -1158,6 +1176,19 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         ctx.summary_provenance_coverage = 0.0
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "not_applicable_conceptual"
+        # Diagnostic: log answer shape so we can correlate output length /
+        # structure with input composition.  ``summary_preview`` is the first
+        # 600 chars verbatim — enough to see whether the LLM enumerated
+        # sub-points, cited articles, or just gave a brief summary.
+        trace_detail(
+            log, ctx, "stage_4_conceptual_summary", "answer_generated",
+            summary_length=len(envelope.answer),
+            summary_preview=envelope.answer[:600],
+            citations=list(envelope.citations),
+            claims_count=len(envelope.claims),
+            confidence=float(envelope.confidence),
+            summary_source="structured_conceptual_summary",
+        )
     except RuntimeError:
         # Circuit breaker open — system-level issue, don't mask with fallback
         raise
