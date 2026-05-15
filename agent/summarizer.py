@@ -424,6 +424,68 @@ def _merge_topic_preferences(*topic_lists: Optional[List[str]]) -> Optional[List
     return merged or None
 
 
+def _expand_text_number_token(raw_token: str) -> Set[str]:
+    """Expand a number token extracted from free-form text to its rounded
+    and unsigned variants.
+
+    Why this exists
+    ---------------
+
+    Text sources like ``stats_hint``, ``domain_knowledge``, and
+    ``external_source_passages`` are tokenized via plain regex
+    (``_extract_number_tokens``).  That returns the literal token —
+    so a source value like ``-0.7712345`` produces only the single
+    token ``"-0.7712345"``.
+
+    But LLMs naturally round derived values when writing prose:
+    they'll cite ``"-0.77"`` or ``"-0.8"`` rather than the full
+    ``"-0.7712345"``.  The provenance gate then sees the LLM token
+    as "not in source," even though semantically it is.
+
+    DataFrame cells already get rounded-variant expansion via
+    ``_tokenize_cell_value`` (lines 460-463 of this file).  This
+    helper brings text sources to parity — same expansion logic.
+
+    Expansion rules
+    ---------------
+
+    For each raw token, returns the set containing:
+      - the original token (always)
+      - the value rounded to 1 decimal place
+      - the value rounded to 2 decimal places
+      - unsigned versions of all the above (for "dropped by 5" matching "-5")
+
+    Non-numeric or non-finite tokens pass through unchanged.
+
+    Used by ``_build_claim_provenance`` for stats_hint /
+    domain_knowledge / external_source_passages indexing.  Trace
+    2026-05-15 58c10c60 confirmed this asymmetry: LLM cited ``-0.77``
+    for a trend_slope of ``-0.7712345`` and the provenance gate
+    rejected it as ungrounded.
+    """
+    result: Set[str] = {raw_token}
+    try:
+        numeric = Decimal(raw_token)
+    except (InvalidOperation, ValueError):
+        return result
+    if not numeric.is_finite():
+        return result
+
+    # Rounded variants at 1 and 2 decimal places.
+    for val in (round(numeric, 1), round(numeric, 2)):
+        t = _normalize_number_token(str(val))
+        if t:
+            result.add(t)
+
+    # Unsigned versions for ALL tokens generated so far.
+    unsigned_extra: Set[str] = set()
+    for t in result:
+        if t.startswith("-"):
+            unsigned_extra.add(t[1:])
+    result.update(unsigned_extra)
+    return result
+
+
 def _tokenize_cell_value(value: Any) -> Set[str]:
     tokens = _extract_number_tokens(str(value))
     if value is None or isinstance(value, bool):
@@ -521,35 +583,42 @@ def _build_claim_provenance(
     def _index_text_source(text: str, *, source_name: str, column_label: str, coordinate: str) -> None:
         if not text:
             return
-        for token in _extract_number_tokens(text):
-            refs = token_index.setdefault(token, [])
-            refs.append({
+        for raw_token in _extract_number_tokens(text):
+            # Build the ref entry once from the RAW token (for human-readable
+            # citation display showing the source value as written).
+            ref_entry = {
                 "source": source_name,
                 "row_number": 0,
                 "row_index": -1,
                 "column": column_label,
-                "value": token,
-                "cell_id": f"{source_name}:{hashlib.md5(token.encode()).hexdigest()[:8]}",
+                "value": raw_token,
+                "cell_id": f"{source_name}:{hashlib.md5(raw_token.encode()).hexdigest()[:8]}",
                 "row_context": {"Type": column_label},
                 "coordinate": coordinate,
                 "query_hash": query_hash,
-            })
+            }
+            # Index under raw_token AND its rounded/unsigned variants so the
+            # gate accepts LLM-rounded numbers as grounded.  See the docstring
+            # on _expand_text_number_token for the asymmetry this fixes.
+            for indexed_token in _expand_text_number_token(raw_token):
+                token_index.setdefault(indexed_token, []).append(ref_entry)
 
     # --- Index statistics and derived analysis ---
     if stats_hint:
-        for token in _extract_number_tokens(stats_hint):
-            refs = token_index.setdefault(token, [])
-            refs.append({
+        for raw_token in _extract_number_tokens(stats_hint):
+            ref_entry = {
                 "source": "derived_analysis",
                 "row_number": 0,
                 "row_index": -1,
                 "column": "Statistics/Causal Evidence",
-                "value": token,
-                "cell_id": f"derived:{hashlib.md5(token.encode()).hexdigest()[:8]}",
+                "value": raw_token,
+                "cell_id": f"derived:{hashlib.md5(raw_token.encode()).hexdigest()[:8]}",
                 "row_context": {"Type": "System Analysis"},
                 "coordinate": "stats_hint",
                 "query_hash": query_hash,
-            })
+            }
+            for indexed_token in _expand_text_number_token(raw_token):
+                token_index.setdefault(indexed_token, []).append(ref_entry)
     _index_text_source(
         domain_knowledge,
         source_name="domain_knowledge",

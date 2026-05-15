@@ -316,6 +316,113 @@ def test_claim_provenance_coverage_requires_all_numeric_tokens():
     assert claim_entries[0]["is_fully_grounded"] is False
 
 
+# ---------------------------------------------------------------------------
+# _expand_text_number_token — rounding-token expansion for text sources
+#
+# DataFrame cells get rounded-variant expansion via _tokenize_cell_value
+# (rounds to 1 and 2 decimals, plus unsigned versions).  Text sources
+# (stats_hint, domain_knowledge, external_source_passages) used to get
+# only plain regex extraction, no expansion.  That asymmetry caused
+# provenance-gate failures when the LLM rounded high-precision derived
+# values (trace 2026-05-15 58c10c60: source "-0.7712345" → LLM "-0.77"
+# → gate rejected as ungrounded).  Tests below pin the new symmetry.
+# ---------------------------------------------------------------------------
+
+
+def test_expand_text_number_token_adds_rounded_variants():
+    """High-precision value expands to 1- and 2-decimal rounded forms."""
+    tokens = summarizer._expand_text_number_token("-0.7712345")
+    # Original always preserved
+    assert "-0.7712345" in tokens
+    # Rounded variants the LLM would naturally produce in prose
+    assert "-0.77" in tokens
+    assert "-0.8" in tokens
+    # Unsigned counterparts (for "dropped by 0.77" prose matching "-0.77")
+    assert "0.7712345" in tokens
+    assert "0.77" in tokens
+    assert "0.8" in tokens
+
+
+def test_expand_text_number_token_integer_is_idempotent():
+    """Integers like 2025 don't over-expand to nearby values."""
+    tokens = summarizer._expand_text_number_token("2025")
+    # No false-positive expansions — 2025 should NOT become 2020 or 2030.
+    assert tokens == {"2025"}
+
+
+def test_expand_text_number_token_non_numeric_passes_through():
+    """Non-numeric input returns just the input, no expansion."""
+    tokens = summarizer._expand_text_number_token("not-a-number")
+    assert tokens == {"not-a-number"}
+
+
+def test_expand_text_number_token_handles_inf_and_nan():
+    """Non-finite values pass through without crashing."""
+    # NaN / inf in decimal form would fail the is_finite check
+    tokens = summarizer._expand_text_number_token("Infinity")
+    # Decimal("Infinity") is valid but not finite — should return only original
+    assert "Infinity" in tokens
+
+
+def test_build_claim_provenance_matches_llm_rounded_stats_hint_value():
+    """The provenance gate should NOT fail when the LLM rounds a high-precision
+    stats_hint value to its 2-decimal form.
+
+    Regression for trace 58c10c60 (2026-05-15): stats_hint contained
+    ``trend_slope: -0.7712345``, LLM cited ``-0.77 GEL/MWh``, provenance
+    gate rejected at 75% coverage.  After this fix the rounded form is
+    indexed alongside the raw value and the claim grounds correctly.
+    """
+    stats_hint = "DERIVED ANALYSIS EVIDENCE (trend_slope: -0.7712345)"
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The calculated long-term trend slope is -0.77 GEL/MWh per month."],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    # Token -0.77 (from the claim) must match the indexed -0.7712345 (from stats_hint).
+    assert claim_entries[0]["matched_tokens"] == ["-0.77"]
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_build_claim_provenance_matches_llm_one_decimal_rounded_stats_value():
+    """Same as above but LLM rounds to 1 decimal (-0.8) instead of 2 (-0.77)."""
+    stats_hint = "DERIVED ANALYSIS EVIDENCE (trend_slope: -0.7712345)"
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The trend slope is approximately -0.8 GEL/MWh per month."],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    assert claim_entries[0]["matched_tokens"] == ["-0.8"]
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_build_claim_provenance_unrelated_number_still_fails():
+    """Defensive: rounding-expansion must NOT make completely unrelated
+    numbers look grounded.  Claim cites ``500`` but source only has
+    ``-0.7712345`` — must remain ungrounded.
+    """
+    stats_hint = "DERIVED ANALYSIS EVIDENCE (trend_slope: -0.7712345)"
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The market grew by 500 units."],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    # 500 not in expansion of -0.7712345 (which yields only -0.77/-0.8/0.77/0.8/etc.)
+    assert claim_entries[0]["unmatched_tokens"] == ["500"]
+    assert claim_entries[0]["is_fully_grounded"] is False
+    assert coverage == pytest.approx(0.0, rel=1e-6)
+
+
 def test_serialize_scalar_normalizes_pandas_numpy_scalars():
     scalar = pd.Series([5]).iloc[0]
     assert summarizer._serialize_scalar(scalar) == 5
