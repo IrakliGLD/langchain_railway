@@ -3307,11 +3307,40 @@ def llm_summarize_structured(
         else query_type in _CONCEPTUAL_QUERY_TYPES
     )
     if is_conceptual_context and vector_knowledge.strip():
+        # Treat DOMAIN_KNOWLEDGE and EXTERNAL_SOURCE_PASSAGES as PEER evidence
+        # sources rather than secondary/primary.  The architecture doc
+        # (docs/active/VECTOR_KNOWLEDGE_ROLLOUT.md "Guardrails") states:
+        # "Curated markdown knowledge in knowledge/*.md remains the canonical
+        # explanation layer; vector chunks are additive external-source
+        # passages."  The previous rule contradicted this by labelling
+        # DOMAIN_KNOWLEDGE "secondary background for brief definitions"
+        # — which suppressed structural rules (enumeration discipline,
+        # completeness checklists) that the inline knowledge files now carry.
+        #
+        # Trace: 2026-05-15 6a169afb — all four prior rescue layers landed
+        # correctly (tier=LIGHT, KNOWLEDGE_PRIMARY, 30k char cap,
+        # regulatory_procedure template), but the answer stayed terse
+        # because the system message told the LLM to use DOMAIN_KNOWLEDGE
+        # "only as secondary background."  Conflict resolution still
+        # prefers external passages on factual disagreements.
         conceptual_evidence_rule = (
-            "When EXTERNAL_SOURCE_PASSAGES are present, treat them as the primary evidence. "
-            "Use DOMAIN_KNOWLEDGE only as secondary background for brief definitions or Georgia context. "
-            "If EXTERNAL_SOURCE_PASSAGES and DOMAIN_KNOWLEDGE differ, prefer EXTERNAL_SOURCE_PASSAGES. "
-            "If EXTERNAL_SOURCE_PASSAGES are incomplete for a requested process or rule, say so directly."
+            "DOMAIN_KNOWLEDGE and EXTERNAL_SOURCE_PASSAGES are peer evidence "
+            "sources.  DOMAIN_KNOWLEDGE provides curated regulatory interpretation, "
+            "structural rules (enumeration discipline, citation requirements, "
+            "completeness checklists), and Georgia-specific context. "
+            "EXTERNAL_SOURCE_PASSAGES provide ground-truth excerpts from official "
+            "regulation documents. Use them together: follow the structural rules "
+            "and completeness requirements specified in DOMAIN_KNOWLEDGE, and cite "
+            "specific articles or paragraphs from EXTERNAL_SOURCE_PASSAGES when "
+            "they appear there. When DOMAIN_KNOWLEDGE prescribes a completeness "
+            "requirement (e.g. 'must enumerate all sub-points'), the answer must "
+            "satisfy it — do not abbreviate to a summary when the enumeration is "
+            "the substance of the question. "
+            "If EXTERNAL_SOURCE_PASSAGES and DOMAIN_KNOWLEDGE differ on a specific "
+            "fact, prefer EXTERNAL_SOURCE_PASSAGES.  If EXTERNAL_SOURCE_PASSAGES "
+            "are incomplete for a requested process or rule, supplement from "
+            "DOMAIN_KNOWLEDGE and identify which source carried each part of "
+            "the answer."
         )
     elif is_conceptual_context:
         conceptual_evidence_rule = "For conceptual questions, use the provided DOMAIN_KNOWLEDGE when available."
