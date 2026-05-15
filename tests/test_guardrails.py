@@ -2165,6 +2165,105 @@ def test_response_mode_fallback_heuristic_conceptual(monkeypatch):
     assert out.is_conceptual is True
 
 
+# ---------------------------------------------------------------------------
+# Disagreement-rescue: factual_lookup + heuristic-conceptual + vector chunks
+# → KNOWLEDGE_PRIMARY (regression for 2026-05-14 trace 614f24ce)
+#
+# These exercise _derive_response_mode() directly via SimpleNamespace to avoid
+# the full process_query monkey-patch chain — the function only reads a small
+# subset of ctx fields, so direct invocation is clean and fast.
+# ---------------------------------------------------------------------------
+
+
+def _mock_ctx_for_response_mode(
+    *,
+    query_type: str,
+    preferred_path: str = "tool",
+    is_conceptual: bool = False,
+    vector_chunk_count: int = 0,
+):
+    """Build a minimal SimpleNamespace ctx for _derive_response_mode tests.
+
+    Only sets the fields the function actually reads.  has_authoritative_question_analysis
+    is exposed as a plain attribute since the function reads it as a bool.
+    """
+    from types import SimpleNamespace
+    classification = SimpleNamespace(query_type=SimpleNamespace(value=query_type))
+    routing = SimpleNamespace(preferred_path=SimpleNamespace(value=preferred_path))
+    question_analysis = SimpleNamespace(classification=classification, routing=routing)
+    vector_knowledge = SimpleNamespace(chunk_count=vector_chunk_count)
+    return SimpleNamespace(
+        has_authoritative_question_analysis=True,
+        question_analysis=question_analysis,
+        query="what is a price of electricity esco paying to sellers of balancing electricity?",
+        effective_query="",
+        is_conceptual=is_conceptual,
+        vector_knowledge=vector_knowledge,
+        clarify_selection_override=False,
+    )
+
+
+def test_response_mode_factual_lookup_with_conceptual_disagreement_and_chunks_is_knowledge():
+    """Three-way conjunction: factual_lookup + heuristic-conceptual + chunks > 0
+    must bump to KNOWLEDGE_PRIMARY so STRICT_NUMERIC grounding doesn't reject
+    the regulation-grounded answer.
+    """
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="factual_lookup",
+        is_conceptual=True,
+        vector_chunk_count=2,
+    )
+    assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
+
+
+def test_response_mode_factual_lookup_without_conceptual_stays_data_primary():
+    """Common case: factual_lookup + non-conceptual → DATA_PRIMARY (unchanged)."""
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="factual_lookup",
+        is_conceptual=False,
+        vector_chunk_count=2,
+    )
+    assert _derive_response_mode(ctx) == ResponseMode.DATA_PRIMARY
+
+
+def test_response_mode_factual_lookup_with_conceptual_but_zero_chunks_stays_data_primary():
+    """If vector retrieval found nothing, the rescue doesn't fire — no point
+    switching to KNOWLEDGE_PRIMARY with no knowledge content to ground on.
+    """
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="factual_lookup",
+        is_conceptual=True,
+        vector_chunk_count=0,
+    )
+    assert _derive_response_mode(ctx) == ResponseMode.DATA_PRIMARY
+
+
+def test_response_mode_data_retrieval_with_conceptual_and_chunks_is_knowledge():
+    """The rescue applies to every member of _ALWAYS_DATA_TYPES, not just
+    factual_lookup.  data_retrieval and data_explanation get the same treatment
+    when the heuristic disagrees and chunks are present.
+    """
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    for qt in ("data_retrieval", "data_explanation"):
+        ctx = _mock_ctx_for_response_mode(
+            query_type=qt,
+            is_conceptual=True,
+            vector_chunk_count=3,
+        )
+        assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY, qt
+
+
 def test_response_mode_fallback_heuristic_data(monkeypatch):
     """When no analyzer and not conceptual, response_mode is data_primary."""
     from agent import pipeline

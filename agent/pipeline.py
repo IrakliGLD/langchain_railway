@@ -220,6 +220,22 @@ def _derive_response_mode(ctx: QueryContext) -> str:
         if qa_type in _ALWAYS_KNOWLEDGE_TYPES:
             return ResponseMode.KNOWLEDGE_PRIMARY
         if qa_type in _ALWAYS_DATA_TYPES:
+            # Disagreement-rescue mirror to _resolve_vector_retrieval_tier:
+            # when the analyzer chose a data shape but the heuristic flagged
+            # the query as conceptual AND vector retrieval actually pulled
+            # regulation chunks, route to KNOWLEDGE_PRIMARY so STRICT_NUMERIC
+            # grounding doesn't reject the regulation-grounded answer
+            # downstream.  Trace: 2026-05-14 incident on
+            # "what is a price of electricity esco paying to sellers of
+            # balancing electricity?" — analyzer chose factual_lookup →
+            # DATA_PRIMARY → STRICT_NUMERIC grounding rejected the prose
+            # answer grounded in transitory_market_rules.md Article 14
+            # (claims_count=0, conservative fallback fired).
+            if (
+                ctx.is_conceptual
+                and getattr(ctx.vector_knowledge, "chunk_count", 0) > 0
+            ):
+                return ResponseMode.KNOWLEDGE_PRIMARY
             return ResponseMode.DATA_PRIMARY
         # Ambiguous types: comparison, forecast, ambiguous, unsupported
         if qa_path == "knowledge":
