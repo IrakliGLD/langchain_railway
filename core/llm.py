@@ -3371,7 +3371,30 @@ def llm_summarize_structured(
         # generic conceptual_definition "100-300 words / 2-3 sentences").
         _FOCUS_WITH_OWN_STRUCTURE = {"regulation"}
         if query_focus not in _FOCUS_WITH_OWN_STRUCTURE:
-            answer_template = get_answer_template(query_type)
+            # Disagreement-rescue layer 4 (template selection):
+            # When response_mode=knowledge_primary fires (set by
+            # _derive_response_mode in agent/pipeline.py when the heuristic
+            # flagged the query as conceptual but the analyzer chose a data
+            # shape), the brief factual_lookup template (50-150 words,
+            # "direct value + brief context") contradicts the
+            # knowledge-grounded enumeration we want.  Override the template
+            # lookup to use regulatory_procedure, which has an explicit
+            # "Enumeration Completeness" rule and 200-600 word budget.
+            #
+            # Trace: 2026-05-15 510d067b — full pipeline correct
+            # (KNOWLEDGE_PRIMARY, vector retrieval pulls Article 14 +
+            # Article 14(9), 30k char domain_knowledge cap) but the answer
+            # still arrived shallow because the factual_lookup template
+            # told the LLM to be terse despite the comprehensive prompt
+            # content.
+            _template_query_type = query_type
+            if response_mode == "knowledge_primary" and query_type in {
+                "factual_lookup",
+                "data_retrieval",
+                "data_explanation",
+            }:
+                _template_query_type = "regulatory_procedure"
+            answer_template = get_answer_template(_template_query_type)
             if answer_template:
                 guidance_parts.append(f"ANSWER STRUCTURE FOR THIS QUERY:\n{answer_template}")
 
