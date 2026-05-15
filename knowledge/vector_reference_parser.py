@@ -92,10 +92,21 @@ def _normalize_ordinal_word_ru(word: str) -> Optional[str]:
 
 
 # Number forms we accept in body-text article references:
-#   * ``14``       → ``14``
-#   * ``14.7``     → ``14.7``      (decimal article)
-#   * ``14.7.3``   → ``14.7.3``    (rare but valid)
-_NUMBER_DECIMAL = r"\d+(?:\.\d+){0,2}"
+#   * ``14``       → ``14``        (plain integer)
+#   * ``14(9)``    → ``14(9)``     (sub-article: "Article 14¹" Georgian notation)
+#   * ``14.7``     → ``14.7``      (legacy decimal article — kept for forward compat)
+#   * ``14.7.3``   → ``14.7.3``    (rare but valid legacy form)
+#   * ``14(9).2``  → ``14(9).2``   (combined; unusual but accepted)
+#
+# Note: the ``M(N)`` parens notation is the canonical Georgian regulatory
+# form. ``M.N`` is being migrated to ``M(N)`` across the corpus; both
+# forms are accepted here for a smooth migration.
+_NUMBER_DECIMAL = r"\d+(?:\(\d+\))?(?:\.\d+){0,2}"
+
+# Paragraph-reference number forms (slice of ``_NUMBER_DECIMAL`` that
+# excludes legacy decimal). Used in standalone paragraph references like
+# ``1(1) პუნქტი`` where the number is the paragraph identifier itself.
+_PARAGRAPH_NUM = r"\d+(?:\(\d+\))?"
 
 # Georgian case-suffix character class on ``მუხლი``. Lists every suffix
 # letter the corpus shows: ``-ის`` (gen), ``-ით`` (instr), ``-ში`` (loc),
@@ -122,48 +133,55 @@ class SectionHeadingInfo:
 # ``MMXIV``.
 _ROMAN_NUMERAL = r"(?:XX[IVX]*|X[IVX]*|VIII|VII|VI|V|IV|III|II|I)"
 
+# Terminator after a heading article/chapter number.  ``\b`` is unsuitable
+# because Python ``\b`` is a transition between word and non-word chars,
+# and a number ending in ``)`` (like ``14(9)``) followed by ``.`` is two
+# non-word chars in a row — no word boundary, so ``\b`` fails.  We accept
+# any common terminator (period, whitespace, punctuation) or end-of-string.
+_HEADING_NUM_END = r"(?=[.\s,;:!?\-]|$)"
+
 # Heading patterns. Each captures the canonical number into group(1).
 _HEADING_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
-    # Georgian article: "მუხლი 14" / "მუხლი 14.7" / "მუხლი 14. Title".
+    # Georgian article: "მუხლი 14" / "მუხლი 14.7" / "მუხლი 14(9). Title".
     (
         "article",
         "article_number",
-        re.compile(rf"^\s*მუხლი\s+({_NUMBER_DECIMAL})\b"),
+        re.compile(rf"^\s*მუხლი\s+({_NUMBER_DECIMAL}){_HEADING_NUM_END}"),
     ),
     # Georgian chapter: "თავი IV" / "თავი IV.1 Title". Roman numerals,
     # optionally with a decimal sub-chapter ("IV.1").
     (
         "chapter",
         "chapter_number",
-        re.compile(rf"^\s*თავი\s+({_ROMAN_NUMERAL}(?:\.\d+)?)\b"),
+        re.compile(rf"^\s*თავი\s+({_ROMAN_NUMERAL}(?:\.\d+)?){_HEADING_NUM_END}"),
     ),
-    # English article: "Article 14" / "Article 14.7. Title".
+    # English article: "Article 14" / "Article 14(9). Title".
     (
         "article",
         "article_number",
-        re.compile(rf"^\s*Article\s+({_NUMBER_DECIMAL})\b", re.IGNORECASE),
+        re.compile(rf"^\s*Article\s+({_NUMBER_DECIMAL}){_HEADING_NUM_END}", re.IGNORECASE),
     ),
     # English chapter: "Chapter IV" / "Chapter 4".
     (
         "chapter",
         "chapter_number",
         re.compile(
-            rf"^\s*Chapter\s+({_ROMAN_NUMERAL}(?:\.\d+)?|\d+(?:\.\d+)?)\b",
+            rf"^\s*Chapter\s+({_ROMAN_NUMERAL}(?:\.\d+)?|\d+(?:\.\d+)?){_HEADING_NUM_END}",
             re.IGNORECASE,
         ),
     ),
-    # Russian article: "Статья 14".
+    # Russian article: "Статья 14" / "Статья 14(9)".
     (
         "article",
         "article_number",
-        re.compile(rf"^\s*Статья\s+({_NUMBER_DECIMAL})\b", re.IGNORECASE),
+        re.compile(rf"^\s*Статья\s+({_NUMBER_DECIMAL}){_HEADING_NUM_END}", re.IGNORECASE),
     ),
     # Russian chapter: "Глава IV" / "Глава 4".
     (
         "chapter",
         "chapter_number",
         re.compile(
-            rf"^\s*Глава\s+({_ROMAN_NUMERAL}(?:\.\d+)?|\d+(?:\.\d+)?)\b",
+            rf"^\s*Глава\s+({_ROMAN_NUMERAL}(?:\.\d+)?|\d+(?:\.\d+)?){_HEADING_NUM_END}",
             re.IGNORECASE,
         ),
     ),
@@ -237,38 +255,63 @@ _SELF_ARTICLE_RE = re.compile(
 # The ``num`` capture is a Python regex group name; the helper iterates
 # all matches and converts each to a :class:`ChunkReference`.
 
-# Georgian suffix-ordinal: "24-ე მუხლი[suffix]" possibly followed by a
-# paragraph reference.
-_KA_SUFFIX_ARTICLE = re.compile(
-    rf"(?P<full_num>{_NUMBER_DECIMAL})-ე\s+მუხლ{_KA_NOUN_SUFFIX}"
+# Paragraph-sub-reference alternatives, shared across all article patterns.
+# Captures one of four forms after the article number:
+#   * prefix-ordinal  ``მე-7 პუნქტი``       (sub_pre=7)
+#   * suffix-ordinal  ``7-ე პუნქტი``        (sub_post=7)
+#   * ordinal word    ``მეშვიდე პუნქტი``    (sub_word=მეშვიდე)
+#   * parens form     ``5(7) პუნქტი``       (sub_paren_num=5(7))
+_PARAGRAPH_SUB_GROUP = (
     rf"(?:\s+(?:"
     rf"(?P<sub_prefix>მე-(?P<sub_pre>\d+))|"
     rf"(?P<sub_suffix>(?P<sub_post>\d+)-ე)|"
-    rf"(?P<sub_word>" + "|".join(_GEORGIAN_ORDINAL_WORDS) + r")"
+    rf"(?P<sub_word>" + "|".join(_GEORGIAN_ORDINAL_WORDS) + r")|"
+    rf"(?P<sub_paren_num>\d+\(\d+\))"
     rf")\s+(?P<sub_unit>პუნქტ|ნაწილ){_KA_NOUN_SUFFIX})?"
+)
+
+# Georgian suffix-ordinal: "24-ე მუხლი[suffix]" possibly followed by a
+# paragraph reference.  Plain integer or decimal article number (parens
+# form like ``14(9)-ე`` is not used in the corpus — parens form supersedes
+# the ordinal-prefix grammar).
+_KA_SUFFIX_ARTICLE = re.compile(
+    rf"(?P<full_num>\d+(?:\.\d+){{0,2}})-ე\s+მუხლ{_KA_NOUN_SUFFIX}"
+    + _PARAGRAPH_SUB_GROUP
 )
 
 # Georgian prefix-ordinal: "მე-14 მუხლი[suffix]" possibly followed by a
-# paragraph reference.
+# paragraph reference.  Plain integer article number only (same reason).
 _KA_PREFIX_ARTICLE = re.compile(
     rf"მე-(?P<full_num>\d+)\s+მუხლ{_KA_NOUN_SUFFIX}"
-    rf"(?:\s+(?:"
-    rf"(?P<sub_prefix>მე-(?P<sub_pre>\d+))|"
-    rf"(?P<sub_suffix>(?P<sub_post>\d+)-ე)|"
-    rf"(?P<sub_word>" + "|".join(_GEORGIAN_ORDINAL_WORDS) + r")"
-    rf")\s+(?P<sub_unit>პუნქტ|ნაწილ){_KA_NOUN_SUFFIX})?"
+    + _PARAGRAPH_SUB_GROUP
 )
 
-# Georgian decimal: "14.7 მუხლი" (decimal article). The decimal IS the
-# article number — does not split into article/paragraph.
-_KA_DECIMAL_ARTICLE = re.compile(
-    rf"(?<![-\d])(?P<full_num>\d+\.\d+(?:\.\d+)?)\s+მუხლ{_KA_NOUN_SUFFIX}"
+# Georgian compound article: "14(9) მუხლი" (parens sub-article) or
+# "14.7 მუხლი" (legacy decimal).  Negative lookbehind ``(?<![-\d])``
+# prevents capturing the ``2`` in ``მე-2``.  Optionally followed by a
+# paragraph reference.
+_KA_COMPOUND_ARTICLE = re.compile(
+    rf"(?<![-\d])(?P<full_num>\d+\(\d+\)(?:\.\d+)?|\d+\.\d+(?:\.\d+)?)\s+მუხლ{_KA_NOUN_SUFFIX}"
+    + _PARAGRAPH_SUB_GROUP
 )
 
 # Georgian forward article (rare in body, common in target headers but
-# we don't parse from headings here): "მუხლი 14" / "მუხლი 14.7".
+# we don't parse from headings here): "მუხლი 14" / "მუხლი 14(9)" /
+# "მუხლი 14.7".  Word-boundary on ``მუხლი`` is the start anchor; the
+# trailing terminator is implicit (greedy ``_NUMBER_DECIMAL`` stops at
+# first non-matching char).
 _KA_FORWARD_ARTICLE = re.compile(
-    rf"\bმუხლი\s+(?P<full_num>{_NUMBER_DECIMAL})\b"
+    rf"\bმუხლი\s+(?P<full_num>{_NUMBER_DECIMAL})(?=[.\s,;:!?\-)]|$)"
+)
+
+# Georgian standalone paragraph reference: "1(1) პუნქტი", "3(6) პუნქტი".
+# Used when body text references a paragraph of the current article
+# without preceding article reference.  Negative lookbehind prevents
+# capturing the digits inside a parenthesised group like ``(9)``.
+# Emitted as :data:`ChunkReferenceKind.self_article` (current article) with
+# ``sub_kind=paragraph`` and ``sub_number=<paren-form>``.
+_KA_SELF_PARAGRAPH = re.compile(
+    rf"(?<![-\d(])(?P<para_num>\d+\(\d+\))\s+(?P<sub_unit>პუნქტ|ნაწილ){_KA_NOUN_SUFFIX}"
 )
 
 # Georgian chapter: "თავი XI" / "XI თავი" / "XI და XII თავებით".
@@ -297,15 +340,17 @@ _RU_ARTICLE = re.compile(
 def _sub_from_match_ka(match: re.Match[str]) -> tuple[Optional[str], Optional[str]]:
     """Resolve the (sub_kind, sub_number) from a Georgian compound match.
 
-    Three named-group alternatives exist for the paragraph number:
-    prefix-ordinal (``მე-N``), suffix-ordinal (``N-ე``), or ordinal-word
-    (``პირველი`` etc.). Exactly one is set per match; the rest are
-    ``None``.
+    Four named-group alternatives exist for the paragraph number:
+    prefix-ordinal (``მე-N``), suffix-ordinal (``N-ე``), ordinal-word
+    (``პირველი`` etc.), or parens form (``N(M)``). Exactly one is set
+    per match; the rest are ``None``.
     """
-    sub_pre = match.groupdict().get("sub_pre")
-    sub_post = match.groupdict().get("sub_post")
-    sub_word = match.groupdict().get("sub_word")
-    sub_unit_raw = match.groupdict().get("sub_unit")
+    groups = match.groupdict()
+    sub_pre = groups.get("sub_pre")
+    sub_post = groups.get("sub_post")
+    sub_word = groups.get("sub_word")
+    sub_paren = groups.get("sub_paren_num")
+    sub_unit_raw = groups.get("sub_unit")
     if not sub_unit_raw:
         return None, None
 
@@ -319,6 +364,8 @@ def _sub_from_match_ka(match: re.Match[str]) -> tuple[Optional[str], Optional[st
         canonical = _normalize_ordinal_word_ka(sub_word)
         if canonical:
             return sub_unit, canonical
+    if sub_paren:
+        return sub_unit, sub_paren
     return None, None
 
 
@@ -416,15 +463,25 @@ def parse_outgoing_references(text: str) -> List[ChunkReference]:
 
     # Compound + bare article forms. Order matters: more-specific
     # (compound) patterns first so we don't truncate a compound to its
-    # bare article fragment.
-    for pattern in (_KA_SUFFIX_ARTICLE, _KA_PREFIX_ARTICLE, _KA_DECIMAL_ARTICLE, _KA_FORWARD_ARTICLE):
+    # bare article fragment.  ``_KA_FORWARD_ARTICLE`` ("მუხლი N") has
+    # no paragraph-sub group — pass empty sub.  The other three patterns
+    # all carry the unified paragraph-sub group.
+    for pattern in (
+        _KA_SUFFIX_ARTICLE,
+        _KA_PREFIX_ARTICLE,
+        _KA_COMPOUND_ARTICLE,
+        _KA_FORWARD_ARTICLE,
+    ):
         for match in pattern.finditer(body):
             if _overlaps_consumed(match.start(), match.end()):
                 continue
             if _is_inside_rejection_window(body, match.start(), rejection_positions):
                 continue
             number = match.group("full_num")
-            sub_kind, sub_number = _sub_from_match_ka(match) if pattern is not _KA_DECIMAL_ARTICLE and pattern is not _KA_FORWARD_ARTICLE else (None, None)
+            if pattern is _KA_FORWARD_ARTICLE:
+                sub_kind, sub_number = None, None
+            else:
+                sub_kind, sub_number = _sub_from_match_ka(match)
             _add_ref(
                 _make_article_ref(
                     number=number,
@@ -435,6 +492,31 @@ def parse_outgoing_references(text: str) -> List[ChunkReference]:
                 match.start(),
                 match.end(),
             )
+
+    # Georgian standalone paragraph references: "1(1) პუნქტი" /
+    # "3(6) პუნქტი" — paragraphs of the current article without an
+    # article prefix.  Emitted as self_article so the resolver does NOT
+    # follow them (the paragraph is in the same article and reachable
+    # via adjacency).  Captured for trace observability and future
+    # same-article paragraph lookup.
+    for match in _KA_SELF_PARAGRAPH.finditer(body):
+        if _overlaps_consumed(match.start(), match.end()):
+            continue
+        if _is_inside_rejection_window(body, match.start(), rejection_positions):
+            continue
+        sub_unit_raw = match.group("sub_unit")
+        sub_kind = "paragraph" if sub_unit_raw.startswith("პუნქტ") else "part"
+        try:
+            ref = ChunkReference(
+                kind=ChunkReferenceKind.self_article,
+                number="self",
+                sub_kind=sub_kind,
+                sub_number=match.group("para_num"),
+                raw_text=match.group(0),
+            )
+        except (TypeError, ValueError):
+            continue
+        _add_ref(ref, match.start(), match.end())
 
     # Georgian Roman-numeral chapter references.
     for match in _KA_CHAPTER.finditer(body):

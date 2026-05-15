@@ -331,3 +331,170 @@ def test_text_with_no_references_returns_empty_list():
         "without referencing any specific article or chapter."
     )
     assert refs == []
+
+
+# ---------------------------------------------------------------------------
+# Stream 1 — Georgian regulatory N(M) notation
+#
+# When sub-articles are added through amendments they get parenthesised
+# superscripts: "Article 14¹" rendered as ``14(1)`` in markdown.  The
+# transitory_market_rules.md corpus uses this for ~173 cross-references
+# and ~21 sub-article headings.  Both parser surfaces — heading and body
+# — must accept this notation alongside the legacy ``N.M`` form.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "title,expected_article",
+    [
+        # Single-digit and multi-digit parens forms.
+        ("მუხლი 14(9). ელექტროენერგიის გაცვლა", "14(9)"),
+        ("მუხლი 14(9)", "14(9)"),
+        ("მუხლი 36(1). მცირე სიმძლავრის ელექტროსადგურები", "36(1)"),
+        ("მუხლი 36(2). ახლად აშენებული ელექტროსადგური", "36(2)"),
+        ("მუხლი 14(12). პრიორიტეტულობის ჯგუფები", "14(12)"),
+        ("მუხლი 14(25). ახალი ხაზის წესების შეზღუდვა", "14(25)"),
+        ("მუხლი 8(1). სახელშეკრულებო ვალდებულებები", "8(1)"),
+        ("მუხლი 9(1)", "9(1)"),
+        # Article number ending with parens followed immediately by period
+        # — the case where the old ``\b`` terminator failed.
+        ("მუხლი 4(2). საცალო მომხმარებლის რეგისტრაცია", "4(2)"),
+    ],
+)
+def test_heading_parses_parens_subarticle_form(title, expected_article):
+    """N(M) heading notation — Georgian regulatory sub-article form."""
+    info = parse_section_heading(title)
+    assert info.section_kind == "article"
+    assert info.article_number == expected_article
+
+
+@pytest.mark.parametrize(
+    "title,expected_article",
+    [
+        ("Article 14(9). Electricity Exchange", "14(9)"),
+        ("Статья 36(1). Малые электростанции", "36(1)"),
+    ],
+)
+def test_heading_parses_parens_form_foreign_languages(title, expected_article):
+    """English and Russian heading patterns also accept N(M) notation."""
+    info = parse_section_heading(title)
+    assert info.section_kind == "article"
+    assert info.article_number == expected_article
+
+
+def test_body_compound_article_parens_form():
+    """``14(9) მუხლი`` standalone (no paragraph sub) → article 14(9)."""
+    refs = parse_outgoing_references(
+        "გათვალისწინებული 14(9) მუხლის შესაბამისად ხორციელდება ანგარიშსწორება."
+    )
+    article_refs = [r for r in refs if r.kind == ChunkReferenceKind.article]
+    assert any(r.number == "14(9)" and r.sub_kind is None for r in article_refs)
+
+
+def test_body_compound_article_parens_with_word_paragraph():
+    """``14(9) მუხლის პირველი პუნქტი`` → article 14(9), paragraph 1."""
+    refs = parse_outgoing_references(
+        "ამ წესების 14(9) მუხლის პირველი პუნქტით განსაზღვრული ფასით."
+    )
+    article_refs = [r for r in refs if r.kind == ChunkReferenceKind.article]
+    matched = [r for r in article_refs if r.number == "14(9)"]
+    assert len(matched) == 1
+    assert matched[0].sub_kind == "paragraph"
+    assert matched[0].sub_number == "1"
+
+
+def test_body_compound_article_parens_with_ordinal_prefix_paragraph():
+    """``36(1) მუხლის მე-2 პუნქტი`` → article 36(1), paragraph 2."""
+    refs = parse_outgoing_references(
+        "შესაბამისად 36(1) მუხლის მე-2 პუნქტი ვრცელდება."
+    )
+    article_refs = [r for r in refs if r.kind == ChunkReferenceKind.article]
+    matched = [r for r in article_refs if r.number == "36(1)"]
+    assert len(matched) == 1
+    assert matched[0].sub_kind == "paragraph"
+    assert matched[0].sub_number == "2"
+
+
+def test_body_compound_article_parens_with_parens_paragraph():
+    """``14(9) მუხლის 5(7) პუნქტი`` → article 14(9), paragraph 5(7)."""
+    refs = parse_outgoing_references(
+        "გათვალისწინებული 14(9) მუხლის 5(7) პუნქტი მოქმედებს."
+    )
+    article_refs = [r for r in refs if r.kind == ChunkReferenceKind.article]
+    matched = [r for r in article_refs if r.number == "14(9)"]
+    assert len(matched) == 1
+    assert matched[0].sub_kind == "paragraph"
+    assert matched[0].sub_number == "5(7)"
+
+
+def test_body_self_paragraph_parens_form():
+    """Standalone ``5(7) პუნქტი`` (current-article paragraph) →
+    self_article + paragraph=5(7)."""
+    refs = parse_outgoing_references(
+        "ამ მუხლის 5(7) პუნქტი განსაზღვრავს გამონაკლის შემთხვევას."
+    )
+    self_refs = [r for r in refs if r.kind == ChunkReferenceKind.self_article]
+    para_refs = [r for r in self_refs if r.sub_kind == "paragraph"]
+    matched = [r for r in para_refs if r.sub_number == "5(7)"]
+    assert len(matched) == 1
+
+
+def test_body_self_paragraph_does_not_match_inside_parens():
+    """The negative lookbehind on ``_KA_SELF_PARAGRAPH`` must prevent
+    capturing the inner ``(9)`` of ``14(9) მუხლი`` as if it were a
+    standalone ``9(...) პუნქტი`` reference.  Defensive regression."""
+    refs = parse_outgoing_references(
+        "14(9) მუხლის შესაბამისად ხორციელდება ანგარიშსწორება."
+    )
+    # No self_article paragraph references should appear — only the
+    # article ref for 14(9).
+    self_para_refs = [
+        r for r in refs
+        if r.kind == ChunkReferenceKind.self_article and r.sub_kind == "paragraph"
+    ]
+    assert self_para_refs == []
+
+
+def test_body_mixed_legacy_decimal_and_parens_forms_both_captured():
+    """Backward-compat: text mixing ``14.7 მუხლი`` (legacy decimal) and
+    ``14(9) მუხლი`` (parens) yields refs for both."""
+    refs = parse_outgoing_references(
+        "გათვალისწინებული 14.7 მუხლის შესაბამისად, ასევე 14(9) მუხლის "
+        "მე-2 პუნქტი ვრცელდება."
+    )
+    article_numbers = {
+        r.number for r in refs if r.kind == ChunkReferenceKind.article
+    }
+    assert "14.7" in article_numbers
+    assert "14(9)" in article_numbers
+
+
+def test_body_forward_article_form_with_parens():
+    """``მუხლი 14(9)`` (forward form, rare in body) → article 14(9)."""
+    refs = parse_outgoing_references(
+        "იხ. მუხლი 14(9), რომელიც ეხება ელექტროენერგიის გაცვლას."
+    )
+    article_refs = [r for r in refs if r.kind == ChunkReferenceKind.article]
+    assert any(r.number == "14(9)" for r in article_refs)
+
+
+def test_body_article_14_then_self_paragraph_no_duplicate():
+    """A compound match like ``14(9) მუხლის 5(7) პუნქტი`` must consume
+    the entire span — the trailing ``5(7) პუნქტი`` should NOT then also
+    be picked up as a standalone self_article paragraph reference.
+    """
+    refs = parse_outgoing_references(
+        "14(9) მუხლის 5(7) პუნქტი ვრცელდება."
+    )
+    # Article match for 14(9) with paragraph sub 5(7): one entry.
+    article_matches = [
+        r for r in refs
+        if r.kind == ChunkReferenceKind.article and r.number == "14(9)"
+    ]
+    assert len(article_matches) == 1
+    # No leftover self_article paragraph reference for the same span.
+    self_5_7 = [
+        r for r in refs
+        if r.kind == ChunkReferenceKind.self_article and r.sub_number == "5(7)"
+    ]
+    assert self_5_7 == []
