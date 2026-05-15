@@ -3255,9 +3255,24 @@ def llm_summarize_structured(
         and question_analysis.render_style == RenderStyle.DETERMINISTIC
     )
     _fast_pipeline = _is_fast_pipeline_mode()
-    if _render_style_deterministic or _fast_pipeline:
+    # Disagreement-rescue layer 7: when the analyzer chose DETERMINISTIC
+    # render but response_mode was overridden to knowledge_primary by the
+    # upstream disagreement-rescue chain (agent/pipeline.py:_derive_response_mode),
+    # we MUST keep domain_knowledge — the rescue exists precisely to bring
+    # the curated inline knowledge into the answer for regulation-grounded
+    # questions the analyzer mis-classified as factual_lookup/SCALAR.
+    # Without this guard, the deterministic-wipe silently strips the 30k
+    # chars of A-F structure even though the upstream pipeline fixed
+    # everything else.  See 2026-05-15 trace 7125570a:
+    # ``domain_kb=30000 chars`` going in, ``domain_knowledge_in_prompt=0``
+    # after.  Layer 7 is the actual root cause masking layers 1-6.
+    _domain_knowledge_rescue = (
+        _render_style_deterministic and response_mode == "knowledge_primary"
+    )
+    if _render_style_deterministic and not _domain_knowledge_rescue:
         domain_knowledge = ""
     if _fast_pipeline:
+        domain_knowledge = ""
         vector_knowledge = ""
     qa_type = question_analysis.classification.query_type.value if question_analysis else "none"
     effective_answer_kind_key = effective_answer_kind.value if effective_answer_kind else "none"
