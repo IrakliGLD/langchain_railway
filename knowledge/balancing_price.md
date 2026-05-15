@@ -19,15 +19,7 @@ electricity at — a single weighted-average price applied to all buyers
 of balancing electricity in a given month.
 
 ESCO **PAYS DIFFERENT PRICES** to each seller. The procurement (buy-side)
-price is **per seller category**, not a single value:
-
-- `regulated_hpp` → regulated tariff per plant (GEL)
-- `regulated_new_tpp` (Gardabani) → regulated tariff (GEL, gas-cost linked)
-- `regulated_old_tpp` → regulated tariff (GEL, gas-cost linked)
-- `deregulated_hydro` → reference price `p_dereg_gel`
-  (summer: cheapest-regulated-HPP-referenced; winter: thermal-tariff-referenced)
-- `renewable_ppa`, `thermal_ppa`, `CfD_scheme` → contract price (USD, support-scheme)
-- `import` → import contract price (USD)
+price is **per seller category**, not a single value.
 
 The regulatory source for ESCO's procurement pricing is
 **`transitory_market_rules.md`, Article 14** — *"მუხლი 14. სისტემის
@@ -36,7 +28,42 @@ The regulatory source for ESCO's procurement pricing is
 balancing electricity **purchased and sold** by the system commercial
 operator).
 
-**Disambiguation rules:**
+### Article 14 §1 — Per-Seller Procurement Rules (Authoritative)
+
+Article 14 paragraph 1 enumerates how ESCO settles with each seller
+category under standard conditions. The sub-letter codes (ა, ბ, ...,
+კ.ბ) are the original Georgian sub-points; preserve them when citing.
+
+| Sub-point | Seller category | Price ESCO pays |
+|---|---|---|
+| **ა** | Qualified enterprise owning a regulated **fixed-tariff** regulating power plant | The Commission-set generation tariff for that plant |
+| **ბ** | Qualified enterprise owning a regulated **upper-cap-tariff** power plant (excluding cases გ, დ, ე) | The Commission-set upper-cap generation tariff for that plant |
+| **გ** | Thermal power plant qualified enterprise that is **NOT** designated by the Government of Georgia as a guaranteed-capacity source for the period | The Commission-set upper-cap generation tariff for that plant |
+| **დ** | Qualified enterprise owning a **guaranteed-capacity source** (excluding case ე) | The upper-cap generation tariff for that guaranteed-capacity source |
+| **ე** | Guaranteed-capacity source during **testing**, on the enterprise's request, for electricity supplied to the busbar | The weighted-average price of balancing electricity purchased that period under §§1, 1.1, 1.2, 1.4, 2, 3.6, 3.7 — but **not exceeding** the Commission-set upper-cap generation tariff for that source |
+| **ვ** | Qualified enterprise owning a **deregulated small-capacity** power plant | Per Article 36¹ §2 of these Rules |
+| **ზ.ა** | **Importer** (other than ESCO), Sep 1 – May 1 (winter) | The **highest** generation tariff among balancing-electricity sellers to ESCO under standard or direct-contract (Article 13 §5) terms — capped at the Commission-set import upper-cap tariff |
+| **ზ.ბ** | **Importer** (other than ESCO), May 1 – Sep 1 (summer) | The tariff of the regulated fixed-tariff plant with the **LOWEST** Commission-set generation tariff |
+| **თ** | Qualified enterprise owning a **newly built** power plant | Per Article 36² of these Rules (with exception in §1.1) |
+| **ი** | Qualified enterprise per Article 3 §2 "b.z" | The tariff of the regulated fixed-tariff plant with the **LOWEST** Commission-set generation tariff — unless the government MoU on plant construction specifies otherwise |
+| **კ.ა** | **Deregulated** plant (excluding ვ, თ), Sep 1 – May 1 (winter) | The tariff of the post-2010-built guaranteed-capacity source with the **HIGHEST** Commission-set generation tariff (testing periods excluded). Fallback: if no current-period tariff exists, use the previous reporting period's highest tariff (excluding May 1 – Sep 1) |
+| **კ.ბ** | **Deregulated** plant (excluding ვ, თ), May 1 – Sep 1 (summer) | The tariff of the regulated fixed-tariff regulating power plant with the **LOWEST** Commission-set generation tariff |
+
+### Mapping Article 14 sub-points to internal entity categories
+
+The data-table entities in this codebase map to Article 14 sub-points
+as follows (for `trade_derived_entities WHERE segment='balancing'`):
+
+| Internal entity | Article 14 rule(s) | Currency basis |
+|---|---|---|
+| `regulated_hpp` (most fixed-tariff regulated HPPs) | ა | GEL (per Commission tariff) |
+| `regulated_new_tpp` (Gardabani — designated guaranteed-capacity source) | დ | GEL (per upper-cap tariff, gas-cost linked) |
+| `regulated_old_tpp` (older thermal, not guaranteed-capacity) | გ or ბ | GEL (per upper-cap tariff, gas-cost linked) |
+| `deregulated_hydro` | კ.ა (winter) / კ.ბ (summer) | GEL (winter: indirect USD link via post-2010 GC source; summer: cheapest fixed HPP tariff) |
+| `renewable_ppa`, `thermal_ppa`, `CfD_scheme` | Sold to ESCO under support-scheme contract terms (Article 14 paragraphs beyond §1 cover these — paragraphs §1.1, §1.2, §1.4, §2, §3.6, §3.7 referenced from sub-point ე) | USD (contract, confidential) |
+| `import` | ზ.ა (winter) / ზ.ბ (summer) | USD (winter: highest seller tariff capped at import upper-cap; summer: cheapest fixed HPP tariff) |
+
+### Disambiguation rules for LLM answers
 
 - Question asks *"what is THE balancing electricity price"* /
   *"what does ESCO sell at"* / *"what is `p_bal_gel`"* →
@@ -46,15 +73,43 @@ operator).
 - Question asks *"what price does ESCO PAY to sellers"* /
   *"how much do producers RECEIVE for balancing electricity"* /
   *"price of balancing electricity ESCO is paying"* →
-  answer is **per seller category** from the list above.
-  Cite Article 14 of the transitory market rules; do NOT
-  quote a single number for `p_bal_gel` — that is the sell
-  side, not the buy side.
+  answer is **per seller category** from the Article 14 §1 table
+  above. **Enumerate all relevant sub-points** (ა, ბ, ..., კ.ბ) —
+  do NOT collapse them into a vague "various per-category" summary.
+  Cite Article 14 §1 of the transitory market rules, with the
+  specific sub-letter code (e.g. "per Article 14 §1.ე"). Do NOT
+  quote a single number for `p_bal_gel` — that is the sell side,
+  not the buy side.
 
 - Ambiguous phrasing (e.g. *"price of balancing electricity"* with
   no buy/sell anchor) → present both sides briefly and ask the user
   which they meant, OR lead with the per-category buy-side list
   (more informative) and then note the aggregate sell-side number.
+
+### Mandatory completeness for buy-side answers
+
+When the user asks about the buy-side price ESCO pays sellers, the
+answer **MUST** include all of the following:
+
+1. The asymmetry note: ESCO pays per-seller, sells at a single
+   weighted average — these are different prices and different
+   regulatory rules.
+2. The full enumeration of Article 14 §1 sub-points ა through კ.ბ
+   that are relevant to the seller categories the user mentioned
+   (or all of them if the user asked broadly).
+3. The **seasonal split** for sub-points ზ (import) and კ
+   (deregulated) — these have summer-vs-winter rules that must
+   be stated explicitly. Never collapse seasonal rules into a
+   single sentence.
+4. The mapping to internal entity categories (the table above)
+   if the user is asking in terms of `regulated_hpp`,
+   `thermal_ppa`, etc.
+5. Citation of Article 14 (and the specific sub-letter) of the
+   transitory market rules.
+
+A buy-side answer that does NOT enumerate the relevant sub-points
+is incomplete — refuse to short-cut into a high-level summary
+when the regulatory detail is the whole point of the question.
 
 ---
 
