@@ -267,9 +267,15 @@ def test_structured_summary_prompt_prioritizes_external_source_passages(monkeypa
         vector_knowledge="EXTERNAL_SOURCE_PASSAGES:\n[1] Capacity rules | section: Export conditions",
     )
 
-    assert "primary evidence" in captured["system"].lower()
-    assert 'prefer citing "external_source_passages"' in captured["prompt"].lower()
-    assert "headers and labels in the response language" in captured["prompt"].lower()
+    # The system prompt establishes the source hierarchy: DOMAIN_KNOWLEDGE and
+    # EXTERNAL_SOURCE_PASSAGES are peer evidence sources with EXTERNAL_SOURCE_PASSAGES
+    # winning on direct fact conflicts. Prior wording said "primary evidence";
+    # the current wording (commit 39af7e1 era) says "peer evidence sources".
+    assert "peer evidence sources" in captured["system"].lower()
+    assert "prefer external_source_passages" in captured["system"].lower()
+    # User-prompt citation rules: cite external_source_passages for verbatim
+    # quotes from regulation text; include regulation title + article identifier.
+    assert 'cite "external_source_passages" for that quote' in captured["prompt"].lower()
     assert "include the regulation/document title together with the article/section identifier" in captured["prompt"].lower()
 
 
@@ -309,5 +315,7 @@ def test_structured_summary_prompt_treats_regulatory_procedure_as_conceptual(mon
         question_analysis=QuestionAnalysis.model_validate(_regulatory_payload()),
     )
 
-    assert "primary evidence" in captured["system"].lower()
+    # Same source-hierarchy invariant as the previous test — current wording
+    # (commit 39af7e1) uses "peer evidence sources" + conflict resolution.
+    assert "peer evidence sources" in captured["system"].lower()
     assert 'prefer external_source_passages' in captured["system"].lower()

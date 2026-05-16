@@ -188,6 +188,39 @@ def test_chart_target_series_order_preserved_for_valid_payload():
     ]
 
 
+def test_routing_needs_clarify_drift_is_absorbed():
+    """Regression for Q2 production trace c5bc0f77 (2026-05-16): the LLM
+    emitted ``routing.needs_clarify`` even though only
+    ``classification.needs_clarification`` is the canonical channel. Before
+    this absorbing default, the stray key crashed the entire analyzer with
+    ``extra_forbidden`` and forced a 7s heuristic fallback. Now it should
+    parse cleanly and the field should be ignored downstream."""
+    payload = _valid_payload()
+    payload["routing"]["needs_clarify"] = False
+
+    model = QuestionAnalysis.model_validate(payload)
+
+    # The absorbing field exists but downstream code never reads it; the
+    # canonical clarification signal remains classification.needs_clarification.
+    assert model.routing.needs_clarify is False
+    assert model.classification.needs_clarification is False
+
+
+def test_routing_needs_clarify_true_value_does_not_alter_routing():
+    """Even when the LLM sets ``routing.needs_clarify=True``, downstream
+    routing is driven by ``preferred_path`` and
+    ``classification.needs_clarification`` — the absorbing field is a
+    schema-tolerance hatch, not a routing input."""
+    payload = _valid_payload()
+    payload["routing"]["needs_clarify"] = True
+
+    model = QuestionAnalysis.model_validate(payload)
+
+    assert model.routing.needs_clarify is True
+    # The actual routing path is untouched by the absorbing field.
+    assert model.routing.preferred_path.value == payload["routing"]["preferred_path"]
+
+
 def test_invalid_roles_for_chart_intent_are_cleared():
     payload = _valid_payload()
     payload["visualization"]["chart_recommended"] = True

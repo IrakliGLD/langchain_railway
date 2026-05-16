@@ -1942,7 +1942,21 @@ SYSTEM_GUIDANCE (authoritative rules):
 
 
 def _extract_json_payload(raw_text: str) -> dict:
-    """Extract a JSON object payload from model output."""
+    """Extract a JSON object payload from model output.
+
+    Tolerates three drift modes observed in production traces:
+      1. Trailing text after the JSON object (Q7 trace 4e9b17da, 2026-05-16:
+         ``Extra data: line 1 column 1407``) — Gemini occasionally appends
+         commentary after the closing brace.
+      2. Markdown fences around the JSON.
+      3. Leading prose before the first ``{``.
+
+    Strategy: strip fences, find the first ``{``, then ``raw_decode`` from
+    that position. ``raw_decode`` returns the first complete JSON value and
+    the index where it stopped — trailing content is silently discarded.
+    Falls back to the prior ``find``/``rfind`` heuristic only if ``raw_decode``
+    also fails (e.g., malformed object).
+    """
     text = (raw_text or "").strip()
     if not text:
         raise ValueError("Empty model output")
@@ -1951,14 +1965,23 @@ def _extract_json_payload(raw_text: str) -> dict:
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
 
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("No JSON object found in model output")
-        parsed = json.loads(text[start : end + 1])
+    parsed = None
+    start = text.find("{")
+    if start != -1:
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError:
+            parsed = None
+
+    if parsed is None:
+        # Fallback: strict full-text parse, then last-resort find/rfind slice.
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            end = text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise ValueError("No JSON object found in model output")
+            parsed = json.loads(text[start : end + 1])
 
     if not isinstance(parsed, dict):
         raise ValueError("Structured output must be a JSON object")

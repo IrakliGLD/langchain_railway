@@ -295,6 +295,19 @@ class RoutingInfo(BaseModel):
     prefer_tool: bool = False
     needs_multi_tool: bool = False
     evidence_roles: List[EvidenceRole] = Field(default_factory=list, max_length=4)
+    # Absorbing field for analyzer-prompt drift: the LLM has been observed
+    # to emit ``routing.needs_clarify`` (Q2 production trace c5bc0f77,
+    # 2026-05-16: "Question-analysis schema validation failed:
+    # routing.needs_clarify  Extra inputs are not permitted") even though
+    # ``ClassificationInfo.needs_clarification`` is the canonical channel
+    # for clarification routing. With ``extra="forbid"`` on this model, the
+    # stray key fails the entire ``QuestionAnalysis`` validation and forces
+    # the heuristic fallback (~7s wasted on the analyzer call). Accept and
+    # ignore the field — ``preferred_path == CLARIFY`` and
+    # ``classification.needs_clarification`` are the canonical signals
+    # downstream consumers read. Same pattern as ``prefer_tool`` and
+    # ``visualization.chart_type``.
+    needs_clarify: bool = False
 
 
 class TopicCandidate(BaseModel):

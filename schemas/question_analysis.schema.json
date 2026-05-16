@@ -11,6 +11,19 @@
     "AnalysisRequirementsInfo": {
       "additionalProperties": false,
       "properties": {
+        "derived_metrics": {
+          "items": {
+            "$ref": "#/$defs/DerivedMetricRequest"
+          },
+          "maxItems": 12,
+          "title": "Derived Metrics",
+          "type": "array"
+        },
+        "needs_correlation_context": {
+          "default": false,
+          "title": "Needs Correlation Context",
+          "type": "boolean"
+        },
         "needs_driver_analysis": {
           "default": false,
           "title": "Needs Driver Analysis",
@@ -20,19 +33,6 @@
           "default": false,
           "title": "Needs Trend Context",
           "type": "boolean"
-        },
-        "needs_correlation_context": {
-          "default": false,
-          "title": "Needs Correlation Context",
-          "type": "boolean"
-        },
-        "derived_metrics": {
-          "items": {
-            "$ref": "#/$defs/DerivedMetricRequest"
-          },
-          "maxItems": 12,
-          "title": "Derived Metrics",
-          "type": "array"
         }
       },
       "title": "AnalysisRequirementsInfo",
@@ -76,11 +76,22 @@
     "ClassificationInfo": {
       "additionalProperties": false,
       "properties": {
-        "query_type": {
-          "$ref": "#/$defs/QueryType"
+        "ambiguities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 25,
+          "title": "Ambiguities",
+          "type": "array"
         },
         "analysis_mode": {
           "$ref": "#/$defs/AnalysisMode"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
         },
         "intent": {
           "maxLength": 512,
@@ -92,19 +103,8 @@
           "title": "Needs Clarification",
           "type": "boolean"
         },
-        "confidence": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Confidence",
-          "type": "number"
-        },
-        "ambiguities": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 25,
-          "title": "Ambiguities",
-          "type": "array"
+        "query_type": {
+          "$ref": "#/$defs/QueryType"
         }
       },
       "required": [
@@ -136,27 +136,14 @@
     "DerivedMetricRequest": {
       "additionalProperties": false,
       "properties": {
-        "metric_name": {
-          "$ref": "#/$defs/DerivedMetricName"
-        },
         "metric": {
           "maxLength": 64,
           "minLength": 1,
           "title": "Metric",
           "type": "string"
         },
-        "target_metric": {
-          "anyOf": [
-            {
-              "maxLength": 64,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Target Metric"
+        "metric_name": {
+          "$ref": "#/$defs/DerivedMetricName"
         },
         "rank_limit": {
           "anyOf": [
@@ -171,6 +158,17 @@
           ],
           "default": null,
           "title": "Rank Limit"
+        },
+        "scenario_aggregation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioAggregation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "scenario_factor": {
           "anyOf": [
@@ -200,17 +198,6 @@
           "default": null,
           "title": "Scenario Volume"
         },
-        "scenario_aggregation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ScenarioAggregation"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "season": {
           "anyOf": [
             {
@@ -221,6 +208,19 @@
             }
           ],
           "default": null
+        },
+        "target_metric": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Metric"
         }
       },
       "required": [
@@ -273,10 +273,6 @@
         "operator": {
           "$ref": "#/$defs/FilterOperator"
         },
-        "value": {
-          "title": "Value",
-          "type": "number"
-        },
         "unit": {
           "anyOf": [
             {
@@ -289,6 +285,10 @@
           ],
           "default": null,
           "title": "Unit"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
         }
       },
       "required": [
@@ -367,10 +367,10 @@
     "LanguageInfo": {
       "additionalProperties": false,
       "properties": {
-        "input_language": {
+        "answer_language": {
           "$ref": "#/$defs/LanguageCode"
         },
-        "answer_language": {
+        "input_language": {
           "$ref": "#/$defs/LanguageCode"
         }
       },
@@ -413,14 +413,6 @@
     "PeriodInfo": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "$ref": "#/$defs/PeriodKind"
-        },
-        "start_date": {
-          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-          "title": "Start Date",
-          "type": "string"
-        },
         "end_date": {
           "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
           "title": "End Date",
@@ -428,6 +420,9 @@
         },
         "granularity": {
           "$ref": "#/$defs/PeriodGranularity"
+        },
+        "kind": {
+          "$ref": "#/$defs/PeriodKind"
         },
         "raw_text": {
           "anyOf": [
@@ -441,6 +436,11 @@
           ],
           "default": null,
           "title": "Raw Text"
+        },
+        "start_date": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "title": "Start Date",
+          "type": "string"
         }
       },
       "required": [
@@ -512,27 +512,6 @@
     "RoutingInfo": {
       "additionalProperties": false,
       "properties": {
-        "preferred_path": {
-          "$ref": "#/$defs/PreferredPath"
-        },
-        "needs_sql": {
-          "title": "Needs Sql",
-          "type": "boolean"
-        },
-        "needs_knowledge": {
-          "title": "Needs Knowledge",
-          "type": "boolean"
-        },
-        "prefer_tool": {
-          "default": false,
-          "title": "Prefer Tool",
-          "type": "boolean"
-        },
-        "needs_multi_tool": {
-          "default": false,
-          "title": "Needs Multi Tool",
-          "type": "boolean"
-        },
         "evidence_roles": {
           "items": {
             "$ref": "#/$defs/EvidenceRole"
@@ -540,6 +519,32 @@
           "maxItems": 4,
           "title": "Evidence Roles",
           "type": "array"
+        },
+        "needs_clarify": {
+          "default": false,
+          "title": "Needs Clarify",
+          "type": "boolean"
+        },
+        "needs_knowledge": {
+          "title": "Needs Knowledge",
+          "type": "boolean"
+        },
+        "needs_multi_tool": {
+          "default": false,
+          "title": "Needs Multi Tool",
+          "type": "boolean"
+        },
+        "needs_sql": {
+          "title": "Needs Sql",
+          "type": "boolean"
+        },
+        "prefer_tool": {
+          "default": false,
+          "title": "Prefer Tool",
+          "type": "boolean"
+        },
+        "preferred_path": {
+          "$ref": "#/$defs/PreferredPath"
         }
       },
       "required": [
@@ -615,27 +620,6 @@
     "SqlHints": {
       "additionalProperties": false,
       "properties": {
-        "metric": {
-          "anyOf": [
-            {
-              "maxLength": 64,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Metric"
-        },
-        "entities": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 25,
-          "title": "Entities",
-          "type": "array"
-        },
         "aggregation": {
           "anyOf": [
             {
@@ -655,10 +639,18 @@
           "title": "Dimensions",
           "type": "array"
         },
-        "period": {
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 25,
+          "title": "Entities",
+          "type": "array"
+        },
+        "filter": {
           "anyOf": [
             {
-              "$ref": "#/$defs/PeriodInfo"
+              "$ref": "#/$defs/FilterCondition"
             },
             {
               "type": "null"
@@ -666,10 +658,23 @@
           ],
           "default": null
         },
-        "filter": {
+        "metric": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FilterCondition"
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric"
+        },
+        "period": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PeriodInfo"
             },
             {
               "type": "null"
@@ -687,11 +692,16 @@
         "name": {
           "$ref": "#/$defs/ToolName"
         },
-        "score": {
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Score",
-          "type": "number"
+        "params_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolParamsHint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "reason": {
           "anyOf": [
@@ -706,16 +716,11 @@
           "default": null,
           "title": "Reason"
         },
-        "params_hint": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ToolParamsHint"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
         }
       },
       "required": [
@@ -738,19 +743,6 @@
     "ToolParamsHint": {
       "additionalProperties": false,
       "properties": {
-        "metric": {
-          "anyOf": [
-            {
-              "maxLength": 64,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Metric"
-        },
         "currency": {
           "anyOf": [
             {
@@ -763,32 +755,6 @@
           ],
           "default": null,
           "title": "Currency"
-        },
-        "granularity": {
-          "anyOf": [
-            {
-              "maxLength": 16,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Granularity"
-        },
-        "start_date": {
-          "anyOf": [
-            {
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Start Date"
         },
         "end_date": {
           "anyOf": [
@@ -811,13 +777,42 @@
           "title": "Entities",
           "type": "array"
         },
-        "types": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 25,
-          "title": "Types",
-          "type": "array"
+        "filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilterCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "granularity": {
+          "anyOf": [
+            {
+              "maxLength": 16,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Granularity"
+        },
+        "metric": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric"
         },
         "mode": {
           "anyOf": [
@@ -832,16 +827,26 @@
           "default": null,
           "title": "Mode"
         },
-        "filter": {
+        "start_date": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FilterCondition"
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Start Date"
+        },
+        "types": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 25,
+          "title": "Types",
+          "type": "array"
         }
       },
       "title": "ToolParamsHint",
@@ -898,22 +903,63 @@
     "VisualizationInfo": {
       "additionalProperties": false,
       "properties": {
-        "chart_requested_by_user": {
-          "default": false,
-          "title": "Chart Requested By User",
-          "type": "boolean"
-        },
-        "chart_recommended": {
-          "default": false,
-          "title": "Chart Recommended",
-          "type": "boolean"
-        },
         "chart_confidence": {
           "default": 0.0,
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Chart Confidence",
           "type": "number"
+        },
+        "chart_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChartIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "chart_recommended": {
+          "default": false,
+          "title": "Chart Recommended",
+          "type": "boolean"
+        },
+        "chart_requested_by_user": {
+          "default": false,
+          "title": "Chart Requested By User",
+          "type": "boolean"
+        },
+        "chart_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chart Type"
+        },
+        "max_series": {
+          "anyOf": [
+            {
+              "maximum": 8,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Series"
+        },
+        "measure_transform": {
+          "$ref": "#/$defs/MeasureTransform",
+          "default": "raw"
         },
         "preferred_chart_family": {
           "anyOf": [
@@ -937,54 +983,33 @@
           ],
           "default": null
         },
-        "visual_goal": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/VisualGoal"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "measure_transform": {
-          "$ref": "#/$defs/MeasureTransform",
-          "default": "raw"
-        },
-        "time_grain": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/VisualizationTimeGrain"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "series_split_mode": {
           "$ref": "#/$defs/SeriesSplitMode",
           "default": "single_chart"
-        },
-        "max_series": {
-          "anyOf": [
-            {
-              "maximum": 8,
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Series"
         },
         "sort_rule": {
           "anyOf": [
             {
               "$ref": "#/$defs/SortRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_series": {
+          "items": {
+            "$ref": "#/$defs/SemanticRole"
+          },
+          "maxItems": 5,
+          "title": "Target Series",
+          "type": "array"
+        },
+        "time_grain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualizationTimeGrain"
             },
             {
               "type": "null"
@@ -1006,36 +1031,16 @@
           "default": null,
           "title": "Top N"
         },
-        "chart_intent": {
+        "visual_goal": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ChartIntent"
+              "$ref": "#/$defs/VisualGoal"
             },
             {
               "type": "null"
             }
           ],
           "default": null
-        },
-        "target_series": {
-          "items": {
-            "$ref": "#/$defs/SemanticRole"
-          },
-          "maxItems": 5,
-          "title": "Target Series",
-          "type": "array"
-        },
-        "chart_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Chart Type"
         }
       },
       "title": "VisualizationInfo",
@@ -1057,44 +1062,6 @@
   "additionalProperties": false,
   "description": "Validated output for the question-analyzer LLM call.",
   "properties": {
-    "version": {
-      "const": "question_analysis_v1",
-      "title": "Version",
-      "type": "string"
-    },
-    "raw_query": {
-      "maxLength": 2000,
-      "minLength": 1,
-      "title": "Raw Query",
-      "type": "string"
-    },
-    "canonical_query_en": {
-      "maxLength": 2000,
-      "minLength": 1,
-      "title": "Canonical Query En",
-      "type": "string"
-    },
-    "language": {
-      "$ref": "#/$defs/LanguageInfo"
-    },
-    "classification": {
-      "$ref": "#/$defs/ClassificationInfo"
-    },
-    "routing": {
-      "$ref": "#/$defs/RoutingInfo"
-    },
-    "knowledge": {
-      "$ref": "#/$defs/KnowledgeInfo"
-    },
-    "tooling": {
-      "$ref": "#/$defs/ToolingInfo"
-    },
-    "sql_hints": {
-      "$ref": "#/$defs/SqlHints"
-    },
-    "visualization": {
-      "$ref": "#/$defs/VisualizationInfo"
-    },
     "analysis_requirements": {
       "$ref": "#/$defs/AnalysisRequirementsInfo"
     },
@@ -1110,29 +1077,14 @@
       "default": null,
       "description": "Shape of the final answer. The LLM should emit this directly; downstream stages trust it without re-interpretation."
     },
-    "render_style": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/RenderStyle"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "Whether the answer should be rendered deterministically (data lookup) or via LLM narrative (explanation, causal reasoning)."
+    "canonical_query_en": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Canonical Query En",
+      "type": "string"
     },
-    "grouping": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Grouping"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "description": "How answer rows should be grouped: none, by_entity, by_period, by_metric."
+    "classification": {
+      "$ref": "#/$defs/ClassificationInfo"
     },
     "entity_scope": {
       "anyOf": [
@@ -1147,6 +1099,59 @@
       "default": null,
       "description": "Scoping hint for entity selection, e.g. 'regulated_plants', 'all', or specific entity names. Tells downstream stages which entities to include.",
       "title": "Entity Scope"
+    },
+    "grouping": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Grouping"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "How answer rows should be grouped: none, by_entity, by_period, by_metric."
+    },
+    "knowledge": {
+      "$ref": "#/$defs/KnowledgeInfo"
+    },
+    "language": {
+      "$ref": "#/$defs/LanguageInfo"
+    },
+    "raw_query": {
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Raw Query",
+      "type": "string"
+    },
+    "render_style": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RenderStyle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Whether the answer should be rendered deterministically (data lookup) or via LLM narrative (explanation, causal reasoning)."
+    },
+    "routing": {
+      "$ref": "#/$defs/RoutingInfo"
+    },
+    "sql_hints": {
+      "$ref": "#/$defs/SqlHints"
+    },
+    "tooling": {
+      "$ref": "#/$defs/ToolingInfo"
+    },
+    "version": {
+      "const": "question_analysis_v1",
+      "title": "Version",
+      "type": "string"
+    },
+    "visualization": {
+      "$ref": "#/$defs/VisualizationInfo"
     }
   },
   "required": [

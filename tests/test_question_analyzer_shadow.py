@@ -987,3 +987,49 @@ def test_pipeline_reject_path_short_circuits_to_clarify_without_plan_generation(
     assert out.summary == "Clarify instead of plan"
     assert out.resolution_policy == "clarify"
     assert out.clarify_reason == "request_not_supported_as_phrased"
+
+
+# -----------------------------------------------------------------------------
+# Regression: _extract_json_payload tolerates trailing content after the JSON
+# object. Production trace 4e9b17da (2026-05-16, Q7 multi-tool guaranteed-source)
+# failed with "Extra data: line 1 column 1407 (char 1406)" — Gemini emitted a
+# valid JSON object followed by extra commentary, which the previous
+# json.loads-then-find/rfind fallback couldn't recover. The new raw_decode
+# strategy extracts the first complete JSON object and discards trailing data.
+# -----------------------------------------------------------------------------
+
+
+def test_extract_json_payload_tolerates_trailing_text():
+    raw = '{"version": "question_analysis_v1", "raw_query": "x"}\n\nSome commentary the LLM should not have emitted.'
+    payload = llm_core._extract_json_payload(raw)
+    assert payload == {"version": "question_analysis_v1", "raw_query": "x"}
+
+
+def test_extract_json_payload_tolerates_trailing_second_object():
+    """If the LLM emits two JSON objects, take the first — raw_decode stops
+    cleanly at the first object's closing brace."""
+    raw = '{"a": 1}\n{"b": 2}'
+    payload = llm_core._extract_json_payload(raw)
+    assert payload == {"a": 1}
+
+
+def test_extract_json_payload_strips_markdown_fences():
+    raw = "```json\n{\"version\": \"question_analysis_v1\"}\n```"
+    payload = llm_core._extract_json_payload(raw)
+    assert payload == {"version": "question_analysis_v1"}
+
+
+def test_extract_json_payload_handles_leading_prose():
+    raw = 'Here is the analysis you requested:\n{"answer": "ok"}'
+    payload = llm_core._extract_json_payload(raw)
+    assert payload == {"answer": "ok"}
+
+
+def test_extract_json_payload_rejects_non_object_root():
+    with pytest.raises(ValueError):
+        llm_core._extract_json_payload('["just", "an", "array"]')
+
+
+def test_extract_json_payload_rejects_empty():
+    with pytest.raises(ValueError):
+        llm_core._extract_json_payload("")
