@@ -3545,6 +3545,29 @@ def llm_summarize_structured(
         "says there are no rows or no data for that entity-period. Otherwise say that the provided data "
         "does not establish a value."
     )
+    # Fix #4 (2026-05-16): per-entity / per-source comparison guardrail.
+    # Q2 production trace c5bc0f77 — query asked to compare avg monthly
+    # balancing price across small hydro, wind, and thermal sellers; the
+    # tool returned a single aggregate balancing-price column plus 31
+    # composition-share columns by source (no per-entity sale prices).
+    # The LLM fabricated category-specific prices that weren't in the
+    # data; grounding gate caught 11 unmatched numeric tokens (ratio
+    # 0.27, threshold 0.90) and the user got a generic fallback answer.
+    # This rule complements MISSING-DATA by addressing the missing-
+    # *dimension* case rather than the missing-*row* case.
+    data_shape_rule = (
+        "DATA-SHAPE RULE: Before claiming any per-entity, per-source, or "
+        "per-category numeric value (e.g. \"thermal plants received X GEL/kWh\", "
+        "\"hydro sellers earned Y\"), inspect DATA_PREVIEW column names to "
+        "confirm that dimension is actually present.  If DATA_PREVIEW "
+        "shows only an aggregate column with composition-share columns "
+        "by source (e.g. ``balancing_price_gel`` plus "
+        "``share_regulated_hpp``, ``share_regulated_old_tpp`` etc.), do "
+        "NOT invent per-source sale prices that are not in the data.  "
+        "Instead describe what the data DOES show (aggregate price + "
+        "composition shares) and explicitly state that per-entity sale "
+        "prices are not in the provided dataset."
+    )
 
     # --- Skill-enriched prompt (Phase 3) ---
     if ENABLE_SKILL_PROMPTS_SUMMARIZER:
@@ -3575,6 +3598,7 @@ def llm_summarize_structured(
             f"{conceptual_evidence_rule} "
             f"{grounding_rule} "
             f"{missing_data_rule} "
+            f"{data_shape_rule} "
             "Return a JSON object. The answer field may contain markdown formatting."
         )
 
@@ -3706,6 +3730,7 @@ def llm_summarize_structured(
             f"{conceptual_evidence_rule} "
             f"{grounding_rule} "
             f"{missing_data_rule} "
+            f"{data_shape_rule} "
             "Return a JSON object. The answer field may contain markdown formatting."
         )
         # Minimal baseline guidance when skill prompts are disabled.

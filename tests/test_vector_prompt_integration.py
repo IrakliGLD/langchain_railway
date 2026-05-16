@@ -279,6 +279,62 @@ def test_structured_summary_prompt_prioritizes_external_source_passages(monkeypa
     assert "include the regulation/document title together with the article/section identifier" in captured["prompt"].lower()
 
 
+def test_structured_summary_prompt_includes_data_shape_rule(monkeypatch):
+    """Regression for Fix #4 (2026-05-16): the system prompt must include the
+    DATA-SHAPE RULE that tells the LLM not to invent per-entity numeric
+    values when the dataset only has aggregate + composition-share columns.
+
+    Q2 production trace c5bc0f77 — query "compare avg monthly balancing
+    price for small hydro / wind / thermal sellers" — the LLM fabricated
+    per-category prices that weren't in the data; grounding gate caught 11
+    unmatched numeric tokens and the user got a generic fallback answer.
+    """
+    captured = {}
+
+    class _DummyCache:
+        def get(self, _key):
+            return None
+
+        def set(self, _key, _value):
+            return None
+
+    class _DummyMessage:
+        content = '{"answer":"ok","claims":[],"citations":["data_preview"],"confidence":0.9}'
+        response_metadata = {}
+
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    def _capture_invoke(_llm, messages, _model_name):
+        captured["system"] = messages[0][1]
+        captured["prompt"] = messages[1][1]
+        return _DummyMessage()
+
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+
+    llm_core.llm_summarize_structured(
+        user_query=(
+            "Compare the average monthly balancing electricity price ESCO paid to "
+            "small hydro, wind, and thermal sellers in 2024."
+        ),
+        data_preview="balancing_price_gel,share_regulated_hpp,share_regulated_old_tpp\n100.0,0.4,0.3\n",
+        stats_hint="comparison",
+        lang_instruction="Respond in English.",
+    )
+
+    system_lower = captured["system"].lower()
+    # The rule must appear by name and must mention the missing-dimension
+    # case (per-entity / per-source values absent in the data).
+    assert "data-shape rule" in system_lower
+    assert "per-entity" in system_lower or "per-source" in system_lower
+    assert "do not invent" in system_lower or "not invent" in system_lower
+    # Must reference composition-share columns specifically — that's the
+    # shape pattern that confused the LLM in Q2.
+    assert "composition-share" in system_lower or "composition shares" in system_lower
+
+
 def test_structured_summary_prompt_treats_regulatory_procedure_as_conceptual(monkeypatch):
     captured = {}
 
