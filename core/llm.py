@@ -3580,9 +3580,10 @@ Citation format rules:
 - cite source anchors like \"data_preview\", \"statistics\", \"domain_knowledge\", \"external_source_passages\", or \"conversation_history\"
 - when a specific article/clause appears verbatim in EXTERNAL_SOURCE_PASSAGES, cite \"external_source_passages\" for that quote
 - when applying a structural rule, completeness requirement, or curated synthesis from DOMAIN_KNOWLEDGE, cite \"domain_knowledge\" — DOMAIN_KNOWLEDGE is a peer authoritative source, not secondary background; follow its enumeration rules and completeness requirements
-- write generated section headers and labels in the response language; do not reuse source headings in another language unless directly quoting them as source text
-- when referencing a regulation, procedure, article, clause, or section from EXTERNAL_SOURCE_PASSAGES, include the regulation/document title together with the article/section identifier when available
-- if only a section heading or locator is available, include the regulation/document title with that section heading or locator; do not say \"Article 14\" or \"Section 8\" alone
+- write the entire answer — including all generated section headers, labels, citations, and parenthetical clarifications — in the response language indicated below; do NOT include source-language script (Georgian, Russian, etc.) anywhere in the answer body when the response language is English (and vice versa)
+- when referencing a regulation, procedure, article, clause, or section from EXTERNAL_SOURCE_PASSAGES, include the regulation/document title together with the article/section identifier, both in the response language; cite as e.g. ``Transitory Electricity Market Rules, Article 14, paragraph 1.ე`` — NOT as ``Transitory Electricity Market Rules, მუხლი 14, პუნქტი 1.ე`` or with the Georgian title in parentheses
+- Georgian sub-letter codes (ა, ბ, გ, ..., კ.ბ) inside paragraph identifiers are the regulatory designators themselves and MAY be preserved verbatim — they identify the sub-point and have no English equivalent; this exception applies ONLY to single-letter sub-point codes, not to source-language words, section names, or document titles
+- if only a section heading or locator is available, translate the heading to the response language; do not say \"Article 14\" or \"Section 8\" alone — include the document title (translated)
 - if confidence is low, set confidence below 0.5
 
 {lang_instruction}

@@ -280,7 +280,19 @@ class RoutingInfo(BaseModel):
     preferred_path: PreferredPath
     needs_sql: bool
     needs_knowledge: bool
-    prefer_tool: bool
+    # Absorbing field for analyzer-prompt drift: the LLM has been observed
+    # to omit ``prefer_tool`` even though the prompt instructs it to populate
+    # the field (see production trace 29c9bae9, 2026-05-15:
+    # "Question-analysis schema validation failed: routing.prefer_tool
+    # Field required").  Same pattern as ``visualization.chart_type`` (fixed
+    # in commit d04d5b8, 2026-05-14) — when the LLM's prompt-following
+    # drifts, an absorbing default lets the schema validation pass and the
+    # analyzer's other fields remain usable, instead of dropping back to
+    # the heuristic fallback (which wastes ~4s of analyzer time per
+    # request).  Defaults to False — the conservative choice; let other
+    # routing signals (preferred_path, candidate_tools) drive tool
+    # selection when the LLM didn't explicitly prefer it.
+    prefer_tool: bool = False
     needs_multi_tool: bool = False
     evidence_roles: List[EvidenceRole] = Field(default_factory=list, max_length=4)
 

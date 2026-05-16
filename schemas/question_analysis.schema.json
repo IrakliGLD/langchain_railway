@@ -524,6 +524,7 @@
           "type": "boolean"
         },
         "prefer_tool": {
+          "default": false,
           "title": "Prefer Tool",
           "type": "boolean"
         },
@@ -544,8 +545,7 @@
       "required": [
         "preferred_path",
         "needs_sql",
-        "needs_knowledge",
-        "prefer_tool"
+        "needs_knowledge"
       ],
       "title": "RoutingInfo",
       "type": "object"
