@@ -191,6 +191,70 @@ def test_sql_executor_hard_relevance_block_skips_execution(monkeypatch):
     assert out.cols == []
 
 
+def test_sql_executor_recovers_from_unwhitelisted_table_400():
+    """Fix A (2026-05-16) — Q4 production trace b21b9ece.
+
+    The legacy planner emitted SQL referencing a table not in ``ALLOWED_TABLES``
+    (e.g. a hallucinated ``power_plants`` table for a regulatory query).
+    ``simple_table_whitelist_check`` raised ``HTTPException(400)``, which
+    propagated uncaught through ``validate_and_execute`` to FastAPI, returning
+    HTTP 400 to the client and triggering 15+ retries via the LLM cache.
+
+    Expected behaviour after the fix: the 400 is caught, ``skip_sql=True``
+    is set with a clear reason, and the pipeline falls through to the
+    conceptual-summary path (same graceful degradation as the existing
+    topic-relevance failure handling).
+    """
+    from agent import sql_executor as _sql_executor
+
+    ctx = QueryContext(
+        query="If a guaranteed-source generator exceeds its forecast by 10%, what price does ESCO pay?",
+        raw_sql="SELECT name, capacity_mw FROM power_plants WHERE type = 'guaranteed_source' LIMIT 10",
+    )
+
+    out = _sql_executor.validate_and_execute(ctx)
+
+    # Should NOT have raised. Pipeline should be in a state ready for the
+    # conceptual-summary fallback.
+    assert out.skip_sql is True
+    assert out.skip_sql_reason is not None
+    assert "sql_validation_failed" in out.skip_sql_reason
+    assert out.rows == []
+    assert out.cols == []
+
+
+def test_sql_executor_recovers_from_unparseable_sql_400():
+    """Parse failures must also gracefully degrade, not propagate 400."""
+    from agent import sql_executor as _sql_executor
+
+    ctx = QueryContext(
+        query="Some knowledge query that produced garbage SQL",
+        raw_sql="SELECT FROM WHERE garbage syntax",
+    )
+
+    out = _sql_executor.validate_and_execute(ctx)
+
+    assert out.skip_sql is True
+    assert "sql_validation_failed" in (out.skip_sql_reason or "")
+    assert out.rows == []
+
+
+def test_sql_executor_recovers_from_disallowed_function_400():
+    """Disallowed SQL functions (e.g. dblink, version) must gracefully
+    degrade rather than 400 the request."""
+    from agent import sql_executor as _sql_executor
+
+    ctx = QueryContext(
+        query="anything",
+        raw_sql="SELECT current_database() FROM price_with_usd",
+    )
+
+    out = _sql_executor.validate_and_execute(ctx)
+
+    assert out.skip_sql is True
+    assert "sql_validation_failed" in (out.skip_sql_reason or "")
+
+
 def test_summarizer_falls_back_when_grounding_fails(monkeypatch):
     calls = {"count": 0}
 

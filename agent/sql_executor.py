@@ -10,6 +10,7 @@ import time
 from typing import Optional, Tuple
 
 import pandas as pd
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
 
@@ -206,9 +207,48 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         return ctx
 
     # --- Validate and sanitize SQL ---
-    sanitized = sanitize_sql(ctx.raw_sql.strip())
-    simple_table_whitelist_check(sanitized)
-    safe_sql = plan_validate_repair(sanitized)
+    # Fix A (2026-05-16): Q4 production trace b21b9ece showed the legacy
+    # planner emitting SQL that fails security/whitelist validation (an
+    # unwhitelisted table reference or a parse error), causing
+    # ``sanitize_sql`` / ``simple_table_whitelist_check`` to raise
+    # ``HTTPException(400)``.  Previously that 400 propagated uncaught
+    # through ``validate_and_execute`` to FastAPI, returning HTTP 400 to
+    # the client and triggering 15+ retries via cache.  This is wrong:
+    # for queries where the SQL is auxiliary (path=knowledge, conceptual
+    # answer available, or any case where a topic-relevance failure would
+    # have gracefully fallen back), a validation failure should also
+    # gracefully degrade — set ``skip_sql=True`` with a clear reason and
+    # let the pipeline fall through to the conceptual-summary path
+    # (matches the existing handling at line ~277 for relevance failures).
+    # Security is not weakened: the SQL is still NOT executed; only the
+    # error-response shape changes from 400 to a useful conceptual answer.
+    try:
+        sanitized = sanitize_sql(ctx.raw_sql.strip())
+        simple_table_whitelist_check(sanitized)
+        safe_sql = plan_validate_repair(sanitized)
+    except HTTPException as exc:
+        ctx.df = pd.DataFrame()
+        ctx.rows = []
+        ctx.cols = []
+        clear_provenance(ctx)
+        failure_reason = f"sql_validation_failed:{exc.detail}"
+        ctx.skip_sql = True
+        ctx.skip_sql_reason = failure_reason
+        log.warning(
+            "⚠️ SQL validation failed (HTTP %s); falling back to conceptual answer. detail=%s",
+            exc.status_code,
+            exc.detail,
+        )
+        trace_detail(
+            log,
+            ctx,
+            "stage_2_sql_execute",
+            "validation_failed",
+            reason=failure_reason,
+            raw_sql_preview=(ctx.raw_sql or "")[:300],
+            status_code=exc.status_code,
+        )
+        return ctx
 
     # Validate aggregation logic
     is_valid_aggregation, validation_reason = validate_aggregation_logic(safe_sql, ctx.aggregation_intent)
