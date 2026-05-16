@@ -544,6 +544,166 @@ def test_topic_overlap_boost_in_scoring():
     assert boost_match >= 0.15  # 2 topic matches → at least 0.20
 
 
+# ---------------------------------------------------------------------------
+# Fix #3 (2026-05-16) — topic-affinity mismatch penalty.
+#
+# Q4 production trace 4cda8fdd: query about wholesale guaranteed-source
+# generators retrieved chunks from a net-metering RETAIL document because
+# embedding similarity matched superficial words ("generator", "surplus",
+# "forecast") and the existing positive-only boost left zero-overlap
+# chunks untouched. The new symmetric penalty breaks ties in favor of
+# on-topic chunks.
+# ---------------------------------------------------------------------------
+
+
+def test_topic_mismatch_penalty_fires_on_zero_overlap():
+    from knowledge.vector_store import _topic_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    off_topic_chunk = VectorChunkRecord(
+        id="c1",
+        document_id="d1",
+        document_title="Net Metering Rules",
+        source_key="retail",
+        section_title="Sec",
+        text_content="micro generator surplus",
+        topics=["net_metering", "micro_generator"],
+        language="ka",
+        similarity_score=0.6,
+    )
+    preferred = ["market_structure", "cfd_ppa", "tariffs"]
+
+    penalty = _topic_mismatch_penalty(off_topic_chunk, preferred)
+    assert penalty < 0.0, "expected a negative penalty for zero-overlap chunk"
+
+
+def test_topic_mismatch_penalty_silent_when_overlap_present():
+    """When there's any overlap, the boost handles scoring; penalty must be 0."""
+    from knowledge.vector_store import _topic_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    on_topic_chunk = VectorChunkRecord(
+        id="c1",
+        document_id="d1",
+        document_title="Doc",
+        source_key="src",
+        section_title="Sec",
+        text_content="text",
+        topics=["market_structure", "cfd_ppa"],
+        language="ka",
+        similarity_score=0.6,
+    )
+    preferred = ["market_structure", "tariffs"]
+
+    assert _topic_mismatch_penalty(on_topic_chunk, preferred) == 0.0
+
+
+def test_topic_mismatch_penalty_silent_when_either_side_empty():
+    """Insufficient information — no penalty when we can't compare topic sets."""
+    from knowledge.vector_store import _topic_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    untagged_chunk = VectorChunkRecord(
+        id="c1",
+        document_id="d1",
+        document_title="Doc",
+        source_key="src",
+        section_title="Sec",
+        text_content="text",
+        topics=[],
+        language="ka",
+        similarity_score=0.6,
+    )
+    tagged_chunk = VectorChunkRecord(
+        id="c2",
+        document_id="d2",
+        document_title="Doc",
+        source_key="src",
+        section_title="Sec",
+        text_content="text",
+        topics=["tariffs"],
+        language="ka",
+        similarity_score=0.6,
+    )
+    assert _topic_mismatch_penalty(untagged_chunk, ["market_structure"]) == 0.0
+    assert _topic_mismatch_penalty(tagged_chunk, []) == 0.0
+
+
+def test_candidate_retrieval_score_penalises_off_topic_chunks():
+    """End-to-end: an off-topic chunk with raw-similarity advantage can be
+    overtaken by an on-topic chunk after boost+penalty are applied. This
+    is the Q4 scoring scenario reduced to its tie-break shape."""
+    from knowledge.vector_store import _candidate_retrieval_score
+    from contracts.vector_knowledge import VectorChunkRecord, VectorRetrievalFilters
+
+    # The off-topic chunk has slightly higher raw similarity but its
+    # topic set has zero overlap with preferred_topics.
+    off_topic = VectorChunkRecord(
+        id="c_off",
+        document_id="d_retail",
+        document_title="Net Metering Extract",
+        source_key="retail_market_rules",
+        section_title="Article 7",
+        text_content="micro generator surplus forecast",
+        topics=["net_metering", "micro_generator"],
+        language="ka",
+        similarity_score=0.55,
+    )
+    # The on-topic chunk has slightly lower raw similarity but matches one
+    # of the analyzer's preferred topics.
+    on_topic = VectorChunkRecord(
+        id="c_on",
+        document_id="d_wholesale",
+        document_title="Transitory Market Rules",
+        source_key="transitory_market_rules",
+        section_title="Article 14",
+        text_content="balancing settlement",
+        topics=["market_structure"],
+        language="ka",
+        similarity_score=0.53,
+    )
+    filters = VectorRetrievalFilters(
+        preferred_topics=["market_structure", "cfd_ppa", "tariffs"],
+    )
+
+    score_off = _candidate_retrieval_score(off_topic, filters=filters)
+    score_on = _candidate_retrieval_score(on_topic, filters=filters)
+
+    # The on-topic chunk should now win the tie thanks to boost + penalty.
+    assert score_on > score_off, (
+        f"on-topic chunk should rank higher after Fix #3; "
+        f"got on={score_on:.4f}, off={score_off:.4f}"
+    )
+
+
+def test_topic_mismatch_penalty_disabled_when_env_zero(monkeypatch):
+    """The operator can disable the penalty by setting the env var to 0."""
+    import importlib
+    import knowledge.vector_store as vs
+
+    monkeypatch.setenv("VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY", "0")
+    reloaded = importlib.reload(vs)
+    try:
+        from contracts.vector_knowledge import VectorChunkRecord
+
+        chunk = VectorChunkRecord(
+            id="c1",
+            document_id="d1",
+            document_title="Doc",
+            source_key="src",
+            section_title="Sec",
+            text_content="text",
+            topics=["net_metering"],
+            language="ka",
+            similarity_score=0.6,
+        )
+        assert reloaded._topic_mismatch_penalty(chunk, ["market_structure"]) == 0.0
+    finally:
+        # Restore the module state for any subsequent test using the default.
+        monkeypatch.delenv("VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY", raising=False)
+        importlib.reload(vs)
+
+
 def test_pack_vector_knowledge_for_prompt_reports_packed_headers():
     bundle = VectorKnowledgeBundle(
         query="Who is eligible to trade?",

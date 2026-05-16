@@ -42,6 +42,20 @@ VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE = _env_float(
     "VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE",
     0.08,
 )
+# Fix #3 (2026-05-16): soft penalty applied to chunks whose topic-tag
+# set has zero overlap with the analyzer-derived ``preferred_topics``.
+# Q4 production trace 4cda8fdd — query about wholesale guaranteed-source
+# generators pulled chunks from a net-metering RETAIL-market document
+# because embedding similarity matched superficial words ("generator",
+# "surplus", "forecast") and the existing ``_topic_overlap_boost`` only
+# adds positive score when there IS overlap — silence on zero overlap.
+# A small symmetric penalty breaks ties in favor of on-topic chunks
+# without overpowering legitimate cross-topic semantic matches.
+# Magnitude is in the same scale as the existing boost (0.10-0.25).
+VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY = _env_float(
+    "VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY",
+    0.05,
+)
 
 
 
@@ -214,6 +228,40 @@ def _topic_overlap_boost(
     return min(0.25, 0.10 + 0.05 * len(matched))
 
 
+def _topic_mismatch_penalty(
+    candidate: VectorChunkRecord,
+    preferred_topics: list[str],
+) -> float:
+    """Symmetric soft penalty for chunks with zero topic overlap.
+
+    Returns a NEGATIVE float (or 0.0). Applied alongside the positive
+    ``_topic_overlap_boost`` in ``_candidate_retrieval_score``.
+
+    Triggers only when:
+      - ``preferred_topics`` is non-empty (analyzer expressed a topic intent),
+      - chunk ``topics`` is non-empty (the corpus tagged this chunk), and
+      - intersection is empty (the chunk's topic tags do not match any
+        analyzer intent).
+
+    When either side is empty we cannot tell — return 0.0 (no penalty).
+    Magnitude is governed by ``VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY``
+    (default 0.05), comparable to the smallest boost level so it breaks
+    ties without overpowering legitimate semantic wins.
+
+    See Q4 production trace 4cda8fdd (2026-05-16).
+    """
+    if VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY <= 0.0:
+        return 0.0
+    if not preferred_topics:
+        return 0.0
+    chunk_topics = set(candidate.topics or [])
+    if not chunk_topics:
+        return 0.0
+    if chunk_topics & set(preferred_topics):
+        return 0.0
+    return -float(VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY)
+
+
 def _market_concept_reference_boost(
     *,
     filters: VectorRetrievalFilters,
@@ -263,9 +311,10 @@ def _candidate_retrieval_score(
 ) -> float:
     base_score = float(candidate.similarity_score or 0.0)
     topic_boost = _topic_overlap_boost(candidate, filters.preferred_topics)
+    topic_penalty = _topic_mismatch_penalty(candidate, filters.preferred_topics)
 
     if not filters.boost_terms:
-        return base_score + topic_boost
+        return base_score + topic_boost + topic_penalty
 
     title_text = _normalize_match_text(candidate.document_title)
     source_text = _normalize_match_text(candidate.source_key)
@@ -298,7 +347,7 @@ def _candidate_retrieval_score(
             boost += 0.08
         if normalized_term in body_text:
             boost += 0.04
-    return base_score + topic_boost + min(boost, 0.85)
+    return base_score + topic_boost + topic_penalty + min(boost, 0.85)
 
 
 def _section_key(candidate: VectorChunkRecord) -> str:
