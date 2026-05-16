@@ -34,6 +34,24 @@ DATA_QUERIES = [
     "Explain the dynamics of exchange rate",
     "What is the growth of hydro generation?",
     "Explain the decline in thermal generation",
+    # ---------------------------------------------------------------
+    # Fix #2 (2026-05-16): multi-clause data intent demotes conceptual
+    # ---------------------------------------------------------------
+    # Q7 production trace 4e9b17da — was wrongly classified conceptual
+    # because of "Define" prefix despite "list" + "show" + "last quarter".
+    "Define guaranteed source, list the three most recent guaranteed-source generators by name, and show their average sale price to ESCO in the last quarter.",
+    # Stripped-down variants that hit each data-intent token individually.
+    "What is balancing electricity and show its monthly average",
+    "Define CfD and list the largest active contracts",
+    "Explain capacity reserves and show the top 5 plants",
+    "What is a deregulated plant, and what is the breakdown by entity?",
+    "Define net metering and count the registered micro-generators",
+    "What is the import dependency and how many TWh did we import last quarter?",
+    "Explain balancing settlement and display this week's results",
+    # Rolling-window anchors that the per-branch year regex missed
+    "What is the balancing price over the last 30 days?",
+    "Show me prices in the last 6 months",
+    "What were tariffs over the last 2 years?",
 ]
 
 # ---------------------------------------------------------------------------
@@ -46,6 +64,13 @@ CONCEPTUAL_QUERIES = [
     "Define renewable energy",
     "What is the difference between CfD and PPA?",
     "explain the concept of balancing electricity",
+    # Fix #2 invariants — these MUST remain conceptual after the
+    # data-intent demotion is added.  Years and regulatory phrasing alone
+    # don't trigger the new pattern; only explicit data verbs do.
+    "What is a guaranteed-source generator?",
+    "Explain the role of ESCO",
+    "What is the purpose of the balancing market?",
+    "Define micro-generator under Georgian regulation",
 ]
 
 

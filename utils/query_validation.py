@@ -24,6 +24,41 @@ _ANALYTICAL_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+
+# Explicit data-intent signals: when present, the query is *not* purely
+# conceptual even if it also contains definition phrasing.  This is the
+# multi-clause case observed in Q7 production trace 4e9b17da (2026-05-16):
+# "Define guaranteed source, list the three most recent generators by name,
+# and show their average sale price to ESCO in the last quarter." — the
+# previous heuristic matched ``\bdefine\b`` and returned True (conceptual),
+# which caused the pipeline to skip plan+SQL generation and answer with a
+# definition only, ignoring the explicit ``list`` and ``show`` clauses.
+#
+# Tokens here are deliberately narrower than ``_ANALYTICAL_KEYWORDS`` —
+# only verbs and time anchors that *unambiguously* signal a need for
+# concrete data, lists, or rankings.  Pure-conceptual queries that happen
+# to contain a year (e.g. "What documents are required for market
+# participation in 2025?") remain conceptual because they don't trigger
+# this pattern.
+_DATA_INTENT_PATTERN = re.compile(
+    r"\b("
+    # Explicit data verbs
+    r"list|show|display|plot|chart|visualize|"
+    r"average|averages|mean|median|"
+    r"top \d+|top \w+|first \d+|first \w+|"
+    r"count|how many|total|sum|"
+    r"rank|ranking|breakdown|most recent|"
+    # Time-bounded data anchors NOT already covered by the per-branch
+    # temporal exclusions inside the definition-pattern path (which
+    # already recognise YYYY but miss week/quarter rolling windows).
+    r"last quarter|last week|"
+    r"last \d+ (?:day|days|week|weeks|month|months|year|years|quarter|quarters)|"
+    r"this quarter|this week|"
+    r"in the last \w+|over the last \w+|in the past \w+"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _METRIC_CAPABILITY_ALIASES = {
     "balancing": {"balancing", "price", "forecast", "trend"},
     "p_bal_gel": {"balancing", "price"},
@@ -160,6 +195,15 @@ def is_conceptual_question(query: str) -> bool:
 
     # Analytical keywords signal data intent — never conceptual
     if _ANALYTICAL_KEYWORDS.search(query_lower):
+        return False
+
+    # Multi-clause data intent (Fix #2, 2026-05-16): even when the query
+    # contains definition phrasing like "define X" or "what is Y", the
+    # presence of explicit data verbs (list / show / average / top N /
+    # most recent / last quarter) means the user wants concrete data —
+    # the pipeline must run tools/SQL, not skip to a definition-only
+    # answer.  Q7 production trace 4e9b17da showed this misrouting.
+    if _DATA_INTENT_PATTERN.search(query_lower):
         return False
 
     # Definition indicators (strong signals)
