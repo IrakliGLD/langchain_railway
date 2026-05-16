@@ -3553,20 +3553,44 @@ def llm_summarize_structured(
     # The LLM fabricated category-specific prices that weren't in the
     # data; grounding gate caught 11 unmatched numeric tokens (ratio
     # 0.27, threshold 0.90) and the user got a generic fallback answer.
-    # This rule complements MISSING-DATA by addressing the missing-
-    # *dimension* case rather than the missing-*row* case.
+    #
+    # Fix C (2026-05-17): softened to permit explicit equivalence
+    # mapping. Q2 production retest 2026-05-16 (trace 967145a7) showed
+    # the previous wording was TOO conservative: the Stage 3 enrichment
+    # surfaces ``price_deregulated_hydro_*`` (from price_with_usd view)
+    # and ``price_regulated_hpp_*`` / ``price_regulated_old_tpp_*`` /
+    # ``price_regulated_new_tpp_*`` (from tariff_with_usd view) — these
+    # ARE the per-category sale prices the user asks about. The LLM
+    # refused to map vernacular labels ("small hydro", "thermal") onto
+    # these columns and produced an "it is not possible" answer despite
+    # the data being present.
+    #
+    # The fix: instruct the LLM to FIRST inspect DATA_PREVIEW for
+    # equivalent / sub-category columns, USE them with an explicit
+    # mapping in the answer, and only refuse when no equivalent column
+    # exists at all. Fabrication is still banned for genuinely-missing
+    # categories.
     data_shape_rule = (
-        "DATA-SHAPE RULE: Before claiming any per-entity, per-source, or "
-        "per-category numeric value (e.g. \"thermal plants received X GEL/kWh\", "
-        "\"hydro sellers earned Y\"), inspect DATA_PREVIEW column names to "
-        "confirm that dimension is actually present.  If DATA_PREVIEW "
-        "shows only an aggregate column with composition-share columns "
-        "by source (e.g. ``balancing_price_gel`` plus "
-        "``share_regulated_hpp``, ``share_regulated_old_tpp`` etc.), do "
-        "NOT invent per-source sale prices that are not in the data.  "
-        "Instead describe what the data DOES show (aggregate price + "
-        "composition shares) and explicitly state that per-entity sale "
-        "prices are not in the provided dataset."
+        "DATA-SHAPE RULE: When the user asks about an entity category "
+        "(e.g. \"small hydro\", \"thermal\", \"wind\", \"regulated plants\"), "
+        "FIRST inspect DATA_PREVIEW column names for equivalent or "
+        "sub-category columns and USE them. Common mappings in this "
+        "dataset: \"small hydro\" ≈ ``price_regulated_hpp_*`` (regulated "
+        "HPPs are mostly small) plus ``price_deregulated_hydro_*`` for "
+        "deregulated hydro; \"thermal\" ≈ ``price_regulated_old_tpp_*`` "
+        "and ``price_regulated_new_tpp_*``; \"renewables\" ≈ "
+        "``price_renewable_ppa_*``. State the column mapping explicitly "
+        "in the answer (e.g. \"using regulated HPP tariff as the small-"
+        "hydro proxy\") so the user can verify.  Only refuse the "
+        "comparison for a specific category if NO equivalent or sub-"
+        "category column exists in DATA_PREVIEW (e.g. there is no pure "
+        "\"wind\" price column — wind is grouped under "
+        "``price_renewable_ppa_*`` alongside solar; say so explicitly). "
+        "Do NOT invent per-category numeric values for categories that "
+        "have no matching column. If DATA_PREVIEW shows only an "
+        "aggregate column with composition-share columns (no per-"
+        "category PRICE columns at all), describe what the data DOES "
+        "show and state which per-category sale prices are absent."
     )
 
     # --- Skill-enriched prompt (Phase 3) ---

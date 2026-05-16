@@ -325,14 +325,19 @@ def test_structured_summary_prompt_includes_data_shape_rule(monkeypatch):
     )
 
     system_lower = captured["system"].lower()
-    # The rule must appear by name and must mention the missing-dimension
-    # case (per-entity / per-source values absent in the data).
+    # The rule must appear by name.
     assert "data-shape rule" in system_lower
-    assert "per-entity" in system_lower or "per-source" in system_lower
+    # Fix C (2026-05-17): rule must INSTRUCT equivalence-mapping FIRST
+    # (use price_regulated_hpp_* for "small hydro", etc.) before refusing.
+    assert "small hydro" in system_lower or "regulated_hpp" in system_lower
+    assert "thermal" in system_lower and "regulated_old_tpp" in system_lower
+    # Must still preserve the anti-fabrication invariant.
     assert "do not invent" in system_lower or "not invent" in system_lower
-    # Must reference composition-share columns specifically — that's the
-    # shape pattern that confused the LLM in Q2.
+    # Must reference composition-share / aggregate columns for the
+    # genuinely-missing-dimension case.
     assert "composition-share" in system_lower or "composition shares" in system_lower
+    # Wind-grouping note (no pure wind column — must be flagged honestly).
+    assert "renewable_ppa" in system_lower
 
 
 def test_structured_summary_prompt_treats_regulatory_procedure_as_conceptual(monkeypatch):
