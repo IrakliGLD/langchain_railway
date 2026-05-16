@@ -52,10 +52,91 @@ VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE = _env_float(
 # A small symmetric penalty breaks ties in favor of on-topic chunks
 # without overpowering legitimate cross-topic semantic matches.
 # Magnitude is in the same scale as the existing boost (0.10-0.25).
+#
+# Fix B (2026-05-16): bumped default from 0.05 → 0.10 after the
+# 2026-05-16 follow-up retest. Q4 still retrieved retail-net-metering
+# chunks even with Fix #3 active because (a) the embedding-similarity
+# gap was larger than 0.05, and (b) net-metering chunks have
+# "tariffs" in their topics — overlapping with the analyzer's
+# ``preferred_topics=["market_structure","cfd_ppa","tariffs"]`` —
+# so the zero-overlap penalty never fired. Bumping the magnitude
+# helps the (a) case; the (b) case is addressed by the new
+# ``_document_domain_mismatch_penalty`` below.
 VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY = _env_float(
     "VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY",
-    0.05,
+    0.10,
 )
+# Fix B (2026-05-16): penalty applied when a chunk's source document
+# is clearly from a different market segment than the query's
+# preferred_topics suggest — e.g. a Retail Market / Net Metering
+# document chunk retrieved for a wholesale Balancing-market query.
+# This penalty fires even when there IS topic overlap (because the
+# Georgian topic taxonomy has ambiguous tags like ``tariffs`` that
+# appear on both retail and wholesale chunks). Document-level domain
+# mismatch is a stronger signal than chunk-tag overlap.
+# Magnitude (0.20 by default) is sized to overcome the smallest
+# boost level (+0.15 for 1-topic overlap) and break the tie.
+VECTOR_DOCUMENT_DOMAIN_PENALTY = _env_float(
+    "VECTOR_DOCUMENT_DOMAIN_PENALTY",
+    0.20,
+)
+
+# Document-title / source-key markers that strongly indicate a chunk
+# is from the RETAIL electricity-market segment (consumers,
+# micro-generators, net metering, retail tariff schemes) rather than
+# the WHOLESALE segment (balancing market, market operator, exchange,
+# CfDs, guaranteed capacity). Includes Georgian originals for chunks
+# whose document_title is in Georgian.
+#
+# Georgian entries use STEMS (without grammatical case endings) so the
+# substring match works across nominative, genitive, dative, etc.
+# E.g. ``ნეტო აღრიცხვ`` matches both ``ნეტო აღრიცხვა`` (nom.) and
+# ``ნეტო აღრიცხვის`` (gen.).
+_RETAIL_DOMAIN_DOCUMENT_MARKERS = (
+    "net metering",
+    "net billing",
+    "retail market",
+    "retail electricity",
+    "micro generator",
+    "micro-generator",
+    "consumer protection",
+    "household consumer",
+    "ნეტო აღრიცხვ",
+    "ნეტო ანგარიშსწორებ",
+    "მიკროსიმძლავრ",
+    "მცირე სიმძლავრ",
+    "საცალო ბაზრ",
+    "მომხმარებლის უფლებ",
+)
+
+# Analyzer-derived preferred_topics that strongly indicate the query
+# is about the WHOLESALE market segment (where retail-only documents
+# are off-topic by construction).
+_WHOLESALE_INTENT_TOPICS = frozenset({
+    "balancing_price",
+    "balancing_market",
+    "balancing_electricity",
+    "balancing_electricity_sellers",
+    "balancing_electricity_buyers",
+    "market_structure",
+    "cfd_ppa",
+    "electricity_market_transitory_model",
+    "electricity_balancing_transitory_model",
+    "market_transition",
+    "market_design",
+    "electricity_market_target_model",
+    "capacity_market",
+    "wholesale_market_participants",
+    "exchange_participation",
+    "exchange_rules",
+    "day_ahead_market",
+    "intraday_market",
+    "generation_mix",
+    "pso_trading",
+    "cross_border_trade",
+    "electricity_export",
+    "electricity_import",
+})
 
 
 
@@ -245,8 +326,8 @@ def _topic_mismatch_penalty(
 
     When either side is empty we cannot tell — return 0.0 (no penalty).
     Magnitude is governed by ``VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY``
-    (default 0.05), comparable to the smallest boost level so it breaks
-    ties without overpowering legitimate semantic wins.
+    (default 0.10 after Fix B), comparable to the smallest boost level
+    so it breaks ties without overpowering legitimate semantic wins.
 
     See Q4 production trace 4cda8fdd (2026-05-16).
     """
@@ -260,6 +341,59 @@ def _topic_mismatch_penalty(
     if chunk_topics & set(preferred_topics):
         return 0.0
     return -float(VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY)
+
+
+def _document_domain_mismatch_penalty(
+    candidate: VectorChunkRecord,
+    preferred_topics: list[str],
+) -> float:
+    """Penalty when a chunk's source document is from a different market
+    segment than the query's ``preferred_topics`` suggest.
+
+    Fix B (2026-05-16) — Q4 production retest after Fix #3 still
+    retrieved Electricity Retail Market Rules / Net Metering chunks
+    for a wholesale guaranteed-source query because:
+
+      1. The embedding similarity gap exceeded the 0.05 zero-overlap
+         penalty magnitude (addressed by bumping it to 0.10), AND
+      2. Net-metering chunks happen to have ``"tariffs"`` in their
+         topics tag set — overlapping with the analyzer's
+         ``preferred_topics=["market_structure","cfd_ppa","tariffs"]``
+         — so the zero-overlap penalty never fired and the chunk
+         instead received a +0.15 ``_topic_overlap_boost``.
+
+    The ``tariffs`` tag is ambiguous: it covers both retail tariff
+    schemes (net metering, micro-generators) and wholesale tariffs
+    (regulated HPP, regulated TPP, guaranteed capacity). Topic-level
+    overlap is therefore not a sufficient signal — we also need
+    document-level domain awareness.
+
+    This helper fires when:
+      - ``preferred_topics`` contains at least one wholesale-domain
+        topic (the query is clearly about wholesale market),
+      - AND the chunk's ``document_title`` or ``source_key`` contains
+        a retail-domain marker (net metering / micro-generator /
+        retail / consumer / Georgian originals).
+
+    Returns a NEGATIVE float sized (default 0.20) to overcome the
+    smallest possible boost (+0.15 for 1-topic overlap) and break the
+    tie. Returns 0.0 when either side fails the trigger conditions or
+    the env kill-switch sets the magnitude to 0.
+    """
+    if VECTOR_DOCUMENT_DOMAIN_PENALTY <= 0.0:
+        return 0.0
+    if not preferred_topics:
+        return 0.0
+    if not (set(preferred_topics) & _WHOLESALE_INTENT_TOPICS):
+        return 0.0
+    title_lower = (candidate.document_title or "").lower()
+    source_lower = (candidate.source_key or "").lower()
+    haystack = f"{title_lower} {source_lower}"
+    if not haystack.strip():
+        return 0.0
+    if any(marker in haystack for marker in _RETAIL_DOMAIN_DOCUMENT_MARKERS):
+        return -float(VECTOR_DOCUMENT_DOMAIN_PENALTY)
+    return 0.0
 
 
 def _market_concept_reference_boost(
@@ -312,9 +446,12 @@ def _candidate_retrieval_score(
     base_score = float(candidate.similarity_score or 0.0)
     topic_boost = _topic_overlap_boost(candidate, filters.preferred_topics)
     topic_penalty = _topic_mismatch_penalty(candidate, filters.preferred_topics)
+    domain_penalty = _document_domain_mismatch_penalty(
+        candidate, filters.preferred_topics
+    )
 
     if not filters.boost_terms:
-        return base_score + topic_boost + topic_penalty
+        return base_score + topic_boost + topic_penalty + domain_penalty
 
     title_text = _normalize_match_text(candidate.document_title)
     source_text = _normalize_match_text(candidate.source_key)
@@ -347,7 +484,7 @@ def _candidate_retrieval_score(
             boost += 0.08
         if normalized_term in body_text:
             boost += 0.04
-    return base_score + topic_boost + topic_penalty + min(boost, 0.85)
+    return base_score + topic_boost + topic_penalty + domain_penalty + min(boost, 0.85)
 
 
 def _section_key(candidate: VectorChunkRecord) -> str:

@@ -704,6 +704,177 @@ def test_topic_mismatch_penalty_disabled_when_env_zero(monkeypatch):
         importlib.reload(vs)
 
 
+# ---------------------------------------------------------------------------
+# Fix B (2026-05-16) — document-level domain mismatch penalty.
+#
+# Q4 production retest (after Fix #3) still pulled net-metering RETAIL
+# chunks for the wholesale guaranteed-source query because net-metering
+# chunks happen to be tagged with ``"tariffs"`` (overlapping with the
+# analyzer's preferred_topics) — so the zero-overlap penalty never fired.
+# Fix B adds a document-level penalty that doesn't depend on topic-tag
+# overlap at all.
+# ---------------------------------------------------------------------------
+
+
+def test_document_domain_penalty_fires_on_retail_doc_for_wholesale_query():
+    """Q4 scenario: chunk's document_title contains 'net metering' and
+    the analyzer's preferred_topics include wholesale-domain markers."""
+    from knowledge.vector_store import _document_domain_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    retail_chunk = VectorChunkRecord(
+        id="c1",
+        document_id="d_retail",
+        document_title="Extract about net metering and net billing from the 'Electricity Retail Market Rules'",
+        source_key="retail_market_rules_net_metering",
+        section_title="Article 45(1)",
+        text_content="micro generator surplus",
+        topics=["tariffs", "net_metering"],  # has overlap with preferred — boost would normally fire
+        language="ka",
+        similarity_score=0.6,
+    )
+    preferred = ["market_structure", "cfd_ppa", "tariffs"]
+
+    penalty = _document_domain_mismatch_penalty(retail_chunk, preferred)
+    assert penalty < 0.0, "expected a document-domain penalty for retail doc in wholesale query"
+
+
+def test_document_domain_penalty_silent_when_no_wholesale_intent():
+    """When the query is NOT clearly wholesale (no balancing/cfd_ppa/etc.),
+    the document-domain penalty does not fire."""
+    from knowledge.vector_store import _document_domain_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    chunk = VectorChunkRecord(
+        id="c1",
+        document_id="d_retail",
+        document_title="Net metering extract",
+        source_key="retail",
+        section_title="Sec",
+        text_content="text",
+        topics=["net_metering"],
+        language="ka",
+        similarity_score=0.6,
+    )
+    # preferred_topics are conceptual / general — not wholesale-specific
+    assert _document_domain_mismatch_penalty(chunk, ["general_definitions"]) == 0.0
+
+
+def test_document_domain_penalty_silent_on_wholesale_document():
+    """A Transitory Market Rules chunk does not get penalised by the
+    document-domain check."""
+    from knowledge.vector_store import _document_domain_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    chunk = VectorChunkRecord(
+        id="c1",
+        document_id="d_wholesale",
+        document_title="Transitory Electricity Market Rules",
+        source_key="transitory_market_rules",
+        section_title="Article 14",
+        text_content="balancing settlement",
+        topics=["balancing_price", "market_structure"],
+        language="ka",
+        similarity_score=0.6,
+    )
+    assert _document_domain_mismatch_penalty(chunk, ["market_structure", "cfd_ppa"]) == 0.0
+
+
+def test_document_domain_penalty_recognises_georgian_markers():
+    """Georgian-titled documents with retail markers must also fire the penalty."""
+    from knowledge.vector_store import _document_domain_mismatch_penalty
+    from contracts.vector_knowledge import VectorChunkRecord
+
+    georgian_retail = VectorChunkRecord(
+        id="c1",
+        document_id="d_retail_ka",
+        document_title="ნეტო აღრიცხვის წესები",
+        source_key="net_metering_ka",
+        section_title="მუხლი 45(1)",
+        text_content="text",
+        topics=["tariffs"],
+        language="ka",
+        similarity_score=0.6,
+    )
+    assert _document_domain_mismatch_penalty(
+        georgian_retail, ["market_structure", "cfd_ppa"]
+    ) < 0.0
+
+
+def test_q4_scenario_retail_chunk_loses_to_wholesale_chunk():
+    """End-to-end Fix B: even when the retail chunk has topic overlap on
+    ``tariffs`` AND a small embedding advantage, the document-domain
+    penalty pushes it below a legitimate wholesale chunk."""
+    from knowledge.vector_store import _candidate_retrieval_score
+    from contracts.vector_knowledge import VectorChunkRecord, VectorRetrievalFilters
+
+    # Retail chunk: has overlap on 'tariffs' (would normally get +0.15 boost)
+    # AND slightly higher embedding similarity (0.60 vs 0.55).
+    retail = VectorChunkRecord(
+        id="c_retail",
+        document_id="d_retail",
+        document_title="Extract about net metering and net billing from the 'Electricity Retail Market Rules'",
+        source_key="net_metering_extract",
+        section_title="Article 45(1)",
+        text_content="micro generator surplus forecast",
+        topics=["tariffs", "net_metering"],
+        language="ka",
+        similarity_score=0.60,
+    )
+    # Wholesale chunk: lower embedding similarity but on-domain.
+    wholesale = VectorChunkRecord(
+        id="c_wholesale",
+        document_id="d_wholesale",
+        document_title="Transitory Electricity Market Rules",
+        source_key="transitory_market_rules",
+        section_title="Article 21",
+        text_content="guaranteed capacity source obligations",
+        topics=["market_structure"],
+        language="ka",
+        similarity_score=0.55,
+    )
+    filters = VectorRetrievalFilters(
+        preferred_topics=["market_structure", "cfd_ppa", "tariffs"],
+    )
+
+    score_retail = _candidate_retrieval_score(retail, filters=filters)
+    score_wholesale = _candidate_retrieval_score(wholesale, filters=filters)
+
+    assert score_wholesale > score_retail, (
+        f"Fix B should let the wholesale chunk win over the retail chunk; "
+        f"got wholesale={score_wholesale:.4f}, retail={score_retail:.4f}"
+    )
+
+
+def test_document_domain_penalty_disabled_when_env_zero(monkeypatch):
+    """Operator can disable the document-domain penalty independently."""
+    import importlib
+    import knowledge.vector_store as vs
+
+    monkeypatch.setenv("VECTOR_DOCUMENT_DOMAIN_PENALTY", "0")
+    reloaded = importlib.reload(vs)
+    try:
+        from contracts.vector_knowledge import VectorChunkRecord
+
+        chunk = VectorChunkRecord(
+            id="c1",
+            document_id="d_retail",
+            document_title="Net metering extract",
+            source_key="retail",
+            section_title="Sec",
+            text_content="text",
+            topics=["net_metering"],
+            language="ka",
+            similarity_score=0.6,
+        )
+        assert reloaded._document_domain_mismatch_penalty(
+            chunk, ["market_structure", "cfd_ppa"]
+        ) == 0.0
+    finally:
+        monkeypatch.delenv("VECTOR_DOCUMENT_DOMAIN_PENALTY", raising=False)
+        importlib.reload(vs)
+
+
 def test_pack_vector_knowledge_for_prompt_reports_packed_headers():
     bundle = VectorKnowledgeBundle(
         query="Who is eligible to trade?",
