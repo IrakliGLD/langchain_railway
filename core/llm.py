@@ -62,6 +62,7 @@ from contracts.question_analysis import (
     AnswerKind,
     ChartFamily,
     ChartIntent,
+    KnowledgeTopicName,
     MeasureTransform,
     PeriodInfo,
     PresentationMode,
@@ -2121,6 +2122,13 @@ def _normalize_period_dates_inplace(container: dict, *, anchor: _date) -> bool:
 _QUESTION_ANALYSIS_SCHEMA = QuestionAnalysis.model_json_schema()
 _QUESTION_ANALYSIS_SCHEMA_DEFS = _QUESTION_ANALYSIS_SCHEMA.get("$defs", {})
 
+# Allowed values for ``knowledge.candidate_topics[*].name``. Used by the
+# sanitizer to drop unknown topic names emitted by the LLM rather than fail
+# the entire ``QuestionAnalysis`` validation (Q6 production trace b19e2464,
+# 2026-05-16: "knowledge.candidate_topics.1.name 'regulatory_procedure'
+# Input should be ... enum values").
+_KNOWN_TOPIC_NAMES = frozenset(t.value for t in KnowledgeTopicName)
+
 
 def _resolve_schema_node(schema: dict | None) -> dict:
     """Resolve simple local $ref pointers inside the QuestionAnalysis schema."""
@@ -2211,6 +2219,14 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
                 score = 0.5
             if not name:
                 continue
+            # Phase 3 (2026-05-16): drop unknown topic names rather than
+            # crash the entire QuestionAnalysis validation. Q6 trace
+            # b19e2464: Gemini emitted "regulatory_procedure" which is
+            # not in ``KnowledgeTopicName``. Keeping the other valid
+            # candidate topics preserves more analyzer signal than the
+            # heuristic fallback would.
+            if name not in _KNOWN_TOPIC_NAMES:
+                continue
             try:
                 score_val = max(0.0, min(1.0, float(score)))
             except (TypeError, ValueError):
@@ -2253,6 +2269,13 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
             sanitized_topics = _sanitize_topic_candidates(raw_topics)
             if sanitized_topics:
                 knowledge["candidate_topics"] = sanitized_topics
+        # Phase 3 (2026-05-16): always sanitize the candidate_topics on the
+        # knowledge object — the LLM normally emits them here directly
+        # (not via the top-level merge above), and we need to drop unknown
+        # enum values (Q6 trace b19e2464) before Pydantic validation.
+        direct_topics = knowledge.get("candidate_topics")
+        if isinstance(direct_topics, list):
+            knowledge["candidate_topics"] = _sanitize_topic_candidates(direct_topics)
 
     tooling = payload.get("tooling")
     if isinstance(tooling, dict):

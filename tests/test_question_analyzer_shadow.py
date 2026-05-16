@@ -1241,3 +1241,121 @@ def test_q3_payload_end_to_end_validates():
     assert _ISO_DATE_PATTERN.match(model.sql_hints.period.start_date)
     assert model.sql_hints.period.end_date == _date_today_iso()
     assert model.tooling.candidate_tools[0].params_hint.end_date == _date_today_iso()
+
+
+# -----------------------------------------------------------------------------
+# Regression: _sanitize_question_analysis_payload drops unknown topic names
+# from knowledge.candidate_topics. Production trace b19e2464 (2026-05-16, Q6
+# minimum-MW query) failed because Gemini emitted
+# candidate_topics[1].name = "regulatory_procedure" which is not in the
+# ``KnowledgeTopicName`` enum. Without filtering, the entire QuestionAnalysis
+# validation crashed and the pipeline fell back to heuristic routing.
+# -----------------------------------------------------------------------------
+
+
+def test_sanitize_drops_unknown_topic_name_from_direct_path():
+    """The common case: LLM emits candidate_topics directly on knowledge."""
+    payload = {
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.9},
+                {"name": "regulatory_procedure", "score": 0.7},  # unknown
+                {"name": "market_structure", "score": 0.6},
+            ]
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    names = [t["name"] for t in sanitized["knowledge"]["candidate_topics"]]
+    assert names == ["balancing_price", "market_structure"]
+
+
+def test_sanitize_drops_unknown_topic_name_from_top_level_merge_path():
+    """Edge case: LLM emits candidate_topics at the top level instead of nested."""
+    payload = {
+        "knowledge": {"candidate_topics": []},
+        "candidate_topics": [
+            {"name": "balancing_price", "score": 0.9},
+            {"name": "unknown_topic_xyz", "score": 0.5},
+        ],
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    names = [t["name"] for t in sanitized["knowledge"]["candidate_topics"]]
+    assert names == ["balancing_price"]
+
+
+def test_sanitize_keeps_all_known_topics():
+    """Sanity check: when all topic names are valid, nothing is dropped."""
+    payload = {
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "balancing_price", "score": 0.9},
+                {"name": "tariffs", "score": 0.8},
+                {"name": "market_structure", "score": 0.7},
+            ]
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    names = [t["name"] for t in sanitized["knowledge"]["candidate_topics"]]
+    assert names == ["balancing_price", "tariffs", "market_structure"]
+
+
+def test_sanitize_all_unknown_topics_yields_empty_list():
+    """When every emitted topic is unknown, candidate_topics becomes empty
+    (still a valid QuestionAnalysis — the field defaults to empty list)."""
+    payload = {
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "regulatory_procedure", "score": 0.7},
+                {"name": "made_up_category", "score": 0.5},
+            ]
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    assert sanitized["knowledge"]["candidate_topics"] == []
+
+
+def test_q6_payload_end_to_end_validates():
+    """Build a Q6-shaped payload with the exact 'regulatory_procedure' drift
+    and verify the full sanitize → QuestionAnalysis.model_validate path
+    succeeds. Previously this exact shape crashed validation."""
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "What is the minimum installed capacity for balancing market?",
+        "canonical_query_en": "What is the minimum installed capacity required for participation in the balancing market?",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "factual_lookup",
+            "analysis_mode": "light",
+            "intent": "minimum_capacity_threshold",
+            "needs_clarification": False,
+            "confidence": 0.85,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "knowledge",
+            "needs_sql": False,
+            "needs_knowledge": True,
+            "prefer_tool": False,
+        },
+        "knowledge": {
+            "candidate_topics": [
+                {"name": "market_structure", "score": 0.9},
+                {"name": "regulatory_procedure", "score": 0.8},  # drift token
+            ]
+        },
+        "tooling": {"candidate_tools": []},
+        "sql_hints": {},
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+        },
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    model = QuestionAnalysis.model_validate(sanitized)
+    # The valid topic is preserved; the drift token is dropped.
+    topic_names = [t.name.value for t in model.knowledge.candidate_topics]
+    assert topic_names == ["market_structure"]
+    # Routing and classification fields survived unchanged.
+    assert model.routing.preferred_path.value == "knowledge"
+    assert model.classification.query_type.value == "factual_lookup"
