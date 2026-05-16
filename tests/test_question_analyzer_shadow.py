@@ -1033,3 +1033,211 @@ def test_extract_json_payload_rejects_non_object_root():
 def test_extract_json_payload_rejects_empty():
     with pytest.raises(ValueError):
         llm_core._extract_json_payload("")
+
+
+# -----------------------------------------------------------------------------
+# Regression: _sanitize_question_analysis_payload normalizes relative-date
+# tokens before Pydantic validation. Production trace 7f6fc4b0 (2026-05-16,
+# Q3 trend+structure query) failed because Gemini emitted
+# ``sql_hints.period.start_date="12m"`` and ``end_date="now"`` rather than
+# the contracted ISO ``^\d{4}-\d{2}-\d{2}$`` format. Phase 2 coerces
+# recognized relative tokens to ISO; unrecognized tokens cause the period
+# block to be dropped.
+# -----------------------------------------------------------------------------
+import datetime as _datetime_for_tests  # noqa: E402
+import re as _re_for_tests  # noqa: E402
+
+_ISO_DATE_PATTERN = _re_for_tests.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _date_today_iso() -> str:
+    return _datetime_for_tests.date.today().isoformat()
+
+
+def test_coerce_relative_date_passes_iso_through():
+    out = llm_core._coerce_relative_date(
+        "2024-06-15", anchor=_datetime_for_tests.date(2026, 5, 16), role="start"
+    )
+    assert out == "2024-06-15"
+
+
+def test_coerce_relative_date_now_returns_anchor():
+    anchor = _datetime_for_tests.date(2026, 5, 16)
+    assert llm_core._coerce_relative_date("now", anchor=anchor, role="end") == "2026-05-16"
+    assert llm_core._coerce_relative_date("TODAY", anchor=anchor, role="end") == "2026-05-16"
+
+
+def test_coerce_relative_date_months_calendar_aware():
+    anchor = _datetime_for_tests.date(2026, 5, 16)
+    # 12 months back from 2026-05-16 is 2025-05-16 (calendar-aware, not 365 days).
+    out = llm_core._coerce_relative_date("12m", anchor=anchor, role="start")
+    assert out == "2025-05-16"
+
+
+def test_coerce_relative_date_units():
+    anchor = _datetime_for_tests.date(2026, 5, 16)
+    assert llm_core._coerce_relative_date("7d", anchor=anchor, role="start") == "2026-05-09"
+    assert llm_core._coerce_relative_date("2w", anchor=anchor, role="start") == "2026-05-02"
+    assert llm_core._coerce_relative_date("1q", anchor=anchor, role="start") == "2026-02-16"
+    assert llm_core._coerce_relative_date("3y", anchor=anchor, role="start") == "2023-05-16"
+
+
+def test_coerce_relative_date_end_role_pins_to_anchor():
+    """For role='end', relative tokens collapse to anchor (rolling-window semantics)."""
+    anchor = _datetime_for_tests.date(2026, 5, 16)
+    assert llm_core._coerce_relative_date("12m", anchor=anchor, role="end") == "2026-05-16"
+
+
+def test_coerce_relative_date_unrecognized_token_returns_none():
+    anchor = _datetime_for_tests.date(2026, 5, 16)
+    assert llm_core._coerce_relative_date("yesterday", anchor=anchor, role="start") is None
+    assert llm_core._coerce_relative_date("last quarter", anchor=anchor, role="start") is None
+    assert llm_core._coerce_relative_date("", anchor=anchor, role="start") is None
+    assert llm_core._coerce_relative_date(None, anchor=anchor, role="start") is None
+    assert llm_core._coerce_relative_date(42, anchor=anchor, role="start") is None
+
+
+def test_sanitize_coerces_period_with_12m_now_drift():
+    """Q3 trace 7f6fc4b0: LLM emitted start='12m', end='now' — must coerce."""
+    payload = {
+        "sql_hints": {
+            "period": {
+                "kind": "range",
+                "start_date": "12m",
+                "end_date": "now",
+                "granularity": "month",
+            }
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    period = sanitized["sql_hints"].get("period")
+    assert period is not None, "period should be preserved after coercion"
+    assert _ISO_DATE_PATTERN.match(period["start_date"]), period["start_date"]
+    assert _ISO_DATE_PATTERN.match(period["end_date"]), period["end_date"]
+    assert period["end_date"] == _date_today_iso()
+
+
+def test_sanitize_drops_period_when_token_unrecognized():
+    payload = {
+        "sql_hints": {
+            "period": {
+                "kind": "range",
+                "start_date": "yesterday",
+                "end_date": "now",
+                "granularity": "month",
+            }
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    assert sanitized["sql_hints"].get("period") is None, "unrecognized start should drop period"
+
+
+def test_sanitize_coerces_params_hint_dates():
+    """params_hint.start_date/end_date also have ISODate contract — coerce them too."""
+    payload = {
+        "tooling": {
+            "candidate_tools": [
+                {
+                    "name": "get_prices",
+                    "score": 0.8,
+                    "params_hint": {
+                        "metric": "p_bal_gel",
+                        "start_date": "6m",
+                        "end_date": "now",
+                    },
+                }
+            ]
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    hint = sanitized["tooling"]["candidate_tools"][0]["params_hint"]
+    assert _ISO_DATE_PATTERN.match(hint["start_date"]), hint["start_date"]
+    assert _ISO_DATE_PATTERN.match(hint["end_date"]), hint["end_date"]
+    assert hint["end_date"] == _date_today_iso()
+
+
+def test_sanitize_drops_unrecognized_params_hint_date():
+    """params_hint dates are Optional — null them rather than drop the whole hint."""
+    payload = {
+        "tooling": {
+            "candidate_tools": [
+                {
+                    "name": "get_prices",
+                    "score": 0.8,
+                    "params_hint": {
+                        "metric": "p_bal_gel",
+                        "start_date": "long ago",
+                        "end_date": "now",
+                    },
+                }
+            ]
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    hint = sanitized["tooling"]["candidate_tools"][0]["params_hint"]
+    assert hint.get("start_date") is None
+    assert hint.get("end_date") == _date_today_iso()
+    # Other params_hint fields preserved.
+    assert hint["metric"] == "p_bal_gel"
+
+
+def test_q3_payload_end_to_end_validates():
+    """Build a minimal Q3-shaped payload with relative-date drift and verify
+    the full sanitize → QuestionAnalysis.model_validate path succeeds."""
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": "Show the trend of balancing electricity prices over the last 12 months",
+        "canonical_query_en": "Trend of balancing electricity prices over the last 12 months.",
+        "language": {"input_language": "en", "answer_language": "en"},
+        "classification": {
+            "query_type": "data_explanation",
+            "analysis_mode": "analyst",
+            "intent": "balancing_price_trend",
+            "needs_clarification": False,
+            "confidence": 0.92,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "sql",
+            "needs_sql": True,
+            "needs_knowledge": True,
+            "prefer_tool": True,
+        },
+        "knowledge": {"candidate_topics": [{"name": "balancing_price", "score": 0.9}]},
+        "tooling": {
+            "candidate_tools": [
+                {
+                    "name": "get_prices",
+                    "score": 0.9,
+                    "params_hint": {
+                        "metric": "p_bal_gel",
+                        "start_date": "12m",
+                        "end_date": "now",
+                    },
+                }
+            ]
+        },
+        "sql_hints": {
+            "metric": "p_bal_gel",
+            "entities": [],
+            "aggregation": "monthly",
+            "dimensions": ["price"],
+            "period": {
+                "kind": "range",
+                "start_date": "12m",
+                "end_date": "now",
+                "granularity": "month",
+            },
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": True,
+            "chart_confidence": 0.9,
+        },
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    model = QuestionAnalysis.model_validate(sanitized)
+    assert model.sql_hints.period is not None
+    assert _ISO_DATE_PATTERN.match(model.sql_hints.period.start_date)
+    assert model.sql_hints.period.end_date == _date_today_iso()
+    assert model.tooling.candidate_tools[0].params_hint.end_date == _date_today_iso()
