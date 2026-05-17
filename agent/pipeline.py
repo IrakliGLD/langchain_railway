@@ -894,6 +894,15 @@ def _merge_frame_into_context_by_date(
         on=date_col_primary,
         how="left",
     )
+    # Driver-enrichment frames come directly from SQL (e.g.
+    # ``compute_entity_price_contributions``) where PostgreSQL ``numeric``
+    # columns arrive as ``Decimal`` with ``object`` dtype. Coerce here so
+    # downstream ``select_dtypes(include="number")`` consumers (per-column
+    # aggregates, grounding-token extraction, chart builders) see proper
+    # float64 dtypes. See ``coerce_decimal_columns_to_float`` for the
+    # full root-cause explanation.
+    from analysis.system_quantities import coerce_decimal_columns_to_float
+    merged, _ = coerce_decimal_columns_to_float(merged)
     ctx.df = merged
     ctx.cols = list(merged.columns)
     ctx.rows = [tuple(r) for r in merged.itertuples(index=False, name=None)]

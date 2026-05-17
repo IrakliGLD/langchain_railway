@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Tuple
+from decimal import Decimal
+from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -151,11 +152,59 @@ def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index()
 
 
+def coerce_decimal_columns_to_float(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """Coerce object-dtype columns that hold ``Decimal`` values to float64.
+
+    Root-cause fix (2026-05-17) — Q2 production trace 5b117786. PostgreSQL
+    ``numeric`` columns arrive in pandas as Python ``Decimal`` objects with
+    ``object`` dtype. ``pd.api.types.is_numeric_dtype`` returns False for
+    object dtype, so downstream code that relies on ``select_dtypes(include=
+    "number")`` (``_append_column_aggregates`` in ``agent/analyzer.py``,
+    the numeric-summary branch of ``quick_stats`` in ``analysis/stats.py``)
+    silently skips every column. Result: ``stats_hint`` is just "Rows: N"
+    and the LLM, given no pre-computed statistics, hallucinates plausible
+    averages from the raw 12-row preview. Those hallucinated numbers don't
+    exist in any data corpus, so the grounding gate correctly rejects them
+    and the conservative fallback replaces the substantive answer.
+
+    Returns the (possibly-mutated) DataFrame and the list of column names
+    that were coerced, for caller logging/observability.
+    """
+    if df is None or df.empty:
+        return df, []
+    converted: List[str] = []
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        # Type-test the first non-null sample. A column is "Decimal-typed"
+        # only if its sample is a Decimal; mixed/string columns are left alone.
+        sample = non_null.iloc[0]
+        if not isinstance(sample, Decimal):
+            continue
+        try:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            converted.append(col)
+        except Exception:
+            # Defensive: keep column unchanged on any conversion error.
+            continue
+    return df, converted
+
+
 def normalize_tool_dataframe(tool_name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Apply tool-specific normalization before analytics consume a result frame."""
+    """Apply tool-specific normalization before analytics consume a result frame.
+
+    Always runs the Decimal→float64 coercion so that PostgreSQL ``numeric``
+    columns become first-class numeric dtypes for ``select_dtypes(include=
+    "number")`` consumers (per-column aggregates, grouping logic, chart
+    builders, grounding-token extraction).
+    """
 
     if df is None or df.empty:
         return df
+    df, _converted = coerce_decimal_columns_to_float(df)
     if tool_name == "get_generation_mix":
         return canonicalize_generation_mix_df(df)
     return df
