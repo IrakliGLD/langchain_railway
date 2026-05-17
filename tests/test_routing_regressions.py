@@ -398,6 +398,50 @@ class TestAnalyzerPromptContent:
             "regress on typo'd phrasings"
         )
 
+    def test_multi_clause_data_intent_rule_present(self, core_rules: str):
+        """Fix E (2026-05-17) — Q7 production trace 5ba12f3c.
+
+        The analyzer classified "Define 'guaranteed source', list the
+        three most recent guaranteed-source generators by name, and show
+        their average sale price to ESCO in the last quarter." as a pure
+        ``conceptual_definition`` because of the ``Define`` prefix, then
+        dropped the ``list`` and ``show`` clauses entirely. The fix adds
+        a multi-clause rule that promotes data-verb clauses over the
+        definition prefix.
+
+        Regression guards:
+        - the rule block exists,
+        - at least one of the canonical Q7-shape few-shot examples
+          ("Define 'guaranteed source', list...", "Define CfD and list...",
+          "What is balancing electricity and show...") survives,
+        - the rule mentions both ``conceptual_definition`` (what we must
+          NOT classify as) and ``data_retrieval`` (the target shape).
+        """
+        lower = core_rules.lower()
+        assert "multi-clause" in lower, (
+            "Multi-clause data-intent rule missing — Q7 misrouting will regress"
+        )
+        # The rule must explicitly forbid pure conceptual_definition for
+        # multi-clause queries with data verbs.
+        multi_idx = lower.find("multi-clause")
+        rule_section = lower[multi_idx: multi_idx + 2500]
+        assert "conceptual_definition" in rule_section, (
+            "Multi-clause rule must reference conceptual_definition (the "
+            "wrong classification) to anchor the override"
+        )
+        assert "data_retrieval" in rule_section, (
+            "Multi-clause rule must reference data_retrieval (the target "
+            "classification when listing/showing entities)"
+        )
+        # At least one of the Q7-shape examples must be present.
+        assert (
+            "define 'guaranteed source'" in rule_section
+            or "define cfd and list" in rule_section
+            or "what is balancing electricity and show" in rule_section
+        ), (
+            "Multi-clause few-shot example missing — Q7-class regression risk"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Phase 1.a — SCENARIO override quantitative-anchor gate (2026-05-13 logs)
