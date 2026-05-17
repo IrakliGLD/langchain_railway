@@ -238,6 +238,80 @@ def _build_grounding_corpus(ctx: QueryContext) -> str:
     return "\n".join(parts)
 
 
+def _add_loose_rounding_tokens(tokens: Set[str], value: Any) -> None:
+    """Tokenize ``value`` with loose-step rounding (nearest 0.5, 1, 5, 10).
+
+    Fix H.1 (2026-05-17) — Q2 production trace 5fb94f75. LLMs writing prose
+    naturally round aggregate values to "human-readable" steps that aren't
+    necessarily nearest-0.1 (e.g. a column mean of ``15.41`` gets cited as
+    ``"15.5"`` because it reads cleaner). The default ``_tokenize_cell_value``
+    only covers nearest-0.1 / nearest-0.01 rounding and truncation, so the
+    LLM's ``15.5`` is flagged as missing even though it's a legitimate
+    rounded derivation. This helper adds the additional step rounds so the
+    grounding gate recognises them as derived from the source aggregate.
+
+    Only invoked for aggregate values (per-column means, sums, pair-wise
+    means/sums); not applied to raw row values, where strict matching is
+    desirable.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return
+    if not (numeric == numeric):  # NaN check
+        return
+    # Nearest-0.5 step
+    for step in (0.5, 1.0, 5.0, 10.0):
+        rounded = round(numeric / step) * step
+        # Render without trailing zeros that confuse string equality
+        if step >= 1.0 and rounded == int(rounded):
+            tokens.update(_tokenize_cell_value(int(rounded)))
+        else:
+            tokens.update(_tokenize_cell_value(round(rounded, 2)))
+
+
+def _iter_pairwise_column_groups(cols: List[str]) -> List[tuple]:
+    """Yield pairs of numeric columns that look like sibling categories.
+
+    Fix H.2 (2026-05-17) — Q2 production trace 5fb94f75. The LLM legitimately
+    answers "average thermal price ≈ 188" by aggregating across two columns
+    (``price_regulated_old_tpp_gel`` and ``price_regulated_new_tpp_gel``).
+    That value isn't in any single column's mean, so the grounding gate
+    flags it as unsupported.
+
+    To capture this case we identify column pairs that:
+      - have the same number of ``_``-separated tokens,
+      - share the LAST token (usually the unit, e.g. ``gel``/``usd``),
+      - differ in EXACTLY ONE non-unit token (e.g. ``old`` vs ``new``).
+
+    A pair like ``(price_regulated_old_tpp_gel, price_regulated_new_tpp_gel)``
+    qualifies; ``(price_regulated_hpp_gel, price_regulated_new_tpp_gel)``
+    doesn't (length / token-count mismatch); ``(price_regulated_old_tpp_gel,
+    price_regulated_old_tpp_usd)`` doesn't (unit mismatch).
+
+    Returns a list of ``(col_a, col_b)`` tuples. Caller computes pair-wise
+    mean/sum aggregates and tokenizes them. Capped at 40 pairs to bound cost.
+    """
+    pairs: List[tuple] = []
+    parts = {c: str(c).split("_") for c in cols}
+    for i, col_a in enumerate(cols):
+        pa = parts[col_a]
+        if len(pa) < 2:
+            continue
+        for col_b in cols[i + 1:]:
+            pb = parts[col_b]
+            if len(pa) != len(pb):
+                continue
+            if pa[-1] != pb[-1]:  # unit suffix must match
+                continue
+            diffs = sum(1 for a, b in zip(pa[:-1], pb[:-1]) if a != b)
+            if diffs == 1:
+                pairs.append((col_a, col_b))
+                if len(pairs) >= 40:
+                    return pairs
+    return pairs
+
+
 def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
     """Add column-level aggregates to grounding tokens for analyst-mode queries.
 
@@ -246,6 +320,11 @@ def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
     each numeric column, we give the grounding check legitimate computed values
     to match against — preventing false-positive failures while keeping the 90%
     threshold intact for non-analyst queries.
+
+    Fix H (2026-05-17) — also adds (a) loose-step rounding of column means
+    (Fix H.1) and (b) pair-wise mean/sum for sibling-column groups (Fix H.2)
+    so the grounding gate recognises LLM-produced category aggregates such
+    as ``thermal_avg ≈ mean(old_tpp_avg, new_tpp_avg)``.
     """
     if ctx.df is None or ctx.df.empty:
         return
@@ -256,12 +335,32 @@ def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
     )
     if not is_analyst:
         return
-    for col in ctx.df.select_dtypes(include="number").columns:
+    numeric_cols = list(ctx.df.select_dtypes(include="number").columns)
+    column_means: Dict[str, float] = {}
+    for col in numeric_cols:
         series = ctx.df[col].dropna()
         if series.empty:
             continue
-        for val in [series.sum(), series.mean(), series.min(), series.max(), len(series)]:
+        col_mean = series.mean()
+        column_means[col] = float(col_mean) if pd.notna(col_mean) else float("nan")
+        for val in [series.sum(), col_mean, series.min(), series.max(), len(series)]:
             tokens.update(_tokenize_cell_value(val))
+        # Fix H.1: loose-step rounding on the mean so LLM rounding (15.41 → 15.5) matches
+        _add_loose_rounding_tokens(tokens, col_mean)
+
+    # Fix H.2: pair-wise mean and sum aggregates for sibling-column groups
+    for col_a, col_b in _iter_pairwise_column_groups(numeric_cols):
+        mean_a = column_means.get(col_a)
+        mean_b = column_means.get(col_b)
+        if mean_a is None or mean_b is None:
+            continue
+        if mean_a != mean_a or mean_b != mean_b:  # NaN guard
+            continue
+        pair_avg = (mean_a + mean_b) / 2.0
+        pair_sum = mean_a + mean_b
+        for val in (pair_avg, pair_sum):
+            tokens.update(_tokenize_cell_value(val))
+            _add_loose_rounding_tokens(tokens, val)
 
 
 def _add_evidence_record_tokens(tokens: Set[str], ctx: QueryContext) -> None:
@@ -381,7 +480,34 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     # that legitimately extend beyond raw data; use a lower threshold.
     # Comparison normalised to ``.value`` to fix the Python-3.11+ StrEnum
     # FQN-stringification bug (see top-of-function comment).
-    min_ratio = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE.value else 0.9
+    if grounding_policy == GroundingPolicy.EVIDENCE_AWARE.value:
+        min_ratio = 0.7
+    else:
+        # Fix H.3 (2026-05-17) — Q2 production trace 5fb94f75. When the
+        # query explicitly asks for an aggregate (average/total/share) and
+        # the pipeline ran in analyst mode, the LLM legitimately produces
+        # computed values that may not all map to raw-data tokens even
+        # with Fix H.1+H.2 expansion (e.g. mean of three categories where
+        # one is unmappable). Relax STRICT_NUMERIC from 0.9 to 0.75 in
+        # that case — still tighter than EVIDENCE_AWARE's 0.7, but high
+        # enough to admit one or two derived aggregates among the usual
+        # raw-data citations. Strict_numeric for non-aggregation queries
+        # keeps the 0.9 threshold unchanged.
+        qa = ctx.question_analysis
+        is_analyst = (
+            (qa is not None and qa.classification.analysis_mode.value == "analyst")
+            or ctx.mode == "analyst"
+        )
+        agg_intent = getattr(ctx, "aggregation_intent", None) or {}
+        wants_aggregate = bool(
+            agg_intent.get("needs_average")
+            or agg_intent.get("needs_total")
+            or agg_intent.get("needs_share")
+        )
+        if is_analyst and wants_aggregate:
+            min_ratio = 0.75
+        else:
+            min_ratio = 0.9
     passed = match_ratio >= min_ratio
     if not passed:
         # Diagnostic: when grounding fails, log the matched vs missing tokens
