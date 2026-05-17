@@ -306,8 +306,20 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
 
 
 def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
-    grounding_policy = str(ctx.grounding_policy or GroundingPolicy.STRICT_NUMERIC)
-    if grounding_policy == GroundingPolicy.NOT_APPLICABLE:
+    # Fix D (2026-05-17): Q3 production trace 9b9b28b4 ran into a silent
+    # threshold-comparison bug. ``GroundingPolicy(str, Enum)`` — in
+    # Python 3.11+ ``str(StrEnum.MEMBER)`` returns the FQN
+    # ``"GroundingPolicy.EVIDENCE_AWARE"`` instead of the value
+    # ``"evidence_aware"``, so the old ``grounding_policy == GroundingPolicy.X``
+    # comparisons silently mismatched and EVIDENCE_AWARE fell through to
+    # the 0.9 STRICT_NUMERIC threshold. Q3's 0.78 ratio would have passed
+    # under the intended 0.7 EVIDENCE_AWARE threshold but instead got
+    # rejected, producing the conservative fallback answer.
+    # Fix: normalise to the enum's ``.value`` (a stable lowercase string)
+    # and compare in string-space throughout.
+    raw_policy = ctx.grounding_policy or GroundingPolicy.STRICT_NUMERIC
+    grounding_policy = getattr(raw_policy, "value", str(raw_policy))
+    if grounding_policy == GroundingPolicy.NOT_APPLICABLE.value:
         return True
 
     claim_text = "\n".join(envelope.claims or [])
@@ -330,7 +342,9 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     match_ratio = matched / max(1, len(answer_tokens))
     # Evidence-aware queries produce derived values (percentages, deltas)
     # that legitimately extend beyond raw data; use a lower threshold.
-    min_ratio = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE else 0.9
+    # Comparison normalised to ``.value`` to fix the Python-3.11+ StrEnum
+    # FQN-stringification bug (see top-of-function comment).
+    min_ratio = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE.value else 0.9
     passed = match_ratio >= min_ratio
     if not passed:
         # Diagnostic: when grounding fails, log the matched vs missing tokens

@@ -5924,6 +5924,64 @@ def test_evidence_aware_grounding_uses_lower_threshold():
     assert summarizer._is_summary_grounded(envelope, ctx_strict) is False
 
 
+def test_evidence_aware_grounding_handles_enum_instance():
+    """Fix D (2026-05-17) regression — Q3 production trace 9b9b28b4.
+
+    The existing ``test_evidence_aware_grounding_uses_lower_threshold``
+    passes the policy as a raw STRING (``"evidence_aware"``). Production
+    code paths often pass the ENUM instance (``GroundingPolicy.EVIDENCE_AWARE``).
+    In Python 3.11+, ``str(StrEnum.MEMBER)`` returns the FQN
+    (``"GroundingPolicy.EVIDENCE_AWARE"``) instead of the value
+    (``"evidence_aware"``) — so the comparison
+    ``str(ctx.grounding_policy) == GroundingPolicy.EVIDENCE_AWARE`` silently
+    returns False and EVIDENCE_AWARE falls through to the 0.9 threshold.
+
+    Q3 ratio 0.78 should pass under the intended 0.7 threshold; the bug
+    rejected it. This test passes the enum instance and asserts the
+    correct threshold is applied.
+    """
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext, GroundingPolicy
+
+    envelope = SummaryEnvelope(
+        answer="The price rose from 50 GEL in January 2024 to 55 GEL, a change of 10%.",
+        claims=[],
+        citations=["data_preview"],
+        confidence=0.8,
+    )
+    ctx_enum = QueryContext(
+        query="Why did the balancing price increase?",
+        preview="date,p_bal_gel\n2024-01-01,50.0\n2024-02-01,55.0",
+        stats_hint="min=50.0 max=55.0",
+        grounding_policy=GroundingPolicy.EVIDENCE_AWARE,  # enum instance, not string
+    )
+
+    # Must pass at the 0.7 EVIDENCE_AWARE threshold, even with the enum form.
+    assert summarizer._is_summary_grounded(envelope, ctx_enum) is True
+
+
+def test_grounding_not_applicable_handles_enum_instance():
+    """The NOT_APPLICABLE short-circuit must also work with the enum form."""
+    from agent import summarizer
+    from core.llm import SummaryEnvelope
+    from models import QueryContext, GroundingPolicy
+
+    # Answer has numeric tokens not in any evidence — would normally fail.
+    envelope = SummaryEnvelope(
+        answer="The answer mentions 12345 and 99999 with no source.",
+        claims=[],
+        citations=["domain_knowledge"],
+        confidence=0.9,
+    )
+    ctx = QueryContext(
+        query="some query",
+        grounding_policy=GroundingPolicy.NOT_APPLICABLE,
+    )
+    # NOT_APPLICABLE should bypass the gate entirely.
+    assert summarizer._is_summary_grounded(envelope, ctx) is True
+
+
 def test_claim_provenance_indexes_domain_and_vector_numeric_tokens():
     """Provenance coverage should include domain/vector numeric evidence for evidence-aware summaries."""
     from agent import summarizer
