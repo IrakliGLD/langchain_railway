@@ -591,10 +591,45 @@ This is the canonical timeline of policy decisions that have shifted balancing-p
 - **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.
 - **Jan–Mar 2024 (temporary rule):** the Electricity (Capacity) Market Rules were temporarily changed for three months. During Jan–Mar 2024, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
 - **Jul 2024:** Exchange launched (GENEX) — added a new trading segment alongside balancing.
-- **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. Identical monthly balancing volumes do not look like random residual sales. This pattern suggests that cheap state-owned hydro may have been deliberately allocated to the balancing segment in those months to help push the balancing price downward. Treat this as a strong analytical inference, not a proven policy fact unless supported by direct operational evidence.
+- **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. This is one instance of a broader state-owned plant allocation pattern — see the *"State-owned plant allocation as a balancing-price-reduction lever"* subsection below for the full case list and detection methodology.
 - **2020 onwards:** Entity-level data available (no composition-based driver evidence before 2020).
 - **From May 2025:** Enguri/Vardnili tariffs increased to cover Abkhazia supply costs (see `market_structure.md` §14).
 - **Jul 2027 (planned):** target market model launch (hourly marginal pricing under self-dispatch) — see `market_structure.md` §3 for the regime-break detail. Forecasts crossing this horizon must flag the structural break.
+
+### State-owned plant allocation as a balancing-price-reduction lever (analytical inference)
+
+Cheap state-owned generation can be steered into the balancing segment to pull the weighted-average balancing price downward. Because the current model is composition-driven (not demand-cleared), increasing the share of a cheap entity in the balancing mix is one of the few direct levers available to policymakers.
+
+**Detection signals.** Two anomaly signals make such allocation visible in `trade_derived_entities` balancing sales:
+
+1. **Round-number MWh quantities** sold to the balancing market by a state-owned plant. Balancing electricity is by construction a *residual* (busbar output minus bilateral + exchange sales), so an exact integer number of thousand MWh is extremely unlikely to occur naturally.
+2. **Identical quantities across two or more consecutive months.** Equally unlikely under organic dispatch — month-to-month residuals depend on weather, demand, contract scheduling, and outages, none of which repeat exactly.
+
+A single occurrence of either signal is weak evidence; a cluster of them concentrated on cheap state-owned plants in the same season is a strong analytical signal.
+
+**Observed cases (2020 onward, the period with entity-level data).**
+
+*Summer cases — Enguri HPP (cheapest source in the system, state-owned hydro):*
+- 2020: May 18, Jul 30, Aug 7, Sep 7 (thousand MWh) — all round numbers
+- 2021: Jun 5 — round number
+- 2025: May 16.698 and Jun 16.698 — identical across two consecutive months; Jul 15 — round number
+
+*Summer cases — Vardnili HPP (state-owned regulated hydro, cheap):*
+- 2020: May 4, Jun 5, Jul 6 — round numbers
+
+*Winter cases — Gardabani TPP (regulated new thermal, cheap relative to the alternative winter balancing mix of imports and PPA/CfD):*
+- 2025: Aug 20, Sep 20, Oct 20, Dec 20 — round numbers, also identical across multiple months
+
+**Interpretation.**
+
+- **2020:** Despite global COVID-period demand softness, Georgian balancing prices did **not** collapse — a direct consequence of the weighted-average pricing formula, which is composition-driven rather than demand-cleared. The clustered Enguri and Vardnili round-number summer allocations are best read as deliberate policy intervention to keep balancing prices in check during a year when the price would otherwise have been determined by an expensive composition.
+- **2025:** A clear two-season toolkit emerges — **Enguri HPP in summer** and **Gardabani TPP in winter**. Each plant is the cheap option in its respective season relative to the alternative balancing mix (imports and PPA/CfD in summer; imports in winter).
+
+**Why summer Enguri vs winter Gardabani.** In summer the alternative balancing supply is dominated by PPA/CfD (~55–57 USD/MWh) and imports, both of which are *above* Enguri's regulated GEL tariff — so pushing Enguri into balancing lowers the weighted average. In winter, hydro is scarce and the alternative balancing mix is dominated by expensive imports; Gardabani's regulated upper-cap tariff (gas + xrate driven) is typically below the import upper-cap, so steering Gardabani volumes into balancing lowers the winter weighted average.
+
+**Caveat.** Treat this as a strong analytical inference, not a proven operational fact, unless corroborated by direct evidence (dispatch instructions, ESCO trade records, regulatory communications). The signals are statistical, not regulatory disclosures.
+
+---
 
 ### Why this matters for forecasting
 
@@ -645,7 +680,7 @@ Therefore, a serious forecast of balancing price requires forecasting **both**:
 
 **Main forecasting uncertainties:**
 - **Imports:** prices depend on regional market conditions and external electricity prices, so they are highly uncertain and difficult to forecast.
-- **Regulated hydro:** its share in balancing electricity is currently modest and is expected to decline as hydropower deregulation expands. However, **state-owned hydropower plants remain regulated** and can still influence balancing prices when their cheap electricity is directed into the balancing segment. The **May-June 2025 Enguri HPP case** is an important example of this possibility.
+- **Regulated hydro:** its share in balancing electricity is currently modest and is expected to decline as hydropower deregulation expands. However, **state-owned hydropower plants remain regulated** and can still influence balancing prices when their cheap electricity is directed into the balancing segment. See the *"State-owned plant allocation as a balancing-price-reduction lever"* subsection above for the documented summer (Enguri HPP) and winter (Gardabani TPP) cases in 2020 and 2025.
 - **PPA and CfD:** these support schemes are the main component and key driver of the reference balancing price. Their future effect depends on how quickly new projects are commissioned and what their contract prices are.
 - **Regulated thermal power plants:** their cost is driven mainly by **gas prices** and the **exchange rate**. Gas prices are influenced by state decisions and negotiations, so future costs are uncertain.
 - **Exchange rate risk:** most important components are directly or indirectly **USD-linked**, so GEL balancing price is highly sensitive to FX movements.
