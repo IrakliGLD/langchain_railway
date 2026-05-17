@@ -80,6 +80,86 @@ _TRANSFORM_PRIORITY: Tuple[str, ...] = (
 )
 
 
+# Fix G (2026-05-17): cap series count in derived MoM/YoY chart specs.
+# Q3 production retest 0f713756 produced a chart with 25+ series jamming
+# prices (0-200 GEL/MWh), USD prices (0-60), shares (0-1), tariffs, and
+# contribution columns all onto one axis — unreadable. Stage 3
+# enrichment adds ~23 driver-context columns; the derived-chart
+# builders ``_build_mom_yoy_specs`` etc. were passing every numeric
+# column straight to the rendered spec with no cap.
+#
+# Default cap (5) chosen to match typical "balancing price + 2-3
+# context drivers" usable view. Caller can override via
+# ``visualization.max_series`` from the analyzer contract.
+_DERIVED_CHART_DEFAULT_MAX_SERIES = 5
+
+
+def _score_column_relevance(col: str, query_lower: str) -> int:
+    """Inline relevance heuristic (mirrors chart_pipeline.relevance_score).
+
+    Kept local to avoid a circular import — derived_chart_builder is
+    called from analyzer.enrich, which runs before chart_pipeline.
+    """
+    score = 0
+    col_lower = col.lower()
+    if any(k in query_lower for k in ["price"]) and any(k in col_lower for k in ["price", "p_bal"]):
+        score += 10
+    if any(k in query_lower for k in ["xrate", "exchange"]) and "xrate" in col_lower:
+        score += 10
+    if any(k in query_lower for k in ["share", "composition", "structure", "mix"]) and "share" in col_lower:
+        score += 5
+    if "tariff" in query_lower and "tariff" in col_lower:
+        score += 5
+    if "p_bal" in col_lower or "balancing_price" in col_lower:
+        score += 3
+    if "xrate" in col_lower:
+        score += 2
+    return score
+
+
+def _limit_derived_num_cols(
+    num_cols: List[str],
+    *,
+    query: Optional[str],
+    max_series: Optional[int],
+) -> List[str]:
+    """Cap ``num_cols`` to a readable series count for derived-chart specs.
+
+    Priority order:
+      1. Always preserve columns that score > 0 on the query-relevance
+         heuristic (so the user's intent column survives even when the
+         cap is tight).
+      2. Fill the remaining slots from the original column order
+         (preserves analyzer-provided ordering for ties).
+
+    Returns the original list when ``max_series`` is None/<=0 or the
+    list is already within the cap. See Fix G comment block above.
+    """
+    cap = max_series if (max_series and max_series > 0) else _DERIVED_CHART_DEFAULT_MAX_SERIES
+    if not num_cols or len(num_cols) <= cap:
+        return list(num_cols)
+
+    query_lower = (query or "").lower()
+    # Stable: preserve original order among equally-scored columns.
+    scored = [
+        (idx, col, _score_column_relevance(col, query_lower))
+        for idx, col in enumerate(num_cols)
+    ]
+    # Sort by (score desc, original_index asc) so high-relevance wins
+    # and ties keep analyzer ordering.
+    scored.sort(key=lambda triple: (-triple[2], triple[0]))
+    trimmed = [col for _idx, col, _score in scored[:cap]]
+    log.info(
+        "_limit_derived_num_cols capped %d → %d series (max_series=%d, query_keywords=%s): %s",
+        len(num_cols),
+        len(trimmed),
+        cap,
+        bool(query_lower),
+        trimmed,
+    )
+    return trimmed
+
+
 def _infer_transform_from_derived_metrics(dm_requests) -> Optional[str]:
     """Inspect a list of DerivedMetricRequest objects and return the
     highest-priority MeasureTransform string, or None when none match.
@@ -295,15 +375,25 @@ def _build_mom_yoy_specs(
     num_cols: List[str],
     label_map: Dict[str, str],
     measure_transform: str,
+    *,
+    query: Optional[str] = None,
+    max_series: Optional[int] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Emit two chart specs — the raw observed data and the period-over-period
     delta — so the renderer can show both panels simultaneously.
 
     Spec 0: raw ``line`` chart of the original series.
     Spec 1: derived ``bar`` chart of the period-over-period change.
+
+    Fix G (2026-05-17): ``num_cols`` is now capped via
+    ``_limit_derived_num_cols`` to prevent the 25-series chaos seen in
+    Q3 production trace 0f713756. ``query`` and ``max_series`` are
+    threaded from ``dispatch_derived_chart``.
     """
     if not num_cols or not time_key:
         return None
+
+    num_cols = _limit_derived_num_cols(num_cols, query=query, max_series=max_series)
 
     dim_map = _infer_dim_map(num_cols)
 
@@ -724,6 +814,11 @@ def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]
     time_grain = getattr(
         getattr(visualization, "time_grain", None), "value", None
     )
+    # Fix G (2026-05-17): thread query and max_series into derived builders
+    # so they can cap num_cols to a readable count.  See
+    # ``_limit_derived_num_cols`` docstring for the heuristic.
+    _query = getattr(ctx, "query", None)
+    _max_series = getattr(visualization, "max_series", None)
 
     # Prepare the common inputs once.
     df = ctx.df.copy()
@@ -749,7 +844,10 @@ def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]
             "dispatch_derived_chart: MoM/YoY override for measure_transform=%s",
             measure_transform,
         )
-        return _build_mom_yoy_specs(df, time_key, num_cols, label_map, measure_transform)
+        return _build_mom_yoy_specs(
+            df, time_key, num_cols, label_map, measure_transform,
+            query=_query, max_series=_max_series,
+        )
 
     # ---- Indexed growth ----
     if measure_transform in _INDEX_TRANSFORMS:
@@ -803,7 +901,10 @@ def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]
                 len(dm_requests),
             )
             if inferred in _MOM_YOY_TRANSFORMS:
-                return _build_mom_yoy_specs(df, time_key, num_cols, label_map, inferred)
+                return _build_mom_yoy_specs(
+                    df, time_key, num_cols, label_map, inferred,
+                    query=_query, max_series=_max_series,
+                )
             if inferred in _INDEX_TRANSFORMS:
                 return _build_index_growth_spec(df, time_key, num_cols, label_map)
 

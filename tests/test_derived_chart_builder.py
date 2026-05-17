@@ -22,6 +22,7 @@ from agent.derived_chart_builder import (  # noqa: E402
     _build_index_growth_spec,
     _build_mom_yoy_specs,
     _build_seasonal_spec,
+    _limit_derived_num_cols,
     _select_forecast_series,
     dispatch_derived_chart,
 )
@@ -558,3 +559,99 @@ def test_generate_cagr_forecast_drops_scratch_columns():
     assert scratch == [], f"Scratch columns leaked: {scratch}"
     # is_forecast marker is expected to remain.
     assert "is_forecast" in out.columns
+
+
+# ---------------------------------------------------------------------------
+# Fix G (2026-05-17) — series cap for derived chart specs
+#
+# Q3 production trace 0f713756 rendered a chart with 25+ series jamming
+# prices (0-200 GEL/MWh), shares (0-1), tariffs, and contributions on
+# one axis. Stage 3 enrichment adds ~23 driver-context columns; the
+# derived builders were passing every column straight through.
+# ---------------------------------------------------------------------------
+
+
+class TestLimitDerivedNumCols:
+    """Unit tests for the ``_limit_derived_num_cols`` helper."""
+
+    def _q3_columns(self) -> list[str]:
+        # The exact column shape from Q3's Stage 3 balancing_driver_enrichment.
+        return [
+            "balancing_price_gel", "balancing_price_usd",
+            "price_deregulated_hydro_gel", "price_deregulated_hydro_usd",
+            "price_regulated_hpp_gel", "price_regulated_hpp_usd",
+            "price_regulated_new_tpp_gel", "price_regulated_new_tpp_usd",
+            "price_regulated_old_tpp_gel", "price_regulated_old_tpp_usd",
+            "share_import", "share_deregulated_hydro", "share_regulated_hpp",
+            "share_renewable_ppa", "share_thermal_ppa", "share_cfd_scheme",
+            "regulated_hpp_tariff_gel", "regulated_old_tpp_tariff_gel",
+            "contribution_deregulated_hydro_gel", "xrate",
+        ]
+
+    def test_default_cap_is_5(self):
+        cols = self._q3_columns()
+        result = _limit_derived_num_cols(cols, query="trend of balancing prices", max_series=None)
+        assert len(result) == 5
+
+    def test_analyzer_cap_respected(self):
+        cols = self._q3_columns()
+        result = _limit_derived_num_cols(cols, query="anything", max_series=8)
+        assert len(result) == 8
+
+    def test_below_cap_returns_unchanged(self):
+        short = ["balancing_price_gel", "share_import"]
+        result = _limit_derived_num_cols(short, query="trend", max_series=None)
+        assert result == short
+
+    def test_query_relevance_prioritises_intent_column(self):
+        """For a "balancing price" query, balancing_price_* columns must
+        survive the cap even when they're far down the original list."""
+        # Put balancing_price last to force the relevance heuristic to
+        # promote it.
+        cols = [f"share_{i}" for i in range(10)] + ["balancing_price_gel"]
+        result = _limit_derived_num_cols(cols, query="balancing price trend", max_series=3)
+        assert "balancing_price_gel" in result
+
+    def test_empty_input_returns_empty(self):
+        assert _limit_derived_num_cols([], query="x", max_series=5) == []
+
+    def test_zero_or_negative_max_falls_back_to_default(self):
+        cols = self._q3_columns()
+        result_neg = _limit_derived_num_cols(cols, query="trend", max_series=0)
+        # max_series=0 falls back to the default cap, not an empty list.
+        assert len(result_neg) == 5
+        result_neg2 = _limit_derived_num_cols(cols, query="trend", max_series=-1)
+        assert len(result_neg2) == 5
+
+
+def test_mom_yoy_specs_apply_series_cap_to_observed_panel():
+    """End-to-end Fix G: feeding 20+ columns into ``_build_mom_yoy_specs``
+    should produce specs whose ``metadata.labels`` count <= the cap."""
+    import pandas as pd
+    rows = []
+    for month in pd.date_range("2025-01-01", periods=8, freq="MS"):
+        row = {"date": month}
+        # 20 numeric columns, only one of which is the user's intent.
+        for i in range(19):
+            row[f"share_col_{i}"] = 0.05 * (i + 1)
+        row["balancing_price_gel"] = 100.0 + month.month
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    num_cols = [c for c in df.columns if c != "date"]
+    label_map = {c: c for c in num_cols}
+
+    specs = _build_mom_yoy_specs(
+        df,
+        time_key="date",
+        num_cols=num_cols,
+        label_map=label_map,
+        measure_transform="mom_delta",
+        query="show balancing electricity price trend",
+        max_series=5,
+    )
+    assert specs is not None
+    observed_spec = specs[0]
+    labels = observed_spec["metadata"]["labels"]
+    assert len(labels) <= 5, f"observed spec exceeded cap: {len(labels)} labels"
+    # balancing_price_gel must survive (it's the user's intent column).
+    assert "balancing_price_gel" in labels
