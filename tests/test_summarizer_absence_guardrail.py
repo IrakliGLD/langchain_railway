@@ -142,3 +142,57 @@ def test_absence_claim_guardrail_allows_conservative_limited_availability_langua
     assert out.summary_source == "structured_summary"
     assert "does not establish a tariff value" in out.summary.lower()
     assert out.summary_citations == ["data_preview"]
+
+
+def test_absence_guardrail_allows_data_shape_equivalence_mapping():
+    """Fix F (2026-05-17) — Q2 production trace 5a00ee06.
+
+    When the LLM follows the DATA-SHAPE RULE by explicitly mapping the
+    user's categories to specific data columns and disclosing which
+    categories lack a dedicated column (e.g. "no dedicated wind
+    column — wind is grouped under price_renewable_ppa_*"), the
+    absence-claim guardrail must NOT replace the substantive answer
+    with a generic refusal.
+
+    Detection signals:
+      - phrases like "DATA-SHAPE RULE", "is grouped under",
+        "does not contain a dedicated", "no dedicated"
+      - column-name citations in backticks (``price_*``, ``share_*``,
+        ``tariff_*``, etc.)
+    """
+    q2_text = (
+        "Based on the provided 2024 data, a comparison can be made.\n\n"
+        "**Data Mapping:**\n"
+        "In accordance with the DATA-SHAPE RULE, the categories are mapped as:\n"
+        "*   Small Hydro: `price_regulated_hpp_gel`\n"
+        "*   Thermal: `price_regulated_old_tpp_gel` and `price_regulated_new_tpp_gel`\n"
+        "*   Wind: no dedicated wind column. Wind is grouped under `price_renewable_ppa_gel`.\n\n"
+        "Year-end values for some categories were not available."
+    )
+    assert summarizer._has_unsupported_absence_claims(q2_text) is False
+
+
+def test_absence_guardrail_still_catches_bare_hallucination():
+    """Negative control: a hallucination without any mapping context
+    must still trip the guardrail."""
+    hallucination = "Entity X had no values recorded during this period."
+    assert summarizer._has_unsupported_absence_claims(hallucination) is True
+
+
+def test_absence_guardrail_catches_blunt_not_available_without_mapping():
+    """Negative control: a blunt 'not available' assertion without
+    column-mapping context must still trip the guardrail."""
+    blunt = "The price for entity Y is not available."
+    assert summarizer._has_unsupported_absence_claims(blunt) is True
+
+
+def test_absence_guardrail_allows_column_citation_only():
+    """When the answer cites at least one data column by name in
+    backticks, treat it as transparent mapping rather than absence
+    claim. This is a weaker signal than the DATA-SHAPE RULE phrases
+    but is sufficient on its own."""
+    proxy_only = (
+        "We used `price_regulated_hpp_gel` as the small-hydro proxy. "
+        "Year-end values were not available for some periods."
+    )
+    assert summarizer._has_unsupported_absence_claims(proxy_only) is False

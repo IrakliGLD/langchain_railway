@@ -159,6 +159,43 @@ _SAFE_LIMITED_AVAILABILITY_PHRASES = (
     "this result set does not establish",
 )
 
+# Fix F (2026-05-17): the DATA-SHAPE RULE in the summarizer prompt
+# (see core/llm.py:_data_shape_rule) explicitly instructs the LLM to
+# disclose when a user-asked category has no dedicated column — e.g.
+# "wind is grouped under renewable_ppa" / "no pure-wind column exists".
+# Q2 production retest 5a00ee06 (2026-05-17) showed the LLM following
+# the rule correctly: it mapped "small hydro" → ``price_regulated_hpp_*``,
+# "thermal" → ``price_regulated_*_tpp_*``, and honestly said the data
+# does not contain a dedicated wind column. The absence-claim guardrail
+# pattern ``\bno\b ... \brecorded|available|present\b`` matched the
+# legitimate disclaimer and replaced the entire useful answer with a
+# generic refusal. This whitelist skips the guardrail when the summary
+# shows clear signals of transparent equivalence-mapping (referencing
+# the DATA-SHAPE RULE, citing specific data column names with
+# backticks, or using mapping/proxy language).
+_DATA_SHAPE_MAPPING_SIGNALS = (
+    "data-shape rule",
+    "data shape rule",
+    "data mapping",
+    "is grouped under",
+    "are grouped under",
+    "does not contain a dedicated",
+    "no dedicated",
+    "as a proxy for",
+    "as the proxy for",
+    "proxy column",
+    "using as a proxy",
+    "in accordance with the data-shape",
+)
+# Detects column-name citations like ``price_regulated_hpp_gel`` or
+# ``share_thermal_ppa`` wrapped in backticks — strong signal that the
+# LLM is doing transparent column-level mapping rather than asserting
+# unsupported absence.
+_COLUMN_CITATION_PATTERN = re.compile(
+    r"`(?:price|share|tariff|balancing|contribution|regulated|deregulated)_[a-z_]+`",
+    re.IGNORECASE,
+)
+
 
 # Numeric grounding helpers normalize every number before provenance matching.
 def _normalize_number_token(raw_token: str) -> Optional[str]:
@@ -374,6 +411,17 @@ def _has_unsupported_absence_claims(summary: str) -> bool:
 
     text_lower = text.lower()
     if any(phrase in text_lower for phrase in _SAFE_LIMITED_AVAILABILITY_PHRASES):
+        return False
+    # Fix F (2026-05-17) — skip the guardrail when the LLM is doing
+    # transparent DATA-SHAPE equivalence-mapping (Q2 trace 5a00ee06).
+    # See _DATA_SHAPE_MAPPING_SIGNALS comment block above.
+    if any(signal in text_lower for signal in _DATA_SHAPE_MAPPING_SIGNALS):
+        return False
+    if _COLUMN_CITATION_PATTERN.search(text):
+        # The summary cites at least one data column by name in
+        # backticks — strong signal that the LLM is being transparent
+        # about which columns it used and which it could not map.
+        # Genuine hallucinated-absence answers don't cite column names.
         return False
 
     return any(pattern.search(text) for pattern in _UNSUPPORTED_ABSENCE_PATTERNS)
