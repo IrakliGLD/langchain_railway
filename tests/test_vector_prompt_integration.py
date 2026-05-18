@@ -327,17 +327,26 @@ def test_structured_summary_prompt_includes_data_shape_rule(monkeypatch):
     system_lower = captured["system"].lower()
     # The rule must appear by name.
     assert "data-shape rule" in system_lower
-    # Fix C (2026-05-17): rule must INSTRUCT equivalence-mapping FIRST
-    # (use price_regulated_hpp_* for "small hydro", etc.) before refusing.
-    assert "small hydro" in system_lower or "regulated_hpp" in system_lower
-    assert "thermal" in system_lower and "regulated_old_tpp" in system_lower
-    # Must still preserve the anti-fabrication invariant.
+    # Revision (2026-05-18): the rule no longer bakes in Georgia-specific
+    # column-name mappings (the old text wrongly asserted "regulated HPPs
+    # are mostly small" and mapped "small hydro" to ``price_regulated_hpp_*``
+    # — see comment in core/llm.py:3554). Authoritative mappings come from
+    # DOMAIN_KNOWLEDGE via vector retrieval. The prompt only asserts the
+    # generic procedure: inspect columns, state mapping explicitly, never
+    # invent per-category numbers, treat the aggregate+composition-shares
+    # case honestly. Tests here assert ONLY on the generic principles.
+    assert "inspect" in system_lower
+    # The "state the mapping explicitly" requirement (substring matches
+    # "mapping" inside "column mapping" or similar phrasing).
+    assert "mapping" in system_lower or " map " in system_lower
+    # Anti-fabrication invariant — the heart of the rule.
     assert "do not invent" in system_lower or "not invent" in system_lower
-    # Must reference composition-share / aggregate columns for the
-    # genuinely-missing-dimension case.
+    # The aggregate+composition-shares fallback case.
     assert "composition-share" in system_lower or "composition shares" in system_lower
-    # Wind-grouping note (no pure wind column — must be flagged honestly).
-    assert "renewable_ppa" in system_lower
+    # The rule must illustrate vernacular categories without prescribing
+    # specific data-column mappings (those are domain content, not rule
+    # content).
+    assert "vernacular" in system_lower or "category" in system_lower
 
 
 def test_structured_summary_prompt_treats_regulatory_procedure_as_conceptual(monkeypatch):

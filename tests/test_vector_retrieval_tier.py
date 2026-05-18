@@ -18,7 +18,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from types import SimpleNamespace
 
-from contracts.question_analysis import AnswerKind, RenderStyle
+from contracts.question_analysis import AnswerKind, KnowledgeTopicName, RenderStyle
 from contracts.vector_knowledge import (
     VectorChunkRecord,
     VectorKnowledgeMode,
@@ -32,13 +32,14 @@ from knowledge.vector_retrieval import retrieve_vector_knowledge
 # ---------------------------------------------------------------------------
 
 
-def _resolve(answer_kind, render_style, *, is_conceptual=False):
+def _resolve(answer_kind, render_style, *, is_conceptual=False, topics=None):
     from agent.pipeline import _resolve_vector_retrieval_tier
 
     return _resolve_vector_retrieval_tier(
         answer_kind=answer_kind,
         render_style=render_style,
         is_conceptual=is_conceptual,
+        topics=topics,
     )
 
 
@@ -104,6 +105,138 @@ def test_tier_narrative_data_shapes_light():
         AnswerKind.SCENARIO,
     ):
         assert _resolve(ak, RenderStyle.NARRATIVE) == VectorRetrievalTier.LIGHT, ak
+
+
+# ---------------------------------------------------------------------------
+# Market-structure rescue (2026-05-18, Q2 production trace c995f0c7)
+#
+# When the analyzer flags a query as touching balancing-price / tariffs /
+# market-structure / CFD-PPA / PSO-trading topics, vector retrieval must
+# stay warm at LIGHT even for ``render_style=DETERMINISTIC`` data shapes.
+# Otherwise the LLM runs Stage 4 with ``domain_knowledge_in_prompt=0 chars``
+# and applies wrong column mappings (e.g. "small hydro" → ``price_regulated_hpp_*``,
+# ignoring the actual deregulated/regulated/PPA settlement-path semantics
+# documented in balancing_price.md and tariffs.md).
+# ---------------------------------------------------------------------------
+
+
+def test_tier_market_structure_topic_rescues_deterministic_data_to_light():
+    """Balancing-price topic + comparison + deterministic must yield LIGHT,
+    not SKIP. This is the exact Q2 trace c995f0c7 shape (analyzer:
+    answer_kind=comparison, render_style=deterministic,
+    candidate_topics=[balancing_price, generation_mix, market_structure])."""
+    for ak in (
+        AnswerKind.SCALAR,
+        AnswerKind.LIST,
+        AnswerKind.TIMESERIES,
+        AnswerKind.COMPARISON,
+        AnswerKind.FORECAST,
+        AnswerKind.SCENARIO,
+    ):
+        assert (
+            _resolve(
+                ak,
+                RenderStyle.DETERMINISTIC,
+                topics=[KnowledgeTopicName.BALANCING_PRICE],
+            )
+            == VectorRetrievalTier.LIGHT
+        ), ak
+
+
+def test_tier_market_structure_topics_each_individually_rescue():
+    """Each of the five market-structure topics must independently trigger
+    the LIGHT rescue when paired with deterministic data shape."""
+    for topic in (
+        KnowledgeTopicName.BALANCING_PRICE,
+        KnowledgeTopicName.TARIFFS,
+        KnowledgeTopicName.MARKET_STRUCTURE,
+        KnowledgeTopicName.CFD_PPA,
+        KnowledgeTopicName.PSO_TRADING,
+    ):
+        assert (
+            _resolve(
+                AnswerKind.COMPARISON,
+                RenderStyle.DETERMINISTIC,
+                topics=[topic],
+            )
+            == VectorRetrievalTier.LIGHT
+        ), topic
+
+
+def test_tier_non_market_structure_topics_keep_deterministic_skip():
+    """Topics outside the market-structure set must NOT trigger the rescue.
+    Pure-data topics (generation_mix, seasonal_patterns, currency_influence,
+    sql_examples, general_definitions) keep the SKIP behavior — the
+    deterministic renderer handles them without needing knowledge files."""
+    for topic in (
+        KnowledgeTopicName.GENERATION_MIX,
+        KnowledgeTopicName.SEASONAL_PATTERNS,
+        KnowledgeTopicName.CURRENCY_INFLUENCE,
+        KnowledgeTopicName.SQL_EXAMPLES,
+        KnowledgeTopicName.GENERAL_DEFINITIONS,
+    ):
+        assert (
+            _resolve(
+                AnswerKind.COMPARISON,
+                RenderStyle.DETERMINISTIC,
+                topics=[topic],
+            )
+            == VectorRetrievalTier.SKIP
+        ), topic
+
+
+def test_tier_market_structure_topic_mixed_with_others_still_rescues():
+    """A market-structure topic appearing alongside non-rescue topics
+    (the realistic case — analyzer emits up to 5 candidate topics) must
+    still trigger the LIGHT rescue."""
+    assert (
+        _resolve(
+            AnswerKind.COMPARISON,
+            RenderStyle.DETERMINISTIC,
+            topics=[
+                KnowledgeTopicName.BALANCING_PRICE,
+                KnowledgeTopicName.GENERATION_MIX,
+                KnowledgeTopicName.MARKET_STRUCTURE,
+            ],
+        )
+        == VectorRetrievalTier.LIGHT
+    )
+
+
+def test_tier_topics_none_or_empty_preserves_existing_skip():
+    """When topics is None (analyzer absent) or empty (analyzer succeeded
+    but emitted no topics), the deterministic-data SKIP behavior must
+    remain unchanged — the rescue only fires on positive topic signal."""
+    assert (
+        _resolve(AnswerKind.COMPARISON, RenderStyle.DETERMINISTIC, topics=None)
+        == VectorRetrievalTier.SKIP
+    )
+    assert (
+        _resolve(AnswerKind.COMPARISON, RenderStyle.DETERMINISTIC, topics=[])
+        == VectorRetrievalTier.SKIP
+    )
+
+
+def test_tier_market_structure_does_not_override_clarify_or_knowledge():
+    """The rescue only applies inside the deterministic-data-shape branch.
+    CLARIFY and KNOWLEDGE/EXPLANATION decisions must be unaffected by
+    topic signal."""
+    assert (
+        _resolve(
+            AnswerKind.CLARIFY,
+            RenderStyle.DETERMINISTIC,
+            topics=[KnowledgeTopicName.BALANCING_PRICE],
+        )
+        == VectorRetrievalTier.SKIP
+    )
+    assert (
+        _resolve(
+            AnswerKind.KNOWLEDGE,
+            RenderStyle.NARRATIVE,
+            topics=[KnowledgeTopicName.BALANCING_PRICE],
+        )
+        == VectorRetrievalTier.FULL
+    )
 
 
 def test_tier_fallback_conceptual_without_qa_is_full():

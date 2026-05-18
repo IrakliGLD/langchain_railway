@@ -48,7 +48,13 @@ from agent.frame_adapters import adapt_tool_result
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from analysis.system_quantities import normalize_tool_dataframe
-from contracts.question_analysis import AnswerKind, PreferredPath, RenderStyle, _SCENARIO_METRIC_NAMES
+from contracts.question_analysis import (
+    AnswerKind,
+    KnowledgeTopicName,
+    PreferredPath,
+    RenderStyle,
+    _SCENARIO_METRIC_NAMES,
+)
 from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
@@ -402,11 +408,36 @@ def _resolve_effective_answer_kind(ctx) -> AnswerKind | None:
     return None
 
 
+# Topics where the answer depends on market-structure / settlement-path
+# semantics that the LLM cannot derive from raw column values alone (e.g.
+# the ESCO buy-vs-sell asymmetry, the 14 named regulated plants, the
+# three settlement paths: regulated tariff / p_dereg / confidential PPA).
+# When the analyzer flags any of these as a candidate topic, we keep
+# vector retrieval warm at LIGHT even for ``DETERMINISTIC`` data shapes
+# so ``balancing_price.md`` / ``tariffs.md`` / ``market_structure.md``
+# reach Stage 4.
+#
+# Q2 production trace c995f0c7 (2026-05-17): analyzer emitted
+# candidate_topics=["balancing_price", "generation_mix", "market_structure"]
+# but render_style=DETERMINISTIC → tier=SKIP → no knowledge in prompt →
+# LLM applied the wrong column mapping (Fix C's baked-in mapping was
+# incorrect; the right mapping lives in balancing_price.md but never
+# reached the LLM).
+_MARKET_STRUCTURE_TOPICS = frozenset({
+    KnowledgeTopicName.BALANCING_PRICE,
+    KnowledgeTopicName.TARIFFS,
+    KnowledgeTopicName.MARKET_STRUCTURE,
+    KnowledgeTopicName.CFD_PPA,
+    KnowledgeTopicName.PSO_TRADING,
+})
+
+
 def _resolve_vector_retrieval_tier(
     answer_kind: AnswerKind | None,
     render_style: RenderStyle | None,
     *,
     is_conceptual: bool = False,
+    topics=None,
 ) -> VectorRetrievalTier:
     """Decide how much vector-retrieval effort a query warrants.
 
@@ -418,6 +449,18 @@ def _resolve_vector_retrieval_tier(
     * Data shapes (SCALAR / LIST / TIMESERIES / COMPARISON / FORECAST /
       SCENARIO) with ``DETERMINISTIC`` render → ``SKIP`` — the generic
       renderer bypasses the LLM and never consumes the vector prompt.
+      Two rescues bump this back to ``LIGHT``:
+        - ``is_conceptual=True``: heuristic / analyzer disagreement,
+          keep regulation context warm (Trace 2026-05-14 SCALAR rescue).
+        - ``topics`` contains any of ``_MARKET_STRUCTURE_TOPICS``: the
+          analyzer flagged the query as touching balancing-price /
+          tariffs / market-structure / CFD-PPA / PSO-trading semantics.
+          The LLM needs ``balancing_price.md`` / ``tariffs.md`` content
+          to map vernacular labels onto the right columns and to
+          respect the ESCO buy-vs-sell asymmetry. Trace 2026-05-17
+          c995f0c7 — ``answer_kind=comparison render_style=deterministic``
+          ran with ``domain_knowledge_in_prompt=0 chars`` and the LLM
+          applied the wrong column mapping for "small hydro sellers".
     * Data shapes with ``NARRATIVE`` render → ``LIGHT`` — the summarizer
       may sprinkle in background context, but ``top_k=6`` + re-rank is
       wasted work for a one-or-two-passage sprinkle.
@@ -439,6 +482,13 @@ def _resolve_vector_retrieval_tier(
     if answer_kind in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION):
         return VectorRetrievalTier.FULL
 
+    topic_set = (
+        set(topics) if topics is not None else set()
+    )
+    needs_market_structure_knowledge = bool(
+        topic_set & _MARKET_STRUCTURE_TOPICS
+    )
+
     if answer_kind is not None:
         # All remaining AnswerKind members are data shapes.
         if render_style == RenderStyle.DETERMINISTIC:
@@ -454,6 +504,10 @@ def _resolve_vector_retrieval_tier(
             # balancing electricity?" — SCALAR+DETERMINISTIC bypassed
             # transitory_market_rules.md Article 14 entirely.
             if is_conceptual:
+                return VectorRetrievalTier.LIGHT
+            # Market-structure rescue (2026-05-18, Q2 trace c995f0c7):
+            # see _MARKET_STRUCTURE_TOPICS comment above.
+            if needs_market_structure_knowledge:
                 return VectorRetrievalTier.LIGHT
             return VectorRetrievalTier.SKIP
         if render_style == RenderStyle.NARRATIVE:
@@ -2048,10 +2102,16 @@ def process_query(
     #   LIGHT → narrative data answers that sprinkle in background
     #   SKIP  → deterministic data paths, clarify, etc.
     _qa_for_tier = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
+    _candidate_topic_names = (
+        [tc.name for tc in (_qa_for_tier.knowledge.candidate_topics or [])]
+        if _qa_for_tier is not None
+        else None
+    )
     _retrieval_tier = _resolve_vector_retrieval_tier(
         answer_kind=ctx.effective_answer_kind,
         render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
         is_conceptual=bool(ctx.is_conceptual),
+        topics=_candidate_topic_names,
     )
     ctx.vector_retrieval_tier = _retrieval_tier
     if _retrieval_tier == VectorRetrievalTier.SKIP:

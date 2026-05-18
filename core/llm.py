@@ -3561,42 +3561,52 @@ def llm_summarize_structured(
     # 0.27, threshold 0.90) and the user got a generic fallback answer.
     #
     # Fix C (2026-05-17): softened to permit explicit equivalence
-    # mapping. Q2 production retest 2026-05-16 (trace 967145a7) showed
-    # the previous wording was TOO conservative: the Stage 3 enrichment
-    # surfaces ``price_deregulated_hydro_*`` (from price_with_usd view)
-    # and ``price_regulated_hpp_*`` / ``price_regulated_old_tpp_*`` /
-    # ``price_regulated_new_tpp_*`` (from tariff_with_usd view) — these
-    # ARE the per-category sale prices the user asks about. The LLM
-    # refused to map vernacular labels ("small hydro", "thermal") onto
-    # these columns and produced an "it is not possible" answer despite
-    # the data being present.
+    # mapping but baked in a Georgia-specific column-mapping table —
+    # including a wrong assertion that "regulated HPPs are mostly small".
     #
-    # The fix: instruct the LLM to FIRST inspect DATA_PREVIEW for
-    # equivalent / sub-category columns, USE them with an explicit
-    # mapping in the answer, and only refuse when no equivalent column
-    # exists at all. Fabrication is still banned for genuinely-missing
-    # categories.
+    # Revision (2026-05-18) — Q2 production retest 2026-05-17 (trace
+    # c995f0c7) showed the baked-in mapping itself was wrong:
+    #   - Georgian "small hydro" = deregulated/private plants (any tech,
+    #     any size, not under PPA or CfD), paid p_dereg_gel — NOT
+    #     ``price_regulated_hpp_*`` which is the weighted regulated-HPP
+    #     tariff covering 14 named regulated plants (per tariffs.md).
+    #   - ``balancing_price_gel`` is the BUYER-side price (what ESCO
+    #     charges balancing-electricity buyers), NOT what ESCO pays to
+    #     sellers (per balancing_price.md "ESCO Buy vs. Sell Asymmetry").
+    #   - The three settlement paths (regulated tariff / p_dereg / PPA-
+    #     CfD-confidential) belong in DOMAIN_KNOWLEDGE — they vary as
+    #     plants deregulate over time and should not be baked into a
+    #     system prompt that ships in code.
+    #
+    # Current fix: make the rule purely generic — inspect columns, name
+    # the column you used, never invent per-category numbers — and let
+    # the authoritative mappings come from DOMAIN_KNOWLEDGE via vector
+    # retrieval (Phase 2). The knowledge files (``balancing_price.md``,
+    # ``tariffs.md``) already carry the correct settlement-path model
+    # and the 14-plant regulated list; Phase 2 ensures they reach Stage
+    # 4 for analyst-mode balancing/pricing/tariff queries.
     data_shape_rule = (
         "DATA-SHAPE RULE: When the user asks about an entity category "
-        "(e.g. \"small hydro\", \"thermal\", \"wind\", \"regulated plants\"), "
-        "FIRST inspect DATA_PREVIEW column names for equivalent or "
-        "sub-category columns and USE them. Common mappings in this "
-        "dataset: \"small hydro\" ≈ ``price_regulated_hpp_*`` (regulated "
-        "HPPs are mostly small) plus ``price_deregulated_hydro_*`` for "
-        "deregulated hydro; \"thermal\" ≈ ``price_regulated_old_tpp_*`` "
-        "and ``price_regulated_new_tpp_*``; \"renewables\" ≈ "
-        "``price_renewable_ppa_*``. State the column mapping explicitly "
-        "in the answer (e.g. \"using regulated HPP tariff as the small-"
-        "hydro proxy\") so the user can verify.  Only refuse the "
-        "comparison for a specific category if NO equivalent or sub-"
-        "category column exists in DATA_PREVIEW (e.g. there is no pure "
-        "\"wind\" price column — wind is grouped under "
-        "``price_renewable_ppa_*`` alongside solar; say so explicitly). "
-        "Do NOT invent per-category numeric values for categories that "
-        "have no matching column. If DATA_PREVIEW shows only an "
-        "aggregate column with composition-share columns (no per-"
-        "category PRICE columns at all), describe what the data DOES "
-        "show and state which per-category sale prices are absent."
+        "(e.g. a vernacular label such as \"small hydro\", \"thermal\", "
+        "\"wind\", \"regulated plants\", \"deregulated sellers\"), do "
+        "NOT assume there is a single column whose name happens to "
+        "match that label. FIRST inspect DATA_PREVIEW column names and "
+        "any DOMAIN_KNOWLEDGE provided in the prompt to determine which "
+        "column(s) actually carry the price or quantity for that "
+        "category in this market. State the column mapping explicitly "
+        "in the answer (e.g. \"using <column_name> as the price for "
+        "<category>\") so the user can verify. When multiple columns "
+        "could plausibly map to one vernacular category, list each "
+        "candidate and explain the trade-off rather than silently "
+        "picking one. Only refuse the comparison for a specific "
+        "category if NO matching column exists in DATA_PREVIEW AND "
+        "DOMAIN_KNOWLEDGE does not document how that category is "
+        "priced. Do NOT invent per-category numeric values. If "
+        "DATA_PREVIEW shows only an aggregate column with composition-"
+        "share columns (no per-category price columns at all), describe "
+        "what the data DOES show and state which per-category sale "
+        "prices are absent rather than fabricating category-specific "
+        "numbers."
     )
 
     # --- Skill-enriched prompt (Phase 3) ---
