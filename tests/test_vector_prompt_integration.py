@@ -332,13 +332,22 @@ def test_structured_summary_prompt_includes_data_shape_rule(monkeypatch):
     # are mostly small" and mapped "small hydro" to ``price_regulated_hpp_*``
     # — see comment in core/llm.py:3554). Authoritative mappings come from
     # DOMAIN_KNOWLEDGE via vector retrieval. The prompt only asserts the
-    # generic procedure: inspect columns, state mapping explicitly, never
-    # invent per-category numbers, treat the aggregate+composition-shares
-    # case honestly. Tests here assert ONLY on the generic principles.
+    # generic procedure: inspect columns, state mapping in human-readable
+    # terms, never invent per-category numbers, treat the
+    # aggregate+composition-shares case honestly. Tests here assert ONLY
+    # on the generic principles.
     assert "inspect" in system_lower
-    # The "state the mapping explicitly" requirement (substring matches
-    # "mapping" inside "column mapping" or similar phrasing).
+    # The "state the mapping" requirement (substring matches "mapping"
+    # inside "the mapping" or similar phrasing).
     assert "mapping" in system_lower or " map " in system_lower
+    # Phase 3 (2026-05-18): the rule must instruct human-readable
+    # labels and forbid raw column/database identifiers in the
+    # user-facing answer. Before this revision the rule's own example
+    # used ``<column_name>`` in backticks and the LLM copied that
+    # pattern verbatim — leaking ``price_deregulated_hydro_gel`` into
+    # user-facing prose.
+    assert "human-readable" in system_lower
+    assert "never cite raw column" in system_lower or "raw column" in system_lower
     # Anti-fabrication invariant — the heart of the rule.
     assert "do not invent" in system_lower or "not invent" in system_lower
     # The aggregate+composition-shares fallback case.
