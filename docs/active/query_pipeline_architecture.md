@@ -139,10 +139,28 @@ HTTP /ask
 │   │   ├─ LIST       → enumerate entities, group by reason
 │   │   ├─ TIMESERIES → format period-indexed rows
 │   │   ├─ COMPARISON → subject vs baseline + delta
-│   │   ├─ SCENARIO   → payoff breakdown
-│   │   └─ FORECAST   → trendline + R² caveat + seasonal + assumptions
+│   │   └─ SCENARIO   → payoff breakdown
 │   │   Specialized formatter:
 │   │   └─ share_summary_override (renewable/thermal PPA decomposition)
+│   │
+│   ├─ [answer_kind = FORECAST] — ALWAYS through LLM (since 2026-05-22).
+│   │   Stage 3 enrichment pre-computes trendline values + R² and
+│   │   emits the ``--- TRENDLINE FORECASTS ---`` block into
+│   │   ``ctx.stats_hint``. The horizon is capped at history_years/2
+│   │   by ``_cap_trendline_horizon_to_history_depth`` so the numbers
+│   │   stay statistically defensible. The LLM consumes stats_hint
+│   │   + forecast-caveats.md (loaded into skill guidance by
+│   │   ``core/llm.py`` when forecast keywords appear) and produces
+│   │   the narrative with R²-tiered reliability templates, the
+│   │   long-horizon "focus on structural drivers" rule, and the
+│   │   July 2027 target-market regime-break warning. The
+│   │   deterministic ``generic_renderer._render_forecast`` is now
+│   │   orphan code from the production path (only exercised by a
+│   │   frame-builder unit test). Production trace c507e4d7
+│   │   (2026-05-22) showed why this matters: the deterministic
+│   │   renderer shipped "Winter (GEL): 12.49 GEL/MWh" — winter
+│   │   forecast 10× lower than current — because it rubber-stamped
+│   │   the one surviving trendline without judgment.
 │   │
 │   └─ [render_style = NARRATIVE]
 │       → LLM summarizer receives pre-structured evidence frames
@@ -240,7 +258,7 @@ A "missing requested evidence" check after Stage 3 can CLARIFY if the analyzer a
 
 `summarizer.summarize_data` dispatch order:
 
-1. **Generic renderer** (`generic_renderer.render`) — handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from canonical evidence frames. Returns None when the shape isn't covered or evidence isn't suitable.
+1. **Generic renderer** (`generic_renderer.render`) — handles SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO from canonical evidence frames. FORECAST is excluded since 2026-05-22 (commit `ef048d6`); it routes through the LLM so `forecast-caveats.md` judgment can be applied to the deterministic trendline values pre-computed in Stage 3. Returns None when the shape isn't covered or evidence isn't suitable.
 2. **share_summary_override** — deterministic specialized formatter for share-intent queries (renewable/thermal PPA decomposition + per-period price join). Sits alongside SCENARIO/FORECAST as a permanent specialized formatter per §2.3 (see §5.3 for why it's not legacy debt).
 3. **Other specialized direct answers** — regulated-tariff-list, residual-weighted-price.
 4. **LLM `llm_summarize_structured`** — for `render_style=NARRATIVE` shapes. Receives focus-aware prompts assembled from [`skills/answer-composer/`](../../skills/answer-composer/SKILL.md). Prompt budget reads `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` (independent of the analyzer budget). Truncation profile selected by `answer_kind`: `_TRUNCATION_PRIORITY_DATA` / `_KNOWLEDGE` / `_EXPLANATION` / `_FORECAST_SCENARIO`; the profile ordering follows three invariants pinned by tests — `UNTRUSTED_CONVERSATION_HISTORY` dropped first in every profile, `UNTRUSTED_EXTERNAL_SOURCE_PASSAGES` preserved last for KNOWLEDGE, `UNTRUSTED_STATISTICS` preserved last for data-grounded profiles (see [`tests/test_vector_retrieval_tier.py`](../../tests/test_vector_retrieval_tier.py)).
@@ -290,7 +308,7 @@ Runtime modules and the files they live in. If this list disagrees with the code
 ### Rendering
 
 - **[`agent/summarizer.py`](../../agent/summarizer.py)** — Stage 4 entry. Tries the generic renderer first; otherwise calls `llm_summarize_structured` with focus-aware prompts. `share_summary_override` is a deliberate specialized formatter (see §5.3). Conceptual answers go to `answer_conceptual`. Owns `_enforce_provenance_gate` (the post-hoc grounding check).
-- **[`agent/generic_renderer.py`](../../agent/generic_renderer.py)** — deterministic rendering for SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST from evidence frames.
+- **[`agent/generic_renderer.py`](../../agent/generic_renderer.py)** — deterministic rendering for SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO from evidence frames. FORECAST excluded since 2026-05-22 — routes through LLM (see §2.3 ideal-tree).
 - **[`agent/chart_pipeline.py`](../../agent/chart_pipeline.py)** — Stage 5 entry. Selects chart frame source, applies `measure_transform` / `time_grain`, iterates `chart_groups`.
 - **[`agent/chart_frame_builder.py`](../../agent/chart_frame_builder.py)** — builds chart-shaped frames from canonical evidence frames.
 - **[`agent/derived_chart_builder.py`](../../agent/derived_chart_builder.py)** — specs for MoM/YoY, index growth, decomposition, forecast, seasonal charts.
@@ -387,13 +405,14 @@ For triaging Q&A failures — latency spikes, grounding failures, schema validat
 
 ## 6. Practical Conclusion
 
-The pipeline is contract-driven end to end. Stage 0.2 emits the answer contract; evidence frames + the generic renderer cover six standard answer shapes deterministically; narrative shapes go to a focus-aware LLM summarizer; the visualization plan flows to Stage 5 without re-interpretation.
+The pipeline is contract-driven end to end. Stage 0.2 emits the answer contract; evidence frames + the generic renderer cover five standard answer shapes deterministically (SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO); FORECAST plus the narrative shapes (EXPLANATION / KNOWLEDGE) go to a focus-aware LLM summarizer with pre-computed evidence in `stats_hint`; the visualization plan flows to Stage 5 without re-interpretation.
 
 After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function `_execute_evidence_plan` called once from `process_query`. The §2.3 Ideal Decision Tree's "Tool execution + evidence collection (single loop — TARGET)" is no longer aspirational — it is the structure that function implements. The remaining structural work is removing Stage 0.7 strategies once F.2 hit-rate data clears.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 
-- **SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO / FORECAST** → no, the generic renderer handles it.
+- **SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO** → no, the generic renderer handles it.
+- **FORECAST** → no, LLM summarizer with pre-computed trendline evidence in `stats_hint` and `forecast-caveats.md` in skill guidance.
 - **EXPLANATION / KNOWLEDGE / CLARIFY** → no, narrative LLM summarizer guided by skills.
 - **Share-composition queries** → no, `share_summary_override` (specialized formatter) handles it.
 - **Analyzer mis-routing the question entirely** → that's the live quality work in §5.3 — fixed by prompt few-shots, cross-check tuning, or runtime-skill edits, not new pipeline stages.

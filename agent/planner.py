@@ -128,30 +128,7 @@ def _expand_forecast_history_window(
 ) -> tuple[Optional[str], Optional[str]]:
     """Ensure forecast tool fetches include enough historical source periods."""
 
-    # Phase A diagnostic probe (2026-05-22) — Q2 production trace c507e4d7
-    # returned 12 rows from get_prices for a forecast query, but the widener
-    # never logged "Expanding forecast source history window". Static analysis
-    # cannot pinpoint which branch silenced the log; this probe captures the
-    # actual inputs and branch decision for the next forecast invocation so
-    # we can localize the root cause without guessing. REMOVE once diagnosed.
-    log.info(
-        "ForecastWindowProbe[entry] query_type=%r tool_name=%r start_date_in=%r "
-        "end_date_in=%r granularity=%r canonical_query=%.120s",
-        getattr(qa.classification.query_type, "value", str(qa.classification.query_type)),
-        tool_name,
-        start_date,
-        end_date,
-        granularity,
-        qa.canonical_query_en or raw_query or "",
-    )
-
     if qa.classification.query_type != QueryType.FORECAST or tool_name != ToolName.GET_PRICES.value:
-        log.info(
-            "ForecastWindowProbe[early_return] reason=guard "
-            "query_type_is_forecast=%s tool_is_get_prices=%s",
-            qa.classification.query_type == QueryType.FORECAST,
-            tool_name == ToolName.GET_PRICES.value,
-        )
         return start_date, end_date
 
     query_text = (qa.canonical_query_en or raw_query or "").lower()
@@ -174,21 +151,7 @@ def _expand_forecast_history_window(
     else:
         widened_start = date(resolved_end.year - desired_history_years + 1, resolved_end.month, 1)
 
-    should_widen = resolved_start is None or resolved_start > widened_start
-    # Probe: surface the decision and the comparison values so we can see
-    # which condition path the function took.
-    log.info(
-        "ForecastWindowProbe[decision] today=%s desired_history_years=%s "
-        "resolved_start=%s resolved_end=%s widened_start=%s should_widen=%s",
-        today.isoformat(),
-        desired_history_years,
-        resolved_start.isoformat() if resolved_start else None,
-        resolved_end.isoformat(),
-        widened_start.isoformat(),
-        should_widen,
-    )
-
-    if should_widen:
+    if resolved_start is None or resolved_start > widened_start:
         log.info(
             "Expanding forecast source history window for %s: %s-%s -> %s-%s (horizon=%sy, excluded_years=%s, granularity=%s)",
             tool_name or "unknown",
@@ -202,11 +165,6 @@ def _expand_forecast_history_window(
         )
         start_date = widened_start.isoformat()
 
-    log.info(
-        "ForecastWindowProbe[exit] start_date_out=%r end_date_out=%r",
-        start_date,
-        end_date,
-    )
     return start_date, end_date
 
 
