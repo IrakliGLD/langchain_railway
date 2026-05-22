@@ -2141,13 +2141,33 @@ def _try_generic_renderer(ctx: QueryContext) -> str | None:
     """Attempt the generic renderer when answer_kind + evidence frame are available.
 
     Handles all standard deterministic answer_kinds: SCALAR, LIST, TIMESERIES,
-    COMPARISON, SCENARIO, and FORECAST.  Returns the rendered answer string,
-    or None if not applicable (caller should fall through to legacy dispatch).
+    COMPARISON, SCENARIO.  FORECAST is intentionally excluded — see below.
+    Returns the rendered answer string, or None if not applicable (caller
+    should fall through to legacy dispatch).
     """
     if not ctx.has_authoritative_question_analysis:
         return None
     qa = ctx.question_analysis
     if qa.answer_kind is None:
+        return None
+
+    # Phase C (2026-05-22): FORECAST answers go through the LLM, not the
+    # deterministic renderer. The trendline values are already in
+    # ``ctx.stats_hint`` from Stage 3 enrichment (``--- TRENDLINE FORECASTS
+    # ---`` block in ``agent/analyzer.py``), so the LLM can cite them
+    # verbatim. What the deterministic renderer cannot do — and what the
+    # LLM with ``forecast-caveats.md`` in skill guidance CAN — is apply
+    # judgment about:
+    #   - R²-tiered reliability caveats (< 0.5 vs 0.5-0.7 vs > 0.7);
+    #   - the "long-horizon → focus on structural drivers, not linear
+    #     extrapolation" rule for 5+ year forecasts;
+    #   - the July 2027 target-market regime-break warning;
+    #   - summer/winter separation with different driver mixes.
+    # Trace c507e4d7 + b7d1a493 (2026-05-22) showed the deterministic
+    # renderer shipped "Winter (GEL): 12.49 GEL/MWh" from a one-year
+    # data window (Phase B fixes the data window; Phase C ensures the
+    # LLM applies judgment to the trendline output).
+    if qa.answer_kind == AnswerKind.FORECAST:
         return None
 
     selected_tariff_aliases = {
@@ -2174,20 +2194,18 @@ def _try_generic_renderer(ctx: QueryContext) -> str | None:
         # regulated-tariff formatter.
         return None
 
-    # For SCENARIO and FORECAST, build typed frames from Stage 3 enrichment
-    # data.  These answer_kinds are inherently deterministic when evidence is
-    # available, so they bypass the render_style gate.
+    # For SCENARIO, build typed frame from Stage 3 enrichment data.  This
+    # answer_kind is inherently deterministic when evidence is available,
+    # so it bypasses the render_style gate.  (FORECAST was treated the same
+    # way until Phase C 2026-05-22; it now early-returns above so the LLM
+    # can apply forecast-caveats.md judgment to the trendline values.)
     frame = evidence_frame
     if qa.answer_kind == AnswerKind.SCENARIO:
         scenario_frame = _build_scenario_frame(ctx)
         if scenario_frame is not None and not scenario_frame.is_empty():
             frame = scenario_frame
-    elif qa.answer_kind == AnswerKind.FORECAST:
-        forecast_frame = _build_forecast_frame(ctx)
-        if forecast_frame is not None and not forecast_frame.is_empty():
-            frame = forecast_frame
     else:
-        # Non-scenario/forecast shapes require explicit DETERMINISTIC render_style.
+        # Non-scenario shapes require explicit DETERMINISTIC render_style.
         if qa.render_style != RenderStyle.DETERMINISTIC:
             return None
 

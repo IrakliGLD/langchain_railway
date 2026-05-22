@@ -57,14 +57,61 @@ def _make_forecast_qa(query: str = "test query") -> QuestionAnalysis:
     })
 
 
-def test_summarize_data_uses_generic_renderer_for_forecast(monkeypatch):
-    def _unexpected_structured(*_args, **_kwargs):
-        raise AssertionError("llm_summarize_structured should not be called for deterministic forecast answers")
+# ---------------------------------------------------------------------------
+# Phase C (2026-05-22): FORECAST answers route through the LLM, not the
+# deterministic ``generic_renderer._render_forecast``.
+#
+# Pre-Phase-C tests in this file asserted ``summary_source == "generic_renderer"``
+# and monkey-patched ``llm_summarize_structured`` to raise — locking in the
+# LLM bypass that produced the "Winter (GEL): 12.49 GEL/MWh" nonsense in
+# production trace c507e4d7. The deterministic renderer cannot apply R²
+# caveats, structural-driver rules for long horizons, or the July 2027
+# regime-break warning from ``skills/answer-composer/references/forecast-caveats.md``.
+#
+# Post-Phase-C, trendline values still get computed in Stage 3 enrichment
+# and added to ``ctx.stats_hint`` (the ``--- TRENDLINE FORECASTS ---`` block);
+# the LLM consumes that block and produces the narrative with the right
+# caveats. The two tests below verify the new invariants:
+#   1. The LLM IS called for FORECAST queries (not bypassed).
+#   2. The trendline data reaches the LLM via ``stats_hint``.
+#   3. ``summary_source`` is the LLM-path label, not ``generic_renderer``.
+#   4. ``_try_generic_renderer`` returns None for FORECAST.
+# ---------------------------------------------------------------------------
 
-    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
 
-    stats_hint = """
-Yearly CAGR=-0.61%. Forecast years: 2030.
+def _capture_llm_calls(monkeypatch, envelope_answer="LLM-rendered forecast narrative"):
+    """Helper — replace llm_summarize_structured with a capture that records
+    call args and returns a controlled SummaryEnvelope so summarize_data can
+    proceed through the LLM path in tests."""
+    from core.llm import SummaryEnvelope
+
+    captured: dict = {"called": False, "args": None, "kwargs": None}
+
+    def _capture(*args, **kwargs):
+        captured["called"] = True
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SummaryEnvelope(
+            answer=envelope_answer,
+            claims=[],
+            citations=["statistics", "data_preview"],
+            confidence=0.85,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _capture)
+    # Bypass the grounding gate so the controlled envelope passes through
+    # without re-routing into the conservative fallback.
+    monkeypatch.setattr(summarizer, "_is_summary_grounded", lambda *_a, **_kw: True)
+    return captured
+
+
+def test_forecast_routes_through_llm_with_trendline_evidence_in_stats_hint(monkeypatch):
+    """Phase C invariant — FORECAST queries must call llm_summarize_structured,
+    and the stats_hint argument passed to the LLM must contain the
+    pre-computed trendline values from Stage 3 enrichment so the LLM can
+    cite them verbatim. Replaces the pre-Phase-C tests that locked in the
+    deterministic-renderer bypass."""
+    stats_hint = """Yearly CAGR=-0.61%. Forecast years: 2030.
 
 --- TRENDLINE FORECASTS (Linear Regression) ---
 Target date: 2030-12-01
@@ -77,267 +124,69 @@ p_bal_gel:
 p_bal_usd:
   - Forecast value: 52.40
   - Equation: y = -0.001x + 54
-  - R² (goodness of fit): 0.398
+  - R² (goodness of fit): 0.398"""
 
-xrate:
-  - Forecast value: 2.77
-  - Equation: y = 0.0001x + 2.6
-  - R² (goodness of fit): 0.221
-""".strip()
+    captured = _capture_llm_calls(monkeypatch)
 
     qa = _make_forecast_qa("forecast balancing electricity price for 2030")
     ctx = QueryContext(
         query="forecast balancing electricity price for 2030",
-        preview="date,p_bal_gel,p_bal_usd,xrate\n2025-09-01,131.7,47.5,2.77",
-        stats_hint=stats_hint,
-        provenance_cols=["date", "p_bal_gel", "p_bal_usd", "xrate"],
-        provenance_rows=[("2025-09-01", 131.7, 47.5, 2.77)],
-        question_analysis=qa,
-        question_analysis_source="llm_active",
-    )
-
-    summarizer.summarize_data(ctx)
-
-    assert ctx.summary_source == "generic_renderer"
-    assert "145.25 GEL/MWh" in ctx.summary
-    assert "52.40 USD/MWh" in ctx.summary
-    assert "December 2030" in ctx.summary
-    assert "R\u00b2=0.412" in ctx.summary
-    assert "R\u00b2=0.398" in ctx.summary
-    assert "2.77" not in ctx.summary
-
-
-def test_summarize_data_renders_overall_and_seasonal_forecast_bundle(monkeypatch):
-    def _unexpected_structured(*_args, **_kwargs):
-        raise AssertionError("llm_summarize_structured should not be called for deterministic forecast answers")
-
-    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
-
-    stats_hint = """
---- TRENDLINE FORECASTS (Linear Regression) ---
-Target date: 2035-12-01
-
-p_bal_gel:
-  - Forecast value: 182.10
-  - Equation: y = 0.01x + 120
-  - RÂ² (goodness of fit): 0.612
-
-p_bal_usd:
-  - Forecast value: 63.40
-  - Equation: y = 0.004x + 45
-  - RÂ² (goodness of fit): 0.422
-
-p_bal_gel (summer):
-  - Forecast value: 160.55
-  - Equation: y = 0.008x + 110
-  - RÂ² (goodness of fit): 0.588
-
-p_bal_usd (summer):
-  - Forecast value: 55.80
-  - Equation: y = 0.003x + 40
-  - RÂ² (goodness of fit): 0.401
-
-p_bal_gel (winter):
-  - Forecast value: 208.46
-  - Equation: y = 0.012x + 135
-  - RÂ² (goodness of fit): 0.662
-
-p_bal_usd (winter):
-  - Forecast value: 62.59
-  - Equation: y = 0.002x + 47
-  - RÂ² (goodness of fit): 0.365
-""".strip()
-
-    qa = _make_forecast_qa("forecast balancing electricity price for 2035")
-    ctx = QueryContext(
-        query="forecast balancing electricity price for 2035",
-        preview="date,p_bal_gel,p_bal_usd\n2025-09-01,159.81,58.99",
+        preview="date,p_bal_gel,p_bal_usd\n2025-09-01,131.7,47.5",
         stats_hint=stats_hint,
         provenance_cols=["date", "p_bal_gel", "p_bal_usd"],
-        provenance_rows=[("2025-09-01", 159.81, 58.99)],
+        provenance_rows=[("2025-09-01", 131.7, 47.5)],
         question_analysis=qa,
         question_analysis_source="llm_active",
     )
 
     summarizer.summarize_data(ctx)
 
-    assert ctx.summary_source == "generic_renderer"
-    assert "Overall (GEL): 182.10 GEL/MWh" in ctx.summary
-    assert "Overall (USD): 63.40 USD/MWh" in ctx.summary
-    assert "Summer (GEL): 160.55 GEL/MWh" in ctx.summary
-    assert "Summer (USD): 55.80 USD/MWh" in ctx.summary
-    assert "Winter (GEL): 208.46 GEL/MWh" in ctx.summary
-    assert "Winter (USD): 62.59 USD/MWh" in ctx.summary
+    # 1. LLM was actually called.
+    assert captured["called"], "Phase C: FORECAST must route through llm_summarize_structured"
+
+    # 2. The stats_hint passed to the LLM (positional arg index 2) contains
+    #    the pre-computed trendline values so the LLM can cite them.
+    llm_stats_hint = captured["args"][2]
+    assert "TRENDLINE FORECASTS" in llm_stats_hint
+    assert "145.25" in llm_stats_hint
+    assert "52.40" in llm_stats_hint
+    assert "0.412" in llm_stats_hint  # R² value reaches the LLM
+
+    # 3. summary_source is the LLM path, not generic_renderer.
+    assert ctx.summary_source == "structured_summary"
+    assert ctx.summary_source != "generic_renderer"
 
 
-# ---------------------------------------------------------------------------
-# Phase 20 — CAGR-backed generic renderer fallback
-#
-# When Stage 3 runs ``_generate_cagr_forecast`` it suppresses the linear
-# trendline pre-calc (Phase 18 visual-conflict rule), so ``stats_hint`` no
-# longer carries a ``--- TRENDLINE FORECASTS ---`` block. Before Phase 20
-# the generic renderer's FORECAST path then returned None and the pipeline
-# fell through to the LLM summarizer, which routinely failed the strict
-# grounding check and emitted the "could not ground a detailed narrative"
-# fallback answer. These tests pin the fallback open so that regression
-# can't return.
-# ---------------------------------------------------------------------------
+def test_forecast_does_not_invoke_generic_renderer(monkeypatch):
+    """Phase C invariant — ``_try_generic_renderer`` must return None for
+    FORECAST answer_kind, so the dispatch falls through to the LLM. Pin
+    this so a future edit can't quietly re-route FORECAST back to
+    ``generic_renderer._render_forecast``."""
+    from contracts.question_analysis import AnswerKind
 
-
-def test_forecast_generic_renderer_falls_back_to_cagr_rows(monkeypatch):
-    """No TRENDLINE FORECASTS block, but ctx.df has is_forecast=True CAGR
-    rows — the generic renderer must still produce a deterministic answer."""
-    import pandas as pd
-
-    def _unexpected_structured(*_args, **_kwargs):
-        raise AssertionError(
-            "llm_summarize_structured should not be called when CAGR rows "
-            "provide a deterministic forecast"
-        )
-
-    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
-
-    # stats_hint only has the CAGR note (no TRENDLINE FORECASTS marker).
-    stats_hint = "Yearly CAGR=5.08% using yearly averages. Forecast years: 2035."
-
-    df = pd.DataFrame({
-        "date": pd.to_datetime([
-            "2023-06-01", "2024-06-01", "2025-06-01", "2035-01-01",
-        ]),
-        "p_bal_gel": [100.0, 105.0, 110.0, 190.25],
-        "is_forecast": [False, False, False, True],
-    })
-
-    qa = _make_forecast_qa("forecast balancing electricity price until 2035")
+    qa = _make_forecast_qa("forecast prices to 2035")
     ctx = QueryContext(
-        query="forecast balancing electricity price until 2035",
-        preview="date,p_bal_gel\n2025-06-01,110.0",
-        stats_hint=stats_hint,
+        query="forecast prices to 2035",
+        preview="date,p_bal_gel\n2025-01-01,100.0",
+        stats_hint=(
+            "--- TRENDLINE FORECASTS (Linear Regression) ---\n"
+            "Target date: 2035-12-01\n"
+            "p_bal_gel:\n  - Forecast value: 150.0"
+        ),
         provenance_cols=["date", "p_bal_gel"],
-        provenance_rows=[("2025-06-01", 110.0)],
+        provenance_rows=[("2025-01-01", 100.0)],
         question_analysis=qa,
         question_analysis_source="llm_active",
     )
-    ctx.df = df
+    # Sanity-check the precondition.
+    assert ctx.question_analysis.answer_kind == AnswerKind.FORECAST
 
-    summarizer.summarize_data(ctx)
-
-    assert ctx.summary_source == "generic_renderer"
-    # The CAGR-projected 2035 value must appear in the answer.
-    assert "190.25" in ctx.summary
-    # No misleading R²=0.000 display when r_squared is unknown.
-    assert "R\u00b2=0.000" not in ctx.summary
-    # Method phrase should reflect CAGR, not linear regression.
-    assert "compound annual growth rate" in ctx.summary.lower()
-
-
-def test_forecast_generic_renderer_seasonal_cagr_rows(monkeypatch):
-    """Seasonal CAGR — ``season`` column present on is_forecast rows.
-    Renderer must emit a Summer/Winter breakdown."""
-    import pandas as pd
-
-    def _unexpected_structured(*_args, **_kwargs):
-        raise AssertionError(
-            "llm_summarize_structured should not be called when CAGR rows "
-            "provide a deterministic forecast"
-        )
-
-    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
-
-    stats_hint = (
-        "Yearly CAGR=5.08%, Summer=4.13%, Winter=7.08%. Forecast years: 2035."
+    # Direct test of the dispatch helper — must return None for FORECAST.
+    result = summarizer._try_generic_renderer(ctx)
+    assert result is None, (
+        "Phase C: _try_generic_renderer must skip FORECAST so the LLM "
+        "path runs (and forecast-caveats.md judgment gets applied)."
     )
-
-    df = pd.DataFrame({
-        "date": pd.to_datetime([
-            "2023-06-01", "2023-12-01", "2024-06-01", "2024-12-01",
-            "2035-04-01", "2035-12-01",
-        ]),
-        "p_bal_gel": [100.0, 120.0, 105.0, 128.0, 175.50, 260.75],
-        "season": ["summer", "winter", "summer", "winter", "summer", "winter"],
-        "is_forecast": [False, False, False, False, True, True],
-    })
-
-    qa = _make_forecast_qa("forecast balancing electricity price until 2035")
-    ctx = QueryContext(
-        query="forecast balancing electricity price until 2035",
-        preview="date,p_bal_gel\n2024-12-01,128.0",
-        stats_hint=stats_hint,
-        provenance_cols=["date", "p_bal_gel", "season"],
-        provenance_rows=[("2024-12-01", 128.0, "winter")],
-        question_analysis=qa,
-        question_analysis_source="llm_active",
-    )
-    ctx.df = df
-
-    summarizer.summarize_data(ctx)
-
-    assert ctx.summary_source == "generic_renderer"
-    assert "175.50" in ctx.summary
-    assert "260.75" in ctx.summary
-    # Seasonal breakdown must appear.
-    assert "Summer" in ctx.summary
-    assert "Winter" in ctx.summary
-    assert "R\u00b2=0.000" not in ctx.summary
-
-
-def test_forecast_generic_renderer_seasonal_multi_currency_cagr_rows(monkeypatch):
-    """Both ``p_bal_gel`` and ``p_bal_usd`` forecast values must surface as
-    separate per-season entries when both currencies are present.  Pins the
-    fix for Defect B (single-currency forecast).
-    """
-    import pandas as pd
-
-    def _unexpected_structured(*_args, **_kwargs):
-        raise AssertionError(
-            "llm_summarize_structured should not be called when CAGR rows "
-            "provide a deterministic forecast"
-        )
-
-    monkeypatch.setattr(summarizer, "llm_summarize_structured", _unexpected_structured)
-
-    # Multi-currency note format produced by _generate_cagr_forecast when both
-    # p_bal_gel and p_bal_usd are present.
-    stats_hint = (
-        "GEL Yearly CAGR=5.08%, Summer=4.13%, Winter=7.08%; "
-        "USD Yearly CAGR=2.10%, Summer=1.80%, Winter=2.50%. "
-        "Forecast years: 2030."
-    )
-
-    df = pd.DataFrame({
-        "date": pd.to_datetime([
-            "2023-06-01", "2023-12-01", "2024-06-01", "2024-12-01",
-            "2030-04-01", "2030-12-01",
-        ]),
-        "p_bal_gel": [100.0, 120.0, 105.0, 128.0, 175.50, 260.75],
-        "p_bal_usd": [40.0,  44.0,  42.0,  47.5,  55.80,   62.59],
-        "season": ["summer", "winter", "summer", "winter", "summer", "winter"],
-        "is_forecast": [False, False, False, False, True, True],
-    })
-
-    qa = _make_forecast_qa("forecast balancing electricity price until 2030")
-    ctx = QueryContext(
-        query="forecast balancing electricity price until 2030",
-        preview="date,p_bal_gel,p_bal_usd\n2024-12-01,128.0,47.5",
-        stats_hint=stats_hint,
-        provenance_cols=["date", "p_bal_gel", "p_bal_usd", "season"],
-        provenance_rows=[("2024-12-01", 128.0, 47.5, "winter")],
-        question_analysis=qa,
-        question_analysis_source="llm_active",
-    )
-    ctx.df = df
-
-    summarizer.summarize_data(ctx)
-
-    assert ctx.summary_source == "generic_renderer"
-    # All four forecast values must appear: summer × GEL/USD, winter × GEL/USD.
-    assert "175.50" in ctx.summary
-    assert "260.75" in ctx.summary
-    assert "55.80" in ctx.summary
-    assert "62.59" in ctx.summary
-    assert "Summer" in ctx.summary and "Winter" in ctx.summary
-    # Both currency labels must be present.
-    assert "GEL" in ctx.summary and "USD" in ctx.summary
 
 
 def test_forecast_generic_renderer_ignores_scratch_and_reference_cols():
