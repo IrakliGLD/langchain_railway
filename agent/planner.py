@@ -2270,16 +2270,33 @@ def resolve_tool_params(
         end_date = end_date or regex_end
 
     # Forecasts need historical source data, not the future horizon itself.
+    #
+    # Fix (2026-05-22, Phase B) — Q2 production trace c507e4d7 + ForecastWindowProbe
+    # capture b7d1a493 confirmed the analyzer emitted ``start=2025-01-01,
+    # end=2034-12-31`` for "forecast next 10 years" — i.e. the FORECAST HORIZON
+    # as the source-data window. The previous check (``start_dt.year >=
+    # date.today().year``) required start to be in the current year or later,
+    # so this query slipped through (start.year=2025 < today.year=2026 → False).
+    # The bogus end date (2034-12-31) was then handed to the widener, which
+    # computed widened_start=2027-12-01 (8 years before 2034) and decided the
+    # window was already wide enough — leaving the tool to fetch only ~12 rows
+    # of actual 2025-onward data.
+    #
+    # The right signal is END_DATE in the future. Whenever a forecast query's
+    # end date is past ``today``, the date range is (partially or fully) the
+    # forecast horizon, not the source-data window. Clear both and let
+    # ``_expand_forecast_history_window`` compute the proper historical
+    # window. This is strictly more inclusive than the old check:
+    #   - both in future (old caught it)          → still caught
+    #   - start in past, end in future (NEW)      → now caught
+    #   - start None, end in future (NEW)         → now caught
+    #   - both in past                            → not caught (correct)
+    #   - end None / end at/before today          → not caught (correct)
     if qa.classification.query_type == QueryType.FORECAST:
-        start_dt = _parse_iso_date(start_date)
         end_dt = _parse_iso_date(end_date)
-        if (
-            start_dt is not None
-            and end_dt is not None
-            and start_dt.year >= date.today().year
-        ):
+        if end_dt is not None and end_dt > date.today():
             log.info(
-                "Forecast query resolved only future horizon dates (%s-%s); clearing source window so tools fetch historical data",
+                "Forecast query resolved future horizon dates (%s-%s); clearing source window so tools fetch historical data",
                 start_date,
                 end_date,
             )

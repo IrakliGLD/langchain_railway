@@ -323,6 +323,176 @@ class TestResolveToolParams:
         assert params["start_date"] == "2019-03-01"
         assert params["end_date"] == "2026-03-31"
 
+    # -----------------------------------------------------------------
+    # Phase B (2026-05-22) — fix for Q2 production trace b7d1a493.
+    #
+    # The previous future-only check at planner.py:2273-2287 required
+    # ``start_dt.year >= date.today().year`` to clear analyzer-emitted
+    # forecast-horizon dates. For "forecast next 10 years" the analyzer
+    # emitted start=2025-01-01, end=2034-12-31 — start is 17 months in
+    # the past but end is 8.5 years in the future. The old check
+    # (today.year=2026, start.year=2025 → 2025 < 2026 → False) skipped
+    # clearing. The widener then saw resolved_end=2034-12-31 and computed
+    # widened_start=2027-12-01 (8 years before 2034) — concluding start
+    # was "already wide enough" — and the tool fetched only ~12 rows of
+    # 2025-onward data instead of 5+ years of monthly history.
+    #
+    # The correct signal is END_DATE in the future. The new check
+    # ``end_dt > date.today()`` catches the full pattern (start anywhere
+    # + end in future). Tests below cover the failure mode plus three
+    # negative controls.
+    # -----------------------------------------------------------------
+
+    def test_forecast_clears_horizon_when_start_past_end_future(self, monkeypatch):
+        """Phase B regression — Q2 trace b7d1a493 exact shape.
+        Analyzer emits start=current_year-1, end=current_year+8.5 for
+        'forecast next 10 years'. Both dates must be cleared so the
+        widener fetches real history."""
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 5, 22)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
+        payload = _make_qa_payload(
+            query_type="forecast",
+            period={
+                "kind": "range",
+                "start_date": "2025-01-01",
+                "end_date": "2034-12-31",
+                "granularity": "year",
+                "raw_text": "next 10 years",
+            },
+        )
+        payload["raw_query"] = "forecast balancing electricity price for next 10 years"
+        payload["canonical_query_en"] = "forecast balancing electricity price for next 10 years"
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        # Dates cleared by the future-end check → widener fires. With
+        # horizon=10 years → desired_history_years=max(5,min(8,12))=8.
+        # resolved_end = _last_completed_month_end(2026-05-22) = 2026-04-30.
+        # widened_start = date(2026-8+1, 4, 1) = 2019-04-01.
+        assert params is not None
+        assert params["granularity"] == "monthly"
+        assert params["start_date"] == "2019-04-01"
+        assert params["end_date"] == "2026-04-30"
+
+    def test_forecast_preserves_past_only_window(self, monkeypatch):
+        """Negative control — user asked for forecast based on a
+        specific HISTORICAL window (e.g. 'forecast based on 2020-2022
+        data'). Both dates are in the past → the check must NOT clear
+        them. The widener may still widen if the window is narrower
+        than desired_history_years, but the analyzer's intent stays."""
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 5, 22)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
+        payload = _make_qa_payload(
+            query_type="forecast",
+            period={
+                "kind": "range",
+                "start_date": "2020-01-01",
+                "end_date": "2022-12-31",
+                "granularity": "year",
+                "raw_text": "2020-2022",
+            },
+        )
+        payload["raw_query"] = "forecast based on 2020-2022 historical data"
+        payload["canonical_query_en"] = "forecast based on 2020-2022 historical data"
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        # end_dt (2022-12-31) <= today (2026-05-22) → NOT cleared.
+        # Widener still fires because resolved_start (2020-01-01) >
+        # widened_start (date(2022-3+2)+1 → 2015-12-01 with default
+        # horizon=3 → desired_history=5 → date(2018,12,1)). Actually
+        # 2020-01-01 > 2018-12-01 → widen to 2018-12-01.
+        # The key assertion is that end_date stayed at the user-provided
+        # historical value, not reset to today's _last_completed_month_end.
+        assert params is not None
+        assert params["end_date"] == "2022-12-31"
+
+    def test_forecast_preserves_end_exactly_today(self, monkeypatch):
+        """Boundary case — end_date equals today (the most recent
+        completed period). The check uses strict ``>``, so end-at-today
+        is treated as historical and NOT cleared."""
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 5, 22)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
+        payload = _make_qa_payload(
+            query_type="forecast",
+            period={
+                "kind": "range",
+                "start_date": "2023-01-01",
+                "end_date": "2026-05-22",  # exactly today
+                "granularity": "month",
+                "raw_text": "through today",
+            },
+        )
+        payload["raw_query"] = "forecast from 2023 data through today"
+        payload["canonical_query_en"] = "forecast from 2023 data through today"
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        # end_dt (2026-05-22) NOT > today (2026-05-22) → NOT cleared.
+        # end stays at the analyzer-provided value.
+        assert params is not None
+        assert params["end_date"] == "2026-05-22"
+
+    def test_non_forecast_query_unaffected_by_check(self, monkeypatch):
+        """Negative control — non-forecast queries (e.g. data_retrieval)
+        must not be touched by the forecast-horizon check, even if the
+        analyzer emitted future dates."""
+        from agent import planner
+
+        class _FixedDate(planner.date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 5, 22)
+
+        monkeypatch.setattr(planner, "date", _FixedDate)
+
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            period={
+                "kind": "range",
+                "start_date": "2025-01-01",
+                "end_date": "2034-12-31",
+                "granularity": "year",
+                "raw_text": "weird future range",
+            },
+        )
+        payload["raw_query"] = "show prices from 2025 to 2034"
+        payload["canonical_query_en"] = "show prices from 2025 to 2034"
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        # query_type != FORECAST → the future-horizon check doesn't fire.
+        # Dates pass through unmodified to the SQL layer (which would
+        # then return no rows, but that's the caller's concern).
+        assert params is not None
+        assert params["start_date"] == "2025-01-01"
+        assert params["end_date"] == "2034-12-31"
+
     def test_expands_single_month_range_window_for_derived_metrics(self):
         payload = _make_qa_payload(
             query_type="data_explanation",
