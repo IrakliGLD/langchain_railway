@@ -1651,6 +1651,60 @@ def _extract_forecast_horizon(query: str) -> int:
     return extract_forecast_horizon_years(query)
 
 
+def _cap_trendline_horizon_to_history_depth(
+    extend_to: Optional[str],
+    df: Optional[pd.DataFrame],
+    cols: list,
+) -> Optional[str]:
+    """Cap a requested trendline horizon at half the available history depth.
+
+    Phase D (2026-05-22) — production trace c507e4d7 had 12 monthly rows
+    of source data but ``trendline_extend_to`` was ``2036-12-01`` (~11
+    years out). Extrapolating linear regression across 11 future years
+    from 1 year of data is mathematically meaningless; the surviving
+    winter trendline (R²=0.568 on 4 points) projected to
+    "12.49 GEL/MWh" — winter forecast 10× lower than current price.
+
+    The ``forecast-caveats.md`` rule "Long-term (5+ years) → focus on
+    structural drivers rather than linear extrapolation" lives in the
+    LLM-facing skill guidance (Phase C routes FORECAST through the
+    LLM). This helper adds a code-level guardrail: cap the trendline
+    projection at half the available history.
+
+      - 8 years of data → max projection 4 years out
+      - 5 years of data → max projection 2 years out
+      - 1 year of data  → max projection 1 year out (floor)
+
+    The LLM can still *discuss* longer horizons via structural drivers
+    in the narrative — but the extrapolated NUMBERS that ship to the
+    user via ``stats_hint`` stay within statistical plausibility.
+
+    Returns the (possibly-capped) extend_to date as an ISO string, or
+    the input unchanged if no cap applies (missing data, parse error,
+    horizon already within bounds).
+    """
+    if not extend_to or df is None or df.empty:
+        return extend_to
+    time_col = next(
+        (c for c in (cols or []) if any(k in c.lower() for k in ("date", "year", "month", "period"))),
+        None,
+    )
+    if not time_col or time_col not in df.columns:
+        return extend_to
+    date_series = pd.to_datetime(df[time_col], errors="coerce").dropna()
+    if date_series.empty:
+        return extend_to
+    hist_min = date_series.min()
+    hist_max = date_series.max()
+    history_years = max(1, int((hist_max - hist_min).days / 365.25))
+    max_horizon_years = max(1, history_years // 2)
+    max_extend = hist_max + pd.DateOffset(years=max_horizon_years)
+    extend_dt = pd.to_datetime(extend_to, errors="coerce")
+    if pd.isna(extend_dt) or extend_dt <= max_extend:
+        return extend_to
+    return max_extend.strftime("%Y-%m-%d")
+
+
 def _month_from_text(s: str) -> Optional[int]:
     months = {
         # English
@@ -2362,6 +2416,27 @@ def enrich(ctx: QueryContext) -> QueryContext:
             current_year = datetime.now().year
             horizon = _extract_forecast_horizon(ctx.query)
             ctx.trendline_extend_to = f"{current_year + horizon}-12-01"
+
+        # Phase D (2026-05-22) — cap horizon to history depth.
+        # See ``_cap_trendline_horizon_to_history_depth`` below for rationale.
+        try:
+            capped = _cap_trendline_horizon_to_history_depth(
+                ctx.trendline_extend_to,
+                ctx.df,
+                ctx.cols or [],
+            )
+            if capped != ctx.trendline_extend_to:
+                log.info(
+                    "📈 Capping trendline horizon: %s -> %s "
+                    "(history//2 rule). LLM can still discuss longer "
+                    "horizons via structural-drivers caveats.",
+                    ctx.trendline_extend_to,
+                    capped,
+                )
+                ctx.trendline_extend_to = capped
+        except Exception as cap_err:
+            log.warning("Trendline horizon cap failed (non-fatal): %s", cap_err)
+
         log.info(f"📈 Trendline requested: extending to {ctx.trendline_extend_to}")
 
         # Pre-calculate trendlines for forecast answer generation
