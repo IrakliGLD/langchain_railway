@@ -1927,6 +1927,22 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             df["is_forecast"] = False
         df_f = pd.concat([df, pd.DataFrame(f_rows)], ignore_index=True)
         note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
+        # Phase G (2026-05-22) — emit projected end-of-horizon value(s) so
+        # the LLM can cite them verbatim. Pre-Phase-G, the LLM saw the CAGR
+        # rate + baseline in stats_hint and DERIVED the projection itself
+        # (e.g. 160 × 1.0027^10 ≈ 165), but that derived number wasn't in
+        # the evidence corpus, so the provenance gate flagged it as
+        # ungrounded and the conservative-fallback answer replaced the
+        # substantive one. See production trace 6aba2969 (2026-05-22).
+        if target_years:
+            end_year = max(target_years)
+            end_val = last_val * ((1 + cagr) ** (end_year - last["year"]))
+            note_parts.append("--- CAGR PROJECTIONS ---")
+            note_parts.append(
+                f"{value_col}: baseline={last_val:.2f} (year {int(last['year'])}), "
+                f"CAGR={cagr*100:.2f}%/year, "
+                f"projection by {int(end_year)} = {end_val:.2f}"
+            )
         return _strip_scratch(df_f), " ".join(note_parts)
 
     elif data_type == "price":
@@ -2130,6 +2146,48 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         if time_granularity != "year" and "__forecast_season" in df_f.columns:
             df_f["season"] = df_f.get("season").fillna(df_f["__forecast_season"])
         note_parts.append(f"Forecast years: {', '.join(map(str, target_years))}.")
+        # Phase G (2026-05-22) — emit projected end-of-horizon value(s) so
+        # the LLM can cite them verbatim. See companion comment in the
+        # quantity branch above and production trace 6aba2969 (2026-05-22).
+        if target_years:
+            end_year = max(target_years)
+            projection_lines = ["--- CAGR PROJECTIONS ---"]
+            for vc, stats in per_currency.items():
+                vc_lower = vc.lower()
+                currency_label = (
+                    "GEL" if vc_lower.endswith("_gel")
+                    else "USD" if vc_lower.endswith("_usd")
+                    else vc
+                )
+                cagr_y_vc = stats["cagr_y"]
+                if np.isnan(cagr_y_vc):
+                    continue
+                baseline_vc = stats["last_val"]
+                horizon_years = end_year - stats["last_year"]
+                end_val = baseline_vc * ((1 + cagr_y_vc) ** horizon_years)
+                projection_lines.append(
+                    f"{currency_label} (yearly): baseline={baseline_vc:.2f} "
+                    f"(year {stats['last_year']}), CAGR={format_cagr(cagr_y_vc)}%/year, "
+                    f"projection by {int(end_year)} = {end_val:.2f}"
+                )
+                # Seasonal projections, when available, give the LLM a
+                # cite-able number for the summer/winter end values too.
+                if not np.isnan(stats["cagr_s"]) and not np.isnan(stats["s_last"]) and stats["s_last"] > 0:
+                    end_s = stats["s_last"] * ((1 + stats["cagr_s"]) ** horizon_years)
+                    projection_lines.append(
+                        f"{currency_label} (summer): baseline={stats['s_last']:.2f}, "
+                        f"CAGR={format_cagr(stats['cagr_s'])}%/year, "
+                        f"projection by {int(end_year)} = {end_s:.2f}"
+                    )
+                if not np.isnan(stats["cagr_w"]) and not np.isnan(stats["w_last"]) and stats["w_last"] > 0:
+                    end_w = stats["w_last"] * ((1 + stats["cagr_w"]) ** horizon_years)
+                    projection_lines.append(
+                        f"{currency_label} (winter): baseline={stats['w_last']:.2f}, "
+                        f"CAGR={format_cagr(stats['cagr_w'])}%/year, "
+                        f"projection by {int(end_year)} = {end_w:.2f}"
+                    )
+            if len(projection_lines) > 1:  # more than just the header
+                note_parts.append("\n".join(projection_lines))
         return _strip_scratch(df_f), " ".join(note_parts)
 
     else:
