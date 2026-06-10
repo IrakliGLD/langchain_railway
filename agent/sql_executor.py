@@ -50,6 +50,55 @@ except ImportError:
 
 BALANCING_SEGMENT_NORMALIZER = "balancing"
 
+# type_tech side-narrowing intent keywords. The legacy SQL path post-filters a
+# mixed-side generation result down to ONE market side only when the question
+# explicitly signals that side. Total / ambiguous questions must keep all rows
+# rather than silently defaulting to supply (which understated totals — audit L1).
+DEMAND_INTENT_KEYWORDS = ("demand", "consumption", "loss", "export")
+SUPPLY_INTENT_KEYWORDS = (
+    # English
+    "generation", "generate", "generated", "generating",
+    "supply", "supplied", "produce", "produced", "production", "output",
+    # Georgian
+    "გენერაცია", "წარმოება", "გამომუშავება",
+    # Russian
+    "генерация", "выработка", "производство",
+)
+
+
+def _resolve_type_tech_side(query: str):
+    """Return (label, tech_types) when the query explicitly targets one market
+    side, else None. Demand intent wins over transit, which wins over supply;
+    no match means a total/ambiguous query that should keep all rows."""
+    q = (query or "").lower()
+    if any(w in q for w in DEMAND_INTENT_KEYWORDS):
+        return "demand", DEMAND_TECH_TYPES
+    if "transit" in q:
+        return "transit", TRANSIT_TECH_TYPES
+    if any(w in q for w in SUPPLY_INTENT_KEYWORDS):
+        return "supply", SUPPLY_TECH_TYPES
+    return None
+
+
+def apply_type_tech_side_filter(df: pd.DataFrame, query: str) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Narrow a ``type_tech`` result to one market side only on explicit intent.
+
+    Returns (possibly_filtered_df, applied_side_label_or_None). A total or
+    ambiguous query returns the dataframe unchanged with ``None`` — it must NOT
+    be silently reduced to the supply side. If the matched side filters to an
+    empty frame, the original frame is kept (no usable narrowing).
+    """
+    if "type_tech" not in df.columns:
+        return df, None
+    side = _resolve_type_tech_side(query)
+    if side is None:
+        return df, None
+    label, tech_types = side
+    filtered = df[df["type_tech"].isin(tech_types)]
+    if filtered.empty:
+        return df, None
+    return filtered.copy(), label
+
 # Deterministic share pivot used both for direct fallback queries and repair paths.
 BALANCING_SHARE_PIVOT_SQL = f"""
 SELECT
@@ -339,24 +388,20 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         from utils.metrics import metrics
         metrics.log_sql_query(elapsed)
 
-        # Narrow mixed generation results to the side of the market implied by the question.
+        # Narrow mixed generation results to the side of the market implied by
+        # the question — but only on explicit intent. Total/ambiguous queries
+        # keep all rows (no silent supply-only default; audit L1).
         if "type_tech" in df.columns:
-            user_query_lower = ctx.query.lower()
-            if any(w in user_query_lower for w in ["demand", "consumption", "loss", "export"]):
-                demand_df = df[df["type_tech"].isin(DEMAND_TECH_TYPES)]
-                if not demand_df.empty:
-                    df = demand_df.copy()
-                    log.info(f"⚙️ Showing DEMAND side only: {DEMAND_TECH_TYPES}")
-            elif "transit" in user_query_lower:
-                transit_df = df[df["type_tech"].isin(TRANSIT_TECH_TYPES)]
-                if not transit_df.empty:
-                    df = transit_df.copy()
-                    log.info("⚙️ Showing TRANSIT data only.")
-            else:
-                supply_df = df[df["type_tech"].isin(SUPPLY_TECH_TYPES)]
-                if not supply_df.empty:
-                    df = supply_df.copy()
-                    log.info(f"⚙️ Showing SUPPLY side only: {SUPPLY_TECH_TYPES}")
+            df, applied_side = apply_type_tech_side_filter(df, ctx.query)
+            if applied_side:
+                log.info("⚙️ Showing %s side only (explicit intent)", applied_side.upper())
+                trace_detail(
+                    log,
+                    ctx,
+                    "stage_2_sql_execute",
+                    "type_tech_side_filter",
+                    side=applied_side,
+                )
 
         ctx.df = df
         ctx.cols = list(df.columns)

@@ -13,7 +13,7 @@ import logging
 from typing import Set
 
 from fastapi import HTTPException
-from sqlglot import parse_one, exp
+from sqlglot import parse, parse_one, exp
 from sqlglot.errors import ParseError
 
 from config import (
@@ -175,11 +175,22 @@ def sanitize_sql(sql: str) -> str:
     # Remove single-line comments
     sql = re.sub(r"--.*", "", sql)
 
-    # Parse and enforce read-only query shape.
+    # Reject stacked / multi-statement input BEFORE shape validation.
+    # parse_one() (used below and by simple_table_whitelist_check) inspects only
+    # the first statement, so a payload like "SELECT ...; SELECT ... FROM auth.users"
+    # would pass validation while the full string still reaches the driver. Parse
+    # the whole input and require exactly one statement. A trailing ";" yields a
+    # None entry, which we drop.
     try:
-        parsed = parse_one(sql, read="postgres")
+        statements = parse(sql, read="postgres")
     except ParseError:
         raise HTTPException(400, "Invalid SQL syntax.")
+    non_empty = [stmt for stmt in statements if stmt is not None]
+    if len(non_empty) != 1:
+        raise HTTPException(400, "Only a single read-only statement is allowed.")
+
+    # Parse and enforce read-only query shape (single statement guaranteed above).
+    parsed = non_empty[0]
 
     allowed_roots = (exp.Select, exp.Union, exp.Except, exp.Intersect)
     if not isinstance(parsed, allowed_roots):

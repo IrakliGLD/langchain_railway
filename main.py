@@ -283,6 +283,42 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
     metrics.log_security_event(event_type)
     security_log.warning(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
+
+def filter_caller_history(
+    raw_history: Optional[List[Dict[str, Any]]],
+    *,
+    is_bearer: bool,
+    max_item_chars: int = 2000,
+    max_items: int = 3,
+) -> Tuple[List[Dict[str, str]], int]:
+    """Normalize caller-provided conversation history into seedable turns.
+
+    Returns (history_items, blocked_count).
+
+    Gateway-mode history is server-loaded by the edge function and trusted, so it
+    is only length-capped (preserving prior behavior). In public-bearer mode the
+    history is client-controlled and untrusted (audit S6): each turn's question
+    and answer are run through the firewall — turns that trip a block rule are
+    dropped, and surviving text is replaced with its sanitized form.
+    """
+    items: List[Dict[str, str]] = []
+    blocked = 0
+    for turn in (raw_history or [])[:max_items]:
+        if not (isinstance(turn, dict) and turn.get("question")):
+            continue
+        question = str(turn.get("question", ""))[:max_item_chars]
+        answer = str(turn.get("answer", ""))[:max_item_chars]
+        if is_bearer:
+            q_decision = inspect_query(question)
+            a_decision = inspect_query(answer)
+            if q_decision.action == "block" or a_decision.action == "block":
+                blocked += 1
+                continue
+            question = q_decision.sanitized_query
+            answer = a_decision.sanitized_query
+        items.append({"question": question, "answer": answer})
+    return items, blocked
+
 # Caller-aware rate limiting: key by authenticated identity when available,
 # fall back to IP for unauthenticated/rejected traffic.
 def _rate_limit_key(request: Request) -> str:
@@ -916,14 +952,18 @@ def ask_post(
         # load persisted turns from the database on behalf of the authenticated user.
         _MAX_HISTORY_ITEM_CHARS = 2000  # ~500 tokens per item, 6 items max
         if not bound_history and q.conversation_history:
-            bound_history = [
-                {
-                    "question": str(t.get("question", ""))[:_MAX_HISTORY_ITEM_CHARS],
-                    "answer": str(t.get("answer", ""))[:_MAX_HISTORY_ITEM_CHARS],
-                }
-                for t in q.conversation_history[:3]
-                if isinstance(t, dict) and t.get("question")
-            ]
+            bound_history, blocked_history_turns = filter_caller_history(
+                q.conversation_history,
+                is_bearer=(caller.auth_mode == "public_bearer"),
+                max_item_chars=_MAX_HISTORY_ITEM_CHARS,
+            )
+            if blocked_history_turns:
+                log_security_event(
+                    "bearer_history_turn_blocked",
+                    request=request,
+                    subject_id=caller.subject_id,
+                    blocked_turns=blocked_history_turns,
+                )
             if bound_history:
                 seed_history(session_id, bound_history)
                 log.info(

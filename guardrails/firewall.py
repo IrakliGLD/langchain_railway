@@ -56,6 +56,69 @@ _BLOCK_RULES = [
             re.IGNORECASE | re.DOTALL,
         ),
     ),
+    # --- Multilingual variants (Georgian / Russian) ---------------------------
+    # The product accepts Georgian and Russian; the English-only rules above let
+    # jailbreak / prompt-exfiltration attempts in those languages pass straight
+    # through (audit S2). These reuse the SAME rule names so the block-category
+    # gate below fires identically.
+    #
+    # NOTE: phrasings are best-effort common forms and should be reviewed by a
+    # native Georgian/Russian speaker before relying on them as the sole control;
+    # they are additive and never weaken the English rules.
+    (
+        "instruction_override",
+        re.compile(
+            r"(игнорир\w*|проигнорир\w*|забуд\w*|отмени|не\s+обращай\s+внимани\w*)"
+            r".{0,80}"
+            r"(предыдущ\w*|выше|систем\w*|инструкц\w*|правил\w*|указани\w*)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "instruction_override",
+        re.compile(
+            r"(უგულებელყ\w*|იგნორ\w*|დაივიწყ\w*|გამოტოვ\w*)"
+            r".{0,80}"
+            r"(წინა|ზემოთ|სისტემ\w*|ინსტრუქც\w*|წეს\w*|მითითებ\w*)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "prompt_exfiltration",
+        re.compile(
+            r"(покажи|раскрой|выведи|напечатай|сообщи|скажи)"
+            r".{0,120}"
+            r"(систем\w*\s+промпт|скрыт\w*|внутренн\w*\s+инструкц\w*|систем\w*\s+инструкц\w*|подсказк\w*)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "prompt_exfiltration",
+        re.compile(
+            r"(აჩვენე|გამოავლინე|დაბეჭდე|მაჩვენე|გაამხილე)"
+            r".{0,120}"
+            r"(სისტემ\w*\s+პრომპტ|დამალულ\w*|შიდა\s+ინსტრუქც\w*|სისტემ\w*\s+ინსტრუქც\w*)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "role_hijack",
+        re.compile(
+            r"(ты\s+теперь|веди\s+себя\s+как|притворись|играй\s+роль)"
+            r".{0,80}"
+            r"(систем\w*|разработчик\w*|root|админ\w*|dan|jailbreak)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "role_hijack",
+        re.compile(
+            r"(შენ\s+ახლა\s+ხარ|იმოქმედე\s+როგორც|მოიქეც\w*\s+როგორც|ითამაშე\s+როლი)"
+            r".{0,80}"
+            r"(სისტემ\w*|დეველოპერ\w*|root|админ\w*|dan|jailbreak)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
 ]
 
 _WARN_RULES = [
