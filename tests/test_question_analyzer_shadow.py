@@ -41,9 +41,9 @@ class _DummyEngine:
 
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
+from agent import pipeline, planner  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core import llm as llm_core  # noqa: E402
-from agent import planner, pipeline  # noqa: E402
 from models import QueryContext  # noqa: E402
 
 

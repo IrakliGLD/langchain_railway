@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import List, Optional, Tuple
 
 from sqlalchemy import bindparam, text
+
 from contracts.vector_knowledge import (
     ChunkIngestRecord,
     ChunkReference,
@@ -728,7 +729,6 @@ class KnowledgeVectorStore:
         params = {"embedding": embedding_literal, "candidate_k": max(candidate_k, top_k)}
         bind_params = []
 
-        preferred_topics = [topic for topic in filters.preferred_topics if str(topic or "").strip()]
         languages = [language for language in filters.languages if str(language or "").strip()]
         document_types = [doc_type for doc_type in filters.document_types if str(doc_type or "").strip()]
         issuers = [issuer for issuer in filters.issuers if str(issuer or "").strip()]

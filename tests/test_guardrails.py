@@ -46,16 +46,19 @@ class _DummyEngine:
 # Prevent DB driver import during module imports in tests.
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
-from guardrails.firewall import inspect_query, build_safe_refusal_message  # noqa: E402
-from utils.query_validation import validate_tool_relevance  # noqa: E402
-from models import QueryContext  # noqa: E402
-from agent import summarizer, sql_executor  # noqa: E402
-from agent import analyzer  # noqa: E402
+import core.llm as llm_core  # noqa: E402
+from agent import (  # noqa: E402
+    analyzer,  # noqa: E402
+    sql_executor,
+    summarizer,
+)
 from agent.provenance import sql_query_hash  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
-import core.llm as llm_core  # noqa: E402
+from guardrails.firewall import build_safe_refusal_message, inspect_query  # noqa: E402
+from models import QueryContext  # noqa: E402
 from utils.metrics import metrics  # noqa: E402
+from utils.query_validation import validate_tool_relevance  # noqa: E402
 
 
 def test_tool_registry_imports_without_syntax_error():
@@ -721,7 +724,7 @@ def test_why_share_queries_do_not_trigger_price_override(monkeypatch):
         ],
     )
 
-    enriched = analyzer.enrich(ctx)
+    analyzer.enrich(ctx)
 
 
 
@@ -1795,8 +1798,8 @@ def test_chart_alias_covers_all_metric_families():
 
 def test_analyzer_overrides_heuristic_conceptual_for_data_query(monkeypatch):
     """When heuristic says conceptual but analyzer confidently says sql/tool, override to data path."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     data_payload = {
         "version": "question_analysis_v1",
@@ -1938,8 +1941,8 @@ def test_data_explanation_with_knowledge_path_not_conceptual(monkeypatch):
     This is the exact scenario from Railway logs where the analyzer correctly identifies
     data_explanation but routes to knowledge, causing the pipeline to short-circuit.
     """
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("data_explanation", "knowledge", confidence=1.0)
     expected = QuestionAnalysis.model_validate(payload)
@@ -1972,8 +1975,8 @@ def test_data_explanation_with_knowledge_path_not_conceptual(monkeypatch):
 
 def test_conceptual_definition_with_knowledge_path_stays_conceptual(monkeypatch):
     """Regression guard: conceptual_definition + knowledge path must remain conceptual."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2005,8 +2008,8 @@ def test_conceptual_definition_with_knowledge_path_stays_conceptual(monkeypatch)
 
 def test_technical_conceptual_definition_can_use_data_primary_path(monkeypatch):
     """Technical concept overviews should not get trapped on regulation-only answers."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2037,9 +2040,9 @@ def test_technical_conceptual_definition_can_use_data_primary_path(monkeypatch):
 
 def test_technical_conceptual_definition_can_fallback_to_router_tool_after_authoritative_qa(monkeypatch):
     """If Stage 0.2 stays conceptual but response_mode promotes to data, Stage 0.7 may still route a tool."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
     from agent.tools.types import ToolInvocation
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
     payload["raw_query"] = "What can you say about import dependency and energy security of Georgia?"
@@ -2097,8 +2100,8 @@ def test_technical_conceptual_definition_can_fallback_to_router_tool_after_autho
 
 def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
     """Ambiguous queries with knowledge path should stay conceptual (safe fallback)."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("ambiguous", "knowledge", confidence=0.5)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2129,8 +2132,8 @@ def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
 
 def test_comparison_with_knowledge_path_is_knowledge_primary(monkeypatch):
     """comparison + knowledge preferred_path → knowledge_primary response mode."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("comparison", "knowledge", confidence=0.9)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2169,8 +2172,8 @@ def test_comparison_with_knowledge_path_is_knowledge_primary(monkeypatch):
 
 def test_response_mode_regulatory_procedure_knowledge_primary(monkeypatch):
     """regulatory_procedure → knowledge_primary regardless of preferred_path."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("regulatory_procedure", "knowledge", confidence=0.92)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2200,8 +2203,8 @@ def test_response_mode_regulatory_procedure_knowledge_primary(monkeypatch):
 
 def test_response_mode_data_retrieval_data_primary(monkeypatch):
     """data_retrieval + tool → data_primary."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("data_retrieval", "tool", confidence=0.95)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2232,8 +2235,8 @@ def test_response_mode_data_retrieval_data_primary(monkeypatch):
 
 def test_response_mode_comparison_with_tool_path_data_primary(monkeypatch):
     """comparison + tool → data_primary (numeric comparison)."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("comparison", "tool", confidence=0.9)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2264,8 +2267,8 @@ def test_response_mode_comparison_with_tool_path_data_primary(monkeypatch):
 
 def test_tool_routing_skipped_for_knowledge_primary(monkeypatch):
     """tool_blocked_by_policy must be True when response_mode is knowledge_primary."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("conceptual_definition", "knowledge", confidence=0.95)
     expected = QuestionAnalysis.model_validate(payload)
@@ -2461,8 +2464,8 @@ def test_response_mode_fallback_heuristic_data(monkeypatch):
 
 def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
     """Shadow analyzer must never influence routing — response_mode must use heuristic fallback."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     # Shadow analyzer says conceptual_definition + knowledge → would be knowledge_primary
     # if trusted, but heuristic says not conceptual → must stay data_primary.
@@ -2501,8 +2504,8 @@ def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
 
 def test_unresolved_analyzer_entities_skip_agent_loop_and_use_planner_path(monkeypatch):
     """Unresolved analyzer entities must fail closed and fall through to planner/SQL, not agent loop."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
     payload["canonical_query_en"] = "Explain balancing composition for the mystery bucket in January 2024"
@@ -2557,9 +2560,9 @@ def test_unresolved_analyzer_entities_skip_agent_loop_and_use_planner_path(monke
 
 def test_analyzer_build_failure_can_recover_via_resolved_query_match(monkeypatch):
     """Analyzer build errors should try one resolved-query recovery before planner/SQL fallback."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
     from agent.tools.types import ToolInvocation
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
     payload["canonical_query_en"] = "Explain the reasons for the increase in balancing electricity price in February 2022"
@@ -2621,9 +2624,9 @@ def test_analyzer_build_failure_can_recover_via_resolved_query_match(monkeypatch
 
 def test_authoritative_question_analysis_skips_raw_router_match(monkeypatch):
     """When Stage 0.2 is authoritative, Stage 0.5 must not raw-match the user query."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
     from agent.tools.types import ToolInvocation
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("comparison", "tool", confidence=0.95)
     payload["canonical_query_en"] = "Compare balancing electricity prices in 2024"
@@ -2703,8 +2706,8 @@ def test_authoritative_question_analysis_skips_raw_router_match(monkeypatch):
 
 def test_authoritative_question_analysis_skips_agent_loop_and_uses_planner_sql(monkeypatch):
     """SQL-shaped authoritative Stage 0.2 requests must not detour into the agent loop."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("data_explanation", "sql", confidence=0.95)
     payload["canonical_query_en"] = "Explain why balancing electricity price changed in November 2021"
@@ -2755,9 +2758,9 @@ def test_authoritative_question_analysis_skips_agent_loop_and_uses_planner_sql(m
 
 def test_resolved_query_recovery_validates_relevance_against_canonical_query(monkeypatch):
     """Recovered tool candidates must be checked against the resolved follow-up meaning."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
     from agent.tools.types import ToolInvocation
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
     payload["canonical_query_en"] = "Explain the reasons for the increase in balancing electricity price in February 2022"
@@ -2829,8 +2832,8 @@ def test_resolved_query_recovery_validates_relevance_against_canonical_query(mon
 
 def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypatch):
     """preferred_path=clarify must short-circuit before tool routing."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("forecast", "clarify", confidence=0.7)
     payload["tooling"]["candidate_tools"] = [{"name": "get_prices", "score": 0.9}]
@@ -3061,8 +3064,8 @@ def test_clarify_selection_override_forces_answer_policy():
 
 def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
     """Missing requested analytical evidence should downgrade Stage 4 to clarify."""
-    from contracts.question_analysis import QuestionAnalysis
     from agent import pipeline
+    from contracts.question_analysis import QuestionAnalysis
 
     payload = _make_analyzer_payload("forecast", "tool", confidence=0.9)
     payload["analysis_requirements"]["derived_metrics"] = [
@@ -3117,7 +3120,7 @@ def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
 
 def test_truncation_priority_knowledge_protects_knowledge_sections():
     """Knowledge-primary truncation should sacrifice data before knowledge."""
-    from core.llm import _TRUNCATION_PRIORITY_KNOWLEDGE, _TRUNCATION_PRIORITY_DATA
+    from core.llm import _TRUNCATION_PRIORITY_DATA, _TRUNCATION_PRIORITY_KNOWLEDGE
 
     # Knowledge-primary: data_preview truncated before domain_knowledge
     dk_idx = _TRUNCATION_PRIORITY_KNOWLEDGE.index("UNTRUSTED_DOMAIN_KNOWLEDGE")
@@ -3779,8 +3782,9 @@ def test_pydantic_entity_limit_accepts_15_entities():
 
 def test_pydantic_entity_limit_rejects_above_25():
     """ToolParamsHint should reject more than 25 entities."""
-    from contracts.question_analysis import ToolParamsHint
     from pydantic import ValidationError
+
+    from contracts.question_analysis import ToolParamsHint
 
     entities = [f"entity_{i}" for i in range(26)]
     with pytest.raises(ValidationError):
@@ -3853,6 +3857,7 @@ def _make_chart_stage_question_analysis(
 def test_chart_column_leak_fix():
     """build_chart must only include selected series (<=3) + time column in chart_data records."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     # 30 rows × 11 numeric columns (prices + xrate + 8 shares) — same shape as production bug
@@ -3880,6 +3885,7 @@ def test_chart_column_leak_fix():
 def test_chart_series_config_dimensions():
     """seriesConfig should assign 'bar' to shares and 'line' to prices."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     dates = pd.date_range("2023-01-01", periods=12, freq="MS")
@@ -3908,6 +3914,7 @@ def test_chart_series_config_dimensions():
 def test_chart_yearly_aggregation():
     """When shares + prices have >24 monthly rows, data should be aggregated to yearly."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     # 60 monthly rows (5 years) with both prices and shares
@@ -3936,6 +3943,7 @@ def test_chart_yearly_aggregation():
 def test_chart_no_aggregation_when_few_rows():
     """When row count is <=24, no yearly aggregation should be applied."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     dates = pd.date_range("2023-01-01", periods=12, freq="MS")
@@ -3961,6 +3969,7 @@ def test_chart_no_aggregation_when_few_rows():
 def test_chart_no_time_column_does_not_crash():
     """build_chart with no time column should still produce a chart without crashing."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     rng = np.random.RandomState(42)
@@ -3980,6 +3989,7 @@ def test_chart_no_time_column_does_not_crash():
 def test_chart_dimension_cap():
     """build_chart must keep at most 2 dimensions, dropping the least relevant."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     dates = pd.date_range("2023-01-01", periods=30, freq="MS")
@@ -4064,6 +4074,7 @@ def test_chart_share_not_forced_line():
 def test_chart_price_xrate_stays_line_not_dualaxis():
     """price+xrate must keep chart_type='line', not be overridden to 'dualaxis'."""
     import numpy as np
+
     from agent.chart_pipeline import build_chart
 
     dates = pd.date_range("2023-01-01", periods=12, freq="MS")
@@ -4407,7 +4418,7 @@ def test_visualization_info_no_include_reference_lines_field():
 def test_visualization_info_accepts_sort_rule_and_top_n():
     """Phase 11: sort_rule (SortRule enum) and top_n (int 1-50) are
     part of VisualizationInfo and validate via Pydantic."""
-    from contracts.question_analysis import VisualizationInfo, SortRule
+    from contracts.question_analysis import SortRule, VisualizationInfo
 
     vis = VisualizationInfo(
         chart_requested_by_user=False,
@@ -4424,6 +4435,7 @@ def test_visualization_info_rejects_top_n_out_of_range():
     """Phase 11: top_n must be within 1-50 inclusive."""
     import pytest
     from pydantic import ValidationError
+
     from contracts.question_analysis import VisualizationInfo
 
     with pytest.raises(ValidationError):
@@ -4447,6 +4459,7 @@ def test_visualization_info_rejects_invalid_sort_rule():
     """Phase 11: sort_rule must be a valid SortRule enum value."""
     import pytest
     from pydantic import ValidationError
+
     from contracts.question_analysis import VisualizationInfo
 
     with pytest.raises(ValidationError):
@@ -4462,6 +4475,7 @@ def test_visualization_validator_logs_drift_warnings(caplog):
     """Phase 11 soft-warn rollout: silently-repaired drift must now be
     logged as a warning so shadow telemetry can surface it."""
     import logging
+
     from contracts.question_analysis import VisualizationInfo
 
     with caplog.at_level(logging.WARNING, logger="Enai.contracts.visualization"):
@@ -4523,6 +4537,7 @@ def test_auto_yearly_rollup_logs_deprecation_warning(caplog):
     The heuristic still fires during rollout to avoid regressions, but a
     warning must be logged so analyzer coverage can be measured."""
     import logging
+
     from agent.chart_pipeline import build_chart
 
     dates = pd.date_range("2021-01-01", periods=36, freq="MS")
@@ -4843,6 +4858,7 @@ def _make_viz_cross_check_qa(
 def test_cross_check_warns_chart_with_no_date_params(caplog):
     """Phase 16 check 1: chart primary_presentation + no date params → warning."""
     import logging
+
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart")
@@ -4860,6 +4876,7 @@ def test_cross_check_warns_chart_with_no_date_params(caplog):
 def test_cross_check_warns_trend_goal_with_no_date_params(caplog):
     """Phase 16 check 2: visual_goal=trend + no date params → warning."""
     import logging
+
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart", visual_goal="trend")
@@ -4877,6 +4894,7 @@ def test_cross_check_warns_trend_goal_with_no_date_params(caplog):
 def test_cross_check_warns_season_grain_with_short_range(caplog):
     """Phase 16 check 3: time_grain=season + < 2 year span → warning."""
     import logging
+
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart", time_grain="season")
@@ -4899,6 +4917,7 @@ def test_cross_check_warns_season_grain_with_short_range(caplog):
 def test_cross_check_no_warning_when_chart_has_date_params(caplog):
     """Phase 16 negative: chart + date params → no warning for check 1."""
     import logging
+
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart")
@@ -4921,6 +4940,7 @@ def test_cross_check_no_warning_when_chart_has_date_params(caplog):
 def test_cross_check_no_warning_for_season_over_two_years(caplog):
     """Phase 16 negative: time_grain=season + 3 year span → no warning."""
     import logging
+
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart", time_grain="season")
@@ -4981,6 +5001,7 @@ def test_find_historical_month_rows_partial():
 def test_historical_month_context_stats():
     """_build_historical_month_context computes correct min/max/avg/trend."""
     import numpy as np
+
     from agent.analyzer import _build_historical_month_context, _metric_aliases
 
     dates = pd.to_datetime(["2019-06-01", "2020-06-01", "2021-06-01", "2022-06-01", "2023-06-01"])
@@ -5109,8 +5130,9 @@ def test_historical_month_context_equal_values():
 
 def test_sql_function_whitelist_blocks_pg_sleep():
     """pg_sleep must be rejected by function whitelisting."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check("SELECT pg_sleep(30) FROM price_with_usd")
@@ -5120,8 +5142,9 @@ def test_sql_function_whitelist_blocks_pg_sleep():
 
 def test_sql_function_whitelist_blocks_current_setting():
     """current_setting must be rejected — could exfiltrate config."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5132,8 +5155,9 @@ def test_sql_function_whitelist_blocks_current_setting():
 
 def test_sql_function_whitelist_blocks_pg_read_file():
     """pg_read_file must be rejected — filesystem access."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5186,8 +5210,9 @@ def test_sql_function_whitelist_allows_replace_for_balancing_segment_normalizati
 
 def test_sql_function_whitelist_blocks_version():
     """version() is a named sqlglot class but leaks server info — must be denied."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check("SELECT version() FROM price_with_usd")
@@ -5196,8 +5221,9 @@ def test_sql_function_whitelist_blocks_version():
 
 def test_sql_function_whitelist_blocks_current_database():
     """current_database() is a named class — must be denied."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check("SELECT current_database() FROM price_with_usd")
@@ -5206,8 +5232,9 @@ def test_sql_function_whitelist_blocks_current_database():
 
 def test_sql_function_whitelist_blocks_dblink():
     """dblink must be blocked — SSRF/remote query execution."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5219,8 +5246,9 @@ def test_sql_function_whitelist_blocks_dblink():
 
 def test_sql_function_whitelist_blocks_lo_import():
     """lo_import must be blocked — filesystem read."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5231,8 +5259,9 @@ def test_sql_function_whitelist_blocks_lo_import():
 
 def test_sql_function_whitelist_blocks_set_config():
     """set_config must be blocked — runtime parameter mutation."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5243,8 +5272,9 @@ def test_sql_function_whitelist_blocks_set_config():
 
 def test_sql_function_whitelist_blocks_function_in_cte():
     """Dangerous function inside a CTE must still be caught."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5255,8 +5285,9 @@ def test_sql_function_whitelist_blocks_function_in_cte():
 
 def test_sql_function_whitelist_blocks_function_in_where():
     """Dangerous function in WHERE clause must be caught."""
-    from core.sql_generator import simple_table_whitelist_check
     from fastapi import HTTPException
+
+    from core.sql_generator import simple_table_whitelist_check
 
     with pytest.raises(HTTPException) as exc:
         simple_table_whitelist_check(
@@ -5272,9 +5303,10 @@ def test_sql_function_whitelist_blocks_function_in_where():
 
 def test_extract_date_range_last_3_years():
     """'last 3 years' should produce a 3-year range ending at current year."""
-    from agent.router import extract_date_range
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
+    from agent.router import extract_date_range
 
     start, end = extract_date_range("what happened in the last 3 years")
     now_year = datetime.now(tz=ZoneInfo("Asia/Tbilisi")).year
@@ -5284,9 +5316,10 @@ def test_extract_date_range_last_3_years():
 
 def test_extract_date_range_last_6_months():
     """'last 6 months' should produce a 6-month lookback from current month."""
-    from agent.router import extract_date_range
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
+    from agent.router import extract_date_range
 
     start, end = extract_date_range("show me the last 6 months")
     assert start is not None
@@ -5615,9 +5648,9 @@ def test_summarize_data_skips_domain_knowledge_for_single_value(monkeypatch):
 def test_summarize_data_merges_vector_topics_and_canonical_query(monkeypatch):
     """summarize_data should merge vector topics into local knowledge selection."""
     from agent import summarizer
+    from contracts.question_analysis import QuestionAnalysis
     from core.llm import SummaryEnvelope
     from models import QueryContext
-    from contracts.question_analysis import QuestionAnalysis
 
     captured = {}
     payload = _make_analyzer_payload("forecast", "tool", confidence=0.95)
@@ -5676,9 +5709,9 @@ def test_summarize_data_merges_vector_topics_and_canonical_query(monkeypatch):
 def test_summarize_data_passes_comparison_focus_for_mom_yoy_explanations(monkeypatch):
     """Comparison-shaped explanations should nudge Stage 4 to answer period-vs-period first."""
     from agent import summarizer
+    from contracts.question_analysis import QuestionAnalysis
     from core.llm import SummaryEnvelope
     from models import QueryContext
-    from contracts.question_analysis import QuestionAnalysis
 
     captured = {}
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
@@ -5727,9 +5760,9 @@ def test_summarize_data_passes_comparison_focus_for_mom_yoy_explanations(monkeyp
 def test_summarize_data_uses_canonical_query_for_structured_summary(monkeypatch):
     """Stage 4 should send the analyzer-resolved query to the LLM, not the raw follow-up wording."""
     from agent import summarizer
+    from contracts.question_analysis import QuestionAnalysis
     from core.llm import SummaryEnvelope
     from models import QueryContext
-    from contracts.question_analysis import QuestionAnalysis
 
     captured = {}
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
@@ -5822,8 +5855,8 @@ def test_evidence_aware_grounding_rejects_unsupported_numbers_even_with_citation
 def test_evidence_aware_policy_requires_non_tabular_need(monkeypatch):
     """Plain numeric forecasts should remain strict_numeric even if stats are present."""
     from agent import summarizer
-    from models import QueryContext
     from contracts.question_analysis import QuestionAnalysis
+    from models import QueryContext
 
     payload = _make_analyzer_payload("forecast", "tool", confidence=0.9)
     payload["routing"]["needs_knowledge"] = False
@@ -5846,8 +5879,8 @@ def test_evidence_aware_policy_requires_non_tabular_need(monkeypatch):
 def test_explanation_with_driver_analysis_gets_evidence_aware_grounding():
     """EXPLANATION answer_kind + needs_driver_analysis should use evidence_aware grounding."""
     from agent import summarizer
-    from models import QueryContext
     from contracts.question_analysis import QuestionAnalysis
+    from models import QueryContext
 
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.9)
     payload["routing"]["needs_knowledge"] = False
@@ -5869,8 +5902,8 @@ def test_explanation_with_driver_analysis_gets_evidence_aware_grounding():
 def test_explanation_without_analytical_signals_stays_strict():
     """EXPLANATION answer_kind without any analytical signal should remain strict_numeric."""
     from agent import summarizer
-    from models import QueryContext
     from contracts.question_analysis import QuestionAnalysis
+    from models import QueryContext
 
     payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.9)
     payload["routing"]["needs_knowledge"] = False
@@ -5942,7 +5975,7 @@ def test_evidence_aware_grounding_handles_enum_instance():
     """
     from agent import summarizer
     from core.llm import SummaryEnvelope
-    from models import QueryContext, GroundingPolicy
+    from models import GroundingPolicy, QueryContext
 
     envelope = SummaryEnvelope(
         answer="The price rose from 50 GEL in January 2024 to 55 GEL, a change of 10%.",
@@ -5965,7 +5998,7 @@ def test_grounding_not_applicable_handles_enum_instance():
     """The NOT_APPLICABLE short-circuit must also work with the enum form."""
     from agent import summarizer
     from core.llm import SummaryEnvelope
-    from models import QueryContext, GroundingPolicy
+    from models import GroundingPolicy, QueryContext
 
     # Answer has numeric tokens not in any evidence — would normally fail.
     envelope = SummaryEnvelope(
@@ -6010,13 +6043,11 @@ def test_claim_provenance_indexes_domain_and_vector_numeric_tokens():
 
 def test_structured_history_formatting_empty():
     """Empty conversation history produces empty string."""
-    from core.llm import llm_summarize_structured
     import core.llm as llm_mod
+    from core.llm import llm_summarize_structured
 
     # We just need to verify the formatting logic, so capture the prompt
     captured = {}
-
-    original_invoke = llm_mod._invoke_with_resilience
 
     def _capture_invoke(llm, messages, model_name):
         captured["prompt"] = messages[1][1]  # user message
@@ -6038,8 +6069,8 @@ def test_structured_history_formatting_empty():
 
 def test_structured_history_formatting_truncation():
     """Long answers in history should be truncated to 500 chars."""
-    from core.llm import llm_summarize_structured
     import core.llm as llm_mod
+    from core.llm import llm_summarize_structured
 
     long_answer = "A" * 600
     history = [
@@ -6072,8 +6103,8 @@ def test_structured_history_formatting_truncation():
 
 def test_structured_history_limits_to_3_pairs():
     """Only last 3 Q&A pairs should be included."""
-    from core.llm import llm_summarize_structured
     import core.llm as llm_mod
+    from core.llm import llm_summarize_structured
 
     history = [
         {"question": f"Question {i}?", "answer": f"Answer {i}"}
@@ -6106,8 +6137,8 @@ def test_structured_history_limits_to_3_pairs():
 
 def test_structured_summary_adds_comparison_first_guidance():
     """comparison_focus should inject comparison-first instructions into the prompt."""
-    from core.llm import llm_summarize_structured
     import core.llm as llm_mod
+    from core.llm import llm_summarize_structured
 
     captured = {}
 

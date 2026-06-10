@@ -19,10 +19,10 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "redteam-gate-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "redteam-gate-openai-key")
 
+from agent import summarizer
+from core.llm import SummaryEnvelope
 from guardrails.firewall import inspect_query
 from models import QueryContext
-from core.llm import SummaryEnvelope
-from agent import summarizer
 
 
 @dataclass(frozen=True)

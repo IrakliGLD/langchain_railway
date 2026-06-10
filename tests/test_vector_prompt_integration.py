@@ -37,6 +37,7 @@ class _DummyEngine:
 
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
+import core.llm as llm_core  # noqa: E402
 from agent import planner, summarizer  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from contracts.vector_knowledge import (  # noqa: E402
@@ -45,7 +46,6 @@ from contracts.vector_knowledge import (  # noqa: E402
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
 )
-import core.llm as llm_core  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 from models import QueryContext  # noqa: E402
 

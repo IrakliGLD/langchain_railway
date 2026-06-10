@@ -50,7 +50,6 @@ from contracts.vector_knowledge import (  # noqa: E402
 )
 from knowledge.vector_store import KnowledgeVectorStore, _resolve_engine  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # 1. Verify columns
 # ---------------------------------------------------------------------------

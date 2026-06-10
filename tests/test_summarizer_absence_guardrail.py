@@ -30,8 +30,8 @@ from contracts.question_analysis import (  # noqa: E402
     RoutingInfo,
     SqlHints,
     ToolCandidate,
-    ToolName,
     ToolingInfo,
+    ToolName,
     VisualizationInfo,
 )
 from core.llm import SummaryEnvelope  # noqa: E402

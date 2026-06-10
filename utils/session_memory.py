@@ -15,7 +15,6 @@ from typing import Dict, List, Optional, Tuple
 
 from config import SESSION_HISTORY_MAX_TURNS, SESSION_IDLE_TTL_SECONDS
 
-
 _SESSION_STORE: Dict[str, Dict[str, object]] = {}
 _SESSION_LOCK = threading.Lock()
 

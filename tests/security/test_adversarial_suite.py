@@ -50,13 +50,13 @@ class _DummyEngine:
 
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
-from guardrails.firewall import inspect_query  # noqa: E402
 from agent.tools.price_tools import get_prices  # noqa: E402
 from agent.tools.registry import execute_tool  # noqa: E402
 from agent.tools.types import ToolInvocation  # noqa: E402
 from core import llm as llm_module  # noqa: E402
 from core import query_executor  # noqa: E402
-from utils.resilience import db_circuit_breaker, get_llm_breaker, RequestBackpressureGate  # noqa: E402
+from guardrails.firewall import inspect_query  # noqa: E402
+from utils.resilience import RequestBackpressureGate, db_circuit_breaker, get_llm_breaker  # noqa: E402
 
 
 def test_prompt_injection_attempt_is_blocked():

@@ -464,10 +464,6 @@ def extract_tariff_entities(query_lower: str) -> List[str]:
             and any(token in query_lower for token in ("plant", "plants", "entity", "entities"))
         )
     )
-    list_shaped_lookup = any(
-        token in query_lower
-        for token in ("which", "what are the", "list", "show all", "enumerate", "name")
-    )
     mentions_specific_alias = any(
         token in query_lower
         for token in (

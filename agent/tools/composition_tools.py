@@ -4,9 +4,9 @@ Typed retrieval tools for balancing composition queries.
 from typing import Iterable, List, Optional
 
 from config import MAX_ROWS
+
 from .common import get_sort_direction, normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
-
 
 # Canonical balancing buckets accepted by the composition tool.
 ALLOWED_BALANCING_ENTITIES = (
@@ -69,7 +69,7 @@ def get_balancing_composition(
     if end_date:
         where_parts.append("date <= :end_date")
         params["end_date"] = end_date
-    
+
     where_clause = " AND ".join(where_parts)
 
     sql = f"""

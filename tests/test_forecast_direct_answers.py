@@ -193,6 +193,7 @@ def test_forecast_generic_renderer_ignores_scratch_and_reference_cols():
     """The CAGR-row extractor must pick the real metric column and ignore
     ``is_forecast``, ``xrate``, and any ``__forecast_*`` leftover."""
     import pandas as pd
+
     from agent.summarizer import _build_forecast_frame_from_cagr_rows
 
     df = pd.DataFrame({

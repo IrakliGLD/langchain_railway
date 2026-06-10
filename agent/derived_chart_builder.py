@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from agent.chart_frame_builder import build_chart_frame_long, from_wide
-from contracts.question_analysis import AnswerKind, MeasureTransform, SemanticRole
 from context import COLUMN_LABELS
+from contracts.question_analysis import AnswerKind, MeasureTransform, SemanticRole
 
 log = logging.getLogger("Enai")
 
@@ -410,7 +410,6 @@ def _build_mom_yoy_specs(
     )
     if raw_frame.is_empty():
         return None
-    wide_raw, _ = raw_frame.long_df, {}
     # Reconstruct wide from long for _spec_from_wide.
     from agent.chart_frame_builder import to_wide
     wide_raw_df = to_wide(raw_frame, time_key=time_key)
@@ -782,7 +781,7 @@ def _build_seasonal_spec(
 # ---------------------------------------------------------------------------
 
 
-def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]]:  # type: ignore[name-defined]
+def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]]:  # type: ignore[name-defined] # noqa: F821 — string annotation avoids circular import
     """Main entry point called from ``analyzer.py:enrich()``.
 
     Inspects the authoritative ``question_analysis.visualization`` contract

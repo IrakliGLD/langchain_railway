@@ -9,7 +9,7 @@ Handles:
 """
 import logging
 import re
-from typing import Tuple, Set, Optional
+from typing import Optional, Set, Tuple
 
 from config import TOOL_RELEVANCE_OVERLAP_THRESHOLD
 from contracts.question_analysis import QuestionAnalysis

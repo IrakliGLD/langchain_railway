@@ -86,7 +86,6 @@ from contracts.question_analysis import (  # noqa: E402
 )
 from models import QueryContext  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # QuestionAnalysis payload helper — minimal fixture builder.
 # ---------------------------------------------------------------------------

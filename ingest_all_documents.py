@@ -48,7 +48,6 @@ os.environ.setdefault("OPENAI_API_KEY", "ingest-script-openai-placeholder")
 from contracts.vector_knowledge import DocumentRegistration  # noqa: E402
 from knowledge.vector_ingestion import VectorKnowledgeIngestor  # noqa: E402
 
-
 DOCS_DIR = Path(__file__).parent / "docs_to_ingest"
 
 

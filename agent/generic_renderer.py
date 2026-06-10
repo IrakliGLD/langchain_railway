@@ -7,8 +7,8 @@ specialized.
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from typing import Optional
 
 from contracts.evidence_frames import (

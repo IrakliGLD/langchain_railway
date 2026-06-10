@@ -3,12 +3,14 @@ Pydantic models for API requests and responses.
 
 Extracted from monolithic main.py for better organization.
 """
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from enum import Enum
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
+
 from contracts.evidence_frames import CanonicalFrame
 from contracts.question_analysis import QuestionAnalysis, ToolName
 from contracts.vector_knowledge import VectorKnowledgeBundle

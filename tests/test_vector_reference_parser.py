@@ -35,7 +35,6 @@ from knowledge.vector_reference_parser import (
     parse_section_heading,
 )
 
-
 # ---------------------------------------------------------------------------
 # Section-heading parser
 # ---------------------------------------------------------------------------

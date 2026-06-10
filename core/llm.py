@@ -9,14 +9,14 @@ Handles:
 - Answer summarization with domain knowledge
 - Domain knowledge filtering and selection
 """
-import json
 import hashlib
+import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date as _date
-from typing import TYPE_CHECKING, Optional, List
-import re
+from typing import TYPE_CHECKING, List, Optional
 
 from dateutil.relativedelta import relativedelta
 
@@ -25,40 +25,37 @@ if TYPE_CHECKING:
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
 from pydantic import BaseModel, Field, ValidationError
+from tenacity import retry, stop_after_attempt, wait_exponential
 
+import knowledge as knowledge_module
 from config import (
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
+    ENABLE_SKILL_PROMPTS_PLANNER,
+    ENABLE_SKILL_PROMPTS_SUMMARIZER,
     FAST_MODE_ANALYZER_BUDGET,
     FAST_MODE_SUMMARIZER_BUDGET,
-    GOOGLE_API_KEY,
-    OPENAI_API_KEY,
-    GEMINI_MODEL,
-    OPENAI_MODEL,
-    MODEL_TYPE,
-    PIPELINE_MODE,
-    PROMPT_BUDGET_MAX_CHARS,
-    OPENAI_INPUT_COST_PER_1K_USD,
-    OPENAI_OUTPUT_COST_PER_1K_USD,
     GEMINI_INPUT_COST_PER_1K_USD,
+    GEMINI_MODEL,
     GEMINI_OUTPUT_COST_PER_1K_USD,
+    GOOGLE_API_KEY,
+    MODEL_TYPE,
+    OPENAI_API_KEY,
+    OPENAI_INPUT_COST_PER_1K_USD,
+    OPENAI_MODEL,
+    OPENAI_OUTPUT_COST_PER_1K_USD,
+    PIPELINE_MODE,
+    PLANNER_MODEL,
+    PROMPT_BUDGET_MAX_CHARS,
     ROUTER_MODEL,
     ROUTER_THINKING_BUDGET,
-    PLANNER_MODEL,
+    SESSION_HISTORY_MAX_TURNS,
     SUMMARIZER_MODEL,
     SUMMARIZER_PROMPT_BUDGET_MAX_CHARS,
-    ENABLE_SKILL_PROMPTS_SUMMARIZER,
-    ENABLE_SKILL_PROMPTS_PLANNER,
-    SESSION_HISTORY_MAX_TURNS,
 )
 from context import DB_SCHEMA_DOC
-from knowledge.sql_example_selector import get_relevant_examples
-from utils.metrics import metrics
-from utils.query_validation import is_conceptual_question
-from utils.resilience import get_llm_breaker
-import knowledge as knowledge_module
 from contracts.question_analysis import (
+    _VALID_ROLES_BY_INTENT,
     AnswerKind,
     ChartFamily,
     ChartIntent,
@@ -72,17 +69,6 @@ from contracts.question_analysis import (
     SeriesSplitMode,
     VisualGoal,
     VisualizationTimeGrain,
-    _VALID_ROLES_BY_INTENT,
-)
-from skills.loader import (
-    get_answer_template,
-    get_focus_guidance,
-    get_seasonal_trend_guidance,
-    get_balancing_template,
-    get_forecast_caveats,
-    get_skills_content_hash,
-    load_reference,
-    _extract_section,
 )
 from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_ANSWER_KIND_GUIDE,
@@ -93,6 +79,20 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
+from knowledge.sql_example_selector import get_relevant_examples
+from skills.loader import (
+    _extract_section,
+    get_answer_template,
+    get_balancing_template,
+    get_focus_guidance,
+    get_forecast_caveats,
+    get_seasonal_trend_guidance,
+    get_skills_content_hash,
+    load_reference,
+)
+from utils.metrics import metrics
+from utils.query_validation import is_conceptual_question
+from utils.resilience import get_llm_breaker
 
 log = logging.getLogger("Enai")
 

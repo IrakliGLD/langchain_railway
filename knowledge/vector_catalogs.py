@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Dict
 
-
 DOCUMENT_TYPE_ALIASES: Dict[str, str] = {
     "regulation": "regulation",
     "rule": "regulation",

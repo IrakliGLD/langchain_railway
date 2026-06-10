@@ -26,7 +26,6 @@ from contracts.vector_knowledge import (
 )
 from knowledge.vector_retrieval import retrieve_vector_knowledge
 
-
 # ---------------------------------------------------------------------------
 # _resolve_vector_retrieval_tier — policy unit tests
 # ---------------------------------------------------------------------------

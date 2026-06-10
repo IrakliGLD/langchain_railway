@@ -96,7 +96,7 @@ def should_generate_chart(
         if answer_kind in {"timeseries", "forecast", "comparison"} and row_count >= 3:
             log.info("Generating chart: answer_kind=%s fallback", answer_kind)
             return True
-            
+
         log.info("Skipping chart: visualization plan did not recommend a chart")
         return False
     else:

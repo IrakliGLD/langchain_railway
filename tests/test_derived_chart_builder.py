@@ -27,7 +27,6 @@ from agent.derived_chart_builder import (  # noqa: E402
     dispatch_derived_chart,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -180,8 +179,8 @@ def test_forecast_splits_observed_and_projected():
     assert specs[0]["type"] == "line"
     # Observed and projected column labels should both appear in labels.
     labels = specs[0]["metadata"]["labels"]
-    observed_labels = [l for l in labels if "Projected" not in l]
-    projected_labels = [l for l in labels if "Projected" in l]
+    observed_labels = [lbl for lbl in labels if "Projected" not in lbl]
+    projected_labels = [lbl for lbl in labels if "Projected" in lbl]
     assert observed_labels
     assert projected_labels
 
@@ -256,6 +255,7 @@ def _make_ctx_with_qa(
         by Phase 17 tests that exercise the derived-metrics fallback path.
     """
     from types import SimpleNamespace
+
     from models import QueryContext
 
     ctx = QueryContext(query="test query")
@@ -346,7 +346,8 @@ def test_dispatcher_fallback_mom_absolute_change():
     """When visualization.measure_transform is unset but derived_metrics
     contains mom_absolute_change, the MoM dual-panel builder must fire."""
     from types import SimpleNamespace
-    from contracts.question_analysis import DerivedMetricName, AnswerKind
+
+    from contracts.question_analysis import AnswerKind, DerivedMetricName
 
     # 6 months is enough for mom_delta (lag=1 → 5 non-NaN delta rows).
     df = _ts_df(6)
@@ -364,6 +365,7 @@ def test_dispatcher_fallback_mom_absolute_change():
 def test_dispatcher_fallback_yoy_percent_change():
     """yoy_percent_change in derived_metrics → yoy_pct transform → dual-panel builder."""
     from types import SimpleNamespace
+
     from contracts.question_analysis import DerivedMetricName
 
     # 24 months so YoY lag=12 yields 12 non-NaN delta rows.
@@ -382,6 +384,7 @@ def test_dispatcher_fallback_skipped_when_explicit_transform():
     derived_metrics fallback must NOT override the explicit routing — the
     explicit branch fires first and the fallback section is never reached."""
     from types import SimpleNamespace
+
     from contracts.question_analysis import DerivedMetricName
 
     df = _ts_df(24)
@@ -478,8 +481,8 @@ def test_build_forecast_spec_filters_series_via_helper():
     assert specs is not None and len(specs) == 1
     labels = specs[0]["metadata"]["labels"]
     # Only GEL labels should appear; USD series dropped by the filter.
-    assert any("GEL" in l for l in labels)
-    assert not any("USD" in l for l in labels), f"USD must be filtered out but got: {labels}"
+    assert any("GEL" in lbl for lbl in labels)
+    assert not any("USD" in lbl for lbl in labels), f"USD must be filtered out but got: {labels}"
 
 
 # ---------------------------------------------------------------------------

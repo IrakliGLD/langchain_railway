@@ -9,9 +9,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import jwt
-import pytest
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 import sqlalchemy
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
@@ -58,24 +58,23 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 sqlalchemy.create_engine = lambda *args, **kwargs: DummyEngine()  # type: ignore[assignment]
 
 
+import main as main_module  # noqa: E402
+from agent.tools import common as tool_common
+from agent.tools import composition_tools
+from analysis.stats import quick_stats, rows_to_preview
+from core.sql_generator import sanitize_sql
 from main import (
     BALANCING_SEGMENT_NORMALIZER,
     BALANCING_SHARE_PIVOT_SQL,
-    build_trade_share_cte,
-    generate_share_summary,
-    fetch_balancing_share_panel,
     build_share_shift_notes,
+    build_trade_share_cte,
     ensure_share_dataframe,
+    fetch_balancing_share_panel,
     filter_caller_history,
+    generate_share_summary,
 )  # noqa: E402
-import main as main_module  # noqa: E402
-from analysis.stats import quick_stats, rows_to_preview
-from agent.tools import composition_tools
-from agent.tools import common as tool_common
-from core.sql_generator import sanitize_sql
 from utils import auth as auth_module
 from utils.session_memory import issue_session_token
-
 
 TEST_SUPABASE_JWT_SECRET = "test-supabase-jwt-secret"
 TEST_BEARER_SUBJECT = "00000000-0000-0000-0000-000000000123"

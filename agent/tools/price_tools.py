@@ -4,9 +4,9 @@ Typed retrieval tools for price queries.
 from typing import List, Optional
 
 from config import MAX_ROWS
+
 from .common import get_sort_direction, normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
-
 
 ALLOWED_METRICS = {"balancing", "deregulated", "guaranteed_capacity", "exchange_rate"}
 ALLOWED_CURRENCIES = {"gel", "usd", "both"}
@@ -29,13 +29,13 @@ def _resolve_columns(metric: str, currency: str) -> List[str]:
         cols.extend([metric_map[metric]["gel"], metric_map[metric]["usd"]])
     else:
         cols.append(metric_map[metric][currency])
-        
+
     # Balancing-price explanations often need both currencies plus xrate in one fetch.
     if metric == "balancing":
         for implicit_col in ["p_bal_gel", "p_bal_usd", "xrate"]:
             if implicit_col not in cols:
                 cols.append(implicit_col)
-                
+
     return cols
 
 

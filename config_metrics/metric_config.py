@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Balancing share metadata – labels, cost buckets, USD linkage
 # ---------------------------------------------------------------------------

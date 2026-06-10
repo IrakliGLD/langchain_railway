@@ -45,13 +45,12 @@ class _DummyEngine:
 
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
-from models import QueryContext  # noqa: E402
+from agent import orchestrator  # noqa: E402
 from agent.planner import normalize_balancing_entities  # noqa: E402
 from agent.router import extract_balancing_entities  # noqa: E402
-from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES  # noqa: E402
-from agent import orchestrator  # noqa: E402
 from agent.tool_adapter import ToolExecutionResult  # noqa: E402
-
+from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES  # noqa: E402
+from models import QueryContext  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Phase 2: normalize_balancing_entities
@@ -199,7 +198,7 @@ def test_agent_loop_includes_resolved_query(monkeypatch):
     ctx = QueryContext(query="why did it increase?")
     ctx.resolved_query = "Why did the balancing electricity price increase in Georgia?"
 
-    out = orchestrator.run_agent_loop(ctx, llm=llm)
+    orchestrator.run_agent_loop(ctx, llm=llm)
 
     user_msg = llm._last_messages[1].content
     assert "Resolved query:" in user_msg
@@ -217,7 +216,7 @@ def test_agent_loop_includes_conversation_history_for_followup(monkeypatch):
         {"question": "Show balancing price trend", "answer": "Prices increased 15% in 2024."},
     ]
 
-    out = orchestrator.run_agent_loop(ctx, llm=llm)
+    orchestrator.run_agent_loop(ctx, llm=llm)
 
     user_msg = llm._last_messages[1].content
     assert "Previous conversation:" in user_msg
@@ -234,7 +233,7 @@ def test_agent_loop_skips_history_for_standalone_query(monkeypatch):
         {"question": "Unrelated prior question", "answer": "Unrelated prior answer."},
     ]
 
-    out = orchestrator.run_agent_loop(ctx, llm=llm)
+    orchestrator.run_agent_loop(ctx, llm=llm)
 
     user_msg = llm._last_messages[1].content
     assert "Previous conversation:" not in user_msg
@@ -248,7 +247,7 @@ def test_agent_loop_includes_tool_fallback_reason(monkeypatch):
     ctx = QueryContext(query="cheap energy composition")
     ctx.tool_fallback_reason = "analyzer_tool_execution_error:Unsupported balancing entity: cheap energy"
 
-    out = orchestrator.run_agent_loop(ctx, llm=llm)
+    orchestrator.run_agent_loop(ctx, llm=llm)
 
     user_msg = llm._last_messages[1].content
     assert "previous tool attempt failed" in user_msg.lower()
@@ -261,7 +260,7 @@ def test_agent_loop_plain_query_when_no_extra_context(monkeypatch):
 
     ctx = QueryContext(query="Show balancing price in 2024")
 
-    out = orchestrator.run_agent_loop(ctx, llm=llm)
+    orchestrator.run_agent_loop(ctx, llm=llm)
 
     user_msg = llm._last_messages[1].content
     assert user_msg == "Show balancing price in 2024"

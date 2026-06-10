@@ -212,7 +212,7 @@ DB_SCHEMA_DICT = {
         },
     },
     "rules": {
-       
+
         "usd_rule": "USD values = GEL / xrate (from price_with_usd joined by date).",
         "granularity": "Monthly data for all except yearly energy_balance_long_mv.",
         "temporal_scope": "2015–present; use full range.",

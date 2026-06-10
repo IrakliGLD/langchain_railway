@@ -16,16 +16,6 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from contracts.question_analysis import (
-    AnswerKind,
-    EvidenceRole,
-    QuestionAnalysis,
-    QueryType,
-    RenderStyle,
-    ToolName,
-    _SCENARIO_METRIC_NAMES,
-)
-from models import QueryContext
 from agent.planner import resolve_tool_params
 from agent.shape_requirements import get_requirement
 from agent.tools import execute_tool
@@ -33,6 +23,16 @@ from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
 from agent.tools.types import ToolInvocation
 from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
 from analysis.system_quantities import normalize_tool_dataframe
+from contracts.question_analysis import (
+    _SCENARIO_METRIC_NAMES,
+    AnswerKind,
+    EvidenceRole,
+    QueryType,
+    QuestionAnalysis,
+    RenderStyle,
+    ToolName,
+)
+from models import QueryContext
 
 log = logging.getLogger("Enai")
 

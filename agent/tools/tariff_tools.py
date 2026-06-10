@@ -5,9 +5,9 @@ from datetime import date
 from typing import Iterable, List, Optional
 
 from config import MAX_ROWS
+
 from .common import get_sort_direction, normalize_date, normalize_limit, run_text_query
 from .types import ToolResult
-
 
 ENGURI_ENTITY = "enguri hpp"
 VARDNILI_ENTITY = "vardnili hpp"

@@ -7,9 +7,9 @@ from sqlalchemy import bindparam, text
 
 from config import MAX_ROWS
 from context import TECH_TYPE_GROUPS
+
 from .common import get_sort_direction, normalize_date, normalize_limit, run_statement
 from .types import ToolResult
-
 
 # Supported request enums are derived from the configured technology groups.
 ALLOWED_MODES = {"quantity", "share"}

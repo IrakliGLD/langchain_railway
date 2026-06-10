@@ -20,8 +20,8 @@ import pandas as pd
 import pytest
 
 from agent.chart_frame_builder import (  # noqa: E402
-    ChartFrame,
     LONG_FRAME_COLUMNS,
+    ChartFrame,
     build_chart_frame,
     build_chart_frame_long,
     classify_series,
@@ -29,7 +29,6 @@ from agent.chart_frame_builder import (  # noqa: E402
     to_wide,
 )
 from contracts.question_analysis import MeasureTransform, SemanticRole  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # classify_series

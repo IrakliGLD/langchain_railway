@@ -9,7 +9,7 @@ class TestTechTypeGroups:
 
     def test_fallback_consistency(self):
         """Test that fallback constants match context.py values."""
-        from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
+        from context import DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES, TRANSIT_TECH_TYPES
 
         # Verify expected values are present
         assert "hydro" in SUPPLY_TECH_TYPES
@@ -24,7 +24,7 @@ class TestTechTypeGroups:
 
     def test_no_duplicates(self):
         """Test that tech type lists don't have duplicates."""
-        from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES
+        from context import DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES
 
         assert len(SUPPLY_TECH_TYPES) == len(set(SUPPLY_TECH_TYPES))
         assert len(DEMAND_TECH_TYPES) == len(set(DEMAND_TECH_TYPES))
@@ -81,7 +81,7 @@ class TestSchemaConsistency:
 
     def test_schema_dict_columns_have_labels(self):
         """Every column in DB_SCHEMA_DICT must have an entry in COLUMN_LABELS."""
-        from context import DB_SCHEMA_DICT, COLUMN_LABELS
+        from context import COLUMN_LABELS, DB_SCHEMA_DICT
 
         missing = []
         for view_name, view_info in DB_SCHEMA_DICT["views"].items():
@@ -96,6 +96,7 @@ class TestSchemaConsistency:
     def test_no_phantom_views_in_schema_doc(self):
         """No view in DB_SCHEMA_DOC should be absent from STATIC_ALLOWED_TABLES."""
         import re
+
         from context import DB_SCHEMA_DOC
 
         allowed = self._parse_static_allowed_tables()

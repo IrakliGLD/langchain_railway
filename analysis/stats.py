@@ -10,8 +10,8 @@ Handles:
 import logging
 from typing import List, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from analysis.system_quantities import normalize_period_series_with_granularity
 

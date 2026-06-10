@@ -10,8 +10,8 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from utils import session_memory  # noqa: E402
 from config import SESSION_HISTORY_MAX_TURNS  # noqa: E402
+from utils import session_memory  # noqa: E402
 
 
 def setup_function():

@@ -9,7 +9,6 @@ from .price_tools import get_prices
 from .tariff_tools import get_tariffs
 from .types import ToolInvocation, ToolResult
 
-
 # Central mapping from public tool names to concrete implementations.
 TOOL_REGISTRY: Dict[str, Callable[..., ToolResult]] = {
     "get_prices": get_prices,

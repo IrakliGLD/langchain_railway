@@ -21,8 +21,8 @@ Manual Review Process:
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict
 from enum import Enum
+from typing import Dict, List, Optional
 
 # =============================================================================
 # TEST CASE DEFINITIONS
@@ -427,9 +427,9 @@ def print_test_case(test_case: TestCase):
     if test_case.expected.should_not_mention:
         print(f"  Should NOT mention: {test_case.expected.should_not_mention}")
     if test_case.expected.should_have_seasonal_breakdown:
-        print(f"  CRITICAL: Must have seasonal breakdown (summer/winter)")
+        print("  CRITICAL: Must have seasonal breakdown (summer/winter)")
     if test_case.expected.should_clarify_thermal_imports:
-        print(f"  CRITICAL: Must clarify thermal uses imported gas")
+        print("  CRITICAL: Must clarify thermal uses imported gas")
     print()
     if test_case.notes:
         print(f"NOTES: {test_case.notes}")

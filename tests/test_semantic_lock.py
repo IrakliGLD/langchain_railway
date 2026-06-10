@@ -45,8 +45,8 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 from contracts.question_analysis import (  # noqa: E402
     AnalysisMode,
-    ChartIntent,
     AnalysisRequirementsInfo,
+    ChartIntent,
     ClassificationInfo,
     DerivedMetricName,
     DerivedMetricRequest,
@@ -66,7 +66,6 @@ from contracts.question_analysis import (  # noqa: E402
 )
 from models import QueryContext  # noqa: E402
 from utils.query_validation import validate_tool_relevance  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Helpers

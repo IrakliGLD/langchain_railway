@@ -8,8 +8,8 @@ Author: AI Engineer Review
 Date: 2025-12-10
 """
 
-import re
 import logging
+import re
 from typing import Dict, Tuple
 
 log = logging.getLogger("Enai")

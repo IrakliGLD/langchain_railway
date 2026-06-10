@@ -13,6 +13,19 @@ from typing import Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from agent.aggregation import detect_aggregation_intent
+from agent.analyzer import BALANCING_SHARE_METADATA
+from agent.router import (
+    extract_balancing_entities,
+    extract_currency,
+    extract_date_range,
+    extract_generation_types,
+    extract_price_metric,
+    extract_tariff_entities,
+)
+from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
+from agent.tools.types import ToolInvocation
+from config import ENABLE_TRACE_DEBUG_ARTIFACTS
 from contracts.question_analysis import (
     AnswerKind,
     PreferredPath,
@@ -21,32 +34,19 @@ from contracts.question_analysis import (
     RenderStyle,
     ToolName,
 )
-from models import QueryContext
 from core.llm import (
-    llm_cache,
-    make_gemini,
-    llm_generate_plan_and_sql,
+    build_question_analyzer_prompt_validation_artifacts,
     get_relevant_domain_knowledge,
     llm_analyze_question,
-    build_question_analyzer_prompt_validation_artifacts,
+    llm_cache,
+    llm_generate_plan_and_sql,
+    make_gemini,
 )
-from utils.language import detect_language, get_language_instruction
+from models import QueryContext
 from utils.forecasting import extract_excluded_years, extract_forecast_horizon_years
+from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
 from utils.trace_logging import trace_detail
-from config import ENABLE_TRACE_DEBUG_ARTIFACTS
-from agent.aggregation import detect_aggregation_intent
-from agent.tools.types import ToolInvocation
-from agent.router import (
-    extract_date_range,
-    extract_currency,
-    extract_price_metric,
-    extract_balancing_entities,
-    extract_tariff_entities,
-    extract_generation_types,
-)
-from agent.analyzer import BALANCING_SHARE_METADATA
-from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
 
 log = logging.getLogger("Enai")
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-
 # Answer-kind guide teaches the analyzer how to classify the expected answer shape.
 QUESTION_ANALYSIS_ANSWER_KIND_GUIDE: List[Dict[str, str]] = [
     {

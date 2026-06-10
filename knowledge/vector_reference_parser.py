@@ -38,12 +38,11 @@ Rejection rule:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import List, Optional
 
 from contracts.vector_knowledge import ChunkReference, ChunkReferenceKind
-
 
 # ---------------------------------------------------------------------------
 # Canonical-number helpers
@@ -262,10 +261,10 @@ _SELF_ARTICLE_RE = re.compile(
 #   * ordinal word    ``მეშვიდე პუნქტი``    (sub_word=მეშვიდე)
 #   * parens form     ``5(7) პუნქტი``       (sub_paren_num=5(7))
 _PARAGRAPH_SUB_GROUP = (
-    rf"(?:\s+(?:"
-    rf"(?P<sub_prefix>მე-(?P<sub_pre>\d+))|"
-    rf"(?P<sub_suffix>(?P<sub_post>\d+)-ე)|"
-    rf"(?P<sub_word>" + "|".join(_GEORGIAN_ORDINAL_WORDS) + r")|"
+    r"(?:\s+(?:"
+    r"(?P<sub_prefix>მე-(?P<sub_pre>\d+))|"
+    r"(?P<sub_suffix>(?P<sub_post>\d+)-ე)|"
+    r"(?P<sub_word>" + "|".join(_GEORGIAN_ORDINAL_WORDS) + r")|"
     rf"(?P<sub_paren_num>\d+\(\d+\))"
     rf")\s+(?P<sub_unit>პუნქტ|ნაწილ){_KA_NOUN_SUFFIX})?"
 )

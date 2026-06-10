@@ -16,19 +16,18 @@ import pandas as pd
 import pytest
 
 from agent.metric_registry import (
-    MetricContext,
     METRIC_REGISTRY,
-    compute_mom,
-    compute_yoy,
-    compute_share_delta_mom,
+    MetricContext,
     compute_correlation,
-    compute_trend_slope,
+    compute_mom,
     compute_scenario,
+    compute_share_delta_mom,
+    compute_trend_slope,
+    compute_yoy,
     dispatch_metric,
     row_value,
     share_value,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -412,8 +411,9 @@ class TestBuildRequestedAnalysisEvidence:
     evidence records as the prior if/elif chain."""
 
     def test_mom_evidence_via_analyzer(self):
-        from agent.analyzer import _build_requested_analysis_evidence
         from unittest.mock import MagicMock
+
+        from agent.analyzer import _build_requested_analysis_evidence
 
         df = _make_df(months=3)
         current_row = df.tail(1)
@@ -452,8 +452,9 @@ class TestBuildRequestedAnalysisEvidence:
         assert len(row["source_cells"]) == 2
 
     def test_scenario_evidence_via_analyzer(self):
-        from agent.analyzer import _build_requested_analysis_evidence
         from unittest.mock import MagicMock
+
+        from agent.analyzer import _build_requested_analysis_evidence
 
         df = _make_df(months=5)
         current_row = df.tail(1)

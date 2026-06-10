@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -16,7 +15,6 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 
 from config import STATIC_ALLOWED_TABLES, validate_runtime_settings  # noqa: E402
-
 
 _READONLY_ROLE_SQL = Path(__file__).resolve().parents[1] / "scripts" / "least_privilege_api_role.sql"
 

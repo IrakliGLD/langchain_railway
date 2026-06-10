@@ -3,8 +3,8 @@ Metrics tracking for observability.
 
 Simple in-memory metrics for monitoring application performance.
 """
-import logging
 import hashlib
+import logging
 import re
 from contextvars import ContextVar
 from typing import Any, Dict

@@ -8,22 +8,22 @@ Handles:
 - LIMIT clause enforcement
 - CTE (Common Table Expression) handling
 """
-import re
 import logging
+import re
 from typing import Set
 
 from fastapi import HTTPException
-from sqlglot import parse, parse_one, exp
+from sqlglot import exp, parse, parse_one
 from sqlglot.errors import ParseError
 
 from config import (
-    ALLOWED_TABLES,
     ALLOWED_PG_FUNCTIONS,
+    ALLOWED_TABLES,
     DENIED_SQL_FUNC_CLASSES,
-    TABLE_SYNONYMS,
-    SYNONYM_PATTERNS,
+    LIMIT_PATTERN,
     MAX_ROWS,
-    LIMIT_PATTERN
+    SYNONYM_PATTERNS,
+    TABLE_SYNONYMS,
 )
 
 log = logging.getLogger("Enai")
@@ -127,7 +127,7 @@ def simple_table_whitelist_check(sql: str) -> None:
         # Reject on any other unexpected error
         raise HTTPException(
             status_code=400,
-            detail=f"❌ SQL Validation Error (Unexpected): An unexpected error occurred during security review."
+            detail="❌ SQL Validation Error (Unexpected): An unexpected error occurred during security review."
         )
 
     if not cleaned_tables:

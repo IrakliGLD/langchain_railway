@@ -24,42 +24,42 @@ import time
 import pandas as pd
 from sqlalchemy import text
 
+from agent import analyzer, chart_pipeline, evidence_planner, orchestrator, planner, sql_executor, summarizer
+from agent.evidence_validator import validate_evidence
+from agent.frame_adapters import adapt_tool_result
+from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
+from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
+from agent.tools import execute_tool
+from agent.tools.types import ToolInvocation
+from analysis.shares import compute_entity_price_contributions
+from analysis.system_quantities import normalize_tool_dataframe
 from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
     ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
-    ENABLE_TYPED_TOOLS,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
+    ENABLE_TYPED_TOOLS,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
     PIPELINE_MODE,
 )
-from analysis.shares import compute_entity_price_contributions
-from core.query_executor import ENGINE
-from models import QueryContext, ResponseMode, ResolutionPolicy
-from utils.metrics import metrics
-from utils.query_validation import validate_tool_relevance
-from agent import planner, sql_executor, analyzer, summarizer, chart_pipeline, orchestrator, evidence_planner
-from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
-from agent.router import match_tool, ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores
-from agent.evidence_validator import validate_evidence
-from agent.frame_adapters import adapt_tool_result
-from agent.tools import execute_tool
-from agent.tools.types import ToolInvocation
-from analysis.system_quantities import normalize_tool_dataframe
 from contracts.question_analysis import (
+    _SCENARIO_METRIC_NAMES,
     AnswerKind,
     KnowledgeTopicName,
     PreferredPath,
     RenderStyle,
-    _SCENARIO_METRIC_NAMES,
 )
 from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
+from core.query_executor import ENGINE
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
 )
+from models import QueryContext, ResolutionPolicy, ResponseMode
+from utils.metrics import metrics
+from utils.query_validation import validate_tool_relevance
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -2012,7 +2012,7 @@ def process_query(
             qa_type = ctx.question_analysis.classification.query_type.value
             qa_path = ctx.question_analysis.routing.preferred_path.value
             qa_conf = ctx.question_analysis.classification.confidence
-            
+
             # Compute analyzer_conceptual for tracing only — the authoritative
             # response_mode derivation happens after Stage 0.3 via
             # _derive_response_mode() which uses a stricter rule set.
@@ -2147,7 +2147,7 @@ def process_query(
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
         ctx.vector_knowledge_error = bundle.error
-        
+
         # Cross-notify circuit breaker on DB-layer failures from vector store.
         # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
         # may surface "OperationalError" with varied messages like "timeout expired",

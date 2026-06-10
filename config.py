@@ -7,6 +7,7 @@ from the monolithic main.py for better organization.
 import os
 import re
 from textwrap import dedent
+
 from dotenv import load_dotenv
 
 # Load environment variables

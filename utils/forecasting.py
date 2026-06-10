@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 _EXCLUDED_YEAR_PATTERN = re.compile(
     r"(?:exclude|excluding|without|except|omit|omitting|do not use|don't use|not use)"
     r"[^0-9]{0,30}"

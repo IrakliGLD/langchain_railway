@@ -37,7 +37,12 @@ class _DummyEngine:
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
 from agent import pipeline  # noqa: E402
-from contracts.vector_knowledge import RetrievalStrategy, VectorChunkRecord, VectorKnowledgeBundle, VectorKnowledgeMode  # noqa: E402
+from contracts.vector_knowledge import (  # noqa: E402
+    RetrievalStrategy,
+    VectorChunkRecord,
+    VectorKnowledgeBundle,
+    VectorKnowledgeMode,
+)
 
 
 def test_pipeline_collects_vector_knowledge_in_shadow_mode(monkeypatch):

@@ -13,23 +13,23 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from contracts.question_analysis import AnswerKind, ChartIntent, SemanticRole
-from models import QueryContext
-from core.query_executor import ENGINE
-from analysis.stats import quick_stats, rows_to_preview
+from agent.provenance import sql_query_hash, stamp_provenance
+from agent.router import extract_balancing_entities
+from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
 from analysis.seasonal_stats import (
-    detect_monthly_timeseries,
     calculate_seasonal_stats,
+    detect_monthly_timeseries,
     format_seasonal_stats,
 )
+from analysis.shares import build_balancing_correlation_df, compute_regulated_plant_sales
+from analysis.stats import quick_stats, rows_to_preview
 from analysis.system_quantities import (
     normalize_period_series,
     normalize_period_series_with_granularity,
 )
-from analysis.shares import build_balancing_correlation_df, compute_regulated_plant_sales
-from agent.provenance import sql_query_hash, stamp_provenance
-from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
-from agent.router import extract_balancing_entities
+from contracts.question_analysis import AnswerKind, ChartIntent, SemanticRole
+from core.query_executor import ENGINE
+from models import QueryContext
 from utils.forecasting import extract_excluded_years, extract_forecast_horizon_years
 from utils.trace_logging import trace_detail
 
@@ -41,14 +41,14 @@ log = logging.getLogger("Enai")
 # re-exported here for backward compatibility with existing imports.
 # ---------------------------------------------------------------------------
 
+from agent.metric_registry import MetricContext, dispatch_metric
 from config_metrics.metric_config import (
     BALANCING_SHARE_METADATA,
-    METRIC_VALUE_ALIASES,
     DERIVED_METRIC_DEFAULTS,
+    METRIC_VALUE_ALIASES,
     SEMANTIC_TO_COLUMNS,
     SUMMER_MONTHS,
 )
-from agent.metric_registry import MetricContext, dispatch_metric
 
 MONTH_NAME_TO_NUMBER = {
     "january": 1, "jan": 1, "february": 2, "feb": 2,
@@ -116,7 +116,7 @@ def build_share_shift_notes(
 
     deltas.sort(key=lambda x: abs(x[1]), reverse=True)
 
-    significant = [(l, d, c, u, k) for l, d, c, u, k in deltas if abs(d) >= 0.005]
+    significant = [(lbl, d, c, u, k) for lbl, d, c, u, k in deltas if abs(d) >= 0.005]
     if not significant:
         return notes
 
@@ -135,7 +135,7 @@ def build_share_shift_notes(
         notes.append("Cheaper balancing supply contracted — upward price pressure.")
     if cheap_delta > 0.01:
         notes.append("Cheaper balancing supply expanded — downward price pressure.")
-        
+
     if moderate_delta > 0.01:
         notes.append("Moderate-cost groups expanded.")
     if moderate_delta < -0.01:
@@ -2043,7 +2043,6 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         # values where the single-column form expects them).
         primary_stats = per_currency.get(value_col) or next(iter(per_currency.values()))
         last_val = primary_stats["last_val"]
-        primary_last_year = primary_stats["last_year"]
 
         # Build per-currency CAGR note.  Single-currency cases preserve the
         # legacy "Yearly CAGR=X%, Summer=Y%, Winter=Z%" line for downstream
@@ -2914,9 +2913,6 @@ def _build_why_context(ctx: QueryContext) -> None:
                                     yoy_shares[col] = float(val)
                                 except (ValueError, TypeError):
                                     continue
-
-    # Track whether any share evidence was found at all
-    share_data_available = bool(cur_shares or prev_shares)
 
     deltas = {k: round(cur_shares.get(k, 0) - prev_shares.get(k, 0), 4) for k in cur_shares}
 

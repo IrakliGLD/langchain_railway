@@ -12,6 +12,7 @@ from contracts.question_analysis import (
     ClassificationInfo,
     KnowledgeInfo,
     KnowledgeTopicName,
+    LanguageCode,
     LanguageInfo,
     PreferredPath,
     QueryType,
@@ -21,7 +22,6 @@ from contracts.question_analysis import (
     ToolingInfo,
     TopicCandidate,
     VisualizationInfo,
-    LanguageCode,
 )
 from contracts.vector_knowledge import (
     RetrievalStrategy,
@@ -507,9 +507,8 @@ def test_build_vector_filters_preserves_raw_query_market_concept_hint():
 
 
 def test_topic_overlap_boost_in_scoring():
-    from knowledge.vector_store import _topic_overlap_boost
-
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _topic_overlap_boost
 
     chunk_with_match = VectorChunkRecord(
         id="c1",
@@ -557,8 +556,8 @@ def test_topic_overlap_boost_in_scoring():
 
 
 def test_topic_mismatch_penalty_fires_on_zero_overlap():
-    from knowledge.vector_store import _topic_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _topic_mismatch_penalty
 
     off_topic_chunk = VectorChunkRecord(
         id="c1",
@@ -579,8 +578,8 @@ def test_topic_mismatch_penalty_fires_on_zero_overlap():
 
 def test_topic_mismatch_penalty_silent_when_overlap_present():
     """When there's any overlap, the boost handles scoring; penalty must be 0."""
-    from knowledge.vector_store import _topic_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _topic_mismatch_penalty
 
     on_topic_chunk = VectorChunkRecord(
         id="c1",
@@ -600,8 +599,8 @@ def test_topic_mismatch_penalty_silent_when_overlap_present():
 
 def test_topic_mismatch_penalty_silent_when_either_side_empty():
     """Insufficient information — no penalty when we can't compare topic sets."""
-    from knowledge.vector_store import _topic_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _topic_mismatch_penalty
 
     untagged_chunk = VectorChunkRecord(
         id="c1",
@@ -633,8 +632,8 @@ def test_candidate_retrieval_score_penalises_off_topic_chunks():
     """End-to-end: an off-topic chunk with raw-similarity advantage can be
     overtaken by an on-topic chunk after boost+penalty are applied. This
     is the Q4 scoring scenario reduced to its tie-break shape."""
-    from knowledge.vector_store import _candidate_retrieval_score
     from contracts.vector_knowledge import VectorChunkRecord, VectorRetrievalFilters
+    from knowledge.vector_store import _candidate_retrieval_score
 
     # The off-topic chunk has slightly higher raw similarity but its
     # topic set has zero overlap with preferred_topics.
@@ -679,6 +678,7 @@ def test_candidate_retrieval_score_penalises_off_topic_chunks():
 def test_topic_mismatch_penalty_disabled_when_env_zero(monkeypatch):
     """The operator can disable the penalty by setting the env var to 0."""
     import importlib
+
     import knowledge.vector_store as vs
 
     monkeypatch.setenv("VECTOR_TOPIC_AFFINITY_MISMATCH_PENALTY", "0")
@@ -719,8 +719,8 @@ def test_topic_mismatch_penalty_disabled_when_env_zero(monkeypatch):
 def test_document_domain_penalty_fires_on_retail_doc_for_wholesale_query():
     """Q4 scenario: chunk's document_title contains 'net metering' and
     the analyzer's preferred_topics include wholesale-domain markers."""
-    from knowledge.vector_store import _document_domain_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _document_domain_mismatch_penalty
 
     retail_chunk = VectorChunkRecord(
         id="c1",
@@ -742,8 +742,8 @@ def test_document_domain_penalty_fires_on_retail_doc_for_wholesale_query():
 def test_document_domain_penalty_silent_when_no_wholesale_intent():
     """When the query is NOT clearly wholesale (no balancing/cfd_ppa/etc.),
     the document-domain penalty does not fire."""
-    from knowledge.vector_store import _document_domain_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _document_domain_mismatch_penalty
 
     chunk = VectorChunkRecord(
         id="c1",
@@ -763,8 +763,8 @@ def test_document_domain_penalty_silent_when_no_wholesale_intent():
 def test_document_domain_penalty_silent_on_wholesale_document():
     """A Transitory Market Rules chunk does not get penalised by the
     document-domain check."""
-    from knowledge.vector_store import _document_domain_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _document_domain_mismatch_penalty
 
     chunk = VectorChunkRecord(
         id="c1",
@@ -782,8 +782,8 @@ def test_document_domain_penalty_silent_on_wholesale_document():
 
 def test_document_domain_penalty_recognises_georgian_markers():
     """Georgian-titled documents with retail markers must also fire the penalty."""
-    from knowledge.vector_store import _document_domain_mismatch_penalty
     from contracts.vector_knowledge import VectorChunkRecord
+    from knowledge.vector_store import _document_domain_mismatch_penalty
 
     georgian_retail = VectorChunkRecord(
         id="c1",
@@ -805,8 +805,8 @@ def test_q4_scenario_retail_chunk_loses_to_wholesale_chunk():
     """End-to-end Fix B: even when the retail chunk has topic overlap on
     ``tariffs`` AND a small embedding advantage, the document-domain
     penalty pushes it below a legitimate wholesale chunk."""
-    from knowledge.vector_store import _candidate_retrieval_score
     from contracts.vector_knowledge import VectorChunkRecord, VectorRetrievalFilters
+    from knowledge.vector_store import _candidate_retrieval_score
 
     # Retail chunk: has overlap on 'tariffs' (would normally get +0.15 boost)
     # AND slightly higher embedding similarity (0.60 vs 0.55).
@@ -849,6 +849,7 @@ def test_q4_scenario_retail_chunk_loses_to_wholesale_chunk():
 def test_document_domain_penalty_disabled_when_env_zero(monkeypatch):
     """Operator can disable the document-domain penalty independently."""
     import importlib
+
     import knowledge.vector_store as vs
 
     monkeypatch.setenv("VECTOR_DOCUMENT_DOMAIN_PENALTY", "0")

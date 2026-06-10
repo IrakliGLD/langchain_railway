@@ -13,7 +13,6 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, build_trade_share_cte
 
-
 # ---------------------------------------------------------------------------
 # BALANCING_SHARE_PIVOT_SQL
 # ---------------------------------------------------------------------------

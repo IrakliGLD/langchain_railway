@@ -47,7 +47,6 @@ sys.path.insert(0, str(_ROOT))
 from contracts.vector_knowledge import ChunkIngestRecord  # noqa: E402
 from knowledge.vector_chunking import chunk_markdown_text  # noqa: E402
 
-
 CORPUS_DIR = _ROOT / "docs_to_ingest"
 
 

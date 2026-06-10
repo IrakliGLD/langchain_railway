@@ -10,7 +10,6 @@ import pytest
 
 from utils.query_validation import is_conceptual_question
 
-
 # ---------------------------------------------------------------------------
 # Queries that SHOULD be classified as data-driven (not conceptual)
 # ---------------------------------------------------------------------------

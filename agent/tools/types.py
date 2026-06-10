@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
-
 # Shared tuple contract returned by every deterministic tool implementation.
 ToolResult = Tuple[pd.DataFrame, List[str], List[tuple]]
 

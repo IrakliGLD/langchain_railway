@@ -14,13 +14,13 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
 
-from models import QueryContext
-from core.sql_generator import sanitize_sql, simple_table_whitelist_check, plan_validate_repair
-from core.query_executor import ENGINE, execute_sql_safely
 from agent.aggregation import validate_aggregation_logic
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance
-from utils.trace_logging import trace_detail
+from core.query_executor import ENGINE, execute_sql_safely
+from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
+from models import QueryContext
 from utils.query_validation import validate_sql_relevance
+from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
@@ -37,7 +37,7 @@ except ImportError:
 # Tech type classifications (from context.py)
 # ---------------------------------------------------------------------------
 try:
-    from context import SUPPLY_TECH_TYPES, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
+    from context import DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES, TRANSIT_TECH_TYPES
 except ImportError:
     SUPPLY_TECH_TYPES = ["hydro", "thermal", "wind", "solar", "import", "self-cons"]
     DEMAND_TECH_TYPES = ["abkhazeti", "supply-distribution", "direct customers", "losses", "export"]

@@ -4,32 +4,32 @@ Pipeline Stage 4: LLM Summarization
 Generates natural language answers — either from domain knowledge (conceptual)
 or from SQL query results (data summarization).
 """
+import hashlib
 import json
 import logging
 import os
 import re
-import hashlib
 from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
 
-from models import QueryContext, ResolutionPolicy, GroundingPolicy
+from agent.analyzer import _extract_forecast_horizon
+from agent.generic_renderer import render as generic_render
+from config import PIPELINE_MODE, PROVENANCE_MIN_COVERAGE
+from context import scrub_schema_mentions
+from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ObservationFrame, ScenarioFrame
+from contracts.question_analysis import AnswerKind, RenderStyle
 from core.llm import (
-    llm_summarize,
-    llm_summarize_structured,
     SummaryEnvelope,
     classify_query_type,
     get_query_focus,
     get_relevant_domain_knowledge,
+    llm_summarize,
+    llm_summarize_structured,
 )
-from contracts.question_analysis import AnswerKind, RenderStyle
-from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ObservationFrame, ScenarioFrame
-from agent.analyzer import _extract_forecast_horizon
-from agent.generic_renderer import render as generic_render
-from context import scrub_schema_mentions
-from config import PIPELINE_MODE, PROVENANCE_MIN_COVERAGE
+from models import GroundingPolicy, QueryContext, ResolutionPolicy
 from utils.metrics import metrics
 from utils.trace_logging import trace_detail
 
@@ -561,7 +561,7 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
 
     # Support rounding and truncation for all numeric values
     # This ensures that raw data like 37.9913 can be matched by LLM-rounded "37.99" or "38"
-    
+
     # 1. Direct percentage support for ratio cells (abs <= 1)
     if abs(numeric) <= 1:
         percent_raw = numeric * Decimal("100")
@@ -569,7 +569,7 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
             t = _normalize_number_token(str(val))
             if t:
                 tokens.add(t)
-        
+
         # Truncation for ratios
         pr_str = str(percent_raw)
         if "." in pr_str:
@@ -2039,14 +2039,12 @@ def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None,
     target_year_rows = forecast_rows[forecast_rows[time_col].dt.year == target_year]
 
     entries: list[dict[str, Any]] = []
-    season_attempt_made = False
     if "season" in target_year_rows.columns:
         season_series = target_year_rows["season"].astype("object").fillna("").str.lower()
         for season_label, season_tag in (("summer", "summer"), ("winter", "winter")):
             season_rows = target_year_rows[season_series == season_label]
             if season_rows.empty:
                 continue
-            season_attempt_made = True
             for metric_col in metric_cols:
                 val = pd.to_numeric(season_rows[metric_col], errors="coerce").dropna()
                 if val.empty:

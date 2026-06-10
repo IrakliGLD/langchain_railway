@@ -1,8 +1,8 @@
 """
 Shared helpers for typed retrieval tools.
 """
-from datetime import date
 import datetime as dt
+from datetime import date
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from config import MAX_ROWS
 from core.query_executor import ENGINE, check_dataframe_memory
+
 from .types import ToolResult
 
 

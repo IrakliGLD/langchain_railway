@@ -14,12 +14,12 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from models import QueryContext  # noqa: E402
 from agent import orchestrator  # noqa: E402
 from agent.provenance import tool_invocation_hash  # noqa: E402
 from agent.tool_adapter import ToolExecutionResult  # noqa: E402
-from utils.metrics import Metrics  # noqa: E402
 from core import llm as llm_module  # noqa: E402
+from models import QueryContext  # noqa: E402
+from utils.metrics import Metrics  # noqa: E402
 
 
 class FakeLLM:

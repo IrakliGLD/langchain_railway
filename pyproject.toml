@@ -10,6 +10,12 @@ ignore = [
     "E402",  # module level import not at top (test files need env setup first)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# main.py keeps `from config import *` as documented backward-compat debt
+# (re-export surface for tests and the evaluate endpoint). Remove this ignore
+# when the star import is replaced with explicit imports.
+"main.py" = ["F403", "F405"]
+
 [tool.ruff.lint.isort]
 known-first-party = [
     "agent", "analysis", "config", "context", "contracts", "core",
@@ -20,3 +26,20 @@ known-first-party = [
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
+
+[tool.coverage.run]
+# Measure production code only — test files and operational scripts would
+# inflate the number (test code is ~100% executed by definition).
+omit = [
+    "tests/*",
+    "scripts/*",
+    "evaluation_engine.py",
+    "evaluation/*",
+    "ingest_all_documents.py",
+    "ingest_one_document.py",
+    "verify_b1_migration.py",
+]
+
+[tool.coverage.report]
+skip_covered = false
+show_missing = false

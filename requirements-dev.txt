@@ -1,0 +1,4 @@
+# Development / CI-only tools (not installed in the Docker image)
+ruff==0.15.16
+# pytest-cov 5.x is the newest line compatible with the pytest==8.0.0 pin in requirements.txt
+pytest-cov==5.0.0

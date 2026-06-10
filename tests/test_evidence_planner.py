@@ -12,12 +12,10 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+import pandas as pd
 import pytest
 
-import pandas as pd
-
-from contracts.question_analysis import QuestionAnalysis
-from models import QueryContext
+from agent.aggregation import detect_aggregation_intent
 from agent.evidence_planner import (
     build_evidence_plan,
     execute_remaining_evidence,
@@ -25,11 +23,11 @@ from agent.evidence_planner import (
     merge_evidence_into_context,
     next_unsatisfied_step,
 )
-from agent.aggregation import detect_aggregation_intent
 from agent.planner import resolve_tool_params
 from agent.summarizer import _add_evidence_record_tokens, _tokenize_cell_value
 from analysis.system_quantities import normalize_tool_dataframe
-
+from contracts.question_analysis import QuestionAnalysis
+from models import QueryContext
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1033,9 +1031,6 @@ class TestResolveToolParams:
 
 def _mock_execute_tool(results_by_name):
     """Return a mock that maps tool name to (df, cols, rows)."""
-    import agent.evidence_planner as ep
-    original = ep.execute_tool
-
     def _mock(invocation):
         name = invocation.name
         if name in results_by_name:
@@ -1547,7 +1542,7 @@ class TestErrorSkipBehavior:
 
 class TestJoinProvenanceGrounding:
     def test_join_provenance_tokens_added(self):
-        from agent.summarizer import _add_join_provenance_tokens, _tokenize_cell_value
+        from agent.summarizer import _add_join_provenance_tokens
 
         ctx = QueryContext(query="test")
         ctx.join_provenance = [

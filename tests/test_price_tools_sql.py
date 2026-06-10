@@ -2,11 +2,12 @@
 Regression: get_prices() must not raise AmbiguousParameter when date filters
 are passed. Tests the SQL generation path, not the DB connection.
 """
-import pytest
-import sys
 import os
-from unittest.mock import patch, MagicMock
+import sys
+from unittest.mock import MagicMock, patch
+
 import pandas as pd
+import pytest
 
 # Mock required environment variables before importing any agent modules
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@host:5432/db")

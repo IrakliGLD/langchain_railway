@@ -5,10 +5,10 @@ Can be used both as standalone script and imported by FastAPI endpoints.
 """
 
 import json
-import time
 import re
-from typing import Dict, List, Any, Tuple, Optional
+import time
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def load_evaluation_dataset(dataset_path: str = "evaluation_dataset.json") -> Dict[str, Any]:

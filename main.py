@@ -25,99 +25,85 @@
 
 import hashlib
 import hmac
+import json
+import logging
 import os
 import re
-import time
-import logging
 import threading
+import time
 import uuid
-import json
-from urllib.parse import urlparse
 from contextvars import ContextVar
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Header, Query, Request, Response
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 # Phase 1D Security: Rate limiting
 from slowapi.util import get_remote_address
-
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError, DatabaseError, SQLAlchemyError
+from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
+from starlette.middleware.base import BaseHTTPMiddleware
 
-import pandas as pd
-import numpy as np
-
-from dotenv import load_dotenv
-
-# Schema & helpers
-from context import DB_SCHEMA_DOC, scrub_schema_mentions, COLUMN_LABELS, DERIVED_LABELS
 import knowledge as knowledge_module
+
+# Phase 6: Pipeline
+from agent.pipeline import process_query
+from analysis.seasonal import compute_seasonal_average
+from analysis.seasonal_stats import calculate_seasonal_stats, detect_monthly_timeseries, format_seasonal_stats
+from analysis.shares import (
+    build_balancing_correlation_df,
+    compute_entity_price_contributions,
+    compute_weighted_balancing_price,
+)
+
+# Phase 3: Analysis modules
+from analysis.stats import quick_stats, rows_to_preview
 
 # ============================================================================
 # REFACTORED MODULES (Phases 1-4)
 # ============================================================================
 # Phase 1: Configuration and Models
 from config import *  # All configuration constants
-from models import Question, APIResponse, MetricsResponse
 
-# Phase 6: Pipeline
-from agent.pipeline import process_query
+# Schema & helpers
+from context import COLUMN_LABELS, DB_SCHEMA_DOC, DERIVED_LABELS, scrub_schema_mentions
+from core.llm import (
+    classify_query_type,
+    get_query_focus,
+    llm_cache,
+    llm_generate_plan_and_sql,
+    llm_summarize,
+    make_gemini,
+    make_openai,
+)
+from core.query_executor import ENGINE, execute_sql_safely, is_database_available
+from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
+from guardrails.firewall import build_safe_refusal_message, inspect_query
+from models import APIResponse, MetricsResponse, Question
+from utils.auth import CallerContext, authenticate_request
+from utils.language import detect_language, get_language_instruction
 
 # Phase 2: Core modules
 from utils.metrics import metrics
+from utils.query_validation import is_conceptual_question, should_skip_sql_execution, validate_sql_relevance
+from utils.resilience import get_resilience_snapshot, request_backpressure_gate
 from utils.session_memory import (
-    get_or_issue_session,
-    get_history,
     append_exchange,
-    seed_history,
+    get_history,
+    get_or_issue_session,
     resolve_session_token,
-)
-from utils.auth import authenticate_request, CallerContext
-from utils.resilience import request_backpressure_gate, get_resilience_snapshot
-from utils.language import detect_language, get_language_instruction
-from utils.query_validation import (
-    is_conceptual_question,
-    validate_sql_relevance,
-    should_skip_sql_execution
-)
-from core.query_executor import ENGINE, execute_sql_safely, is_database_available
-from core.sql_generator import simple_table_whitelist_check, sanitize_sql, plan_validate_repair
-from core.llm import (
-    llm_cache,
-    make_gemini,
-    make_openai,
-    llm_generate_plan_and_sql,
-    llm_summarize,
-    classify_query_type,
-    get_query_focus
-)
-
-# Phase 3: Analysis modules
-from analysis.stats import quick_stats, rows_to_preview
-from analysis.seasonal import compute_seasonal_average
-from analysis.seasonal_stats import (
-    detect_monthly_timeseries,
-    calculate_seasonal_stats,
-    format_seasonal_stats
-)
-from analysis.shares import (
-    build_balancing_correlation_df,
-    compute_weighted_balancing_price,
-    compute_entity_price_contributions
-)
-from guardrails.firewall import inspect_query, build_safe_refusal_message
-
-# Phase 4: Visualization modules
-from visualization.chart_selector import (
-    should_generate_chart,
-    infer_dimension,
-    detect_column_types,
-    select_chart_type
+    seed_history,
 )
 from visualization.chart_builder import prepare_chart_data
+
+# Phase 4: Visualization modules
+from visualization.chart_selector import detect_column_types, infer_dimension, select_chart_type, should_generate_chart
+
 # ============================================================================
 
 # -----------------------------
@@ -178,23 +164,23 @@ log.info(f"🔒 CORS: Allowed origins: {ALLOWED_ORIGINS}")
 # Re-exports: functions moved to agent/ but kept importable from main
 # for backward compatibility (tests, evaluate endpoint, etc.)
 # ---------------------------------------------------------------------------
-from agent.sql_executor import (
-    should_inject_balancing_pivot,
-    build_trade_share_cte,
-    fetch_balancing_share_panel,
-    ensure_share_dataframe,
-    BALANCING_SHARE_PIVOT_SQL,
-    BALANCING_SEGMENT_NORMALIZER,
-)
 from agent.analyzer import (
-    generate_share_summary,
-    build_share_shift_notes,
     BALANCING_SHARE_METADATA,
     MONTH_NAME_TO_NUMBER,
+    build_share_shift_notes,
+    generate_share_summary,
 )
 from agent.planner import (  # noqa: F401 — backward compat re-exports
-    detect_analysis_mode,
     ANALYTICAL_KEYWORDS,
+    detect_analysis_mode,
+)
+from agent.sql_executor import (
+    BALANCING_SEGMENT_NORMALIZER,
+    BALANCING_SHARE_PIVOT_SQL,
+    build_trade_share_cte,
+    ensure_share_dataframe,
+    fetch_balancing_share_panel,
+    should_inject_balancing_pivot,
 )
 
 # Intentionally unused import to keep backward compat:
@@ -573,12 +559,7 @@ def evaluate(
 
     try:
         # Import evaluation engine
-        from evaluation_engine import (
-            load_evaluation_dataset,
-            filter_queries,
-            run_single_evaluation,
-            generate_summary
-        )
+        from evaluation_engine import filter_queries, generate_summary, load_evaluation_dataset, run_single_evaluation
 
         # Load dataset
         dataset = load_evaluation_dataset()
@@ -588,7 +569,7 @@ def evaluate(
         filtered_queries = filter_queries(queries, mode=mode, query_type=type, query_id=query_id)
 
         if not filtered_queries:
-            raise HTTPException(status_code=404, detail=f"No queries found matching filters")
+            raise HTTPException(status_code=404, detail="No queries found matching filters")
 
         # Define API function that calls pipeline internally
         def call_api_internal(query_text: str):
@@ -1095,8 +1076,8 @@ def ask_post(
 if __name__ == "__main__":
     try:
         import uvicorn
-        port = int(os.getenv("PORT", 8000)) 
-        
+        port = int(os.getenv("PORT", 8000))
+
         # CRITICAL: host '0.0.0.0' is required for container accessibility
         log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{port}")
         uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")

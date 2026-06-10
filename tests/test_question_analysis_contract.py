@@ -10,10 +10,10 @@ from contracts.question_analysis import (
     ChartIntent,
     DerivedMetricName,
     DerivedMetricRequest,
-    QuestionAnalysis,
     QueryType,
-    SemanticRole,
+    QuestionAnalysis,
     ScenarioAggregation,
+    SemanticRole,
 )
 
 

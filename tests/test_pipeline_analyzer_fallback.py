@@ -247,8 +247,9 @@ def test_generate_cagr_forecast_emits_both_currencies_when_present():
     seasonal CAGR branch must emit forecast rows with BOTH currencies
     populated (per row, per season).  Pins the fix for Defect B
     (single-currency forecast)."""
-    from agent import analyzer
     import numpy as np
+
+    from agent import analyzer
 
     months = pd.date_range("2019-01-01", "2025-12-01", freq="MS")
     # Build a synthetic monthly series so the seasonal branch fires.

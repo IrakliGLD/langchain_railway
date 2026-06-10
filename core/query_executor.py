@@ -7,18 +7,18 @@ Handles:
 - Query timeout configuration
 - Safe SQL execution with pandas DataFrame output
 """
-import time
 import logging
+import time
 import urllib.parse
-from typing import Tuple, List, Any
+from typing import Any, List, Tuple
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import SQLAlchemyError, OperationalError, DatabaseError
 import pandas as pd
 from fastapi import HTTPException
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
+from sqlalchemy.pool import QueuePool
 
-from config import SUPABASE_DB_URL, MAX_RESULT_SIZE_MB, MAX_ROWS
+from config import MAX_RESULT_SIZE_MB, MAX_ROWS, SUPABASE_DB_URL
 from utils.metrics import metrics
 from utils.resilience import db_circuit_breaker
 

@@ -6,21 +6,22 @@ Executes typed tools and returns:
 - compact preview text for LLM context
 """
 import logging
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
+from agent.tools import execute_tool
+from agent.tools.types import ToolInvocation
 from config import (
     AGENT_TOOL_PREVIEW_MAX_CHARS,
     AGENT_TOOL_PREVIEW_ROWS,
-    AGENT_TOOL_TIMEOUT_SECONDS,
     AGENT_TOOL_RETRY_ATTEMPTS,
+    AGENT_TOOL_TIMEOUT_SECONDS,
 )
-from agent.tools import execute_tool
-from agent.tools.types import ToolInvocation
 
 log = logging.getLogger("Enai")
 

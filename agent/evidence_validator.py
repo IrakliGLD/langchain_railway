@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from agent.shape_requirements import get_requirement
 from contracts.evidence_frames import (
     CanonicalFrame,
     ComparisonFrame,
@@ -16,7 +17,6 @@ from contracts.evidence_frames import (
     ObservationFrame,
 )
 from contracts.question_analysis import AnswerKind
-from agent.shape_requirements import get_requirement
 
 log = logging.getLogger("Enai")
 

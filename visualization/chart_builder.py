@@ -9,21 +9,21 @@ Handles:
 - Trendline calculation and projection
 """
 import logging
-from typing import Dict, List, Set, Tuple, Optional
 import re
+from typing import Dict, List, Optional, Set, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from scipy import stats
 
 from visualization.chart_selector import (
+    determine_axis_mode,
     infer_dimension,
+    unit_for_index,
     unit_for_price,
     unit_for_qty,
-    unit_for_index,
-    unit_for_xrate,
     unit_for_share,
-    determine_axis_mode
+    unit_for_xrate,
 )
 
 log = logging.getLogger("Enai")
@@ -500,7 +500,7 @@ def prepare_chart_data(
         log.warning(f"⚠️ CHART DIMENSION WARNING: {mix_reason}")
         log.warning(f"⚠️ Detected dimensions: {dimensions}")
         log.warning(f"⚠️ Columns: {filtered_num_cols}")
-        log.warning(f"⚠️ LLM should have created separate chart groups for these metrics!")
+        log.warning("⚠️ LLM should have created separate chart groups for these metrics!")
         # Note: We still proceed with chart generation, but log the warning
         # In future, could auto-split into multiple charts here
 

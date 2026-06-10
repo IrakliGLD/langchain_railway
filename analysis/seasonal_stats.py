@@ -9,8 +9,9 @@ Handles:
 """
 import logging
 from typing import Dict, Optional, Tuple
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 log = logging.getLogger("Enai")
 

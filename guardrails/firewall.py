@@ -3,8 +3,8 @@ Stage-0 AI firewall for user query safety.
 
 This module classifies incoming prompts before they enter the planning pipeline.
 """
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import List
 
 
