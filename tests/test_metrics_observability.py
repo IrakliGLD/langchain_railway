@@ -70,6 +70,24 @@ def test_cost_estimation_uses_actual_model_provider(monkeypatch):
     assert abs(gemini_cost - 7.0) < 1e-9
 
 
+def test_analyzer_cross_check_events_are_tracked():
+    """A5: cross-check outcomes are counted and exposed in get_stats."""
+    m = Metrics()
+    m.log_analyzer_cross_check("disagreement")
+    m.log_analyzer_cross_check("disagreement")
+    m.log_analyzer_cross_check("override_applied")
+    m.log_analyzer_cross_check("legal_list_exception")
+    m.log_analyzer_cross_check("scenario_override_gated")
+    m.log_analyzer_cross_check("")  # unknown bucket, must not raise
+
+    events = m.get_stats()["analyzer_cross_check_events"]
+    assert events["disagreement"] == 2
+    assert events["override_applied"] == 1
+    assert events["legal_list_exception"] == 1
+    assert events["scenario_override_gated"] == 1
+    assert events["unknown"] == 1
+
+
 def test_router_and_fallback_intent_metrics_are_tracked():
     m = Metrics()
     m.log_router_match("deterministic")

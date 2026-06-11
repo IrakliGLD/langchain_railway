@@ -53,6 +53,13 @@ class Metrics:
         self.stage_0_7_entered_count = 0
         self.stage_0_7_invocation_built_count = 0
         self.stage_0_7_used_result_count = 0
+        # Analyzer answer-kind cross-check observability (A5, 2026-06-10).
+        # Disagreement/override rates turn the cross-check thresholds
+        # (confidence gates, legal-list exception, scenario anchor gate) into
+        # data-tunable knobs instead of intuition. Keys: "disagreement",
+        # "override_applied", "legal_list_exception",
+        # "scenario_override_applied", "scenario_override_gated".
+        self.analyzer_cross_check_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -280,6 +287,18 @@ class Metrics:
         elif normalized == "used_result":
             self.stage_0_7_used_result_count += 1
 
+    def log_analyzer_cross_check(self, event: str) -> None:
+        """Track answer-kind cross-check outcomes (A5).
+
+        ``disagreement / requests`` is the analyzer-vs-heuristic friction rate;
+        ``override_applied / disagreement`` shows how often the safer-option
+        policy actually changes the contract. Sustained near-zero disagreement
+        justifies relaxing the cross-check; high rates point at analyzer prompt
+        work (§5.3) before threshold tuning.
+        """
+        key = (event or "unknown").strip().lower() or "unknown"
+        self.analyzer_cross_check_events[key] = self.analyzer_cross_check_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -368,6 +387,7 @@ class Metrics:
             "stage_0_7_entered": self.stage_0_7_entered_count,
             "stage_0_7_invocation_built": self.stage_0_7_invocation_built_count,
             "stage_0_7_used_result": self.stage_0_7_used_result_count,
+            "analyzer_cross_check_events": dict(self.analyzer_cross_check_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

@@ -9,7 +9,7 @@ Technical reference for the `langchain_railway` query pipeline. Describes the cu
 
 ## 1. Executive Summary
 
-Stage 0.2 is the one LLM call that interprets the user question. It emits a full answer contract — `answer_kind`, `render_style`, `grouping`, `entity_scope`, `candidate_tools`, `params_hint`, `evidence_roles`, `derived_metrics`, `visualization` — and downstream stages execute it without re-interpretation.
+Stage 0.2 is the single **interpretation** point: the one LLM call that interprets the user question. It emits a full answer contract — `answer_kind`, `render_style`, `grouping`, `entity_scope`, `candidate_tools`, `params_hint`, `evidence_roles`, `derived_metrics`, `visualization` — and downstream stages execute it without re-interpretation. Other LLM calls do exist downstream (the narrative summarizer for EXPLANATION/KNOWLEDGE shapes, the FORECAST composer, the legacy SQL planner on the fallback path, and the OpenAI fallback on Gemini failure) — they *render or recover*, they do not re-interpret the question.
 
 After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function (`_execute_evidence_plan`) called once from `process_query`. It contains the four-strategy primary invocation picker (`_pick_primary_invocation`), the shared executor (`_execute_evidence_step`), the secondary evidence loop, and the post-loop driver-context enrichment. Evidence frames + the generic renderer cover six answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO, FORECAST) deterministically; narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
 
@@ -54,9 +54,9 @@ HTTP /ask
 
 ### 2.3 Ideal Decision Tree
 
-**Design principle: Stage 0.2 is the one LLM call. Make it emit the full contract. Everything after just executes — no re-interpretation.**
+**Design principle: Stage 0.2 is the one *interpretation* call. Make it emit the full contract. Everything after executes or renders — no re-interpretation.** (Rendering may itself use an LLM — see §3.9 — but always against the Stage 0.2 contract, never against a fresh reading of the question.)
 
-The current pipeline matches this tree closely. The main remaining mismatch is that primary execution (one block) and the Stage 0.8 secondary loop are still separate code paths instead of one iteration over `evidence_plan`.
+The current pipeline matches this tree closely. After §5.1 the entire tool-execution surface is one orchestration **function** (`_execute_evidence_plan`) called once from `process_query`; internally it still runs three passes (primary strategy chain, secondary loop, driver enrichment) rather than literally one for-loop over `evidence_plan`. Where this document says "single loop", read "single orchestration function".
 
 ```text
 HTTP /ask
@@ -75,8 +75,11 @@ HTTP /ask
 │   │   answer_kind, render_style, grouping, entity_scope,
 │   │   visualization (full).
 │   │
-│   │ NOTE: primary_tool is NOT emitted. Tool selection is deterministic
-│   │ via candidate_tools[0] + evidence planner.
+│   │ NOTE: primary_tool is NOT emitted. candidate_tools[0] feeds the
+│   │ evidence planner, but until F.6 lands the runtime picker is a
+│   │ four-strategy priority cascade (§3.6: plan-driven → keyword router
+│   │ → analyzer-built → router fallback) — not a single deterministic
+│   │ source.
 │   │
 │   │ Active cross-check: LLM-emitted vs query_type-derived answer_kind.
 │   │ Disagreement is logged; the safer option is preferred unless the
@@ -102,10 +105,12 @@ HTTP /ask
 │   │   SCENARIO → scenario params available
 │   → Ordered list of tool steps, validated against the answer contract.
 │
-├─ Tool execution + evidence collection (single loop — TARGET)
-│   │ Today: primary execution (one orchestration block over the
-│   │ first plan step, with four strategies) + Stage 0.8 secondary
-│   │ loop (over remaining steps). The merge into one for-loop is open.
+├─ Tool execution + evidence collection (one orchestration function)
+│   │ Implemented by _execute_evidence_plan (§3.6): primary execution
+│   │ (strategy chain over the first plan step) + secondary loop (over
+│   │ remaining steps) + driver enrichment, as three passes inside one
+│   │ function. A literal single for-loop over evidence_plan remains a
+│   │ nice-to-have, not a gap.
 │   │
 │   │ for each evidence step:
 │   │   1. pick invocation (plan-driven; for the primary step also
@@ -154,9 +159,9 @@ HTTP /ask
 │   │   the narrative with R²-tiered reliability templates, the
 │   │   long-horizon "focus on structural drivers" rule, and the
 │   │   July 2027 target-market regime-break warning. The
-│   │   deterministic ``generic_renderer._render_forecast`` is now
-│   │   orphan code from the production path (only exercised by a
-│   │   frame-builder unit test). Production trace c507e4d7
+│   │   deterministic ``generic_renderer._render_forecast`` was
+│   │   orphan code from the production path and was deleted on
+│   │   2026-06-10 (A2). Production trace c507e4d7
 │   │   (2026-05-22) showed why this matters: the deterministic
 │   │   renderer shipped "Winter (GEL): 12.49 GEL/MWh" — winter
 │   │   forecast 10× lower than current — because it rubber-stamped
@@ -192,6 +197,8 @@ Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer
 ### 3.3 Stage 0.3 — Vector Knowledge Retrieval
 
 Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, no re-rank) for narrative data, SKIP for deterministic data and CLARIFY. The tier is computed by `_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`.
+
+**Known coupling risk:** the tier inherits Stage 0.2's classification. If the analyzer mislabels a question that genuinely needs regulatory/conceptual grounding as deterministic data, retrieval is SKIPped and the answer is silently ungrounded — the misclassification costs twice. Tiering is a deliberate cost optimization; treat retrieval-starved wrong answers as a §5.3 routing failure, not a retrieval bug.
 
 **Cross-reference expansion (Phase A, env-gated).** Regulatory documents are riddled with cross-references like `მე-14 მუხლის მე-7 პუნქტი` ("paragraph 7 of article 14") that point to articles outside the top-K matched set. Phase A handles the cheapest slice — same-document adjacency — without any schema change. `resolve_adjacent_chunks` in [`knowledge/vector_retrieval.py`](../../knowledge/vector_retrieval.py) computes `(document_id, chunk_index ± 1)` for each top-K hit, deduplicates, excludes chunks already in the bundle, and fetches them via `KnowledgeVectorStore.fetch_chunks_by_index` using the existing `(document_id, chunk_index)` index. The result lives on `VectorKnowledgeBundle.adjacent_chunks`. Controlled by `VECTOR_ADJACENCY_MODE ∈ {off, shadow, on}` (default `off`): `shadow` fetches and emits a `stage_0_3_vector_knowledge_adjacency` trace event without changing pack output; `on` flips the pack function to append adjacency entries (tagged `| adjacent` in their header) after the primary chunks within the same `VECTOR_KNOWLEDGE_MAX_CHARS` budget. Primary chunks always win under budget pressure. See [`VECTOR_KNOWLEDGE_ROLLOUT.md`](VECTOR_KNOWLEDGE_ROLLOUT.md) "Adjacency expansion" for the rollout path.
 
@@ -265,6 +272,8 @@ A "missing requested evidence" check after Stage 3 can CLARIFY if the analyzer a
 
 A post-hoc provenance gate runs after the summary. It is a no-op for canonical-frame paths (claims list is empty → `gate_passed=True, reason="no_claims"`); for narrative LLM summaries it catches numeric hallucinations and replaces the answer with a `citation_gate_fallback` on coverage failure.
 
+**Coverage boundary (accepted gap, not an oversight):** the gate therefore protects only narrative LLM answers. Deterministic renders (generic renderer + specialized formatters) ship with **no post-hoc numeric check** — their correctness rests entirely on evidence-frame construction, which is validated at attach time (`evidence_validator`) for *shape*, not values. If a frame is built from the wrong rows, the renderer prints the wrong number confidently. Mitigation lives upstream (planner validation, tool relevance checks), not in Stage 4.
+
 ### 3.10 Stage 5 — Chart Pipeline
 
 `chart_pipeline.build_chart` consumes the analyzer's `VisualizationInfo` directly. The chart frame source is selected first: derived chart builders produce specs for MoM/YoY, index growth, decomposition, forecast, and seasonal answers; otherwise canonical evidence frames feed `chart_frame_builder`. Multi-group plans are iterated — `chart_groups` produces one chart per group, with per-group `type`, `title`, `y_axis_label`, and `metrics` honoured.
@@ -335,6 +344,21 @@ Developer-only (NOT loaded into prompts):
 
 ---
 
+## 4.1 Deployment Constraint: Single Replica
+
+The service holds request-scoped *and* cross-request state **in process memory**: rate-limit
+buckets (`main.py`), session-bound conversation history (`utils/session_memory.py`), the LLM
+response cache (`core/llm.py`), and circuit-breaker state (`utils/resilience.py`).
+
+**The deployment assumption is exactly one worker process / one replica.** With N replicas:
+rate limits multiply by N, sessions issued on one replica are unknown to the others, and
+cache/breaker state diverges. A shared-store migration (Redis) was evaluated and **declined**
+on 2026-06-10 (owner decision: no new runtime infrastructure — see
+`medium_fix_plan_2026-06-10.md` P5). If horizontal scaling ever becomes necessary, that
+decision is the one to revisit *first*; do not scale out without it.
+
+---
+
 ## 5. What Still Needs to Be Fixed
 
 Priority-sorted. Each item is paired with the verification needed before removal/refactor.
@@ -351,7 +375,7 @@ Priority-sorted. Each item is paired with the verification needed before removal
 
 **Verification:** the [targeted test suite](../../skills/developer-phased-audit/references/targeted-suite.md) passes at every sub-phase. Diff symmetry inspection confirms every `metrics.log_*` line and every `_trace_stage`/`_emit_trace_stage` call from the old block has a matching counterpart in the new function — pure structural move with no logic change. Trace shapes (`stage_0_5_plan_driven`, `stage_0_5_router_match`, `stage_0_6_tool_execute`, `stage_0_7_analyzer_route`, `stage_0_7_analyzer_tool_execute`, `stage_0_8_evidence_loop`) and metric counters fire under identical conditions to the pre-§5.1 form.
 
-After §5.1, the §2.3 Ideal Decision Tree's "Tool execution + evidence collection (single loop — TARGET)" is no longer aspirational — it is the structure `_execute_evidence_plan` implements.
+After §5.1, the §2.3 Ideal Decision Tree's "Tool execution + evidence collection" node is implemented by `_execute_evidence_plan` — one orchestration function with three internal passes (see the §2.3 note on terminology).
 
 ### 5.2 Stage 0.7 Removal (F.6, gated)
 
@@ -407,7 +431,7 @@ For triaging Q&A failures — latency spikes, grounding failures, schema validat
 
 The pipeline is contract-driven end to end. Stage 0.2 emits the answer contract; evidence frames + the generic renderer cover five standard answer shapes deterministically (SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO); FORECAST plus the narrative shapes (EXPLANATION / KNOWLEDGE) go to a focus-aware LLM summarizer with pre-computed evidence in `stats_hint`; the visualization plan flows to Stage 5 without re-interpretation.
 
-After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function `_execute_evidence_plan` called once from `process_query`. The §2.3 Ideal Decision Tree's "Tool execution + evidence collection (single loop — TARGET)" is no longer aspirational — it is the structure that function implements. The remaining structural work is removing Stage 0.7 strategies once F.2 hit-rate data clears.
+After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function `_execute_evidence_plan` called once from `process_query` — one orchestration function with three internal passes (see §2.3 note). The remaining structural work is removing Stage 0.7 strategies once F.2 hit-rate data clears.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 

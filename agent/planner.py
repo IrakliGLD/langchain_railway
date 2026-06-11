@@ -1678,13 +1678,9 @@ def _query_requests_trend(qa: QuestionAnalysis, raw_query: str) -> bool:
 # Constants (moved from main.py)
 # ---------------------------------------------------------------------------
 
-ANALYTICAL_KEYWORDS = {
-    "trend", "change", "growth", "increase", "decrease", "compare", "impact",
-    "volatility", "pattern", "season", "relationship", "correlation", "evolution",
-    "driver", "cause", "effect", "factor", "reason", "influence", "depend", "why", "behind",
-    "payoff", "hypothetical", "scenario",
-}
-
+# Canonical list lives in the shared lexicon (A3, 2026-06-10); alias kept
+# because main.py re-exports ANALYTICAL_KEYWORDS for backward compat.
+from contracts.intent_lexicon import MODE_ANALYTICAL_KEYWORDS as ANALYTICAL_KEYWORDS  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers (moved from main.py)

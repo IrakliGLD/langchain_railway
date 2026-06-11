@@ -12,6 +12,12 @@ import pandas as pd
 from pydantic import BaseModel, Field, field_validator
 
 from contracts.evidence_frames import CanonicalFrame
+from contracts.intent_lexicon import (
+    CUSTOM_PRICE_CALC_SIGNALS,
+    QUANTITY_REQUEST_SIGNALS,
+    SHARE_INTENT_CLASSIFIER_SIGNALS,
+    SHARE_INTENT_QUERY_SIGNALS,
+)
 from contracts.question_analysis import QuestionAnalysis, ToolName
 from contracts.vector_knowledge import VectorKnowledgeBundle
 
@@ -224,22 +230,22 @@ class QueryContext:
         # share-summary override.
         custom_price_calc = any(
             signal in query_lower
-            for signal in ("weighted average", "average price", "weighted avg", "mean price")
+            for signal in CUSTOM_PRICE_CALC_SIGNALS
         ) and "balancing" in query_lower
         quantity_request = any(
             signal in query_lower
-            for signal in ("how much", "quantity", "volume", "mwh")
+            for signal in QUANTITY_REQUEST_SIGNALS
         )
         if custom_price_calc or quantity_request:
             return False
 
         share_like_query = any(
             signal in query_lower
-            for signal in ("share", "composition", "contribute", "contribution")
+            for signal in SHARE_INTENT_QUERY_SIGNALS
         )
         share_like_intent = any(
             signal in intent_lower
-            for signal in ("share", "composition")
+            for signal in SHARE_INTENT_CLASSIFIER_SIGNALS
         )
         return share_like_query or share_like_intent
 

@@ -15,7 +15,6 @@ from contracts.evidence_frames import (
     CanonicalFrame,
     ComparisonFrame,
     EntitySetFrame,
-    ForecastFrame,
     ObservationFrame,
     ScenarioFrame,
 )
@@ -48,9 +47,9 @@ def render(
         return _render_comparison(frame)
     if answer_kind == AnswerKind.SCENARIO:
         return _render_scenario(frame)
-    if answer_kind == AnswerKind.FORECAST:
-        return _render_forecast(frame)
-    # EXPLANATION, KNOWLEDGE, CLARIFY — not handled here (require LLM narrative).
+    # EXPLANATION, KNOWLEDGE, CLARIFY — require LLM narrative. FORECAST routes
+    # through the LLM summarizer since 2026-05-22 (commit ef048d6); its
+    # deterministic renderer was deleted as orphan code (A2, 2026-06-10).
     return None
 
 
@@ -630,212 +629,6 @@ def _render_scenario(frame: CanonicalFrame) -> str | None:
         return None
 
     return "\n\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# FORECAST — trendline + R² caveat + seasonal breakdown
-# ---------------------------------------------------------------------------
-
-_FORECAST_METRIC_LABELS = {
-    "p_bal_gel": "Balancing electricity price",
-    "p_bal_usd": "Balancing electricity price",
-    "p_dereg_gel": "Deregulated electricity price",
-    "p_dereg_usd": "Deregulated electricity price",
-    "p_gcap_gel": "Guaranteed capacity price",
-    "p_gcap_usd": "Guaranteed capacity price",
-    "xrate": "Exchange rate",
-}
-
-_BALANCING_PRICE_METRICS = {"p_bal_gel", "p_bal_usd"}
-_REGIME_BREAK_DATE = "2027-07"
-_REGIME_BREAK_WARNING = (
-    "\n\n**Important:** Georgia's planned target electricity market model (~July 2027) "
-    "would shift balancing price formation from monthly weighted-average settlement to hourly marginal pricing "
-    "under self-dispatch. This forecast extends into or beyond that horizon, so the structural break "
-    "may fundamentally change price dynamics. Past policy changes (e.g., the January 2024 gas price increase "
-    "for regulated thermals, and temporary deregulated hydro pricing rule changes in Jan\u2013Mar 2024) "
-    "illustrate how regulatory decisions can materially shift balancing prices."
-)
-
-
-def _price_unit_for_metric(metric: str) -> str:
-    metric_lower = str(metric or "").lower()
-    if metric_lower.endswith("_usd"):
-        return "USD/MWh"
-    if metric_lower.endswith("_gel"):
-        return "GEL/MWh"
-    if metric_lower == "xrate":
-        return "GEL per USD"
-    return "Value"
-
-
-def _forecast_caveat_for_r_squared(r_squared: float | None) -> str:
-    if r_squared is None:
-        return (
-            "This forecast is based on historical trendline extrapolation and should be treated cautiously "
-            "because balancing prices can change with tariffs, new PPA/CfD capacity, market rules, and import prices."
-        )
-    if r_squared < 0.5:
-        return (
-            f"This forecast has moderate-to-low reliability (R\u00b2={r_squared:.3f}) due to variability in historical prices. "
-            "Actual prices may differ significantly because of regulatory decisions, new PPA/CfD capacity, market rule changes, or import price shifts."
-        )
-    if r_squared < 0.7:
-        return (
-            f"This forecast assumes current market structure, PPA contracts, and regulatory framework remain unchanged (R\u00b2={r_squared:.3f}). "
-            "Actual prices may differ because of gas-price negotiations, new PPA/CfD capacity additions, GNERC tariff decisions, or changes in neighbouring electricity markets."
-        )
-    return (
-        f"While this trend is statistically strong (R\u00b2={r_squared:.3f}), it still reflects past patterns and assumes unchanged regulatory and contractual conditions. "
-        "Key uncertainties remain PPA/CfD capacity growth, gas-price negotiations, market-rule changes, and import-price dynamics."
-    )
-
-
-def _regime_break_warning_if_needed(target_date: str | None, metrics: set[str]) -> str:
-    if not target_date or not (metrics & _BALANCING_PRICE_METRICS):
-        return ""
-    if target_date >= _REGIME_BREAK_DATE:
-        return _REGIME_BREAK_WARNING
-    return ""
-
-
-def _render_forecast(frame: CanonicalFrame) -> str | None:
-    if not isinstance(frame, ForecastFrame) or frame.is_empty():
-        return None
-
-    target_date = frame.target_date
-    entries = frame.rows
-
-    # Determine primary metric and label.
-    primary_entry = next(
-        (e for e in entries if str(e.get("metric", "")).endswith("_gel")),
-        entries[0],
-    )
-    primary_metric = str(primary_entry.get("metric", "")).strip()
-    metric_label = _FORECAST_METRIC_LABELS.get(
-        primary_metric, primary_metric.replace("_", " ").title()
-    )
-
-    # Entries with ``r_squared=None`` come from the CAGR-projected fallback
-    # (no regression fit), not linear regression. Swap the headline wording
-    # and suppress the ``(R²=…)`` annotation so we don't show a bogus
-    # ``R²=0.000`` to the user.
-    has_r_squared = any(e.get("r_squared") is not None for e in entries)
-    method_phrase = "linear regression" if has_r_squared else "compound annual growth rate"
-
-    def _r2_suffix(entry: dict) -> str:
-        r2 = entry.get("r_squared")
-        if r2 is None:
-            return ""
-        return f" (R\u00b2={float(r2):.3f})"
-
-    # Format target date for display.
-    target_label = target_date or "the requested forecast horizon"
-    try:
-        import pandas as pd
-        ts = pd.to_datetime(target_date, errors="raise")
-        target_label = ts.strftime("%B %Y")
-    except Exception:
-        pass
-
-    # Check regime-break warning.
-    entry_metrics = {
-        str(e.get("metric", "")).split("_summer")[0].split("_winter")[0]
-        for e in entries
-    }
-    regime_warning = _regime_break_warning_if_needed(target_date, entry_metrics)
-
-    # Separate seasonal and overall entries.
-    season_entries = [e for e in entries if e.get("season")]
-    overall_entries = [e for e in entries if not e.get("season")]
-    gel_entry = next(
-        (e for e in overall_entries if str(e.get("metric", "")).endswith("_gel")), None
-    )
-    usd_entry = next(
-        (e for e in overall_entries if str(e.get("metric", "")).endswith("_usd")), None
-    )
-
-    if season_entries:
-        lines = [
-            f"**{metric_label} Forecast**",
-            "",
-            f"Based on {method_phrase} to {target_label}:",
-        ]
-        if gel_entry is not None:
-            lines.append(
-                f"- Overall (GEL): {float(gel_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(gel_entry.get('metric', '')))}"
-                f"{_r2_suffix(gel_entry)}"
-            )
-        if usd_entry is not None:
-            lines.append(
-                f"- Overall (USD): {float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}"
-                f"{_r2_suffix(usd_entry)}"
-            )
-        for entry in sorted(
-            season_entries,
-            key=lambda item: (
-                {"summer": 0, "winter": 1}.get(
-                    str(item.get("season", "")).strip().lower(), 99
-                ),
-                0
-                if str(item.get("metric", "")).strip().lower().endswith("_gel")
-                else 1
-                if str(item.get("metric", "")).strip().lower().endswith("_usd")
-                else 2,
-            ),
-        ):
-            season = str(entry.get("season", "")).title()
-            metric = str(entry.get("metric", "")).strip().lower()
-            currency_label = (
-                "GEL"
-                if metric.endswith("_gel")
-                else "USD"
-                if metric.endswith("_usd")
-                else metric.upper()
-            )
-            season = f"{season} ({currency_label})"
-            unit = _price_unit_for_metric(str(entry.get("metric", "")))
-            lines.append(
-                f"- {season}: {float(entry['forecast_value']):.2f} {unit}"
-                f"{_r2_suffix(entry)}"
-            )
-        lines.append("")
-        lines.append(
-            _forecast_caveat_for_r_squared(
-                (gel_entry or primary_entry).get("r_squared")
-            )
-        )
-        if regime_warning:
-            lines.append(regime_warning)
-        return "\n".join(lines)
-
-    # Non-seasonal path.
-    if gel_entry is not None:
-        answer = (
-            f"Based on {method_phrase}, **{metric_label}** is forecast to reach "
-            f"**{float(gel_entry['forecast_value']):.2f} {_price_unit_for_metric(str(gel_entry.get('metric', '')))}** "
-            f"by **{target_label}**{_r2_suffix(gel_entry)}."
-        )
-        if usd_entry is not None:
-            answer += (
-                f" The parallel USD series points to **{float(usd_entry['forecast_value']):.2f} "
-                f"{_price_unit_for_metric(str(usd_entry.get('metric', '')))}**"
-                f"{_r2_suffix(usd_entry)}."
-            )
-        answer += f"\n\n{_forecast_caveat_for_r_squared(gel_entry.get('r_squared'))}"
-        answer += regime_warning
-        return answer
-
-    first_entry = entries[0]
-    return (
-        f"Based on {method_phrase}, **{metric_label}** is forecast to reach "
-        f"**{float(first_entry['forecast_value']):.2f} {_price_unit_for_metric(str(first_entry.get('metric', '')))}** "
-        f"by **{target_label}**{_r2_suffix(first_entry)}.\n\n"
-        f"{_forecast_caveat_for_r_squared(first_entry.get('r_squared'))}"
-        f"{regime_warning}"
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -554,6 +554,7 @@ def _cross_check_answer_kind(ctx) -> None:
         and qa.classification.query_type.value in _LEGAL_LIST_QUERY_TYPES
         and qa.classification.confidence >= _LEGAL_LIST_MIN_CONFIDENCE
     ):
+        metrics.log_analyzer_cross_check("legal_list_exception")
         log.info(
             "answer_kind cross-check: trusting LLM list shape for legal/conceptual question "
             "(llm=list derived=%s confidence=%.2f query_type=%s, query=%.80s)",
@@ -574,6 +575,7 @@ def _cross_check_answer_kind(ctx) -> None:
         # Neither is in the safe set — trust the LLM (it has more context).
         chosen = llm_kind
 
+    metrics.log_analyzer_cross_check("disagreement")
     log.warning(
         "answer_kind cross-check disagreement: llm=%s derived=%s chosen=%s "
         "(query_type=%s, query=%.80s)",
@@ -583,8 +585,19 @@ def _cross_check_answer_kind(ctx) -> None:
         qa.classification.query_type.value,
         ctx.query,
     )
+    trace_detail(
+        log,
+        ctx,
+        "stage_0_2_question_analyzer",
+        "answer_kind_cross_check",
+        llm_kind=llm_kind.value if llm_kind else None,
+        derived_kind=derived_kind.value if derived_kind else None,
+        chosen=chosen.value,
+        query_type=qa.classification.query_type.value,
+    )
     # Update the analysis in-place if the chosen value differs from what the LLM emitted.
     if chosen != llm_kind:
+        metrics.log_analyzer_cross_check("override_applied")
         qa.answer_kind = chosen
 
 
@@ -2068,12 +2081,14 @@ def process_query(
                 m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
             )
             if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
+                metrics.log_analyzer_cross_check("scenario_override_applied")
                 log.info(
                     "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
                     qa.answer_kind.value if qa.answer_kind else None,
                 )
                 qa.answer_kind = AnswerKind.SCENARIO
             elif has_scenario_metric:
+                metrics.log_analyzer_cross_check("scenario_override_gated")
                 log.info(
                     "answer_kind override suppressed: scenario derived metrics present "
                     "but no quantitative anchor in query (kind=%s, query=%.80s)",

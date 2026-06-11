@@ -36,21 +36,21 @@ rest. The audit step of each phase explicitly re-runs the known patch-heavy file
 
 ---
 
-## Phase overview
+## Phase overview (status updated 2026-06-10 evening)
 
-| Phase | Track | Item | Effort | Risk |
-|---|---|---|---|---|
-| A1 | Arch | Architecture-doc truth pass + single-replica constraint pinned | S | None (docs) |
-| Q1 | Quality | Extract LLM provider/runtime layer from `core/llm.py` | M | Low-Med |
-| Q2 | Quality | Extract JSON payload parsing/sanitization from `core/llm.py` | M | Low |
-| Q3 | Quality | Extract analyzer-prompt assembly + truncation engine from `core/llm.py` | M | Med |
-| Q4 | Quality | Split share-analysis family out of `agent/analyzer.py` | M | Low-Med |
-| A2 | Arch | Delete orphan code (`generic_renderer._render_forecast` + dead branches) | S | Low |
-| A3 | Arch | Consolidate multilingual intent lexicons into one module | M | Med |
-| Q5 | Quality | `main.py` hygiene: kill `from config import *`, lifespan handler, version unification | S | Low |
-| Q6 | Quality | Generate both balancing share-pivot SQL artifacts from one spec | S | Low |
-| A4 | Arch | Stage 0.7 / agent-loop removal decision (data-gated, with a date) | S code / needs prod data | Med |
-| A5 | Arch | Cross-check disagreement-rate observability | S | Low |
+| Phase | Track | Item | Status |
+|---|---|---|---|
+| A1 | Arch | Architecture-doc truth pass + single-replica constraint pinned | ✅ done |
+| Q1 | Quality | Extract LLM provider/runtime layer → `core/llm_runtime.py` | ✅ done (reduced scope: patched orchestration symbols stayed in `core.llm` per the governing rule; see module docstrings) |
+| Q2 | Quality | Extract JSON payload parsing/sanitization → `core/llm_payloads.py` | ✅ done |
+| Q3 | Quality | Extract truncation engine → `core/prompt_budget.py` (Q3a) | ✅ Q3a done (`_enforce_prompt_budget` stayed in `core.llm` — patched + patch-dependent). **Q3b (analyzer prompt-block assembly, ~800 lines) deferred** — next candidate, same shim discipline. `core/llm.py`: 4,253 → ~3,300 lines |
+| Q4 | Quality | Split share-analysis family out of `agent/analyzer.py` | ⏸ deferred (next session) |
+| A2 | Arch | Delete orphan `generic_renderer._render_forecast` (+206 lines of forecast-only helpers, dispatch branch, doc refs) | ✅ done |
+| A3 | Arch | Consolidate multilingual intent lexicons → `contracts/intent_lexicon.py` | ✅ partial: module seeded; `sql_executor`, `planner`, `models` migrated with HEAD-identity checks. **A3.d remaining:** `utils/query_validation.py`, `agent/router.py` (listed in the module docstring) |
+| Q5 | Quality | `main.py` hygiene: explicit config imports (per-file-ignore deleted), lifespan handler, `__version__` unified | ✅ done |
+| Q6 | Quality | Both balancing share-pivot SQL artifacts rendered from one spec | ✅ done — generated strings **byte-identical** to the former literals (verified vs git HEAD); the pre-existing pivot/CTE asymmetry (`share_total_hpp`) preserved and documented |
+| A4 | Arch | Stage 0.7 / agent-loop removal decision | ⏸ **owner action**: pull 14 days of `stage_0_7_*` counters from production `/metrics`; decision rule pre-committed in §A4 below |
+| A5 | Arch | Cross-check disagreement-rate observability | ✅ done — `analyzer_cross_check_events` counters + disagreement trace event |
 
 Recommended order: **A1 → Q1 → Q2 → Q3 → Q4 → A2 → A3 → Q5 → Q6 → A5**, with **A4**
 scheduled independently (it waits on production metrics, not on code).

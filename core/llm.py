@@ -110,36 +110,20 @@ class SummaryEnvelope(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
-def _to_int(value) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _extract_token_usage(message) -> tuple[int, int, int]:
-    """Best-effort extraction of prompt/completion/total tokens from LLM message."""
-    prompt_tokens = 0
-    completion_tokens = 0
-    total_tokens = 0
-
-    usage_metadata = getattr(message, "usage_metadata", None)
-    if isinstance(usage_metadata, dict):
-        prompt_tokens = _to_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
-        completion_tokens = _to_int(usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens"))
-        total_tokens = _to_int(usage_metadata.get("total_tokens"))
-
-    response_metadata = getattr(message, "response_metadata", None)
-    if isinstance(response_metadata, dict):
-        token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
-        if isinstance(token_usage, dict):
-            prompt_tokens = max(prompt_tokens, _to_int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens")))
-            completion_tokens = max(completion_tokens, _to_int(token_usage.get("completion_tokens") or token_usage.get("output_tokens")))
-            total_tokens = max(total_tokens, _to_int(token_usage.get("total_tokens")))
-
-    if total_tokens <= 0:
-        total_tokens = prompt_tokens + completion_tokens
-    return prompt_tokens, completion_tokens, total_tokens
+# Provider runtime layer (Q1, 2026-06-10): client factories, response-cache
+# class, and token/cost accounting live in core/llm_runtime.py. The names are
+# re-imported here so existing `core.llm.<name>` imports and monkeypatches
+# keep working. The orchestration symbols tests patch (llm_cache,
+# _invoke_with_resilience, get_llm_for_stage, _log_usage_for_message,
+# make_gemini/make_openai) intentionally stay defined in THIS module — see the
+# patch-surface note in core/llm_runtime.py before moving anything else.
+from core.llm_runtime import (  # noqa: F401 — re-export surface
+    LLMResponseCache,
+    _extract_token_usage,
+    _to_int,
+    get_gemini,
+    get_openai,
+)
 
 
 def _is_openai_model_name(model_name: str) -> bool:
@@ -158,7 +142,11 @@ def _is_openai_model_name(model_name: str) -> bool:
 
 
 def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: str) -> float:
-    """Estimate USD cost based on provider-level token rates and actual model used."""
+    """Estimate USD cost based on provider-level token rates and actual model used.
+
+    Stays in core.llm (not llm_runtime): reads provider config constants that
+    tests monkeypatch on THIS module (test_metrics_observability).
+    """
     if _is_openai_model_name(model_name):
         return (
             (prompt_tokens / 1000.0) * OPENAI_INPUT_COST_PER_1K_USD
@@ -168,6 +156,10 @@ def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: s
         (prompt_tokens / 1000.0) * GEMINI_INPUT_COST_PER_1K_USD
         + (completion_tokens / 1000.0) * GEMINI_OUTPUT_COST_PER_1K_USD
     )
+
+
+def _provider_from_model_name(model_name: str) -> str:
+    return "openai" if _is_openai_model_name(model_name) else "gemini"
 
 
 def _log_usage_for_message(message, model_name: str):
@@ -180,10 +172,6 @@ def _log_usage_for_message(message, model_name: str):
         total_tokens=total_tokens,
         estimated_cost_usd=estimated_cost,
     )
-
-
-def _provider_from_model_name(model_name: str) -> str:
-    return "openai" if _is_openai_model_name(model_name) else "gemini"
 
 
 def _invoke_with_resilience(llm, messages, model_name: str):
@@ -204,152 +192,8 @@ def _invoke_with_resilience(llm, messages, model_name: str):
     return message
 
 
-# -----------------------------
-# LLM Response Cache (Phase 1 Optimization + Request Coalescing)
-# -----------------------------
-
-import threading as _threading
-
-
-class LLMResponseCache:
-    """Thread-safe in-memory cache with request coalescing for LLM responses.
-
-    Phase 1 optimization: Cache identical prompts to avoid repeated LLM calls.
-    Phase 2 optimization: Request coalescing ("singleflight") prevents stampeding
-    herd cache misses.  When multiple threads request the same prompt concurrently,
-    only one thread calls the LLM.  The remaining threads block on a
-    ``threading.Event`` until the leader finishes, then read from the cache.
-
-    The public API (``get`` / ``set``) is fully backward-compatible.  The
-    coalescing lifecycle is:
-      1. ``get()`` → cache miss → returns ``None``
-      2. Caller calls ``mark_in_flight(prompt)``
-      3. Caller calls the LLM
-      4. Caller calls ``set(prompt, response)`` on success (or
-         ``cancel_in_flight(prompt)`` on failure)
-
-    If a concurrent thread calls ``get()`` while a key is in-flight, the get
-    blocks up to ``coalesce_timeout`` seconds waiting for the leader.
-    """
-
-    def __init__(
-        self,
-        max_size: int = 1000,
-        coalesce_timeout: float = 180.0,
-    ):
-        self._cache: dict[str, str] = {}
-        self._max_size = max_size
-        self._hits = 0
-        self._misses = 0
-        self._coalesce_hits = 0
-        self._coalesce_timeout = coalesce_timeout
-        # Guards both _cache and _in_flight mutations.
-        self._lock = _threading.Lock()
-        # key → Event; set when the leader finishes (success or failure).
-        self._in_flight: dict[str, _threading.Event] = {}
-
-    def _make_key(self, prompt: str) -> str:
-        """Generate cache key from prompt hash."""
-        return hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]
-
-    # --- core API (backward-compatible) ---
-
-    def get(self, prompt: str) -> Optional[str]:
-        """Return cached response, or ``None`` on a true miss.
-
-        If another thread is currently computing the same key (in-flight), this
-        method blocks until the leader finishes, then returns the cached value
-        (or ``None`` if the leader failed).
-        """
-        key = self._make_key(prompt)
-
-        with self._lock:
-            if key in self._cache:
-                self._hits += 1
-                log.info("✅ LLM cache HIT (hit rate: %.1f%%)", self.hit_rate() * 100)
-                return self._cache[key]
-
-            event = self._in_flight.get(key)
-            if event is None:
-                # True miss — no cached value, nobody computing it.
-                self._misses += 1
-                return None
-
-        # Another thread is computing this key — wait for it.
-        log.info("⏳ LLM cache: waiting for in-flight result (key=%.8s…)", key)
-        signaled = event.wait(timeout=self._coalesce_timeout)
-
-        with self._lock:
-            result = self._cache.get(key)
-
-        if result is not None:
-            self._coalesce_hits += 1
-            log.info(
-                "✅ LLM cache COALESCE HIT (waited=%.0fs, hit rate: %.1f%%)",
-                0 if signaled else self._coalesce_timeout,
-                self.hit_rate() * 100,
-            )
-            return result
-
-        # Leader failed — caller should proceed as a fresh miss.
-        self._misses += 1
-        return None
-
-    def set(self, prompt: str, response: str):
-        """Cache response for prompt and wake any waiting threads."""
-        key = self._make_key(prompt)
-
-        with self._lock:
-            if len(self._cache) >= self._max_size:
-                remove_count = max(1, self._max_size // 10)
-                for _ in range(remove_count):
-                    self._cache.pop(next(iter(self._cache)), None)
-                log.info("🗑️ Cache eviction: removed %d oldest entries", remove_count)
-            self._cache[key] = response
-            event = self._in_flight.pop(key, None)
-
-        if event is not None:
-            event.set()  # Wake all waiters.
-
-    # --- coalescing lifecycle ---
-
-    def mark_in_flight(self, prompt: str):
-        """Mark *prompt* as being computed.  Must be followed by ``set()`` or
-        ``cancel_in_flight()`` (use try/finally)."""
-        key = self._make_key(prompt)
-        with self._lock:
-            if key not in self._in_flight:
-                self._in_flight[key] = _threading.Event()
-
-    def cancel_in_flight(self, prompt: str):
-        """Remove the in-flight marker without caching a value.  Wakes any
-        waiting threads so they can retry independently."""
-        key = self._make_key(prompt)
-        with self._lock:
-            event = self._in_flight.pop(key, None)
-        if event is not None:
-            event.set()
-
-    # --- stats ---
-
-    def hit_rate(self) -> float:
-        """Calculate cache hit rate (includes coalesce hits)."""
-        total = self._hits + self._coalesce_hits + self._misses
-        return (self._hits + self._coalesce_hits) / total if total > 0 else 0.0
-
-    def stats(self) -> dict:
-        """Get cache statistics."""
-        return {
-            "size": len(self._cache),
-            "hits": self._hits,
-            "coalesce_hits": self._coalesce_hits,
-            "misses": self._misses,
-            "hit_rate": self.hit_rate(),
-            "in_flight": len(self._in_flight),
-        }
-
-
-# Global cache instance
+# Global cache instance (class lives in core/llm_runtime.py; the instance
+# stays HERE because tests monkeypatch `core.llm.llm_cache`).
 llm_cache = LLMResponseCache(max_size=1000)
 
 
@@ -367,58 +211,9 @@ def _cache_cancel_in_flight(cache_input: str):
         fn(cache_input)
 
 
-# -----------------------------
-# LLM Instances (Singleton Pattern)
-# -----------------------------
-
-_gemini_llm = None
-_openai_llm = None
-
-
-def get_gemini() -> ChatGoogleGenerativeAI:
-    """Get cached Gemini LLM instance (singleton pattern).
-
-    Note: convert_system_message_to_human=True is required because Gemini
-    doesn't natively support SystemMessages in the LangChain interface.
-
-    Retry configuration: max_retries=2 to prevent quota exhaustion from
-    aggressive retry behavior (default is 6 retries with exponential backoff).
-    """
-    global _gemini_llm
-    if _gemini_llm is None:
-        _gemini_llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL,
-            google_api_key=GOOGLE_API_KEY,
-            temperature=0,
-            convert_system_message_to_human=True,
-            max_retries=2,  # Limit retries to prevent quota exhaustion
-            timeout=120     # Allow up to 120s for large prompts (default is 60s)
-        )
-        log.info("✅ Gemini LLM instance cached (max_retries=2, timeout=120s)")
-    return _gemini_llm
-
-
-def get_openai() -> ChatOpenAI:
-    """Get cached OpenAI LLM instance (singleton pattern).
-
-    Raises:
-        RuntimeError: If OPENAI_API_KEY is not configured
-    """
-    global _openai_llm
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
-    if _openai_llm is None:
-        _openai_llm = ChatOpenAI(
-            model=OPENAI_MODEL,
-            temperature=0,
-            openai_api_key=OPENAI_API_KEY,
-            max_retries=2  # Limit retries to prevent quota exhaustion
-        )
-        log.info("✅ OpenAI LLM instance cached (max_retries=2)")
-    return _openai_llm
-
-
-# Backward compatibility aliases
+# Backward compatibility aliases (factories live in core/llm_runtime.py;
+# these alias bindings stay HERE because tests monkeypatch `core.llm.make_openai`
+# and get_llm_for_stage below resolves them through this module's globals).
 make_gemini = get_gemini
 make_openai = get_openai
 
@@ -1945,57 +1740,22 @@ SYSTEM_GUIDANCE (authoritative rules):
     return out
 
 
-def _extract_json_payload(raw_text: str) -> dict:
-    """Extract a JSON object payload from model output.
-
-    Tolerates three drift modes observed in production traces:
-      1. Trailing text after the JSON object (Q7 trace 4e9b17da, 2026-05-16:
-         ``Extra data: line 1 column 1407``) — Gemini occasionally appends
-         commentary after the closing brace.
-      2. Markdown fences around the JSON.
-      3. Leading prose before the first ``{``.
-
-    Strategy: strip fences, find the first ``{``, then ``raw_decode`` from
-    that position. ``raw_decode`` returns the first complete JSON value and
-    the index where it stopped — trailing content is silently discarded.
-    Falls back to the prior ``find``/``rfind`` heuristic only if ``raw_decode``
-    also fails (e.g., malformed object).
-    """
-    text = (raw_text or "").strip()
-    if not text:
-        raise ValueError("Empty model output")
-
-    # Remove markdown fences if present.
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-
-    parsed = None
-    start = text.find("{")
-    if start != -1:
-        try:
-            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
-        except json.JSONDecodeError:
-            parsed = None
-
-    if parsed is None:
-        # Fallback: strict full-text parse, then last-resort find/rfind slice.
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise ValueError("No JSON object found in model output")
-            parsed = json.loads(text[start : end + 1])
-
-    if not isinstance(parsed, dict):
-        raise ValueError("Structured output must be a JSON object")
-    return parsed
-
-
-def _compact_json(value) -> str:
-    """Serialize JSON with stable compact formatting for prompt/cache efficiency."""
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
+# Payload parsing / sanitization layer (Q2, 2026-06-10): JSON extraction,
+# relative-date coercion, and QuestionAnalysis payload sanitizers live in
+# core/llm_payloads.py (pure functions, no patched config reads). Names are
+# re-imported so `core.llm.<name>` references keep working.
+from core.llm_payloads import (  # noqa: F401 -- re-export surface
+    _PERIOD_RAW_TEXT_MAX_LENGTH,
+    _coerce_null_lists_from_schema,
+    _coerce_relative_date,
+    _compact_json,
+    _extract_json_payload,
+    _normalize_period_dates_inplace,
+    _resolve_schema_node,
+    _sanitize_chart_hints,
+    _sanitize_question_analysis_payload,
+    _schema_allows_array,
+)
 
 # ---------------------------------------------------------------------------
 # Analyzer catalog JSON — serialized once at module import instead of per
@@ -2009,463 +1769,6 @@ _CHART_POLICY_JSON = _compact_json(QUESTION_ANALYSIS_CHART_POLICY)
 _FILTER_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_FILTER_GUIDE)
 _QUERY_TYPE_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_QUERY_TYPE_GUIDE)
 _ANSWER_KIND_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_ANSWER_KIND_GUIDE)
-
-
-_PERIOD_RAW_TEXT_MAX_LENGTH = (
-    PeriodInfo.model_json_schema()
-    .get("properties", {})
-    .get("raw_text", {})
-    .get("anyOf", [{}])[0]
-    .get("maxLength", 120)
-)
-
-
-# ---------------------------------------------------------------------------
-# Relative-date coercion for analyzer-emitted period fields.
-#
-# The contract (`contracts.question_analysis.ISODate`) constrains period
-# fields to `^\d{4}-\d{2}-\d{2}$`, but Gemini has been observed to emit
-# relative tokens like ``"12m"`` (12 months back) and ``"now"`` (today) —
-# see Q3 production trace 7f6fc4b0 (2026-05-16). Pydantic rejection of the
-# stray token previously crashed the full QuestionAnalysis validation and
-# forced a ~8s heuristic fallback. The sanitizer normalizes recognized
-# relative tokens to ISO before validation; un-coercible tokens cause the
-# enclosing period block to be dropped (graceful degradation — downstream
-# SQL planner re-derives the period from query text).
-# ---------------------------------------------------------------------------
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_RELATIVE_DATE_RE = re.compile(r"^\s*(\d+)\s*([dwmqy])\s*$", re.IGNORECASE)
-
-
-def _coerce_relative_date(token: object, *, anchor: _date, role: str) -> Optional[str]:
-    """Normalize an analyzer-emitted date token to ISO ``YYYY-MM-DD`` or None.
-
-    Tolerated drift modes:
-      - already-ISO string → returned verbatim
-      - ``"now"`` / ``"today"`` (case-insensitive) → ``anchor.isoformat()``
-      - ``"<N>d|w|m|q|y"`` (e.g. ``"12m"``) → calendar-aware offset using
-        ``dateutil.relativedelta``. For ``role="start"`` the result is
-        ``anchor - N units``; for ``role="end"`` the result is ``anchor``
-        (intuitive when paired with ``start='Nm', end='now'`` for a
-        rolling-window query).
-
-    Returns ``None`` when the token is unrecognizable. The caller should
-    drop the enclosing period block in that case rather than emit invalid
-    ISO that would crash strict Pydantic validation.
-    """
-    if isinstance(token, _date):
-        return token.isoformat()
-    if not isinstance(token, str):
-        return None
-    text = token.strip().lower()
-    if not text:
-        return None
-    if _ISO_DATE_RE.match(text):
-        return text
-    if text in {"now", "today"}:
-        return anchor.isoformat()
-    match = _RELATIVE_DATE_RE.match(text)
-    if not match:
-        return None
-    n = int(match.group(1))
-    unit = match.group(2).lower()
-    if role == "end":
-        # Relative tokens at end-of-window anchor to "now" — the natural
-        # interpretation of e.g. start='12m', end='12m' is "12 months back
-        # through now", not "a 24-month range centred on now".
-        return anchor.isoformat()
-    # role == "start": calendar-aware offset back from anchor.
-    if unit == "d":
-        delta = relativedelta(days=n)
-    elif unit == "w":
-        delta = relativedelta(weeks=n)
-    elif unit == "m":
-        delta = relativedelta(months=n)
-    elif unit == "q":
-        delta = relativedelta(months=n * 3)
-    elif unit == "y":
-        delta = relativedelta(years=n)
-    else:
-        return None
-    return (anchor - delta).isoformat()
-
-
-def _normalize_period_dates_inplace(container: dict, *, anchor: _date) -> bool:
-    """Normalize ``start_date`` and ``end_date`` keys on a period-like dict.
-
-    Returns True when both dates are present and ISO-valid (either already
-    or after coercion). Returns False when either is missing or could not
-    be coerced — caller should drop the period block.
-    """
-    if not isinstance(container, dict):
-        return False
-    start_raw = container.get("start_date")
-    end_raw = container.get("end_date")
-    if start_raw is None and end_raw is None:
-        return False
-    start_iso = _coerce_relative_date(start_raw, anchor=anchor, role="start") if start_raw is not None else None
-    end_iso = _coerce_relative_date(end_raw, anchor=anchor, role="end") if end_raw is not None else None
-    if not start_iso or not end_iso:
-        return False
-    # Enforce start <= end; if reversed after coercion (very rare), drop —
-    # PeriodInfo._validate_date_order would otherwise crash Pydantic.
-    try:
-        if _date.fromisoformat(end_iso) < _date.fromisoformat(start_iso):
-            return False
-    except ValueError:
-        return False
-    container["start_date"] = start_iso
-    container["end_date"] = end_iso
-    return True
-
-
-_QUESTION_ANALYSIS_SCHEMA = QuestionAnalysis.model_json_schema()
-_QUESTION_ANALYSIS_SCHEMA_DEFS = _QUESTION_ANALYSIS_SCHEMA.get("$defs", {})
-
-# Allowed values for ``knowledge.candidate_topics[*].name``. Used by the
-# sanitizer to drop unknown topic names emitted by the LLM rather than fail
-# the entire ``QuestionAnalysis`` validation (Q6 production trace b19e2464,
-# 2026-05-16: "knowledge.candidate_topics.1.name 'regulatory_procedure'
-# Input should be ... enum values").
-_KNOWN_TOPIC_NAMES = frozenset(t.value for t in KnowledgeTopicName)
-
-
-def _resolve_schema_node(schema: dict | None) -> dict:
-    """Resolve simple local $ref pointers inside the QuestionAnalysis schema."""
-    if not isinstance(schema, dict):
-        return {}
-    ref = schema.get("$ref")
-    if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
-        return schema
-    return _QUESTION_ANALYSIS_SCHEMA_DEFS.get(ref.split("/")[-1], schema)
-
-
-def _schema_allows_array(schema: dict | None) -> bool:
-    """Return True when the schema node accepts an array value."""
-    node = _resolve_schema_node(schema)
-    if not isinstance(node, dict):
-        return False
-    if node.get("type") == "array":
-        return True
-    for option in node.get("anyOf", []):
-        resolved = _resolve_schema_node(option)
-        if isinstance(resolved, dict) and resolved.get("type") == "array":
-            return True
-    return False
-
-
-def _coerce_null_lists_from_schema(value, schema: dict | None):
-    """Recursively coerce nulls to [] for fields declared as arrays in the contract."""
-    node = _resolve_schema_node(schema)
-    if not isinstance(node, dict):
-        return value
-
-    if value is None and _schema_allows_array(node):
-        return []
-
-    if value is None:
-        return value
-
-    if "anyOf" in node:
-        for option in node.get("anyOf", []):
-            resolved = _resolve_schema_node(option)
-            if not isinstance(resolved, dict):
-                continue
-            option_type = resolved.get("type")
-            if option_type == "object" and isinstance(value, dict):
-                return _coerce_null_lists_from_schema(value, resolved)
-            if option_type == "array" and isinstance(value, list):
-                return _coerce_null_lists_from_schema(value, resolved)
-        return value
-
-    node_type = node.get("type")
-    if node_type == "object" and isinstance(value, dict):
-        properties = node.get("properties", {})
-        for key, child_schema in properties.items():
-            if key in value:
-                value[key] = _coerce_null_lists_from_schema(value.get(key), child_schema)
-        return value
-
-    if node_type == "array" and isinstance(value, list):
-        item_schema = node.get("items")
-        if item_schema is None:
-            return value
-        return [_coerce_null_lists_from_schema(item, item_schema) for item in value]
-
-    return value
-
-
-def _sanitize_question_analysis_payload(payload: dict) -> dict:
-    """Best-effort cleanup for question-analysis payloads before model validation."""
-    if not isinstance(payload, dict):
-        return payload
-
-    payload = _coerce_null_lists_from_schema(payload, _QUESTION_ANALYSIS_SCHEMA)
-
-    def _pop_dict(source: dict, key: str) -> dict | None:
-        value = source.pop(key, None)
-        return value if isinstance(value, dict) else None
-
-    def _sanitize_topic_candidates(raw_topics: object) -> list[dict]:
-        if not isinstance(raw_topics, list):
-            return []
-        sanitized_topics: list[dict] = []
-        for item in raw_topics:
-            if isinstance(item, dict):
-                name = str(item.get("name") or "").strip()
-                score = item.get("score", 0.5)
-            else:
-                name = str(item or "").strip()
-                score = 0.5
-            if not name:
-                continue
-            # Phase 3 (2026-05-16): drop unknown topic names rather than
-            # crash the entire QuestionAnalysis validation. Q6 trace
-            # b19e2464: Gemini emitted "regulatory_procedure" which is
-            # not in ``KnowledgeTopicName``. Keeping the other valid
-            # candidate topics preserves more analyzer signal than the
-            # heuristic fallback would.
-            if name not in _KNOWN_TOPIC_NAMES:
-                continue
-            try:
-                score_val = max(0.0, min(1.0, float(score)))
-            except (TypeError, ValueError):
-                score_val = 0.5
-            sanitized_topics.append({"name": name, "score": score_val})
-        return sanitized_topics
-
-    def _guess_tool_name_from_params_hint(params_hint: dict) -> str | None:
-        if not isinstance(params_hint, dict):
-            return None
-        if params_hint.get("types") or params_hint.get("mode") in {"quantity", "share"}:
-            return "get_generation_mix"
-        entities = {
-            str(entity).strip().lower()
-            for entity in (params_hint.get("entities") or [])
-            if str(entity).strip()
-        }
-        if entities:
-            tariff_like = {
-                "enguri", "vardnili", "gardabani", "regulated_hpp",
-                "regulated_new_tpp", "regulated_old_tpp", "old_tpp_group",
-            }
-            if entities & tariff_like:
-                return "get_tariffs"
-            return "get_balancing_composition"
-        if any(params_hint.get(key) is not None for key in ("metric", "currency", "granularity", "start_date", "end_date")):
-            return "get_prices"
-        return None
-
-    classification = payload.get("classification")
-    if isinstance(classification, dict):
-        raw_ambiguities = payload.pop("ambiguities", None)
-        if raw_ambiguities is not None and not classification.get("ambiguities"):
-            classification["ambiguities"] = raw_ambiguities
-
-    knowledge = payload.get("knowledge")
-    if isinstance(knowledge, dict):
-        raw_topics = payload.pop("candidate_topics", None)
-        if raw_topics is not None and not knowledge.get("candidate_topics"):
-            sanitized_topics = _sanitize_topic_candidates(raw_topics)
-            if sanitized_topics:
-                knowledge["candidate_topics"] = sanitized_topics
-        # Phase 3 (2026-05-16): always sanitize the candidate_topics on the
-        # knowledge object — the LLM normally emits them here directly
-        # (not via the top-level merge above), and we need to drop unknown
-        # enum values (Q6 trace b19e2464) before Pydantic validation.
-        direct_topics = knowledge.get("candidate_topics")
-        if isinstance(direct_topics, list):
-            knowledge["candidate_topics"] = _sanitize_topic_candidates(direct_topics)
-
-    tooling = payload.get("tooling")
-    if isinstance(tooling, dict):
-        raw_candidate_tools = payload.pop("candidate_tools", None)
-        if isinstance(raw_candidate_tools, list) and not tooling.get("candidate_tools"):
-            tooling["candidate_tools"] = raw_candidate_tools
-
-        raw_params_hint = _pop_dict(tooling, "params_hint")
-        if raw_params_hint is None:
-            raw_params_hint = _pop_dict(payload, "params_hint")
-        if raw_params_hint is not None:
-            candidate_tools = tooling.get("candidate_tools")
-            if isinstance(candidate_tools, list) and candidate_tools:
-                first_candidate = candidate_tools[0]
-                if isinstance(first_candidate, dict) and not first_candidate.get("params_hint"):
-                    first_candidate["params_hint"] = raw_params_hint
-            else:
-                guessed_tool = _guess_tool_name_from_params_hint(raw_params_hint)
-                if guessed_tool:
-                    tooling["candidate_tools"] = [{
-                        "name": guessed_tool,
-                        "score": 0.5,
-                        "reason": "sanitized params_hint",
-                        "params_hint": raw_params_hint,
-                    }]
-
-    sql_hints = payload.get("sql_hints")
-    if sql_hints is None:
-        payload["sql_hints"] = {}
-        sql_hints = payload["sql_hints"]
-    if isinstance(sql_hints, dict):
-        if sql_hints.get("dimensions") is None:
-            sql_hints["dimensions"] = []
-        period = sql_hints.get("period")
-        if isinstance(period, dict):
-            # Phase 2 (2026-05-16): coerce relative tokens like "12m" / "now"
-            # to ISO YYYY-MM-DD before Pydantic sees them (Q3 trace 7f6fc4b0).
-            # If coercion fails for either bound, drop the period — downstream
-            # SQL planner re-derives the period from query text.
-            anchor = _date.today()
-            if not _normalize_period_dates_inplace(period, anchor=anchor):
-                sql_hints.pop("period", None)
-            else:
-                raw_text = period.get("raw_text")
-                if isinstance(raw_text, str) and len(raw_text) > _PERIOD_RAW_TEXT_MAX_LENGTH:
-                    period.pop("raw_text", None)
-        elif period is None:
-            sql_hints.pop("period", None)
-
-    # Apply the same coercion to tooling.candidate_tools[*].params_hint dates.
-    # These also use the ISODate contract (Optional, so the field can be
-    # nulled rather than dropping the whole hint).
-    tooling_hint_anchor = _date.today()
-    tooling_for_dates = payload.get("tooling")
-    if isinstance(tooling_for_dates, dict):
-        for candidate in tooling_for_dates.get("candidate_tools") or []:
-            if not isinstance(candidate, dict):
-                continue
-            params_hint = candidate.get("params_hint")
-            if not isinstance(params_hint, dict):
-                continue
-            start_raw = params_hint.get("start_date")
-            end_raw = params_hint.get("end_date")
-            if start_raw is not None:
-                coerced = _coerce_relative_date(start_raw, anchor=tooling_hint_anchor, role="start")
-                if coerced is None:
-                    params_hint.pop("start_date", None)
-                else:
-                    params_hint["start_date"] = coerced
-            if end_raw is not None:
-                coerced = _coerce_relative_date(end_raw, anchor=tooling_hint_anchor, role="end")
-                if coerced is None:
-                    params_hint.pop("end_date", None)
-                else:
-                    params_hint["end_date"] = coerced
-
-    vis = payload.get("visualization")
-    if not isinstance(vis, dict):
-        return payload
-
-    raw_family = vis.get("preferred_chart_family")
-    if isinstance(raw_family, str):
-        try:
-            vis["preferred_chart_family"] = ChartFamily(raw_family).value
-        except ValueError:
-            vis.pop("preferred_chart_family", None)
-
-    raw_presentation = vis.get("primary_presentation")
-    if isinstance(raw_presentation, str):
-        try:
-            vis["primary_presentation"] = PresentationMode(raw_presentation).value
-        except ValueError:
-            vis.pop("primary_presentation", None)
-
-    raw_goal = vis.get("visual_goal")
-    if isinstance(raw_goal, str):
-        try:
-            vis["visual_goal"] = VisualGoal(raw_goal).value
-        except ValueError:
-            vis.pop("visual_goal", None)
-
-    raw_transform = vis.get("measure_transform")
-    if isinstance(raw_transform, str):
-        try:
-            vis["measure_transform"] = MeasureTransform(raw_transform).value
-        except ValueError:
-            vis.pop("measure_transform", None)
-
-    raw_time_grain = vis.get("time_grain")
-    if isinstance(raw_time_grain, str):
-        try:
-            vis["time_grain"] = VisualizationTimeGrain(raw_time_grain).value
-        except ValueError:
-            vis.pop("time_grain", None)
-
-    raw_split_mode = vis.get("series_split_mode")
-    if isinstance(raw_split_mode, str):
-        try:
-            vis["series_split_mode"] = SeriesSplitMode(raw_split_mode).value
-        except ValueError:
-            vis.pop("series_split_mode", None)
-
-    raw_max_series = vis.get("max_series")
-    if raw_max_series is not None:
-        try:
-            max_series = int(raw_max_series)
-        except (TypeError, ValueError):
-            vis.pop("max_series", None)
-        else:
-            if 1 <= max_series <= 8:
-                vis["max_series"] = max_series
-            else:
-                vis.pop("max_series", None)
-
-    chart_requested = bool(vis.get("chart_requested_by_user"))
-    chart_recommended = bool(vis.get("chart_recommended"))
-    if (
-        vis.get("primary_presentation")
-        in {PresentationMode.CHART.value, PresentationMode.CHART_PLUS_TABLE.value}
-        and not chart_requested
-        and not chart_recommended
-    ):
-        chart_recommended = True
-        vis["chart_recommended"] = True
-    if not chart_requested and not chart_recommended:
-        vis.pop("chart_intent", None)
-        vis.pop("target_series", None)
-        return payload
-
-    chart_intent = None
-    raw_intent = vis.get("chart_intent")
-    if isinstance(raw_intent, str):
-        try:
-            chart_intent = ChartIntent(raw_intent)
-            vis["chart_intent"] = chart_intent.value
-        except ValueError:
-            vis.pop("chart_intent", None)
-
-    raw_roles = vis.get("target_series")
-    sanitized_roles: list[str] = []
-    if isinstance(raw_roles, list):
-        for role in raw_roles:
-            if not isinstance(role, str):
-                continue
-            try:
-                sanitized_roles.append(SemanticRole(role).value)
-            except ValueError:
-                continue
-
-    if sanitized_roles:
-        vis["target_series"] = sanitized_roles
-    else:
-        vis.pop("target_series", None)
-
-    if chart_intent is not None:
-        allowed_roles = _VALID_ROLES_BY_INTENT.get(chart_intent, frozenset())
-        if not vis.get("target_series") or any(
-            SemanticRole(role) not in allowed_roles for role in vis["target_series"]
-        ):
-            vis.pop("chart_intent", None)
-            vis.pop("target_series", None)
-    else:
-        vis.pop("target_series", None)
-
-    return payload
-
-
-def _sanitize_chart_hints(payload: dict) -> dict:
-    """Backward-compatible alias for question-analysis payload sanitization."""
-    return _sanitize_question_analysis_payload(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -3245,6 +2548,73 @@ def build_question_analyzer_prompt_validation_artifacts(
 # and are intentionally omitted from analyzer truncation priorities.
 # Clarify is implemented as a history-priority overlay on top of these base
 # profiles so data/knowledge families keep their existing non-history ordering.
+# Generic prompt-budget engine lives in core/prompt_budget.py (Q3a,
+# 2026-06-10). Re-imported so `core.llm.<name>` references and the monkeypatch
+# on core.llm._enforce_prompt_budget keep working: the entry points below call
+# these via THIS module's globals. The _ANALYZER_TRUNCATION_* lists stay here
+# because they reference the _ANALYZER_RULE_BLOCK_* prompt constants.
+from core.prompt_budget import (  # noqa: F401 -- re-export surface
+    _SECTION_CONTENT_RE,
+    _TRUNCATION_PRIORITY,
+    _TRUNCATION_PRIORITY_DATA,
+    _TRUNCATION_PRIORITY_EXPLANATION,
+    _TRUNCATION_PRIORITY_FORECAST_SCENARIO,
+    _TRUNCATION_PRIORITY_KNOWLEDGE,
+    _head_tail_truncate,
+    _protected_section_fallback_truncate,
+    _section_aware_truncate,
+    _select_summarizer_truncation_priority,
+    _truncate_text,
+)
+
+
+# _enforce_prompt_budget stays in THIS module: tests monkeypatch it here
+# (4 call sites) AND patch its collaborator core.llm._section_aware_truncate
+# expecting interception -- so it must resolve helpers via this module's
+# globals (the re-imported bindings above), not prompt_budget's.
+def _enforce_prompt_budget(
+    prompt: str,
+    label: str,
+    *,
+    budget_override: int | None = None,
+    truncation_priority: list[str] | None = None,
+) -> str:
+    """Hard cap prompt size to control latency/cost blowups.
+
+    Uses section-aware truncation: truncates lower-priority sections first
+    while preserving user_question and system guidance.  The truncation
+    order is determined by *truncation_priority* (defaults to
+    ``_TRUNCATION_PRIORITY``).  Falls back to head+tail split if section
+    parsing fails.
+
+    A 10% headroom margin is applied so truncated prompts land well below
+    the ceiling, reducing Gemini timeout risk on near-capacity prompts.
+    """
+    _raw = max(1500, int(budget_override if budget_override is not None else PROMPT_BUDGET_MAX_CHARS))
+    budget = int(_raw * 0.90)  # 10% headroom for processing safety
+    if len(prompt) <= budget:
+        return prompt
+
+    priority = truncation_priority or _TRUNCATION_PRIORITY
+    try:
+        return _section_aware_truncate(prompt, budget, label, priority)
+    except Exception as exc:
+        if _SECTION_CONTENT_RE.search(prompt):
+            log.warning(
+                "Section-aware truncation failed for label=%s (%s), falling back to protected-section trim",
+                label,
+                exc,
+            )
+            return _protected_section_fallback_truncate(prompt, budget, label, priority)
+        log.warning(
+            "Section-aware truncation failed for label=%s (%s), falling back to head+tail",
+            label,
+            exc,
+        )
+        return _head_tail_truncate(prompt, budget, label)
+
+
+
 _ANALYZER_TRUNCATION_DATA = [
     "UNTRUSTED_CONVERSATION_HISTORY",
     _ANALYZER_RULE_BLOCK_CHART,
@@ -3953,301 +3323,3 @@ Citation format rules:
     return envelope
 
 
-def _truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    keep = max(0, max_chars - 24)
-    return text[:keep] + "\n...[truncated]"
-
-
-# Sections truncated first → last when prompt exceeds budget.
-# Sections NOT listed here (user_question) are fully protected.
-# Data-primary: sacrifice knowledge before data.
-_TRUNCATION_PRIORITY_DATA = [
-    "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_DOMAIN_KNOWLEDGE",
-    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
-    "UNTRUSTED_DATA_PREVIEW",
-    "UNTRUSTED_STATISTICS",
-]
-# Knowledge-primary: sacrifice data before knowledge.
-_TRUNCATION_PRIORITY_KNOWLEDGE = [
-    "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_DATA_PREVIEW",
-    "UNTRUSTED_STATISTICS",
-    "UNTRUSTED_DOMAIN_KNOWLEDGE",
-    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
-]
-# Phase D: explanation answers rely on strict grounding against derived metrics
-# (correlations, mom, yoy). Shed knowledge before shedding the statistics,
-# to ensure the grounding checks don't fail when the budget is squeezed.
-_TRUNCATION_PRIORITY_EXPLANATION = [
-    "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_DOMAIN_KNOWLEDGE",
-    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
-    "UNTRUSTED_DATA_PREVIEW",
-    "UNTRUSTED_STATISTICS",
-]
-# Phase D: forecast / scenario answers MUST keep the stats + data preview
-# (the projection or payoff is computed against those rows).  Sacrifice
-# knowledge passages first — they only add caveats.
-_TRUNCATION_PRIORITY_FORECAST_SCENARIO = [
-    "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
-    "UNTRUSTED_DOMAIN_KNOWLEDGE",
-    "UNTRUSTED_DATA_PREVIEW",
-    "UNTRUSTED_STATISTICS",
-]
-# Default (backward-compatible) — preserves original ordering for callers
-# that don't pass an explicit truncation_priority (e.g. llm_summarize legacy path).
-_TRUNCATION_PRIORITY = [
-    "UNTRUSTED_CONVERSATION_HISTORY",
-    "UNTRUSTED_DATA_PREVIEW",
-    "UNTRUSTED_DOMAIN_KNOWLEDGE",
-    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
-    "UNTRUSTED_STATISTICS",
-]
-
-
-def _select_summarizer_truncation_priority(
-    *,
-    question_analysis: Optional["QuestionAnalysis"] = None,
-    effective_answer_kind: Optional[AnswerKind] = None,
-    response_mode: str = "",
-    resolution_policy: str = "",
-) -> list[str]:
-    """Pick the summarizer-truncation profile for a given answer.
-
-    Phase D promotes profile selection from the coarse ``response_mode`` axis
-    (data vs. knowledge) to the fine ``answer_kind`` axis when the analyzer
-    is authoritative:
-
-    * FORECAST / SCENARIO → preserve stats + data preview the longest
-      (the projection / payoff is computed against those rows).
-    * EXPLANATION → balance data + knowledge; shed pre-computed stats first.
-    * KNOWLEDGE / CLARIFY → preserve passages + domain knowledge.
-    * SCALAR / LIST / TIMESERIES / COMPARISON → preserve data preview +
-      statistics (classic DATA profile).
-
-    Fallback to ``response_mode`` / ``resolution_policy`` when no analyzer
-    output is available, matching pre-Phase-D behavior.
-    """
-    if question_analysis is not None and question_analysis.answer_kind is not None:
-        ak = question_analysis.answer_kind
-    elif effective_answer_kind is not None:
-        ak = effective_answer_kind
-    else:
-        ak = None
-
-    if ak is not None:
-        if ak in (AnswerKind.FORECAST, AnswerKind.SCENARIO):
-            return _TRUNCATION_PRIORITY_FORECAST_SCENARIO
-        if ak == AnswerKind.EXPLANATION:
-            return _TRUNCATION_PRIORITY_EXPLANATION
-        if ak in (AnswerKind.KNOWLEDGE, AnswerKind.CLARIFY):
-            return _TRUNCATION_PRIORITY_KNOWLEDGE
-        # Data shapes (SCALAR, LIST, TIMESERIES, COMPARISON).
-        return _TRUNCATION_PRIORITY_DATA
-
-    # Analyzer-absent fallback (preserves pre-Phase-D behavior).
-    if response_mode == "knowledge_primary" or resolution_policy == "clarify":
-        return _TRUNCATION_PRIORITY_KNOWLEDGE
-    return _TRUNCATION_PRIORITY_DATA
-
-_SECTION_CONTENT_RE = re.compile(
-    r"((?:UNTRUSTED|CONTRACT|RULE)_\w+):\n<<<(.*?)>>>", re.DOTALL,
-)
-
-
-def _enforce_prompt_budget(
-    prompt: str,
-    label: str,
-    *,
-    budget_override: int | None = None,
-    truncation_priority: list[str] | None = None,
-) -> str:
-    """Hard cap prompt size to control latency/cost blowups.
-
-    Uses section-aware truncation: truncates lower-priority sections first
-    while preserving user_question and system guidance.  The truncation
-    order is determined by *truncation_priority* (defaults to
-    ``_TRUNCATION_PRIORITY``).  Falls back to head+tail split if section
-    parsing fails.
-
-    A 10% headroom margin is applied so truncated prompts land well below
-    the ceiling, reducing Gemini timeout risk on near-capacity prompts.
-    """
-    _raw = max(1500, int(budget_override if budget_override is not None else PROMPT_BUDGET_MAX_CHARS))
-    budget = int(_raw * 0.90)  # 10% headroom for processing safety
-    if len(prompt) <= budget:
-        return prompt
-
-    priority = truncation_priority or _TRUNCATION_PRIORITY
-    try:
-        return _section_aware_truncate(prompt, budget, label, priority)
-    except Exception as exc:
-        if _SECTION_CONTENT_RE.search(prompt):
-            log.warning(
-                "Section-aware truncation failed for label=%s (%s), falling back to protected-section trim",
-                label,
-                exc,
-            )
-            return _protected_section_fallback_truncate(prompt, budget, label, priority)
-        log.warning(
-            "Section-aware truncation failed for label=%s (%s), falling back to head+tail",
-            label,
-            exc,
-        )
-        return _head_tail_truncate(prompt, budget, label)
-
-
-def _head_tail_truncate(prompt: str, budget: int, label: str) -> str:
-    """Original head+tail fallback."""
-    marker = "\n\n...[prompt budget applied]...\n\n"
-    tail_budget = min(4000, max(500, budget // 3))
-    head_budget = max(0, budget - tail_budget - len(marker))
-    trimmed = prompt[:head_budget] + marker + prompt[-tail_budget:]
-    log.warning(
-        "Prompt budget applied (head+tail): label=%s original_chars=%s budget=%s",
-        label, len(prompt), budget,
-    )
-    return trimmed
-
-
-def _protected_section_fallback_truncate(
-    prompt: str,
-    budget: int,
-    label: str,
-    priority: list[str],
-) -> str:
-    """Emergency tagged-section fallback that preserves protected sections intact.
-
-    When section-aware truncation fails, do not slice through tagged prompt
-    sections. Instead, drop whole eligible sections in priority order and keep
-    the remaining tagged sections plus trailing schema/instructions unchanged.
-    If the protected remainder still exceeds budget, return it intact and log
-    the overage rather than truncating the contract mid-block.
-    """
-
-    matches = list(_SECTION_CONTENT_RE.finditer(prompt))
-    if not matches:
-        return _head_tail_truncate(prompt, budget, label)
-
-    prefix = prompt[:matches[0].start()]
-    suffix = prompt[matches[-1].end():]
-    sections = [
-        {
-            "name": match.group(1),
-            "content": match.group(2),
-            "keep": True,
-        }
-        for match in matches
-    ]
-    eligible = set(priority or _TRUNCATION_PRIORITY)
-
-    def _render() -> str:
-        parts: list[str] = []
-        if prefix.strip():
-            parts.append(prefix.rstrip())
-        for section in sections:
-            if not section["keep"]:
-                continue
-            parts.append(f"{section['name']}:\n<<<{section['content']}>>>")
-        if suffix.strip():
-            parts.append(suffix.strip())
-        return "\n\n".join(parts)
-
-    rendered = _render()
-    if len(rendered) <= budget:
-        return rendered
-
-    dropped_sections: list[str] = []
-    for section_name in priority or _TRUNCATION_PRIORITY:
-        if len(rendered) <= budget:
-            break
-        for section in sections:
-            if (
-                section["keep"]
-                and section["name"] == section_name
-                and section["name"] in eligible
-            ):
-                section["keep"] = False
-                dropped_sections.append(section_name)
-                rendered = _render()
-                break
-
-    if len(rendered) > budget:
-        log.warning(
-            "Prompt budget fallback preserved protected sections over budget: label=%s final=%d budget=%d dropped_sections=%s",
-            label,
-            len(rendered),
-            budget,
-            dropped_sections,
-        )
-        return rendered
-
-    log.warning(
-        "Prompt budget applied (protected-section fallback): label=%s original=%d final=%d budget=%d dropped_sections=%s",
-        label,
-        len(prompt),
-        len(rendered),
-        budget,
-        dropped_sections,
-    )
-    return rendered
-
-
-def _section_aware_truncate(
-    prompt: str,
-    budget: int,
-    label: str,
-    priority: list[str] | None = None,
-) -> str:
-    """Parse prompt into tagged sections and truncate low-priority ones first."""
-    # Collect section name, content-start pos, content-end pos, original content
-    section_spans: list[tuple[str, int, int, str]] = []
-    replaced: dict[str, str] = {}  # section_name → new content
-    for m in _SECTION_CONTENT_RE.finditer(prompt):
-        section_spans.append((m.group(1), m.start(2), m.end(2), m.group(2)))
-
-    if not section_spans:
-        raise ValueError("No tagged sections found in prompt")
-
-    excess = len(prompt) - budget
-
-    for section_name in (priority or _TRUNCATION_PRIORITY):
-        if excess <= 0:
-            break
-        # Find this section's content
-        content = None
-        for name, _s, _e, orig in section_spans:
-            if name == section_name:
-                content = orig
-                break
-        if content is None or not content.strip():
-            continue
-
-        current_len = len(content)
-        target_len = max(0, current_len - excess)
-        if target_len == 0:
-            replaced[section_name] = ""
-            excess -= current_len
-        else:
-            new_content = _truncate_text(content, target_len)
-            replaced[section_name] = new_content
-            excess -= (current_len - len(new_content))
-
-    if excess > 0:
-        raise ValueError(f"Still {excess} chars over budget after truncating all eligible sections")
-
-    # Rebuild: replace in reverse position order so earlier offsets stay valid
-    result = prompt
-    for name, start, end, _orig in reversed(section_spans):
-        if name in replaced:
-            result = result[:start] + replaced[name] + result[end:]
-
-    log.warning(
-        "Prompt budget applied (section-aware): label=%s original=%d final=%d budget=%d truncated_sections=%s",
-        label, len(prompt), len(result), budget, list(replaced.keys()),
-    )
-    return result

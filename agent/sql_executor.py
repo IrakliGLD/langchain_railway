@@ -50,19 +50,13 @@ except ImportError:
 
 BALANCING_SEGMENT_NORMALIZER = "balancing"
 
-# type_tech side-narrowing intent keywords. The legacy SQL path post-filters a
-# mixed-side generation result down to ONE market side only when the question
-# explicitly signals that side. Total / ambiguous questions must keep all rows
-# rather than silently defaulting to supply (which understated totals — audit L1).
-DEMAND_INTENT_KEYWORDS = ("demand", "consumption", "loss", "export")
-SUPPLY_INTENT_KEYWORDS = (
-    # English
-    "generation", "generate", "generated", "generating",
-    "supply", "supplied", "produce", "produced", "production", "output",
-    # Georgian
-    "გენერაცია", "წარმოება", "გამომუშავება",
-    # Russian
-    "генерация", "выработка", "производство",
+# type_tech side-narrowing intent keywords — canonical lists live in the
+# shared lexicon (A3, 2026-06-10); aliases kept for import compatibility.
+from contracts.intent_lexicon import (  # noqa: E402
+    DEMAND_SIDE_KEYWORDS as DEMAND_INTENT_KEYWORDS,
+)
+from contracts.intent_lexicon import (
+    SUPPLY_SIDE_KEYWORDS as SUPPLY_INTENT_KEYWORDS,
 )
 
 
@@ -99,30 +93,60 @@ def apply_type_tech_side_filter(df: pd.DataFrame, query: str) -> Tuple[pd.DataFr
         return df, None
     return filtered.copy(), label
 
-# Deterministic share pivot used both for direct fallback queries and repair paths.
-BALANCING_SHARE_PIVOT_SQL = f"""
+# ---------------------------------------------------------------------------
+# Balancing share pivot — single spec (Q6, 2026-06-10).
+#
+# The standalone pivot SQL and the CTE injected by build_trade_share_cte used
+# to hand-maintain the same entity→share_* mapping twice; both are now
+# rendered from the spec below. The generated strings are byte-identical to
+# the former literals (verified against git HEAD at migration time);
+# tests/test_sql_executor_pivot.py pins the shape.
+#
+# NOTE the deliberate asymmetry: ``share_total_hpp`` exists only in the
+# standalone pivot (scope="pivot") — the CTE never had it, and adding it
+# would change the CTE column surface. Preserve scopes when editing.
+# ---------------------------------------------------------------------------
+
+_SHARE_ENTITY_COLUMNS = [
+    ("import", "share_import"),
+    ("deregulated_hydro", "share_deregulated_hydro"),
+    ("regulated_hpp", "share_regulated_hpp"),
+    ("regulated_new_tpp", "share_regulated_new_tpp"),
+    ("regulated_old_tpp", "share_regulated_old_tpp"),
+    ("renewable_ppa", "share_renewable_ppa"),
+    ("thermal_ppa", "share_thermal_ppa"),
+    ("CfD_scheme", "share_cfd_scheme"),
+]
+
+# (column_alias, component_entities, scope) — scope ∈ {"both", "pivot"}
+_SHARE_COMPOSITE_COLUMNS = [
+    ("share_all_ppa", ["renewable_ppa", "thermal_ppa"], "both"),
+    ("share_all_renewables", ["regulated_hpp", "deregulated_hydro", "renewable_ppa", "CfD_scheme"], "both"),
+    ("share_total_hpp", ["regulated_hpp", "deregulated_hydro"], "pivot"),
+]
+
+_SHARE_RATIO_EXPR = "ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4)"
+
+
+def _render_balancing_pivot_sql() -> str:
+    """Render the standalone share pivot from the spec (aggregate MAX form)."""
+    def term(e: str) -> str:
+        return f"MAX(CASE WHEN entity='{e}' THEN share ELSE 0 END)"
+
+    entity_lines = [f"    {term(e)} AS {col}," for e, col in _SHARE_ENTITY_COLUMNS]
+    composite_lines = []
+    for col, components, _scope in _SHARE_COMPOSITE_COLUMNS:
+        joined = " +\n        ".join(term(e) for e in components)
+        composite_lines.append(f"    {joined} AS {col},")
+    body = "\n".join(entity_lines + composite_lines).rstrip(",")
+    return f"""
 SELECT
     date,
     '{BALANCING_SEGMENT_NORMALIZER}' AS segment,
-    MAX(CASE WHEN entity='import' THEN share ELSE 0 END) AS share_import,
-    MAX(CASE WHEN entity='deregulated_hydro' THEN share ELSE 0 END) AS share_deregulated_hydro,
-    MAX(CASE WHEN entity='regulated_hpp' THEN share ELSE 0 END) AS share_regulated_hpp,
-    MAX(CASE WHEN entity='regulated_new_tpp' THEN share ELSE 0 END) AS share_regulated_new_tpp,
-    MAX(CASE WHEN entity='regulated_old_tpp' THEN share ELSE 0 END) AS share_regulated_old_tpp,
-    MAX(CASE WHEN entity='renewable_ppa' THEN share ELSE 0 END) AS share_renewable_ppa,
-    MAX(CASE WHEN entity='thermal_ppa' THEN share ELSE 0 END) AS share_thermal_ppa,
-    MAX(CASE WHEN entity='CfD_scheme' THEN share ELSE 0 END) AS share_cfd_scheme,
-    MAX(CASE WHEN entity='renewable_ppa' THEN share ELSE 0 END) +
-        MAX(CASE WHEN entity='thermal_ppa' THEN share ELSE 0 END) AS share_all_ppa,
-    MAX(CASE WHEN entity='regulated_hpp' THEN share ELSE 0 END) +
-        MAX(CASE WHEN entity='deregulated_hydro' THEN share ELSE 0 END) +
-        MAX(CASE WHEN entity='renewable_ppa' THEN share ELSE 0 END) +
-        MAX(CASE WHEN entity='CfD_scheme' THEN share ELSE 0 END) AS share_all_renewables,
-    MAX(CASE WHEN entity='regulated_hpp' THEN share ELSE 0 END) +
-        MAX(CASE WHEN entity='deregulated_hydro' THEN share ELSE 0 END) AS share_total_hpp
+{body}
 FROM (
     SELECT date, entity,
-           ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) AS share
+           {_SHARE_RATIO_EXPR} AS share
     FROM trade_derived_entities
     WHERE LOWER(REPLACE(segment, ' ', '_')) = '{BALANCING_SEGMENT_NORMALIZER}'
     GROUP BY date, entity
@@ -131,6 +155,10 @@ GROUP BY date
 ORDER BY date DESC
 LIMIT 120
 """.strip()
+
+
+# Deterministic share pivot used both for direct fallback queries and repair paths.
+BALANCING_SHARE_PIVOT_SQL = _render_balancing_pivot_sql()
 
 
 # ---------------------------------------------------------------------------
@@ -153,35 +181,38 @@ def should_inject_balancing_pivot(user_query: str, sql: str) -> bool:
     return has_balancing and has_entity and has_trade and not has_share_col
 
 
-def build_trade_share_cte(original_sql: str) -> str:
-    """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
-    cte_name = "tde"
-    cte = f"""WITH {cte_name} AS (
+def _render_trade_share_cte_body(cte_name: str) -> str:
+    """Render the windowed-share CTE from the same spec as the standalone pivot."""
+    def term(e: str) -> str:
+        return f"MAX(CASE WHEN entity='{e}' THEN {_SHARE_RATIO_EXPR} ELSE 0 END) OVER (PARTITION BY date)"
+
+    entity_lines = [f"        {term(e)} AS {col}," for e, col in _SHARE_ENTITY_COLUMNS]
+    composite_lines = []
+    for col, components, scope in _SHARE_COMPOSITE_COLUMNS:
+        if scope != "both":
+            continue  # share_total_hpp is pivot-only; the CTE never exposed it.
+        joined = " +\n         ".join(term(e) for e in components)
+        composite_lines.append(f"        ({joined}) AS {col},")
+    body = "\n".join(entity_lines + composite_lines).rstrip(",")
+    return f"""WITH {cte_name} AS (
     -- Materialize both raw quantity and reusable share_* columns in one place.
     SELECT
         date,
         entity,
         SUM(quantity) AS quantity,
-        ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) AS share,
-        MAX(CASE WHEN entity='import' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_import,
-        MAX(CASE WHEN entity='deregulated_hydro' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_deregulated_hydro,
-        MAX(CASE WHEN entity='regulated_hpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_hpp,
-        MAX(CASE WHEN entity='regulated_new_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_new_tpp,
-        MAX(CASE WHEN entity='regulated_old_tpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_regulated_old_tpp,
-        MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_renewable_ppa,
-        MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_thermal_ppa,
-        MAX(CASE WHEN entity='CfD_scheme' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) AS share_cfd_scheme,
-        (MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
-         MAX(CASE WHEN entity='thermal_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_ppa,
-        (MAX(CASE WHEN entity='regulated_hpp' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
-         MAX(CASE WHEN entity='deregulated_hydro' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
-         MAX(CASE WHEN entity='renewable_ppa' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date) +
-         MAX(CASE WHEN entity='CfD_scheme' THEN ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4) ELSE 0 END) OVER (PARTITION BY date)) AS share_all_renewables
+        {_SHARE_RATIO_EXPR} AS share,
+{body}
     FROM trade_derived_entities
     WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
     GROUP BY date, entity
 )
 """
+
+
+def build_trade_share_cte(original_sql: str) -> str:
+    """Inject a balancing electricity share pivot as a CTE and alias original SQL to it."""
+    cte_name = "tde"
+    cte = _render_trade_share_cte_body(cte_name)
     # Replace trade_derived_entities references in original SQL
     rewritten = re.sub(
         r'\btrade_derived_entities\b',

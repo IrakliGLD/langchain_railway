@@ -32,6 +32,7 @@ import re
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -67,8 +68,26 @@ from analysis.stats import quick_stats, rows_to_preview
 # ============================================================================
 # REFACTORED MODULES (Phases 1-4)
 # ============================================================================
-# Phase 1: Configuration and Models
-from config import *  # All configuration constants
+# Phase 1: Configuration constants (explicit imports — Q5, 2026-06-10; the
+# former star import hid this dependency surface behind a ruff ignore)
+from config import (
+    ALLOWED_TABLES,
+    ASK_RATE_LIMIT_GATEWAY_PER_MINUTE,
+    ASK_RATE_LIMIT_PREAUTH_PER_MINUTE,
+    ASK_RATE_LIMIT_PUBLIC_PER_MINUTE,
+    ENABLE_EVALUATE_ENDPOINT,
+    ENABLE_METRICS_ENDPOINT,
+    ENABLE_PUBLIC_BEARER_AUTH,
+    ENAI_AUTH_MODE,
+    EVALUATE_ADMIN_SECRET,
+    GATEWAY_SHARED_SECRET,
+    GEMINI_MODEL,
+    MODEL_TYPE,
+    OPENAI_MODEL,
+    SESSION_SIGNING_SECRET,
+    STATIC_ALLOWED_TABLES,
+    SUPABASE_JWT_SECRET,
+)
 
 # Schema & helpers
 from context import COLUMN_LABELS, DB_SCHEMA_DOC, DERIVED_LABELS, scrub_schema_mentions
@@ -252,7 +271,25 @@ def refresh_schema_map() -> bool:
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="Enai Analyst (Gemini)", version="18.6") # Version bump
+# Single source of truth for the app version (Q5, 2026-06-10 — the file-header
+# comment and FastAPI(version=...) previously disagreed: "v20.0" vs "18.6").
+__version__ = "20.0"
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Startup hook: prime schema cache and validate skills.
+
+    Replaces the deprecated ``@app.on_event("startup")`` (Q5, 2026-06-10).
+    """
+    refresh_schema_map()
+    from skills.loader import validate_skills, warmup_cache
+    validate_skills()
+    warmup_cache()
+    yield
+
+
+app = FastAPI(title="Enai Analyst (Gemini)", version=__version__, lifespan=_lifespan)
 security_log = logging.getLogger("EnaiSecurity")
 
 
@@ -454,13 +491,7 @@ app.add_middleware(
 # Data helpers: Imported from analysis.stats (line 83)
 # -----------------------------
 # rows_to_preview() and quick_stats() are imported from analysis.stats
-@app.on_event("startup")
-def on_startup() -> None:
-    """Non-blocking startup hook to prime schema cache and validate skills."""
-    refresh_schema_map()
-    from skills.loader import validate_skills, warmup_cache
-    validate_skills()
-    warmup_cache()
+# (startup hook moved to the _lifespan context manager above — Q5, 2026-06-10)
 
 
 @app.get("/ask")
@@ -790,10 +821,6 @@ def generate_html_report(summary: Dict[str, Any], results: List[Dict[str, Any]],
 
     return html
 
-# main.py v18.7 — Gemini Analyst (chart rules + period aggregation)
-# (Only added targeted comments/logic for: 1) chart axis restriction; 2) user-defined period aggregation)
-
-# ... [all your imports and setup remain IDENTICAL above this point] ...
 
 
 @app.post('/ask', response_model=APIResponse)

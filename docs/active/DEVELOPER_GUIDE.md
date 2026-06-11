@@ -30,6 +30,14 @@ Set `ENAI_AUTH_MODE` explicitly in deployed environments:
 - **`gateway_and_bearer`** — direct `Authorization: Bearer <token>` calls are part of the boundary. `SUPABASE_JWT_SECRET` is mandatory.
 - **`auto`** — temporary compatibility mode during rollout. Bearer auth turns on only when `SUPABASE_JWT_SECRET` is present. **Migrate to an explicit mode**; do not leave production on `auto`.
 
+## Deployment Constraint: Single Replica
+
+Run **exactly one worker process / one replica** (`uvicorn` default single worker; do not add
+`--workers N` or scale Railway replicas). Rate limits, session memory, the LLM cache, and
+circuit breakers are all in-process — multiple replicas multiply rate limits and fragment
+sessions. See `query_pipeline_architecture.md` §4.1 for the rationale and the declined
+shared-store alternative.
+
 ## Deployment Environment Values
 
 ```bash

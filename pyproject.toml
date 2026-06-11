@@ -10,12 +10,6 @@ ignore = [
     "E402",  # module level import not at top (test files need env setup first)
 ]
 
-[tool.ruff.lint.per-file-ignores]
-# main.py keeps `from config import *` as documented backward-compat debt
-# (re-export surface for tests and the evaluate endpoint). Remove this ignore
-# when the star import is replaced with explicit imports.
-"main.py" = ["F403", "F405"]
-
 [tool.ruff.lint.isort]
 known-first-party = [
     "agent", "analysis", "config", "context", "contracts", "core",
