@@ -290,7 +290,10 @@ class Metrics:
     def log_analyzer_cross_check(self, event: str) -> None:
         """Track answer-kind cross-check outcomes (A5).
 
-        ``disagreement / requests`` is the analyzer-vs-heuristic friction rate;
+        Buckets are DISJOINT: a legal-list exception is also an LLM-vs-derived
+        mismatch, but it is counted only as ``legal_list_exception`` (the
+        cross-check returns before the disagreement counter). Total mismatch
+        rate = (``disagreement`` + ``legal_list_exception``) / requests;
         ``override_applied / disagreement`` shows how often the safer-option
         policy actually changes the contract. Sustained near-zero disagreement
         justifies relaxing the cross-check; high rates point at analyzer prompt

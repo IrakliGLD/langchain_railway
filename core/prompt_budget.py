@@ -13,7 +13,6 @@ import logging
 import re
 from typing import Optional
 
-from config import PROMPT_BUDGET_MAX_CHARS
 from contracts.question_analysis import AnswerKind, QuestionAnalysis
 
 log = logging.getLogger("Enai")

@@ -59,7 +59,8 @@ def _make_forecast_qa(query: str = "test query") -> QuestionAnalysis:
 
 # ---------------------------------------------------------------------------
 # Phase C (2026-05-22): FORECAST answers route through the LLM, not the
-# deterministic ``generic_renderer._render_forecast``.
+# deterministic ``generic_renderer._render_forecast`` (deleted as orphan
+# code on 2026-06-10, improvement-plan A2).
 #
 # Pre-Phase-C tests in this file asserted ``summary_source == "generic_renderer"``
 # and monkey-patched ``llm_summarize_structured`` to raise — locking in the
@@ -160,8 +161,9 @@ p_bal_usd:
 def test_forecast_does_not_invoke_generic_renderer(monkeypatch):
     """Phase C invariant — ``_try_generic_renderer`` must return None for
     FORECAST answer_kind, so the dispatch falls through to the LLM. Pin
-    this so a future edit can't quietly re-route FORECAST back to
-    ``generic_renderer._render_forecast``."""
+    this so a future edit can't quietly re-route FORECAST back to a
+    deterministic renderer (``_render_forecast`` itself was deleted on
+    2026-06-10, improvement-plan A2)."""
     from contracts.question_analysis import AnswerKind
 
     qa = _make_forecast_qa("forecast prices to 2035")
