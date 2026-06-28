@@ -317,6 +317,40 @@ def scrub_schema_mentions(text: str) -> str:
     text = text.replace("```", "").strip()
     return text
 
+
+# Source anchors the summarizer is asked to put in the structured ``citations``
+# field — NOT inline. Some models (e.g. gpt-oss-120b) leak them into the answer
+# body as ``*[domain_knowledge]*``, ``[statistics]`` or ``【statistics】``.
+_CITATION_ANCHORS = (
+    "data_preview", "statistics", "domain_knowledge",
+    "external_source_passages", "conversation_history",
+)
+_CITATION_MARKER_RE = re.compile(
+    r"\s*\*{0,2}[\[\(【]\s*"
+    r"(?:" + "|".join(_CITATION_ANCHORS) + r")"
+    r"(?:\s*[,;/&]\s*(?:" + "|".join(_CITATION_ANCHORS) + r"))*"
+    r"\s*[\]\)】]\*{0,2}",
+    re.IGNORECASE,
+)
+
+
+def strip_inline_citation_markers(text: str) -> str:
+    """Remove inline citation tags the model leaks into the answer prose.
+
+    Citations belong in the structured ``citations`` field, not the body. Strips
+    ``*[domain_knowledge]*``, ``[statistics]``, ``【statistics】`` and multi-anchor
+    variants, then tidies the whitespace/punctuation left behind. Anchors are
+    technical tokens that don't occur in natural prose, so this is safe.
+    """
+    if not text:
+        return text
+    cleaned = _CITATION_MARKER_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)        # collapse double spaces
+    cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)  # space before punctuation
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)        # trailing space before newline
+    return cleaned.strip()
+
+
 # --- Supply/Demand/Transit explicit lists for backend filtering ---
 SUPPLY_TECH_TYPES = list(dict.fromkeys(list(TECH_TYPE_GROUPS["supply"].keys()) + ["self-cons"]))
 DEMAND_TECH_TYPES = list(TECH_TYPE_GROUPS["demand"].keys())

@@ -97,6 +97,57 @@ def test_conceptual_answer_uses_filtered_domain_knowledge_for_genex(monkeypatch)
     assert out.summary_provenance_gate_reason == "not_applicable_conceptual"
 
 
+def test_conceptual_answer_flags_retrieval_failure_instead_of_claiming_absence(monkeypatch):
+    """When vector retrieval errored, the conceptual prompt must tell the model
+    NOT to claim the info is absent (prod traces d62c2134 / b0aef6fd)."""
+    captured = {}
+
+    def _fake_structured(*_args, **kwargs):
+        captured["stats_hint"] = kwargs.get("stats_hint", "")
+        return SummaryEnvelope(
+            answer="Answer from domain knowledge only.",
+            claims=[],
+            citations=["domain_knowledge"],
+            confidence=0.7,
+        )
+
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: '{"market_structure": "Some curated market context."}',
+    )
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+
+    ctx = QueryContext(query="who can export electricity?", lang_instruction="Respond in English.")
+    ctx.vector_knowledge_error = "400 API key not valid"
+    summarizer.answer_conceptual(ctx)
+
+    assert "RETRIEVAL UNAVAILABLE" in captured["stats_hint"]
+    assert "could not be retrieved" in captured["stats_hint"].lower()
+
+
+def test_conceptual_answer_no_retrieval_caveat_when_retrieval_ok(monkeypatch):
+    captured = {}
+
+    def _fake_structured(*_args, **kwargs):
+        captured["stats_hint"] = kwargs.get("stats_hint", "")
+        return SummaryEnvelope(
+            answer="ok", claims=[], citations=["domain_knowledge"], confidence=0.9,
+        )
+
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: '{"market_structure": "context"}',
+    )
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+
+    ctx = QueryContext(query="what is genex?", lang_instruction="Respond in English.")
+    summarizer.answer_conceptual(ctx)
+
+    assert "RETRIEVAL UNAVAILABLE" not in captured["stats_hint"]
+
+
 def test_structured_summary_cache_key_changes_with_domain_knowledge(monkeypatch):
     cache_keys = []
 

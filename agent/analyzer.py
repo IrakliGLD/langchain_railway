@@ -2693,16 +2693,25 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
         return
 
     from context import COLUMN_LABELS
+    from analysis.stats import is_intensive_metric
     lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
     for col in numeric_cols:
         series = ctx.df[col].dropna()
         if series.empty:
             continue
         label = COLUMN_LABELS.get(col, col)
-        lines.append(
-            f"{label}: sum={series.sum():.4f}, mean={series.mean():.4f}, "
-            f"min={series.min():.4f}, max={series.max():.4f}, count={len(series)}"
-        )
+        # Never expose a SUM for intensive (per-unit) columns like prices — a
+        # summed per-MWh price is meaningless and gets misread as a level.
+        if is_intensive_metric(col):
+            lines.append(
+                f"{label}: mean={series.mean():.4f}, "
+                f"min={series.min():.4f}, max={series.max():.4f}, count={len(series)}"
+            )
+        else:
+            lines.append(
+                f"{label}: sum={series.sum():.4f}, mean={series.mean():.4f}, "
+                f"min={series.min():.4f}, max={series.max():.4f}, count={len(series)}"
+            )
     if len(lines) > 1:
         ctx.stats_hint += "\n".join(lines)
         log.info("Added column aggregates to stats_hint for %d numeric columns", len(numeric_cols))

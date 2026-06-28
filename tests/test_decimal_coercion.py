@@ -188,7 +188,9 @@ def test_append_column_aggregates_produces_output_after_decimal_coercion():
     # ``_append_column_aggregates`` applies COLUMN_LABELS for human-readable
     # labels; "p_bal_gel" becomes "Balancing electricity price (GEL/MWh)".
     assert "Balancing electricity price" in ctx_coerced.stats_hint
-    assert "sum=1206.0000" in ctx_coerced.stats_hint  # 12 rows of 95..106
+    # p_bal_gel is an intensive (per-MWh) price: aggregates expose mean/min/max
+    # but NOT sum — a summed price is meaningless (see is_intensive_metric).
+    assert "sum=" not in ctx_coerced.stats_hint
     assert "mean=100.5000" in ctx_coerced.stats_hint
     assert "min=95.0000" in ctx_coerced.stats_hint
     assert "max=106.0000" in ctx_coerced.stats_hint
