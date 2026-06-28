@@ -23,7 +23,9 @@ from config import (
     GOOGLE_API_KEY,
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
+    NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
+    NVIDIA_TEMPERATURE,
     OPENAI_API_KEY,
     OPENAI_MODEL,
 )
@@ -278,10 +280,14 @@ def get_nvidia() -> ChatOpenAI:
     if _nvidia_llm is None:
         _nvidia_llm = ChatOpenAI(
             model=NVIDIA_MODEL,
-            temperature=0,
+            temperature=NVIDIA_TEMPERATURE,
+            max_tokens=NVIDIA_MAX_TOKENS,
             openai_api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_BASE_URL,
             max_retries=2  # Limit retries to prevent quota exhaustion
         )
-        log.info("✅ NVIDIA LLM instance cached (model=%s, max_retries=2)", NVIDIA_MODEL)
+        log.info(
+            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, max_retries=2)",
+            NVIDIA_MODEL, NVIDIA_MAX_TOKENS, NVIDIA_TEMPERATURE,
+        )
     return _nvidia_llm

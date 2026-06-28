@@ -133,6 +133,85 @@ def test_cagr_projection_values_provide_tokenisable_numbers():
         )
 
 
+def test_forecast_series_block_quantity_lists_per_year_values():
+    """Phase H: the per-year FORECAST SERIES block must list every projected
+    year (not just the end value), so the LLM can quote intermediate years
+    verbatim instead of recomputing the path (prod trace abb741aa)."""
+    from agent.analyzer import _generate_cagr_forecast
+
+    df = pd.DataFrame({
+        "year": pd.to_datetime([f"{y}-01-01" for y in range(2018, 2026)]),
+        "quantity": [100.0, 105.0, 110.0, 115.5, 121.3, 127.4, 133.7, 140.4],
+    })
+    df_out, note = _generate_cagr_forecast(df, "forecast quantity for the next decade")
+
+    assert "--- FORECAST SERIES (per year) ---" in note
+    block = note[note.find("--- FORECAST SERIES (per year) ---"):]
+    value_lines = [ln for ln in block.splitlines() if " = " in ln]
+    # One line per projected year → well more than the single end value.
+    assert len(value_lines) >= 3, f"expected multiple per-year lines, got: {block!r}"
+
+
+def test_forecast_series_block_price_includes_seasons_and_currencies():
+    """Phase H price branch: the per-year series distinguishes currencies
+    (GEL/USD) and seasons (summer/winter)."""
+    from agent.analyzer import _generate_cagr_forecast
+
+    rows = []
+    for year in range(2019, 2026):
+        for month in range(1, 13):
+            rows.append({
+                "date": pd.Timestamp(year=year, month=month, day=1),
+                "p_bal_gel": 100.0 + (year - 2019) * 1.0 + (month % 2) * 5.0,
+                "p_bal_usd": 35.0 + (year - 2019) * 1.5 + (month % 2) * 2.0,
+            })
+    df = pd.DataFrame(rows)
+
+    df_out, note = _generate_cagr_forecast(df, "forecast balancing electricity price for next 10 years")
+
+    assert "--- FORECAST SERIES (per year) ---" in note
+    block = note[note.find("--- FORECAST SERIES (per year) ---"):]
+    assert "GEL" in block and "USD" in block
+    assert "summer" in block and "winter" in block
+
+
+def test_forecast_series_intermediate_values_are_tokenisable():
+    """Load-bearing for the grounding fix: every per-year projected value in the
+    series block must be tokenisable from the note, so a summarizer that quotes
+    an intermediate year passes the grounding/provenance check (the failure mode
+    in prod trace abb741aa, where intermediate years were absent from the prompt
+    and the LLM's recomputed numbers were rejected)."""
+    import re
+
+    from agent.analyzer import _generate_cagr_forecast
+    from agent.summarizer import _extract_number_tokens
+
+    rows = []
+    for year in range(2019, 2026):
+        for month in range(1, 13):
+            rows.append({
+                "date": pd.Timestamp(year=year, month=month, day=1),
+                "p_bal_gel": 100.0 + (year - 2019) * 2.0 + (month % 2) * 5.0,
+                "p_bal_usd": 35.0 + (year - 2019) * 1.5 + (month % 2) * 2.0,
+            })
+    df = pd.DataFrame(rows)
+
+    df_out, note = _generate_cagr_forecast(df, "forecast balancing electricity price for next 10 years")
+
+    assert "--- FORECAST SERIES (per year) ---" in note
+    # Series block is appended last, so slice from its header to end of note.
+    block = note[note.find("--- FORECAST SERIES (per year) ---"):]
+    series_values = re.findall(r"=\s*([\d.]+)\s*$", block, re.MULTILINE)
+    assert series_values, f"no per-year values parsed from: {block!r}"
+
+    tokens = _extract_number_tokens(note)
+    for val in series_values:
+        norm = val.rstrip("0").rstrip(".")
+        assert val in tokens or norm in tokens, (
+            f"series value {val!r} not tokenisable; tokens sample={sorted(tokens)[:30]!r}"
+        )
+
+
 def test_cagr_projection_block_omitted_when_no_target_years():
     """Defensive: if ``_resolve_target_years`` produced no years (edge case),
     the block must not be appended."""

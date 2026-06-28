@@ -85,6 +85,9 @@ def test_nvidia_factory_builds_chatopenai_with_base_url(monkeypatch):
     assert model == config.NVIDIA_MODEL
     base = str(getattr(client, "openai_api_base", "") or getattr(client, "base_url", ""))
     assert "integrate.api.nvidia.com" in base
+    # Env-configurable output cap + sampling temperature are applied.
+    assert client.temperature == config.NVIDIA_TEMPERATURE
+    assert client.max_tokens == config.NVIDIA_MAX_TOKENS
 
 
 def test_nvidia_factory_requires_key(monkeypatch):

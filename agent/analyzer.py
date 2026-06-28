@@ -1943,6 +1943,21 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
                 f"CAGR={cagr*100:.2f}%/year, "
                 f"projection by {int(end_year)} = {end_val:.2f}"
             )
+        # Phase H (2026-06-28) — also serialize the full per-year series (see the
+        # companion comment in the price branch below): hand the LLM every
+        # projected year to quote verbatim, not just the end value, so grounding
+        # matches the narrated path instead of forcing the model to recompute it.
+        if f_rows:
+            series_lines = ["--- FORECAST SERIES (per year) ---"]
+            for row in f_rows:
+                ts = row.get(time_col)
+                year = getattr(ts, "year", ts)
+                val = row.get(value_col)
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    continue
+                series_lines.append(f"{int(year)} {value_col} = {val:.2f}")
+            if len(series_lines) > 1:  # more than just the header
+                note_parts.append("\n".join(series_lines))
         return _strip_scratch(df_f), " ".join(note_parts)
 
     elif data_type == "price":
@@ -2148,16 +2163,21 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         # Phase G (2026-05-22) — emit projected end-of-horizon value(s) so
         # the LLM can cite them verbatim. See companion comment in the
         # quantity branch above and production trace 6aba2969 (2026-05-22).
+        # Shared currency-label derivation (GEL/USD from the value-column suffix),
+        # reused by both the projections summary and the per-year series block.
+        def _ccy_label(vc: str) -> str:
+            vc_lower = vc.lower()
+            if vc_lower.endswith("_gel"):
+                return "GEL"
+            if vc_lower.endswith("_usd"):
+                return "USD"
+            return vc
+
         if target_years:
             end_year = max(target_years)
             projection_lines = ["--- CAGR PROJECTIONS ---"]
             for vc, stats in per_currency.items():
-                vc_lower = vc.lower()
-                currency_label = (
-                    "GEL" if vc_lower.endswith("_gel")
-                    else "USD" if vc_lower.endswith("_usd")
-                    else vc
-                )
+                currency_label = _ccy_label(vc)
                 cagr_y_vc = stats["cagr_y"]
                 if np.isnan(cagr_y_vc):
                     continue
@@ -2187,6 +2207,30 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
                     )
             if len(projection_lines) > 1:  # more than just the header
                 note_parts.append("\n".join(projection_lines))
+
+        # Phase H (2026-06-28) — serialize the FULL per-year projected series (the
+        # authoritative f_rows) into the note → stats_hint. Without this the
+        # summarizer prompt carries only baseline + CAGR%/year + final-year value,
+        # forcing the LLM to recompute the intermediate years itself; its arithmetic
+        # diverges from these rows and trips the grounding guardrail (prod trace
+        # abb741aa). Emitting the series lets the LLM quote authoritative values AND
+        # places them in the grounding corpus, while invented numbers still fail.
+        if f_rows:
+            series_lines = ["--- FORECAST SERIES (per year) ---"]
+            for row in f_rows:
+                ts = row.get(time_col)
+                year = getattr(ts, "year", ts)
+                season = row.get("__forecast_season")
+                season_suffix = f" {season}" if season else ""
+                for vc in per_currency:
+                    val = row.get(vc)
+                    if val is None or (isinstance(val, float) and np.isnan(val)):
+                        continue
+                    series_lines.append(
+                        f"{int(year)} {_ccy_label(vc)}{season_suffix} = {val:.2f}"
+                    )
+            if len(series_lines) > 1:  # more than just the header
+                note_parts.append("\n".join(series_lines))
         return _strip_scratch(df_f), " ".join(note_parts)
 
     else:
