@@ -1,7 +1,9 @@
 # Core database and API dependencies
 sqlalchemy==2.0.44
 psycopg2-binary==2.9.11
-psycopg==3.2.1
+# [binary] bundles libpq into the wheel so no system libpq/libpq-dev is needed
+# in the container (the runtime driver is postgresql+psycopg:// = psycopg v3).
+psycopg[binary]==3.2.1
 
 # FastAPI and web server
 fastapi==0.109.2
