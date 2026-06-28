@@ -30,6 +30,7 @@ from core.llm import (
     llm_summarize_structured,
 )
 from models import GroundingPolicy, QueryContext, ResolutionPolicy
+from utils.language import get_grounding_fallback_message
 from utils.metrics import metrics
 from utils.trace_logging import trace_detail
 
@@ -1038,6 +1039,11 @@ def _derive_data_summary_grounding_policy(ctx: QueryContext, query_type: str) ->
         analyzer_active
         and ctx.question_analysis.analysis_requirements.derived_metrics
     )
+    # When domain knowledge is injected into the prompt, the answer is expected
+    # to weave in domain figures (e.g. support-scheme USD prices) that are not in
+    # the data corpus — strict numeric grounding over-rejects them. Must be read
+    # AFTER ctx.summary_domain_knowledge is set by the caller (see summarize_data).
+    has_domain_knowledge = bool((getattr(ctx, "summary_domain_knowledge", "") or "").strip())
     # answer_kind-aware: analytical answer shapes produce derived values
     # (MoM deltas, percentages, projections) that strict grounding rejects.
     answer_kind = (
@@ -1047,7 +1053,10 @@ def _derive_data_summary_grounding_policy(ctx: QueryContext, query_type: str) ->
     )
     if (
         answer_kind in _ANALYTICAL_ANSWER_KINDS
-        and (needs_knowledge or needs_driver_analysis or has_non_tabular_evidence or has_derived_metrics)
+        and (
+            needs_knowledge or needs_driver_analysis or has_non_tabular_evidence
+            or has_derived_metrics or has_domain_knowledge
+        )
     ):
         return GroundingPolicy.EVIDENCE_AWARE
     # Legacy query_type fallback when answer_kind is unavailable.
@@ -2343,7 +2352,6 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         else:
             query_type = classify_query_type(ctx.query)
             routing_query = ctx.query
-        ctx.grounding_policy = _derive_data_summary_grounding_policy(ctx, query_type)
         comparison_focus = _should_use_comparison_first_guidance(ctx, query_type)
         render_deterministic = (
             ctx.question_analysis is not None
@@ -2366,6 +2374,10 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             if preferred_topics:
                 log.info("Using merged topics for data summary domain knowledge: %s", preferred_topics)
         ctx.summary_domain_knowledge = domain_knowledge
+        # Decide grounding policy AFTER domain knowledge is loaded so an
+        # explanatory answer that carries domain knowledge uses EVIDENCE_AWARE
+        # (its domain figures count as grounded) rather than STRICT_NUMERIC.
+        ctx.grounding_policy = _derive_data_summary_grounding_policy(ctx, query_type)
         vector_knowledge = (
             ctx.vector_knowledge_prompt
             if PIPELINE_MODE != "fast"
@@ -2407,8 +2419,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 else:
                     log.warning("Summary grounding check failed; using conservative fallback answer.")
                     envelope = SummaryEnvelope(
-                        answer="I could not fully ground a detailed narrative from the provided data preview. "
-                        "Please refine the query or narrow the period for a more precise grounded answer.",
+                        answer=get_grounding_fallback_message(getattr(ctx, "lang_code", "") or "en"),
                         claims=[],
                         citations=["guardrail_grounding_fallback"],
                         confidence=0.2,
