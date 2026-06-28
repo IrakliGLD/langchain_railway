@@ -21,6 +21,9 @@ from langchain_openai import ChatOpenAI
 from config import (
     GEMINI_MODEL,
     GOOGLE_API_KEY,
+    NVIDIA_API_KEY,
+    NVIDIA_BASE_URL,
+    NVIDIA_MODEL,
     OPENAI_API_KEY,
     OPENAI_MODEL,
 )
@@ -212,6 +215,7 @@ class LLMResponseCache:
 
 _gemini_llm = None
 _openai_llm = None
+_nvidia_llm = None
 
 
 def get_gemini() -> ChatGoogleGenerativeAI:
@@ -255,3 +259,29 @@ def get_openai() -> ChatOpenAI:
         )
         log.info("✅ OpenAI LLM instance cached (max_retries=2)")
     return _openai_llm
+
+
+def get_nvidia() -> ChatOpenAI:
+    """Get cached NVIDIA LLM instance (singleton pattern).
+
+    build.nvidia.com exposes an OpenAI-compatible API, so it is driven through
+    ``ChatOpenAI`` — identical to ``get_openai()`` except for the custom
+    ``base_url``. The model id (e.g. ``openai/gpt-oss-120b``), key, and base URL
+    all come from env (NVIDIA_MODEL / NVIDIA_API_KEY / NVIDIA_BASE_URL).
+
+    Raises:
+        RuntimeError: If NVIDIA_API_KEY is not configured
+    """
+    global _nvidia_llm
+    if not NVIDIA_API_KEY:
+        raise RuntimeError("NVIDIA_API_KEY not set")
+    if _nvidia_llm is None:
+        _nvidia_llm = ChatOpenAI(
+            model=NVIDIA_MODEL,
+            temperature=0,
+            openai_api_key=NVIDIA_API_KEY,
+            base_url=NVIDIA_BASE_URL,
+            max_retries=2  # Limit retries to prevent quota exhaustion
+        )
+        log.info("✅ NVIDIA LLM instance cached (model=%s, max_retries=2)", NVIDIA_MODEL)
+    return _nvidia_llm

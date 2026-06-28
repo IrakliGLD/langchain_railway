@@ -83,6 +83,7 @@ from config import (
     GATEWAY_SHARED_SECRET,
     GEMINI_MODEL,
     MODEL_TYPE,
+    NVIDIA_MODEL,
     OPENAI_MODEL,
     SESSION_SIGNING_SECRET,
     STATIC_ALLOWED_TABLES,
@@ -93,6 +94,7 @@ from config import (
 from context import COLUMN_LABELS, DB_SCHEMA_DOC, DERIVED_LABELS, scrub_schema_mentions
 from core.llm import (
     classify_query_type,
+    get_primary_model_name,
     get_query_focus,
     llm_cache,
     llm_generate_plan_and_sql,
@@ -550,8 +552,10 @@ def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
         "cache": llm_cache.stats(),  # Phase 1 optimization: cache metrics
         "model": {
             "type": MODEL_TYPE,
+            "active_model": get_primary_model_name(),
             "gemini_model": GEMINI_MODEL if MODEL_TYPE == "gemini" else None,
             "openai_model": OPENAI_MODEL if MODEL_TYPE == "openai" else None,
+            "nvidia_model": NVIDIA_MODEL if MODEL_TYPE == "nvidia" else None,
         },
         "database": {
             "pool_size": pool_size,
