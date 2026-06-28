@@ -20,6 +20,9 @@ load_dotenv()
 # LLM API Keys
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# NVIDIA (build.nvidia.com) is OpenAI-API-compatible; reached via ChatOpenAI
+# with a custom base_url. Key supplied via env, like the providers above.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 # Database
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
@@ -63,9 +66,13 @@ ENABLE_PUBLIC_BEARER_AUTH = ENAI_AUTH_MODE == "gateway_and_bearer" or (
 )
 
 # LLM Configuration
+# MODEL_TYPE selects the active provider: "gemini" (default), "openai", or "nvidia".
 MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# NVIDIA (build.nvidia.com) — OpenAI-API-compatible endpoint driven via ChatOpenAI.
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
+NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
@@ -174,6 +181,8 @@ OPENAI_INPUT_COST_PER_1K_USD = float(os.getenv("OPENAI_INPUT_COST_PER_1K_USD", "
 OPENAI_OUTPUT_COST_PER_1K_USD = float(os.getenv("OPENAI_OUTPUT_COST_PER_1K_USD", "0"))
 GEMINI_INPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_INPUT_COST_PER_1K_USD", "0"))
 GEMINI_OUTPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_OUTPUT_COST_PER_1K_USD", "0"))
+NVIDIA_INPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_INPUT_COST_PER_1K_USD", "0"))
+NVIDIA_OUTPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_OUTPUT_COST_PER_1K_USD", "0"))
 
 # Memory Limits (PRODUCTION SAFETY: Prevents OOM errors)
 MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
@@ -195,6 +204,7 @@ def validate_runtime_settings(
     allow_evaluate_endpoint: bool,
     model_type: str,
     google_api_key: str | None,
+    nvidia_api_key: str | None = None,
 ) -> None:
     valid_auth_modes = {"auto", "gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -226,8 +236,15 @@ def validate_runtime_settings(
             raise RuntimeError(
                 "ENABLE_EVALUATE_ENDPOINT=true requires ALLOW_EVALUATE_ENDPOINT=true"
             )
+    valid_model_types = {"gemini", "openai", "nvidia"}
+    if model_type not in valid_model_types:
+        raise RuntimeError(
+            "Invalid MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+        )
     if model_type == "gemini" and not google_api_key:
         raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
+    if model_type == "nvidia" and not nvidia_api_key:
+        raise RuntimeError("MODEL_TYPE=nvidia but NVIDIA_API_KEY is missing")
 
 
 validate_runtime_settings(
@@ -242,6 +259,7 @@ validate_runtime_settings(
     allow_evaluate_endpoint=ALLOW_EVALUATE_ENDPOINT,
     model_type=MODEL_TYPE,
     google_api_key=GOOGLE_API_KEY,
+    nvidia_api_key=NVIDIA_API_KEY,
 )
 
 # ===================================================================

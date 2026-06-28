@@ -23,11 +23,8 @@ from config import (
     AGENT_TOOL_PREVIEW_MAX_CHARS,
     AGENT_TOOL_PREVIEW_ROWS,
     AGENT_TOOL_TIMEOUT_SECONDS,
-    GEMINI_MODEL,
-    MODEL_TYPE,
-    OPENAI_MODEL,
 )
-from core.llm import _log_usage_for_message, make_gemini, make_openai
+from core.llm import _log_usage_for_message, get_primary_llm, get_primary_model_name
 from models import QueryContext
 from utils.metrics import metrics
 
@@ -106,7 +103,7 @@ AGENT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
 
 # Provider helpers and response parsers normalize differences across LLM backends.
 def _build_agent_model():
-    llm = make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+    llm = get_primary_llm()
     try:
         return llm.bind_tools(AGENT_TOOL_SCHEMAS)
     except Exception as exc:  # pragma: no cover - provider-specific behavior
@@ -282,7 +279,7 @@ def _resolve_agent_model_name(llm: Any, response: Any) -> str:
         if value:
             return str(value)
 
-    return GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL
+    return get_primary_model_name()
 
 
 def _set_fallback(ctx: QueryContext, reason: str) -> QueryContext:

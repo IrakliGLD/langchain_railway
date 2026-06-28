@@ -40,6 +40,9 @@ from config import (
     GEMINI_OUTPUT_COST_PER_1K_USD,
     GOOGLE_API_KEY,
     MODEL_TYPE,
+    NVIDIA_INPUT_COST_PER_1K_USD,
+    NVIDIA_MODEL,
+    NVIDIA_OUTPUT_COST_PER_1K_USD,
     OPENAI_API_KEY,
     OPENAI_INPUT_COST_PER_1K_USD,
     OPENAI_MODEL,
@@ -122,23 +125,41 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
     _extract_token_usage,
     _to_int,
     get_gemini,
+    get_nvidia,
     get_openai,
 )
 
 
-def _is_openai_model_name(model_name: str) -> bool:
+def _provider_from_model_name(model_name: str) -> str:
+    """Classify a model-name string to its provider: ``gemini``/``openai``/``nvidia``.
+
+    Used for per-provider cost attribution and circuit-breaker keys, so it must
+    work even when *model_name* differs from the active MODEL_TYPE (e.g. an
+    OpenAI fallback while MODEL_TYPE=gemini). Reads MODEL_TYPE as a module global
+    so test monkeypatches apply.
+    """
     name = (model_name or "").strip().lower()
+    _default = MODEL_TYPE if MODEL_TYPE in ("gemini", "openai", "nvidia") else "gemini"
     if not name:
-        return MODEL_TYPE == "openai"
+        return _default
+    if name == NVIDIA_MODEL.lower():
+        return "nvidia"
     if name == OPENAI_MODEL.lower():
-        return True
+        return "openai"
     if name == GEMINI_MODEL.lower():
-        return False
-    if name.startswith("gpt-") or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
-        return True
+        return "gemini"
     if name.startswith("gemini"):
-        return False
-    return MODEL_TYPE == "openai"
+        return "gemini"
+    if name.startswith("gpt-") or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
+        return "openai"
+    # NVIDIA NIM model ids are namespaced, e.g. "openai/gpt-oss-120b", "meta/llama-3.1-...".
+    if "/" in name:
+        return "nvidia"
+    return _default
+
+
+def _is_openai_model_name(model_name: str) -> bool:
+    return _provider_from_model_name(model_name) == "openai"
 
 
 def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: str) -> float:
@@ -147,19 +168,17 @@ def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: s
     Stays in core.llm (not llm_runtime): reads provider config constants that
     tests monkeypatch on THIS module (test_metrics_observability).
     """
-    if _is_openai_model_name(model_name):
-        return (
-            (prompt_tokens / 1000.0) * OPENAI_INPUT_COST_PER_1K_USD
-            + (completion_tokens / 1000.0) * OPENAI_OUTPUT_COST_PER_1K_USD
-        )
+    provider = _provider_from_model_name(model_name)
+    if provider == "openai":
+        input_rate, output_rate = OPENAI_INPUT_COST_PER_1K_USD, OPENAI_OUTPUT_COST_PER_1K_USD
+    elif provider == "nvidia":
+        input_rate, output_rate = NVIDIA_INPUT_COST_PER_1K_USD, NVIDIA_OUTPUT_COST_PER_1K_USD
+    else:
+        input_rate, output_rate = GEMINI_INPUT_COST_PER_1K_USD, GEMINI_OUTPUT_COST_PER_1K_USD
     return (
-        (prompt_tokens / 1000.0) * GEMINI_INPUT_COST_PER_1K_USD
-        + (completion_tokens / 1000.0) * GEMINI_OUTPUT_COST_PER_1K_USD
+        (prompt_tokens / 1000.0) * input_rate
+        + (completion_tokens / 1000.0) * output_rate
     )
-
-
-def _provider_from_model_name(model_name: str) -> str:
-    return "openai" if _is_openai_model_name(model_name) else "gemini"
 
 
 def _log_usage_for_message(message, model_name: str):
@@ -216,6 +235,46 @@ def _cache_cancel_in_flight(cache_input: str):
 # and get_llm_for_stage below resolves them through this module's globals).
 make_gemini = get_gemini
 make_openai = get_openai
+make_nvidia = get_nvidia
+
+
+def get_primary_llm():
+    """Return the LLM client for the active provider (governed by MODEL_TYPE).
+
+    Single choke point replacing the former binary
+    ``make_gemini() if MODEL_TYPE == "gemini" else make_openai()`` branches.
+    Resolves the ``make_*`` factories and ``MODEL_TYPE`` through this module's
+    globals on every call so test monkeypatches still take effect — do not turn
+    this into an import-time dict (see patch-surface note in core/llm_runtime.py).
+    """
+    if MODEL_TYPE == "nvidia":
+        return make_nvidia()
+    if MODEL_TYPE == "openai":
+        return make_openai()
+    return make_gemini()  # gemini is the documented default
+
+
+def get_primary_model_name() -> str:
+    """Return the model-name string for the active provider (MODEL_TYPE).
+
+    Named with a ``get_`` prefix to avoid shadowing the long-standing
+    ``primary_model_name`` local variable used inside the fallback blocks below.
+    """
+    if MODEL_TYPE == "nvidia":
+        return NVIDIA_MODEL
+    if MODEL_TYPE == "openai":
+        return OPENAI_MODEL
+    return GEMINI_MODEL
+
+
+def _should_fallback_to_openai() -> bool:
+    """Whether a failed primary call should retry on OpenAI.
+
+    OpenAI stays the universal safety net, but only when it isn't already the
+    primary and an OPENAI_API_KEY is actually configured — so NVIDIA/Gemini-only
+    deployments don't crash attempting a keyless fallback.
+    """
+    return MODEL_TYPE != "openai" and bool(OPENAI_API_KEY)
 
 
 # Stage-specific model instances (cached per model name)
@@ -245,14 +304,15 @@ def get_llm_for_stage(
     after one attempt instead of being consumed by langchain's internal retries.
     (``max_retries=0`` is treated as "use defaults" by the Google SDK.)
 
-    Falls back to ``make_openai()`` when Gemini is unavailable.
+    Falls back to the active provider's primary client (``get_primary_llm()``)
+    when a Gemini-only stage override can't be honored.
     """
     needs_dedicated = thinking_budget is not None or max_retries is not None
 
     # No overrides — fast path unchanged
     if not needs_dedicated:
         if not stage_model or stage_model == GEMINI_MODEL:
-            return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+            return get_primary_llm()
 
         if not GOOGLE_API_KEY:
             log.warning(
@@ -260,7 +320,7 @@ def get_llm_for_stage(
                 "falling back to global default.",
                 stage_model,
             )
-            return make_gemini() if MODEL_TYPE == "gemini" else make_openai()
+            return get_primary_llm()
 
         if stage_model not in _stage_model_cache:
             _stage_model_cache[stage_model] = ChatGoogleGenerativeAI(
@@ -275,9 +335,11 @@ def get_llm_for_stage(
         return _stage_model_cache[stage_model]
 
     # Dedicated instance with overrides (thinking_budget and/or max_retries).
+    # These knobs only apply to Gemini; for any other active provider return its
+    # plain primary client (NVIDIA/OpenAI ignore thinking_budget).
     effective_model = stage_model or GEMINI_MODEL
     if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
-        return make_openai()
+        return get_primary_llm()
 
     parts = [effective_model]
     if thinking_budget is not None:
@@ -1189,7 +1251,7 @@ SELECT ...
     try:
         try:
             llm = get_llm_for_stage(PLANNER_MODEL)
-            primary_model_name = PLANNER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            primary_model_name = PLANNER_MODEL or get_primary_model_name()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             combined_output = message.content.strip()
             _log_usage_for_message(message, model_name=primary_model_name)
@@ -1197,7 +1259,7 @@ SELECT ...
         except Exception as e:
             log.warning(f"Combined generation failed: {e}")
             # Fallback to OpenAI only when primary was Gemini
-            if MODEL_TYPE != "openai":
+            if _should_fallback_to_openai():
                 try:
                     llm = make_openai()
                     message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
@@ -1714,14 +1776,14 @@ SYSTEM_GUIDANCE (authoritative rules):
     try:
         try:
             llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
-            primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             out = message.content.strip()
             _log_usage_for_message(message, model_name=primary_model_name)
             metrics.log_llm_call(time.time() - llm_start)
         except Exception as e:
             log.warning(f"Summarize failed with Gemini, fallback: {e}")
-            if MODEL_TYPE != "openai":
+            if _should_fallback_to_openai():
                 llm = make_openai()
                 message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
                 out = message.content.strip()
@@ -2744,14 +2806,14 @@ def llm_analyze_question(
             else:
                 router_thinking_budget = min(router_thinking_budget, 512)
         llm = get_llm_for_stage(ROUTER_MODEL, thinking_budget=router_thinking_budget, max_retries=2)
-        primary_model_name = ROUTER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+        primary_model_name = ROUTER_MODEL or get_primary_model_name()
         message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
         raw_output = message.content.strip()
         _log_usage_for_message(message, model_name=primary_model_name)
         metrics.log_llm_call(time.time() - llm_start)
     except Exception as exc:
         log.warning("Question analyzer failed with primary model, fallback: %s", exc)
-        if MODEL_TYPE != "openai":
+        if _should_fallback_to_openai():
             llm = make_openai()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
             raw_output = message.content.strip()
@@ -3253,7 +3315,7 @@ Citation format rules:
 
         try:
             llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
-            primary_model_name = SUMMARIZER_MODEL or (GEMINI_MODEL if MODEL_TYPE == "gemini" else OPENAI_MODEL)
+            primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
             # Diagnostic: log prompt composition + system message preview right
             # before the LLM call.  Without this we can't tell whether the LLM
             # actually saw the comprehensive guidance — the difference between
@@ -3299,7 +3361,7 @@ Citation format rules:
 
     if last_exc is not None:
         log.warning("Structured summarize failed with primary model, fallback: %s", last_exc)
-        if MODEL_TYPE != "openai":
+        if _should_fallback_to_openai():
             llm = make_openai()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
             raw_output = message.content.strip()
