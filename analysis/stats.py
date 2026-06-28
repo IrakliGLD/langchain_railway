@@ -18,6 +18,38 @@ from analysis.system_quantities import normalize_period_series_with_granularity
 log = logging.getLogger("Enai")
 
 
+# Intensive metrics (per-unit values like prices/rates) must be AVERAGED across
+# periods, never summed — summing a per-MWh price over 12 months yields a
+# meaningless inflated level (e.g. 12×123 ≈ 1,482 GEL/MWh). Extensive metrics
+# (quantities/volumes) sum to a meaningful annual total.
+# NOTE: keep tokens that won't substring-match an extensive word. "ratio" is
+# deliberately excluded — it is a substring of "gene[ratio]n".
+_INTENSIVE_TOKENS = (
+    "price", "tariff", "xrate", "rate", "p_bal", "cost",
+    "share", "pct", "percent", "cagr",
+)
+_EXTENSIVE_TOKENS = (
+    "quantity", "volume", "generation", "demand",
+    "consumption", "export", "import", "supply",
+)
+
+
+def is_intensive_metric(col: str) -> bool:
+    """Whether *col* holds an intensive (per-unit) value that must be averaged
+    rather than summed across periods.
+
+    Intensive tokens take precedence (a price-of-X is still a price); unknown
+    columns default to intensive — averaging never inflates a level, and a
+    period-over-period % trend is identical either way, so this is the safe bias.
+    """
+    c = (col or "").lower()
+    if any(tok in c for tok in _INTENSIVE_TOKENS):
+        return True
+    if any(tok in c for tok in _EXTENSIVE_TOKENS):
+        return False
+    return True
+
+
 def rows_to_preview(
     rows: List[Tuple],
     cols: List[str],

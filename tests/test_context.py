@@ -170,5 +170,42 @@ class TestScrubSchemaMentions:
         assert "Share of Renewable PPA" in out or "Renewable PPA" in out
 
 
+class TestStripInlineCitationMarkers:
+    """Inline citation tags leaked by the LLM must be removed from the answer."""
+
+    def test_strips_asterisk_bracket_marker(self):
+        from context import strip_inline_citation_markers
+
+        out = strip_inline_citation_markers(
+            "cheaper electricity on the exchange. *[domain_knowledge]*"
+        )
+        assert out == "cheaper electricity on the exchange."
+
+    def test_strips_cjk_bracket_marker(self):
+        from context import strip_inline_citation_markers
+
+        out = strip_inline_citation_markers("CAGR of 2.5% per year【statistics】.")
+        assert out == "CAGR of 2.5% per year."
+
+    def test_strips_multi_anchor_marker_keeping_one_space(self):
+        from context import strip_inline_citation_markers
+
+        out = strip_inline_citation_markers("see [statistics, domain_knowledge] here")
+        assert out == "see here"
+
+    def test_leaves_real_bracketed_content_intact(self):
+        from context import strip_inline_citation_markers
+
+        # A year in brackets is not a citation anchor and must survive.
+        out = strip_inline_citation_markers("the year [2024] was notable")
+        assert out == "the year [2024] was notable"
+
+    def test_preserves_line_structure(self):
+        from context import strip_inline_citation_markers
+
+        out = strip_inline_citation_markers("first point. *[domain_knowledge]*\n2. second")
+        assert out == "first point.\n2. second"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

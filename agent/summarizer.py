@@ -18,7 +18,7 @@ import pandas as pd
 from agent.analyzer import _extract_forecast_horizon
 from agent.generic_renderer import render as generic_render
 from config import PIPELINE_MODE, PROVENANCE_MIN_COVERAGE
-from context import scrub_schema_mentions
+from context import scrub_schema_mentions, strip_inline_citation_markers
 from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ObservationFrame, ScenarioFrame
 from contracts.question_analysis import AnswerKind, RenderStyle
 from core.llm import (
@@ -1142,7 +1142,7 @@ def answer_clarify(ctx: QueryContext) -> QueryContext:
     ctx.summary_provenance_gate_reason = "not_applicable_clarify"
     ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
     ctx.summary_domain_knowledge = ""
-    ctx.summary = scrub_schema_mentions(ctx.summary)
+    ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
     return ctx
 
 
@@ -1270,6 +1270,23 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             "Active vector evidence present for conceptual answer; synthesizing peer domain knowledge"
         )
 
+    # Retrieval-failure resilience: when vector retrieval errored (e.g. the
+    # embeddings API is down) the official-document passages are MISSING, not
+    # proven absent. Without this the model answers "the provided sources do not
+    # contain..." even though the regulations were ingested (prod traces
+    # d62c2134 / b0aef6fd, where stage_0_3 returned a 400).
+    if getattr(ctx, "vector_knowledge_error", ""):
+        conceptual_hint += (
+            "\n\nIMPORTANT — RETRIEVAL UNAVAILABLE: Retrieval of official "
+            "document/regulation passages FAILED for this query due to a technical "
+            "error, so any such passages are MISSING (not proven absent). Do NOT "
+            "state that the information does not exist or is not in the sources. "
+            "Answer from DOMAIN_KNOWLEDGE for whatever it covers; for anything it "
+            "does not cover, say the official documents could not be retrieved right "
+            "now and suggest retrying shortly."
+        )
+        log.info("Conceptual answer: vector retrieval unavailable — added do-not-claim-absence caveat")
+
     vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active and PIPELINE_MODE != "fast" else ""
     domain_knowledge_for_summary = domain_knowledge
     if vector_evidence_active:
@@ -1372,7 +1389,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         ctx.summary_provenance_coverage = 0.0
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "not_applicable_conceptual"
-    ctx.summary = scrub_schema_mentions(ctx.summary)
+    ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
     log.info("✅ Conceptual answer generated")
     return ctx
 
@@ -2439,7 +2456,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             ctx.summary_citations = ["legacy_text_fallback"]
             ctx.summary_confidence = 0.5
 
-    ctx.summary = scrub_schema_mentions(ctx.summary)
+    ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
     _apply_absence_claim_guardrail(ctx)
     trace_detail(
         log,

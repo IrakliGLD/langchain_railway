@@ -95,13 +95,21 @@ def calculate_seasonal_stats(
     """
     stats = {}
 
+    # Intensive metrics (prices/rates) must be AVERAGED per year, not summed —
+    # summing monthly prices inflates the level 12× (the 1,482-GEL/MWh bug).
+    # Extensive metrics (quantities) sum to a meaningful annual total.
+    from analysis.stats import is_intensive_metric
+    intensive = is_intensive_metric(value_col)
+    agg = "mean" if intensive else "sum"
+    stats['aggregate_kind'] = "average" if intensive else "total"
+
     # Parse year and month
     df = df.copy()
     df['_year'] = df[time_col].astype(str).str[:4].astype(int)
     df['_month'] = df[time_col].astype(str).str[5:7].astype(int)
 
-    # 1. Yearly totals
-    yearly_totals = df.groupby('_year')[value_col].sum().sort_index()
+    # 1. Yearly values (mean for intensive prices, sum for extensive quantities)
+    yearly_totals = df.groupby('_year')[value_col].agg(agg).sort_index()
 
     # 2. Detect incomplete years
     months_per_year = df.groupby('_year').size()
@@ -173,8 +181,8 @@ def calculate_seasonal_stats(
 
     # 6. Recent trend (last 12 months vs previous 12 months, if available)
     if len(df) >= 24:
-        recent_12 = df.tail(12)[value_col].sum()
-        previous_12 = df.iloc[-24:-12][value_col].sum()
+        recent_12 = df.tail(12)[value_col].agg(agg)
+        previous_12 = df.iloc[-24:-12][value_col].agg(agg)
 
         if previous_12 > 0:
             recent_trend_pct = ((recent_12 - previous_12) / previous_12) * 100
@@ -204,9 +212,12 @@ def format_seasonal_stats(stats: Dict[str, any]) -> str:
 
     lines.append("SEASONAL-ADJUSTED TREND ANALYSIS:")
 
-    # Overall trend
+    # Overall trend. Label the endpoints by aggregate kind so an averaged price
+    # level (e.g. 123 → 158) is never misread as an annual total.
     if 'overall_growth_pct' in stats:
-        lines.append(f"- Overall growth ({stats['first_year']}-{stats['last_year']}): {stats['overall_growth_pct']:+.1f}% "
+        _level_word = "avg" if stats.get('aggregate_kind') == "average" else "annual total"
+        lines.append(f"- Overall growth ({_level_word}, {stats['first_year']}-{stats['last_year']}): "
+                    f"{stats['overall_growth_pct']:+.1f}% "
                     f"({stats['first_year_total']:.0f} → {stats['last_year_total']:.0f})")
 
     if 'cagr' in stats:
