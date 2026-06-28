@@ -212,6 +212,62 @@ def test_forecast_series_intermediate_values_are_tokenisable():
         )
 
 
+def test_forecast_holds_fx_fixed_converting_usd_to_gel():
+    """Fixed-FX logic: with GEL+USD+xrate present, USD is trend-forecast and GEL is
+    derived = USD x latest xrate. Reproduces prod trace 11a670ce, where independent
+    per-currency CAGR made GEL winter FALL while USD winter ROSE. After the fix GEL
+    winter must rise in step with USD winter, and GEL = USD x xrate_fixed on every
+    forecast row."""
+    from agent.analyzer import _generate_cagr_forecast
+
+    XRATE = 2.70  # latest/current GEL per USD (held fixed)
+    rows = []
+    for year in range(2019, 2026):
+        t = year - 2019
+        for month in range(1, 13):
+            summer = month in (4, 5, 6, 7)  # SUMMER_MONTHS
+            if summer:
+                usd = 48.0 + t * 1.3   # summer USD rises
+                gel = 150.0 + t * 2.5  # summer GEL rises
+            else:
+                usd = 50.0 + t * 1.3   # winter USD rises
+                gel = 160.0 - t * 1.7  # winter GEL falls (the historical anomaly)
+            rows.append({
+                "date": pd.Timestamp(year=year, month=month, day=1),
+                "p_bal_gel": gel,
+                "p_bal_usd": usd,
+                "xrate": XRATE,
+            })
+    df = pd.DataFrame(rows)
+
+    df_out, note = _generate_cagr_forecast(
+        df, "forecast balancing electricity price for next 10 years"
+    )
+
+    fc = df_out[df_out["is_forecast"] == True].copy()  # noqa: E712
+    assert not fc.empty
+
+    # 1) GEL is derived from USD at the fixed rate on EVERY forecast row.
+    ratios = (fc["p_bal_gel"] / fc["p_bal_usd"]).dropna()
+    assert not ratios.empty
+    assert ((ratios - XRATE).abs() < 1e-6).all(), (
+        f"GEL/USD ratio not fixed at {XRATE}: {ratios.tolist()[:5]}"
+    )
+
+    # 2) The fixed-FX assumption is stated explicitly with the latest xrate.
+    assert "Exchange-rate assumption" in note
+    assert "2.70" in note
+
+    # 3) GEL winter now RISES with USD winter (anomaly fixed), despite the
+    #    historical GEL winter series declining.
+    winter = fc[fc["date"].dt.month == 12].sort_values("date")
+    assert len(winter) >= 2
+    assert winter["p_bal_usd"].iloc[-1] > winter["p_bal_usd"].iloc[0]  # sanity: USD winter rises
+    assert winter["p_bal_gel"].iloc[-1] > winter["p_bal_gel"].iloc[0], (
+        "GEL winter forecast should rise with USD winter under fixed FX"
+    )
+
+
 def test_cagr_projection_block_omitted_when_no_target_years():
     """Defensive: if ``_resolve_target_years`` produced no years (edge case),
     the block must not be appended."""

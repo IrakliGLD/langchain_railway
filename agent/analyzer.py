@@ -1771,6 +1771,31 @@ def _gather_forecast_value_cols(df_in: pd.DataFrame) -> Tuple[Optional[str], Lis
     return time_col, []
 
 
+def _latest_fixed_xrate(df_in: pd.DataFrame, time_col: Optional[str]) -> Optional[float]:
+    """Return the latest (current) GEL-per-USD exchange rate from an ``xrate``
+    column, or ``None`` if unavailable.
+
+    Used to hold FX fixed for balancing-price forecasts: we trend-forecast USD
+    and convert to GEL at this constant rate (see ``_generate_cagr_forecast``),
+    per the documented methodology in ``knowledge/balancing_price.md`` and
+    ``skills/answer-composer/references/forecast-caveats.md``.
+    """
+    xrate_col = next((c for c in df_in.columns if str(c).lower() == "xrate"), None)
+    if xrate_col is None:
+        return None
+    cols = [c for c in (time_col, xrate_col) if c is not None]
+    sub = df_in[cols].dropna(subset=[xrate_col])
+    if sub.empty:
+        return None
+    if time_col is not None and time_col in sub.columns:
+        sub = sub.sort_values(time_col)
+    try:
+        val = float(sub[xrate_col].iloc[-1])
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
 def _detect_data_type(value_col: str) -> str:
     """Classify column into 'price', 'quantity', or 'other'."""
     c = value_col.lower()
@@ -2053,6 +2078,54 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
                 .sort_index()
             )
             return df_in, " ".join(note_parts + [_usable_yearly_points_message(len(df_y_primary))]).strip()
+
+        # Fixed-FX override: per the documented methodology (knowledge/balancing_price.md,
+        # skills/answer-composer/references/forecast-caveats.md) we do NOT separately
+        # forecast the exchange rate. When both GEL and USD balancing-price columns are
+        # present, trend-forecast USD only and derive GEL = USD x the fixed current
+        # (latest) xrate, so both series share one growth path and FX is held constant.
+        # Independent per-currency CAGRs otherwise extrapolate historical FX drift
+        # (prod trace 11a670ce: GEL winter fell while USD winter rose). Falls back to the
+        # original per-currency behavior when USD or a usable xrate is unavailable.
+        usd_col = next((c for c in per_currency if str(c).lower().endswith("_usd")), None)
+        gel_col = next((c for c in per_currency if str(c).lower().endswith("_gel")), None)
+        if usd_col and gel_col:
+            xrate_fixed = _latest_fixed_xrate(df, time_col)
+            if xrate_fixed is None:
+                # Imply the current rate from the latest GEL/USD levels.
+                u_last = per_currency[usd_col]["last_val"]
+                g_last = per_currency[gel_col]["last_val"]
+                if (
+                    u_last and u_last > 0
+                    and not np.isnan(u_last) and not np.isnan(g_last)
+                ):
+                    xrate_fixed = g_last / u_last
+            if xrate_fixed and xrate_fixed > 0:
+                us = per_currency[usd_col]
+
+                def _to_gel(v):
+                    return (
+                        v * xrate_fixed
+                        if v is not None and not (isinstance(v, float) and np.isnan(v))
+                        else v
+                    )
+
+                # GEL is fully derived from the USD forecast at the fixed rate, so it
+                # shares USD's per-season growth (GEL = USD x xrate_fixed everywhere).
+                per_currency[gel_col] = {
+                    "last_val": us["last_val"] * xrate_fixed,
+                    "last_year": us["last_year"],
+                    "cagr_y": us["cagr_y"],
+                    "cagr_s": us["cagr_s"],
+                    "cagr_w": us["cagr_w"],
+                    "s_last": _to_gel(us["s_last"]),
+                    "w_last": _to_gel(us["w_last"]),
+                }
+                note_parts.append(
+                    f"Exchange-rate assumption: held fixed at the latest level "
+                    f"(xrate={xrate_fixed:.4f} GEL/USD). Only USD is trend-forecast; "
+                    f"GEL = USD x fixed xrate."
+                )
 
         # Legacy aliases (kept so any external reader sees primary-column
         # values where the single-column form expects them).
