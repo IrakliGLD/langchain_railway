@@ -73,6 +73,11 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # NVIDIA (build.nvidia.com) — OpenAI-API-compatible endpoint driven via ChatOpenAI.
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+# Output-token cap and sampling temperature for the NVIDIA client. max_tokens
+# matters for reasoning models (e.g. gpt-oss-120b) whose hidden reasoning counts
+# against the output budget — raise NVIDIA_MAX_TOKENS if answers get truncated.
+NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
+NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
