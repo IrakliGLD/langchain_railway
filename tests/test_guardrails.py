@@ -5973,6 +5973,51 @@ def test_explanation_without_analytical_signals_stays_strict():
     assert summarizer._derive_data_summary_grounding_policy(ctx, "data_explanation") == "strict_numeric"
 
 
+def test_explanation_with_domain_knowledge_gets_evidence_aware_grounding():
+    """EXPLANATION answer_kind that carries injected domain_knowledge must use
+    evidence_aware grounding even when vector/derived/needs_knowledge are all
+    false (prod trace e1ba37a3: a Georgian 'why' answer was wrongly discarded
+    under strict_numeric because domain figures aren't in the strict corpus)."""
+    from agent import summarizer
+    from contracts.question_analysis import QuestionAnalysis
+    from models import QueryContext
+
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.9)
+    payload["routing"]["needs_knowledge"] = False
+    payload["analysis_requirements"]["needs_driver_analysis"] = False
+    payload["answer_kind"] = "explanation"
+    expected = QuestionAnalysis.model_validate(payload)
+
+    ctx = QueryContext(
+        query="Why did the balancing price change in May 2024?",
+        question_analysis=expected,
+        question_analysis_source="llm_active",
+        response_mode="data_primary",
+        resolution_policy="answer",
+        summary_domain_knowledge="### Balancing price drivers\nSupport schemes priced 55-57 USD/MWh.",
+    )
+
+    assert summarizer._derive_data_summary_grounding_policy(ctx, "data_explanation") == "evidence_aware"
+
+
+def test_grounding_fallback_message_is_localized():
+    """The conservative grounding fallback must be returned in the user's
+    language, so a Georgian/Russian question doesn't get an English non-answer."""
+    from utils.language import get_grounding_fallback_message
+
+    ka = get_grounding_fallback_message("ka")
+    ru = get_grounding_fallback_message("ru")
+    en = get_grounding_fallback_message("en")
+
+    # Georgian message uses Georgian script (U+10A0–U+10FF).
+    assert any("Ⴀ" <= ch <= "ჿ" for ch in ka)
+    # Russian message uses Cyrillic script (U+0400–U+04FF).
+    assert any("Ѐ" <= ch <= "ӿ" for ch in ru)
+    # English message is ASCII prose; unknown codes fall back to English.
+    assert "could not fully ground" in en
+    assert get_grounding_fallback_message("xx") == en
+
+
 def test_evidence_aware_grounding_uses_lower_threshold():
     """Evidence-aware grounding should use 0.7 threshold instead of 0.9."""
     from agent import summarizer
