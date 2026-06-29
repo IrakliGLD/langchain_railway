@@ -268,6 +268,22 @@ def get_primary_model_name() -> str:
     return GEMINI_MODEL
 
 
+def _normalize_stage_model_name(stage_model: Optional[str]) -> str:
+    return str(stage_model or "").strip().lower()
+
+
+def _stage_model_requests_primary(stage_model: Optional[str]) -> bool:
+    """Return True when a stage env var names the active primary provider."""
+    name = _normalize_stage_model_name(stage_model)
+    if name in {"", "primary", "default", "auto"}:
+        return True
+    return name == str(MODEL_TYPE or "").strip().lower()
+
+
+def _stage_model_is_provider_alias(stage_model: Optional[str]) -> bool:
+    return _normalize_stage_model_name(stage_model) in {"gemini", "openai", "nvidia"}
+
+
 def get_effective_model_name_for_stage(
     stage_model: Optional[str] = None,
     *,
@@ -282,15 +298,21 @@ def get_effective_model_name_for_stage(
     """
     needs_dedicated = thinking_budget is not None or max_retries is not None
     if not needs_dedicated:
-        if not stage_model or stage_model == GEMINI_MODEL:
+        if (
+            _stage_model_requests_primary(stage_model)
+            or _stage_model_is_provider_alias(stage_model)
+            or stage_model == GEMINI_MODEL
+        ):
             return get_primary_model_name()
         if not GOOGLE_API_KEY:
             return get_primary_model_name()
         return stage_model
 
+    if _stage_model_is_provider_alias(stage_model) and not _stage_model_requests_primary(stage_model):
+        return get_primary_model_name()
     if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
         return get_primary_model_name()
-    return stage_model or GEMINI_MODEL
+    return GEMINI_MODEL if _stage_model_requests_primary(stage_model) else (stage_model or GEMINI_MODEL)
 
 
 def _should_fallback_to_openai() -> bool:
@@ -337,7 +359,15 @@ def get_llm_for_stage(
 
     # No overrides — fast path unchanged
     if not needs_dedicated:
-        if not stage_model or stage_model == GEMINI_MODEL:
+        if _stage_model_requests_primary(stage_model) or stage_model == GEMINI_MODEL:
+            return get_primary_llm()
+
+        if _stage_model_is_provider_alias(stage_model):
+            log.warning(
+                "Stage model provider alias %s is not a dedicated override; "
+                "falling back to global default.",
+                stage_model,
+            )
             return get_primary_llm()
 
         if not GOOGLE_API_KEY:
@@ -363,7 +393,14 @@ def get_llm_for_stage(
     # Dedicated instance with overrides (thinking_budget and/or max_retries).
     # These knobs only apply to Gemini; for any other active provider return its
     # plain primary client (NVIDIA/OpenAI ignore thinking_budget).
-    effective_model = stage_model or GEMINI_MODEL
+    if _stage_model_is_provider_alias(stage_model) and not _stage_model_requests_primary(stage_model):
+        log.warning(
+            "Stage model provider alias %s is not a dedicated override; "
+            "falling back to global default.",
+            stage_model,
+        )
+        return get_primary_llm()
+    effective_model = GEMINI_MODEL if _stage_model_requests_primary(stage_model) else (stage_model or GEMINI_MODEL)
     if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
         return get_primary_llm()
 

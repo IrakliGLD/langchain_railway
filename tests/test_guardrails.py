@@ -337,6 +337,32 @@ def test_summarizer_falls_back_when_grounding_fails(monkeypatch):
     assert out.summary_confidence == pytest.approx(0.2, rel=1e-6)
 
 
+def test_summarizer_degrades_when_llm_circuit_breaker_is_open(monkeypatch):
+    def _raise_circuit_open(*_args, **_kwargs):
+        raise RuntimeError("LLM circuit breaker open for provider=nvidia reason=open")
+
+    def _unexpected_legacy_llm(*_args, **_kwargs):
+        raise AssertionError("legacy LLM fallback should not run when breaker is open")
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _raise_circuit_open)
+    monkeypatch.setattr(summarizer, "llm_summarize", _unexpected_legacy_llm)
+    monkeypatch.setattr(summarizer, "classify_query_type", lambda _query: "single_value")
+
+    ctx = QueryContext(
+        query="Show latest balancing price",
+        preview="date p_bal_gel\n2024-01-01 10.0",
+        stats_hint="Rows: 1",
+        lang_code="en",
+        lang_instruction="Respond in English.",
+    )
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "llm_unavailable_fallback"
+    assert out.summary_citations == ["llm_unavailable_fallback"]
+    assert out.summary_confidence == pytest.approx(0.2, rel=1e-6)
+    assert out.summary_provenance_gate_passed is True
+
+
 def test_grounding_token_normalization_handles_large_and_decimal_values():
     tokens = summarizer._extract_number_tokens("Result moved from 9999 to 10.0 and then 10")
     assert "9999" in tokens

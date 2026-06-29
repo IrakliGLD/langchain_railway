@@ -36,6 +36,13 @@ from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
+_LLM_CIRCUIT_OPEN_MARKER = "llm circuit breaker open"
+
+
+def _is_llm_circuit_open_error(exc: Exception) -> bool:
+    return _LLM_CIRCUIT_OPEN_MARKER in str(exc).lower()
+
+
 _NUMBER_PATTERN = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "segment")
 _MAX_REFS_PER_TOKEN = 4
@@ -2444,9 +2451,20 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 debug=True,
                 summary_envelope=envelope,
             )
-        except RuntimeError:
-            # Circuit breaker open — system-level issue, don't mask with fallback
-            raise
+        except RuntimeError as e:
+            # Provider outage: return a conservative answer instead of 500.
+            if not _is_llm_circuit_open_error(e):
+                raise
+            metrics.log_error()
+            log.warning(
+                "Structured summarization unavailable; using conservative fallback: %s",
+                e,
+            )
+            ctx.summary = get_grounding_fallback_message(getattr(ctx, "lang_code", "") or "en")
+            ctx.summary_source = "llm_unavailable_fallback"
+            ctx.summary_claims = []
+            ctx.summary_citations = ["llm_unavailable_fallback"]
+            ctx.summary_confidence = 0.2
         except Exception as e:
             metrics.log_summary_schema_failure()
             log.warning(
