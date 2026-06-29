@@ -522,6 +522,67 @@ def test_build_claim_provenance_matches_llm_one_decimal_rounded_stats_value():
     assert coverage == pytest.approx(1.0, rel=1e-6)
 
 
+def test_build_claim_provenance_matches_llm_higher_precision_cell_value():
+    """The provenance gate must NOT fail when the LLM cites a data value at a
+    different precision than the indexed 1-2 decimal expansion.
+
+    Regression for trace 9e9629a1: data cell p_bal_usd=44.3214; the LLM wrote
+    44.321 (3 decimals); the index only held 44.3/44.32 so the claim was judged
+    ungrounded. _rounded_match_variants rounds the claim token down to 44.32."""
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The balancing price was 44.321 USD/MWh."],
+        cols=["p_bal_usd"],
+        rows=[(44.3214,)],
+        source="tool",
+    )
+
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_build_claim_provenance_still_rejects_genuinely_absent_number():
+    """Precision tolerance must not ground a number absent from every source."""
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The value was 999 GEL."],
+        cols=["p_bal_usd"],
+        rows=[(44.3214,)],
+        source="tool",
+    )
+
+    assert "999" in claim_entries[0]["unmatched_tokens"]
+    assert claim_entries[0]["is_fully_grounded"] is False
+
+
+def test_provenance_gate_evidence_aware_uses_lower_threshold():
+    """EVIDENCE_AWARE answers pass the provenance gate at the 0.70 bar (matching
+    the grounding check); the same coverage fails under STRICT_NUMERIC, and the
+    citation-gate fallback message is localized to the query language."""
+    from models import GroundingPolicy, QueryContext
+
+    def _ctx(policy, lang="en"):
+        c = QueryContext(query="why did the price change?", lang_code=lang)
+        c.grounding_policy = policy
+        c.summary_claim_provenance = [
+            {"tokens": ["1"], "is_fully_grounded": True, "unmatched_tokens": []},
+            {"tokens": ["2"], "is_fully_grounded": True, "unmatched_tokens": []},
+            {"tokens": ["3"], "is_fully_grounded": False, "unmatched_tokens": ["3"]},
+        ]
+        c.summary_provenance_coverage = 0.7
+        return c
+
+    ea = _ctx(GroundingPolicy.EVIDENCE_AWARE)
+    summarizer._enforce_provenance_gate(ea)
+    assert ea.summary_provenance_gate_passed is True
+
+    sn = _ctx(GroundingPolicy.STRICT_NUMERIC, lang="ka")
+    summarizer._enforce_provenance_gate(sn)
+    assert sn.summary_provenance_gate_passed is False
+    assert sn.summary_source == "citation_gate_fallback"
+    # Fallback is localized to Georgian (U+10A0–U+10FF).
+    assert any("Ⴀ" <= ch <= "ჿ" for ch in sn.summary)
+
+
 def test_build_claim_provenance_unrelated_number_still_fails():
     """Defensive: rounding-expansion must NOT make completely unrelated
     numbers look grounded.  Claim cites ``500`` but source only has
@@ -570,7 +631,8 @@ def test_provenance_gate_blocks_partially_grounded_numeric_claims(monkeypatch):
     out = summarizer.summarize_data(ctx)
 
     assert out.summary_provenance_gate_passed is False
-    assert "citation-grade grounding" in out.summary
+    # Fallback is the localized grounding message (lang_code unset → English).
+    assert "could not fully ground" in out.summary
     assert out.summary_citations == ["citation_gate_fallback"]
 
 
