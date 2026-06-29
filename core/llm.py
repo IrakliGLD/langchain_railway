@@ -39,6 +39,7 @@ from config import (
     GEMINI_MODEL,
     GEMINI_OUTPUT_COST_PER_1K_USD,
     GOOGLE_API_KEY,
+    LLM_CACHE_COALESCE_TIMEOUT_SECONDS,
     MODEL_TYPE,
     NVIDIA_INPUT_COST_PER_1K_USD,
     NVIDIA_MODEL,
@@ -213,7 +214,7 @@ def _invoke_with_resilience(llm, messages, model_name: str):
 
 # Global cache instance (class lives in core/llm_runtime.py; the instance
 # stays HERE because tests monkeypatch `core.llm.llm_cache`).
-llm_cache = LLMResponseCache(max_size=1000)
+llm_cache = LLMResponseCache(max_size=1000, coalesce_timeout=LLM_CACHE_COALESCE_TIMEOUT_SECONDS)
 
 
 def _cache_mark_in_flight(cache_input: str):
@@ -2814,13 +2815,18 @@ def llm_analyze_question(
     except Exception as exc:
         log.warning("Question analyzer failed with primary model, fallback: %s", exc)
         if _should_fallback_to_openai():
-            llm = make_openai()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-            raw_output = message.content.strip()
-            _log_usage_for_message(message, model_name=OPENAI_MODEL)
-            metrics.log_llm_call(time.time() - llm_start)
+            try:
+                llm = make_openai()
+                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+                raw_output = message.content.strip()
+                _log_usage_for_message(message, model_name=OPENAI_MODEL)
+                metrics.log_llm_call(time.time() - llm_start)
+            except Exception:
+                _cache_cancel_in_flight(cache_input)
+                raise
         else:
             metrics.log_error()
+            _cache_cancel_in_flight(cache_input)
             raise
 
     try:
@@ -3362,13 +3368,18 @@ Citation format rules:
     if last_exc is not None:
         log.warning("Structured summarize failed with primary model, fallback: %s", last_exc)
         if _should_fallback_to_openai():
-            llm = make_openai()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-            raw_output = message.content.strip()
-            _log_usage_for_message(message, model_name=OPENAI_MODEL)
-            metrics.log_llm_call(time.time() - llm_start)
+            try:
+                llm = make_openai()
+                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+                raw_output = message.content.strip()
+                _log_usage_for_message(message, model_name=OPENAI_MODEL)
+                metrics.log_llm_call(time.time() - llm_start)
+            except Exception:
+                _cache_cancel_in_flight(cache_input)
+                raise
         else:
             metrics.log_error()
+            _cache_cancel_in_flight(cache_input)
             raise last_exc
 
     try:

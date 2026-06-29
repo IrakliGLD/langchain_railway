@@ -140,6 +140,8 @@ def test_nvidia_factory_applies_gemma_request_options(monkeypatch):
     monkeypatch.setattr(llm_runtime, "NVIDIA_TEMPERATURE", 1.0)
     monkeypatch.setattr(llm_runtime, "NVIDIA_TOP_P", 0.95)
     monkeypatch.setattr(llm_runtime, "NVIDIA_CHAT_TEMPLATE_KWARGS", {"enable_thinking": True})
+    monkeypatch.setattr(llm_runtime, "NVIDIA_REQUEST_TIMEOUT_SECONDS", 45.0)
+    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_RETRIES", 0)
     monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
 
     client = llm_runtime.get_nvidia()
@@ -148,6 +150,8 @@ def test_nvidia_factory_applies_gemma_request_options(monkeypatch):
     assert model == "google/gemma-4-31b-it"
     assert client.max_tokens == 16384
     assert client.temperature == 1.0
+    assert client.request_timeout == 45.0
+    assert client.max_retries == 0
 
     model_kwargs = getattr(client, "model_kwargs", {}) or {}
     top_p = getattr(client, "top_p", None)
@@ -164,16 +168,28 @@ def test_nvidia_kwargs_use_model_kwargs_for_older_chatopenai(monkeypatch):
     monkeypatch.setattr(llm_runtime, "NVIDIA_TEMPERATURE", 1.0)
     monkeypatch.setattr(llm_runtime, "NVIDIA_TOP_P", 0.95)
     monkeypatch.setattr(llm_runtime, "NVIDIA_CHAT_TEMPLATE_KWARGS", {"enable_thinking": True})
+    monkeypatch.setattr(llm_runtime, "NVIDIA_REQUEST_TIMEOUT_SECONDS", 45.0)
+    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_RETRIES", 0)
     monkeypatch.setattr(llm_runtime, "_chat_openai_supports_kwarg", lambda _name: False)
 
     kwargs = llm_runtime._build_nvidia_chat_openai_kwargs()
 
     assert "top_p" not in kwargs
     assert "extra_body" not in kwargs
+    assert kwargs["request_timeout"] == 45.0
+    assert kwargs["max_retries"] == 0
     assert kwargs["model_kwargs"] == {
         "top_p": 0.95,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
     }
+
+
+def test_llm_response_cache_releases_stale_in_flight_marker():
+    cache = llm_runtime.LLMResponseCache(max_size=10, coalesce_timeout=0.001)
+    cache.mark_in_flight("same-prompt")
+
+    assert cache.get("same-prompt") is None
+    assert cache.stats()["in_flight"] == 0
 
 
 def test_nvidia_factory_requires_key(monkeypatch):

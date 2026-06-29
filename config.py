@@ -159,6 +159,8 @@ NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com
 # against the output budget — raise NVIDIA_MAX_TOKENS if answers get truncated.
 NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", str(_NVIDIA_DEFAULTS["max_tokens"]))))
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", str(_NVIDIA_DEFAULTS["temperature"])))
+NVIDIA_REQUEST_TIMEOUT_SECONDS = max(5.0, float(os.getenv("NVIDIA_REQUEST_TIMEOUT_SECONDS", "60")))
+NVIDIA_MAX_RETRIES = max(0, int(os.getenv("NVIDIA_MAX_RETRIES", "0")))
 _default_nvidia_top_p = _NVIDIA_DEFAULTS["top_p"]
 NVIDIA_TOP_P = _optional_float_env(
     "NVIDIA_TOP_P",
@@ -173,6 +175,10 @@ NVIDIA_CHAT_TEMPLATE_KWARGS = (
     {"enable_thinking": NVIDIA_ENABLE_THINKING}
     if NVIDIA_ENABLE_THINKING is not None
     else None
+)
+LLM_CACHE_COALESCE_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.getenv("LLM_CACHE_COALESCE_TIMEOUT_SECONDS", str(NVIDIA_REQUEST_TIMEOUT_SECONDS + 15))),
 )
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this

@@ -24,8 +24,10 @@ from config import (
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
     NVIDIA_CHAT_TEMPLATE_KWARGS,
+    NVIDIA_MAX_RETRIES,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
+    NVIDIA_REQUEST_TIMEOUT_SECONDS,
     NVIDIA_TEMPERATURE,
     NVIDIA_TOP_P,
     OPENAI_API_KEY,
@@ -145,6 +147,8 @@ class LLMResponseCache:
 
         with self._lock:
             result = self._cache.get(key)
+            if result is None and not signaled and self._in_flight.get(key) is event:
+                self._in_flight.pop(key, None)
 
         if result is not None:
             self._coalesce_hits += 1
@@ -154,6 +158,12 @@ class LLMResponseCache:
                 self.hit_rate() * 100,
             )
             return result
+
+        if not signaled:
+            log.warning(
+                "LLM cache: in-flight wait timed out; released stale marker (key=%.8s)",
+                key,
+            )
 
         # Leader failed — caller should proceed as a fresh miss.
         self._misses += 1
@@ -246,7 +256,8 @@ def _build_nvidia_chat_openai_kwargs() -> dict:
         "max_tokens": NVIDIA_MAX_TOKENS,
         "openai_api_key": NVIDIA_API_KEY,
         "base_url": NVIDIA_BASE_URL,
-        "max_retries": 2,  # Limit retries to prevent quota exhaustion
+        "request_timeout": NVIDIA_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": NVIDIA_MAX_RETRIES,
     }
     model_kwargs = {}
     if NVIDIA_TOP_P is not None:
@@ -326,12 +337,15 @@ def get_nvidia() -> ChatOpenAI:
         log.info(
             (
                 "NVIDIA LLM instance cached "
-                "(model=%s, max_tokens=%s, temperature=%s, top_p=%s, chat_template_kwargs=%s, max_retries=2)"
+                "(model=%s, max_tokens=%s, temperature=%s, top_p=%s, "
+                "chat_template_kwargs=%s, request_timeout=%s, max_retries=%s)"
             ),
             NVIDIA_MODEL,
             NVIDIA_MAX_TOKENS,
             NVIDIA_TEMPERATURE,
             NVIDIA_TOP_P,
             NVIDIA_CHAT_TEMPLATE_KWARGS,
+            NVIDIA_REQUEST_TIMEOUT_SECONDS,
+            NVIDIA_MAX_RETRIES,
         )
     return _nvidia_llm
