@@ -23,6 +23,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # NVIDIA (build.nvidia.com) is OpenAI-API-compatible; reached via ChatOpenAI
 # with a custom base_url. Key supplied via env, like the providers above.
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+NVIDIA_OPENAI_API_KEY = os.getenv("NVIDIA_OPENAI_API_KEY")
+NVIDIA_GEMMA_API_KEY = os.getenv("NVIDIA_GEMMA_API_KEY")
 
 # Database
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
@@ -40,6 +42,25 @@ def _read_secret_env(*names: str):
             value = value[1:-1]
         return value or None
     return None
+
+
+def _optional_float_env(name: str, default: float | None = None) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw)
+
+
+def _optional_bool_env(name: str, default: bool | None = None) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Invalid {name}. Expected one of: true/false, 1/0, yes/no, on/off")
 
 
 # API Security
@@ -71,13 +92,88 @@ MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # NVIDIA (build.nvidia.com) — OpenAI-API-compatible endpoint driven via ChatOpenAI.
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
+NVIDIA_MODEL_OPTIONS = {
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+    "gemma-4-31b-it": "google/gemma-4-31b-it",
+    "google/gemma-4-31b-it": "google/gemma-4-31b-it",
+}
+
+
+def _resolve_nvidia_model(model_name: str | None) -> str:
+    requested = (model_name or "openai/gpt-oss-120b").strip()
+    return NVIDIA_MODEL_OPTIONS.get(requested.lower(), requested)
+
+
+def _nvidia_model_defaults(model_name: str) -> dict[str, object]:
+    if model_name.lower() == "google/gemma-4-31b-it":
+        return {
+            "max_tokens": 16384,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "enable_thinking": True,
+        }
+    return {
+        "max_tokens": 4096,
+        "temperature": 0.0,
+        "top_p": None,
+        "enable_thinking": None,
+    }
+
+
+def _nvidia_model_api_key_family(model_name: str) -> str:
+    name = (model_name or "").strip().lower()
+    if name.startswith("google/gemma") or "/gemma" in name:
+        return "gemma"
+    if name.startswith("openai/"):
+        return "openai"
+    return "default"
+
+
+def _resolve_nvidia_api_key(
+    model_name: str,
+    *,
+    default_api_key: str | None,
+    openai_api_key: str | None,
+    gemma_api_key: str | None,
+) -> str | None:
+    family = _nvidia_model_api_key_family(model_name)
+    if family == "gemma":
+        return gemma_api_key or default_api_key
+    if family == "openai":
+        return openai_api_key or default_api_key
+    return default_api_key
+
+
+NVIDIA_MODEL = _resolve_nvidia_model(os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b"))
+_NVIDIA_DEFAULTS = _nvidia_model_defaults(NVIDIA_MODEL)
+NVIDIA_API_KEY = _resolve_nvidia_api_key(
+    NVIDIA_MODEL,
+    default_api_key=NVIDIA_API_KEY,
+    openai_api_key=NVIDIA_OPENAI_API_KEY,
+    gemma_api_key=NVIDIA_GEMMA_API_KEY,
+)
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Output-token cap and sampling temperature for the NVIDIA client. max_tokens
 # matters for reasoning models (e.g. gpt-oss-120b) whose hidden reasoning counts
 # against the output budget — raise NVIDIA_MAX_TOKENS if answers get truncated.
-NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
-NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
+NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", str(_NVIDIA_DEFAULTS["max_tokens"]))))
+NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", str(_NVIDIA_DEFAULTS["temperature"])))
+_default_nvidia_top_p = _NVIDIA_DEFAULTS["top_p"]
+NVIDIA_TOP_P = _optional_float_env(
+    "NVIDIA_TOP_P",
+    float(_default_nvidia_top_p) if _default_nvidia_top_p is not None else None,
+)
+_default_nvidia_enable_thinking = _NVIDIA_DEFAULTS["enable_thinking"]
+NVIDIA_ENABLE_THINKING = _optional_bool_env(
+    "NVIDIA_ENABLE_THINKING",
+    bool(_default_nvidia_enable_thinking) if _default_nvidia_enable_thinking is not None else None,
+)
+NVIDIA_CHAT_TEMPLATE_KWARGS = (
+    {"enable_thinking": NVIDIA_ENABLE_THINKING}
+    if NVIDIA_ENABLE_THINKING is not None
+    else None
+)
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
