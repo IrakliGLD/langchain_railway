@@ -320,16 +320,25 @@ def scrub_schema_mentions(text: str) -> str:
 
 # Source anchors the summarizer is asked to put in the structured ``citations``
 # field — NOT inline. Some models (e.g. gpt-oss-120b) leak them into the answer
-# body as ``*[domain_knowledge]*``, ``[statistics]`` or ``【statistics】``.
+# body as ``*[domain_knowledge]*``, ``[statistics]`` or ``【regulated_plant_sales】``.
+# The anchor set is OPEN-ENDED: why-context evidence blocks add their own anchors
+# (regulated_plant_sales, component_pressure, …), so match the marker SHAPE —
+# a known base anchor OR any snake_case identifier with an underscore — rather
+# than a fixed vocabulary that silently misses new anchors.
 _CITATION_ANCHORS = (
     "data_preview", "statistics", "domain_knowledge",
     "external_source_passages", "conversation_history",
 )
+# One anchor token: a base anchor, or a snake_case id with ≥1 underscore (covers
+# evidence-block anchors and future ones). Excludes prose like [2024] / [note].
+_CITATION_ANCHOR_TOKEN = (
+    r"(?:" + "|".join(_CITATION_ANCHORS) + r"|[a-z][a-z0-9]*(?:_[a-z0-9]+)+)"
+)
 _CITATION_MARKER_RE = re.compile(
     r"\s*\*{0,2}[\[\(【]\s*"
-    r"(?:" + "|".join(_CITATION_ANCHORS) + r")"
-    r"(?:\s*[,;/&]\s*(?:" + "|".join(_CITATION_ANCHORS) + r"))*"
-    r"\s*[\]\)】]\*{0,2}",
+    + _CITATION_ANCHOR_TOKEN
+    + r"(?:\s*[,;/&]\s*" + _CITATION_ANCHOR_TOKEN + r")*"
+    + r"\s*[\]\)】]\*{0,2}",
     re.IGNORECASE,
 )
 
