@@ -6080,6 +6080,29 @@ def test_grounding_fallback_message_is_localized():
     assert get_grounding_fallback_message("xx") == en
 
 
+def test_grounding_corpus_includes_domain_knowledge_for_evidence_aware_enum():
+    """Regression: _build_grounding_corpus must include domain_knowledge under
+    EVIDENCE_AWARE even when grounding_policy is the ENUM (as production sets it).
+    Python 3.11+ str(StrEnum) returns 'GroundingPolicy.EVIDENCE_AWARE', so the old
+    str()==enum compare was always False and silently dropped domain figures from
+    the grounding corpus — EVIDENCE_AWARE answers citing them failed grounding
+    (prod trace 663461d6)."""
+    from agent import summarizer
+    from models import GroundingPolicy, QueryContext
+
+    ctx = QueryContext(query="why did the balancing price change?")
+    ctx.summary_domain_knowledge = "support schemes are priced around 55-57 USD/MWh"
+
+    ctx.grounding_policy = GroundingPolicy.EVIDENCE_AWARE  # enum, as production sets it
+    corpus = summarizer._build_grounding_corpus(ctx)
+    assert "55-57" in corpus, "EVIDENCE_AWARE corpus must include domain_knowledge"
+
+    ctx.grounding_policy = GroundingPolicy.STRICT_NUMERIC
+    assert "55-57" not in summarizer._build_grounding_corpus(ctx), (
+        "STRICT_NUMERIC corpus must NOT include domain_knowledge"
+    )
+
+
 def test_evidence_aware_grounding_uses_lower_threshold():
     """Evidence-aware grounding should use 0.7 threshold instead of 0.9."""
     from agent import summarizer
