@@ -206,6 +206,27 @@ class TestStripInlineCitationMarkers:
         out = strip_inline_citation_markers("first point. *[domain_knowledge]*\n2. second")
         assert out == "first point.\n2. second"
 
+    def test_strips_evidence_block_anchor_not_in_base_list(self):
+        from context import strip_inline_citation_markers
+
+        # why-context evidence-block anchors (regulated_plant_sales,
+        # component_pressure, …) are NOT in the base list but are snake_case
+        # identifiers, so the shape-based matcher must still strip them.
+        out = strip_inline_citation_markers(
+            "tariff of 40.21 GEL/MWh (14.73 USD/MWh)【regulated_plant_sales】."
+        )
+        assert out == "tariff of 40.21 GEL/MWh (14.73 USD/MWh)."
+        assert "regulated_plant_sales" not in out
+        out2 = strip_inline_citation_markers("pressure rose [component_pressure]")
+        assert out2 == "pressure rose"
+
+    def test_leaves_single_word_bracket_prose_intact(self):
+        from context import strip_inline_citation_markers
+
+        # A bracketed common word (no underscore, not a base anchor) is prose,
+        # not a citation anchor, and must survive.
+        assert strip_inline_citation_markers("see the [note] above") == "see the [note] above"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

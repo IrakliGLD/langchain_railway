@@ -556,6 +556,29 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
     return result
 
 
+def _rounded_match_variants(token: str) -> List[str]:
+    """Return a numeric token rounded to 2 and 1 decimals.
+
+    Used as a fallback in claim matching: the model may quote a source value at a
+    different precision than the 1–2-decimal expansion stored in the index (e.g.
+    it writes ``44.321`` for source ``44.3214``). Rounding the *claim* token down
+    lets it match the indexed ``44.32``. Only the claim side is rounded, so a
+    genuinely-absent number (``999``) still finds no match.
+    """
+    try:
+        numeric = Decimal(token)
+    except (InvalidOperation, ValueError):
+        return []
+    if not numeric.is_finite():
+        return []
+    variants: List[str] = []
+    for places in (2, 1):
+        candidate = _normalize_number_token(str(round(numeric, places)))
+        if candidate and candidate != token and candidate not in variants:
+            variants.append(candidate)
+    return variants
+
+
 def _tokenize_cell_value(value: Any) -> Set[str]:
     tokens = _extract_number_tokens(str(value))
     if value is None or isinstance(value, bool):
@@ -742,8 +765,17 @@ def _build_claim_provenance(
         seen_refs = set()
 
         for token in claim_tokens:
+            raw_refs = token_index.get(token)
+            if not raw_refs:
+                # Precision-tolerant retry: the model may round a source value to
+                # a different decimal precision than the indexed 1–2-decimal
+                # expansion (e.g. 44.321 for source 44.3214).
+                for variant in _rounded_match_variants(token):
+                    if variant in token_index:
+                        raw_refs = token_index[variant]
+                        break
             refs = sorted(
-                token_index.get(token, []),
+                raw_refs or [],
                 key=lambda ref: (
                     source_priority.get(str(ref.get("source") or "unknown"), 4),
                     int(ref.get("row_index", -1)),
@@ -862,7 +894,17 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
     # values (MoM changes, percentages) from raw data.  Coverage already
     # captures grounding quality proportionally.  has_ungrounded_claim is
     # still computed and logged for observability.
-    gate_passed = coverage >= PROVENANCE_MIN_COVERAGE
+    # Align with the grounding check: an EVIDENCE_AWARE (mixed data + domain
+    # knowledge) answer is accepted by _is_summary_grounded at 0.70, so the
+    # provenance gate must not reject the same answer at 0.80. Normalize the
+    # policy value to dodge the Py3.11 StrEnum str() trap.
+    _policy_val = getattr(ctx.grounding_policy, "value", str(ctx.grounding_policy or ""))
+    min_coverage = (
+        min(PROVENANCE_MIN_COVERAGE, 0.70)
+        if _policy_val == GroundingPolicy.EVIDENCE_AWARE.value
+        else PROVENANCE_MIN_COVERAGE
+    )
+    gate_passed = coverage >= min_coverage
     if gate_passed:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "ok"
@@ -884,13 +926,10 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
         metrics.log_provenance_gate_failure()
     ctx.summary_provenance_gate_passed = False
     ctx.summary_provenance_gate_reason = (
-        f"coverage={coverage:.4f}, min={PROVENANCE_MIN_COVERAGE:.4f}, "
+        f"coverage={coverage:.4f}, min={min_coverage:.4f}, "
         f"ungrounded_numeric_claims={int(has_ungrounded_claim)}"
     )
-    ctx.summary = (
-        "I could not produce citation-grade grounding for all numeric claims from the retrieved dataset. "
-        "Please refine the query scope (period/entity/metric) and retry."
-    )
+    ctx.summary = get_grounding_fallback_message(getattr(ctx, "lang_code", "") or "en")
     ctx.summary_source = "citation_gate_fallback"
     ctx.summary_claims = []
     ctx.summary_citations = ["citation_gate_fallback"]
