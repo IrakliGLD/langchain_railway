@@ -222,47 +222,6 @@ _openai_llm = None
 _nvidia_llm = None
 
 
-def _chat_openai_supports_kwarg(name: str) -> bool:
-    fields = getattr(ChatOpenAI, "model_fields", None) or getattr(ChatOpenAI, "__fields__", {})
-    return name in fields
-
-
-def _set_chat_openai_request_option(
-    kwargs: dict,
-    model_kwargs: dict,
-    name: str,
-    value,
-) -> None:
-    if _chat_openai_supports_kwarg(name):
-        kwargs[name] = value
-    else:
-        model_kwargs[name] = value
-
-
-def _build_nvidia_chat_openai_kwargs() -> dict:
-    kwargs = {
-        "model": NVIDIA_MODEL,
-        "temperature": NVIDIA_TEMPERATURE,
-        "max_tokens": NVIDIA_MAX_TOKENS,
-        "openai_api_key": NVIDIA_API_KEY,
-        "base_url": NVIDIA_BASE_URL,
-        "max_retries": 2,  # Limit retries to prevent quota exhaustion
-    }
-    model_kwargs = {}
-    if NVIDIA_TOP_P is not None:
-        _set_chat_openai_request_option(kwargs, model_kwargs, "top_p", NVIDIA_TOP_P)
-    if NVIDIA_CHAT_TEMPLATE_KWARGS:
-        _set_chat_openai_request_option(
-            kwargs,
-            model_kwargs,
-            "extra_body",
-            {"chat_template_kwargs": dict(NVIDIA_CHAT_TEMPLATE_KWARGS)},
-        )
-    if model_kwargs:
-        kwargs["model_kwargs"] = model_kwargs
-    return kwargs
-
-
 def get_gemini() -> ChatGoogleGenerativeAI:
     """Get cached Gemini LLM instance (singleton pattern).
 
@@ -322,7 +281,22 @@ def get_nvidia() -> ChatOpenAI:
     if not NVIDIA_API_KEY:
         raise RuntimeError("NVIDIA_API_KEY not set")
     if _nvidia_llm is None:
-        _nvidia_llm = ChatOpenAI(**_build_nvidia_chat_openai_kwargs())
+        kwargs = {
+            "model": NVIDIA_MODEL,
+            "temperature": NVIDIA_TEMPERATURE,
+            "max_tokens": NVIDIA_MAX_TOKENS,
+            "openai_api_key": NVIDIA_API_KEY,
+            "base_url": NVIDIA_BASE_URL,
+            "max_retries": 2,  # Limit retries to prevent quota exhaustion
+        }
+        if NVIDIA_TOP_P is not None:
+            kwargs["top_p"] = NVIDIA_TOP_P
+        if NVIDIA_CHAT_TEMPLATE_KWARGS:
+            kwargs["extra_body"] = {
+                "chat_template_kwargs": dict(NVIDIA_CHAT_TEMPLATE_KWARGS),
+            }
+
+        _nvidia_llm = ChatOpenAI(**kwargs)
         log.info(
             (
                 "NVIDIA LLM instance cached "

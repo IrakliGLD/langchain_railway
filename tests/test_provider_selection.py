@@ -157,25 +157,6 @@ def test_nvidia_factory_applies_gemma_request_options(monkeypatch):
     assert extra_body == {"chat_template_kwargs": {"enable_thinking": True}}
 
 
-def test_nvidia_kwargs_use_model_kwargs_for_older_chatopenai(monkeypatch):
-    monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", "test-nvidia-key")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_TOKENS", 16384)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TEMPERATURE", 1.0)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TOP_P", 0.95)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_CHAT_TEMPLATE_KWARGS", {"enable_thinking": True})
-    monkeypatch.setattr(llm_runtime, "_chat_openai_supports_kwarg", lambda _name: False)
-
-    kwargs = llm_runtime._build_nvidia_chat_openai_kwargs()
-
-    assert "top_p" not in kwargs
-    assert "extra_body" not in kwargs
-    assert kwargs["model_kwargs"] == {
-        "top_p": 0.95,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
-    }
-
-
 def test_nvidia_factory_requires_key(monkeypatch):
     monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", None)
     monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
