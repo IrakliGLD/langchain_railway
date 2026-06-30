@@ -235,7 +235,15 @@ def _extract_number_tokens(text: str) -> Set[str]:
 
 def _build_grounding_corpus(ctx: QueryContext) -> str:
     parts = [ctx.preview or "", ctx.stats_hint or ""]
-    if str(ctx.grounding_policy or "") == GroundingPolicy.EVIDENCE_AWARE:
+    # Normalize the policy to its .value first: in Python 3.11+ ``str(StrEnum)``
+    # returns "GroundingPolicy.EVIDENCE_AWARE", so the old ``str(...) == enum``
+    # compare was ALWAYS False for the enum (production) and silently EXCLUDED
+    # domain_knowledge/vector from the grounding corpus. EVIDENCE_AWARE answers
+    # that cite domain figures (≈55-57 USD/MWh, article refs) then failed
+    # grounding (prod trace 663461d6). Tests passed only because they set the
+    # policy as the string "evidence_aware", which compared True.
+    policy_value = getattr(ctx.grounding_policy, "value", str(ctx.grounding_policy or ""))
+    if policy_value == GroundingPolicy.EVIDENCE_AWARE.value:
         parts.append(ctx.summary_domain_knowledge or "")
         parts.append(ctx.vector_knowledge_prompt or "")
     if ctx.df is not None and not ctx.df.empty:
@@ -453,11 +461,8 @@ def _apply_absence_claim_guardrail(ctx: QueryContext) -> None:
     log.warning(
         "Summary contained unsupported absence claims; replacing with conservative fallback."
     )
-    ctx.summary = (
-        "I could not safely determine from the provided table whether omitted or blank values "
-        "indicate true absence or incomplete evidence coverage. Please narrow the period or ask "
-        "for a specific entity/date slice for a fully grounded answer."
-    )
+    # Localized so a non-English question doesn't get an English non-answer.
+    ctx.summary = get_grounding_fallback_message(getattr(ctx, "lang_code", "") or "en")
     ctx.summary_source = "absence_claim_guardrail"
     ctx.summary_claims = []
     ctx.summary_citations = ["absence_claim_guardrail"]
