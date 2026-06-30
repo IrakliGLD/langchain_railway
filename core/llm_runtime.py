@@ -23,11 +23,9 @@ from config import (
     GOOGLE_API_KEY,
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
-    NVIDIA_CHAT_TEMPLATE_KWARGS,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_TEMPERATURE,
-    NVIDIA_TOP_P,
     OPENAI_API_KEY,
     OPENAI_MODEL,
 )
@@ -270,9 +268,8 @@ def get_nvidia() -> ChatOpenAI:
 
     build.nvidia.com exposes an OpenAI-compatible API, so it is driven through
     ``ChatOpenAI`` — identical to ``get_openai()`` except for the custom
-    ``base_url``. The model id and base URL come from env. The key is the
-    resolved config value from NVIDIA_OPENAI_API_KEY / NVIDIA_GEMMA_API_KEY,
-    falling back to NVIDIA_API_KEY.
+    ``base_url``. The model id (e.g. ``openai/gpt-oss-120b``), key, and base URL
+    all come from env (NVIDIA_MODEL / NVIDIA_API_KEY / NVIDIA_BASE_URL).
 
     Raises:
         RuntimeError: If NVIDIA_API_KEY is not configured
@@ -281,31 +278,16 @@ def get_nvidia() -> ChatOpenAI:
     if not NVIDIA_API_KEY:
         raise RuntimeError("NVIDIA_API_KEY not set")
     if _nvidia_llm is None:
-        kwargs = {
-            "model": NVIDIA_MODEL,
-            "temperature": NVIDIA_TEMPERATURE,
-            "max_tokens": NVIDIA_MAX_TOKENS,
-            "openai_api_key": NVIDIA_API_KEY,
-            "base_url": NVIDIA_BASE_URL,
-            "max_retries": 2,  # Limit retries to prevent quota exhaustion
-        }
-        if NVIDIA_TOP_P is not None:
-            kwargs["top_p"] = NVIDIA_TOP_P
-        if NVIDIA_CHAT_TEMPLATE_KWARGS:
-            kwargs["extra_body"] = {
-                "chat_template_kwargs": dict(NVIDIA_CHAT_TEMPLATE_KWARGS),
-            }
-
-        _nvidia_llm = ChatOpenAI(**kwargs)
+        _nvidia_llm = ChatOpenAI(
+            model=NVIDIA_MODEL,
+            temperature=NVIDIA_TEMPERATURE,
+            max_tokens=NVIDIA_MAX_TOKENS,
+            openai_api_key=NVIDIA_API_KEY,
+            base_url=NVIDIA_BASE_URL,
+            max_retries=2  # Limit retries to prevent quota exhaustion
+        )
         log.info(
-            (
-                "NVIDIA LLM instance cached "
-                "(model=%s, max_tokens=%s, temperature=%s, top_p=%s, chat_template_kwargs=%s, max_retries=2)"
-            ),
-            NVIDIA_MODEL,
-            NVIDIA_MAX_TOKENS,
-            NVIDIA_TEMPERATURE,
-            NVIDIA_TOP_P,
-            NVIDIA_CHAT_TEMPLATE_KWARGS,
+            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, max_retries=2)",
+            NVIDIA_MODEL, NVIDIA_MAX_TOKENS, NVIDIA_TEMPERATURE,
         )
     return _nvidia_llm

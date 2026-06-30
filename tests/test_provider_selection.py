@@ -24,7 +24,6 @@ from core import llm, llm_runtime
 def test_provider_from_model_name_classifies_three_providers():
     assert llm._provider_from_model_name("openai/gpt-oss-120b") == "nvidia"
     assert llm._provider_from_model_name("meta/llama-3.1-8b") == "nvidia"
-    assert llm._provider_from_model_name("google/gemma-4-31b-it") == "nvidia"
     assert llm._provider_from_model_name("gpt-4o-mini") == "openai"
     assert llm._provider_from_model_name("o1-preview") == "openai"
     assert llm._provider_from_model_name("gemini-2.5-flash") == "gemini"
@@ -89,72 +88,6 @@ def test_nvidia_factory_builds_chatopenai_with_base_url(monkeypatch):
     # Env-configurable output cap + sampling temperature are applied.
     assert client.temperature == config.NVIDIA_TEMPERATURE
     assert client.max_tokens == config.NVIDIA_MAX_TOKENS
-
-
-def test_nvidia_model_option_resolves_gemma_alias_with_defaults():
-    model = config._resolve_nvidia_model("gemma-4-31b-it")
-    assert model == "google/gemma-4-31b-it"
-    assert config._nvidia_model_defaults(model) == {
-        "max_tokens": 16384,
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "enable_thinking": True,
-    }
-
-
-def test_nvidia_api_key_resolver_prefers_model_family_specific_keys():
-    assert config._resolve_nvidia_api_key(
-        "google/gemma-4-31b-it",
-        default_api_key="generic-key",
-        openai_api_key="nvidia-openai-key",
-        gemma_api_key="nvidia-gemma-key",
-    ) == "nvidia-gemma-key"
-
-    assert config._resolve_nvidia_api_key(
-        "openai/gpt-oss-120b",
-        default_api_key="generic-key",
-        openai_api_key="nvidia-openai-key",
-        gemma_api_key="nvidia-gemma-key",
-    ) == "nvidia-openai-key"
-
-
-def test_nvidia_api_key_resolver_keeps_generic_fallback():
-    assert config._resolve_nvidia_api_key(
-        "google/gemma-4-31b-it",
-        default_api_key="generic-key",
-        openai_api_key=None,
-        gemma_api_key=None,
-    ) == "generic-key"
-    assert config._resolve_nvidia_api_key(
-        "meta/llama-3.1-8b",
-        default_api_key="generic-key",
-        openai_api_key="nvidia-openai-key",
-        gemma_api_key="nvidia-gemma-key",
-    ) == "generic-key"
-
-
-def test_nvidia_factory_applies_gemma_request_options(monkeypatch):
-    monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", "test-nvidia-key")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_TOKENS", 16384)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TEMPERATURE", 1.0)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TOP_P", 0.95)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_CHAT_TEMPLATE_KWARGS", {"enable_thinking": True})
-    monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
-
-    client = llm_runtime.get_nvidia()
-
-    model = getattr(client, "model_name", None) or getattr(client, "model", None)
-    assert model == "google/gemma-4-31b-it"
-    assert client.max_tokens == 16384
-    assert client.temperature == 1.0
-
-    model_kwargs = getattr(client, "model_kwargs", {}) or {}
-    top_p = getattr(client, "top_p", None)
-    assert (top_p if top_p is not None else model_kwargs.get("top_p")) == 0.95
-
-    extra_body = getattr(client, "extra_body", None) or model_kwargs.get("extra_body")
-    assert extra_body == {"chat_template_kwargs": {"enable_thinking": True}}
 
 
 def test_nvidia_factory_requires_key(monkeypatch):
