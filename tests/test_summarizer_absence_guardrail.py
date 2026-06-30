@@ -118,7 +118,8 @@ def test_absence_claim_guardrail_replaces_unsupported_summary(monkeypatch):
     out = summarizer.summarize_data(_make_tariff_ctx())
 
     assert out.summary_source == "absence_claim_guardrail"
-    assert "omitted or blank values" in out.summary
+    # Fallback is now the localized conservative message (English here, no lang_code).
+    assert "could not fully ground" in out.summary
     assert "did not have active tariff values recorded" not in out.summary
     assert out.summary_citations == ["absence_claim_guardrail"]
 
