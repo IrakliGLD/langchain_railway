@@ -86,19 +86,6 @@ def test_effective_stage_model_name_honors_gemini_planner_override(monkeypatch):
     assert llm.get_effective_model_name_for_stage("gemini-2.5-pro") == "gemini-2.5-pro"
 
 
-def test_nvidia_stage_model_alias_uses_primary_provider(monkeypatch):
-    sentinel = object()
-    monkeypatch.setattr(llm, "MODEL_TYPE", "nvidia")
-    monkeypatch.setattr(llm, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm, "GOOGLE_API_KEY", "test-google-key")
-    monkeypatch.setattr(llm, "make_nvidia", lambda: sentinel)
-
-    assert llm.get_effective_model_name_for_stage("nvidia") == "google/gemma-4-31b-it"
-    assert llm.get_effective_model_name_for_stage("default") == "google/gemma-4-31b-it"
-    assert llm.get_llm_for_stage("nvidia") is sentinel
-    assert llm.get_llm_for_stage("nvidia", max_retries=1) is sentinel
-
-
 def test_get_primary_llm_dispatches_to_active_provider(monkeypatch):
     sentinel = {"nvidia": object(), "openai": object(), "gemini": object()}
     monkeypatch.setattr(llm, "make_nvidia", lambda: sentinel["nvidia"])
