@@ -23,13 +23,9 @@ from config import (
     GOOGLE_API_KEY,
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
-    NVIDIA_CHAT_TEMPLATE_KWARGS,
-    NVIDIA_MAX_RETRIES,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
-    NVIDIA_REQUEST_TIMEOUT_SECONDS,
     NVIDIA_TEMPERATURE,
-    NVIDIA_TOP_P,
     OPENAI_API_KEY,
     OPENAI_MODEL,
 )
@@ -147,8 +143,6 @@ class LLMResponseCache:
 
         with self._lock:
             result = self._cache.get(key)
-            if result is None and not signaled and self._in_flight.get(key) is event:
-                self._in_flight.pop(key, None)
 
         if result is not None:
             self._coalesce_hits += 1
@@ -158,12 +152,6 @@ class LLMResponseCache:
                 self.hit_rate() * 100,
             )
             return result
-
-        if not signaled:
-            log.warning(
-                "LLM cache: in-flight wait timed out; released stale marker (key=%.8s)",
-                key,
-            )
 
         # Leader failed — caller should proceed as a fresh miss.
         self._misses += 1
@@ -232,48 +220,6 @@ _openai_llm = None
 _nvidia_llm = None
 
 
-def _chat_openai_supports_kwarg(name: str) -> bool:
-    fields = getattr(ChatOpenAI, "model_fields", None) or getattr(ChatOpenAI, "__fields__", {})
-    return name in fields
-
-
-def _set_chat_openai_request_option(
-    kwargs: dict,
-    model_kwargs: dict,
-    name: str,
-    value,
-) -> None:
-    if _chat_openai_supports_kwarg(name):
-        kwargs[name] = value
-    else:
-        model_kwargs[name] = value
-
-
-def _build_nvidia_chat_openai_kwargs() -> dict:
-    kwargs = {
-        "model": NVIDIA_MODEL,
-        "temperature": NVIDIA_TEMPERATURE,
-        "max_tokens": NVIDIA_MAX_TOKENS,
-        "openai_api_key": NVIDIA_API_KEY,
-        "base_url": NVIDIA_BASE_URL,
-        "request_timeout": NVIDIA_REQUEST_TIMEOUT_SECONDS,
-        "max_retries": NVIDIA_MAX_RETRIES,
-    }
-    model_kwargs = {}
-    if NVIDIA_TOP_P is not None:
-        _set_chat_openai_request_option(kwargs, model_kwargs, "top_p", NVIDIA_TOP_P)
-    if NVIDIA_CHAT_TEMPLATE_KWARGS:
-        _set_chat_openai_request_option(
-            kwargs,
-            model_kwargs,
-            "extra_body",
-            {"chat_template_kwargs": dict(NVIDIA_CHAT_TEMPLATE_KWARGS)},
-        )
-    if model_kwargs:
-        kwargs["model_kwargs"] = model_kwargs
-    return kwargs
-
-
 def get_gemini() -> ChatGoogleGenerativeAI:
     """Get cached Gemini LLM instance (singleton pattern).
 
@@ -322,9 +268,8 @@ def get_nvidia() -> ChatOpenAI:
 
     build.nvidia.com exposes an OpenAI-compatible API, so it is driven through
     ``ChatOpenAI`` — identical to ``get_openai()`` except for the custom
-    ``base_url``. The model id and base URL come from env. The key is the
-    resolved config value from NVIDIA_OPENAI_API_KEY / NVIDIA_GEMMA_API_KEY,
-    falling back to NVIDIA_API_KEY.
+    ``base_url``. The model id (e.g. ``openai/gpt-oss-120b``), key, and base URL
+    all come from env (NVIDIA_MODEL / NVIDIA_API_KEY / NVIDIA_BASE_URL).
 
     Raises:
         RuntimeError: If NVIDIA_API_KEY is not configured
@@ -333,19 +278,16 @@ def get_nvidia() -> ChatOpenAI:
     if not NVIDIA_API_KEY:
         raise RuntimeError("NVIDIA_API_KEY not set")
     if _nvidia_llm is None:
-        _nvidia_llm = ChatOpenAI(**_build_nvidia_chat_openai_kwargs())
+        _nvidia_llm = ChatOpenAI(
+            model=NVIDIA_MODEL,
+            temperature=NVIDIA_TEMPERATURE,
+            max_tokens=NVIDIA_MAX_TOKENS,
+            openai_api_key=NVIDIA_API_KEY,
+            base_url=NVIDIA_BASE_URL,
+            max_retries=2  # Limit retries to prevent quota exhaustion
+        )
         log.info(
-            (
-                "NVIDIA LLM instance cached "
-                "(model=%s, max_tokens=%s, temperature=%s, top_p=%s, "
-                "chat_template_kwargs=%s, request_timeout=%s, max_retries=%s)"
-            ),
-            NVIDIA_MODEL,
-            NVIDIA_MAX_TOKENS,
-            NVIDIA_TEMPERATURE,
-            NVIDIA_TOP_P,
-            NVIDIA_CHAT_TEMPLATE_KWARGS,
-            NVIDIA_REQUEST_TIMEOUT_SECONDS,
-            NVIDIA_MAX_RETRIES,
+            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, max_retries=2)",
+            NVIDIA_MODEL, NVIDIA_MAX_TOKENS, NVIDIA_TEMPERATURE,
         )
     return _nvidia_llm

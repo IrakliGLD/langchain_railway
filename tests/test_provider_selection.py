@@ -24,7 +24,6 @@ from core import llm, llm_runtime
 def test_provider_from_model_name_classifies_three_providers():
     assert llm._provider_from_model_name("openai/gpt-oss-120b") == "nvidia"
     assert llm._provider_from_model_name("meta/llama-3.1-8b") == "nvidia"
-    assert llm._provider_from_model_name("google/gemma-4-31b-it") == "nvidia"
     assert llm._provider_from_model_name("gpt-4o-mini") == "openai"
     assert llm._provider_from_model_name("o1-preview") == "openai"
     assert llm._provider_from_model_name("gemini-2.5-flash") == "gemini"
@@ -59,46 +58,6 @@ def test_get_primary_model_name_follows_model_type(monkeypatch):
     assert llm.get_primary_model_name() == config.GEMINI_MODEL
 
 
-def test_effective_stage_model_name_matches_primary_when_nvidia_ignores_dedicated_override(monkeypatch):
-    monkeypatch.setattr(llm, "MODEL_TYPE", "nvidia")
-    monkeypatch.setattr(llm, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm, "GOOGLE_API_KEY", "test-google-key")
-
-    assert (
-        llm.get_effective_model_name_for_stage("gemini-2.5-pro", max_retries=1)
-        == "google/gemma-4-31b-it"
-    )
-    assert (
-        llm.get_effective_model_name_for_stage(
-            "gemini-2.5-pro",
-            thinking_budget=512,
-            max_retries=2,
-        )
-        == "google/gemma-4-31b-it"
-    )
-
-
-def test_effective_stage_model_name_honors_gemini_planner_override(monkeypatch):
-    monkeypatch.setattr(llm, "MODEL_TYPE", "nvidia")
-    monkeypatch.setattr(llm, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm, "GOOGLE_API_KEY", "test-google-key")
-
-    assert llm.get_effective_model_name_for_stage("gemini-2.5-pro") == "gemini-2.5-pro"
-
-
-def test_nvidia_stage_model_alias_uses_primary_provider(monkeypatch):
-    sentinel = object()
-    monkeypatch.setattr(llm, "MODEL_TYPE", "nvidia")
-    monkeypatch.setattr(llm, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm, "GOOGLE_API_KEY", "test-google-key")
-    monkeypatch.setattr(llm, "make_nvidia", lambda: sentinel)
-
-    assert llm.get_effective_model_name_for_stage("nvidia") == "google/gemma-4-31b-it"
-    assert llm.get_effective_model_name_for_stage("default") == "google/gemma-4-31b-it"
-    assert llm.get_llm_for_stage("nvidia") is sentinel
-    assert llm.get_llm_for_stage("nvidia", max_retries=1) is sentinel
-
-
 def test_get_primary_llm_dispatches_to_active_provider(monkeypatch):
     sentinel = {"nvidia": object(), "openai": object(), "gemini": object()}
     monkeypatch.setattr(llm, "make_nvidia", lambda: sentinel["nvidia"])
@@ -129,107 +88,6 @@ def test_nvidia_factory_builds_chatopenai_with_base_url(monkeypatch):
     # Env-configurable output cap + sampling temperature are applied.
     assert client.temperature == config.NVIDIA_TEMPERATURE
     assert client.max_tokens == config.NVIDIA_MAX_TOKENS
-
-
-def test_nvidia_model_option_resolves_gemma_alias_with_defaults():
-    model = config._resolve_nvidia_model("gemma-4-31b-it")
-    assert model == "google/gemma-4-31b-it"
-    assert config._nvidia_model_defaults(model) == {
-        "max_tokens": 16384,
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "enable_thinking": True,
-    }
-
-
-def test_nvidia_api_key_resolver_prefers_model_family_specific_keys():
-    assert config._resolve_nvidia_api_key(
-        "google/gemma-4-31b-it",
-        default_api_key="generic-key",
-        openai_api_key="nvidia-openai-key",
-        gemma_api_key="nvidia-gemma-key",
-    ) == "nvidia-gemma-key"
-
-    assert config._resolve_nvidia_api_key(
-        "openai/gpt-oss-120b",
-        default_api_key="generic-key",
-        openai_api_key="nvidia-openai-key",
-        gemma_api_key="nvidia-gemma-key",
-    ) == "nvidia-openai-key"
-
-
-def test_nvidia_api_key_resolver_keeps_generic_fallback():
-    assert config._resolve_nvidia_api_key(
-        "google/gemma-4-31b-it",
-        default_api_key="generic-key",
-        openai_api_key=None,
-        gemma_api_key=None,
-    ) == "generic-key"
-    assert config._resolve_nvidia_api_key(
-        "meta/llama-3.1-8b",
-        default_api_key="generic-key",
-        openai_api_key="nvidia-openai-key",
-        gemma_api_key="nvidia-gemma-key",
-    ) == "generic-key"
-
-
-def test_nvidia_factory_applies_gemma_request_options(monkeypatch):
-    monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", "test-nvidia-key")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_TOKENS", 16384)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TEMPERATURE", 1.0)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TOP_P", 0.95)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_CHAT_TEMPLATE_KWARGS", {"enable_thinking": True})
-    monkeypatch.setattr(llm_runtime, "NVIDIA_REQUEST_TIMEOUT_SECONDS", 45.0)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_RETRIES", 0)
-    monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
-
-    client = llm_runtime.get_nvidia()
-
-    model = getattr(client, "model_name", None) or getattr(client, "model", None)
-    assert model == "google/gemma-4-31b-it"
-    assert client.max_tokens == 16384
-    assert client.temperature == 1.0
-    assert client.request_timeout == 45.0
-    assert client.max_retries == 0
-
-    model_kwargs = getattr(client, "model_kwargs", {}) or {}
-    top_p = getattr(client, "top_p", None)
-    assert (top_p if top_p is not None else model_kwargs.get("top_p")) == 0.95
-
-    extra_body = getattr(client, "extra_body", None) or model_kwargs.get("extra_body")
-    assert extra_body == {"chat_template_kwargs": {"enable_thinking": True}}
-
-
-def test_nvidia_kwargs_use_model_kwargs_for_older_chatopenai(monkeypatch):
-    monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", "test-nvidia-key")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MODEL", "google/gemma-4-31b-it")
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_TOKENS", 16384)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TEMPERATURE", 1.0)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_TOP_P", 0.95)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_CHAT_TEMPLATE_KWARGS", {"enable_thinking": True})
-    monkeypatch.setattr(llm_runtime, "NVIDIA_REQUEST_TIMEOUT_SECONDS", 45.0)
-    monkeypatch.setattr(llm_runtime, "NVIDIA_MAX_RETRIES", 0)
-    monkeypatch.setattr(llm_runtime, "_chat_openai_supports_kwarg", lambda _name: False)
-
-    kwargs = llm_runtime._build_nvidia_chat_openai_kwargs()
-
-    assert "top_p" not in kwargs
-    assert "extra_body" not in kwargs
-    assert kwargs["request_timeout"] == 45.0
-    assert kwargs["max_retries"] == 0
-    assert kwargs["model_kwargs"] == {
-        "top_p": 0.95,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
-    }
-
-
-def test_llm_response_cache_releases_stale_in_flight_marker():
-    cache = llm_runtime.LLMResponseCache(max_size=10, coalesce_timeout=0.001)
-    cache.mark_in_flight("same-prompt")
-
-    assert cache.get("same-prompt") is None
-    assert cache.stats()["in_flight"] == 0
 
 
 def test_nvidia_factory_requires_key(monkeypatch):

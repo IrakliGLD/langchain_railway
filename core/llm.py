@@ -39,7 +39,6 @@ from config import (
     GEMINI_MODEL,
     GEMINI_OUTPUT_COST_PER_1K_USD,
     GOOGLE_API_KEY,
-    LLM_CACHE_COALESCE_TIMEOUT_SECONDS,
     MODEL_TYPE,
     NVIDIA_INPUT_COST_PER_1K_USD,
     NVIDIA_MODEL,
@@ -214,7 +213,7 @@ def _invoke_with_resilience(llm, messages, model_name: str):
 
 # Global cache instance (class lives in core/llm_runtime.py; the instance
 # stays HERE because tests monkeypatch `core.llm.llm_cache`).
-llm_cache = LLMResponseCache(max_size=1000, coalesce_timeout=LLM_CACHE_COALESCE_TIMEOUT_SECONDS)
+llm_cache = LLMResponseCache(max_size=1000)
 
 
 def _cache_mark_in_flight(cache_input: str):
@@ -268,53 +267,6 @@ def get_primary_model_name() -> str:
     return GEMINI_MODEL
 
 
-def _normalize_stage_model_name(stage_model: Optional[str]) -> str:
-    return str(stage_model or "").strip().lower()
-
-
-def _stage_model_requests_primary(stage_model: Optional[str]) -> bool:
-    """Return True when a stage env var names the active primary provider."""
-    name = _normalize_stage_model_name(stage_model)
-    if name in {"", "primary", "default", "auto"}:
-        return True
-    return name == str(MODEL_TYPE or "").strip().lower()
-
-
-def _stage_model_is_provider_alias(stage_model: Optional[str]) -> bool:
-    return _normalize_stage_model_name(stage_model) in {"gemini", "openai", "nvidia"}
-
-
-def get_effective_model_name_for_stage(
-    stage_model: Optional[str] = None,
-    *,
-    thinking_budget: Optional[int] = None,
-    max_retries: Optional[int] = None,
-) -> str:
-    """Return the model name that ``get_llm_for_stage`` will actually use.
-
-    Stage overrides are Gemini-only.  Under MODEL_TYPE=nvidia/openai, calls with
-    thinking_budget or max_retries fall back to the primary provider client, so
-    telemetry and circuit-breaker keys must use the primary model name too.
-    """
-    needs_dedicated = thinking_budget is not None or max_retries is not None
-    if not needs_dedicated:
-        if (
-            _stage_model_requests_primary(stage_model)
-            or _stage_model_is_provider_alias(stage_model)
-            or stage_model == GEMINI_MODEL
-        ):
-            return get_primary_model_name()
-        if not GOOGLE_API_KEY:
-            return get_primary_model_name()
-        return stage_model
-
-    if _stage_model_is_provider_alias(stage_model) and not _stage_model_requests_primary(stage_model):
-        return get_primary_model_name()
-    if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
-        return get_primary_model_name()
-    return GEMINI_MODEL if _stage_model_requests_primary(stage_model) else (stage_model or GEMINI_MODEL)
-
-
 def _should_fallback_to_openai() -> bool:
     """Whether a failed primary call should retry on OpenAI.
 
@@ -359,15 +311,7 @@ def get_llm_for_stage(
 
     # No overrides — fast path unchanged
     if not needs_dedicated:
-        if _stage_model_requests_primary(stage_model) or stage_model == GEMINI_MODEL:
-            return get_primary_llm()
-
-        if _stage_model_is_provider_alias(stage_model):
-            log.warning(
-                "Stage model provider alias %s is not a dedicated override; "
-                "falling back to global default.",
-                stage_model,
-            )
+        if not stage_model or stage_model == GEMINI_MODEL:
             return get_primary_llm()
 
         if not GOOGLE_API_KEY:
@@ -393,14 +337,7 @@ def get_llm_for_stage(
     # Dedicated instance with overrides (thinking_budget and/or max_retries).
     # These knobs only apply to Gemini; for any other active provider return its
     # plain primary client (NVIDIA/OpenAI ignore thinking_budget).
-    if _stage_model_is_provider_alias(stage_model) and not _stage_model_requests_primary(stage_model):
-        log.warning(
-            "Stage model provider alias %s is not a dedicated override; "
-            "falling back to global default.",
-            stage_model,
-        )
-        return get_primary_llm()
-    effective_model = GEMINI_MODEL if _stage_model_requests_primary(stage_model) else (stage_model or GEMINI_MODEL)
+    effective_model = stage_model or GEMINI_MODEL
     if MODEL_TYPE != "gemini" or not GOOGLE_API_KEY:
         return get_primary_llm()
 
@@ -1314,7 +1251,7 @@ SELECT ...
     try:
         try:
             llm = get_llm_for_stage(PLANNER_MODEL)
-            primary_model_name = get_effective_model_name_for_stage(PLANNER_MODEL)
+            primary_model_name = PLANNER_MODEL or get_primary_model_name()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             combined_output = message.content.strip()
             _log_usage_for_message(message, model_name=primary_model_name)
@@ -1839,7 +1776,7 @@ SYSTEM_GUIDANCE (authoritative rules):
     try:
         try:
             llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
-            primary_model_name = get_effective_model_name_for_stage(SUMMARIZER_MODEL, max_retries=1)
+            primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
             message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
             out = message.content.strip()
             _log_usage_for_message(message, model_name=primary_model_name)
@@ -2869,11 +2806,7 @@ def llm_analyze_question(
             else:
                 router_thinking_budget = min(router_thinking_budget, 512)
         llm = get_llm_for_stage(ROUTER_MODEL, thinking_budget=router_thinking_budget, max_retries=2)
-        primary_model_name = get_effective_model_name_for_stage(
-            ROUTER_MODEL,
-            thinking_budget=router_thinking_budget,
-            max_retries=2,
-        )
+        primary_model_name = ROUTER_MODEL or get_primary_model_name()
         message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
         raw_output = message.content.strip()
         _log_usage_for_message(message, model_name=primary_model_name)
@@ -2881,18 +2814,13 @@ def llm_analyze_question(
     except Exception as exc:
         log.warning("Question analyzer failed with primary model, fallback: %s", exc)
         if _should_fallback_to_openai():
-            try:
-                llm = make_openai()
-                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-                raw_output = message.content.strip()
-                _log_usage_for_message(message, model_name=OPENAI_MODEL)
-                metrics.log_llm_call(time.time() - llm_start)
-            except Exception:
-                _cache_cancel_in_flight(cache_input)
-                raise
+            llm = make_openai()
+            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+            raw_output = message.content.strip()
+            _log_usage_for_message(message, model_name=OPENAI_MODEL)
+            metrics.log_llm_call(time.time() - llm_start)
         else:
             metrics.log_error()
-            _cache_cancel_in_flight(cache_input)
             raise
 
     try:
@@ -3387,7 +3315,7 @@ Citation format rules:
 
         try:
             llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
-            primary_model_name = get_effective_model_name_for_stage(SUMMARIZER_MODEL, max_retries=1)
+            primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
             # Diagnostic: log prompt composition + system message preview right
             # before the LLM call.  Without this we can't tell whether the LLM
             # actually saw the comprehensive guidance — the difference between
@@ -3427,25 +3355,20 @@ Citation format rules:
             exc_str = str(exc).lower()
             is_timeout = any(kw in exc_str for kw in ("deadline", "timeout", "504", "timed out"))
             if is_timeout and attempt < max_attempts - 1:
-                log.warning("Primary LLM timeout attempt %d, will retry with reduced budget: %s", attempt + 1, exc)
+                log.warning("Gemini timeout attempt %d, will retry with reduced budget: %s", attempt + 1, exc)
                 continue
             break  # Non-timeout error → fall through to OpenAI fallback
 
     if last_exc is not None:
         log.warning("Structured summarize failed with primary model, fallback: %s", last_exc)
         if _should_fallback_to_openai():
-            try:
-                llm = make_openai()
-                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-                raw_output = message.content.strip()
-                _log_usage_for_message(message, model_name=OPENAI_MODEL)
-                metrics.log_llm_call(time.time() - llm_start)
-            except Exception:
-                _cache_cancel_in_flight(cache_input)
-                raise
+            llm = make_openai()
+            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
+            raw_output = message.content.strip()
+            _log_usage_for_message(message, model_name=OPENAI_MODEL)
+            metrics.log_llm_call(time.time() - llm_start)
         else:
             metrics.log_error()
-            _cache_cancel_in_flight(cache_input)
             raise last_exc
 
     try:
