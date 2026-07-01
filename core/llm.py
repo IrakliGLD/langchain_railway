@@ -16,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date as _date
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 from dateutil.relativedelta import relativedelta
 
@@ -104,15 +104,6 @@ def _is_fast_pipeline_mode() -> bool:
     return PIPELINE_MODE == "fast"
 
 
-class SummaryEnvelope(BaseModel):
-    """Strict schema for guarded summarizer output."""
-
-    answer: str = Field(min_length=1)
-    claims: List[str] = Field(default_factory=list)
-    citations: List[str] = Field(default_factory=list)
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
 # Provider runtime layer (Q1, 2026-06-10): client factories, response-cache
 # class, and token/cost accounting live in core/llm_runtime.py. The names are
 # re-imported here so existing `core.llm.<name>` imports and monkeypatches
@@ -130,32 +121,46 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
 )
 
 
+# Public result contract + query-classification heuristics (P0-1,
+# architecture-audit 2026-06-30): SummaryEnvelope moved to contracts/summary.py
+# and classify_query_type/get_query_focus to core/query_classifier.py, so leaf
+# consumers (visualization, guardrails) can depend on them without importing this
+# hub. Re-exported here so existing `core.llm.<name>` imports and monkeypatches
+# keep working.
+from contracts.summary import SummaryEnvelope  # noqa: F401 — re-export surface
+from core.query_classifier import (  # noqa: F401 — re-export surface
+    classify_query_type,
+    get_query_focus,
+)
+
+
 def _provider_from_model_name(model_name: str) -> str:
     """Classify a model-name string to its provider: ``gemini``/``openai``/``nvidia``.
 
     Used for per-provider cost attribution and circuit-breaker keys, so it must
     work even when *model_name* differs from the active MODEL_TYPE (e.g. an
-    OpenAI fallback while MODEL_TYPE=gemini). Reads MODEL_TYPE as a module global
-    so test monkeypatches apply.
+    OpenAI fallback while MODEL_TYPE=gemini). Drives off the ``_PROVIDERS``
+    registry (defined below); each entry resolves its model name/prefixes through
+    module globals so test monkeypatches apply. Precedence is preserved exactly:
+    configured-model exact match, then name-prefix, then namespaced NIM ids.
     """
     name = (model_name or "").strip().lower()
-    _default = MODEL_TYPE if MODEL_TYPE in ("gemini", "openai", "nvidia") else "gemini"
     if not name:
-        return _default
-    if name == NVIDIA_MODEL.lower():
-        return "nvidia"
-    if name == OPENAI_MODEL.lower():
-        return "openai"
-    if name == GEMINI_MODEL.lower():
-        return "gemini"
-    if name.startswith("gemini"):
-        return "gemini"
-    if name.startswith("gpt-") or name.startswith("o1") or name.startswith("o3") or name.startswith("o4"):
-        return "openai"
-    # NVIDIA NIM model ids are namespaced, e.g. "openai/gpt-oss-120b", "meta/llama-3.1-...".
+        return _active_provider_key()
+    # 1. exact match to a provider's configured model (e.g. NVIDIA_MODEL="openai/gpt-oss-120b")
+    for key, prov in _PROVIDERS.items():
+        if name == prov.model_name().lower():
+            return key
+    # 2. provider name-prefix rules (gemini*, gpt-/o1/o3/o4)
+    for key, prov in _PROVIDERS.items():
+        if any(name.startswith(prefix) for prefix in prov.name_prefixes):
+            return key
+    # 3. namespaced NIM ids ("vendor/model") route to the namespaced provider
     if "/" in name:
-        return "nvidia"
-    return _default
+        for key, prov in _PROVIDERS.items():
+            if prov.namespaced:
+                return key
+    return _active_provider_key()
 
 
 def _is_openai_model_name(model_name: str) -> bool:
@@ -165,19 +170,14 @@ def _is_openai_model_name(model_name: str) -> bool:
 def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: str) -> float:
     """Estimate USD cost based on provider-level token rates and actual model used.
 
-    Stays in core.llm (not llm_runtime): reads provider config constants that
-    tests monkeypatch on THIS module (test_metrics_observability).
+    Stays in core.llm (not llm_runtime): the ``_PROVIDERS`` rate accessors read
+    provider config constants that tests monkeypatch on THIS module
+    (test_metrics_observability).
     """
-    provider = _provider_from_model_name(model_name)
-    if provider == "openai":
-        input_rate, output_rate = OPENAI_INPUT_COST_PER_1K_USD, OPENAI_OUTPUT_COST_PER_1K_USD
-    elif provider == "nvidia":
-        input_rate, output_rate = NVIDIA_INPUT_COST_PER_1K_USD, NVIDIA_OUTPUT_COST_PER_1K_USD
-    else:
-        input_rate, output_rate = GEMINI_INPUT_COST_PER_1K_USD, GEMINI_OUTPUT_COST_PER_1K_USD
+    provider = _PROVIDERS[_provider_from_model_name(model_name)]
     return (
-        (prompt_tokens / 1000.0) * input_rate
-        + (completion_tokens / 1000.0) * output_rate
+        (prompt_tokens / 1000.0) * provider.input_rate()
+        + (completion_tokens / 1000.0) * provider.output_rate()
     )
 
 
@@ -238,20 +238,74 @@ make_openai = get_openai
 make_nvidia = get_nvidia
 
 
+# -----------------------------
+# Provider registry (P0-2, architecture-audit 2026-06-30)
+# -----------------------------
+# Single source of truth for the three LLM providers, replacing the per-provider
+# if/elif chains in _provider_from_model_name / _estimate_cost_usd /
+# get_primary_llm / get_primary_model_name. Adding a provider = one _Provider
+# entry here + its factory in core/llm_runtime.py + config constants.
+#
+# PATCH SURFACE: every value is a call-time closure over a core.llm module global
+# (MODEL_TYPE, <X>_MODEL, <X>_*_COST_PER_1K_USD, make_<x>) so test monkeypatches
+# still take effect. Do NOT capture these values at import time — see the note in
+# core/llm_runtime.py and the get_primary_llm docstring.
+@dataclass(frozen=True)
+class _Provider:
+    key: str
+    make_client: Callable[[], object]
+    model_name: Callable[[], str]
+    input_rate: Callable[[], float]
+    output_rate: Callable[[], float]
+    name_prefixes: tuple[str, ...] = ()
+    namespaced: bool = False  # NIM-style "vendor/model" ids classify here
+
+
+_PROVIDERS: dict[str, _Provider] = {
+    "gemini": _Provider(
+        key="gemini",
+        make_client=lambda: make_gemini(),
+        model_name=lambda: GEMINI_MODEL,
+        input_rate=lambda: GEMINI_INPUT_COST_PER_1K_USD,
+        output_rate=lambda: GEMINI_OUTPUT_COST_PER_1K_USD,
+        name_prefixes=("gemini",),
+    ),
+    "openai": _Provider(
+        key="openai",
+        make_client=lambda: make_openai(),
+        model_name=lambda: OPENAI_MODEL,
+        input_rate=lambda: OPENAI_INPUT_COST_PER_1K_USD,
+        output_rate=lambda: OPENAI_OUTPUT_COST_PER_1K_USD,
+        name_prefixes=("gpt-", "o1", "o3", "o4"),
+    ),
+    "nvidia": _Provider(
+        key="nvidia",
+        make_client=lambda: make_nvidia(),
+        model_name=lambda: NVIDIA_MODEL,
+        input_rate=lambda: NVIDIA_INPUT_COST_PER_1K_USD,
+        output_rate=lambda: NVIDIA_OUTPUT_COST_PER_1K_USD,
+        namespaced=True,
+    ),
+}
+
+_DEFAULT_PROVIDER = "gemini"
+
+
+def _active_provider_key() -> str:
+    """Provider key for the active MODEL_TYPE (module global), defaulting to gemini."""
+    return MODEL_TYPE if MODEL_TYPE in _PROVIDERS else _DEFAULT_PROVIDER
+
+
 def get_primary_llm():
     """Return the LLM client for the active provider (governed by MODEL_TYPE).
 
-    Single choke point replacing the former binary
-    ``make_gemini() if MODEL_TYPE == "gemini" else make_openai()`` branches.
-    Resolves the ``make_*`` factories and ``MODEL_TYPE`` through this module's
-    globals on every call so test monkeypatches still take effect — do not turn
-    this into an import-time dict (see patch-surface note in core/llm_runtime.py).
+    Single choke point resolving through the ``_PROVIDERS`` registry. The
+    registry's ``make_client`` closures read the ``make_*`` factories and
+    MODEL_TYPE through this module's globals on every call so test monkeypatches
+    still take effect — the registry is an import-time *structure*, NOT an
+    import-time dict of captured values (see patch-surface note in core/llm_runtime.py).
     """
-    if MODEL_TYPE == "nvidia":
-        return make_nvidia()
-    if MODEL_TYPE == "openai":
-        return make_openai()
-    return make_gemini()  # gemini is the documented default
+    return _PROVIDERS[_active_provider_key()].make_client()
 
 
 def get_primary_model_name() -> str:
@@ -260,11 +314,7 @@ def get_primary_model_name() -> str:
     Named with a ``get_`` prefix to avoid shadowing the long-standing
     ``primary_model_name`` local variable used inside the fallback blocks below.
     """
-    if MODEL_TYPE == "nvidia":
-        return NVIDIA_MODEL
-    if MODEL_TYPE == "openai":
-        return OPENAI_MODEL
-    return GEMINI_MODEL
+    return _PROVIDERS[_active_provider_key()].model_name()
 
 
 def _should_fallback_to_openai() -> bool:
@@ -381,95 +431,6 @@ STAGE_MODELS = {
 # Query Classification Helpers
 # -----------------------------
 
-def classify_query_type(user_query: str) -> str:
-    """
-    Classify query into specific types for better chart/answer decisions.
-
-    Returns:
-        - "single_value": One specific value requested
-        - "list": Enumeration/listing of items
-        - "comparison": Comparing two or more things
-        - "trend": Time series analysis
-        - "table": Detailed data display
-        - "unknown": Cannot determine type
-    """
-    query_lower = user_query.lower()
-    regulation_procedure_patterns = [
-        "who is eligible", "who can participate", "who may participate",
-        "who can register", "who may register", "what documents are required",
-        "what documents do i need", "what are the requirements",
-        "requirements for registration", "registration process",
-        "how to register", "how can i register", "what is the procedure",
-        "licensing procedure", "participation conditions", "deadline for registration",
-    ]
-    regulation_data_patterns = [
-        "how many", "count", "total", "number of", "statistics", "breakdown",
-    ]
-
-    # Single value indicators (highest priority)
-    if any(p in query_lower for p in [
-        "what is the", "what was the", "how much is", "how much was",
-        "რა არის", "რა იყო", "сколько"
-    ]) and any(p in query_lower for p in [
-        "in june", "in 2024", "for june", "for 2024", "latest", "last month",
-        "during", "იუნის", "წელს", "в июне", "в 2024",
-        "jan ", "feb ", "mar ", "apr ", "may ", "jun ",
-        "jul ", "aug ", "sep ", "oct ", "nov ", "dec ",
-        "january", "february", "march", "april", "june", "july",
-        "august", "september", "october", "november", "december",
-    ]):
-        return "single_value"
-
-    # Regulatory procedure indicators should win over the broad
-    # "what are the" list fallback.
-    if any(p in query_lower for p in regulation_procedure_patterns):
-        if not any(p in query_lower for p in regulation_data_patterns):
-            return "regulatory_procedure"
-
-    # List indicators
-    if any(p in query_lower for p in [
-        "list all", "show all", "enumerate", "which entities",
-        "what are the", "name all", "give me all entities",
-        "ჩამოთვალე", "ყველა", "перечисли", "какие"
-    ]):
-        return "list"
-
-    # Comparison indicators
-    if any(p in query_lower for p in [
-        "compare", " vs ", " vs. ", "versus", "difference between",
-        "compared to", "შედარება", "შედარებით", "сравни", "по сравнению"
-    ]):
-        return "comparison"
-
-    # Trend indicators
-    if any(p in query_lower for p in [
-        "trend", "over time", "dynamics", "evolution", "change over",
-        "from 20", "between 20", "since 20",
-        "динамика", "ტენდენცია", "დინამიკა"
-    ]):
-        return "trend"
-    if (
-        re.search(r"\b(monthly|daily|yearly|weekly|quarterly)\b", query_lower)
-        and re.search(r"\b\d{4}\b", query_lower)
-    ):
-        return "trend"
-
-    # Table indicators
-    if any(p in query_lower for p in [
-        "show me all", "give me all", "detailed", "breakdown", "show data",
-        "table", "tabular"
-    ]):
-        return "table"
-
-    # Date-range patterns → trend (catches "jan 2024 to dec 2024", "during 2024")
-    if re.search(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{4}\s+to\s+", query_lower):
-        return "trend"
-    if "during" in query_lower and re.search(r"\d{4}", query_lower):
-        return "trend"
-
-    return "unknown"
-
-
 _EXPLICIT_FORECAST_QUERY_SIGNALS = (
     "forecast",
     "predict",
@@ -484,71 +445,6 @@ _EXPLICIT_FORECAST_QUERY_SIGNALS = (
 
 def _has_explicit_forecast_prompt_signal(query_lower: str) -> bool:
     return any(signal in query_lower for signal in _EXPLICIT_FORECAST_QUERY_SIGNALS)
-
-
-def get_query_focus(user_query: str) -> str:
-    """
-    Determine the main focus of the query to filter domain knowledge appropriately.
-
-    Returns:
-        - "cpi": Consumer Price Index queries
-        - "tariff": Tariff-focused queries
-        - "generation": Electricity generation queries
-        - "regulation": Registration, eligibility, procedure queries
-        - "energy_security": Energy security, import dependence queries
-        - "balancing": Balancing market/price queries
-        - "trade": Import/export/trade queries
-        - "general": Cannot determine or multiple focuses
-    """
-    query_lower = user_query.lower()
-
-    # CPI focus (check first - very specific)
-    if any(k in query_lower for k in ["cpi", "inflation", "consumer price index", "ინფლაცია"]):
-        return "cpi"
-
-    # Tariff focus (check before balancing - tariff is more specific)
-    if any(k in query_lower for k in ["tariff", "ტარიფი", "тариф"]) and \
-       not any(k in query_lower for k in ["balancing", "საბალანსო", "баланс"]):
-        return "tariff"
-
-    # Generation focus
-    if any(k in query_lower for k in ["generation", "generated", "produce", "გენერაცია", "генерация", "производство"]) and \
-       not any(k in query_lower for k in ["price", "ფასი", "цена"]):
-        return "generation"
-
-    # Regulation / procedure focus (check before trade — registration queries
-    # about exchange participation, eligibility, etc. should get regulation
-    # guidance, not trade guidance).  Exclude data-intent queries that happen
-    # to mention generic tokens like "participant" or "license".
-    _data_intent = any(k in query_lower for k in [
-        "how many", "count", "total", "number of", "breakdown", "statistics",
-        "რამდენი", "სულ", "сколько", "количество",
-    ])
-    if not _data_intent and any(k in query_lower for k in [
-        "register", "registration", "eligible", "eligibility",
-        "procedure", "requirement", "participant", "license", "licence",
-        "რეგისტრაცია", "მონაწილე", "регистрация", "участник",
-    ]):
-        return "regulation"
-
-    # Energy security focus (check before trade — "import dependence" is security, not trade)
-    if any(k in query_lower for k in [
-        "energy security", "უსაფრთხოება", "энергобезопасность",
-        "import dependence", "import reliance", "self-sufficient",
-        "იმპორტზე დამოკიდებულება",
-    ]):
-        return "energy_security"
-
-    # Trade focus
-    if any(k in query_lower for k in ["import", "export", "trade", "იმპორტი", "ექსპორტი", "импорт", "экспорт"]) and \
-       not any(k in query_lower for k in ["price", "ფასი", "цена"]):
-        return "trade"
-
-    # Balancing focus (check last - most common)
-    if any(k in query_lower for k in ["balancing", "p_bal", "საბალანსო", "баланс", "balance market"]):
-        return "balancing"
-
-    return "general"
 
 
 # -----------------------------

@@ -20,7 +20,7 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "redteam-gate-openai-key")
 
 from agent import summarizer
-from core.llm import SummaryEnvelope
+from contracts.summary import SummaryEnvelope
 from guardrails.firewall import inspect_query
 from models import QueryContext
 
