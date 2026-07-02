@@ -1973,6 +1973,145 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _finalize_answer_kind(ctx: QueryContext) -> None:
+    """Cross-check + finalize answer_kind/render_style and effective_answer_kind.
+
+    Extracted verbatim from process_query (audit P0-4a). Pure ctx mutation; no
+    early return.
+    """
+    # --- answer_kind cross-check (before Stage 0.3 so we can skip retrieval) ---
+    _cross_check_answer_kind(ctx)
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
+        if qa.answer_kind is None:
+            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
+        # Override: scenario-family derived metrics signal SCENARIO when the
+        # LLM misclassified a scenario query as data_explanation or similar.
+        # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
+        # are never overridden — they represent a deliberate shape choice.
+        #
+        # Gated on a quantitative anchor in the user query: see comment near
+        # ``_QUANTITATIVE_ANCHOR_RE``.  Without an anchor, the analyzer is
+        # likely hallucinating ``scenario_factor`` (production log 2026-05-13);
+        # we stay on the narrative path instead of computing a garbage number.
+        if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
+            derived = qa.analysis_requirements.derived_metrics or []
+            has_scenario_metric = any(
+                m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
+            )
+            if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
+                metrics.log_analyzer_cross_check("scenario_override_applied")
+                log.info(
+                    "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
+                    qa.answer_kind.value if qa.answer_kind else None,
+                )
+                qa.answer_kind = AnswerKind.SCENARIO
+            elif has_scenario_metric:
+                metrics.log_analyzer_cross_check("scenario_override_gated")
+                log.info(
+                    "answer_kind override suppressed: scenario derived metrics present "
+                    "but no quantitative anchor in query (kind=%s, query=%.80s)",
+                    qa.answer_kind.value if qa.answer_kind else None,
+                    ctx.query,
+                )
+        # Fallback: if LLM did not emit render_style, default to narrative (safer).
+        if qa.render_style is None:
+            qa.render_style = RenderStyle.NARRATIVE
+        log.info(
+            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
+            qa.answer_kind.value if qa.answer_kind else None,
+            qa.render_style.value if qa.render_style else None,
+            qa.grouping.value if qa.grouping else None,
+            qa.entity_scope,
+            ctx.query,
+        )
+
+    # Populate ctx.effective_answer_kind once so Stage 3 enrichment dispatch
+    # works whether the analyzer was authoritative, shadow, or failed.  This
+    # restores forecast/why/share behaviors on analyzer failure (F1).
+    ctx.effective_answer_kind = _resolve_effective_answer_kind(ctx)
+
+
+def _resolve_vector_tier(ctx: QueryContext) -> "VectorRetrievalTier":
+    """Resolve + record the 3-tier vector-retrieval policy for this query.
+
+    Extracted verbatim from process_query (audit P0-4a). Sets
+    ctx.vector_retrieval_tier and returns the tier for local use by Stage 0.3.
+    """
+    # Three-tier vector retrieval policy (Phase D):
+    #   FULL  → knowledge / explanation answers that consume passages directly
+    #   LIGHT → narrative data answers that sprinkle in background
+    #   SKIP  → deterministic data paths, clarify, etc.
+    _qa_for_tier = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
+    _candidate_topic_names = (
+        [tc.name for tc in (_qa_for_tier.knowledge.candidate_topics or [])]
+        if _qa_for_tier is not None
+        else None
+    )
+    _retrieval_tier = _resolve_vector_retrieval_tier(
+        answer_kind=ctx.effective_answer_kind,
+        render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
+        is_conceptual=bool(ctx.is_conceptual),
+        topics=_candidate_topic_names,
+    )
+    ctx.vector_retrieval_tier = _retrieval_tier
+    if _retrieval_tier == VectorRetrievalTier.SKIP:
+        log.info(
+            "Skipping vector retrieval: tier=SKIP (answer_kind=%s render_style=%s)",
+            getattr(ctx.effective_answer_kind, "value", None),
+            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
+        )
+    elif _retrieval_tier == VectorRetrievalTier.LIGHT:
+        log.info(
+            "Vector retrieval: tier=LIGHT (answer_kind=%s render_style=%s)",
+            getattr(ctx.effective_answer_kind, "value", None),
+            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
+        )
+    return _retrieval_tier
+
+
+def _apply_response_mode(ctx: QueryContext) -> None:
+    """Derive + record response_mode/resolution_policy and policy-blocked flags.
+
+    Extracted verbatim from process_query (audit P0-4a). Pure ctx mutation; no
+    early return.
+    """
+    # --- Derive response_mode (single source of truth for answer mode) ---
+    ctx.response_mode = _derive_response_mode(ctx)
+    ctx.resolution_policy = _derive_resolution_policy(ctx)
+    ctx.requested_derived_metrics = _requested_derived_metric_names(ctx)
+    # Keep is_conceptual in sync for backward compatibility with stages that
+    # still read it, but no stage should ever re-derive this independently.
+    ctx.is_conceptual = ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY
+    log.info(
+        "Response mode derived: %s | resolution_policy=%s",
+        ctx.response_mode,
+        ctx.resolution_policy,
+    )
+
+    # Set policy-blocked flags for observability before the short-circuit return.
+    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY or ctx.resolution_policy == ResolutionPolicy.CLARIFY:
+        if ENABLE_TYPED_TOOLS:
+            ctx.tool_blocked_by_policy = True
+        if ENABLE_AGENT_LOOP:
+            ctx.agent_loop_blocked_by_policy = True
+
+    trace_detail(
+        log, ctx, "response_mode_derivation", "result",
+        response_mode=ctx.response_mode,
+        resolution_policy=ctx.resolution_policy,
+        is_conceptual=ctx.is_conceptual,
+        tool_blocked_by_policy=ctx.tool_blocked_by_policy,
+        agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
+        clarify_reason=ctx.clarify_reason,
+        requested_derived_metrics=list(ctx.requested_derived_metrics or []),
+        analyzer_available=ctx.question_analysis is not None,
+        analyzer_source=ctx.question_analysis_source,
+        semantic_locked=ctx.semantic_locked,
+    )
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -2059,88 +2198,9 @@ def process_query(
     if routing_query_source == "llm_active_canonical":
         ctx.semantic_locked = True
 
-    # --- answer_kind cross-check (before Stage 0.3 so we can skip retrieval) ---
-    _cross_check_answer_kind(ctx)
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
-        if qa.answer_kind is None:
-            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
-        # Override: scenario-family derived metrics signal SCENARIO when the
-        # LLM misclassified a scenario query as data_explanation or similar.
-        # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
-        # are never overridden — they represent a deliberate shape choice.
-        #
-        # Gated on a quantitative anchor in the user query: see comment near
-        # ``_QUANTITATIVE_ANCHOR_RE``.  Without an anchor, the analyzer is
-        # likely hallucinating ``scenario_factor`` (production log 2026-05-13);
-        # we stay on the narrative path instead of computing a garbage number.
-        if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
-            derived = qa.analysis_requirements.derived_metrics or []
-            has_scenario_metric = any(
-                m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
-            )
-            if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
-                metrics.log_analyzer_cross_check("scenario_override_applied")
-                log.info(
-                    "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
-                    qa.answer_kind.value if qa.answer_kind else None,
-                )
-                qa.answer_kind = AnswerKind.SCENARIO
-            elif has_scenario_metric:
-                metrics.log_analyzer_cross_check("scenario_override_gated")
-                log.info(
-                    "answer_kind override suppressed: scenario derived metrics present "
-                    "but no quantitative anchor in query (kind=%s, query=%.80s)",
-                    qa.answer_kind.value if qa.answer_kind else None,
-                    ctx.query,
-                )
-        # Fallback: if LLM did not emit render_style, default to narrative (safer).
-        if qa.render_style is None:
-            qa.render_style = RenderStyle.NARRATIVE
-        log.info(
-            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
-            qa.answer_kind.value if qa.answer_kind else None,
-            qa.render_style.value if qa.render_style else None,
-            qa.grouping.value if qa.grouping else None,
-            qa.entity_scope,
-            ctx.query,
-        )
+    _finalize_answer_kind(ctx)
 
-    # Populate ctx.effective_answer_kind once so Stage 3 enrichment dispatch
-    # works whether the analyzer was authoritative, shadow, or failed.  This
-    # restores forecast/why/share behaviors on analyzer failure (F1).
-    ctx.effective_answer_kind = _resolve_effective_answer_kind(ctx)
-
-    # Three-tier vector retrieval policy (Phase D):
-    #   FULL  → knowledge / explanation answers that consume passages directly
-    #   LIGHT → narrative data answers that sprinkle in background
-    #   SKIP  → deterministic data paths, clarify, etc.
-    _qa_for_tier = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
-    _candidate_topic_names = (
-        [tc.name for tc in (_qa_for_tier.knowledge.candidate_topics or [])]
-        if _qa_for_tier is not None
-        else None
-    )
-    _retrieval_tier = _resolve_vector_retrieval_tier(
-        answer_kind=ctx.effective_answer_kind,
-        render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
-        is_conceptual=bool(ctx.is_conceptual),
-        topics=_candidate_topic_names,
-    )
-    ctx.vector_retrieval_tier = _retrieval_tier
-    if _retrieval_tier == VectorRetrievalTier.SKIP:
-        log.info(
-            "Skipping vector retrieval: tier=SKIP (answer_kind=%s render_style=%s)",
-            getattr(ctx.effective_answer_kind, "value", None),
-            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
-        )
-    elif _retrieval_tier == VectorRetrievalTier.LIGHT:
-        log.info(
-            "Vector retrieval: tier=LIGHT (answer_kind=%s render_style=%s)",
-            getattr(ctx.effective_answer_kind, "value", None),
-            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
-        )
+    _retrieval_tier = _resolve_vector_tier(ctx)
 
     # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
     if (
@@ -2289,39 +2349,7 @@ def process_query(
                 would_be_packed_chars=_ref_packed_chars,
             )
 
-    # --- Derive response_mode (single source of truth for answer mode) ---
-    ctx.response_mode = _derive_response_mode(ctx)
-    ctx.resolution_policy = _derive_resolution_policy(ctx)
-    ctx.requested_derived_metrics = _requested_derived_metric_names(ctx)
-    # Keep is_conceptual in sync for backward compatibility with stages that
-    # still read it, but no stage should ever re-derive this independently.
-    ctx.is_conceptual = ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY
-    log.info(
-        "Response mode derived: %s | resolution_policy=%s",
-        ctx.response_mode,
-        ctx.resolution_policy,
-    )
-
-    # Set policy-blocked flags for observability before the short-circuit return.
-    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY or ctx.resolution_policy == ResolutionPolicy.CLARIFY:
-        if ENABLE_TYPED_TOOLS:
-            ctx.tool_blocked_by_policy = True
-        if ENABLE_AGENT_LOOP:
-            ctx.agent_loop_blocked_by_policy = True
-
-    trace_detail(
-        log, ctx, "response_mode_derivation", "result",
-        response_mode=ctx.response_mode,
-        resolution_policy=ctx.resolution_policy,
-        is_conceptual=ctx.is_conceptual,
-        tool_blocked_by_policy=ctx.tool_blocked_by_policy,
-        agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
-        clarify_reason=ctx.clarify_reason,
-        requested_derived_metrics=list(ctx.requested_derived_metrics or []),
-        analyzer_available=ctx.question_analysis is not None,
-        analyzer_source=ctx.question_analysis_source,
-        semantic_locked=ctx.semantic_locked,
-    )
+    _apply_response_mode(ctx)
 
     if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
         if not ctx.clarify_reason:
