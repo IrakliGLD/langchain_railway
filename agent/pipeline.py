@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 
 import pandas as pd
 from sqlalchemy import text
@@ -2270,6 +2271,54 @@ def _run_vector_knowledge_stage(
             )
 
 
+@dataclass
+class StageResult:
+    """Outcome of a process_query stage that may short-circuit the pipeline.
+
+    ``ctx`` is the (possibly replaced) context to continue with. ``terminal``
+    True means process_query should return ``ctx`` immediately because an early
+    answer (clarify / conceptual / agent-exit) was produced. (audit P0-4c)
+    """
+    ctx: QueryContext
+    terminal: bool = False
+
+
+def _early_answer_clarify(ctx: QueryContext) -> StageResult:
+    """Produce the clarify answer when resolution policy is CLARIFY (terminal).
+
+    Extracted from process_query (audit P0-4c). Non-CLARIFY policies pass through
+    unchanged (terminal=False). Uses the module-level _emit_trace_stage.
+    """
+    if ctx.resolution_policy != ResolutionPolicy.CLARIFY:
+        return StageResult(ctx, terminal=False)
+    if not ctx.clarify_reason:
+        if (
+            ctx.has_authoritative_question_analysis
+            and ctx.question_analysis.routing.preferred_path == PreferredPath.REJECT
+        ):
+            ctx.clarify_reason = "request_not_supported_as_phrased"
+        else:
+            ctx.clarify_reason = "analyzer_preferred_path_clarify"
+    t_stage = time.time()
+    ctx = summarizer.answer_clarify(ctx)
+    _emit_trace_stage(ctx, "stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
+    return StageResult(ctx, terminal=True)
+
+
+def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
+    """Produce the conceptual answer when response mode is KNOWLEDGE_PRIMARY (terminal).
+
+    Extracted from process_query (audit P0-4c). Other response modes pass through
+    unchanged (terminal=False). Uses the module-level _emit_trace_stage.
+    """
+    if ctx.response_mode != ResponseMode.KNOWLEDGE_PRIMARY:
+        return StageResult(ctx, terminal=False)
+    t_stage = time.time()
+    ctx = summarizer.answer_conceptual(ctx)
+    _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+    return StageResult(ctx, terminal=True)
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -2364,25 +2413,15 @@ def process_query(
 
     _apply_response_mode(ctx)
 
-    if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
-        if not ctx.clarify_reason:
-            if (
-                ctx.has_authoritative_question_analysis
-                and ctx.question_analysis.routing.preferred_path == PreferredPath.REJECT
-            ):
-                ctx.clarify_reason = "request_not_supported_as_phrased"
-            else:
-                ctx.clarify_reason = "analyzer_preferred_path_clarify"
-        t_stage = time.time()
-        ctx = summarizer.answer_clarify(ctx)
-        _trace_stage("stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
+    _res = _early_answer_clarify(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
         return ctx
 
     # Conceptual short-circuit
-    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY:
-        t_stage = time.time()
-        ctx = summarizer.answer_conceptual(ctx)
-        _trace_stage("stage_4_conceptual_summary", t_stage)
+    _res = _early_answer_conceptual(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
         return ctx
 
     # Stage 0.4: expand the authoritative analyzer output into the exact datasets we still need.
