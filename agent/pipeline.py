@@ -2112,6 +2112,164 @@ def _apply_response_mode(ctx: QueryContext) -> None:
     )
 
 
+def _run_vector_knowledge_stage(
+    ctx: QueryContext, _retrieval_tier: "VectorRetrievalTier", routing_query: str
+) -> None:
+    """Stage 0.3 - vector-backed knowledge retrieval (shadow/active).
+
+    No-op when the feature is disabled or the tier is SKIP. Extracted from
+    process_query (audit P0-4b); uses the module-level _emit_trace_stage rather
+    than the process_query-local _trace_stage closure.
+    """
+    # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
+    if (
+        (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS)
+        and _retrieval_tier != VectorRetrievalTier.SKIP
+    ):
+        t_stage = time.time()
+        retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
+        bundle = retrieve_vector_knowledge(
+            routing_query,
+            retrieval_mode=(
+                VectorKnowledgeMode.active
+                if ENABLE_VECTOR_KNOWLEDGE_HINTS
+                else VectorKnowledgeMode.shadow
+            ),
+            question_analysis=ctx.question_analysis,
+            tier=_retrieval_tier,
+        )
+        ctx.vector_knowledge = bundle
+        ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
+        ctx.vector_knowledge_error = bundle.error
+
+        # Cross-notify circuit breaker on DB-layer failures from vector store.
+        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
+        # may surface "OperationalError" with varied messages like "timeout expired",
+        # "connection timed out", "could not connect", etc.
+        if bundle.error:
+            _err_lower = str(bundle.error).lower()
+            _is_db_failure = any(kw in _err_lower for kw in (
+                "connectiontimeout", "operationalerror", "timeout",
+                "could not connect", "connection refused", "connection reset",
+            ))
+            if _is_db_failure:
+                from utils.resilience import db_circuit_breaker
+                db_circuit_breaker.record_failure()
+                log.warning(
+                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
+                    db_circuit_breaker._failure_count,
+                    db_circuit_breaker.failure_threshold,
+                    bundle.error,
+                )
+
+        packed_vector_knowledge = (
+            pack_vector_knowledge_for_prompt(bundle)
+            if not bundle.error
+            else None
+        )
+        ctx.vector_knowledge_prompt = (
+            packed_vector_knowledge.prompt
+            if packed_vector_knowledge is not None
+            else ""
+        )
+        top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
+        top_sections = [
+            f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
+            for chunk in bundle.chunks[:3]
+        ]
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_3_vector_knowledge",
+            "validated",
+            mode=retrieval_mode,
+            tier=_retrieval_tier.value,
+            chunk_count=bundle.chunk_count,
+            strategy=bundle.strategy.value,
+            preferred_topics=bundle.filters.preferred_topics,
+            top_sources=top_sources,
+            top_sections=top_sections,
+            packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
+            packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
+            packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
+            error=bundle.error,
+        )
+        _emit_trace_stage(
+            ctx,
+            "stage_0_3_vector_knowledge",
+            t_stage,
+            mode=retrieval_mode,
+            tier=_retrieval_tier.value,
+            chunk_count=bundle.chunk_count,
+            error=bool(bundle.error),
+            strategy=bundle.strategy.value,
+        )
+        # Phase A.2: adjacency observability. When
+        # ``VECTOR_ADJACENCY_MODE != "off"``, the bundle carries any
+        # adjacent chunks the retriever fetched. Emit a separate trace
+        # event so the hit rate is visible in production logs without
+        # changing the prompt content (A.3 owns the pack cutover).
+        if bundle.adjacent_chunks:
+            from knowledge.vector_retrieval import get_adjacency_mode
+
+            _adj_sections = [
+                f"{c.document_title or c.source_key} | "
+                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
+                for c in bundle.adjacent_chunks[:6]
+            ]
+            # Estimate the pack cost an A.3 cutover would incur — text + header.
+            _adj_packed_chars = sum(
+                len(c.text_content or "") + 80 for c in bundle.adjacent_chunks
+            )
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_adjacency",
+                "validated",
+                adjacency_mode=get_adjacency_mode(),
+                adjacent_chunk_count=len(bundle.adjacent_chunks),
+                adjacent_sections=_adj_sections,
+                would_be_packed_chars=_adj_packed_chars,
+            )
+
+        # Phase B.3: reference-expansion observability. Same shadow pattern
+        # as adjacency — emit the resolved-chunk metadata so the operator
+        # can observe hit rate before flipping to "on" in B.4.
+        if bundle.reference_chunks:
+            from knowledge.vector_retrieval import get_reference_expansion_mode
+
+            _ref_sections = [
+                f"{c.document_title or c.source_key} | "
+                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
+                for c in bundle.reference_chunks[:6]
+            ]
+            _ref_packed_chars = sum(
+                len(c.text_content or "") + 80 for c in bundle.reference_chunks
+            )
+            # Also surface the union of outgoing-ref article numbers across
+            # the primary set, so an operator can spot when the resolver
+            # silently dropped refs (e.g. budget cap, missing target).
+            _attempted_article_numbers: set[str] = set()
+            for c in bundle.chunks:
+                for ref in c.outgoing_refs or []:
+                    kind_value = getattr(ref.kind, "value", str(ref.kind or ""))
+                    if kind_value == "article":
+                        num = str(ref.number or "").strip()
+                        if num:
+                            _attempted_article_numbers.add(num)
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_references",
+                "validated",
+                reference_mode=get_reference_expansion_mode(),
+                reference_chunk_count=len(bundle.reference_chunks),
+                reference_sections=_ref_sections,
+                attempted_article_numbers=sorted(_attempted_article_numbers),
+                would_be_packed_chars=_ref_packed_chars,
+            )
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -2202,152 +2360,7 @@ def process_query(
 
     _retrieval_tier = _resolve_vector_tier(ctx)
 
-    # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
-    if (
-        (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS)
-        and _retrieval_tier != VectorRetrievalTier.SKIP
-    ):
-        t_stage = time.time()
-        retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
-        bundle = retrieve_vector_knowledge(
-            routing_query,
-            retrieval_mode=(
-                VectorKnowledgeMode.active
-                if ENABLE_VECTOR_KNOWLEDGE_HINTS
-                else VectorKnowledgeMode.shadow
-            ),
-            question_analysis=ctx.question_analysis,
-            tier=_retrieval_tier,
-        )
-        ctx.vector_knowledge = bundle
-        ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
-        ctx.vector_knowledge_error = bundle.error
-
-        # Cross-notify circuit breaker on DB-layer failures from vector store.
-        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
-        # may surface "OperationalError" with varied messages like "timeout expired",
-        # "connection timed out", "could not connect", etc.
-        if bundle.error:
-            _err_lower = str(bundle.error).lower()
-            _is_db_failure = any(kw in _err_lower for kw in (
-                "connectiontimeout", "operationalerror", "timeout",
-                "could not connect", "connection refused", "connection reset",
-            ))
-            if _is_db_failure:
-                from utils.resilience import db_circuit_breaker
-                db_circuit_breaker.record_failure()
-                log.warning(
-                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
-                    db_circuit_breaker._failure_count,
-                    db_circuit_breaker.failure_threshold,
-                    bundle.error,
-                )
-
-        packed_vector_knowledge = (
-            pack_vector_knowledge_for_prompt(bundle)
-            if not bundle.error
-            else None
-        )
-        ctx.vector_knowledge_prompt = (
-            packed_vector_knowledge.prompt
-            if packed_vector_knowledge is not None
-            else ""
-        )
-        top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
-        top_sections = [
-            f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
-            for chunk in bundle.chunks[:3]
-        ]
-        trace_detail(
-            log,
-            ctx,
-            "stage_0_3_vector_knowledge",
-            "validated",
-            mode=retrieval_mode,
-            tier=_retrieval_tier.value,
-            chunk_count=bundle.chunk_count,
-            strategy=bundle.strategy.value,
-            preferred_topics=bundle.filters.preferred_topics,
-            top_sources=top_sources,
-            top_sections=top_sections,
-            packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
-            packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
-            packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
-            error=bundle.error,
-        )
-        _trace_stage(
-            "stage_0_3_vector_knowledge",
-            t_stage,
-            mode=retrieval_mode,
-            tier=_retrieval_tier.value,
-            chunk_count=bundle.chunk_count,
-            error=bool(bundle.error),
-            strategy=bundle.strategy.value,
-        )
-        # Phase A.2: adjacency observability. When
-        # ``VECTOR_ADJACENCY_MODE != "off"``, the bundle carries any
-        # adjacent chunks the retriever fetched. Emit a separate trace
-        # event so the hit rate is visible in production logs without
-        # changing the prompt content (A.3 owns the pack cutover).
-        if bundle.adjacent_chunks:
-            from knowledge.vector_retrieval import get_adjacency_mode
-
-            _adj_sections = [
-                f"{c.document_title or c.source_key} | "
-                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
-                for c in bundle.adjacent_chunks[:6]
-            ]
-            # Estimate the pack cost an A.3 cutover would incur — text + header.
-            _adj_packed_chars = sum(
-                len(c.text_content or "") + 80 for c in bundle.adjacent_chunks
-            )
-            trace_detail(
-                log,
-                ctx,
-                "stage_0_3_vector_knowledge_adjacency",
-                "validated",
-                adjacency_mode=get_adjacency_mode(),
-                adjacent_chunk_count=len(bundle.adjacent_chunks),
-                adjacent_sections=_adj_sections,
-                would_be_packed_chars=_adj_packed_chars,
-            )
-
-        # Phase B.3: reference-expansion observability. Same shadow pattern
-        # as adjacency — emit the resolved-chunk metadata so the operator
-        # can observe hit rate before flipping to "on" in B.4.
-        if bundle.reference_chunks:
-            from knowledge.vector_retrieval import get_reference_expansion_mode
-
-            _ref_sections = [
-                f"{c.document_title or c.source_key} | "
-                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
-                for c in bundle.reference_chunks[:6]
-            ]
-            _ref_packed_chars = sum(
-                len(c.text_content or "") + 80 for c in bundle.reference_chunks
-            )
-            # Also surface the union of outgoing-ref article numbers across
-            # the primary set, so an operator can spot when the resolver
-            # silently dropped refs (e.g. budget cap, missing target).
-            _attempted_article_numbers: set[str] = set()
-            for c in bundle.chunks:
-                for ref in c.outgoing_refs or []:
-                    kind_value = getattr(ref.kind, "value", str(ref.kind or ""))
-                    if kind_value == "article":
-                        num = str(ref.number or "").strip()
-                        if num:
-                            _attempted_article_numbers.add(num)
-            trace_detail(
-                log,
-                ctx,
-                "stage_0_3_vector_knowledge_references",
-                "validated",
-                reference_mode=get_reference_expansion_mode(),
-                reference_chunk_count=len(bundle.reference_chunks),
-                reference_sections=_ref_sections,
-                attempted_article_numbers=sorted(_attempted_article_numbers),
-                would_be_packed_chars=_ref_packed_chars,
-            )
+    _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
 
     _apply_response_mode(ctx)
 
