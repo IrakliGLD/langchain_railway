@@ -327,6 +327,52 @@ def _should_fallback_to_openai() -> bool:
     return MODEL_TYPE != "openai" and bool(OPENAI_API_KEY)
 
 
+def _fallback_to_openai(messages, primary_exc: Exception, *, llm_start: float, label: str):
+    """Shared OpenAI safety-net for a failed primary LLM call.
+
+    Retries *messages* on OpenAI when a fallback is warranted; otherwise re-raises
+    *primary_exc*. Logs an error metric on any terminal failure (no fallback
+    available, or the fallback itself failed) so a fully-failed call is always
+    counted. Returns the OpenAI response message on success.
+    """
+    if not _should_fallback_to_openai():
+        metrics.log_error()
+        raise primary_exc
+    try:
+        fallback_llm = make_openai()
+        message = _invoke_with_resilience(fallback_llm, messages, OPENAI_MODEL)
+    except Exception as fallback_exc:
+        log.warning("%s failed with fallback: %s", label, fallback_exc)
+        metrics.log_error()
+        raise
+    _log_usage_for_message(message, model_name=OPENAI_MODEL)
+    metrics.log_llm_call(time.time() - llm_start)
+    return message
+
+
+def _invoke_with_openai_fallback(
+    primary_factory, primary_model_name: str, messages, *, llm_start: float, label: str
+):
+    """Invoke the primary LLM with resilience, falling back to OpenAI on any failure.
+
+    Collapses the primary-invoke + OpenAI-fallback block the llm_* entry points
+    previously duplicated. *primary_factory* is called INSIDE the try so a failure
+    to construct the primary client (e.g. a keyless provider) still triggers the
+    OpenAI fallback, exactly as before. Callers own their cache lifecycle and
+    result parsing around the returned message. (llm_summarize_structured keeps
+    its own timeout-retry loop and calls _fallback_to_openai directly.)
+    """
+    try:
+        llm = primary_factory()
+        message = _invoke_with_resilience(llm, messages, primary_model_name)
+    except Exception as primary_exc:
+        log.warning("%s failed with primary model, fallback: %s", label, primary_exc)
+        return _fallback_to_openai(messages, primary_exc, llm_start=llm_start, label=label)
+    _log_usage_for_message(message, model_name=primary_model_name)
+    metrics.log_llm_call(time.time() - llm_start)
+    return message
+
+
 # Stage-specific model instances (cached per model name)
 _stage_model_cache: dict = {}
 
@@ -1144,32 +1190,16 @@ SELECT ...
 """
     prompt = _enforce_prompt_budget(prompt, label="plan_and_sql")
     llm_start = time.time()
+    primary_model_name = PLANNER_MODEL or get_primary_model_name()
     try:
-        try:
-            llm = get_llm_for_stage(PLANNER_MODEL)
-            primary_model_name = PLANNER_MODEL or get_primary_model_name()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
-            combined_output = message.content.strip()
-            _log_usage_for_message(message, model_name=primary_model_name)
-            metrics.log_llm_call(time.time() - llm_start)
-        except Exception as e:
-            log.warning(f"Combined generation failed: {e}")
-            # Fallback to OpenAI only when primary was Gemini
-            if _should_fallback_to_openai():
-                try:
-                    llm = make_openai()
-                    message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-                    combined_output = message.content.strip()
-                    _log_usage_for_message(message, model_name=OPENAI_MODEL)
-                    metrics.log_llm_call(time.time() - llm_start)
-                except Exception as e_f:
-                    log.warning(f"Combined generation failed with fallback: {e_f}")
-                    metrics.log_error()
-                    raise e_f  # Re-raise final exception
-            else:
-                metrics.log_error()
-                raise
-
+        message = _invoke_with_openai_fallback(
+            lambda: get_llm_for_stage(PLANNER_MODEL),
+            primary_model_name,
+            [("system", system), ("user", prompt)],
+            llm_start=llm_start,
+            label="Combined generation",
+        )
+        combined_output = message.content.strip()
         # Phase 1B Optimization: Cache the response
         llm_cache.set(cache_input, combined_output)
     except Exception:
@@ -1669,26 +1699,16 @@ SYSTEM_GUIDANCE (authoritative rules):
     prompt = _enforce_prompt_budget(prompt, label="summarize")
 
     llm_start = time.time()
+    primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
     try:
-        try:
-            llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
-            primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
-            out = message.content.strip()
-            _log_usage_for_message(message, model_name=primary_model_name)
-            metrics.log_llm_call(time.time() - llm_start)
-        except Exception as e:
-            log.warning(f"Summarize failed with Gemini, fallback: {e}")
-            if _should_fallback_to_openai():
-                llm = make_openai()
-                message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-                out = message.content.strip()
-                _log_usage_for_message(message, model_name=OPENAI_MODEL)
-                metrics.log_llm_call(time.time() - llm_start)
-            else:
-                metrics.log_error()
-                raise
-
+        message = _invoke_with_openai_fallback(
+            lambda: get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1),
+            primary_model_name,
+            [("system", system), ("user", prompt)],
+            llm_start=llm_start,
+            label="Summarize",
+        )
+        out = message.content.strip()
         # Phase 1 Optimization: Cache the response for future identical requests
         llm_cache.set(cache_input, out)
     except Exception:
@@ -2694,30 +2714,23 @@ def llm_analyze_question(
     )
 
     llm_start = time.time()
-    try:
-        router_thinking_budget = ROUTER_THINKING_BUDGET
-        if _is_fast_pipeline_mode():
-            if router_thinking_budget is None:
-                router_thinking_budget = 512
-            else:
-                router_thinking_budget = min(router_thinking_budget, 512)
-        llm = get_llm_for_stage(ROUTER_MODEL, thinking_budget=router_thinking_budget, max_retries=2)
-        primary_model_name = ROUTER_MODEL or get_primary_model_name()
-        message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], primary_model_name)
-        raw_output = message.content.strip()
-        _log_usage_for_message(message, model_name=primary_model_name)
-        metrics.log_llm_call(time.time() - llm_start)
-    except Exception as exc:
-        log.warning("Question analyzer failed with primary model, fallback: %s", exc)
-        if _should_fallback_to_openai():
-            llm = make_openai()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-            raw_output = message.content.strip()
-            _log_usage_for_message(message, model_name=OPENAI_MODEL)
-            metrics.log_llm_call(time.time() - llm_start)
+    router_thinking_budget = ROUTER_THINKING_BUDGET
+    if _is_fast_pipeline_mode():
+        if router_thinking_budget is None:
+            router_thinking_budget = 512
         else:
-            metrics.log_error()
-            raise
+            router_thinking_budget = min(router_thinking_budget, 512)
+    primary_model_name = ROUTER_MODEL or get_primary_model_name()
+    message = _invoke_with_openai_fallback(
+        lambda: get_llm_for_stage(
+            ROUTER_MODEL, thinking_budget=router_thinking_budget, max_retries=2
+        ),
+        primary_model_name,
+        [("system", system), ("user", prompt)],
+        llm_start=llm_start,
+        label="Question analyzer",
+    )
+    raw_output = message.content.strip()
 
     try:
         payload = _sanitize_question_analysis_payload(_extract_json_payload(raw_output))
@@ -3257,15 +3270,11 @@ Citation format rules:
 
     if last_exc is not None:
         log.warning("Structured summarize failed with primary model, fallback: %s", last_exc)
-        if _should_fallback_to_openai():
-            llm = make_openai()
-            message = _invoke_with_resilience(llm, [("system", system), ("user", prompt)], OPENAI_MODEL)
-            raw_output = message.content.strip()
-            _log_usage_for_message(message, model_name=OPENAI_MODEL)
-            metrics.log_llm_call(time.time() - llm_start)
-        else:
-            metrics.log_error()
-            raise last_exc
+        message = _fallback_to_openai(
+            [("system", system), ("user", prompt)], last_exc,
+            llm_start=llm_start, label="Structured summarize",
+        )
+        raw_output = message.content.strip()
 
     try:
         payload = _extract_json_payload(raw_output)
