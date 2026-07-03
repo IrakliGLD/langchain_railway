@@ -349,9 +349,9 @@ LIMIT_PATTERN = re.compile(r"\bLIMIT\s*\d+\b", re.IGNORECASE)
 # Analysis Configuration
 # ===================================================================
 
-# Seasonal months
-SUMMER_MONTHS = [4, 5, 6, 7]
-WINTER_MONTHS = [1, 2, 3, 8, 9, 10, 11, 12]
+# Seasonal months (canonical source of truth; tuples for immutability)
+SUMMER_MONTHS = (4, 5, 6, 7)
+WINTER_MONTHS = (1, 2, 3, 8, 9, 10, 11, 12)
 
 # Balancing segment normalizer
 BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"

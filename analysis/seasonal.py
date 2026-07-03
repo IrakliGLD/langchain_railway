@@ -14,6 +14,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from config import SUMMER_MONTHS
+
 log = logging.getLogger("Enai")
 
 
@@ -63,7 +65,7 @@ def compute_seasonal_average(
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
     # Define seasons (vectorized operation - faster than .apply())
-    summer_months = [4, 5, 6, 7]
+    summer_months = SUMMER_MONTHS
     df["season"] = np.where(
         df[date_col].dt.month.isin(summer_months),
         "Summer",
