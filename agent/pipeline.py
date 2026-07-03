@@ -2319,6 +2319,90 @@ def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
     return StageResult(ctx, terminal=True)
 
 
+def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
+    """Legacy fallback: generate + execute SQL (or short-circuit to a conceptual answer).
+
+    Extracted from process_query (audit P0-4d). terminal=True when a conceptual answer
+    was produced (is_conceptual / skip_sql); otherwise SQL ran (or a tool already did)
+    and the pipeline continues. Uses the module-level _emit_trace_stage.
+    """
+    # Final legacy fallback: generate SQL, execute it, then continue through analysis/summarization.
+    if not ctx.used_tool:
+        if ctx.tool_fallback_reason:
+            metrics.log_tool_fallback_intent(ctx.query, f"tool_fallback:{ctx.tool_fallback_reason}")
+        t_stage = time.time()
+        ctx = planner.generate_plan(ctx)
+        _emit_trace_stage(ctx, "stage_1_generate_plan", t_stage, conceptual=ctx.is_conceptual, skip_sql=ctx.skip_sql)
+        log.info("Stage 1 complete | conceptual=%s | skip_sql=%s", ctx.is_conceptual, ctx.skip_sql)
+
+        if ctx.is_conceptual or ctx.skip_sql:
+            if ctx.skip_sql and not ctx.is_conceptual:
+                log.info("Skipping SQL path: %s", ctx.skip_sql_reason)
+            t_stage = time.time()
+            ctx = summarizer.answer_conceptual(ctx)
+            _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+            return StageResult(ctx, terminal=True)
+
+        t_stage = time.time()
+        ctx = sql_executor.validate_and_execute(ctx)
+        _emit_trace_stage(ctx, "stage_2_sql_execute", t_stage, rows=len(ctx.rows), cols=len(ctx.cols))
+        log.info("Stage 2 complete | rows=%s | cols=%s", len(ctx.rows), len(ctx.cols))
+        if ctx.skip_sql:
+            log.info("Stage 2 blocked by policy: %s", ctx.skip_sql_reason)
+            t_stage = time.time()
+            ctx = summarizer.answer_conceptual(ctx)
+            _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+            return StageResult(ctx, terminal=True)
+    else:
+        log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
+    return StageResult(ctx, terminal=False)
+
+
+def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
+    """Block data summarization when requested derived evidence is missing.
+
+    Extracted from process_query (audit P0-4d). terminal=True only when there is no
+    partial evidence and we must clarify; partial-evidence and not-blocked both pass
+    through. Uses the module-level _emit_trace_stage.
+    """
+    if _should_block_data_summary_for_missing_evidence(ctx):
+        # If some evidence was materialized, allow Stage 4 with partial data
+        # rather than forcing a clarification that discards all available context.
+        if ctx.analysis_evidence:
+            log.info(
+                "Partial evidence available (%d records); proceeding to Stage 4 "
+                "despite missing: %s",
+                len(ctx.analysis_evidence), ctx.missing_evidence_for_metrics,
+            )
+            ctx.data_summary_blocked_reason = (
+                "partial_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+            )
+            # Fall through to Stage 4 summarize_data below
+        else:
+            ctx.resolution_policy = ResolutionPolicy.CLARIFY
+            ctx.clarify_reason = "missing_requested_analysis_evidence"
+            ctx.data_summary_blocked_reason = (
+                "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+            )
+            ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
+            ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
+            log.info(
+                "Blocking data summarization due to missing derived evidence: %s",
+                ctx.missing_evidence_for_metrics,
+            )
+            t_stage = time.time()
+            ctx = summarizer.answer_clarify(ctx)
+            _emit_trace_stage(
+                ctx,
+                "stage_4_clarify_summary",
+                t_stage,
+                reason=ctx.clarify_reason,
+                missing_evidence=",".join(ctx.missing_evidence_for_metrics),
+            )
+            return StageResult(ctx, terminal=True)
+    return StageResult(ctx, terminal=False)
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -2494,35 +2578,10 @@ def process_query(
         elif ctx.agent_outcome == "fallback_exit":
             log.info("Agent fallback exit | reason=%s", ctx.agent_fallback_reason)
 
-    # Final legacy fallback: generate SQL, execute it, then continue through analysis/summarization.
-    if not ctx.used_tool:
-        if ctx.tool_fallback_reason:
-            metrics.log_tool_fallback_intent(ctx.query, f"tool_fallback:{ctx.tool_fallback_reason}")
-        t_stage = time.time()
-        ctx = planner.generate_plan(ctx)
-        _trace_stage("stage_1_generate_plan", t_stage, conceptual=ctx.is_conceptual, skip_sql=ctx.skip_sql)
-        log.info("Stage 1 complete | conceptual=%s | skip_sql=%s", ctx.is_conceptual, ctx.skip_sql)
-
-        if ctx.is_conceptual or ctx.skip_sql:
-            if ctx.skip_sql and not ctx.is_conceptual:
-                log.info("Skipping SQL path: %s", ctx.skip_sql_reason)
-            t_stage = time.time()
-            ctx = summarizer.answer_conceptual(ctx)
-            _trace_stage("stage_4_conceptual_summary", t_stage)
-            return ctx
-
-        t_stage = time.time()
-        ctx = sql_executor.validate_and_execute(ctx)
-        _trace_stage("stage_2_sql_execute", t_stage, rows=len(ctx.rows), cols=len(ctx.cols))
-        log.info("Stage 2 complete | rows=%s | cols=%s", len(ctx.rows), len(ctx.cols))
-        if ctx.skip_sql:
-            log.info("Stage 2 blocked by policy: %s", ctx.skip_sql_reason)
-            t_stage = time.time()
-            ctx = summarizer.answer_conceptual(ctx)
-            _trace_stage("stage_4_conceptual_summary", t_stage)
-            return ctx
-    else:
-        log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
+    _res = _run_generate_sql_stage(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        return ctx
 
     # Snapshot the source tabular output before analyzer mutates or augments the evidence.
     if ctx.rows and ctx.cols and not ctx.provenance_rows:
@@ -2579,40 +2638,10 @@ def process_query(
         missing_evidence_for_metrics=list(ctx.missing_evidence_for_metrics or []),
     )
 
-    if _should_block_data_summary_for_missing_evidence(ctx):
-        # If some evidence was materialized, allow Stage 4 with partial data
-        # rather than forcing a clarification that discards all available context.
-        if ctx.analysis_evidence:
-            log.info(
-                "Partial evidence available (%d records); proceeding to Stage 4 "
-                "despite missing: %s",
-                len(ctx.analysis_evidence), ctx.missing_evidence_for_metrics,
-            )
-            ctx.data_summary_blocked_reason = (
-                "partial_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
-            )
-            # Fall through to Stage 4 summarize_data below
-        else:
-            ctx.resolution_policy = ResolutionPolicy.CLARIFY
-            ctx.clarify_reason = "missing_requested_analysis_evidence"
-            ctx.data_summary_blocked_reason = (
-                "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
-            )
-            ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
-            ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
-            log.info(
-                "Blocking data summarization due to missing derived evidence: %s",
-                ctx.missing_evidence_for_metrics,
-            )
-            t_stage = time.time()
-            ctx = summarizer.answer_clarify(ctx)
-            _trace_stage(
-                "stage_4_clarify_summary",
-                t_stage,
-                reason=ctx.clarify_reason,
-                missing_evidence=",".join(ctx.missing_evidence_for_metrics),
-            )
-            return ctx
+    _res = _check_missing_evidence_stage(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        return ctx
 
     # Append structured evidence summary when evidence planner contributed data
     if ENABLE_EVIDENCE_PLANNER and ctx.evidence_collected:
