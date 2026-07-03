@@ -1,0 +1,66 @@
+"""Database engine - single source of truth.
+
+Extracted from core/query_executor.py (audit P1) as a dependency-light leaf so that
+both core.query_executor and knowledge.vector_store can import ENGINE downward without
+the core<->knowledge lazy-import dance. Imports only stdlib + sqlalchemy + config.
+"""
+import logging
+import urllib.parse
+
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool
+
+from config import SUPABASE_DB_URL
+
+log = logging.getLogger("Enai")
+
+
+def coerce_to_psycopg_url(url: str) -> str:
+    """
+    Convert database URL to use psycopg driver.
+
+    Ensures the URL uses postgresql+psycopg:// scheme for SQLAlchemy.
+
+    Args:
+        url: Database URL (can be postgres://, postgresql://, or postgresql+psycopg://)
+
+    Returns:
+        URL with postgresql+psycopg:// scheme
+
+    Examples:
+        >>> coerce_to_psycopg_url("postgres://user:pass@host/db")
+        'postgresql+psycopg://user:pass@host/db'
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme in ("postgres", "postgresql"):
+        return url.replace(parsed.scheme, "postgresql+psycopg", 1)
+    if not parsed.scheme.startswith("postgresql+"):
+        return "postgresql+psycopg://" + url.split("://", 1)[-1]
+    return url
+
+
+# Database URL with psycopg driver
+DB_URL = coerce_to_psycopg_url(SUPABASE_DB_URL)
+
+# SQLAlchemy engine with connection pooling
+# Pool budget: pool_size + max_overflow = 5 max connections from this engine.
+# Combined with vector_store (which reuses this engine after Fix 3), total
+# stays well within Supabase PgBouncer limits (typically 10-20 slots).
+ENGINE = create_engine(
+    DB_URL,
+    poolclass=QueuePool,
+    pool_size=3,           # Conservative: avoids PgBouncer saturation under concurrent load
+    max_overflow=2,        # Total max: 5 connections from this engine
+    pool_timeout=30,
+    pool_pre_ping=True,
+    pool_recycle=300,      # 5 min: recycle before PgBouncer kills idle connections
+    connect_args={
+        "connect_timeout": 10,  # Fail fast: 10s is sufficient for Supabase TCP handshake
+        # Phase 1D Security: Database-level query timeout (30 seconds max)
+        "options": "-c statement_timeout=30000",  # 30s in milliseconds
+        # PgBouncer compatibility: disable psycopg auto-prepared statements
+        # to avoid "prepared statement already exists" errors in transaction-pooled mode.
+        # Required for engine unification with vector_store (Fix 3).
+        "prepare_threshold": None,
+    },
+)

@@ -9,71 +9,22 @@ Handles:
 """
 import logging
 import time
-import urllib.parse
 from typing import Any, List, Tuple
 
 import pandas as pd
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
-from sqlalchemy.pool import QueuePool
 
-from config import MAX_RESULT_SIZE_MB, MAX_ROWS, SUPABASE_DB_URL
+from config import MAX_RESULT_SIZE_MB, MAX_ROWS
+
+# ENGINE + DB_URL live in core/db.py (leaf) now; re-exported here for back-compat so
+# every `from core.query_executor import ENGINE` (and its test monkeypatches) keeps working.
+from core.db import DB_URL, ENGINE, coerce_to_psycopg_url  # noqa: F401
 from utils.metrics import metrics
 from utils.resilience import db_circuit_breaker
 
 log = logging.getLogger("Enai")
-
-
-def coerce_to_psycopg_url(url: str) -> str:
-    """
-    Convert database URL to use psycopg driver.
-
-    Ensures the URL uses postgresql+psycopg:// scheme for SQLAlchemy.
-
-    Args:
-        url: Database URL (can be postgres://, postgresql://, or postgresql+psycopg://)
-
-    Returns:
-        URL with postgresql+psycopg:// scheme
-
-    Examples:
-        >>> coerce_to_psycopg_url("postgres://user:pass@host/db")
-        'postgresql+psycopg://user:pass@host/db'
-    """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme in ("postgres", "postgresql"):
-        return url.replace(parsed.scheme, "postgresql+psycopg", 1)
-    if not parsed.scheme.startswith("postgresql+"):
-        return "postgresql+psycopg://" + url.split("://", 1)[-1]
-    return url
-
-
-# Database URL with psycopg driver
-DB_URL = coerce_to_psycopg_url(SUPABASE_DB_URL)
-
-# SQLAlchemy engine with connection pooling
-# Pool budget: pool_size + max_overflow = 5 max connections from this engine.
-# Combined with vector_store (which reuses this engine after Fix 3), total
-# stays well within Supabase PgBouncer limits (typically 10-20 slots).
-ENGINE = create_engine(
-    DB_URL,
-    poolclass=QueuePool,
-    pool_size=3,           # Conservative: avoids PgBouncer saturation under concurrent load
-    max_overflow=2,        # Total max: 5 connections from this engine
-    pool_timeout=30,
-    pool_pre_ping=True,
-    pool_recycle=300,      # 5 min: recycle before PgBouncer kills idle connections
-    connect_args={
-        "connect_timeout": 10,  # Fail fast: 10s is sufficient for Supabase TCP handshake
-        # Phase 1D Security: Database-level query timeout (30 seconds max)
-        "options": "-c statement_timeout=30000",  # 30s in milliseconds
-        # PgBouncer compatibility: disable psycopg auto-prepared statements
-        # to avoid "prepared statement already exists" errors in transaction-pooled mode.
-        # Required for engine unification with vector_store (Fix 3).
-        "prepare_threshold": None,
-    },
-)
 
 
 def check_dataframe_memory(df: pd.DataFrame, max_mb: int = None) -> None:
