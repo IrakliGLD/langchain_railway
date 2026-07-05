@@ -3213,7 +3213,9 @@ def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
 
 def test_truncation_priority_knowledge_protects_knowledge_sections():
     """Knowledge-primary truncation should sacrifice data before knowledge."""
-    from core.llm import _TRUNCATION_PRIORITY_DATA, _TRUNCATION_PRIORITY_KNOWLEDGE
+    # Import from the canonical home (core.prompt_budget), not the core.llm
+    # re-export, so this stays stable through the planned core/llm.py split.
+    from core.prompt_budget import _TRUNCATION_PRIORITY_DATA, _TRUNCATION_PRIORITY_KNOWLEDGE
 
     # Knowledge-primary: data_preview truncated before domain_knowledge
     dk_idx = _TRUNCATION_PRIORITY_KNOWLEDGE.index("UNTRUSTED_DOMAIN_KNOWLEDGE")

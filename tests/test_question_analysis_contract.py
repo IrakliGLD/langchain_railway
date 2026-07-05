@@ -148,6 +148,15 @@ def test_period_end_must_not_precede_start():
         QuestionAnalysis.model_validate(payload)
 
 
+def test_period_rejects_impossible_calendar_date():
+    """ISODate now rejects shape-valid but impossible dates (e.g. month 13)."""
+    payload = _valid_payload()
+    payload["sql_hints"]["period"]["end_date"] = "2021-13-01"
+
+    with pytest.raises(ValidationError):
+        QuestionAnalysis.model_validate(payload)
+
+
 def test_schema_snapshot_matches_runtime_model():
     schema_path = Path(__file__).resolve().parents[1] / "schemas" / "question_analysis.schema.json"
     snapshot = json.loads(schema_path.read_text(encoding="utf-8"))

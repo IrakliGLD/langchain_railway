@@ -30,24 +30,65 @@ class CircuitBreaker:
         self._half_open_probe_in_flight = False
         self._lock = threading.Lock()
 
+    @property
+    def state(self) -> str:
+        """Current state (``closed`` | ``open`` | ``half_open``), lock-guarded.
+
+        Prefer this over reading ``_state`` directly so callers never touch the
+        private attribute without the lock.
+        """
+        with self._lock:
+            return self._state
+
+    def _evaluate(self, now_ts: float) -> Tuple[bool, str, bool]:
+        """Pure decision for the current state; caller must hold ``self._lock``.
+
+        Returns ``(allowed, reason, starts_probe)``. ``starts_probe`` is True when
+        *committing* this decision consumes the single half-open probe slot.
+        ``allow_request`` commits the decision; ``would_allow`` discards it — so
+        both share one code path and cannot drift.
+        """
+        if self._state == "open":
+            if now_ts - self._opened_at >= self.reset_timeout_seconds:
+                # Reset window elapsed: the next real acquire probes once.
+                return True, "half_open_probe", True
+            return False, "open", False
+        if self._state == "half_open":
+            if self._half_open_probe_in_flight:
+                return False, "half_open_busy", False
+            return True, "half_open_probe", True
+        return True, "closed", False
+
     def allow_request(self) -> Tuple[bool, str]:
-        """Return whether request can proceed and decision reason."""
+        """Acquire permission to proceed, consuming the half-open probe slot.
+
+        This is the *guarded-call* entry point: a caller granted ``allowed=True``
+        in half-open state has claimed the sole probe and MUST report the outcome
+        via ``record_success``/``record_failure``. An advisory check that will not
+        itself make the guarded call must use ``would_allow`` instead — otherwise
+        the probe slot is claimed but never released and recovery wedges until
+        process restart.
+        """
         now_ts = time.time()
         with self._lock:
-            if self._state == "open":
-                if now_ts - self._opened_at >= self.reset_timeout_seconds:
-                    self._state = "half_open"
-                    self._half_open_probe_in_flight = False
-                else:
-                    return False, "open"
-
-            if self._state == "half_open":
-                if self._half_open_probe_in_flight:
-                    return False, "half_open_busy"
+            allowed, reason, starts_probe = self._evaluate(now_ts)
+            if allowed and starts_probe:
+                self._state = "half_open"
                 self._half_open_probe_in_flight = True
-                return True, "half_open_probe"
+            return allowed, reason
 
-            return True, "closed"
+    def would_allow(self) -> Tuple[bool, str]:
+        """Read-only preview of ``allow_request`` that mutates no state.
+
+        Use for advisory pre-checks (e.g. "should I attempt tool execution?")
+        that do NOT themselves make the guarded DB call. Reading this never
+        consumes the half-open probe, so an advisory caller cannot starve the
+        real probe owner.
+        """
+        now_ts = time.time()
+        with self._lock:
+            allowed, reason, _starts_probe = self._evaluate(now_ts)
+            return allowed, reason
 
     def record_success(self) -> None:
         with self._lock:

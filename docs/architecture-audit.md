@@ -9,6 +9,36 @@
 
 ---
 
+## Progress update — 2026-07-05
+
+Status of the prioritized recommendations below, reconciled against `main` plus the pending
+`refactor/*` branch stack (PR #88 merged; loop-deletion and tool-routing safe-slice pending).
+Legend: ✅ done · ◐ partial · ☐ open. The per-item line numbers further down are from the
+2026-06-30 revision and have since drifted; trust the symbols, not the lines.
+
+| # | Item | Status | Notes |
+|---|------|:--:|-------|
+| P0-1 | Types + `classify_query_type` → `contracts/` + `core/query_classifier.py` | ✅ | `core/query_classifier.py` landed (PR #88); the upward LLM-type imports are broken. |
+| P0-2 | `Provider` strategy + `PROVIDERS` registry | ✅ | `_PROVIDERS` registry at `core/llm.py:264`; the resolvers are now dict lookups. |
+| P0-3 | Extract `invoke_llm_with_policy` / collapse the 4 fallback blocks | ✅ | Collapsed into shared `_invoke_with_openai_fallback` / `_fallback_to_openai`; `_should_fallback_to_openai` at `core/llm.py:320`. |
+| P0-4 | `Stage`/`StageResult` + decompose `process_query` | ✅ | `StageResult` at `pipeline.py:2274`; `process_query` ~597→~290 lines; the last inline early-return went with the loop deletion. |
+| P1-5 | Unify the 4 tool-routing tables | ◐ | Safe slice done — `router.extract_granularity` is the single granularity authority, and the `orchestrator` table was removed with the loop deletion. **Open:** SELECTION-logic unification of the remaining 3 tables (keywords vs analyzer output vs evidence rules — reconciling them changes routing; needs an old-vs-new disagreement harness). |
+| P1-6 | Delete/adopt dead `analysis/seasonal.py`; collapse 3 CAGR impls | ◐ | Dead `compute_seasonal_cagr`/`compute_seasonal_comparison` removed; `compute_seasonal_average` retained and adopted (`main.py:57`). **Open:** inline forecast CAGR (`analyzer.py`) and `analysis/stats.py` CAGR are still separate — the 3→1 consolidation is not done. |
+| P1-7 | Extract `agent/grounding.py` from `summarizer.py` | ☐ | Deferred (~600 lines, cross-module). |
+| P1-8 | Single `SeasonConfig`/`SUMMER_MONTHS` | ✅ | One canonical tuple at `config.py:353`; the duplicate/hardcoded defs are gone. |
+| P1-9 | Centralize DB in `core/db.py` | ✅ | Engine extracted to a `core/db.py` leaf (PR #88), cutting the `core ⇄ knowledge` cycle. Residual read-only `ENGINE.connect()` call-site cleanup in `pipeline.py` still tracked here. |
+| P1-10 | Declarative `(predicate, patch)` guardrail table | ☐ | Still 7 chained `_apply_*_guardrail` at `planner.py:1866-1898`. |
+| P2-11 | Delete/quarantine the legacy agent loop | ✅ | `orchestrator.py` deleted; `run_agent_loop` gone; `ENABLE_AGENT_LOOP` kept inert. |
+| P2-12 | Split `analyzer.py` along its seams | ☐ | Open. |
+| P2-13 | De-duplicate `_metric_aliases` / regex tables / scenario tuples | ☐ | Open. |
+| P2-14 | Re-seam `pipeline` ↔ `evidence_planner` | ☐ | Open. |
+| P2-15 | Type transient/timeout errors; inject `cache`/`breaker` | ☐ | Open. |
+
+A separate 2026-07-05 **correctness** review (non-structural) tracks runtime bugs — e.g. the DB
+circuit-breaker half-open recovery wedge — outside this document.
+
+---
+
 ## Executive summary
 
 The **spine of the architecture is sound**: the intended high→low layering (`main → agent → core/analysis → contracts/utils`) holds for the large majority of edges, `contracts/` is a clean dependency sink with zero outbound layer imports, and `core/`/`analysis/` contain no imports back into `agent/`. Several modules are exemplary (`sql_generator.py`, `query_executor.py`, `evidence_validator.py`, `llm_payloads.py`, `prompt_budget.py`).

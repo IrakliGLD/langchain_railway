@@ -1731,12 +1731,16 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
     same conditions as before. Pure refactor.
     """
     from utils.resilience import db_circuit_breaker
-    _cb_allowed, _cb_reason = db_circuit_breaker.allow_request()
+    # Advisory peek only. The real DB probe is owned by core.query_executor's
+    # guarded allow_request()/record_* pair; calling allow_request() here would
+    # consume the half-open probe slot without ever recording an outcome, which
+    # wedges the breaker in half_open (probe forever "in flight") until restart.
+    _cb_allowed, _cb_reason = db_circuit_breaker.would_allow()
     if not _cb_allowed:
         log.warning(
             "Skipping tool execution: circuit breaker is %s (%s). "
             "Pipeline will fall through to Stage 1/2 or CLARIFY.",
-            db_circuit_breaker._state, _cb_reason,
+            db_circuit_breaker.state, _cb_reason,
         )
 
     # ---- Pass 1: primary execution via the strategy chain ----
