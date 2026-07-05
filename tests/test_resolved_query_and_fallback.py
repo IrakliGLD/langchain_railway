@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 import sqlalchemy
-from langchain_core.messages import AIMessage
 
 # Ensure config validation passes before importing project modules.
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -45,7 +44,6 @@ class _DummyEngine:
 
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
-from agent import orchestrator  # noqa: E402
 from agent.planner import normalize_balancing_entities  # noqa: E402
 from agent.router import extract_balancing_entities  # noqa: E402
 from agent.tool_adapter import ToolExecutionResult  # noqa: E402
@@ -170,100 +168,6 @@ def test_extract_balancing_entities_does_not_match_regulated_inside_deregulated(
 def test_extract_balancing_entities_does_not_match_old_group_inside_new_regulated_tpp():
     result = extract_balancing_entities("new regulated tpp")
     assert result == ["regulated_new_tpp"]
-
-
-# ---------------------------------------------------------------------------
-# Phase 4: agent loop context enrichment
-# ---------------------------------------------------------------------------
-
-
-class FakeLLM:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self._idx = 0
-
-    def invoke(self, messages):
-        self._last_messages = messages
-        if self._idx >= len(self._responses):
-            return AIMessage(content="", tool_calls=[])
-        res = self._responses[self._idx]
-        self._idx += 1
-        return res
-
-
-def test_agent_loop_includes_resolved_query(monkeypatch):
-    """When resolved_query differs from query, the agent sees the resolved form."""
-    llm = FakeLLM([AIMessage(content="Answer based on context.", tool_calls=[])])
-
-    ctx = QueryContext(query="why did it increase?")
-    ctx.resolved_query = "Why did the balancing electricity price increase in Georgia?"
-
-    orchestrator.run_agent_loop(ctx, llm=llm)
-
-    user_msg = llm._last_messages[1].content
-    assert "Resolved query:" in user_msg
-    assert "balancing electricity price" in user_msg
-    assert "why did it increase?" in user_msg
-
-
-def test_agent_loop_includes_conversation_history_for_followup(monkeypatch):
-    """When query is a follow-up (resolved_query differs), history is injected."""
-    llm = FakeLLM([AIMessage(content="Follow-up answer.", tool_calls=[])])
-
-    ctx = QueryContext(query="what about cheap energy?")
-    ctx.resolved_query = "What is the share of cheap energy sources in balancing composition?"
-    ctx.conversation_history = [
-        {"question": "Show balancing price trend", "answer": "Prices increased 15% in 2024."},
-    ]
-
-    orchestrator.run_agent_loop(ctx, llm=llm)
-
-    user_msg = llm._last_messages[1].content
-    assert "Previous conversation:" in user_msg
-    assert "balancing price trend" in user_msg
-    assert "15%" in user_msg
-
-
-def test_agent_loop_skips_history_for_standalone_query(monkeypatch):
-    """When query is standalone (no resolved_query diff), history is NOT injected."""
-    llm = FakeLLM([AIMessage(content="Direct answer.", tool_calls=[])])
-
-    ctx = QueryContext(query="Show balancing price in 2024")
-    ctx.conversation_history = [
-        {"question": "Unrelated prior question", "answer": "Unrelated prior answer."},
-    ]
-
-    orchestrator.run_agent_loop(ctx, llm=llm)
-
-    user_msg = llm._last_messages[1].content
-    assert "Previous conversation:" not in user_msg
-    assert "Unrelated prior" not in user_msg
-
-
-def test_agent_loop_includes_tool_fallback_reason(monkeypatch):
-    """When a tool failed before reaching agent loop, the reason is included."""
-    llm = FakeLLM([AIMessage(content="Let me help.", tool_calls=[])])
-
-    ctx = QueryContext(query="cheap energy composition")
-    ctx.tool_fallback_reason = "analyzer_tool_execution_error:Unsupported balancing entity: cheap energy"
-
-    orchestrator.run_agent_loop(ctx, llm=llm)
-
-    user_msg = llm._last_messages[1].content
-    assert "previous tool attempt failed" in user_msg.lower()
-    assert "cheap energy" in user_msg
-
-
-def test_agent_loop_plain_query_when_no_extra_context(monkeypatch):
-    """First-turn query with no history or resolved_query stays unchanged."""
-    llm = FakeLLM([AIMessage(content="Simple answer.", tool_calls=[])])
-
-    ctx = QueryContext(query="Show balancing price in 2024")
-
-    orchestrator.run_agent_loop(ctx, llm=llm)
-
-    user_msg = llm._last_messages[1].content
-    assert user_msg == "Show balancing price in 2024"
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,6 @@ Stages:
   0.5  evidence collection loop          -> frame adapters + canonical evidence frames
   0.6  evidence validation               -> gap detection, render_style degradation
   0.7  router.match_tool (legacy)        -> fallback pre-LLM deterministic routing
-  0.8  orchestrator.run_agent_loop       -> bounded typed-tool loop (legacy fallback)
   1/2  planner / sql_executor            -> legacy LLM plan + SQL fallback
   3    analyzer.enrich                   -> stats, correlation, trendlines
   4    summarizer.summarize_data         -> generic renderer or LLM narrative
@@ -25,7 +24,7 @@ from dataclasses import dataclass
 import pandas as pd
 from sqlalchemy import text
 
-from agent import analyzer, chart_pipeline, evidence_planner, orchestrator, planner, sql_executor, summarizer
+from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_executor, summarizer
 from agent.evidence_validator import validate_evidence
 from agent.frame_adapters import adapt_tool_result
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
@@ -2526,58 +2525,9 @@ def process_query(
     # is identical to the pre-§5.1.b form.
     ctx = _execute_evidence_plan(ctx)
 
-    # Stage 1/2: agent loop or SQL fallback only runs after deterministic tool paths are exhausted.
-    # When Stage 0.2 is authoritative, it owns route selection, so the
-    # context-blind agent loop must not run ahead of planner/SQL fallback.
-    # Without authoritative Stage 0.2, the agent loop remains the last resort.
-    _analyzer_tool_failed = (
-        not ctx.used_tool
-        and ctx.tool_fallback_reason
-        and ctx.tool_fallback_reason.startswith("analyzer_tool_")
-    )
-    _evidence_plan_satisfied = (
-        ENABLE_EVIDENCE_PLANNER
-        and ctx.evidence_plan
-        and ctx.evidence_plan_complete
-    )
-    if (
-        not ctx.used_tool
-        and not _evidence_plan_satisfied
-        and ENABLE_AGENT_LOOP
-        and not _analyzer_tool_failed
-        and not ctx.has_authoritative_question_analysis
-    ):
-        t_stage = time.time()
-        ctx = orchestrator.run_agent_loop(ctx)
-        _trace_stage("stage_agent_loop", t_stage, outcome=ctx.agent_outcome, rounds=ctx.agent_rounds)
-        if ctx.agent_outcome == "conceptual_exit":
-            log.info("Agent conceptual exit | rounds=%s", ctx.agent_rounds)
-            return ctx
-        if ctx.agent_outcome == "data_exit":
-            _relevance_q = ctx.resolved_query or ctx.query
-            tool_relevant, tool_reason = validate_tool_relevance(
-                _relevance_q,
-                ctx.tool_name or "",
-                question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
-            )
-            if not tool_relevant:
-                metrics.log_relevance_block()
-                ctx.used_tool = False
-                ctx.agent_outcome = "fallback_exit"
-                ctx.agent_fallback_reason = "agent_tool_relevance_blocked"
-                ctx.tool_fallback_reason = f"agent_tool_relevance_blocked:{tool_reason}"
-                metrics.log_tool_fallback_intent(ctx.query, "agent_tool_relevance_blocked")
-                ctx.df = ctx.df.iloc[0:0]
-                ctx.cols = []
-                ctx.rows = []
-                clear_provenance(ctx)
-                log.warning("Agent data exit blocked by relevance policy. reason=%s", tool_reason)
-            else:
-                log.info("Agent tool relevance validated. reason=%s", tool_reason)
-            log.info("Agent data exit | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
-        elif ctx.agent_outcome == "fallback_exit":
-            log.info("Agent fallback exit | reason=%s", ctx.agent_fallback_reason)
-
+    # Legacy agent loop removed (audit): with Stage 0.2 authoritative it never ran,
+    # and analyzer-failure / no-tool cases fall through to the generate-plan/SQL
+    # fallback below (a more capable path than the retired keyword-driven loop).
     _res = _run_generate_sql_stage(ctx)
     ctx = _res.ctx
     if _res.terminal:
