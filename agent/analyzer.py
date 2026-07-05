@@ -2015,6 +2015,14 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
             span_vc = last_vc["year"] - first_vc["year"]
             first_val_vc = _robust_endpoint_value(df_y_vc[vc], window=3, which="first")
             last_val_vc = _robust_endpoint_value(df_y_vc[vc], window=3, which="last")
+            # Fallback is 0 (flat), NOT np.nan, and the asymmetry with the seasonal
+            # CAGRs below (which fall back to np.nan) is deliberate: cagr_y is the
+            # primary projection driver at (1 + cagr_y) ** n, and cagr_s/cagr_w use
+            # np.nan as a "no distinct seasonal trend -> reuse cagr_y" sentinel
+            # (consumed below at the `else stats["cagr_y"]` branches). A np.nan here
+            # would propagate through both the yearly projection and that seasonal
+            # fallback, turning the whole forecast frame into NaN; 0 degrades
+            # gracefully to a flat projection when no trend is computable.
             cagr_y_vc = (
                 (last_val_vc / first_val_vc) ** (1 / span_vc) - 1
                 if span_vc > 0 and first_val_vc > 0 and last_val_vc > 0

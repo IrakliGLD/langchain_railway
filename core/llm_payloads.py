@@ -138,6 +138,14 @@ def _coerce_relative_date(token: object, *, anchor: _date, role: str) -> Optiona
     if not text:
         return None
     if _ISO_DATE_RE.match(text):
+        # Shape-valid but possibly an impossible calendar date (e.g. 2024-13-32).
+        # Drop those to None so callers omit the field instead of emitting invalid
+        # ISO that strict Pydantic (ISODate) would reject downstream — the period
+        # path already relied on this, the tooling params_hint path did not.
+        try:
+            _date.fromisoformat(text)
+        except ValueError:
+            return None
         return text
     if text in {"now", "today"}:
         return anchor.isoformat()

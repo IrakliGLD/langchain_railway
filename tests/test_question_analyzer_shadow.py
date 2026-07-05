@@ -1177,6 +1177,30 @@ def test_sanitize_drops_unrecognized_params_hint_date():
     hint = sanitized["tooling"]["candidate_tools"][0]["params_hint"]
     assert hint.get("start_date") is None
     assert hint.get("end_date") == _date_today_iso()
+
+
+def test_sanitize_drops_calendar_invalid_params_hint_date():
+    """A shape-valid but impossible date (e.g. 2024-13-32) must be dropped, not
+    emitted — otherwise strict ISODate validation rejects the whole analysis."""
+    payload = {
+        "tooling": {
+            "candidate_tools": [
+                {
+                    "name": "get_prices",
+                    "score": 0.8,
+                    "params_hint": {
+                        "metric": "p_bal_gel",
+                        "start_date": "2024-13-32",
+                        "end_date": "now",
+                    },
+                }
+            ]
+        }
+    }
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    hint = sanitized["tooling"]["candidate_tools"][0]["params_hint"]
+    assert hint.get("start_date") is None
+    assert hint.get("end_date") == _date_today_iso()
     # Other params_hint fields preserved.
     assert hint["metric"] == "p_bal_gel"
 

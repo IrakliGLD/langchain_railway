@@ -8,7 +8,9 @@ import hashlib
 import json
 import logging
 import os
+import os
 import re
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Set
@@ -351,6 +353,144 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
     return tokens
 
 
+# ---------------------------------------------------------------------------
+# Grounding shadow harness (audit Phase 2/7). SHADOW-ONLY: nothing below is
+# wired to the live grounding gate. It builds a *candidate* grounding corpus
+# that scopes the ratio->percent (x100) token expansion to genuine ratio/share
+# columns, plus a comparator that reports where the candidate would disagree
+# with the current "x100 for every abs<=1 cell" policy. Purpose: gather
+# disagreement evidence before deciding any cutover (docs/architecture-audit.md
+# P1-7). Keep this together with the grounding code when grounding.py is split.
+# ---------------------------------------------------------------------------
+
+# Column names whose [0,1] values are genuinely ratios/shares and legitimately
+# render as percentages (share_import, import_dependency_ratio, *_percent, ...).
+_RATIO_COLUMN_RE = re.compile(r"(?:^share_|_share$|(?:^|_)ratio(?:$|_)|percent|_pct$)", re.IGNORECASE)
+
+
+def _is_ratio_column(name: Any) -> bool:
+    """True when a column name denotes a ratio/share/percent metric."""
+    return bool(name) and bool(_RATIO_COLUMN_RE.search(str(name)))
+
+
+def _build_grounding_tokens_candidate(ctx: QueryContext) -> Set[str]:
+    """Candidate grounding corpus for the shadow harness (NOT wired to gating).
+
+    Identical to :func:`_build_grounding_tokens` except raw result-set cells only
+    emit x100 percent tokens when their column is a genuine ratio/share column.
+    The stats_hint text expansion and the derived aggregate/evidence/join adders
+    keep x100 (those values are ratios/percentages by construction). This narrows
+    the false-PASS surface where a raw [0,1] value — e.g. a correlation
+    coefficient of 0.85 — currently mints a bare percent token like "85" that an
+    ungrounded answer can match. Aggregate/evidence tightening is a deliberate
+    follow-up knob, kept permissive here so the first comparison isolates the
+    raw-cell effect.
+    """
+    tokens = _extract_number_tokens(_build_grounding_corpus(ctx))
+    expanded: Set[str] = set()
+    for t in tokens:
+        expanded.update(_tokenize_cell_value(t))  # stats_hint ratios keep x100
+    tokens.update(expanded)
+    if ctx.df is not None and not ctx.df.empty:
+        for col_name, series in ctx.df.head(200).items():
+            emit = _is_ratio_column(col_name)
+            for value in series.tolist():
+                tokens.update(_tokenize_cell_value(value, emit_ratio_percent=emit))
+    elif ctx.rows:
+        cols = list(getattr(ctx, "cols", None) or [])
+        for row in ctx.rows[:200]:
+            for idx, value in enumerate(row):
+                col_name = cols[idx] if idx < len(cols) else ""
+                tokens.update(
+                    _tokenize_cell_value(value, emit_ratio_percent=_is_ratio_column(col_name))
+                )
+    _add_aggregate_tokens(tokens, ctx)
+    _add_evidence_record_tokens(tokens, ctx)
+    _add_join_provenance_tokens(tokens, ctx)
+    return tokens
+
+
+@dataclass
+class GroundingComparison:
+    """Current-vs-candidate grounding decision for one answer (shadow harness)."""
+
+    current_passed: bool
+    candidate_passed: bool
+    current_ratio: float
+    candidate_ratio: float
+    threshold: float
+    answer_token_count: int
+    # Tokens matched under the CURRENT corpus but not the candidate — i.e. the
+    # percent tokens the tightening removes (the false-PASS surface).
+    divergent_tokens: List[str]
+
+    @property
+    def disagree(self) -> bool:
+        return self.current_passed != self.candidate_passed
+
+
+def compare_grounding_policies(envelope: SummaryEnvelope, ctx: QueryContext) -> GroundingComparison:
+    """Shadow-compare the current vs candidate grounding decision. Pure; no gating.
+
+    Mirrors :func:`_is_summary_grounded`'s token extraction and threshold, but
+    scores the answer against BOTH corpora so callers can log or review where the
+    two policies diverge before any cutover.
+    """
+    raw_policy = ctx.grounding_policy or GroundingPolicy.STRICT_NUMERIC
+    grounding_policy = getattr(raw_policy, "value", str(raw_policy))
+    claim_text = "\n".join(envelope.claims or [])
+    answer_tokens = _extract_number_tokens((envelope.answer or "") + "\n" + claim_text)
+    if grounding_policy == GroundingPolicy.NOT_APPLICABLE.value or not answer_tokens:
+        return GroundingComparison(True, True, 1.0, 1.0, 0.0, len(answer_tokens), [])
+
+    threshold = 0.7 if grounding_policy == GroundingPolicy.EVIDENCE_AWARE.value else 0.9
+    current_src = _build_grounding_tokens(ctx)
+    candidate_src = _build_grounding_tokens_candidate(ctx)
+    current_matched = {t for t in answer_tokens if t in current_src}
+    candidate_matched = {t for t in answer_tokens if t in candidate_src}
+    n = max(1, len(answer_tokens))
+    current_passed = bool(current_src) and len(current_matched) / n >= threshold
+    candidate_passed = bool(candidate_src) and len(candidate_matched) / n >= threshold
+    return GroundingComparison(
+        current_passed=current_passed,
+        candidate_passed=candidate_passed,
+        current_ratio=len(current_matched) / n,
+        candidate_ratio=len(candidate_matched) / n,
+        threshold=threshold,
+        answer_token_count=len(answer_tokens),
+        divergent_tokens=sorted(current_matched - candidate_matched),
+    )
+
+
+# Off by default: enabling GROUNDING_SHADOW_LOG makes the live gate additionally
+# log (never act on) candidate-vs-current disagreements over real traffic.
+_GROUNDING_SHADOW_LOG = os.getenv("GROUNDING_SHADOW_LOG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _maybe_log_grounding_shadow(envelope: SummaryEnvelope, ctx: QueryContext) -> None:
+    """Shadow-log where the candidate ratio-scoping policy would disagree with the
+    live grounding decision. Never changes the gate; see docs/architecture-audit.md
+    P1-7 for the disagreement-review cutover process.
+    """
+    if not _GROUNDING_SHADOW_LOG:
+        return
+    try:
+        comparison = compare_grounding_policies(envelope, ctx)
+    except Exception:  # pragma: no cover - shadow must never break the gate
+        return
+    if comparison.disagree:
+        log.warning(
+            "🕵️ grounding shadow DISAGREE: live_passed=%s candidate_passed=%s "
+            "(live_ratio=%.2f candidate_ratio=%.2f threshold=%.2f) removed_tokens=%s",
+            comparison.current_passed,
+            comparison.candidate_passed,
+            comparison.current_ratio,
+            comparison.candidate_ratio,
+            comparison.threshold,
+            comparison.divergent_tokens[:20],
+        )
+
+
 def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     # Fix D (2026-05-17): Q3 production trace 9b9b28b4 ran into a silent
     # threshold-comparison bug. ``GroundingPolicy(str, Enum)`` — in
@@ -410,6 +550,7 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
             grounding_policy,
             sorted(missing)[:20],
         )
+    _maybe_log_grounding_shadow(envelope, ctx)
     return passed
 
 
@@ -577,7 +718,7 @@ def _rounded_match_variants(token: str) -> List[str]:
     return variants
 
 
-def _tokenize_cell_value(value: Any) -> Set[str]:
+def _tokenize_cell_value(value: Any, *, emit_ratio_percent: bool = True) -> Set[str]:
     tokens = _extract_number_tokens(str(value))
     if value is None or isinstance(value, bool):
         return tokens
@@ -591,8 +732,10 @@ def _tokenize_cell_value(value: Any) -> Set[str]:
     # Support rounding and truncation for all numeric values
     # This ensures that raw data like 37.9913 can be matched by LLM-rounded "37.99" or "38"
 
-    # 1. Direct percentage support for ratio cells (abs <= 1)
-    if abs(numeric) <= 1:
+    # 1. Direct percentage support for ratio cells (abs <= 1). Gated by
+    # emit_ratio_percent so the grounding shadow harness can build a candidate
+    # corpus that scopes this x100 expansion to genuine ratio/share columns.
+    if emit_ratio_percent and abs(numeric) <= 1:
         percent_raw = numeric * Decimal("100")
         for val in [percent_raw, round(percent_raw, 1), round(percent_raw, 2)]:
             t = _normalize_number_token(str(val))

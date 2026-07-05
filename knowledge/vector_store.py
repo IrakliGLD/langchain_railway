@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from functools import lru_cache
@@ -18,6 +19,14 @@ from contracts.vector_knowledge import (
     VectorChunkRecord,
     VectorRetrievalFilters,
 )
+
+
+log = logging.getLogger("Enai")
+
+# Schema names are interpolated directly into SQL identifiers (identifiers
+# cannot be bound parameters), so constrain them to a bare SQL-identifier shape
+# as defence in depth even though the value is env-derived today.
+_SCHEMA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -198,14 +207,16 @@ _phase_b1_columns_present: Optional[bool] = None
 
 def _check_phase_b1_columns_present() -> bool:
     """Return True iff every Phase B.1 column exists on
-    ``knowledge.document_chunks``. Cached after the first call.
+    ``knowledge.document_chunks``.
 
-    Defaults to False on probe failure — safer to use the old SELECT
-    shape than to crash the whole retrieval path.
+    Only a positive result is cached. A negative or failed probe re-checks on
+    the next call, so a schema migration that lands after process start is
+    picked up without a restart (the old behaviour cached the first ``False``
+    forever, silently dropping B.1 columns for the process lifetime).
     """
     global _phase_b1_columns_present
-    if _phase_b1_columns_present is not None:
-        return _phase_b1_columns_present
+    if _phase_b1_columns_present:
+        return True
     try:
         with _resolve_engine().begin() as conn:
             rows = conn.execute(
@@ -221,38 +232,47 @@ def _check_phase_b1_columns_present() -> bool:
                 {"schema": VECTOR_KNOWLEDGE_SCHEMA, "names": list(_PHASE_B1_COLUMNS)},
             ).mappings().all()
         found = {row["column_name"] for row in rows}
-        _phase_b1_columns_present = all(col in found for col in _PHASE_B1_COLUMNS)
+        present = all(col in found for col in _PHASE_B1_COLUMNS)
     except Exception:
-        _phase_b1_columns_present = False
-    return _phase_b1_columns_present
+        # Probe failed (transient DB error, unexpected row shape, or schema not
+        # reachable yet): do not cache — retry on the next call so a migration
+        # that lands after startup is picked up without a restart.
+        return False
+    if present:
+        _phase_b1_columns_present = True
+    return present
 
 
-def _parse_outgoing_refs(raw: object) -> List[ChunkReference]:
+def _parse_outgoing_refs(raw: object, chunk_id: str = "") -> List[ChunkReference]:
     """Deserialise the ``outgoing_refs`` JSONB column into structured refs.
 
     Phase B.1: the column may be ``None`` (legacy rows pre-migration),
-    an empty list, or a list of dicts (post-Phase-B.2 ingest). Garbage
-    entries are silently skipped — the parser is the source of truth
-    for schema, but the store stays robust if anything else writes there.
+    an empty list, or a list of dicts (post-Phase-B.2 ingest). Malformed
+    entries are dropped rather than failing the whole row, but each drop is now
+    logged (with the owning ``chunk_id`` when known) so silent cross-reference
+    loss is visible; operator can re-run the backfill to repair them.
     """
     if not raw:
         return []
+    ref_id = chunk_id or "<unknown>"
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except (TypeError, ValueError):
+            log.warning("outgoing_refs JSON parse failed for chunk %s; dropping the column value.", ref_id)
             return []
     if not isinstance(raw, list):
+        log.warning("outgoing_refs for chunk %s is %s, expected list; dropping.", ref_id, type(raw).__name__)
         return []
     refs: List[ChunkReference] = []
     for entry in raw:
         if not isinstance(entry, dict):
+            log.warning("Skipping non-dict outgoing_refs entry for chunk %s: %r", ref_id, entry)
             continue
         try:
             refs.append(ChunkReference(**entry))
-        except (TypeError, ValueError):
-            # Drop malformed entries rather than failing the whole row;
-            # operator can re-run the backfill to repair them.
+        except (TypeError, ValueError) as exc:
+            log.warning("Dropping malformed outgoing_refs entry for chunk %s (%s): %r", ref_id, exc, entry)
             continue
     return refs
 
@@ -283,7 +303,7 @@ def _row_to_chunk_record(
         chapter_number=str(row.get("chapter_number") or ""),
         parent_chapter=str(row.get("parent_chapter") or ""),
         section_kind=str(row.get("section_kind") or ""),
-        outgoing_refs=_parse_outgoing_refs(row.get("outgoing_refs")),
+        outgoing_refs=_parse_outgoing_refs(row.get("outgoing_refs"), chunk_id=str(row.get("id") or "")),
         page_start=row.get("page_start"),
         page_end=row.get("page_end"),
         text_content=str(row.get("text_content") or ""),
@@ -582,6 +602,8 @@ class KnowledgeVectorStore:
     """SQL helpers for storing vectorized document chunks in Supabase Postgres."""
 
     def __init__(self, schema: str = VECTOR_KNOWLEDGE_SCHEMA) -> None:
+        if not _SCHEMA_IDENTIFIER_RE.match(schema):
+            raise ValueError(f"Invalid vector-knowledge schema identifier: {schema!r}")
         self.schema = schema
 
     def count_active_documents(self) -> int:

@@ -196,7 +196,11 @@ def main() -> int:
         "section_kind_totals": Counter[str](),
     }
     for path in md_files:
-        summary = _run_one_document(path, details=args.details)
+        try:
+            summary = _run_one_document(path, details=args.details)
+        except Exception as exc:  # noqa: BLE001 — one bad file must not abort the whole scan
+            print(f"\n=== {path.name}: ERROR ({type(exc).__name__}: {exc}) — skipped ===")
+            continue
         aggregate["total_chunks"] += summary.get("chunks", 0)
         aggregate["total_refs"] += summary.get("total_refs", 0)
         aggregate["refs_with_sub"] += summary.get("refs_with_sub", 0)

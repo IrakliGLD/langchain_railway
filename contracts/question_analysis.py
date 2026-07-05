@@ -6,9 +6,36 @@ from datetime import date
 from enum import Enum
 from typing import Annotated, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
-ISODate = Annotated[str, StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$")]
+
+def _validate_calendar_date(value: str) -> str:
+    """Reject well-formatted but impossible dates (e.g. ``2024-13-32``).
+
+    ``StringConstraints`` only checks the ``YYYY-MM-DD`` *shape*; this also
+    verifies the date is real so downstream SQL and date arithmetic can trust it
+    instead of failing later with an opaque error.
+    """
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid calendar date: {value!r}") from exc
+    return value
+
+
+ISODate = Annotated[
+    str,
+    StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    AfterValidator(_validate_calendar_date),
+]
 
 
 # Core enums describe the analyzer's language, routing, period, and metric vocabulary.

@@ -504,27 +504,30 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             )
 
         elif "UndefinedColumn" in msg:
-            # Retry once with configured column synonyms before surfacing the DB error.
-            fixed = False
+            # Retry once with configured column synonyms before surfacing the DB
+            # error. Apply *every* matching synonym in a single pass so a query
+            # that references two or more renamed columns is repaired in one
+            # retry instead of failing after only the first was corrected.
+            applied: list[str] = []
             for bad, good in COLUMN_SYNONYMS.items():
                 if re.search(rf"\b{bad}\b", safe_sql, flags=re.IGNORECASE):
                     safe_sql = re.sub(rf"\b{bad}\b", good, safe_sql, flags=re.IGNORECASE)
-                    log.warning(f"🔁 Auto-corrected column '{bad}' → '{good}' (retry)")
-                    ctx.safe_sql = safe_sql
-                    df, cols, rows, _ = execute_sql_safely(safe_sql)
-                    ctx.df = df
-                    ctx.cols = list(df.columns)
-                    ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
-                    stamp_provenance(
-                        ctx,
-                        ctx.cols,
-                        ctx.rows,
-                        source="sql",
-                        query_hash=sql_query_hash(ctx.safe_sql),
-                    )
-                    fixed = True
-                    break
-            if not fixed:
+                    applied.append(f"{bad}→{good}")
+            if applied:
+                log.warning("🔁 Auto-corrected columns %s (retry)", ", ".join(applied))
+                ctx.safe_sql = safe_sql
+                df, cols, rows, _ = execute_sql_safely(safe_sql)
+                ctx.df = df
+                ctx.cols = list(df.columns)
+                ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
+                stamp_provenance(
+                    ctx,
+                    ctx.cols,
+                    ctx.rows,
+                    source="sql",
+                    query_hash=sql_query_hash(ctx.safe_sql),
+                )
+            else:
                 log.exception("SQL execution failed (UndefinedColumn)")
                 raise
         else:
