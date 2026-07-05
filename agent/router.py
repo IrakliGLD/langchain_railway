@@ -172,7 +172,7 @@ def _build_semantic_invocation(
 
     if tool_name == "get_generation_mix":
         types = extract_generation_types(query_lower)
-        granularity = "yearly" if any(t in query_lower for t in ["yearly", "annual"]) else "monthly"
+        granularity = extract_granularity(query_lower)
         return ToolInvocation(
             name="get_generation_mix",
             params={
@@ -188,7 +188,7 @@ def _build_semantic_invocation(
 
     if tool_name == "get_prices":
         metric = extract_price_metric(query_lower)
-        granularity = "yearly" if any(t in query_lower for t in ["yearly", "annual"]) else "monthly"
+        granularity = extract_granularity(query_lower)
         return ToolInvocation(
             name="get_prices",
             params={
@@ -504,6 +504,17 @@ def extract_generation_types(query_lower: str) -> List[str]:
 
 
 # Main deterministic routing ladder: tariffs, composition, generation, prices, then semantic fallback.
+def extract_granularity(query_lower: str) -> str:
+    """Detect yearly vs monthly granularity from the query (multilingual).
+
+    Single authority for granularity detection so the deterministic router and its
+    semantic fallback agree (audit P1). Georgian/Russian yearly terms included.
+    """
+    if any(t in query_lower for t in ("yearly", "annual", "წლიურ", "год")):
+        return "yearly"
+    return "monthly"
+
+
 def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocation]:
     """Return a deterministic tool invocation when confidence is high."""
     q = query.lower().strip()
@@ -559,7 +570,7 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
     if has_generation and not has_tariff:
         types = extract_generation_types(q)
         mode = "share" if has_share else "quantity"
-        granularity = "yearly" if any(t in q for t in ["yearly", "annual", "წლიურ", "год"]) else "monthly"
+        granularity = extract_granularity(q)
         return ToolInvocation(
             name="get_generation_mix",
             params={
@@ -576,7 +587,7 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
     # 4) Prices
     if has_price and not has_tariff:
         metric = extract_price_metric(q)
-        granularity = "yearly" if any(t in q for t in ["yearly", "annual", "წლიურ", "год"]) else "monthly"
+        granularity = extract_granularity(q)
         return ToolInvocation(
             name="get_prices",
             params={
