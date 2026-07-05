@@ -1,5 +1,5 @@
 """
-Integration-style tests for pipeline behavior when Phase 4 agent loop is enabled.
+Integration-style tests for the pipeline's generate-plan/SQL fallback path and stage timings.
 """
 import os
 from typing import Any
@@ -51,97 +51,6 @@ def _minimal_df():
         "p_bal_usd": [10.0],
     })
     return df, list(df.columns), [tuple(r) for r in df.itertuples(index=False, name=None)]
-
-
-def test_pipeline_uses_agent_data_exit_and_skips_legacy_sql(monkeypatch):
-    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
-    monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: ctx)
-    monkeypatch.setattr(pipeline, "match_tool", lambda _query: None)
-
-    def _agent_data_exit(ctx):
-        df, cols, rows = _minimal_df()
-        ctx.agent_outcome = "data_exit"
-        ctx.used_tool = True
-        ctx.tool_name = "get_prices"
-        ctx.df = df
-        ctx.cols = cols
-        ctx.rows = rows
-        return ctx
-
-    monkeypatch.setattr(pipeline.orchestrator, "run_agent_loop", _agent_data_exit)
-    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda _ctx: (_ for _ in ()).throw(AssertionError("legacy planner should not run")))
-    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", lambda _ctx: (_ for _ in ()).throw(AssertionError("legacy SQL should not run")))
-    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
-    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "ok") or ctx)
-    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: setattr(ctx, "chart_type", "line") or ctx)
-
-    out = pipeline.process_query("Show balancing price trend")
-    assert out.agent_outcome == "data_exit"
-    assert out.summary == "ok"
-    assert out.chart_type == "line"
-
-
-def test_pipeline_agent_fallback_runs_legacy_path(monkeypatch):
-    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
-    monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: ctx)
-    monkeypatch.setattr(pipeline, "match_tool", lambda _query: None)
-
-    def _agent_fallback(ctx):
-        ctx.agent_outcome = "fallback_exit"
-        ctx.used_tool = False
-        ctx.agent_fallback_reason = "agent_max_rounds_exceeded"
-        return ctx
-
-    planner_called = {"value": False}
-    sql_called = {"value": False}
-
-    def _planner(ctx):
-        planner_called["value"] = True
-        ctx.is_conceptual = False
-        ctx.skip_sql = False
-        return ctx
-
-    def _sql(ctx):
-        sql_called["value"] = True
-        df, cols, rows = _minimal_df()
-        ctx.df = df
-        ctx.cols = cols
-        ctx.rows = rows
-        return ctx
-
-    monkeypatch.setattr(pipeline.orchestrator, "run_agent_loop", _agent_fallback)
-    monkeypatch.setattr(pipeline.planner, "generate_plan", _planner)
-    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", _sql)
-    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
-    monkeypatch.setattr(pipeline.summarizer, "summarize_data", lambda ctx: setattr(ctx, "summary", "fallback-ok") or ctx)
-    monkeypatch.setattr(pipeline.chart_pipeline, "build_chart", lambda ctx: ctx)
-
-    out = pipeline.process_query("Need analysis")
-    assert planner_called["value"] is True
-    assert sql_called["value"] is True
-    assert out.summary == "fallback-ok"
-
-
-def test_pipeline_returns_on_agent_conceptual_exit(monkeypatch):
-    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
-    monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: ctx)
-    monkeypatch.setattr(pipeline, "match_tool", lambda _query: None)
-
-    def _agent_conceptual(ctx):
-        ctx.agent_outcome = "conceptual_exit"
-        ctx.is_conceptual = True
-        ctx.summary = "Conceptual answer"
-        return ctx
-
-    monkeypatch.setattr(pipeline.orchestrator, "run_agent_loop", _agent_conceptual)
-    monkeypatch.setattr(pipeline.planner, "generate_plan", lambda _ctx: (_ for _ in ()).throw(AssertionError("legacy planner should not run")))
-
-    out = pipeline.process_query("Did prices go up?")
-    assert out.agent_outcome == "conceptual_exit"
-    assert out.summary == "Conceptual answer"
 
 
 def test_pipeline_records_stage_timings(monkeypatch):

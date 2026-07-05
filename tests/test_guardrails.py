@@ -2643,10 +2643,6 @@ def test_unresolved_analyzer_entities_skip_agent_loop_and_use_planner_path(monke
     )
     monkeypatch.setattr(pipeline, "match_tool", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        pipeline.orchestrator, "run_agent_loop",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run after analyzer tool build failure")),
-    )
-    monkeypatch.setattr(
         pipeline.planner, "generate_plan",
         lambda ctx, **_kw: setattr(ctx, "plan", {"intent": "data"}) or ctx,
     )
@@ -2716,10 +2712,6 @@ def test_analyzer_build_failure_can_recover_via_resolved_query_match(monkeypatch
             ["date", "p_bal_gel"],
             [("2022-02-01", 195.8)],
         ),
-    )
-    monkeypatch.setattr(
-        pipeline.orchestrator, "run_agent_loop",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run when resolved-query recovery succeeds")),
     )
     monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
     monkeypatch.setattr(
@@ -2839,10 +2831,6 @@ def test_authoritative_question_analysis_skips_agent_loop_and_uses_planner_sql(m
         lambda ctx: setattr(ctx, "question_analysis", expected) or setattr(ctx, "question_analysis_source", "llm_active") or ctx,
     )
     monkeypatch.setattr(
-        pipeline.orchestrator, "run_agent_loop",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run when Stage 0.2 is authoritative")),
-    )
-    monkeypatch.setattr(
         pipeline.planner, "generate_plan",
         lambda ctx, **_kw: setattr(ctx, "plan", {"intent": expected.classification.intent, "target": "p_bal_gel", "period": ""})
         or setattr(ctx, "raw_sql", "SELECT 1")
@@ -2923,10 +2911,6 @@ def test_resolved_query_recovery_validates_relevance_against_canonical_query(mon
             [("2022-02-01", 195.8)],
         ),
     )
-    monkeypatch.setattr(
-        pipeline.orchestrator, "run_agent_loop",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run when resolved-query recovery succeeds")),
-    )
     monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
     monkeypatch.setattr(
         pipeline.summarizer, "summarize_data",
@@ -2971,10 +2955,6 @@ def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypa
     monkeypatch.setattr(
         pipeline, "match_tool",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("match_tool must not run for clarify policy")),
-    )
-    monkeypatch.setattr(
-        pipeline.orchestrator, "run_agent_loop",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("agent loop must not run for clarify policy")),
     )
 
     out = pipeline.process_query("How will electricity prices change according to the target model?")
