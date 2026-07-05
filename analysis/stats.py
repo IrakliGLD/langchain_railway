@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.system_quantities import normalize_period_series_with_granularity
+from config import SUMMER_MONTHS
 
 log = logging.getLogger("Enai")
 
@@ -196,7 +197,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                 # --- Seasonal split (Summer vs Winter) with CAGR ---
                 try:
                     df['month'] = df[time_col].dt.month
-                    summer_mask = df['month'].isin([4, 5, 6, 7])
+                    summer_mask = df['month'].isin(SUMMER_MONTHS)
                     winter_mask = ~summer_mask
 
                     def seasonal_avg(df_season, col, year):

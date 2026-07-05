@@ -151,7 +151,7 @@ def _get_engine():
     # Previously this created an independent pool (pool_size=5, max_overflow=2)
     # which, combined with the main engine's pool, could exceed PgBouncer limits
     # and cause cascading ConnectionTimeout errors across all pipeline stages.
-    from core.query_executor import ENGINE as _main_engine
+    from core.db import ENGINE as _main_engine
     return _main_engine
 
 

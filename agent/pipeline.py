@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 
 import pandas as pd
 from sqlalchemy import text
@@ -1973,6 +1974,435 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _finalize_answer_kind(ctx: QueryContext) -> None:
+    """Cross-check + finalize answer_kind/render_style and effective_answer_kind.
+
+    Extracted verbatim from process_query (audit P0-4a). Pure ctx mutation; no
+    early return.
+    """
+    # --- answer_kind cross-check (before Stage 0.3 so we can skip retrieval) ---
+    _cross_check_answer_kind(ctx)
+    if ctx.has_authoritative_question_analysis:
+        qa = ctx.question_analysis
+        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
+        if qa.answer_kind is None:
+            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
+        # Override: scenario-family derived metrics signal SCENARIO when the
+        # LLM misclassified a scenario query as data_explanation or similar.
+        # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
+        # are never overridden — they represent a deliberate shape choice.
+        #
+        # Gated on a quantitative anchor in the user query: see comment near
+        # ``_QUANTITATIVE_ANCHOR_RE``.  Without an anchor, the analyzer is
+        # likely hallucinating ``scenario_factor`` (production log 2026-05-13);
+        # we stay on the narrative path instead of computing a garbage number.
+        if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
+            derived = qa.analysis_requirements.derived_metrics or []
+            has_scenario_metric = any(
+                m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
+            )
+            if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
+                metrics.log_analyzer_cross_check("scenario_override_applied")
+                log.info(
+                    "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
+                    qa.answer_kind.value if qa.answer_kind else None,
+                )
+                qa.answer_kind = AnswerKind.SCENARIO
+            elif has_scenario_metric:
+                metrics.log_analyzer_cross_check("scenario_override_gated")
+                log.info(
+                    "answer_kind override suppressed: scenario derived metrics present "
+                    "but no quantitative anchor in query (kind=%s, query=%.80s)",
+                    qa.answer_kind.value if qa.answer_kind else None,
+                    ctx.query,
+                )
+        # Fallback: if LLM did not emit render_style, default to narrative (safer).
+        if qa.render_style is None:
+            qa.render_style = RenderStyle.NARRATIVE
+        log.info(
+            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
+            qa.answer_kind.value if qa.answer_kind else None,
+            qa.render_style.value if qa.render_style else None,
+            qa.grouping.value if qa.grouping else None,
+            qa.entity_scope,
+            ctx.query,
+        )
+
+    # Populate ctx.effective_answer_kind once so Stage 3 enrichment dispatch
+    # works whether the analyzer was authoritative, shadow, or failed.  This
+    # restores forecast/why/share behaviors on analyzer failure (F1).
+    ctx.effective_answer_kind = _resolve_effective_answer_kind(ctx)
+
+
+def _resolve_vector_tier(ctx: QueryContext) -> "VectorRetrievalTier":
+    """Resolve + record the 3-tier vector-retrieval policy for this query.
+
+    Extracted verbatim from process_query (audit P0-4a). Sets
+    ctx.vector_retrieval_tier and returns the tier for local use by Stage 0.3.
+    """
+    # Three-tier vector retrieval policy (Phase D):
+    #   FULL  → knowledge / explanation answers that consume passages directly
+    #   LIGHT → narrative data answers that sprinkle in background
+    #   SKIP  → deterministic data paths, clarify, etc.
+    _qa_for_tier = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
+    _candidate_topic_names = (
+        [tc.name for tc in (_qa_for_tier.knowledge.candidate_topics or [])]
+        if _qa_for_tier is not None
+        else None
+    )
+    _retrieval_tier = _resolve_vector_retrieval_tier(
+        answer_kind=ctx.effective_answer_kind,
+        render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
+        is_conceptual=bool(ctx.is_conceptual),
+        topics=_candidate_topic_names,
+    )
+    ctx.vector_retrieval_tier = _retrieval_tier
+    if _retrieval_tier == VectorRetrievalTier.SKIP:
+        log.info(
+            "Skipping vector retrieval: tier=SKIP (answer_kind=%s render_style=%s)",
+            getattr(ctx.effective_answer_kind, "value", None),
+            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
+        )
+    elif _retrieval_tier == VectorRetrievalTier.LIGHT:
+        log.info(
+            "Vector retrieval: tier=LIGHT (answer_kind=%s render_style=%s)",
+            getattr(ctx.effective_answer_kind, "value", None),
+            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
+        )
+    return _retrieval_tier
+
+
+def _apply_response_mode(ctx: QueryContext) -> None:
+    """Derive + record response_mode/resolution_policy and policy-blocked flags.
+
+    Extracted verbatim from process_query (audit P0-4a). Pure ctx mutation; no
+    early return.
+    """
+    # --- Derive response_mode (single source of truth for answer mode) ---
+    ctx.response_mode = _derive_response_mode(ctx)
+    ctx.resolution_policy = _derive_resolution_policy(ctx)
+    ctx.requested_derived_metrics = _requested_derived_metric_names(ctx)
+    # Keep is_conceptual in sync for backward compatibility with stages that
+    # still read it, but no stage should ever re-derive this independently.
+    ctx.is_conceptual = ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY
+    log.info(
+        "Response mode derived: %s | resolution_policy=%s",
+        ctx.response_mode,
+        ctx.resolution_policy,
+    )
+
+    # Set policy-blocked flags for observability before the short-circuit return.
+    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY or ctx.resolution_policy == ResolutionPolicy.CLARIFY:
+        if ENABLE_TYPED_TOOLS:
+            ctx.tool_blocked_by_policy = True
+        if ENABLE_AGENT_LOOP:
+            ctx.agent_loop_blocked_by_policy = True
+
+    trace_detail(
+        log, ctx, "response_mode_derivation", "result",
+        response_mode=ctx.response_mode,
+        resolution_policy=ctx.resolution_policy,
+        is_conceptual=ctx.is_conceptual,
+        tool_blocked_by_policy=ctx.tool_blocked_by_policy,
+        agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
+        clarify_reason=ctx.clarify_reason,
+        requested_derived_metrics=list(ctx.requested_derived_metrics or []),
+        analyzer_available=ctx.question_analysis is not None,
+        analyzer_source=ctx.question_analysis_source,
+        semantic_locked=ctx.semantic_locked,
+    )
+
+
+def _run_vector_knowledge_stage(
+    ctx: QueryContext, _retrieval_tier: "VectorRetrievalTier", routing_query: str
+) -> None:
+    """Stage 0.3 - vector-backed knowledge retrieval (shadow/active).
+
+    No-op when the feature is disabled or the tier is SKIP. Extracted from
+    process_query (audit P0-4b); uses the module-level _emit_trace_stage rather
+    than the process_query-local _trace_stage closure.
+    """
+    # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
+    if (
+        (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS)
+        and _retrieval_tier != VectorRetrievalTier.SKIP
+    ):
+        t_stage = time.time()
+        retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
+        bundle = retrieve_vector_knowledge(
+            routing_query,
+            retrieval_mode=(
+                VectorKnowledgeMode.active
+                if ENABLE_VECTOR_KNOWLEDGE_HINTS
+                else VectorKnowledgeMode.shadow
+            ),
+            question_analysis=ctx.question_analysis,
+            tier=_retrieval_tier,
+        )
+        ctx.vector_knowledge = bundle
+        ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
+        ctx.vector_knowledge_error = bundle.error
+
+        # Cross-notify circuit breaker on DB-layer failures from vector store.
+        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
+        # may surface "OperationalError" with varied messages like "timeout expired",
+        # "connection timed out", "could not connect", etc.
+        if bundle.error:
+            _err_lower = str(bundle.error).lower()
+            _is_db_failure = any(kw in _err_lower for kw in (
+                "connectiontimeout", "operationalerror", "timeout",
+                "could not connect", "connection refused", "connection reset",
+            ))
+            if _is_db_failure:
+                from utils.resilience import db_circuit_breaker
+                db_circuit_breaker.record_failure()
+                log.warning(
+                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
+                    db_circuit_breaker._failure_count,
+                    db_circuit_breaker.failure_threshold,
+                    bundle.error,
+                )
+
+        packed_vector_knowledge = (
+            pack_vector_knowledge_for_prompt(bundle)
+            if not bundle.error
+            else None
+        )
+        ctx.vector_knowledge_prompt = (
+            packed_vector_knowledge.prompt
+            if packed_vector_knowledge is not None
+            else ""
+        )
+        top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
+        top_sections = [
+            f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
+            for chunk in bundle.chunks[:3]
+        ]
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_3_vector_knowledge",
+            "validated",
+            mode=retrieval_mode,
+            tier=_retrieval_tier.value,
+            chunk_count=bundle.chunk_count,
+            strategy=bundle.strategy.value,
+            preferred_topics=bundle.filters.preferred_topics,
+            top_sources=top_sources,
+            top_sections=top_sections,
+            packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
+            packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
+            packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
+            error=bundle.error,
+        )
+        _emit_trace_stage(
+            ctx,
+            "stage_0_3_vector_knowledge",
+            t_stage,
+            mode=retrieval_mode,
+            tier=_retrieval_tier.value,
+            chunk_count=bundle.chunk_count,
+            error=bool(bundle.error),
+            strategy=bundle.strategy.value,
+        )
+        # Phase A.2: adjacency observability. When
+        # ``VECTOR_ADJACENCY_MODE != "off"``, the bundle carries any
+        # adjacent chunks the retriever fetched. Emit a separate trace
+        # event so the hit rate is visible in production logs without
+        # changing the prompt content (A.3 owns the pack cutover).
+        if bundle.adjacent_chunks:
+            from knowledge.vector_retrieval import get_adjacency_mode
+
+            _adj_sections = [
+                f"{c.document_title or c.source_key} | "
+                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
+                for c in bundle.adjacent_chunks[:6]
+            ]
+            # Estimate the pack cost an A.3 cutover would incur — text + header.
+            _adj_packed_chars = sum(
+                len(c.text_content or "") + 80 for c in bundle.adjacent_chunks
+            )
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_adjacency",
+                "validated",
+                adjacency_mode=get_adjacency_mode(),
+                adjacent_chunk_count=len(bundle.adjacent_chunks),
+                adjacent_sections=_adj_sections,
+                would_be_packed_chars=_adj_packed_chars,
+            )
+
+        # Phase B.3: reference-expansion observability. Same shadow pattern
+        # as adjacency — emit the resolved-chunk metadata so the operator
+        # can observe hit rate before flipping to "on" in B.4.
+        if bundle.reference_chunks:
+            from knowledge.vector_retrieval import get_reference_expansion_mode
+
+            _ref_sections = [
+                f"{c.document_title or c.source_key} | "
+                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
+                for c in bundle.reference_chunks[:6]
+            ]
+            _ref_packed_chars = sum(
+                len(c.text_content or "") + 80 for c in bundle.reference_chunks
+            )
+            # Also surface the union of outgoing-ref article numbers across
+            # the primary set, so an operator can spot when the resolver
+            # silently dropped refs (e.g. budget cap, missing target).
+            _attempted_article_numbers: set[str] = set()
+            for c in bundle.chunks:
+                for ref in c.outgoing_refs or []:
+                    kind_value = getattr(ref.kind, "value", str(ref.kind or ""))
+                    if kind_value == "article":
+                        num = str(ref.number or "").strip()
+                        if num:
+                            _attempted_article_numbers.add(num)
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_references",
+                "validated",
+                reference_mode=get_reference_expansion_mode(),
+                reference_chunk_count=len(bundle.reference_chunks),
+                reference_sections=_ref_sections,
+                attempted_article_numbers=sorted(_attempted_article_numbers),
+                would_be_packed_chars=_ref_packed_chars,
+            )
+
+
+@dataclass
+class StageResult:
+    """Outcome of a process_query stage that may short-circuit the pipeline.
+
+    ``ctx`` is the (possibly replaced) context to continue with. ``terminal``
+    True means process_query should return ``ctx`` immediately because an early
+    answer (clarify / conceptual / agent-exit) was produced. (audit P0-4c)
+    """
+    ctx: QueryContext
+    terminal: bool = False
+
+
+def _early_answer_clarify(ctx: QueryContext) -> StageResult:
+    """Produce the clarify answer when resolution policy is CLARIFY (terminal).
+
+    Extracted from process_query (audit P0-4c). Non-CLARIFY policies pass through
+    unchanged (terminal=False). Uses the module-level _emit_trace_stage.
+    """
+    if ctx.resolution_policy != ResolutionPolicy.CLARIFY:
+        return StageResult(ctx, terminal=False)
+    if not ctx.clarify_reason:
+        if (
+            ctx.has_authoritative_question_analysis
+            and ctx.question_analysis.routing.preferred_path == PreferredPath.REJECT
+        ):
+            ctx.clarify_reason = "request_not_supported_as_phrased"
+        else:
+            ctx.clarify_reason = "analyzer_preferred_path_clarify"
+    t_stage = time.time()
+    ctx = summarizer.answer_clarify(ctx)
+    _emit_trace_stage(ctx, "stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
+    return StageResult(ctx, terminal=True)
+
+
+def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
+    """Produce the conceptual answer when response mode is KNOWLEDGE_PRIMARY (terminal).
+
+    Extracted from process_query (audit P0-4c). Other response modes pass through
+    unchanged (terminal=False). Uses the module-level _emit_trace_stage.
+    """
+    if ctx.response_mode != ResponseMode.KNOWLEDGE_PRIMARY:
+        return StageResult(ctx, terminal=False)
+    t_stage = time.time()
+    ctx = summarizer.answer_conceptual(ctx)
+    _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+    return StageResult(ctx, terminal=True)
+
+
+def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
+    """Legacy fallback: generate + execute SQL (or short-circuit to a conceptual answer).
+
+    Extracted from process_query (audit P0-4d). terminal=True when a conceptual answer
+    was produced (is_conceptual / skip_sql); otherwise SQL ran (or a tool already did)
+    and the pipeline continues. Uses the module-level _emit_trace_stage.
+    """
+    # Final legacy fallback: generate SQL, execute it, then continue through analysis/summarization.
+    if not ctx.used_tool:
+        if ctx.tool_fallback_reason:
+            metrics.log_tool_fallback_intent(ctx.query, f"tool_fallback:{ctx.tool_fallback_reason}")
+        t_stage = time.time()
+        ctx = planner.generate_plan(ctx)
+        _emit_trace_stage(ctx, "stage_1_generate_plan", t_stage, conceptual=ctx.is_conceptual, skip_sql=ctx.skip_sql)
+        log.info("Stage 1 complete | conceptual=%s | skip_sql=%s", ctx.is_conceptual, ctx.skip_sql)
+
+        if ctx.is_conceptual or ctx.skip_sql:
+            if ctx.skip_sql and not ctx.is_conceptual:
+                log.info("Skipping SQL path: %s", ctx.skip_sql_reason)
+            t_stage = time.time()
+            ctx = summarizer.answer_conceptual(ctx)
+            _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+            return StageResult(ctx, terminal=True)
+
+        t_stage = time.time()
+        ctx = sql_executor.validate_and_execute(ctx)
+        _emit_trace_stage(ctx, "stage_2_sql_execute", t_stage, rows=len(ctx.rows), cols=len(ctx.cols))
+        log.info("Stage 2 complete | rows=%s | cols=%s", len(ctx.rows), len(ctx.cols))
+        if ctx.skip_sql:
+            log.info("Stage 2 blocked by policy: %s", ctx.skip_sql_reason)
+            t_stage = time.time()
+            ctx = summarizer.answer_conceptual(ctx)
+            _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+            return StageResult(ctx, terminal=True)
+    else:
+        log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
+    return StageResult(ctx, terminal=False)
+
+
+def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
+    """Block data summarization when requested derived evidence is missing.
+
+    Extracted from process_query (audit P0-4d). terminal=True only when there is no
+    partial evidence and we must clarify; partial-evidence and not-blocked both pass
+    through. Uses the module-level _emit_trace_stage.
+    """
+    if _should_block_data_summary_for_missing_evidence(ctx):
+        # If some evidence was materialized, allow Stage 4 with partial data
+        # rather than forcing a clarification that discards all available context.
+        if ctx.analysis_evidence:
+            log.info(
+                "Partial evidence available (%d records); proceeding to Stage 4 "
+                "despite missing: %s",
+                len(ctx.analysis_evidence), ctx.missing_evidence_for_metrics,
+            )
+            ctx.data_summary_blocked_reason = (
+                "partial_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+            )
+            # Fall through to Stage 4 summarize_data below
+        else:
+            ctx.resolution_policy = ResolutionPolicy.CLARIFY
+            ctx.clarify_reason = "missing_requested_analysis_evidence"
+            ctx.data_summary_blocked_reason = (
+                "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
+            )
+            ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
+            ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
+            log.info(
+                "Blocking data summarization due to missing derived evidence: %s",
+                ctx.missing_evidence_for_metrics,
+            )
+            t_stage = time.time()
+            ctx = summarizer.answer_clarify(ctx)
+            _emit_trace_stage(
+                ctx,
+                "stage_4_clarify_summary",
+                t_stage,
+                reason=ctx.clarify_reason,
+                missing_evidence=",".join(ctx.missing_evidence_for_metrics),
+            )
+            return StageResult(ctx, terminal=True)
+    return StageResult(ctx, terminal=False)
+
+
 def process_query(
     query: str,
     conversation_history=None,
@@ -2059,289 +2489,23 @@ def process_query(
     if routing_query_source == "llm_active_canonical":
         ctx.semantic_locked = True
 
-    # --- answer_kind cross-check (before Stage 0.3 so we can skip retrieval) ---
-    _cross_check_answer_kind(ctx)
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        # Fallback: if LLM did not emit answer_kind, derive it from query_type.
-        if qa.answer_kind is None:
-            qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
-        # Override: scenario-family derived metrics signal SCENARIO when the
-        # LLM misclassified a scenario query as data_explanation or similar.
-        # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
-        # are never overridden — they represent a deliberate shape choice.
-        #
-        # Gated on a quantitative anchor in the user query: see comment near
-        # ``_QUANTITATIVE_ANCHOR_RE``.  Without an anchor, the analyzer is
-        # likely hallucinating ``scenario_factor`` (production log 2026-05-13);
-        # we stay on the narrative path instead of computing a garbage number.
-        if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
-            derived = qa.analysis_requirements.derived_metrics or []
-            has_scenario_metric = any(
-                m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
-            )
-            if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
-                metrics.log_analyzer_cross_check("scenario_override_applied")
-                log.info(
-                    "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
-                    qa.answer_kind.value if qa.answer_kind else None,
-                )
-                qa.answer_kind = AnswerKind.SCENARIO
-            elif has_scenario_metric:
-                metrics.log_analyzer_cross_check("scenario_override_gated")
-                log.info(
-                    "answer_kind override suppressed: scenario derived metrics present "
-                    "but no quantitative anchor in query (kind=%s, query=%.80s)",
-                    qa.answer_kind.value if qa.answer_kind else None,
-                    ctx.query,
-                )
-        # Fallback: if LLM did not emit render_style, default to narrative (safer).
-        if qa.render_style is None:
-            qa.render_style = RenderStyle.NARRATIVE
-        log.info(
-            "answer_kind=%s render_style=%s grouping=%s entity_scope=%s (query=%.80s)",
-            qa.answer_kind.value if qa.answer_kind else None,
-            qa.render_style.value if qa.render_style else None,
-            qa.grouping.value if qa.grouping else None,
-            qa.entity_scope,
-            ctx.query,
-        )
+    _finalize_answer_kind(ctx)
 
-    # Populate ctx.effective_answer_kind once so Stage 3 enrichment dispatch
-    # works whether the analyzer was authoritative, shadow, or failed.  This
-    # restores forecast/why/share behaviors on analyzer failure (F1).
-    ctx.effective_answer_kind = _resolve_effective_answer_kind(ctx)
+    _retrieval_tier = _resolve_vector_tier(ctx)
 
-    # Three-tier vector retrieval policy (Phase D):
-    #   FULL  → knowledge / explanation answers that consume passages directly
-    #   LIGHT → narrative data answers that sprinkle in background
-    #   SKIP  → deterministic data paths, clarify, etc.
-    _qa_for_tier = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
-    _candidate_topic_names = (
-        [tc.name for tc in (_qa_for_tier.knowledge.candidate_topics or [])]
-        if _qa_for_tier is not None
-        else None
-    )
-    _retrieval_tier = _resolve_vector_retrieval_tier(
-        answer_kind=ctx.effective_answer_kind,
-        render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
-        is_conceptual=bool(ctx.is_conceptual),
-        topics=_candidate_topic_names,
-    )
-    ctx.vector_retrieval_tier = _retrieval_tier
-    if _retrieval_tier == VectorRetrievalTier.SKIP:
-        log.info(
-            "Skipping vector retrieval: tier=SKIP (answer_kind=%s render_style=%s)",
-            getattr(ctx.effective_answer_kind, "value", None),
-            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
-        )
-    elif _retrieval_tier == VectorRetrievalTier.LIGHT:
-        log.info(
-            "Vector retrieval: tier=LIGHT (answer_kind=%s render_style=%s)",
-            getattr(ctx.effective_answer_kind, "value", None),
-            getattr(_qa_for_tier.render_style, "value", None) if _qa_for_tier is not None else None,
-        )
+    _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
 
-    # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
-    if (
-        (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS)
-        and _retrieval_tier != VectorRetrievalTier.SKIP
-    ):
-        t_stage = time.time()
-        retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
-        bundle = retrieve_vector_knowledge(
-            routing_query,
-            retrieval_mode=(
-                VectorKnowledgeMode.active
-                if ENABLE_VECTOR_KNOWLEDGE_HINTS
-                else VectorKnowledgeMode.shadow
-            ),
-            question_analysis=ctx.question_analysis,
-            tier=_retrieval_tier,
-        )
-        ctx.vector_knowledge = bundle
-        ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
-        ctx.vector_knowledge_error = bundle.error
+    _apply_response_mode(ctx)
 
-        # Cross-notify circuit breaker on DB-layer failures from vector store.
-        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
-        # may surface "OperationalError" with varied messages like "timeout expired",
-        # "connection timed out", "could not connect", etc.
-        if bundle.error:
-            _err_lower = str(bundle.error).lower()
-            _is_db_failure = any(kw in _err_lower for kw in (
-                "connectiontimeout", "operationalerror", "timeout",
-                "could not connect", "connection refused", "connection reset",
-            ))
-            if _is_db_failure:
-                from utils.resilience import db_circuit_breaker
-                db_circuit_breaker.record_failure()
-                log.warning(
-                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
-                    db_circuit_breaker._failure_count,
-                    db_circuit_breaker.failure_threshold,
-                    bundle.error,
-                )
-
-        packed_vector_knowledge = (
-            pack_vector_knowledge_for_prompt(bundle)
-            if not bundle.error
-            else None
-        )
-        ctx.vector_knowledge_prompt = (
-            packed_vector_knowledge.prompt
-            if packed_vector_knowledge is not None
-            else ""
-        )
-        top_sources = [chunk.document_title or chunk.source_key for chunk in bundle.chunks[:3]]
-        top_sections = [
-            f"{chunk.document_title or chunk.source_key} | {chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
-            for chunk in bundle.chunks[:3]
-        ]
-        trace_detail(
-            log,
-            ctx,
-            "stage_0_3_vector_knowledge",
-            "validated",
-            mode=retrieval_mode,
-            tier=_retrieval_tier.value,
-            chunk_count=bundle.chunk_count,
-            strategy=bundle.strategy.value,
-            preferred_topics=bundle.filters.preferred_topics,
-            top_sources=top_sources,
-            top_sections=top_sections,
-            packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
-            packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
-            packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
-            error=bundle.error,
-        )
-        _trace_stage(
-            "stage_0_3_vector_knowledge",
-            t_stage,
-            mode=retrieval_mode,
-            tier=_retrieval_tier.value,
-            chunk_count=bundle.chunk_count,
-            error=bool(bundle.error),
-            strategy=bundle.strategy.value,
-        )
-        # Phase A.2: adjacency observability. When
-        # ``VECTOR_ADJACENCY_MODE != "off"``, the bundle carries any
-        # adjacent chunks the retriever fetched. Emit a separate trace
-        # event so the hit rate is visible in production logs without
-        # changing the prompt content (A.3 owns the pack cutover).
-        if bundle.adjacent_chunks:
-            from knowledge.vector_retrieval import get_adjacency_mode
-
-            _adj_sections = [
-                f"{c.document_title or c.source_key} | "
-                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
-                for c in bundle.adjacent_chunks[:6]
-            ]
-            # Estimate the pack cost an A.3 cutover would incur — text + header.
-            _adj_packed_chars = sum(
-                len(c.text_content or "") + 80 for c in bundle.adjacent_chunks
-            )
-            trace_detail(
-                log,
-                ctx,
-                "stage_0_3_vector_knowledge_adjacency",
-                "validated",
-                adjacency_mode=get_adjacency_mode(),
-                adjacent_chunk_count=len(bundle.adjacent_chunks),
-                adjacent_sections=_adj_sections,
-                would_be_packed_chars=_adj_packed_chars,
-            )
-
-        # Phase B.3: reference-expansion observability. Same shadow pattern
-        # as adjacency — emit the resolved-chunk metadata so the operator
-        # can observe hit rate before flipping to "on" in B.4.
-        if bundle.reference_chunks:
-            from knowledge.vector_retrieval import get_reference_expansion_mode
-
-            _ref_sections = [
-                f"{c.document_title or c.source_key} | "
-                f"{c.section_title or c.section_path or f'chunk_{c.chunk_index}'}"
-                for c in bundle.reference_chunks[:6]
-            ]
-            _ref_packed_chars = sum(
-                len(c.text_content or "") + 80 for c in bundle.reference_chunks
-            )
-            # Also surface the union of outgoing-ref article numbers across
-            # the primary set, so an operator can spot when the resolver
-            # silently dropped refs (e.g. budget cap, missing target).
-            _attempted_article_numbers: set[str] = set()
-            for c in bundle.chunks:
-                for ref in c.outgoing_refs or []:
-                    kind_value = getattr(ref.kind, "value", str(ref.kind or ""))
-                    if kind_value == "article":
-                        num = str(ref.number or "").strip()
-                        if num:
-                            _attempted_article_numbers.add(num)
-            trace_detail(
-                log,
-                ctx,
-                "stage_0_3_vector_knowledge_references",
-                "validated",
-                reference_mode=get_reference_expansion_mode(),
-                reference_chunk_count=len(bundle.reference_chunks),
-                reference_sections=_ref_sections,
-                attempted_article_numbers=sorted(_attempted_article_numbers),
-                would_be_packed_chars=_ref_packed_chars,
-            )
-
-    # --- Derive response_mode (single source of truth for answer mode) ---
-    ctx.response_mode = _derive_response_mode(ctx)
-    ctx.resolution_policy = _derive_resolution_policy(ctx)
-    ctx.requested_derived_metrics = _requested_derived_metric_names(ctx)
-    # Keep is_conceptual in sync for backward compatibility with stages that
-    # still read it, but no stage should ever re-derive this independently.
-    ctx.is_conceptual = ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY
-    log.info(
-        "Response mode derived: %s | resolution_policy=%s",
-        ctx.response_mode,
-        ctx.resolution_policy,
-    )
-
-    # Set policy-blocked flags for observability before the short-circuit return.
-    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY or ctx.resolution_policy == ResolutionPolicy.CLARIFY:
-        if ENABLE_TYPED_TOOLS:
-            ctx.tool_blocked_by_policy = True
-        if ENABLE_AGENT_LOOP:
-            ctx.agent_loop_blocked_by_policy = True
-
-    trace_detail(
-        log, ctx, "response_mode_derivation", "result",
-        response_mode=ctx.response_mode,
-        resolution_policy=ctx.resolution_policy,
-        is_conceptual=ctx.is_conceptual,
-        tool_blocked_by_policy=ctx.tool_blocked_by_policy,
-        agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
-        clarify_reason=ctx.clarify_reason,
-        requested_derived_metrics=list(ctx.requested_derived_metrics or []),
-        analyzer_available=ctx.question_analysis is not None,
-        analyzer_source=ctx.question_analysis_source,
-        semantic_locked=ctx.semantic_locked,
-    )
-
-    if ctx.resolution_policy == ResolutionPolicy.CLARIFY:
-        if not ctx.clarify_reason:
-            if (
-                ctx.has_authoritative_question_analysis
-                and ctx.question_analysis.routing.preferred_path == PreferredPath.REJECT
-            ):
-                ctx.clarify_reason = "request_not_supported_as_phrased"
-            else:
-                ctx.clarify_reason = "analyzer_preferred_path_clarify"
-        t_stage = time.time()
-        ctx = summarizer.answer_clarify(ctx)
-        _trace_stage("stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
+    _res = _early_answer_clarify(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
         return ctx
 
     # Conceptual short-circuit
-    if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY:
-        t_stage = time.time()
-        ctx = summarizer.answer_conceptual(ctx)
-        _trace_stage("stage_4_conceptual_summary", t_stage)
+    _res = _early_answer_conceptual(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
         return ctx
 
     # Stage 0.4: expand the authoritative analyzer output into the exact datasets we still need.
@@ -2414,35 +2578,10 @@ def process_query(
         elif ctx.agent_outcome == "fallback_exit":
             log.info("Agent fallback exit | reason=%s", ctx.agent_fallback_reason)
 
-    # Final legacy fallback: generate SQL, execute it, then continue through analysis/summarization.
-    if not ctx.used_tool:
-        if ctx.tool_fallback_reason:
-            metrics.log_tool_fallback_intent(ctx.query, f"tool_fallback:{ctx.tool_fallback_reason}")
-        t_stage = time.time()
-        ctx = planner.generate_plan(ctx)
-        _trace_stage("stage_1_generate_plan", t_stage, conceptual=ctx.is_conceptual, skip_sql=ctx.skip_sql)
-        log.info("Stage 1 complete | conceptual=%s | skip_sql=%s", ctx.is_conceptual, ctx.skip_sql)
-
-        if ctx.is_conceptual or ctx.skip_sql:
-            if ctx.skip_sql and not ctx.is_conceptual:
-                log.info("Skipping SQL path: %s", ctx.skip_sql_reason)
-            t_stage = time.time()
-            ctx = summarizer.answer_conceptual(ctx)
-            _trace_stage("stage_4_conceptual_summary", t_stage)
-            return ctx
-
-        t_stage = time.time()
-        ctx = sql_executor.validate_and_execute(ctx)
-        _trace_stage("stage_2_sql_execute", t_stage, rows=len(ctx.rows), cols=len(ctx.cols))
-        log.info("Stage 2 complete | rows=%s | cols=%s", len(ctx.rows), len(ctx.cols))
-        if ctx.skip_sql:
-            log.info("Stage 2 blocked by policy: %s", ctx.skip_sql_reason)
-            t_stage = time.time()
-            ctx = summarizer.answer_conceptual(ctx)
-            _trace_stage("stage_4_conceptual_summary", t_stage)
-            return ctx
-    else:
-        log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
+    _res = _run_generate_sql_stage(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        return ctx
 
     # Snapshot the source tabular output before analyzer mutates or augments the evidence.
     if ctx.rows and ctx.cols and not ctx.provenance_rows:
@@ -2499,40 +2638,10 @@ def process_query(
         missing_evidence_for_metrics=list(ctx.missing_evidence_for_metrics or []),
     )
 
-    if _should_block_data_summary_for_missing_evidence(ctx):
-        # If some evidence was materialized, allow Stage 4 with partial data
-        # rather than forcing a clarification that discards all available context.
-        if ctx.analysis_evidence:
-            log.info(
-                "Partial evidence available (%d records); proceeding to Stage 4 "
-                "despite missing: %s",
-                len(ctx.analysis_evidence), ctx.missing_evidence_for_metrics,
-            )
-            ctx.data_summary_blocked_reason = (
-                "partial_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
-            )
-            # Fall through to Stage 4 summarize_data below
-        else:
-            ctx.resolution_policy = ResolutionPolicy.CLARIFY
-            ctx.clarify_reason = "missing_requested_analysis_evidence"
-            ctx.data_summary_blocked_reason = (
-                "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
-            )
-            ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
-            ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
-            log.info(
-                "Blocking data summarization due to missing derived evidence: %s",
-                ctx.missing_evidence_for_metrics,
-            )
-            t_stage = time.time()
-            ctx = summarizer.answer_clarify(ctx)
-            _trace_stage(
-                "stage_4_clarify_summary",
-                t_stage,
-                reason=ctx.clarify_reason,
-                missing_evidence=",".join(ctx.missing_evidence_for_metrics),
-            )
-            return ctx
+    _res = _check_missing_evidence_stage(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        return ctx
 
     # Append structured evidence summary when evidence planner contributed data
     if ENABLE_EVIDENCE_PLANNER and ctx.evidence_collected:

@@ -12,7 +12,7 @@ import logging
 import re
 from typing import List, Set, Tuple
 
-from core.llm import classify_query_type
+from core.query_classifier import classify_query_type
 
 log = logging.getLogger("Enai")
 
