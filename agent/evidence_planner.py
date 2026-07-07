@@ -23,6 +23,7 @@ from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
 from agent.tools.types import ToolInvocation
 from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
 from analysis.system_quantities import normalize_tool_dataframe
+from utils.metrics import metrics
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
     AnswerKind,
@@ -435,6 +436,19 @@ def _add_steps_from_rules(
     if primary_tool == ToolName.GET_BALANCING_COMPOSITION.value and (
         needs_driver or needs_correlation or threshold_share_with_prices
     ):
+        if threshold_share_with_prices:
+            # Ontology-migration shadow (§5 slice 1): measure whether the
+            # analyzer already emits get_prices for threshold-share queries.
+            # The planner rule stays authoritative until sustained agreement
+            # clears the cutover bar; only then is this rule deletable and
+            # the contract becomes the sole owner of the evidence ontology.
+            _analyzer_emitted = any(
+                t.name == ToolName.GET_PRICES.value
+                for t in (qa.tooling.candidate_tools or [])[1:]
+            )
+            metrics.log_evidence_rule_agreement(
+                "threshold_share_price_context", agree=_analyzer_emitted,
+            )
         if ToolName.GET_PRICES.value not in added_tools:
             params = _resolve_secondary_params(
                 qa, ToolName.GET_PRICES.value, raw_query, candidates, primary_params,

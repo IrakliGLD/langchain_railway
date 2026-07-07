@@ -63,6 +63,20 @@ Expected shape:
 - `routing.needs_multi_tool = true`
 - `tooling.candidate_tools` should prioritize `get_prices` and `get_balancing_composition`
 
+## Example 2d
+
+Input:
+
+`which sources have a share above 10 percent in balancing electricity and at what price?`
+
+Expected shape:
+
+- `classification.query_type = data_retrieval`
+- `answer_kind = list`
+- `routing.preferred_path = tool`
+- `routing.needs_multi_tool = true`
+- `tooling.candidate_tools` should prioritize `get_balancing_composition`, then `get_prices` — threshold-share questions that mention price context need the per-period prices as secondary evidence, not only the composition shares
+
 ## Example 3
 
 Input:

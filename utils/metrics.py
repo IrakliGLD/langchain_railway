@@ -64,6 +64,9 @@ class Metrics:
         # "empty_result_rendered", "period_coverage_gap",
         # "requested_entities_missing".
         self.render_fitness_events = {}
+        # Planner-rule vs analyzer-emission agreement (ontology migration §5):
+        # "<rule>:agree" / "<rule>:disagree".
+        self.evidence_rule_agreement_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -311,6 +314,16 @@ class Metrics:
         key = (tag or "unknown").strip().lower() or "unknown"
         self.render_fitness_events[key] = self.render_fitness_events.get(key, 0) + 1
 
+    def log_evidence_rule_agreement(self, rule: str, agree: bool) -> None:
+        """Track planner-rule vs analyzer-emission agreement (ontology migration).
+
+        Cutover rule per architecture §5: a planner rule may be deleted only
+        after sustained ``agree`` dominance (>=95% over 14 days) shows the
+        analyzer contract already carries the same evidence intent.
+        """
+        key = f"{(rule or 'unknown').strip().lower()}:{'agree' if agree else 'disagree'}"
+        self.evidence_rule_agreement_events[key] = self.evidence_rule_agreement_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -401,6 +414,7 @@ class Metrics:
             "stage_0_7_used_result": self.stage_0_7_used_result_count,
             "analyzer_cross_check_events": dict(self.analyzer_cross_check_events),
             "render_fitness_events": dict(self.render_fitness_events),
+            "evidence_rule_agreement_events": dict(self.evidence_rule_agreement_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),
