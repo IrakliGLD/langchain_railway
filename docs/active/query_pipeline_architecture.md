@@ -282,6 +282,8 @@ A post-hoc provenance gate runs after the summary. It is a no-op for canonical-f
 
 `chart_pipeline.build_chart` consumes the analyzer's `VisualizationInfo` directly. The chart frame source is selected first: derived chart builders produce specs for MoM/YoY, index growth, decomposition, forecast, and seasonal answers; otherwise canonical evidence frames feed `chart_frame_builder`. Multi-group plans are iterated — `chart_groups` produces one chart per group, with per-group `type`, `title`, `y_axis_label`, and `metrics` honoured.
 
+**Uncertainty default (2026-07-07).** When the analyzer leaves `primary_presentation` null on a COMPARISON answer, Stage 5 applies `chart_plus_table` via `effective_primary_presentation` ([`visualization/chart_selector.py`](../../visualization/chart_selector.py)) — the reader gets the chart *and* the exact values instead of a row-count-heuristic chart-only guess (closed the former §5.6 item). Explicit presentations, including `text`/`table`, always win; analyzer-emission observability (planning cross-check, trace serialization) still reads the raw contract.
+
 ---
 
 ## 4. Module Responsibilities & Source of Truth
@@ -411,6 +413,8 @@ The architecture trades regex brittleness for LLM non-determinism. Cross-check, 
 
 This is ongoing — every new failure report potentially adds a few-shot example, a cross-check refinement, or an answer-composer rule.
 
+**Regression harness (2026-07-07):** [`evaluation/routing_golden_set.py`](../../evaluation/routing_golden_set.py) runs the live analyzer plus the finalize cross-check over [`evaluation/routing_golden_set.json`](../../evaluation/routing_golden_set.json) and scores the routed contract fields (`query_type`, `answer_kind`, `render_style`, `preferred_path`, `top_tool`). Run it after every analyzer-prompt, cross-check, or runtime-skill edit — it is the pre-deploy complement to the A5 production disagreement counters. Extend the fixture set with each fixed failure so the fix cannot silently regress. Fixture structure and enum validity are pinned by `tests/test_routing_golden_set.py`; the live run needs real LLM keys and is operator-run, not CI.
+
 ### 5.4 `share_summary_override` Is A Specialized Formatter — Not Removable
 
 Earlier versions of this document listed `share_summary_override` as legacy debt to be absorbed into the generic renderer. A 2026-05-10 audit determined this was a misclassification: it is a deliberate **specialized formatter** for share-intent queries, in the same category as SCENARIO and FORECAST per §2.3.
@@ -430,10 +434,10 @@ Earlier versions of this document proposed removing the post-hoc provenance gate
 
 ### 5.6 Small Open Items
 
-- **`FilterCondition` audit.** The contract exists on `ToolParamsHint` and is consumed by tool executors. Audit periodically that new threshold-style queries route through the structured filter rather than ad-hoc post-fetch filtering inside summarizers. ([`contracts/question_analysis.py`](../../contracts/question_analysis.py))
 - **Cross-tool computational queries.** Default is narrative rendering — let the LLM synthesise from pre-structured evidence. If a repeating pattern emerges, add a `derived_metric` type and let Stage 3 compute it (same shape as MoM/YoY/correlation). Principle: narrative as default, derived metric only when the pattern repeats. No structural change required.
-- **Borderline `answer_kind=COMPARISON` chart vs table.** Today `primary_presentation` is consulted, but when the analyzer leaves it null the code falls back to row-count heuristics. The right move when uncertain is `chart_plus_table` rather than chart-only. ([`agent/chart_pipeline.py`](../../agent/chart_pipeline.py))
 - **Reference lines.** `include_reference_lines` was dropped because a bare bool can't carry which axis/value/label. If reference-line rendering becomes needed, introduce a concrete `ReferenceLineSpec` dataclass first.
+
+Resolved 2026-07-07 and removed from this list: the borderline-COMPARISON item (null `primary_presentation` now defaults to `chart_plus_table` — see §3.10) and the `FilterCondition` audit (performed; clean — the contract flows `params_hint.filter` → `adapt_tool_result` → `_apply_filter` in every frame adapter, and no ad-hoc post-fetch threshold filtering exists in the summarizer/renderer layer).
 
 ### 5.7 Triage Playbook (operational, not architectural)
 
