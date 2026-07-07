@@ -74,6 +74,7 @@ class QueryContext:
     vector_knowledge_error: str = ""
     vector_knowledge_source: str = ""
     vector_knowledge_prompt: str = ""
+    vector_retrieval_tier: str = ""              # "full" | "light" | "skip"; set in process_query
 
     # --- response policy (set once after Stage 0.2, authoritative for all later stages) ---
     response_mode: str = ""                       # ResponseMode value or "" before derivation

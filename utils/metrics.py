@@ -60,6 +60,10 @@ class Metrics:
         # "override_applied", "legal_list_exception",
         # "scenario_override_applied", "scenario_override_gated".
         self.analyzer_cross_check_events = {}
+        # Shadow fitness violations on deterministic renders (§3.9):
+        # "empty_result_rendered", "period_coverage_gap",
+        # "requested_entities_missing".
+        self.render_fitness_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -302,6 +306,11 @@ class Metrics:
         key = (event or "unknown").strip().lower() or "unknown"
         self.analyzer_cross_check_events[key] = self.analyzer_cross_check_events.get(key, 0) + 1
 
+    def log_render_fitness(self, tag: str) -> None:
+        """Track shadow fitness violations on deterministic renders (§3.9)."""
+        key = (tag or "unknown").strip().lower() or "unknown"
+        self.render_fitness_events[key] = self.render_fitness_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -391,6 +400,7 @@ class Metrics:
             "stage_0_7_invocation_built": self.stage_0_7_invocation_built_count,
             "stage_0_7_used_result": self.stage_0_7_used_result_count,
             "analyzer_cross_check_events": dict(self.analyzer_cross_check_events),
+            "render_fitness_events": dict(self.render_fitness_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

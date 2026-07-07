@@ -53,6 +53,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import knowledge as knowledge_module
 
 # Phase 6: Pipeline
+from agent.answer_provenance import build_answer_provenance
 from agent.pipeline import process_query
 from analysis.seasonal import compute_seasonal_average
 from analysis.seasonal_stats import calculate_seasonal_stats, detect_monthly_timeseries, format_seasonal_stats
@@ -1081,6 +1082,7 @@ def ask_post(
                 "summary_provenance_gate_reason": str(ctx.summary_provenance_gate_reason or ""),
                 "provenance_query_hash": str(ctx.provenance_query_hash or ""),
                 "provenance_source": str(ctx.provenance_source or ""),
+                "answer_provenance": build_answer_provenance(ctx),
             }
         )
 

@@ -92,18 +92,14 @@ def validate_expected_enums(cases: list[dict]) -> None:
 
 
 def _routed_fields(ctx) -> dict:
-    """Read the post-finalize routed values off the context."""
-    qa = ctx.question_analysis
-    if qa is None:
-        return {}
-    tools = qa.tooling.candidate_tools or []
-    return {
-        "query_type": qa.classification.query_type.value,
-        "answer_kind": qa.answer_kind.value if qa.answer_kind else None,
-        "render_style": qa.render_style.value if qa.render_style else None,
-        "preferred_path": qa.routing.preferred_path.value,
-        "top_tool": tools[0].name if tools else None,
-    }
+    """Read the post-finalize routed values off the context.
+
+    Delegates to the runtime's single authority so the eval and the
+    production fixture-candidate emitter can never drift apart.
+    """
+    from agent.fixture_candidates import routed_fields_snapshot
+
+    return routed_fields_snapshot(ctx.question_analysis)
 
 
 def run(cases: list[dict], min_score: float) -> int:

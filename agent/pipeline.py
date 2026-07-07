@@ -28,6 +28,7 @@ from sqlalchemy import text
 
 from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_executor, summarizer
 from agent.evidence_validator import validate_evidence
+from agent.fixture_candidates import log_fixture_candidate
 from agent.frame_adapters import adapt_tool_result
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
@@ -579,6 +580,7 @@ def _cross_check_answer_kind(ctx) -> None:
         chosen = llm_kind
 
     metrics.log_analyzer_cross_check("disagreement")
+    log_fixture_candidate("cross_check_disagreement", ctx)
     log.warning(
         "answer_kind cross-check disagreement: llm=%s derived=%s chosen=%s "
         "(query_type=%s, query=%.80s)",
@@ -2576,6 +2578,7 @@ def process_query(
     _finalize_answer_kind(ctx)
 
     _retrieval_tier = _resolve_vector_tier(ctx)
+    ctx.vector_retrieval_tier = _retrieval_tier.value
 
     _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
 
