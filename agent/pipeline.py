@@ -19,6 +19,8 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 
 import pandas as pd
@@ -42,6 +44,7 @@ from config import (
     ENABLE_TYPED_TOOLS,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
+    EVIDENCE_PARALLEL_SECONDARY,
     PIPELINE_MODE,
 )
 from contracts.question_analysis import (
@@ -1613,6 +1616,18 @@ def _execute_evidence_step(
     return True
 
 
+def _prefetched_result_executor(result):
+    """Executor stand-in that returns an already-fetched tool result.
+
+    Lets the prefetch pass hand a concurrently-fetched result to
+    ``_execute_evidence_step`` through its ``executor=`` parameter, so the
+    normalise/store logic (and every log line it emits) runs unchanged.
+    """
+    def _executor(_invocation):
+        return result
+    return _executor
+
+
 def _run_secondary_evidence_loop(
     ctx: QueryContext,
     *,
@@ -1629,62 +1644,128 @@ def _run_secondary_evidence_loop(
     ``ctx.evidence_collected`` only), and finally joins secondary frames
     into ``ctx.df`` via ``merge_evidence_into_context``.
 
+    When ``EVIDENCE_PARALLEL_SECONDARY`` is on and two or more steps
+    remain, the pure-I/O tool calls are prefetched concurrently on a
+    2-worker pool (sized to the core/db.py budget of 5 connections),
+    but every ctx mutation still happens serially in plan order: each
+    prefetched result is handed to ``_execute_evidence_step`` through
+    its ``executor=`` parameter. Evidence storage order, log order,
+    trace shapes, and metric counters are therefore identical to the
+    serial path. One semantic shift: the loop budget bounds *waiting*
+    rather than *starting* — a step still running at the deadline is
+    marked ``evidence_loop_budget_exceeded`` (serially it would block
+    the loop unboundedly and starve later steps instead); its DB work
+    remains bounded by the statement timeout.
+
     Phase F.5.1.a moved this body out of ``evidence_planner`` into
     pipeline.py to remove the circular-import workaround that previously
     forced a lazy ``from agent.pipeline import _execute_evidence_step``
     inside the loop. ``evidence_planner.execute_remaining_evidence`` is
     preserved as a thin delegate that calls this function and passes its
     local ``execute_tool`` binding, so tests that monkey-patch
-    ``agent.evidence_planner.execute_tool`` continue to work.
+    ``agent.evidence_planner.execute_tool`` continue to work — the
+    prefetch pool submits that same binding.
     """
     remaining = [
         s for s in ctx.evidence_plan
         if not s.get("satisfied") and not s.get("error")
     ]
     cap = min(len(remaining), evidence_planner._EVIDENCE_LOOP_MAX_STEPS)
+    steps = remaining[:cap]
 
     budget = timeout_seconds or evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS
     deadline = time.time() + budget
 
-    for step in remaining[:cap]:
-        if time.time() > deadline:
-            step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
-            log.warning(
-                "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
-                budget, step["tool_name"], step.get("role"),
-            )
-            continue
-
-        invocation = ToolInvocation(
+    invocations = [
+        ToolInvocation(
             name=step["tool_name"],
             params=step["params"],
             confidence=0.85,
             reason=f"evidence_plan:{step['role']}",
         )
-        try:
-            _execute_evidence_step(
-                ctx,
-                invocation,
-                plan_step=step,
-                is_primary=False,
-                is_explanation=False,
-                stage_label="stage_0_8",
-                validate_relevance=False,
-                emit_tool_call_metric=False,
-                emit_tool_execute_trace=False,
-                executor=executor,
-            )
-            stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
-            log.info(
-                "Evidence loop: fetched %s via %s (%d rows)",
-                step["role"], invocation.name, stored_rows,
-            )
-        except Exception as exc:
-            step["error"] = str(exc)
-            log.warning(
-                "Evidence loop: step failed. role=%s tool=%s err=%s",
-                step["role"], step["tool_name"], exc,
-            )
+        for step in steps
+    ]
+
+    # Prefetch pass: start the pure-I/O tool calls concurrently. Results are
+    # applied strictly in plan order below, so parallelism never reorders ctx
+    # mutations.
+    pool = None
+    futures: list = [None] * len(steps)
+    if EVIDENCE_PARALLEL_SECONDARY and len(steps) >= 2:
+        pool = ThreadPoolExecutor(
+            max_workers=min(2, len(steps)),
+            thread_name_prefix="stage08-prefetch",
+        )
+        futures = [pool.submit(executor, inv) for inv in invocations]
+
+    try:
+        for step, invocation, future in zip(steps, invocations, futures):
+            step_executor = executor
+            if future is None:
+                # Serial path: the budget gates starting a step.
+                if time.time() > deadline:
+                    step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
+                    log.warning(
+                        "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
+                        budget, step["tool_name"], step.get("role"),
+                    )
+                    continue
+            else:
+                # Prefetched path: the budget bounds waiting for the result.
+                try:
+                    result = future.result(timeout=max(0.0, deadline - time.time()))
+                except FuturesTimeoutError as exc:
+                    if future.done():
+                        # The tool itself raised a TimeoutError (alias of the
+                        # futures timeout) — treat as a step failure, not budget.
+                        step["error"] = str(exc)
+                        log.warning(
+                            "Evidence loop: step failed. role=%s tool=%s err=%s",
+                            step["role"], step["tool_name"], exc,
+                        )
+                    else:
+                        step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
+                        log.warning(
+                            "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
+                            budget, step["tool_name"], step.get("role"),
+                        )
+                    continue
+                except Exception as exc:
+                    step["error"] = str(exc)
+                    log.warning(
+                        "Evidence loop: step failed. role=%s tool=%s err=%s",
+                        step["role"], step["tool_name"], exc,
+                    )
+                    continue
+                step_executor = _prefetched_result_executor(result)
+
+            try:
+                _execute_evidence_step(
+                    ctx,
+                    invocation,
+                    plan_step=step,
+                    is_primary=False,
+                    is_explanation=False,
+                    stage_label="stage_0_8",
+                    validate_relevance=False,
+                    emit_tool_call_metric=False,
+                    emit_tool_execute_trace=False,
+                    executor=step_executor,
+                )
+                stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
+                log.info(
+                    "Evidence loop: fetched %s via %s (%d rows)",
+                    step["role"], invocation.name, stored_rows,
+                )
+            except Exception as exc:
+                step["error"] = str(exc)
+                log.warning(
+                    "Evidence loop: step failed. role=%s tool=%s err=%s",
+                    step["role"], step["tool_name"], exc,
+                )
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     ctx = evidence_planner.merge_evidence_into_context(ctx)
     ctx.evidence_plan_complete = all(s.get("satisfied") for s in ctx.evidence_plan)

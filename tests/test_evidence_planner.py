@@ -12,6 +12,9 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+import threading
+import time
+
 import pandas as pd
 import pytest
 
@@ -1097,10 +1100,13 @@ class TestExecuteRemainingEvidence:
         assert "error" in ctx.evidence_plan[1]
 
     def test_cap_at_three_steps(self, monkeypatch):
+        # Lock because the prefetch pool may call the mock from two threads.
+        count_lock = threading.Lock()
         call_count = {"n": 0}
 
         def counting_mock(inv):
-            call_count["n"] += 1
+            with count_lock:
+                call_count["n"] += 1
             df = pd.DataFrame({"date": ["2023-01-01"], "val": [1.0]})
             return df, list(df.columns), [tuple(r) for r in df.itertuples(index=False)]
 
@@ -1123,6 +1129,110 @@ class TestExecuteRemainingEvidence:
         ctx = execute_remaining_evidence(ctx)
 
         assert call_count["n"] == 3  # capped at 3
+
+
+class TestExecuteRemainingEvidenceParallel:
+    """Stage 0.8 concurrent prefetch (EVIDENCE_PARALLEL_SECONDARY)."""
+
+    @staticmethod
+    def _df_result(col: str):
+        df = pd.DataFrame({"date": ["2023-01-01"], col: [1.0]})
+        return df, list(df.columns), [tuple(r) for r in df.itertuples(index=False)]
+
+    def _two_step_ctx(self):
+        ctx = QueryContext(query="test")
+        ctx.tool_name = "get_prices"
+        ctx.df = pd.DataFrame({"date": ["2023-01-01"], "p_bal_gel": [50.0]})
+        ctx.cols = list(ctx.df.columns)
+        ctx.rows = [tuple(r) for r in ctx.df.itertuples(index=False)]
+        ctx.evidence_plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "params": {}, "satisfied": True},
+            {"role": "r1", "tool_name": "get_balancing_composition", "params": {}, "satisfied": False},
+            {"role": "r2", "tool_name": "get_tariffs", "params": {}, "satisfied": False},
+        ]
+        return ctx
+
+    def test_prefetch_runs_steps_concurrently(self, monkeypatch):
+        def slow_mock(inv):
+            time.sleep(0.3)
+            return self._df_result(f"val_{inv.name}")
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", slow_mock)
+        ctx = self._two_step_ctx()
+
+        t0 = time.time()
+        ctx = execute_remaining_evidence(ctx)
+        elapsed = time.time() - t0
+
+        assert "r1" in ctx.evidence_collected
+        assert "r2" in ctx.evidence_collected
+        # Two 0.3s calls serially take >= 0.6s; prefetched they overlap.
+        assert elapsed < 0.55, f"prefetch did not run concurrently: {elapsed:.2f}s"
+
+    def test_storage_order_is_plan_order_even_when_first_step_slower(self, monkeypatch):
+        def uneven_mock(inv):
+            if inv.name == "get_balancing_composition":
+                time.sleep(0.25)
+            return self._df_result(f"val_{inv.name}")
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", uneven_mock)
+        ctx = self._two_step_ctx()
+
+        ctx = execute_remaining_evidence(ctx)
+
+        assert list(ctx.evidence_collected.keys()) == ["r1", "r2"]
+        assert ctx.evidence_plan_complete is True
+
+    def test_budget_bounds_waiting_and_marks_slow_step(self, monkeypatch):
+        def hanging_mock(inv):
+            if inv.name == "get_tariffs":
+                time.sleep(1.5)
+            return self._df_result(f"val_{inv.name}")
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", hanging_mock)
+        ctx = self._two_step_ctx()
+
+        ctx = execute_remaining_evidence(ctx, timeout_seconds=0.4)
+
+        assert "r1" in ctx.evidence_collected
+        assert "r2" not in ctx.evidence_collected
+        assert str(ctx.evidence_plan[2]["error"]).startswith("evidence_loop_budget_exceeded")
+        assert ctx.evidence_plan_complete is False
+
+    def test_prefetch_exception_marks_step_error_and_others_stored(self, monkeypatch):
+        def flaky_mock(inv):
+            if inv.name == "get_tariffs":
+                raise RuntimeError("boom")
+            return self._df_result(f"val_{inv.name}")
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", flaky_mock)
+        ctx = self._two_step_ctx()
+
+        ctx = execute_remaining_evidence(ctx)
+
+        assert "r1" in ctx.evidence_collected
+        assert "r2" not in ctx.evidence_collected
+        assert ctx.evidence_plan[2]["error"] == "boom"
+        assert ctx.evidence_plan_complete is False
+
+    def test_kill_switch_forces_serial_path(self, monkeypatch):
+        monkeypatch.setattr("agent.pipeline.EVIDENCE_PARALLEL_SECONDARY", False)
+
+        def slow_mock(inv):
+            time.sleep(0.2)
+            return self._df_result(f"val_{inv.name}")
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", slow_mock)
+        ctx = self._two_step_ctx()
+
+        t0 = time.time()
+        ctx = execute_remaining_evidence(ctx)
+        elapsed = time.time() - t0
+
+        assert "r1" in ctx.evidence_collected
+        assert "r2" in ctx.evidence_collected
+        # Serial path: two 0.2s sleeps cannot finish faster than 0.4s.
+        assert elapsed >= 0.4
 
 
 class TestMergeEvidenceIntoContext:

@@ -2,7 +2,7 @@
 
 Technical reference for the `langchain_railway` query pipeline. Describes the current runtime, the Ideal Decision Tree it targets, and the structural work that is still open.
 
-**Last updated:** 2026-05-13
+**Last updated:** 2026-07-07 (truth pass: agent-loop deletion, `core/` split, `process_query` stage decomposition; efficiency pass: Stage 0.8 concurrent prefetch, embedding caching, `tool_adapter` removal)
 **Source of truth:** the code referenced inline below. When this document and the code disagree, the code wins — update this document.
 
 ---
@@ -11,9 +11,9 @@ Technical reference for the `langchain_railway` query pipeline. Describes the cu
 
 Stage 0.2 is the single **interpretation** point: the one LLM call that interprets the user question. It emits a full answer contract — `answer_kind`, `render_style`, `grouping`, `entity_scope`, `candidate_tools`, `params_hint`, `evidence_roles`, `derived_metrics`, `visualization` — and downstream stages execute it without re-interpretation. Other LLM calls do exist downstream (the narrative summarizer for EXPLANATION/KNOWLEDGE shapes, the FORECAST composer, the legacy SQL planner on the fallback path, and the OpenAI fallback on Gemini failure) — they *render or recover*, they do not re-interpret the question.
 
-After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function (`_execute_evidence_plan`) called once from `process_query`. It contains the four-strategy primary invocation picker (`_pick_primary_invocation`), the shared executor (`_execute_evidence_step`), the secondary evidence loop, and the post-loop driver-context enrichment. Evidence frames + the generic renderer cover six answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO, FORECAST) deterministically; narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
+After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function (`_execute_evidence_plan`) called once from `process_query`. It contains the four-strategy primary invocation picker (`_pick_primary_invocation`), the shared executor (`_execute_evidence_step`), the secondary evidence loop, and the post-loop driver-context enrichment. Evidence frames + the generic renderer cover five answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO) deterministically; FORECAST routes through the LLM over pre-computed trendline evidence (§3.9); narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
 
-The remaining structural work is removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go (F.6). Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
+The legacy agent loop is **deleted** (architecture-audit P2, 2026-07): with an authoritative Stage 0.2 contract it never fired, and analyzer-failure / no-tool cases fall through to the SQL fallback (§3.7). After the P0-4 decomposition, `process_query` itself is a thin ~230-line stage driver built from `StageResult` stage functions (§4 Orchestration). The remaining structural work is removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go (F.6). Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
 
 ---
 
@@ -35,9 +35,9 @@ HTTP /ask
                   inside one orchestration block)
   → Stage 0.8     secondary evidence loop (additional plan steps)
                   → balancing driver-context enrichment (post-loop, conditional)
-  → Stage agent   legacy agent loop (only when no authoritative analyzer)
   → Stages 1/2    legacy SQL fallback (only when typed tools didn't produce
-                  primary data)
+                  primary data; the agent loop that used to sit before this
+                  was deleted — §3.7)
   → Stage 3       analyzer enrichment (dispatches on contract flags)
   → Stage 4       generic renderer OR specialized formatter OR LLM summarizer
   → Stage 5       chart pipeline (consumes VisualizationInfo, multi-group)
@@ -93,8 +93,8 @@ HTTP /ask
 │   → The analyzer's output is the contract. Downstream stages trust it.
 │
 ├─ Stage 0.3: vector knowledge retrieval (three-tier)
-│   ├─ KNOWLEDGE / EXPLANATION → FULL (top-K=6, re-ranked)
-│   ├─ data + NARRATIVE → LIGHT (top-K=2, no re-rank)
+│   ├─ KNOWLEDGE / EXPLANATION → FULL (top-K=6, over-fetched candidate pool)
+│   ├─ data + NARRATIVE → LIGHT (top-K=2, tighter candidate pool)
 │   └─ data + DETERMINISTIC, or CLARIFY → SKIP
 │
 ├─ Stage 0.4: evidence planner
@@ -196,7 +196,9 @@ Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer
 
 ### 3.3 Stage 0.3 — Vector Knowledge Retrieval
 
-Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, no re-rank) for narrative data, SKIP for deterministic data and CLARIFY. The tier is computed by `_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`.
+Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, tighter candidate pool, no boost-term expansion) for narrative data, SKIP for deterministic data and CLARIFY. The tier is computed by `_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`. There is no separate re-rank pass — candidates are over-fetched and ordered by similarity.
+
+**Embedding caching (2026-07-07).** The embedding provider is a per-config singleton (`knowledge/vector_embeddings.get_embedding_provider`) so retrieval reuses one SDK client instead of constructing one per request, and query embeddings are memoized at the retrieval call site (`VECTOR_QUERY_EMBEDDING_CACHE_SIZE`, default 256, ≤0 disables) so repeated questions skip the embedding API round trip. Explicitly injected providers bypass the memo.
 
 **Known coupling risk:** the tier inherits Stage 0.2's classification. If the analyzer mislabels a question that genuinely needs regulatory/conceptual grounding as deterministic data, retrieval is SKIPped and the answer is silently ungrounded — the misclassification costs twice. Tiering is a deliberate cost optimization; treat retrieval-starved wrong answers as a §5.3 routing failure, not a retrieval bug.
 
@@ -206,7 +208,7 @@ Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K
 
 ### 3.4 Response Mode + Resolution Policy (Inline)
 
-Derived inline from the analyzer contract — no separate stage. `KNOWLEDGE_PRIMARY` and `CLARIFY` short-circuit to the relevant summarizer entry point. Everything else continues to evidence planning.
+Derived inline from the analyzer contract — no separate stage (`_apply_response_mode` in `pipeline.py`). `KNOWLEDGE_PRIMARY` and `CLARIFY` short-circuit to the relevant summarizer entry point via the `_early_answer_conceptual` / `_early_answer_clarify` stage functions. Everything else continues to evidence planning.
 
 ### 3.5 Stage 0.4 — Evidence Planner
 
@@ -241,6 +243,8 @@ Failure handling is source-aware: analyzer-source failures route to `_attempt_an
 
 When the evidence plan still has unsatisfied steps, the loop iterates over them with a per-loop budget (`EVIDENCE_LOOP_BUDGET_SECONDS`) and capped iterations (`_EVIDENCE_LOOP_MAX_STEPS=3`). Each step calls the same `_execute_evidence_step` helper with secondary semantics (`is_primary=False`, `validate_relevance=False`, no per-step trace or `log_tool_call`) — preserves the historical observability of one outer `stage_0_8_evidence_loop` trace rather than per-step.
 
+**Concurrent prefetch (2026-07-07).** When `EVIDENCE_PARALLEL_SECONDARY` is on (default) and ≥2 steps remain, the pure-I/O tool calls are prefetched on a 2-worker pool (sized to the `core/db.py` budget of 5 connections), but every ctx mutation is applied serially in plan order by handing each prefetched result to `_execute_evidence_step` through its `executor=` parameter — storage order, log order, trace shapes, and metric counters are identical to the serial path. One semantic shift: the loop budget bounds *waiting* rather than *starting* (a step still running at the deadline is marked `evidence_loop_budget_exceeded` instead of blocking the loop unboundedly; its DB work stays bounded by the statement timeout). The env flag is a kill switch.
+
 The loop body lives in `_run_secondary_evidence_loop` in `pipeline.py` (moved out of `evidence_planner.py` in §5.1.a, commit `ea677dc`). `evidence_planner.execute_remaining_evidence` remains as a thin delegate so tests that monkey-patch `agent.evidence_planner.execute_tool` continue to intercept tool calls — the delegate passes its local `execute_tool` binding to the helper via the `executor=` parameter.
 
 After the loop, `merge_evidence_into_context` joins secondary frames into `ctx.df` via date-aligned joins.
@@ -249,11 +253,11 @@ After the loop, `merge_evidence_into_context` joins secondary frames into `ctx.d
 
 When primary execution produced a usable result (`ctx.used_tool` and `ctx.tool_name` set), `_enrich_prices_with_balancing_driver_context` attaches source-price and contribution columns for balancing-price answers.
 
-### 3.7 Stage agent_loop, Stages 1/2 — Legacy Fallbacks
+### 3.7 Stages 1/2 — Legacy SQL Fallback
 
-The agent loop (`orchestrator.run_agent_loop`) is gated on `ENABLE_AGENT_LOOP and not ctx.has_authoritative_question_analysis and not analyzer_tool_failed` — it fires only when there is no firm Stage 0.2 contract. May set `ctx.used_tool=True` and exit early as `conceptual_exit` or `data_exit`.
+The legacy agent loop (`orchestrator.run_agent_loop`) was **deleted** in the architecture-audit P2 cleanup (2026-07). With Stage 0.2 authoritative it never fired in production, and analyzer-failure / no-tool cases fall through to the generate-plan/SQL fallback below — a more capable path than the retired keyword-driven loop. `agent/orchestrator.py` no longer exists. `ENABLE_AGENT_LOOP` survives as an inert config flag: it only feeds the `agent_loop_blocked_by_policy` observability fields so trace shapes stay stable; no loop code remains behind it.
 
-Stages 1/2 (`planner.generate_plan` + `sql_executor.validate_and_execute`) fire when `not ctx.used_tool` after the above. The condition is the §2.3 ideal's "SQL escape hatch when no typed tool produced primary data". Conceptual or `skip_sql` paths route to `summarizer.answer_conceptual` and return.
+Stages 1/2 (`planner.generate_plan` + `sql_executor.validate_and_execute`) fire when `not ctx.used_tool` after evidence-plan execution. The condition is the §2.3 ideal's "SQL escape hatch when no typed tool produced primary data". Conceptual or `skip_sql` paths route to `summarizer.answer_conceptual` and return (terminal). The stage body lives in `_run_generate_sql_stage`, one of the `StageResult` stage functions extracted from `process_query` (audit P0-4d).
 
 ### 3.8 Stage 3 — Analyzer Enrichment
 
@@ -286,13 +290,18 @@ Runtime modules and the files they live in. If this list disagrees with the code
 
 ### Orchestration
 
-- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline. Stage tracing via `_emit_trace_stage` + local `_trace_stage` closure. Holds: `_cross_check_answer_kind` (with the legal-list exception), `_pick_primary_invocation` (the four-strategy chain), `_execute_evidence_step` (the shared tool executor), `_run_secondary_evidence_loop` (the Stage 0.8 body, moved from `evidence_planner.py` in §5.1.a), `_execute_evidence_plan` (the §5.1.b consolidated function combining primary execution + secondary loop + driver enrichment), `_attempt_analyzer_tool_recovery` (analyzer-source recovery candidate). After §5.1 the function `process_query` calls one line for the entire tool-execution surface: `ctx = _execute_evidence_plan(ctx)`.
+- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline; after the P0-4 decomposition it is a thin ~230-line stage driver. Stage tracing via `_emit_trace_stage` + local `_trace_stage` closure. Stage helpers extracted from the old inline body: `_detect_clarify_selection` / `_rewrite_query_for_clarify_selection` (clarify-selection replies), `_derive_resolved_query`, `_finalize_answer_kind` (applies `_cross_check_answer_kind`), `_resolve_vector_tier`, `_run_vector_knowledge_stage`, `_apply_response_mode`, plus the `StageResult` early-return stages `_early_answer_clarify`, `_early_answer_conceptual`, `_run_generate_sql_stage`, `_check_missing_evidence_stage`. Also holds: `_cross_check_answer_kind` (with the legal-list exception), `_pick_primary_invocation` (the four-strategy chain), `_execute_evidence_step` (the shared tool executor), `_run_secondary_evidence_loop` (the Stage 0.8 body, moved from `evidence_planner.py` in §5.1.a), `_execute_evidence_plan` (the §5.1.b consolidated function combining primary execution + secondary loop + driver enrichment), `_attempt_analyzer_tool_recovery` (analyzer-source recovery candidate). The entire tool-execution surface remains one call: `ctx = _execute_evidence_plan(ctx)`.
 
 ### Analyzer + Routing
 
-- **[`core/llm.py`](../../core/llm.py)** — All LLM call sites and prompt assembly. Owns `_classify_analyzer_prompt_profile`, `_build_analyzer_prompt_blocks`, the catalogue JSON cached at module load, `_ANALYZER_TRUNCATION_*` priorities, `_TRUNCATION_PRIORITY_*` summarizer profiles by `answer_kind`, fast-mode budget overrides, OpenAI fallback on Gemini failure.
+- **[`core/llm.py`](../../core/llm.py)** — LLM orchestration hub: all stage entry points and prompt assembly. Owns `_classify_analyzer_prompt_profile`, `_build_analyzer_prompt_blocks`, the catalogue JSON cached at module load, `_ANALYZER_TRUNCATION_*` priorities, fast-mode budget overrides, the provider registry (`_PROVIDERS`: gemini / openai / nvidia — `MODEL_TYPE` selects the primary; `get_primary_llm` / `get_llm_for_stage` resolve at call time so test monkeypatches hold), and the OpenAI fallback on Gemini failure (`_invoke_with_openai_fallback`). Split down since 2026-06-10 (Q1–Q3a, P0-1) into the modules below; symbols that tests monkeypatch by module path intentionally stayed here.
+- **[`core/llm_runtime.py`](../../core/llm_runtime.py)** — provider client factories, `LLMResponseCache`, token/cost accounting (Q1 extraction).
+- **[`core/llm_payloads.py`](../../core/llm_payloads.py)** — JSON extraction from model output, relative-date coercion, schema-aware null-list coercion, `QuestionAnalysis` payload sanitizers (Q2 extraction; pure functions).
+- **[`core/prompt_budget.py`](../../core/prompt_budget.py)** — prompt-budget enforcement + section-aware truncation engine; owns the `_TRUNCATION_PRIORITY_*` summarizer profiles selected per `answer_kind` (Q3a extraction; the `_enforce_prompt_budget` entry point remains in `core.llm` for the patch surface).
+- **[`core/query_classifier.py`](../../core/query_classifier.py)** — dependency-free heuristic query-classification helpers (P0-1 extraction); `core.llm` re-exports them for backward compatibility.
 - **[`agent/planner.py`](../../agent/planner.py)** — `prepare_context`, language detection, mode selection, heuristic conceptual classifier, `build_tool_invocation_from_analysis` (strategy 3 in the primary picker), legacy `generate_plan` for SQL fallback.
-- **[`agent/router.py`](../../agent/router.py)** — `match_tool` keyword+semantic tool router (strategies 2 and 4 in the primary picker).
+- **[`agent/router.py`](../../agent/router.py)** — `match_tool` keyword+semantic tool router (strategies 2 and 4 in the primary picker). Also `extract_granularity`, the single authority for yearly/monthly granularity detection shared by the deterministic router and its semantic fallback.
+- **[`contracts/intent_lexicon.py`](../../contracts/intent_lexicon.py)** — multilingual (EN/KA/RU) intent keyword lexicon, one named constant per concept (A3). Consumers import the sets; the matching logic stays at the call sites. Migrated so far: `sql_executor`, `planner`, `models`; still to migrate (A3.d): `utils/query_validation.py`, `agent/router.py`.
 - **[`contracts/question_analysis.py`](../../contracts/question_analysis.py)**, **[`question_analysis_catalogs.py`](../../contracts/question_analysis_catalogs.py)** — the Stage 0.2 contract: `QuestionAnalysis` Pydantic model with `AnswerKind`, `RenderStyle`, `Grouping`, `VisualizationInfo`, `FilterCondition`, `MeasureTransform`, `VisualizationTimeGrain`, `SeriesSplitMode`, `SortRule`, `ChartFamily`, `VisualGoal`, `PresentationMode`, `SemanticRole`, `ChartIntent`. Catalogs supply the LLM-facing JSON that explains each enum.
 - **[`schemas/question_analysis.schema.json`](../../schemas/question_analysis.schema.json)** — JSON-schema snapshot of the Pydantic model, asserted by `test_question_analysis_contract.py::test_schema_snapshot_matches_runtime_model`.
 
@@ -301,8 +310,7 @@ Runtime modules and the files they live in. If this list disagrees with the code
 - **[`agent/evidence_planner.py`](../../agent/evidence_planner.py)** — builds and validates the evidence plan (`_validate_plan_against_answer_kind`); holds `merge_evidence_into_context` (date-aligned joins of secondary frames into `ctx.df`). `execute_remaining_evidence` is a thin delegate after §5.1.a — the secondary loop body itself lives in `pipeline.py` as `_run_secondary_evidence_loop`; the delegate stays so tests that monkey-patch `agent.evidence_planner.execute_tool` keep working.
 - **[`agent/evidence_validator.py`](../../agent/evidence_validator.py)** — `validate_evidence` runs inline during frame attachment; checks frames against `answer_kind` shape requirements (shared with the planner via [`agent/shape_requirements.py`](../../agent/shape_requirements.py)).
 - **[`agent/frame_adapters.py`](../../agent/frame_adapters.py)** — per-tool adapters that normalise raw tool output into `ObservationFrame` / `EntitySetFrame` / `ComparisonFrame`.
-- **[`agent/tools/`](../../agent/tools/)** — typed tool implementations.
-- **[`agent/tool_adapter.py`](../../agent/tool_adapter.py)** — runs typed tools with timeouts; produces compact preview text for LLM contexts.
+- **[`agent/tools/`](../../agent/tools/)** — typed tool implementations. (`agent/tool_adapter.py` — the agent loop's timeout/preview wrapper — was deleted with the loop; the pipeline binds `agent.tools.execute_tool` directly, bounded by the DB statement timeout.)
 - **[`contracts/evidence_frames.py`](../../contracts/evidence_frames.py)** — `ObservationFrame`, `EntitySetFrame`, `ComparisonFrame` definitions.
 - **[`contracts/vector_knowledge.py`](../../contracts/vector_knowledge.py)** — `VectorRetrievalTier` enum + vector-knowledge bundle types.
 - **[`knowledge/vector_retrieval.py`](../../knowledge/vector_retrieval.py)** — three-tier retrieval implementation.
@@ -322,6 +330,7 @@ Runtime modules and the files they live in. If this list disagrees with the code
 - **[`agent/chart_frame_builder.py`](../../agent/chart_frame_builder.py)** — builds chart-shaped frames from canonical evidence frames.
 - **[`agent/derived_chart_builder.py`](../../agent/derived_chart_builder.py)** — specs for MoM/YoY, index growth, decomposition, forecast, seasonal charts.
 - **[`visualization/chart_selector.py`](../../visualization/chart_selector.py)** — `should_generate_chart` gate (consults `VisualizationInfo` + row count + answer_kind).
+- **[`contracts/summary.py`](../../contracts/summary.py)** — the summary-generation result contract shared by the summarizer, guardrails, and tests (P0-1 extraction from `core/llm.py`).
 
 ### Skills
 
@@ -339,8 +348,11 @@ Developer-only (NOT loaded into prompts):
 
 ### Legacy / Fallback
 
-- **[`agent/orchestrator.py`](../../agent/orchestrator.py)** — legacy agent loop. Fires only when there is no authoritative analyzer.
 - **[`agent/sql_executor.py`](../../agent/sql_executor.py)** — Stage 2 SQL execution + safety checks for the legacy SQL escape hatch.
+- **[`core/sql_generator.py`](../../core/sql_generator.py)** — SQL sanitization, AST-based table-whitelist validation, synonym auto-correction for the fallback SQL.
+- **[`core/query_executor.py`](../../core/query_executor.py)** — pooled, read-only, timeout-guarded query execution.
+- **[`core/db.py`](../../core/db.py)** — the SQLAlchemy engine, single source of truth (audit P1); imported downward by both `core.query_executor` and `knowledge.vector_store`.
+- `agent/orchestrator.py` (the legacy agent loop) is **deleted** — see §3.7.
 
 ---
 
@@ -348,7 +360,7 @@ Developer-only (NOT loaded into prompts):
 
 The service holds request-scoped *and* cross-request state **in process memory**: rate-limit
 buckets (`main.py`), session-bound conversation history (`utils/session_memory.py`), the LLM
-response cache (`core/llm.py`), and circuit-breaker state (`utils/resilience.py`).
+response cache (`core/llm_runtime.py`), and circuit-breaker state (`utils/resilience.py`).
 
 **The deployment assumption is exactly one worker process / one replica.** With N replicas:
 rate limits multiply by N, sessions issued on one replica are unknown to the others, and
@@ -380,6 +392,8 @@ After §5.1, the §2.3 Ideal Decision Tree's "Tool execution + evidence collecti
 ### 5.2 Stage 0.7 Removal (F.6, gated)
 
 **What:** Remove the analyzer-built (strategy 3) and authoritative router-fallback (strategy 4) branches from `_pick_primary_invocation`. With them gone, Stage 0.7 disappears entirely; the strategy chain becomes plan-driven + keyword-router (the latter only when no authoritative analyzer).
+
+**Status (2026-07):** the sibling half of audit item A4 — legacy agent-loop removal — is done (§3.7). What remains gated on production data is only this strategy 3–4 deletion.
 
 **Gate:** Two-week production data from the F.2 hit-rate counters (`stage_0_7_entered`, `stage_0_7_invocation_built`, `stage_0_7_used_result`) showing `used_result / requests < 5%`. Until that is observed, removal is premature.
 
@@ -431,7 +445,7 @@ For triaging Q&A failures — latency spikes, grounding failures, schema validat
 
 The pipeline is contract-driven end to end. Stage 0.2 emits the answer contract; evidence frames + the generic renderer cover five standard answer shapes deterministically (SCALAR / LIST / TIMESERIES / COMPARISON / SCENARIO); FORECAST plus the narrative shapes (EXPLANATION / KNOWLEDGE) go to a focus-aware LLM summarizer with pre-computed evidence in `stats_hint`; the visualization plan flows to Stage 5 without re-interpretation.
 
-After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function `_execute_evidence_plan` called once from `process_query` — one orchestration function with three internal passes (see §2.3 note). The remaining structural work is removing Stage 0.7 strategies once F.2 hit-rate data clears.
+After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function `_execute_evidence_plan` called once from `process_query` — one orchestration function with three internal passes (see §2.3 note); after the P0-4 decomposition, `process_query` itself is a thin ~230-line driver over `StageResult` stage functions. The legacy agent loop is deleted (§3.7). The remaining structural work is removing Stage 0.7 strategies once F.2 hit-rate data clears.
 
 **The practical test:** when a new question family appears, does it require a Stage 4 patch?
 

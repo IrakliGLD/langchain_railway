@@ -105,6 +105,11 @@ if PIPELINE_MODE not in {"deep", "fast"}:
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")
+# Stage 0.8: prefetch secondary evidence tool calls concurrently (2 workers,
+# sized to the core/db.py pool budget of 5). Results are applied strictly in
+# plan order, so storage/log/trace order is identical to the serial path;
+# this is a kill switch, not a rollout gate.
+EVIDENCE_PARALLEL_SECONDARY = os.getenv("EVIDENCE_PARALLEL_SECONDARY", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")
@@ -117,11 +122,6 @@ ENABLE_EVALUATE_ENDPOINT = os.getenv("ENABLE_EVALUATE_ENDPOINT", "false").lower(
 ENABLE_VECTOR_KNOWLEDGE_HINTS = os.getenv("ENABLE_VECTOR_KNOWLEDGE_HINTS", "true").lower() in ("1", "true", "yes", "on")
 TRACE_TEXT_MAX_CHARS = max(120, int(os.getenv("TRACE_TEXT_MAX_CHARS", "800")))
 TRACE_MAX_LIST_ITEMS = max(1, int(os.getenv("TRACE_MAX_LIST_ITEMS", "8")))
-AGENT_MAX_ROUNDS = max(1, int(os.getenv("AGENT_MAX_ROUNDS", "3")))
-AGENT_TOOL_PREVIEW_ROWS = max(1, int(os.getenv("AGENT_TOOL_PREVIEW_ROWS", "10")))
-AGENT_TOOL_PREVIEW_MAX_CHARS = max(200, int(os.getenv("AGENT_TOOL_PREVIEW_MAX_CHARS", "3000")))
-AGENT_TOOL_TIMEOUT_SECONDS = max(1, int(os.getenv("AGENT_TOOL_TIMEOUT_SECONDS", "15")))
-AGENT_TOOL_RETRY_ATTEMPTS = max(1, int(os.getenv("AGENT_TOOL_RETRY_ATTEMPTS", "2")))
 PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "45000")))
 # Per-stage prompt budgets (Phase 2.b, 2026-05-13).  Both default to the
 # legacy single-knob PROMPT_BUDGET_MAX_CHARS so existing deployments keep
