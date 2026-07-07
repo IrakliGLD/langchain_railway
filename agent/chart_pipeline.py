@@ -19,7 +19,11 @@ from config import ENAI_CHART_LONGFORM
 from context import COLUMN_LABELS
 from models import QueryContext
 from utils.trace_logging import trace_detail
-from visualization.chart_selector import select_chart_type, should_generate_chart
+from visualization.chart_selector import (
+    effective_primary_presentation,
+    select_chart_type,
+    should_generate_chart,
+)
 
 log = logging.getLogger("Enai")
 
@@ -174,6 +178,7 @@ def build_chart(ctx: QueryContext) -> QueryContext:
 
     qa_for_chart = ctx.question_analysis if ctx.question_analysis_source == "llm_active" else None
     vis = getattr(qa_for_chart, "visualization", None)
+    effective_presentation = effective_primary_presentation(qa_for_chart)
 
     generate_chart = should_generate_chart(
         ctx.query,
@@ -187,6 +192,7 @@ def build_chart(ctx: QueryContext) -> QueryContext:
         row_count=len(df),
         num_cols=num_cols,
         visualization=vis,
+        effective_presentation=effective_presentation,
     )
     if not generate_chart:
         log.info("Skipping chart generation (rows=%d).", len(df))
@@ -218,12 +224,13 @@ def build_chart(ctx: QueryContext) -> QueryContext:
 
     _apply_chart_collection(ctx, charts)
 
-    # Phase 12: when the analyzer asks for chart_plus_table, attach a
-    # companion table so the renderer can show the underlying observed
-    # values next to any derived chart. Uses the pre-transform frame (df)
-    # so exact numeric lookups are preserved regardless of measure_transform.
-    presentation = getattr(getattr(vis, "primary_presentation", None), "value", None)
-    if presentation == "chart_plus_table":
+    # Phase 12: when the analyzer asks for chart_plus_table — or the
+    # presentation is null and the COMPARISON default applies (§5.6) —
+    # attach a companion table so the renderer can show the underlying
+    # observed values next to any derived chart. Uses the pre-transform
+    # frame (df) so exact numeric lookups are preserved regardless of
+    # measure_transform.
+    if effective_presentation == "chart_plus_table":
         ctx.companion_table = _build_companion_table(df, label_map_all)
         # Surface on primary chart metadata so a single-payload consumer
         # sees the companion without reaching into a separate field.
@@ -354,17 +361,21 @@ def _apply_legacy_chart_suppression(
     row_count: int,
     num_cols: List[str],
     visualization: Optional[Any],
+    effective_presentation: Optional[str] = None,
 ) -> bool:
     if not generate_chart:
         return False
 
     query_text = ctx.query.lower()
     chart_requested = bool(getattr(visualization, "chart_requested_by_user", False))
-    chart_contract_prefers_chart = getattr(
-        getattr(visualization, "primary_presentation", None),
-        "value",
-        None,
-    ) in {"chart", "chart_plus_table"}
+    presentation_value = effective_presentation
+    if presentation_value is None:
+        presentation_value = getattr(
+            getattr(visualization, "primary_presentation", None),
+            "value",
+            None,
+        )
+    chart_contract_prefers_chart = presentation_value in {"chart", "chart_plus_table"}
 
     if ctx.skip_chart_due_to_relevance:
         log.info("Skipping chart generation: SQL query not relevant to user question")
