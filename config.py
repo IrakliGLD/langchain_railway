@@ -89,9 +89,11 @@ SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "").strip() or None
 
 # Thinking-budget cap for the router/question-analyzer stage.
 # Limits thinking tokens on Gemini 2.5 models to prevent latency spirals.
-# Default 2048 is enough for classification; set to 0 to disable thinking.
+# Default 1024 (lowered from 2048, 2026-07-07): classification rarely needs
+# more, and the budget is paid in latency+cost on every request; raise via
+# env if routing accuracy regresses. Set to 0 to disable thinking.
 # Non-thinking models silently ignore this parameter.
-_raw_tb = os.getenv("ROUTER_THINKING_BUDGET", "2048").strip()
+_raw_tb = os.getenv("ROUTER_THINKING_BUDGET", "1024").strip()
 ROUTER_THINKING_BUDGET: int | None = int(_raw_tb) if _raw_tb else None
 
 # Pipeline effort mode (Phase E / 14.9 steps 9-10).
