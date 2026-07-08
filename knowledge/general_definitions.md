@@ -174,6 +174,43 @@ Regulated tariffs are **NOT support schemes**.
 
 ---
 
+### Direct Contract
+**Definition:** A bilateral wholesale electricity purchase/sale contract registered for market settlement.
+
+**Georgia Context:**
+- direct contracts continue during the transitional market model
+- registered direct-contract quantities reduce residual monthly balancing exposure
+- import/export direct contracts also trigger cross-border registration and operational rules
+- support-scheme purchase arrangements can use mandatory direct-contract logic
+
+See `direct_contracts.md`.
+
+---
+
+### Contractual Application
+**Definition:** The registration form/application that operationalizes a direct contract for market settlement.
+
+**Georgia Context:**
+The contractual application is important because settlement and dispatch accounting use registered contract/application data. If contract and application terms conflict, the registered application can matter more for operational settlement.
+
+---
+
+### Qualified Enterprise
+**Definition:** A wholesale-market participant that has the legal status/authorization needed to participate in electricity wholesale trade under the relevant market rules.
+
+**Georgia Context:**
+Qualified-enterprise status matters for direct contracts, balancing electricity sales/purchases, import/export, and exchange eligibility. Do not treat ordinary retail consumers as qualified wholesale participants unless the rules identify them as such.
+
+---
+
+### WPSO / Wholesale Public Service Organization
+**Definition:** A public-service wholesale role used for support-scheme, public-service, and transition-settlement functions.
+
+**Georgia Context:**
+The Electricity Market Concept uses this role for renewable/PPA/GEP support, public-service supply needs, Abkhazia-related public-service supply, CfD/tariff-difference settlements, and special-fund flows. It is not ordinary competitive trading.
+
+---
+
 ## 4. Physical System Concepts
 
 ### Generation Mix
@@ -250,6 +287,28 @@ Regulated tariffs are **NOT support schemes**.
 - Exports in summer (hydro surplus)
 - Main partners: Turkey, Azerbaijan, Armenia, Russia
 - Prices are USD-based
+
+---
+
+### Cross-Border Capacity
+**Definition:** Transfer capacity available on an interconnection for import, export, or transit.
+
+**Georgia Context:**
+- MWh import/export volumes are not the same as MW transfer capacity
+- capacity allocation can involve NTC, NAC, ATC, allocated capacity, and auction capacity
+- the Dispatch Licensee / TSO may restrict cross-border flows for system stability, deficit, surplus, emergency, or transmission-security reasons
+
+See `cross_border_trade.md`.
+
+---
+
+### Surplus and Curtailment
+**Definition:** Surplus is a system condition where available generation exceeds what can be consumed, exported, stored, or safely accommodated. Curtailment is restriction of generation or flows to maintain system security.
+
+**Georgia Context:**
+- the TSO may restrict cross-border inflow or domestic production in surplus or forecast-surplus situations
+- curtailment rules have exceptions, especially electricity produced for export and annual-regulation reservoir PSO HPP safety treatment
+- temporary rules may apply for specific periods, such as May-July 2026
 
 ---
 

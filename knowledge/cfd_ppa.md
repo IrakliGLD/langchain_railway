@@ -90,6 +90,7 @@ Contracts for Difference are introduced for new renewable power plant projects u
 - Under the transitional market model:
   - CfD plants face **quantity risk**, not **price risk**
   - Curtailment by GSE leads to direct revenue loss (not compensated)
+  - Surplus or curtailment questions should also check `cross_border_trade.md` because Article 16^1 and temporary Article 60 rules affect whether output is restricted or treated through balancing/direct-contract settlement.
 
 - As CfD capacity increases:
   - central dispatch complexity for GSE increases
@@ -280,10 +281,12 @@ Support schemes are not directly stored as tariffs but can be observed indirectl
 - CfD/PPA electricity:
   - ESCO, on behalf of the state, still has the obligation to buy electricity from PPA plants at the PPA price. It then becomes ESCO's responsibility to market this procured electricity, because ESCO does not consume it itself. So ESCO acts as a trader in this regard.
   - CfD electricity will be sold on the Exchange and only the price difference will be compensated under the support scheme.
+  - Support-scheme producers are expected to interact with organized markets rather than remain simple residual balancing sellers.
 
 - Risk shift:
   - reduced curtailment exposure
   - increased imbalance risk
+  - price risk remains hedged by the PPA/CfD support instrument, but quantity/imbalance risk becomes more operationally important.
 
 
 

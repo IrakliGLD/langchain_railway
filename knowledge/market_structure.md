@@ -63,6 +63,8 @@ Despite being formally called a "balancing market", the current system functions
 
 - Day-ahead exchange (GENEX) introduced in **July 2024**
 - Trade on exchange is **hourly**
+- Exchange trading is **voluntary** during the July 1, 2024 to July 1, 2027 transition
+- Only the buyer/seller categories listed in Electricity Market Concept Article 17^4 can trade on the exchange
 - However:
   - exchange is layered on top of the existing monthly balancing model
   - does NOT replace balancing settlement
@@ -72,9 +74,24 @@ Despite being formally called a "balancing market", the current system functions
   - monthly balancing settlement remains dominant
   - exchange provides partial price signals
 
+For detailed exchange eligibility and the Article 17^4 transition rule, see `exchange_transition.md`.
+
 ---
 
-### 2.5 Structural Characteristics
+### 2.5 Direct Contracts in the Transition
+
+Direct contracts continue alongside exchange trading and balancing settlement.
+
+Core rule:
+- registered direct-contract quantities reduce the residual quantity settled as balancing electricity
+- import/export direct contracts also have cross-border registration and operational rules
+- mandatory direct contracts, including support-scheme arrangements, can enter ESCO procurement pricing through Article 14
+
+For contract registration and settlement implications, see `direct_contracts.md`.
+
+---
+
+### 2.6 Structural Characteristics
 
 - Market still has **limited competition and participation**
 - A large share of electricity is settled through balancing rather than competitive trading
@@ -96,6 +113,9 @@ Key features:
 - **Balance Responsible Parties (BRPs)**
 - **Hourly imbalance settlement**
 - **Real balancing market with products (FCR, aFRR, mFRR)**
+- Organized markets: day-ahead, intraday, balancing, and ancillary services
+- Transparent, competitive, non-discriminatory price formation
+- Consumer choice and supplier competition
 
 ---
 
@@ -129,7 +149,21 @@ Key features:
 
 ---
 
-### 3.5 Forecasting Implication
+### 3.5 WPSO / ESCO Role in the Target Design
+
+The Electricity Market Concept keeps a wholesale public service organization role for public-service and support-scheme settlement functions.
+
+Expected functions include:
+- support for renewable/PPA/GEP producers
+- organized-market purchase or sale on behalf of public-service obligations
+- settlement of CfD or tariff-difference compensation
+- special-fund flows for support-scheme and public-service costs
+
+This role should not be read as ordinary competitive trading by ESCO. It is a public-service/support-settlement layer within the target model.
+
+---
+
+### 3.6 Forecasting Implication
 
 - Forecasts based on the **current monthly weighted-average balancing price** should not be treated as structurally reliable beyond the expected transition to the target model.
 - Any forecast extending toward or beyond **July 2027** crosses a likely **price-formation regime change**:
@@ -259,7 +293,7 @@ Key features:
 ## 9. Key Events
 
 - **2006:** Balancing market established
-- **Jul 2024:** Exchange launched (GENEX) — hybrid model begins
+- **Jul 1, 2024:** Exchange launched (GENEX) and Article 17^4 transition period begins — hybrid model begins
 - **Jul 2027 (planned):** Target model launch (EU-style market) — delay risk exists
 
 ---

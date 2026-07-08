@@ -155,6 +155,12 @@ def _extract_bridge_topics(
         _add("electricity_import")
         _add("cross_border_trade")
 
+    if _has_any("direct contract", "direct contracts", "bilateral contract", "contractual application", "contract registration"):
+        _add("direct_contracts")
+        _add("wholesale_market_participants")
+        if _has_any("import", "export", "cross border", "cross-border"):
+            _add("cross_border_trade")
+
     if _has_any("transitory", "transitional", "transition model", "transition"):
         # Always add concept-level topic
         _add("electricity_market_transitory_model")
@@ -188,6 +194,7 @@ def _extract_bridge_topics(
         _add("participant_registration")
         _add("exchange_registration")
         _add("exchange_participation")
+        _add("exchange_transition")
         _add("exchange_rules")
 
     if _has_any(
@@ -209,13 +216,16 @@ def _extract_bridge_topics(
         _add("whoesale_market_participants")
 
     if _has_any("exchange", "electricity exchange"):
+        _add("exchange_transition")
         _add("exchange_rules")
         _add("exchange_participation")
 
     if _has_any("day ahead", "day-ahead"):
+        _add("exchange_transition")
         _add("day_ahead_market")
 
     if _has_any("intraday", "intra day", "intra-day"):
+        _add("exchange_transition")
         _add("intraday_market")
 
     if _has_any("deregulation", "deregulate", "liberalization", "liberalisation"):
@@ -268,6 +278,10 @@ def _extract_boost_terms(
 
     phrase_rules = [
         (
+            ("direct contract", "direct contracts", "bilateral contract", "contractual application", "contract registration"),
+            ["direct contract", "bilateral contract", "contract registration", "direct_contracts", "contractual application"],
+        ),
+        (
             ("capacity market", "capacity", "guaranteed capacity"),
             ["capacity market", "capacity", "guaranteed capacity"],
         ),
@@ -289,7 +303,7 @@ def _extract_boost_terms(
         ),
         (
             ("day-ahead", "day ahead", "intraday"),
-            ["day-ahead", "intraday"],
+            ["day-ahead", "intraday", "exchange transition", "exchange_transition"],
         ),
         (
             ("transitory", "transition", "transitional", "transition model"),

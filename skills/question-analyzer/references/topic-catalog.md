@@ -14,6 +14,18 @@ Runtime source of truth: [contracts/question_analysis_catalogs.py](../../../cont
 
 - Use for: participants, GENEX, ESCO, GSE, market roles, balancing market structure
 
+## direct_contracts
+
+- Use for: direct contracts, bilateral contracts, contract registration, contractual applications, project-company contracts
+
+## cross_border_trade
+
+- Use for: import/export/transit rules, cross-border capacity, emergency import/export, surplus, curtailment
+
+## exchange_transition
+
+- Use for: July 2024-July 2027 exchange transition, voluntary GENEX trading, day-ahead/intraday eligibility, Article 17^4
+
 ## tariffs
 
 - Use for: regulated tariffs, tariff entities, cost-plus tariff logic

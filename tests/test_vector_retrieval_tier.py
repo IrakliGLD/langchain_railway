@@ -110,7 +110,8 @@ def test_tier_narrative_data_shapes_light():
 # Market-structure rescue (2026-05-18, Q2 production trace c995f0c7)
 #
 # When the analyzer flags a query as touching balancing-price / tariffs /
-# market-structure / CFD-PPA / PSO-trading topics, vector retrieval must
+# market-structure / direct-contract / cross-border / exchange-transition /
+# CFD-PPA / PSO-trading topics, vector retrieval must
 # stay warm at LIGHT even for ``render_style=DETERMINISTIC`` data shapes.
 # Otherwise the LLM runs Stage 4 with ``domain_knowledge_in_prompt=0 chars``
 # and applies wrong column mappings (e.g. "small hydro" → ``price_regulated_hpp_*``,
@@ -143,12 +144,15 @@ def test_tier_market_structure_topic_rescues_deterministic_data_to_light():
 
 
 def test_tier_market_structure_topics_each_individually_rescue():
-    """Each of the five market-structure topics must independently trigger
+    """Each market-structure topic must independently trigger
     the LIGHT rescue when paired with deterministic data shape."""
     for topic in (
         KnowledgeTopicName.BALANCING_PRICE,
         KnowledgeTopicName.TARIFFS,
         KnowledgeTopicName.MARKET_STRUCTURE,
+        KnowledgeTopicName.DIRECT_CONTRACTS,
+        KnowledgeTopicName.CROSS_BORDER_TRADE,
+        KnowledgeTopicName.EXCHANGE_TRANSITION,
         KnowledgeTopicName.CFD_PPA,
         KnowledgeTopicName.PSO_TRADING,
     ):

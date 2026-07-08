@@ -129,6 +129,24 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Market participants, institutions, market structure, and market model design questions.",
     },
     {
+        "name": "direct_contracts",
+        "concepts": ["direct contract", "bilateral contract", "contract registration",
+                      "contractual application", "project company", "guaranteed purchase"],
+        "use_for": "Direct-contract eligibility, registration, termination, project-company contract treatment, and how bilateral contracts affect balancing settlement.",
+    },
+    {
+        "name": "cross_border_trade",
+        "concepts": ["import", "export", "transit", "cross-border capacity", "interconnection",
+                      "ATC", "NTC", "surplus", "curtailment", "emergency import"],
+        "use_for": "Import/export/transit rules, cross-border capacity allocation, emergency cross-border trade, surplus, curtailment, and TSO restriction powers.",
+    },
+    {
+        "name": "exchange_transition",
+        "concepts": ["GENEX", "exchange transition", "Article 17^4", "day-ahead",
+                      "intraday", "eligible buyers", "eligible sellers", "voluntary exchange"],
+        "use_for": "July 2024-July 2027 exchange transition, voluntary day-ahead/intraday participation, exchange eligibility, and exchange interaction with monthly balancing.",
+    },
+    {
         "name": "tariffs",
         "concepts": ["regulated tariff", "GNERC", "Enguri", "Gardabani", "cost-plus"],
         "use_for": "Tariff entities, tariff logic, and regulated pricing questions.",
