@@ -71,13 +71,25 @@ MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # NVIDIA (build.nvidia.com) — OpenAI-API-compatible endpoint driven via ChatOpenAI.
+# Any NIM model id works env-only, e.g. NVIDIA_MODEL=z-ai/glm-5.2 (with
+# MODEL_TYPE=nvidia); namespaced vendor/model ids classify to this provider
+# for cost attribution automatically. Restart required (env read at import).
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Output-token cap and sampling temperature for the NVIDIA client. max_tokens
-# matters for reasoning models (e.g. gpt-oss-120b) whose hidden reasoning counts
-# against the output budget — raise NVIDIA_MAX_TOKENS if answers get truncated.
+# matters for reasoning models (gpt-oss-120b, glm-5.2) whose hidden reasoning
+# counts against the output budget — raise NVIDIA_MAX_TOKENS (e.g. 16384) if
+# answers get truncated.
 NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
+# Optional wall-clock bound per NVIDIA call, in seconds. Unset/0 = unbounded
+# (the pre-2026-07-08 behavior). When set, a slow shared-endpoint model (the
+# z-ai/glm-5.2 incident: 113s analyzer + 192s summarizer calls at ~12 tok/s)
+# times out and falls back to OpenAI instead of holding the request for
+# minutes; max_retries drops to 1 because retrying a timeout on a slow model
+# only multiplies the wait (same rationale as the Gemini summarizer client).
+_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "").strip()
+NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or

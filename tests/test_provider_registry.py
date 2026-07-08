@@ -84,3 +84,23 @@ def test_registry_is_single_source_of_truth():
         assert isinstance(prov.model_name(), str)
         assert isinstance(prov.input_rate(), float)
         assert isinstance(prov.output_rate(), float)
+
+
+def test_nvidia_timeout_env_bounds_client_and_drops_retries(monkeypatch):
+    """2026-07-08 glm-5.2 incident: NVIDIA_TIMEOUT_SECONDS must bound the call
+    and force max_retries=1 (retrying a timeout on a slow model multiplies the
+    wait before the OpenAI fallback can fire). Unset keeps prior behavior."""
+    from core import llm_runtime
+
+    monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
+    monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(llm_runtime, "NVIDIA_TIMEOUT_SECONDS", 90.0)
+    bounded = llm_runtime.get_nvidia()
+    assert bounded.request_timeout == 90.0
+    assert bounded.max_retries == 1
+
+    monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
+    monkeypatch.setattr(llm_runtime, "NVIDIA_TIMEOUT_SECONDS", None)
+    unbounded = llm_runtime.get_nvidia()
+    assert unbounded.request_timeout is None
+    assert unbounded.max_retries == 2

@@ -26,6 +26,7 @@ from config import (
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_TEMPERATURE,
+    NVIDIA_TIMEOUT_SECONDS,
     OPENAI_API_KEY,
     OPENAI_MODEL,
 )
@@ -278,16 +279,25 @@ def get_nvidia() -> ChatOpenAI:
     if not NVIDIA_API_KEY:
         raise RuntimeError("NVIDIA_API_KEY not set")
     if _nvidia_llm is None:
-        _nvidia_llm = ChatOpenAI(
+        client_kwargs = dict(
             model=NVIDIA_MODEL,
             temperature=NVIDIA_TEMPERATURE,
             max_tokens=NVIDIA_MAX_TOKENS,
             openai_api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_BASE_URL,
-            max_retries=2  # Limit retries to prevent quota exhaustion
+            max_retries=2,  # Limit retries to prevent quota exhaustion
         )
+        if NVIDIA_TIMEOUT_SECONDS:
+            # Bounded call: a timeout must reach the OpenAI fallback after ONE
+            # attempt — retrying a slow model just multiplies the wait (see the
+            # NVIDIA_TIMEOUT_SECONDS comment in config.py).
+            client_kwargs["request_timeout"] = NVIDIA_TIMEOUT_SECONDS
+            client_kwargs["max_retries"] = 1
+        _nvidia_llm = ChatOpenAI(**client_kwargs)
         log.info(
-            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, max_retries=2)",
+            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, "
+            "timeout=%s, max_retries=%s)",
             NVIDIA_MODEL, NVIDIA_MAX_TOKENS, NVIDIA_TEMPERATURE,
+            NVIDIA_TIMEOUT_SECONDS or "unbounded", client_kwargs["max_retries"],
         )
     return _nvidia_llm

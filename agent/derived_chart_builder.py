@@ -117,25 +117,58 @@ def _score_column_relevance(col: str, query_lower: str) -> int:
     return score
 
 
+def _dedupe_value_identical_cols(df: Optional[pd.DataFrame], cols: List[str]) -> List[str]:
+    """Drop later columns whose values exactly duplicate an earlier kept column.
+
+    Joins can carry the same series under two names — the balancing
+    driver-context enrichment re-attaches ``balancing_price_gel/usd`` next to
+    the primary ``p_bal_gel/usd`` — and plotting both doubles the legend with
+    perfectly overlapping lines (2026-07-08 chart report). First occurrence
+    wins, so query-relevance ranking and analyzer ordering keep priority.
+    Exact equality only: legitimately different series are never merged, and
+    if a duplicate drifts numerically the dedup simply does not fire.
+    """
+    if df is None or not cols:
+        return list(cols)
+    kept: List[str] = []
+    for col in cols:
+        if col in df.columns and any(
+            k in df.columns and df[col].equals(df[k]) for k in kept
+        ):
+            continue
+        kept.append(col)
+    return kept
+
+
 def _limit_derived_num_cols(
     num_cols: List[str],
     *,
     query: Optional[str],
     max_series: Optional[int],
+    df: Optional[pd.DataFrame] = None,
 ) -> List[str]:
     """Cap ``num_cols`` to a readable series count for derived-chart specs.
 
     Priority order:
+      0. Drop value-identical duplicate columns (see
+         ``_dedupe_value_identical_cols``) when ``df`` is provided.
       1. Always preserve columns that score > 0 on the query-relevance
          heuristic (so the user's intent column survives even when the
          cap is tight).
       2. Fill the remaining slots from the original column order
          (preserves analyzer-provided ordering for ties).
 
-    Returns the original list when ``max_series`` is None/<=0 or the
+    Returns the (deduped) list when ``max_series`` is None/<=0 or the
     list is already within the cap. See Fix G comment block above.
     """
     cap = max_series if (max_series and max_series > 0) else _DERIVED_CHART_DEFAULT_MAX_SERIES
+    deduped = _dedupe_value_identical_cols(df, num_cols)
+    if len(deduped) < len(num_cols):
+        log.info(
+            "_limit_derived_num_cols dropped %d value-duplicate series: kept %s",
+            len(num_cols) - len(deduped), deduped,
+        )
+    num_cols = deduped
     if not num_cols or len(num_cols) <= cap:
         return list(num_cols)
 
@@ -393,7 +426,7 @@ def _build_mom_yoy_specs(
     if not num_cols or not time_key:
         return None
 
-    num_cols = _limit_derived_num_cols(num_cols, query=query, max_series=max_series)
+    num_cols = _limit_derived_num_cols(num_cols, query=query, max_series=max_series, df=df)
 
     dim_map = _infer_dim_map(num_cols)
 

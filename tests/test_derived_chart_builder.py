@@ -606,6 +606,48 @@ class TestLimitDerivedNumCols:
         result = _limit_derived_num_cols(short, query="trend", max_series=None)
         assert result == short
 
+    def _enriched_duplicate_df(self) -> pd.DataFrame:
+        # The 2026-07-08 chart report: driver enrichment re-attaches the
+        # balancing price under a second name, value-identical to the primary.
+        gel = [145.0, 137.4, 85.2, 121.0]
+        usd = [55.0, 54.96, 32.9, 46.0]
+        return pd.DataFrame({
+            "date": pd.date_range("2023-02-01", periods=4, freq="MS"),
+            "p_bal_gel": gel,
+            "p_bal_usd": usd,
+            "balancing_price_gel": gel,
+            "balancing_price_usd": usd,
+            "share_import": [0.1, 0.2, 0.0, 0.1],
+        })
+
+    def test_value_duplicate_series_dropped_first_occurrence_wins(self):
+        df = self._enriched_duplicate_df()
+        cols = ["p_bal_gel", "p_bal_usd", "balancing_price_gel",
+                "balancing_price_usd", "share_import"]
+        result = _limit_derived_num_cols(
+            cols, query="why balancing electricity price changed in may 2023?",
+            max_series=4, df=df,
+        )
+        assert result == ["p_bal_gel", "p_bal_usd", "share_import"]
+
+    def test_duplicates_dropped_even_below_cap(self):
+        df = self._enriched_duplicate_df()
+        cols = ["p_bal_gel", "balancing_price_gel"]
+        result = _limit_derived_num_cols(cols, query="trend", max_series=None, df=df)
+        assert result == ["p_bal_gel"]
+
+    def test_different_values_are_not_merged(self):
+        df = self._enriched_duplicate_df()
+        df["balancing_price_gel"] = df["balancing_price_gel"] + 1.0
+        cols = ["p_bal_gel", "balancing_price_gel"]
+        result = _limit_derived_num_cols(cols, query="trend", max_series=None, df=df)
+        assert result == cols
+
+    def test_no_df_keeps_prior_behavior(self):
+        cols = ["p_bal_gel", "balancing_price_gel"]
+        result = _limit_derived_num_cols(cols, query="trend", max_series=None)
+        assert result == cols
+
     def test_query_relevance_prioritises_intent_column(self):
         """For a "balancing price" query, balancing_price_* columns must
         survive the cap even when they're far down the original list."""
