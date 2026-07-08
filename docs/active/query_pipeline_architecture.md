@@ -310,7 +310,7 @@ Runtime modules and the files they live in. If this list disagrees with the code
 
 ### Orchestration
 
-- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline; after the P0-4 decomposition it is a thin ~230-line stage driver. Stage tracing via `_emit_trace_stage` + local `_trace_stage` closure. Stage helpers extracted from the old inline body: `_detect_clarify_selection` / `_rewrite_query_for_clarify_selection` (clarify-selection replies), `_derive_resolved_query`, `_finalize_answer_kind` (applies `_cross_check_answer_kind`), `_resolve_vector_tier`, `_run_vector_knowledge_stage`, `_apply_response_mode`, plus the `StageResult` early-return stages `_early_answer_clarify`, `_early_answer_conceptual`, `_run_generate_sql_stage`, `_check_missing_evidence_stage`. Also holds: `_cross_check_answer_kind` (with the legal-list exception), `_pick_primary_invocation` (the four-strategy chain), `_execute_evidence_step` (the shared tool executor), `_run_secondary_evidence_loop` (the Stage 0.8 body, moved from `evidence_planner.py` in §5.1.a), `_execute_evidence_plan` (the §5.1.b consolidated function combining primary execution + secondary loop + driver enrichment), `_attempt_analyzer_tool_recovery` (analyzer-source recovery candidate). The entire tool-execution surface remains one call: `ctx = _execute_evidence_plan(ctx)`.
+- **[`agent/pipeline.py`](../../agent/pipeline.py)** — `process_query` orchestrates the full pipeline; after the P0-4 decomposition it is a thin ~230-line stage driver. Stage tracing via `_emit_trace_stage` + local `_trace_stage` closure. Stage helpers extracted from the old inline body: `_detect_clarify_selection` / `_rewrite_query_for_clarify_selection` (clarify-selection replies), `_derive_resolved_query`, `_finalize_answer_kind` (applies `_cross_check_answer_kind`), `_resolve_vector_tier`, `_run_vector_knowledge_stage`, `_apply_response_mode`, plus the `StageResult` early-return stages `_early_answer_clarify`, `_early_answer_conceptual`, `_run_generate_sql_stage`, `_check_missing_evidence_stage`. Also holds: `_cross_check_answer_kind` (with the legal-list exception), `_pick_primary_invocation` (the four-strategy chain), `_execute_evidence_step` (the shared tool executor), `_run_secondary_evidence_loop` (the Stage 0.8 body, moved from `evidence_planner.py` in §5.1.a), `_execute_evidence_plan` (the §5.1.b consolidated function combining primary execution + secondary loop + driver enrichment), `_attempt_analyzer_tool_recovery` (analyzer-source recovery candidate), `_detect_evidence_anomaly` + `_attempt_evidence_reanalysis` (Stage 0.9, §3.6). The entire tool-execution surface remains one call: `ctx = _execute_evidence_plan(ctx)`.
 
 ### Analyzer + Routing
 
@@ -322,6 +322,8 @@ Runtime modules and the files they live in. If this list disagrees with the code
 - **[`agent/planner.py`](../../agent/planner.py)** — `prepare_context`, language detection, mode selection, heuristic conceptual classifier, `build_tool_invocation_from_analysis` (strategy 3 in the primary picker), legacy `generate_plan` for SQL fallback.
 - **[`agent/router.py`](../../agent/router.py)** — `match_tool` keyword+semantic tool router (strategies 2 and 4 in the primary picker). Also `extract_granularity`, the single authority for yearly/monthly granularity detection shared by the deterministic router and its semantic fallback.
 - **[`contracts/intent_lexicon.py`](../../contracts/intent_lexicon.py)** — multilingual (EN/KA/RU) intent keyword lexicon, one named constant per concept (A3). Consumers import the sets; the matching logic stays at the call sites. Migrated so far: `sql_executor`, `planner`, `models`; still to migrate (A3.d): `utils/query_validation.py`, `agent/router.py`.
+- **[`agent/contract_continuity.py`](../../agent/contract_continuity.py)** — compact routed-contract snapshot for the next turn's `TRUSTED_PREVIOUS_CONTRACT` block (§3.2; stored via `utils/session_memory.set_last_contract`).
+- **[`agent/fixture_candidates.py`](../../agent/fixture_candidates.py)** — `routed_fields_snapshot` (single authority, reused by the golden-set runner) + `ROUTING_FIXTURE_CANDIDATE` emission at the cross-check-disagreement and provenance-gate-failure sites (§5.3).
 - **[`contracts/question_analysis.py`](../../contracts/question_analysis.py)**, **[`question_analysis_catalogs.py`](../../contracts/question_analysis_catalogs.py)** — the Stage 0.2 contract: `QuestionAnalysis` Pydantic model with `AnswerKind`, `RenderStyle`, `Grouping`, `VisualizationInfo`, `FilterCondition`, `MeasureTransform`, `VisualizationTimeGrain`, `SeriesSplitMode`, `SortRule`, `ChartFamily`, `VisualGoal`, `PresentationMode`, `SemanticRole`, `ChartIntent`. Catalogs supply the LLM-facing JSON that explains each enum.
 - **[`schemas/question_analysis.schema.json`](../../schemas/question_analysis.schema.json)** — JSON-schema snapshot of the Pydantic model, asserted by `test_question_analysis_contract.py::test_schema_snapshot_matches_runtime_model`.
 
@@ -351,6 +353,8 @@ Runtime modules and the files they live in. If this list disagrees with the code
 - **[`agent/derived_chart_builder.py`](../../agent/derived_chart_builder.py)** — specs for MoM/YoY, index growth, decomposition, forecast, seasonal charts.
 - **[`visualization/chart_selector.py`](../../visualization/chart_selector.py)** — `should_generate_chart` gate (consults `VisualizationInfo` + row count + answer_kind).
 - **[`contracts/summary.py`](../../contracts/summary.py)** — the summary-generation result contract shared by the summarizer, guardrails, and tests (P0-1 extraction from `core/llm.py`).
+- **[`agent/render_fitness.py`](../../agent/render_fitness.py)** — shadow fitness checks on deterministic renders (§3.9); `period_bounds_from_hint`/`df_date_span` are also reused by Stage 0.9 anomaly detection.
+- **[`agent/answer_provenance.py`](../../agent/answer_provenance.py)** — the response-facing `answer_provenance` block (§3.9); read-only, contractually un-crashable projection of `QueryContext`.
 
 ### Skills
 
@@ -379,8 +383,9 @@ Developer-only (NOT loaded into prompts):
 ## 4.1 Deployment Constraint: Single Replica
 
 The service holds request-scoped *and* cross-request state **in process memory**: rate-limit
-buckets (`main.py`), session-bound conversation history (`utils/session_memory.py`), the LLM
-response cache (`core/llm_runtime.py`), and circuit-breaker state (`utils/resilience.py`).
+buckets (`main.py`), session-bound conversation history and last-contract snapshots
+(`utils/session_memory.py`), the LLM response cache (`core/llm_runtime.py`), and
+circuit-breaker state (`utils/resilience.py`).
 
 **The deployment assumption is exactly one worker process / one replica.** With N replicas:
 rate limits multiply by N, sessions issued on one replica are unknown to the others, and
