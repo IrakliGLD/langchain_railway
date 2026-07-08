@@ -67,6 +67,9 @@ class Metrics:
         # Planner-rule vs analyzer-emission agreement (ontology migration §5):
         # "<rule>:agree" / "<rule>:disagree".
         self.evidence_rule_agreement_events = {}
+        # Surprising-evidence detections after plan execution (§3.6):
+        # "primary_empty", "period_gap".
+        self.evidence_anomaly_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -324,6 +327,11 @@ class Metrics:
         key = f"{(rule or 'unknown').strip().lower()}:{'agree' if agree else 'disagree'}"
         self.evidence_rule_agreement_events[key] = self.evidence_rule_agreement_events.get(key, 0) + 1
 
+    def log_evidence_anomaly(self, tag: str) -> None:
+        """Track surprising-evidence detections (§3.6); sizes the re-analysis blast radius."""
+        key = (tag or "unknown").strip().lower() or "unknown"
+        self.evidence_anomaly_events[key] = self.evidence_anomaly_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -415,6 +423,7 @@ class Metrics:
             "analyzer_cross_check_events": dict(self.analyzer_cross_check_events),
             "render_fitness_events": dict(self.render_fitness_events),
             "evidence_rule_agreement_events": dict(self.evidence_rule_agreement_events),
+            "evidence_anomaly_events": dict(self.evidence_anomaly_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

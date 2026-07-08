@@ -1865,6 +1865,8 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
             previous_contract=(
                 ctx.previous_contract_snapshot if ENABLE_CONTRACT_CONTINUITY else ""
             ),
+            # Set only by the flag-gated re-analysis in pipeline.py; "" otherwise.
+            evidence_anomaly_note=getattr(ctx, "evidence_anomaly", "") or "",
         )
         ctx.question_analysis, guardrail_applied = _apply_balancing_month_explanation_guardrail(
             analyzed,

@@ -126,6 +126,10 @@ HTTP /ask
 │   │   ├─ analyzer-source → _attempt_analyzer_tool_recovery
 │   │   ├─ otherwise → mark fallback reason; fall through to SQL
 │   │   └─ no plan steps + SQL fallback possible → SQL escape hatch
+│   │
+│   │ After execution: surprising-evidence detection (always; counters) →
+│   │ flag-gated ONE re-analysis with the anomaly as trusted context —
+│   │ the same Stage 0.2 interpreter, never a loop (§3.6).
 │
 ├─ Stage 3: analyzer enrichment — dispatches on answer_kind + contract flags
 │   │ answer_kind = SCALAR/TIMESERIES + share signal → share enrichment
@@ -254,6 +258,10 @@ After the loop, `merge_evidence_into_context` joins secondary frames into `ctx.d
 #### Pass 3 — Driver-context enrichment
 
 When primary execution produced a usable result (`ctx.used_tool` and `ctx.tool_name` set), `_enrich_prices_with_balancing_driver_context` attaches source-price and contribution columns for balancing-price answers.
+
+#### Stage 0.9 — Evidence-anomaly detection + gated re-analysis (2026-07-07)
+
+After `_execute_evidence_plan` returns, `_detect_evidence_anomaly` checks data-shaped, authoritative contracts for surprising primary evidence: `primary_empty` (tool succeeded, zero rows) and `period_gap` (rendered rows entirely outside the requested period, reusing `agent/render_fitness.py`). Detection is always on — `evidence_anomaly_events` counters plus a `stage_0_9_evidence_anomaly` trace size the blast radius. Behind `ENABLE_EVIDENCE_REANALYSIS` (default OFF), `_attempt_evidence_reanalysis` runs **one** retry: the SAME Stage 0.2 interpreter re-runs with the anomaly attached as a `TRUSTED_EVIDENCE_ANOMALY` block (cache-key participating), the finalize cross-check re-applies, per-attempt evidence state resets to defaults, and the plan rebuilds and re-executes. `reanalysis_attempted` guards against loops; the vector bundle from the first pass is kept (tier changes out of scope). This closes the open-loop gap without reintroducing an agent loop — one interpretation, of more information. Enablement criteria: §5.8.
 
 ### 3.7 Stages 1/2 — Legacy SQL Fallback
 
@@ -449,7 +457,11 @@ Resolved 2026-07-07 and removed from this list: the borderline-COMPARISON item (
 
 Storage of the previous turn's routed-contract snapshot is live (§3.2); prompt injection sits behind `ENABLE_CONTRACT_CONTINUITY` (default off). **Cutover:** (1) teach the golden-set runner to chain turns so the `c00x` continuity fixtures can execute, and get them green; (2) enable the flag in production and watch `analyzer_cross_check_events` stay at-or-below baseline for two weeks. Rollback is an env flip. The eventual slice 2 — the analyzer emitting a contract *delta* instead of a full re-interpretation — is deliberately deferred until slice 1 proves the trusted-block mechanism in production.
 
-### 5.8 Evidence-Ontology Consolidation (migration, shadow since 2026-07-07)
+### 5.8 Evidence-Triggered Re-Analysis (detection live, retry gated)
+
+Anomaly detection and counters are live (§3.6 Stage 0.9); the single retry sits behind `ENABLE_EVIDENCE_REANALYSIS` (default off). **Enablement:** two weeks of `evidence_anomaly_events` from production to size the blast radius (expected rare — these are the residue of routing errors), the routing golden set green with the flag on, then enable. Rollback is an env flip. If anomaly rates are high, that is §5.3 analyzer-quality work first — the retry is a safety net, not a crutch.
+
+### 5.9 Evidence-Ontology Consolidation (migration, shadow since 2026-07-07)
 
 **Principle:** the contract should own the evidence ontology; the planner becomes purely mechanical (validate + order, never invent). Today the planner still *adds* steps from its own rule tables — domain knowledge living outside the contract, and the reason tool-routing unification is hard.
 
@@ -457,7 +469,7 @@ Storage of the previous turn's routed-contract snapshot is live (§3.2); prompt 
 
 **Slice 1 (live):** `threshold_share_price_context` — threshold-share queries asking for price context. The analyzer prompt (question-analyzer skill, Example 2d) now teaches emitting `get_prices` as a secondary candidate; the planner rule at `_add_steps_from_rules` still adds the step and logs agreement. Known detection gap (candidate for the golden set): the planner's `_SHARE_THRESHOLD_PATTERNS` require a literal `%` — "above 10 percent" spelled out does not trigger the rule.
 
-### 5.9 Triage Playbook (operational, not architectural)
+### 5.10 Triage Playbook (operational, not architectural)
 
 For triaging Q&A failures — latency spikes, grounding failures, schema validation crashes, routing misclassification — consult [`skills/pipeline-failure-diagnostics/`](../../skills/pipeline-failure-diagnostics/). The skill is the source of truth for failure patterns and fix-layer selection; this architecture document deliberately does not duplicate that content.
 

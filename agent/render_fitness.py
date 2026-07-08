@@ -30,7 +30,7 @@ def period_bounds_from_hint(question_analysis) -> tuple[str, str] | None:
     return str(start), str(end)
 
 
-def _df_date_span(df: pd.DataFrame) -> tuple[date, date] | None:
+def df_date_span(df: pd.DataFrame) -> tuple[date, date] | None:
     if df is None or df.empty:
         return None
     time_cols, _, _ = detect_column_types(list(df.columns))
@@ -60,7 +60,7 @@ def evaluate_render_fitness(ctx) -> list[str]:
 
     bounds = period_bounds_from_hint(qa) if qa is not None else None
     if bounds:
-        span = _df_date_span(df)
+        span = df_date_span(df)
         if span:
             req_start = date.fromisoformat(bounds[0])
             req_end = date.fromisoformat(bounds[1])

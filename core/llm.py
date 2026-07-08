@@ -2259,8 +2259,10 @@ _PREVIOUS_CONTRACT_GUIDANCE = (
     "2023', 'same in USD'), interpret it relative to this contract. If the "
     "new question is self-contained, ignore this block.\n"
 )
+_ANALYZER_BLOCK_EVIDENCE_ANOMALY = "TRUSTED_EVIDENCE_ANOMALY"
 _ANALYZER_PINNED_HEAD = [
     "UNTRUSTED_USER_QUESTION",
+    _ANALYZER_BLOCK_EVIDENCE_ANOMALY,
     _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
     "CONTRACT_QUERY_TYPE_GUIDE",
     "CONTRACT_ANSWER_KIND_GUIDE",
@@ -2315,6 +2317,7 @@ def _build_analyzer_prompt_blocks(
     *,
     prompt_context: Optional[_AnalyzerPromptContext] = None,
     previous_contract: str = "",
+    evidence_anomaly_note: str = "",
 ) -> list[tuple[str, str]]:
     """Assemble ordered analyzer prompt blocks.
 
@@ -2367,6 +2370,11 @@ def _build_analyzer_prompt_blocks(
             _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
             _PREVIOUS_CONTRACT_GUIDANCE + previous_contract,
         ))
+    # Evidence-triggered re-analysis (flag-gated at the pipeline): the anomaly
+    # note from the failed first pass. Tiny and decision-critical, so it is
+    # deliberately absent from the truncation priority lists (never truncated).
+    if evidence_anomaly_note:
+        blocks.append((_ANALYZER_BLOCK_EVIDENCE_ANOMALY, evidence_anomaly_note))
     # --- Conditional inclusion (C3) --------------------------------------
     # Omit catalog / guide blocks that are irrelevant for the pre-classified
     # question type.  Behavior fall-back: when ``pre_type`` is empty or
@@ -2680,6 +2688,7 @@ def llm_analyze_question(
     user_query: str,
     conversation_history: Optional[list] = None,
     previous_contract: str = "",
+    evidence_anomaly_note: str = "",
 ) -> QuestionAnalysis:
     """Normalize and classify a raw user question into the question-analysis contract.
 
@@ -2701,7 +2710,8 @@ def llm_analyze_question(
         f"{_TOOL_CATALOG_JSON}|"
         f"{_DERIVED_METRIC_CATALOG_JSON}|"
         f"{_ANSWER_KIND_GUIDE_JSON}|"
-        f"prev={previous_contract}"
+        f"prev={previous_contract}|"
+        f"anom={evidence_anomaly_note}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -2731,6 +2741,7 @@ def llm_analyze_question(
         prompt_profile,
         prompt_context=prompt_context,
         previous_contract=previous_contract,
+        evidence_anomaly_note=evidence_anomaly_note,
     )
     prompt = _render_analyzer_prompt(blocks, schema_hint)
     truncation_priority = _select_analyzer_truncation_priority(

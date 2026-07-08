@@ -96,6 +96,8 @@ class QueryContext:
     evidence_gap: Optional[Any] = None  # EvidenceGap from evidence_validator (Phase 3)
 
     # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
+    evidence_anomaly: str = ""                   # anomaly note for the gated re-analysis; "" otherwise
+    reanalysis_attempted: bool = False           # guards the single re-analysis attempt per request
     evidence_plan: List[Dict[str, Any]] = dc_field(default_factory=list)
     evidence_plan_source: str = ""                # "deterministic" | "analyzer" | ""
     evidence_collected: Dict[str, Any] = dc_field(default_factory=dict)  # role -> {tool, df, cols, rows}

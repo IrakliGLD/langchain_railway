@@ -117,6 +117,12 @@ EVIDENCE_PARALLEL_SECONDARY = os.getenv("EVIDENCE_PARALLEL_SECONDARY", "true").l
 # are interpreted as deltas. Default OFF — cutover criteria in
 # docs/active/query_pipeline_architecture.md §5.
 ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lower() in ("1", "true", "yes", "on")
+# Evidence-triggered re-analysis (design item 1): on surprising primary
+# evidence (empty frame / period gap), re-run Stage 0.2 ONCE with the anomaly
+# as trusted context and re-execute the plan. Detection + counters are always
+# on (shadow); the retry is gated here. Default OFF — enablement criteria in
+# docs/active/query_pipeline_architecture.md §5.
+ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")

@@ -195,7 +195,8 @@ def test_planner_threads_snapshot_only_when_flag_on(monkeypatch):
 
     captured: list[str] = []
 
-    def _fake_llm_analyze(user_query, conversation_history=None, previous_contract=""):
+    def _fake_llm_analyze(user_query, conversation_history=None, previous_contract="",
+                          evidence_anomaly_note=""):
         captured.append(previous_contract)
         return QuestionAnalysis(**_qa_payload())
 
