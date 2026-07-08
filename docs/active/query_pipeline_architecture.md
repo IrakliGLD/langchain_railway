@@ -2,7 +2,7 @@
 
 Technical reference for the `langchain_railway` query pipeline. Describes the current runtime, the Ideal Decision Tree it targets, and the structural work that is still open.
 
-**Last updated:** 2026-07-07 (truth pass: agent-loop deletion, `core/` split, `process_query` stage decomposition; efficiency pass: Stage 0.8 concurrent prefetch, embedding caching, `tool_adapter` removal)
+**Last updated:** 2026-07-08 (design-gap closures: answer provenance, render-fitness shadow, self-growing golden set, contract continuity [flag off], ontology-agreement shadow, evidence re-analysis [flag off]. Earlier 2026-07-07: truth pass — agent-loop deletion, `core/` split, `process_query` decomposition; efficiency pass — Stage 0.8 prefetch, embedding caching, `tool_adapter` removal)
 **Source of truth:** the code referenced inline below. When this document and the code disagree, the code wins — update this document.
 
 ---
@@ -13,7 +13,9 @@ Stage 0.2 is the single **interpretation** point: the one LLM call that interpre
 
 After the 2026-05-10 F.5 + §5.1 refactor series, the entire tool-execution surface is one function (`_execute_evidence_plan`) called once from `process_query`. It contains the four-strategy primary invocation picker (`_pick_primary_invocation`), the shared executor (`_execute_evidence_step`), the secondary evidence loop, and the post-loop driver-context enrichment. Evidence frames + the generic renderer cover five answer shapes (SCALAR, LIST, TIMESERIES, COMPARISON, SCENARIO) deterministically; FORECAST routes through the LLM over pre-computed trendline evidence (§3.9); narrative shapes (EXPLANATION, KNOWLEDGE, CLARIFY) go to a focus-aware LLM summarizer. The visualization plan flows through Stage 5 unchanged.
 
-The legacy agent loop is **deleted** (architecture-audit P2, 2026-07): with an authoritative Stage 0.2 contract it never fired, and analyzer-failure / no-tool cases fall through to the SQL fallback (§3.7). After the P0-4 decomposition, `process_query` itself is a thin ~230-line stage driver built from `StageResult` stage functions (§4 Orchestration). The remaining structural work is removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go (F.6). Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
+The legacy agent loop is **deleted** (architecture-audit P2, 2026-07): with an authoritative Stage 0.2 contract it never fired, and analyzer-failure / no-tool cases fall through to the SQL fallback (§3.7). After the P0-4 decomposition, `process_query` itself is a thin stage driver built from `StageResult` stage functions (§4 Orchestration). The remaining structural work is removing Stage 0.7 strategies from `_pick_primary_invocation` once two-week production hit-rate data confirms they can go (F.6). Quality work (analyzer routing accuracy, narrative grounding) is ongoing and uses the [`pipeline-failure-diagnostics`](../../skills/pipeline-failure-diagnostics/SKILL.md) developer skill as its playbook.
+
+The 2026-07-08 design-gap series closed the review's "the pipeline is a monologue" findings: every response carries an **answer-provenance block** (§3.9); deterministic renders get a **shadow fitness check** (§3.9); routing failures feed a **self-growing golden set** (§5.3); and two flag-gated-OFF capabilities await their §5 criteria — **contract continuity** (follow-ups as deltas over the previous turn's contract, §3.2/§5.7) and **evidence-triggered re-analysis** (one same-interpreter retry on surprising evidence, §3.6/§5.8). The ontology-agreement shadow (§5.9) measures when the first planner rule can migrate into the contract.
 
 ---
 
@@ -35,6 +37,8 @@ HTTP /ask
                   inside one orchestration block)
   → Stage 0.8     secondary evidence loop (additional plan steps)
                   → balancing driver-context enrichment (post-loop, conditional)
+  → Stage 0.9     surprising-evidence detection (always; counters/trace)
+                  → flag-gated ONE re-analysis (ENABLE_EVIDENCE_REANALYSIS)
   → Stages 1/2    legacy SQL fallback (only when typed tools didn't produce
                   primary data; the agent loop that used to sit before this
                   was deleted — §3.7)
@@ -293,6 +297,8 @@ A post-hoc provenance gate runs after the summary. It is a no-op for canonical-f
 ### 3.10 Stage 5 — Chart Pipeline
 
 `chart_pipeline.build_chart` consumes the analyzer's `VisualizationInfo` directly. The chart frame source is selected first: derived chart builders produce specs for MoM/YoY, index growth, decomposition, forecast, and seasonal answers; otherwise canonical evidence frames feed `chart_frame_builder`. Multi-group plans are iterated — `chart_groups` produces one chart per group, with per-group `type`, `title`, `y_axis_label`, and `metrics` honoured.
+
+**Design principle — intent vs realization:** Stage 0.2 emits visualization *intent* (it cannot know row counts or data shape); Stage 5 owns *realization* (the gates, the uncertainty default below, row-count checks). Do not "fix" Stage-5 gates by pushing data-dependent visualization decisions into the analyzer — it cannot make them well.
 
 **Uncertainty default (2026-07-07).** When the analyzer leaves `primary_presentation` null on a COMPARISON answer, Stage 5 applies `chart_plus_table` via `effective_primary_presentation` ([`visualization/chart_selector.py`](../../visualization/chart_selector.py)) — the reader gets the chart *and* the exact values instead of a row-count-heuristic chart-only guess (closed the former §5.6 item). Explicit presentations, including `text`/`table`, always win; analyzer-emission observability (planning cross-check, trace serialization) still reads the raw contract.
 
