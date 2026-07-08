@@ -25,7 +25,7 @@ ESCO **PAYS DIFFERENT PRICES** to each seller. The procurement (buy-side)
 price is **per seller category**, not a single value. The two sides are
 governed by different regulatory paragraphs and use different formulas.
 
-The regulatory source is `transitory_market_rules.md`, **Article 14** —
+The regulatory source is the **Electricity (Capacity) Market Rules** (stored in the source package as `transitory_market_rules.md`), **Article 14** —
 *"მუხლი 14. სისტემის კომერციული ოპერატორის მიერ შესყიდული და გაყიდული
 საბალანსო ელექტროენერგიის ფასის ფორმირება"* (formation of the price of
 balancing electricity **purchased and sold** by the system commercial
@@ -43,7 +43,7 @@ the rules.
 **Mandatory purchase categories** (Art 13 §4.ა–ლ):
 - Generators (busbar output minus direct-contract sales)
 - Importers (imports minus direct-contract sales)
-- Concept Art 17(4) §7 enterprises (busbar output minus exchange + direct-contract sales)
+- Electricity Market Model Concept Article 17^4(7) enterprises (busbar output minus exchange + direct-contract sales)
 - Direct customers / USP / free supplier / public-service supplier /
   last-resort supplier (positive difference between exchange purchases and actual consumption)
 - Dispatch licensee (transmission losses + transit losses)
@@ -67,7 +67,7 @@ electricity and import-direct-contracted electricity sold downstream.
 **Buyers of balancing electricity from ESCO** (Art 13 §9–§14):
 direct customers, USP, free/public/last-resort suppliers, dispatch
 licensee (transmission + transit losses), distribution licensee
-(distribution losses), exporter qualified enterprises, Concept Art 17(4)
+(distribution losses), exporter qualified enterprises, Electricity Market Model Concept Article 17^4
 qualified enterprises, exchange operator.
 
 ### B. Per-seller buy-side prices (Article 14 — buy side)
@@ -594,7 +594,7 @@ This is the canonical timeline of policy decisions that have shifted balancing-p
 - **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.
 - **Jan–Mar 2024 (temporary rule):** the Electricity (Capacity) Market Rules were temporarily changed for three months. During Jan–Mar 2024, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
 - **Jul 2024:** Exchange launched (GENEX) — added a new trading segment alongside balancing.
-- **Jul 2024-Jul 2027 transition:** Exchange trading is voluntary and limited to eligible Article 17^4 buyers/sellers; monthly balancing price and quantity still apply. See `exchange_transition.md`.
+- **Jul 2024-Jul 2027 transition:** Exchange trading is voluntary and limited to buyers/sellers eligible under Article 17^4 of the Electricity Market Model Concept; monthly balancing price and quantity still apply. See `exchange_transition.md`.
 - **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. This is one instance of a broader state-owned plant allocation pattern — see the *"State-owned plant allocation as a balancing-price-reduction lever"* subsection below for the full case list and detection methodology.
 - **2020 onwards:** Entity-level data available (no composition-based driver evidence before 2020).
 - **From May 2025:** Enguri/Vardnili tariffs increased to cover Abkhazia supply costs (see `market_structure.md` §14).

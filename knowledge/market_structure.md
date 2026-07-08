@@ -64,7 +64,7 @@ Despite being formally called a "balancing market", the current system functions
 - Day-ahead exchange (GENEX) introduced in **July 2024**
 - Trade on exchange is **hourly**
 - Exchange trading is **voluntary** during the July 1, 2024 to July 1, 2027 transition
-- Only the buyer/seller categories listed in Electricity Market Concept Article 17^4 can trade on the exchange
+- Only the buyer/seller categories listed in Article 17^4 of the Electricity Market Model Concept can trade on the exchange
 - However:
   - exchange is layered on top of the existing monthly balancing model
   - does NOT replace balancing settlement
@@ -74,7 +74,7 @@ Despite being formally called a "balancing market", the current system functions
   - monthly balancing settlement remains dominant
   - exchange provides partial price signals
 
-For detailed exchange eligibility and the Article 17^4 transition rule, see `exchange_transition.md`.
+For detailed exchange eligibility and the Article 17^4 transition rule in the Electricity Market Model Concept, see `exchange_transition.md`.
 
 ---
 
@@ -151,7 +151,7 @@ Key features:
 
 ### 3.5 WPSO / ESCO Role in the Target Design
 
-The Electricity Market Concept keeps a wholesale public service organization role for public-service and support-scheme settlement functions.
+The Electricity Market Model Concept keeps a wholesale public service organization role for public-service and support-scheme settlement functions.
 
 Expected functions include:
 - support for renewable/PPA/GEP producers
@@ -293,7 +293,7 @@ This role should not be read as ordinary competitive trading by ESCO. It is a pu
 ## 9. Key Events
 
 - **2006:** Balancing market established
-- **Jul 1, 2024:** Exchange launched (GENEX) and Article 17^4 transition period begins — hybrid model begins
+- **Jul 1, 2024:** Exchange launched (GENEX) and the Article 17^4 transition period under the Electricity Market Model Concept begins — hybrid model begins
 - **Jul 2027 (planned):** Target model launch (EU-style market) — delay risk exists
 
 ---
