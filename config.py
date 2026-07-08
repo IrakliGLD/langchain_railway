@@ -71,11 +71,15 @@ MODEL_TYPE = os.getenv("MODEL_TYPE", "gemini").lower()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # NVIDIA (build.nvidia.com) — OpenAI-API-compatible endpoint driven via ChatOpenAI.
+# Any NIM model id works env-only, e.g. NVIDIA_MODEL=z-ai/glm-5.2 (with
+# MODEL_TYPE=nvidia); namespaced vendor/model ids classify to this provider
+# for cost attribution automatically. Restart required (env read at import).
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Output-token cap and sampling temperature for the NVIDIA client. max_tokens
-# matters for reasoning models (e.g. gpt-oss-120b) whose hidden reasoning counts
-# against the output budget — raise NVIDIA_MAX_TOKENS if answers get truncated.
+# matters for reasoning models (gpt-oss-120b, glm-5.2) whose hidden reasoning
+# counts against the output budget — raise NVIDIA_MAX_TOKENS (e.g. 16384) if
+# answers get truncated.
 NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 
