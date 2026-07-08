@@ -2494,6 +2494,7 @@ def process_query(
     conversation_history=None,
     trace_id: str = "",
     session_id: str = "",
+    previous_contract_snapshot: str = "",
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -2507,6 +2508,7 @@ def process_query(
         conversation_history=conversation_history,
         trace_id=trace_id,
         session_id=session_id,
+        previous_contract_snapshot=previous_contract_snapshot,
         clarify_selection_override=selected is not None,
     )
 

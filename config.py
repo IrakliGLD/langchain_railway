@@ -112,6 +112,11 @@ ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() i
 # plan order, so storage/log/trace order is identical to the serial path;
 # this is a kill switch, not a rollout gate.
 EVIDENCE_PARALLEL_SECONDARY = os.getenv("EVIDENCE_PARALLEL_SECONDARY", "true").lower() in ("1", "true", "yes", "on")
+# Stage 0.2 contract continuity (slice 1): inject the previous turn's routed
+# contract as a TRUSTED analyzer-prompt block so follow-ups ("and for 2023")
+# are interpreted as deltas. Default OFF — cutover criteria in
+# docs/active/query_pipeline_architecture.md §5.
+ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")

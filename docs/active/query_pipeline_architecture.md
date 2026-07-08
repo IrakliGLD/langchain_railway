@@ -194,6 +194,8 @@ The semantic centre of the pipeline. Emits the full contract listed in §2.3. Pr
 
 Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer_kind` against a `query_type`-derived value every call. On disagreement the safer option is preferred unless the legal-list exception fires (LIST + regulatory/conceptual + confidence ≥ 0.85). The scenario-metric override (EXPLANATION/SCALAR/TIMESERIES → SCENARIO when the analyzer emits a scenario-family derived metric) is additionally gated on a quantitative anchor in the user query — a digit, percent, or multiplicative/directional word — to prevent garbage renderer output when the analyzer hallucinates a `scenario_factor` from an anchorless question (2026-05-13 fix).
 
+**Contract continuity (2026-07-07, injection flag-gated OFF: `ENABLE_CONTRACT_CONTINUITY`).** After every successful request, a compact routed-contract snapshot ([`agent/contract_continuity.py`](../../agent/contract_continuity.py)) is stored on the session (`utils/session_memory.set_last_contract`, same TTL as history; storage is always on). With the flag on, the next turn's analyzer prompt receives it as a `TRUSTED_PREVIOUS_CONTRACT` block pinned right after the user question, instructing the LLM to interpret follow-ups ("and for 2023", "same in USD") as deltas over the previous contract instead of re-deriving intent from history text — which the truncation policy drops first. Truncation placement: drops second (right after history) in both analyzer profiles; for the clarify profile it moves to the preserved end alongside history. The snapshot participates in the analyzer cache key, so follow-ups can never hit a stale cached interpretation. Cutover criteria: §5.7.
+
 ### 3.3 Stage 0.3 — Vector Knowledge Retrieval
 
 Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, tighter candidate pool, no boost-term expansion) for narrative data, SKIP for deterministic data and CLARIFY. The tier is computed by `_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`. There is no separate re-rank pass — candidates are over-fetched and ordered by similarity.
@@ -443,7 +445,11 @@ Earlier versions of this document proposed removing the post-hoc provenance gate
 
 Resolved 2026-07-07 and removed from this list: the borderline-COMPARISON item (null `primary_presentation` now defaults to `chart_plus_table` — see §3.10) and the `FilterCondition` audit (performed; clean — the contract flows `params_hint.filter` → `adapt_tool_result` → `_apply_filter` in every frame adapter, and no ad-hoc post-fetch threshold filtering exists in the summarizer/renderer layer).
 
-### 5.7 Evidence-Ontology Consolidation (migration, shadow since 2026-07-07)
+### 5.7 Contract Continuity (slice 1 live, injection gated)
+
+Storage of the previous turn's routed-contract snapshot is live (§3.2); prompt injection sits behind `ENABLE_CONTRACT_CONTINUITY` (default off). **Cutover:** (1) teach the golden-set runner to chain turns so the `c00x` continuity fixtures can execute, and get them green; (2) enable the flag in production and watch `analyzer_cross_check_events` stay at-or-below baseline for two weeks. Rollback is an env flip. The eventual slice 2 — the analyzer emitting a contract *delta* instead of a full re-interpretation — is deliberately deferred until slice 1 proves the trusted-block mechanism in production.
+
+### 5.8 Evidence-Ontology Consolidation (migration, shadow since 2026-07-07)
 
 **Principle:** the contract should own the evidence ontology; the planner becomes purely mechanical (validate + order, never invent). Today the planner still *adds* steps from its own rule tables — domain knowledge living outside the contract, and the reason tool-routing unification is hard.
 
@@ -451,7 +457,7 @@ Resolved 2026-07-07 and removed from this list: the borderline-COMPARISON item (
 
 **Slice 1 (live):** `threshold_share_price_context` — threshold-share queries asking for price context. The analyzer prompt (question-analyzer skill, Example 2d) now teaches emitting `get_prices` as a secondary candidate; the planner rule at `_add_steps_from_rules` still adds the step and logs agreement. Known detection gap (candidate for the golden set): the planner's `_SHARE_THRESHOLD_PATTERNS` require a literal `%` — "above 10 percent" spelled out does not trigger the rule.
 
-### 5.8 Triage Playbook (operational, not architectural)
+### 5.9 Triage Playbook (operational, not architectural)
 
 For triaging Q&A failures — latency spikes, grounding failures, schema validation crashes, routing misclassification — consult [`skills/pipeline-failure-diagnostics/`](../../skills/pipeline-failure-diagnostics/). The skill is the source of truth for failure patterns and fix-layer selection; this architecture document deliberately does not duplicate that content.
 

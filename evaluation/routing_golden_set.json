@@ -79,6 +79,27 @@
       "query": "Почему изменилась цена балансирующей электроэнергии в марте 2024 года?",
       "note": "RU: why did the balancing price change (explanation)",
       "expected": {"query_type": "data_explanation", "answer_kind": "explanation"}
+    },
+    {
+      "id": "c001",
+      "query": "and for 2023?",
+      "note": "continuity follow-up after r002 (monthly balancing prices); requires previous-contract injection — runner turn-chaining pending",
+      "skip_unless_continuity": true,
+      "expected": {"answer_kind": "timeseries"}
+    },
+    {
+      "id": "c002",
+      "query": "same but in USD",
+      "note": "continuity follow-up after r001 (June-2024 balancing price scalar); requires previous-contract injection — runner turn-chaining pending",
+      "skip_unless_continuity": true,
+      "expected": {"answer_kind": "scalar"}
+    },
+    {
+      "id": "c003",
+      "query": "და 2023 წელს?",
+      "note": "KA continuity follow-up ('and in 2023?') after r012; requires previous-contract injection — runner turn-chaining pending",
+      "skip_unless_continuity": true,
+      "expected": {"answer_kind": "scalar"}
     }
   ]
 }

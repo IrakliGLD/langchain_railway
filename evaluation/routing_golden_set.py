@@ -179,6 +179,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"routing_golden_set.json OK: {len(cases)} case(s), "
               f"assertable fields {_ASSERTABLE_FIELDS}")
         return 0
+    continuity_cases = [c for c in cases if c.get("skip_unless_continuity")]
+    if continuity_cases:
+        cases = [c for c in cases if not c.get("skip_unless_continuity")]
+        print(
+            f"Skipping {len(continuity_cases)} continuity case(s) — the runner "
+            "does not chain turns yet (architecture §5 contract-continuity slice)"
+        )
     return run(cases, args.min_score)
 
 

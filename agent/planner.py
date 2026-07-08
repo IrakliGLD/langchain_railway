@@ -25,7 +25,7 @@ from agent.router import (
 )
 from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
 from agent.tools.types import ToolInvocation
-from config import ENABLE_TRACE_DEBUG_ARTIFACTS
+from config import ENABLE_CONTRACT_CONTINUITY, ENABLE_TRACE_DEBUG_ARTIFACTS
 from contracts.question_analysis import (
     AnswerKind,
     PreferredPath,
@@ -1862,6 +1862,9 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
         analyzed = llm_analyze_question(
             user_query=ctx.query,
             conversation_history=ctx.conversation_history,
+            previous_contract=(
+                ctx.previous_contract_snapshot if ENABLE_CONTRACT_CONTINUITY else ""
+            ),
         )
         ctx.question_analysis, guardrail_applied = _apply_balancing_month_explanation_guardrail(
             analyzed,

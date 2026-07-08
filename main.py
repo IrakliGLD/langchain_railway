@@ -54,6 +54,7 @@ import knowledge as knowledge_module
 
 # Phase 6: Pipeline
 from agent.answer_provenance import build_answer_provenance
+from agent.contract_continuity import continuity_snapshot_json
 from agent.pipeline import process_query
 from analysis.seasonal import compute_seasonal_average
 from analysis.seasonal_stats import calculate_seasonal_stats, detect_monthly_timeseries, format_seasonal_stats
@@ -117,9 +118,11 @@ from utils.resilience import get_resilience_snapshot, request_backpressure_gate
 from utils.session_memory import (
     append_exchange,
     get_history,
+    get_last_contract,
     get_or_issue_session,
     resolve_session_token,
     seed_history,
+    set_last_contract,
 )
 from visualization.chart_builder import prepare_chart_data
 
@@ -1042,6 +1045,7 @@ def ask_post(
                 conversation_history=bound_history,
                 trace_id=trace_id,
                 session_id=session_id,
+                previous_contract_snapshot=get_last_contract(session_id),
             )
         except HTTPException:
             _finalize_request_telemetry()
@@ -1060,6 +1064,9 @@ def ask_post(
             raise HTTPException(status_code=500, detail=f'Query processing failed: {e}')
 
         append_exchange(session_id, query_text, ctx.summary)
+        _contract_snapshot = continuity_snapshot_json(ctx)
+        if _contract_snapshot:
+            set_last_contract(session_id, _contract_snapshot)
         req_usage = _finalize_request_telemetry()
 
         exec_time = time.time() - t0

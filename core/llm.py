@@ -2237,16 +2237,31 @@ def _promote_history_to_front(section_names: list[str], prompt_profile: str) -> 
 
 
 def _move_history_to_end(priority: list[str], prompt_profile: str) -> list[str]:
-    """Move conversation history to the last truncation slot for clarify turns."""
+    """Move conversation context to the last truncation slots for clarify turns.
+
+    The previous-contract block is the compact, trusted form of history, so it
+    moves together with history (history preserved longest, contract
+    second-longest).
+    """
     if prompt_profile != "clarify" or "UNTRUSTED_CONVERSATION_HISTORY" not in priority:
         return list(priority)
-    return [name for name in priority if name != "UNTRUSTED_CONVERSATION_HISTORY"] + [
-        "UNTRUSTED_CONVERSATION_HISTORY"
+    _moved = {"UNTRUSTED_CONVERSATION_HISTORY", _ANALYZER_BLOCK_PREVIOUS_CONTRACT}
+    return [name for name in priority if name not in _moved] + [
+        _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
+        "UNTRUSTED_CONVERSATION_HISTORY",
     ]
 
 
+_ANALYZER_BLOCK_PREVIOUS_CONTRACT = "TRUSTED_PREVIOUS_CONTRACT"
+_PREVIOUS_CONTRACT_GUIDANCE = (
+    "Previous turn's routed contract (trusted context from this session, not "
+    "user input). If the new question is a follow-up or delta (e.g. 'and for "
+    "2023', 'same in USD'), interpret it relative to this contract. If the "
+    "new question is self-contained, ignore this block.\n"
+)
 _ANALYZER_PINNED_HEAD = [
     "UNTRUSTED_USER_QUESTION",
+    _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
     "CONTRACT_QUERY_TYPE_GUIDE",
     "CONTRACT_ANSWER_KIND_GUIDE",
 ]
@@ -2299,6 +2314,7 @@ def _build_analyzer_prompt_blocks(
     prompt_profile: str,
     *,
     prompt_context: Optional[_AnalyzerPromptContext] = None,
+    previous_contract: str = "",
 ) -> list[tuple[str, str]]:
     """Assemble ordered analyzer prompt blocks.
 
@@ -2341,6 +2357,16 @@ def _build_analyzer_prompt_blocks(
         (_ANALYZER_RULE_BLOCK_CHART, _ANALYZER_CHART_RULES),
         ("CONTRACT_RULES", _ANALYZER_CORE_RULES.rstrip()),
     ]
+    # Contract continuity (flag-gated at the caller): the previous turn's
+    # routed contract as TRUSTED context. Position is governed by
+    # _ANALYZER_PINNED_HEAD (right after the user question); never dropped by
+    # the conditional-inclusion rules below because it is cheap and the LLM
+    # is instructed to ignore it for self-contained questions.
+    if previous_contract:
+        blocks.append((
+            _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
+            _PREVIOUS_CONTRACT_GUIDANCE + previous_contract,
+        ))
     # --- Conditional inclusion (C3) --------------------------------------
     # Omit catalog / guide blocks that are irrelevant for the pre-classified
     # question type.  Behavior fall-back: when ``pre_type`` is empty or
@@ -2595,6 +2621,7 @@ def _enforce_prompt_budget(
 
 _ANALYZER_TRUNCATION_DATA = [
     "UNTRUSTED_CONVERSATION_HISTORY",
+    _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
     _ANALYZER_RULE_BLOCK_CHART,
     "UNTRUSTED_CHART_POLICY_HINTS",
     "UNTRUSTED_TOPIC_CATALOG",
@@ -2606,6 +2633,7 @@ _ANALYZER_TRUNCATION_DATA = [
 ]
 _ANALYZER_TRUNCATION_KNOWLEDGE = [
     "UNTRUSTED_CONVERSATION_HISTORY",
+    _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
     "UNTRUSTED_TOOL_CATALOG",
     "UNTRUSTED_DERIVED_METRIC_CATALOG",
     _ANALYZER_RULE_BLOCK_CHART,
@@ -2651,8 +2679,15 @@ def _select_analyzer_truncation_priority(
 def llm_analyze_question(
     user_query: str,
     conversation_history: Optional[list] = None,
+    previous_contract: str = "",
 ) -> QuestionAnalysis:
-    """Normalize and classify a raw user question into the question-analysis contract."""
+    """Normalize and classify a raw user question into the question-analysis contract.
+
+    ``previous_contract`` (contract continuity, flag-gated at the caller) is a
+    compact JSON snapshot of the previous turn's routed contract; when
+    non-empty it is injected as a TRUSTED prompt block and participates in the
+    cache key so follow-ups never hit a stale cached interpretation.
+    """
 
     prompt_context = _build_analyzer_prompt_context(user_query, conversation_history)
     pre_type = prompt_context.effective_pre_type
@@ -2665,7 +2700,8 @@ def llm_analyze_question(
         f"{_TOPIC_CATALOG_JSON}|"
         f"{_TOOL_CATALOG_JSON}|"
         f"{_DERIVED_METRIC_CATALOG_JSON}|"
-        f"{_ANSWER_KIND_GUIDE_JSON}"
+        f"{_ANSWER_KIND_GUIDE_JSON}|"
+        f"prev={previous_contract}"
     )
     cached_response = llm_cache.get(cache_input)
     if cached_response:
@@ -2694,6 +2730,7 @@ def llm_analyze_question(
         pre_type,
         prompt_profile,
         prompt_context=prompt_context,
+        previous_contract=previous_contract,
     )
     prompt = _render_analyzer_prompt(blocks, schema_hint)
     truncation_priority = _select_analyzer_truncation_priority(
