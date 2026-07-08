@@ -137,6 +137,15 @@ def test_why_context_emits_signal_trace(monkeypatch, caplog):
 
 
 def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
+    # Hermetic grounding: domain knowledge is a legitimate provenance source,
+    # and once any TestClient test has warmed the knowledge cache the merged
+    # balancing pack contains 60-family tokens that cover the claim below
+    # (2026-07-08: the knowledge expansion in b0052a8 flipped this gate to
+    # PASS in full-suite order). This test reasons about provenance_rows vs
+    # preview only, so it must pin the knowledge source to empty.
+    monkeypatch.setattr(
+        summarizer, "get_relevant_domain_knowledge", lambda *a, **k: "",
+    )
     monkeypatch.setattr(
         summarizer,
         "llm_summarize_structured",
