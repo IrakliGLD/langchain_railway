@@ -478,7 +478,7 @@ Anomaly detection and counters are live (§3.6 Stage 0.9); the single retry sits
 
 **Migration pattern (one rule per slice):** teach the analyzer to emit the evidence intent (skill guidance), keep the planner rule authoritative, and measure agreement via `evidence_rule_agreement_events` (`<rule>:agree` / `<rule>:disagree` in `/metrics`). **Cutover per rule:** ≥95% agreement over 14 days → delete the planner rule in a dedicated session, gated by the routing golden set plus disagreement review.
 
-**Slice 1 (live):** `threshold_share_price_context` — threshold-share queries asking for price context. The analyzer prompt (question-analyzer skill, Example 2d) now teaches emitting `get_prices` as a secondary candidate; the planner rule at `_add_steps_from_rules` still adds the step and logs agreement. Known detection gap (candidate for the golden set): the planner's `_SHARE_THRESHOLD_PATTERNS` require a literal `%` — "above 10 percent" spelled out does not trigger the rule.
+**Slice 1 (live):** `threshold_share_price_context` — threshold-share queries asking for price context. The analyzer prompt (question-analyzer skill, Example 2d) now teaches emitting `get_prices` as a secondary candidate; the planner rule at `_add_steps_from_rules` still adds the step and logs agreement. The `%`-only detection gap was fixed 2026-07-08 (`_SHARE_THRESHOLD_PATTERNS` now also match spelled-out "percent"/"pct"; golden-set case r014). KA/RU threshold phrasings remain fixture-driven — harvest them from production, don't guess.
 
 ### 5.10 Triage Playbook (operational, not architectural)
 

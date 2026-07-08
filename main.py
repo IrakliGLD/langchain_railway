@@ -90,6 +90,7 @@ from config import (
     SESSION_SIGNING_SECRET,
     STATIC_ALLOWED_TABLES,
     SUPABASE_JWT_SECRET,
+    TRUST_PROXY_CLIENT_IP,
 )
 
 # Schema & helpers
@@ -387,6 +388,13 @@ _user_rate_buckets: Dict[str, List[float]] = {}
 _user_rate_lock = threading.Lock()
 
 
+# Amortized bucket eviction: without it, subjects that stop sending keep an
+# entry forever and each bucket map grows with every distinct IP/session the
+# process ever sees. Swept at most once per interval, per bucket map.
+_BUCKET_SWEEP_INTERVAL_SECONDS = 300.0
+_bucket_last_sweep: Dict[int, float] = {}
+
+
 def _check_sliding_window_rate_limit(
     *,
     subject_id: str,
@@ -398,6 +406,14 @@ def _check_sliding_window_rate_limit(
     """Return True when the subject stays within the sliding-window budget."""
     now = time.time()
     with bucket_lock:
+        if now - _bucket_last_sweep.get(id(buckets), 0.0) > _BUCKET_SWEEP_INTERVAL_SECONDS:
+            _bucket_last_sweep[id(buckets)] = now
+            stale = [
+                key for key, stamps in buckets.items()
+                if not stamps or now - stamps[-1] >= window_seconds
+            ]
+            for key in stale:
+                del buckets[key]
         timestamps = [t for t in buckets.get(subject_id, []) if now - t < window_seconds]
         if len(timestamps) >= max_requests:
             buckets[subject_id] = timestamps
@@ -407,10 +423,32 @@ def _check_sliding_window_rate_limit(
         return True
 
 
+def _preauth_client_ip(request: Request) -> str:
+    """Client IP for the pre-auth limiter.
+
+    Behind the platform proxy every request shares one socket peer, so keying
+    on it collapses all callers into a single bucket — one abusive client
+    exhausts the pre-auth budget for everyone. Trust exactly one proxy hop:
+    take the LAST X-Forwarded-For entry (appended by the trusted edge), so
+    client-supplied spoof entries earlier in the list are ignored. This
+    deliberately differs from the verified-gateway key in _rate_limit_key,
+    which may take the FIRST entry because the secret-checked gateway
+    supplies clean forwarding. TRUST_PROXY_CLIENT_IP=false restores the
+    socket peer for direct-exposure deployments.
+    """
+    if TRUST_PROXY_CLIENT_IP:
+        forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+        if forwarded_for:
+            last_hop = forwarded_for.rsplit(",", 1)[-1].strip()
+            if last_hop:
+                return last_hop
+    return get_remote_address(request)
+
+
 def _check_preauth_rate_limit(request: Request) -> bool:
-    """Apply a coarse remote-IP guard before auth to dampen abusive bursts."""
+    """Apply a coarse per-client guard before auth to dampen abusive bursts."""
     return _check_sliding_window_rate_limit(
-        subject_id=f"ip:{get_remote_address(request)}",
+        subject_id=f"ip:{_preauth_client_ip(request)}",
         buckets=_preauth_rate_buckets,
         bucket_lock=_preauth_rate_lock,
         max_requests=ASK_RATE_LIMIT_PREAUTH_PER_MINUTE,
@@ -1058,10 +1096,9 @@ def ask_post(
                 request=request,
                 error=str(e),
             )
-            _caller = getattr(request.state, "caller", None)
-            if _caller and _caller.auth_mode == "public_bearer":
-                raise HTTPException(status_code=500, detail="Query processing failed")
-            raise HTTPException(status_code=500, detail=f'Query processing failed: {e}')
+            # Generic detail for every auth mode: the exception is already in
+            # the server log (log.exception above) and the security event.
+            raise HTTPException(status_code=500, detail="Query processing failed")
 
         append_exchange(session_id, query_text, ctx.summary)
         _contract_snapshot = continuity_snapshot_json(ctx)

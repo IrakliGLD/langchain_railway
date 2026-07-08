@@ -1050,5 +1050,87 @@ class TestBalancingCompositionTool:
         assert captured["params"]["start_date"] == "2024-01-01"
 
 
+# ---------------------------------------------------------------------------
+# 2026-07-08 audit remediations (findings #2, #3, #4)
+# ---------------------------------------------------------------------------
+
+def test_preauth_client_ip_uses_last_forwarded_hop(monkeypatch):
+    """Finding #2: behind the platform proxy the socket peer collapses every
+    caller into one bucket. The last XFF hop (appended by the trusted edge)
+    is the client; earlier, client-supplied entries are spoofable and ignored."""
+    monkeypatch.setattr(main_module, "TRUST_PROXY_CLIENT_IP", True)
+
+    spoof_then_real = _make_request(
+        {"X-Forwarded-For": "6.6.6.6, 203.0.113.9"}, client_host="10.0.0.1",
+    )
+    assert main_module._preauth_client_ip(spoof_then_real) == "203.0.113.9"
+
+    no_header = _make_request({}, client_host="10.0.0.1")
+    assert main_module._preauth_client_ip(no_header) == "10.0.0.1"
+
+    monkeypatch.setattr(main_module, "TRUST_PROXY_CLIENT_IP", False)
+    direct = _make_request(
+        {"X-Forwarded-For": "6.6.6.6"}, client_host="10.0.0.1",
+    )
+    assert main_module._preauth_client_ip(direct) == "10.0.0.1"
+
+
+def test_preauth_buckets_are_per_client_not_shared(monkeypatch):
+    monkeypatch.setattr(main_module, "TRUST_PROXY_CLIENT_IP", True)
+    monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_PREAUTH_PER_MINUTE", 1)
+    _clear_rate_limit_buckets()
+
+    client_a = _make_request({"X-Forwarded-For": "203.0.113.9"}, client_host="10.0.0.1")
+    client_b = _make_request({"X-Forwarded-For": "198.51.100.7"}, client_host="10.0.0.1")
+
+    assert main_module._check_preauth_rate_limit(client_a) is True
+    # Different real client behind the same proxy peer must have its own budget.
+    assert main_module._check_preauth_rate_limit(client_b) is True
+    assert main_module._check_preauth_rate_limit(client_a) is False
+
+
+def test_sliding_window_evicts_stale_subjects(monkeypatch):
+    """Finding #4: subjects that stop sending must not occupy the bucket map
+    forever."""
+    _clear_rate_limit_buckets()
+    now = time.time()
+    main_module._preauth_rate_buckets["ip:stale"] = [now - 3600.0]
+    main_module._preauth_rate_buckets["ip:empty"] = []
+    # Force the sweep to be due.
+    main_module._bucket_last_sweep[id(main_module._preauth_rate_buckets)] = 0.0
+
+    fresh = _make_request({"X-Forwarded-For": "203.0.113.9"})
+    monkeypatch.setattr(main_module, "TRUST_PROXY_CLIENT_IP", True)
+    assert main_module._check_preauth_rate_limit(fresh) is True
+
+    assert "ip:stale" not in main_module._preauth_rate_buckets
+    assert "ip:empty" not in main_module._preauth_rate_buckets
+    assert "ip:203.0.113.9" in main_module._preauth_rate_buckets
+
+
+def test_pipeline_failure_detail_is_generic_for_all_modes(monkeypatch):
+    """Finding #3 (June S8): 500 detail must not leak exception text in any
+    auth mode; the traceback lives in the server log."""
+    _install_successful_ask_mocks(monkeypatch)
+    monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+
+    def _boom(**kwargs):
+        raise RuntimeError("secret-internal-detail")
+
+    monkeypatch.setattr(main_module, "process_query", _boom)
+
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={"X-App-Key": "test-gateway-key"},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Query processing failed"
+    assert "secret-internal-detail" not in response.text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

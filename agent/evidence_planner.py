@@ -49,13 +49,17 @@ _SHAPE_BLOCKS_FAST_PATH = frozenset({
     AnswerKind.SCENARIO,
 })
 
+# "%" or spelled-out "percent"/"pct" (audit 2026-07-08 finding #6: the
+# spelled-out form previously never matched). \b keeps "percentage" excluded.
+# KA/RU threshold phrasings stay fixture-driven (§5.9), not guessed here.
+_PCT = r"\s*(?:%|percent\b|pct\b)"
 _SHARE_THRESHOLD_PATTERNS = (
-    r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+\d+(?:\.\d+)?\s*%",
-    r"(at least|not less than|minimum of)\s+\d+(?:\.\d+)?\s*%",
-    r"(less than|below|under|fewer than)\s+\d+(?:\.\d+)?\s*%",
-    r"(at most|no more than|maximum of)\s+\d+(?:\.\d+)?\s*%",
-    r"\d+(?:\.\d+)?\s*%\s+or\s+more",
-    r"\d+(?:\.\d+)?\s*%\s+or\s+less",
+    rf"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"(at least|not less than|minimum of)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"(less than|below|under|fewer than)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"(at most|no more than|maximum of)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"\d+(?:\.\d+)?{_PCT}\s+or\s+more",
+    rf"\d+(?:\.\d+)?{_PCT}\s+or\s+less",
 )
 _SHARE_MONTH_LIST_HINTS = (
     "months where",

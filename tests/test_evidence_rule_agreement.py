@@ -16,9 +16,6 @@ from contracts.question_analysis import QuestionAnalysis
 from models import QueryContext
 from utils.metrics import metrics
 
-# NOTE: the planner's _SHARE_THRESHOLD_PATTERNS require a literal "%" —
-# "10 percent" spelled out does not trigger the rule (pre-existing gap,
-# candidate for the routing golden set).
 _THRESHOLD_QUERY = (
     "which sources have a share above 10% in balancing electricity "
     "and at what price?"
@@ -93,6 +90,38 @@ def test_agree_counted_when_analyzer_emits_prices_secondary():
     ])
     assert metrics.evidence_rule_agreement_events.get(
         "threshold_share_price_context:agree") == 1
+    assert any(s["tool_name"] == "get_prices" for s in ctx.evidence_plan)
+
+
+def test_spelled_out_percent_triggers_rule_too():
+    """Audit 2026-07-08 finding #6: 'above 10 percent' must route like
+    'above 10%'. 'percentage' must NOT match (word boundary)."""
+    from agent.evidence_planner import _is_threshold_share_query
+
+    tool = "get_balancing_composition"
+    assert _is_threshold_share_query("sources with share above 10 percent", tool)
+    assert _is_threshold_share_query("share of at least 5.5 pct", tool)
+    assert _is_threshold_share_query("share above 10%", tool)
+    assert not _is_threshold_share_query("share above 10 percentage", tool)
+    assert not _is_threshold_share_query("what is the share of imports", tool)
+
+    # End-to-end: the spelled-out form now feeds the agreement counter and
+    # the planner rule adds the prices step.
+    metrics.evidence_rule_agreement_events.clear()
+    query = ("which sources have a share above 10 percent in balancing "
+             "electricity and at what price?")
+    ctx = QueryContext(query=query)
+    payload = _qa_payload([
+        {"name": "get_balancing_composition", "score": 0.9, "reason": "shares"},
+    ])
+    payload["raw_query"] = query
+    payload["canonical_query_en"] = query
+    ctx.question_analysis = QuestionAnalysis(**payload)
+    ctx.question_analysis_source = "llm_active"
+    ctx = build_evidence_plan(ctx)
+
+    assert metrics.evidence_rule_agreement_events.get(
+        "threshold_share_price_context:disagree") == 1
     assert any(s["tool_name"] == "get_prices" for s in ctx.evidence_plan)
 
 

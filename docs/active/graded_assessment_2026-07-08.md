@@ -85,3 +85,9 @@ Non-findings verified clean during the hunt: no mutable default arguments; the o
 6. When raising the coverage floor, **spend it on `core/llm.py` and `main.py`** — the uncovered 1,168 lines there are where the next regression hides.
 
 *Assessment performed read-mostly; the only code changed was the lint remediation (`a47aa90`), committed separately.*
+
+---
+
+## Post-assessment remediation (same day)
+
+Findings **#2, #3, #4, #5, #6, #10 fixed** in the follow-up commit(s): pre-auth limiter now keys on the last `X-Forwarded-For` hop (spoof-resistant one-trusted-hop rule; `TRUST_PROXY_CLIENT_IP` kill switch for direct exposure); 500 detail generic for all auth modes; amortized bucket eviction (5-minute sweep); `psycopg2-binary` removed; threshold patterns match spelled-out "percent"/"pct" (golden case r014); UTC-explicit current-year. Each fix is pinned by tests. Remaining open by design: **#7** pool/backpressure (operator capacity decision), **#8** coverage distribution (ongoing), **#9** LIGHT-tier retrieval overlap (planned flag-gated change), plus the branch-protection recommendation (GitHub settings — operator).

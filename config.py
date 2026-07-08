@@ -123,6 +123,11 @@ ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lo
 # on (shadow); the retry is gated here. Default OFF — enablement criteria in
 # docs/active/query_pipeline_architecture.md §5.
 ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
+# Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
+# hop) for the client IP. Default on — production always sits behind the
+# Railway edge, where the socket peer is the proxy and would collapse every
+# caller into one shared bucket. Set to false for direct-exposure deployments.
+TRUST_PROXY_CLIENT_IP = os.getenv("TRUST_PROXY_CLIENT_IP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")

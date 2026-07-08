@@ -81,6 +81,12 @@
       "expected": {"query_type": "data_explanation", "answer_kind": "explanation"}
     },
     {
+      "id": "r014",
+      "query": "which sources have a share above 10 percent in balancing electricity and at what price?",
+      "note": "threshold share, spelled-out percent (audit 2026-07-08 finding #6 — must route like the % form)",
+      "expected": {"answer_kind": "list"}
+    },
+    {
       "id": "c001",
       "query": "and for 2023?",
       "note": "continuity follow-up after r002 (monthly balancing prices); requires previous-contract injection — runner turn-chaining pending",
