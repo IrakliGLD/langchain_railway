@@ -31,8 +31,8 @@ from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_execu
 from agent.evidence_validator import validate_evidence
 from agent.fixture_candidates import log_fixture_candidate
 from agent.frame_adapters import adapt_tool_result
-from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
+from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
@@ -42,10 +42,10 @@ from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
     ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
+    ENABLE_EVIDENCE_REANALYSIS,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
     ENABLE_TYPED_TOOLS,
-    ENABLE_EVIDENCE_REANALYSIS,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
     EVIDENCE_PARALLEL_SECONDARY,

@@ -23,7 +23,6 @@ from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
 from agent.tools.types import ToolInvocation
 from analysis.evidence_joins import join_evidence, join_evidence_with_provenance
 from analysis.system_quantities import normalize_tool_dataframe
-from utils.metrics import metrics
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
     AnswerKind,
@@ -34,6 +33,7 @@ from contracts.question_analysis import (
     ToolName,
 )
 from models import QueryContext
+from utils.metrics import metrics
 
 log = logging.getLogger("Enai")
 

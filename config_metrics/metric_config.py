@@ -88,7 +88,6 @@ DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
 # Winter covers months 1-3 AND 8-12 (the two halves add up to 12 months).
 from config import SUMMER_MONTHS, WINTER_MONTHS  # noqa: E402,F401
 
-
 # ---------------------------------------------------------------------------
 # Semantic tool names → DataFrame column candidates
 # ---------------------------------------------------------------------------

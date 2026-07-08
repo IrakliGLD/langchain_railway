@@ -2700,8 +2700,8 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
     if not numeric_cols:
         return
 
-    from context import COLUMN_LABELS
     from analysis.stats import is_intensive_metric
+    from context import COLUMN_LABELS
     lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
     for col in numeric_cols:
         series = ctx.df[col].dropna()

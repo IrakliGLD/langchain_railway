@@ -111,6 +111,13 @@ def _is_fast_pipeline_mode() -> bool:
 # _invoke_with_resilience, get_llm_for_stage, _log_usage_for_message,
 # make_gemini/make_openai) intentionally stay defined in THIS module — see the
 # patch-surface note in core/llm_runtime.py before moving anything else.
+# Public result contract + query-classification heuristics (P0-1,
+# architecture-audit 2026-06-30): SummaryEnvelope moved to contracts/summary.py
+# and classify_query_type/get_query_focus to core/query_classifier.py, so leaf
+# consumers (visualization, guardrails) can depend on them without importing this
+# hub. Re-exported here so existing `core.llm.<name>` imports and monkeypatches
+# keep working.
+from contracts.summary import SummaryEnvelope  # noqa: F401 — re-export surface
 from core.llm_runtime import (  # noqa: F401 — re-export surface
     LLMResponseCache,
     _extract_token_usage,
@@ -119,15 +126,6 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
     get_nvidia,
     get_openai,
 )
-
-
-# Public result contract + query-classification heuristics (P0-1,
-# architecture-audit 2026-06-30): SummaryEnvelope moved to contracts/summary.py
-# and classify_query_type/get_query_focus to core/query_classifier.py, so leaf
-# consumers (visualization, guardrails) can depend on them without importing this
-# hub. Re-exported here so existing `core.llm.<name>` imports and monkeypatches
-# keep working.
-from contracts.summary import SummaryEnvelope  # noqa: F401 — re-export surface
 from core.query_classifier import (  # noqa: F401 — re-export surface
     classify_query_type,
     get_query_focus,
