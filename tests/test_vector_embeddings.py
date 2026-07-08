@@ -217,3 +217,36 @@ def test_gemini_provider_falls_back_to_google_generativeai(monkeypatch):
     assert captured["calls"][1]["task_type"] == "retrieval_document"
     assert len(query_embedding) == 768
     assert len(doc_embeddings) == 2
+
+
+def test_get_embedding_provider_caches_instance_per_config(monkeypatch):
+    class FakeEmbeddings:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-cache-test")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "1536")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_openai",
+        types.SimpleNamespace(OpenAIEmbeddings=FakeEmbeddings),
+    )
+
+    vector_embeddings.reset_embedding_provider_cache()
+    try:
+        first = vector_embeddings.get_embedding_provider()
+        second = vector_embeddings.get_embedding_provider()
+        assert first is second
+
+        # A config change keys a fresh instance.
+        monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-cache-test-b")
+        third = vector_embeddings.get_embedding_provider()
+        assert third is not first
+
+        vector_embeddings.reset_embedding_provider_cache()
+        fourth = vector_embeddings.get_embedding_provider()
+        assert fourth is not third
+    finally:
+        vector_embeddings.reset_embedding_provider_cache()

@@ -4675,6 +4675,71 @@ def test_chart_plus_table_emits_companion_table():
     assert out.chart_meta.get("companionTable") is out.companion_table
 
 
+def test_effective_primary_presentation_defaults_comparison_to_chart_plus_table():
+    """§5.6: null presentation defaults to chart_plus_table for COMPARISON only;
+    explicit presentations always win."""
+    from visualization.chart_selector import effective_primary_presentation
+
+    comparison_null = _make_chart_stage_question_analysis(
+        answer_kind="comparison", primary_presentation=None, chart_recommended=False,
+    )
+    assert effective_primary_presentation(comparison_null) == "chart_plus_table"
+
+    timeseries_null = _make_chart_stage_question_analysis(
+        answer_kind="timeseries", primary_presentation=None, chart_recommended=False,
+    )
+    assert effective_primary_presentation(timeseries_null) is None
+
+    comparison_table = _make_chart_stage_question_analysis(
+        answer_kind="comparison", primary_presentation="table", chart_recommended=False,
+    )
+    assert effective_primary_presentation(comparison_table) == "table"
+
+    assert effective_primary_presentation(None) is None
+
+
+def test_comparison_null_presentation_gate_allows_two_row_chart():
+    """§5.6: a 2-row COMPARISON with null presentation charts via the contract
+    branch (was: no chart — the >=3-row compatibility fallback missed it)."""
+    from visualization.chart_selector import should_generate_chart
+
+    comparison_null = _make_chart_stage_question_analysis(
+        answer_kind="comparison", primary_presentation=None, chart_recommended=False,
+    )
+    assert should_generate_chart(
+        "How does 2023 compare to 2024?", 2, question_analysis=comparison_null,
+    ) is True
+
+    # Contrast: timeseries with null presentation keeps the old fallback rule.
+    timeseries_null = _make_chart_stage_question_analysis(
+        answer_kind="timeseries", primary_presentation=None, chart_recommended=False,
+    )
+    assert should_generate_chart(
+        "Show the price trend", 2, question_analysis=timeseries_null,
+    ) is False
+
+
+def test_comparison_null_presentation_emits_companion_table():
+    """§5.6 end-to-end: COMPARISON + null presentation behaves as
+    chart_plus_table — chart built AND companion table attached, even for a
+    'how ... compare' query that the legacy suppression would otherwise drop."""
+    from agent.chart_pipeline import build_chart
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"date": dates, "p_bal_gel": [10, 12, 11, 13, 14, 15]})
+    ctx = _make_chart_ctx(df, query="How does 2024 H1 compare to 2023 H1?")
+    ctx.question_analysis = _make_chart_stage_question_analysis(
+        answer_kind="comparison", primary_presentation=None, chart_recommended=False,
+    )
+    ctx.question_analysis_source = "llm_active"
+
+    out = build_chart(ctx)
+
+    assert out.chart_type is not None
+    assert out.companion_table is not None
+    assert out.chart_meta.get("companionTable") is out.companion_table
+
+
 def test_chart_presentation_does_not_emit_companion_table():
     """Phase 12 negative case: primary_presentation=chart alone must NOT
     populate companion_table (only chart_plus_table does)."""

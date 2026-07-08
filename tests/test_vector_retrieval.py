@@ -2021,3 +2021,64 @@ def test_pack_b4_a3_independent_envs_can_flip_separately(monkeypatch):
     assert not any("| referenced" in h for h in packed.headers)
     assert any("| adjacent" in h for h in packed.headers)
 
+
+def test_factory_path_caches_repeat_query_embeddings(monkeypatch):
+    from knowledge import vector_retrieval
+
+    calls = {"n": 0}
+
+    class CountingProvider:
+        _model = "cache-test-model"
+
+        def embed_query(self, text):
+            calls["n"] += 1
+            return [0.1, 0.2, 0.3]
+
+    provider = CountingProvider()
+    monkeypatch.setattr(
+        "knowledge.vector_embeddings.get_embedding_provider", lambda: provider
+    )
+    vector_retrieval._QUERY_EMBEDDING_CACHE.clear()
+    try:
+        for _ in range(2):
+            bundle = retrieve_vector_knowledge(
+                "Why did balancing electricity price change?",
+                retrieval_mode=VectorKnowledgeMode.shadow,
+                question_analysis=_analysis(),
+                store=FakeStore(),
+                embedding_provider=None,
+            )
+            assert bundle.chunk_count == 1
+        assert calls["n"] == 1
+
+        retrieve_vector_knowledge(
+            "How are transmission tariffs set?",
+            retrieval_mode=VectorKnowledgeMode.shadow,
+            question_analysis=_analysis(),
+            store=FakeStore(),
+            embedding_provider=None,
+        )
+        assert calls["n"] == 2
+    finally:
+        vector_retrieval._QUERY_EMBEDDING_CACHE.clear()
+
+
+def test_injected_provider_bypasses_embedding_cache():
+    calls = {"n": 0}
+
+    class CountingProvider:
+        def embed_query(self, text):
+            calls["n"] += 1
+            return [0.1, 0.2, 0.3]
+
+    provider = CountingProvider()
+    for _ in range(2):
+        retrieve_vector_knowledge(
+            "Why did balancing electricity price change?",
+            retrieval_mode=VectorKnowledgeMode.shadow,
+            question_analysis=_analysis(),
+            store=FakeStore(),
+            embedding_provider=provider,
+        )
+    assert calls["n"] == 2
+

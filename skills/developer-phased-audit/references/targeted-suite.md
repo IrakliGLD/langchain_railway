@@ -37,13 +37,13 @@ before declaring a sub-phase done.
 
 ## Files in scope (snapshot)
 
-Run `ls tests/*.py | sort` for the live list. Snapshot at 2026-05-13:
+Run `ls tests/*.py | sort` for the live list. Snapshot at 2026-07-07 (`test_orchestrator.py` deleted with the agent loop; `test_tool_adapter.py` deleted with the dead adapter):
 
 | Group | Files |
 |---|---|
-| Pipeline orchestration | `test_main.py`, `test_pipeline_agent_mode.py`, `test_pipeline_analyzer_fallback.py`, `test_pipeline_balancing_enrichment.py`, `test_orchestrator.py`, `test_phase5_cleanup.py` |
+| Pipeline orchestration | `test_main.py`, `test_pipeline_agent_mode.py`, `test_pipeline_analyzer_fallback.py`, `test_pipeline_balancing_enrichment.py`, `test_phase5_cleanup.py` |
 | Analyzer + routing | `test_question_analysis_catalogs.py`, `test_question_analysis_contract.py`, `test_question_analyzer_phase_c.py`, `test_question_analyzer_shadow.py`, `test_router.py`, `test_routing_regressions.py`, `test_resolved_query_and_fallback.py`, `test_semantic_lock.py`, `test_session_memory.py` |
-| Evidence + planning | `test_evidence_joins.py`, `test_evidence_planner.py`, `test_frame_adapters_filter.py`, `test_guardrails.py`, `test_tool_adapter.py` |
+| Evidence + planning | `test_evidence_joins.py`, `test_evidence_planner.py`, `test_frame_adapters_filter.py`, `test_guardrails.py` |
 | Vector / RAG | `test_vector_embeddings.py`, `test_vector_ingestion.py`, `test_vector_knowledge_contract.py`, `test_vector_pipeline.py`, `test_vector_prompt_integration.py`, `test_vector_retrieval.py`, `test_vector_retrieval_tier.py`, `test_vector_store.py` |
 | Summarizer + rendering | `test_balancing_prompt_guidance.py`, `test_chart_frame_builder.py`, `test_derived_chart_builder.py`, `test_forecast_direct_answers.py`, `test_regulated_tariff_list.py`, `test_residual_weighted_price_direct.py`, `test_summarizer_absence_guardrail.py`, `test_tariff_snapshot_rendering.py` |
 | Tools + SQL | `test_price_tools_sql.py`, `test_shares_sql.py`, `test_sql_executor_pivot.py`, `test_tariff_tools.py` |

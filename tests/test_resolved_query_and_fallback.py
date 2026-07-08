@@ -46,7 +46,6 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 from agent.planner import normalize_balancing_entities  # noqa: E402
 from agent.router import extract_balancing_entities  # noqa: E402
-from agent.tool_adapter import ToolExecutionResult  # noqa: E402
 from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES  # noqa: E402
 from models import QueryContext  # noqa: E402
 

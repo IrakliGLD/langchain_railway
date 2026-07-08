@@ -20,7 +20,6 @@ from contracts.vector_knowledge import (
     VectorRetrievalFilters,
 )
 
-
 log = logging.getLogger("Enai")
 
 # Schema names are interpolated directly into SQL identifiers (identifiers

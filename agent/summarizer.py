@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 import os
-import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -18,7 +17,18 @@ from typing import Any, Dict, List, Optional, Set
 import pandas as pd
 
 from agent.analyzer import _extract_forecast_horizon
+from agent.fixture_candidates import log_fixture_candidate
 from agent.generic_renderer import render as generic_render
+from agent.render_fitness import evaluate_render_fitness
+
+# Deterministic Stage-4 sources subject to the shadow fitness check (§3.9).
+# Keep in sync with agent/answer_provenance.py's path map.
+_DETERMINISTIC_SUMMARY_SOURCES = {
+    "generic_renderer",
+    "deterministic_share_summary",
+    "deterministic_regulated_tariff_list_direct",
+    "deterministic_residual_weighted_price_direct",
+}
 from config import PIPELINE_MODE, PROVENANCE_MIN_COVERAGE
 from context import scrub_schema_mentions, strip_inline_citation_markers
 from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ObservationFrame, ScenarioFrame
@@ -1065,6 +1075,7 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
     metrics.log_summary_grounding_failure()
     if hasattr(metrics, "log_provenance_gate_failure"):
         metrics.log_provenance_gate_failure()
+    log_fixture_candidate("provenance_gate_failure", ctx)
     ctx.summary_provenance_gate_passed = False
     ctx.summary_provenance_gate_reason = (
         f"coverage={coverage:.4f}, min={min_coverage:.4f}, "
@@ -2656,6 +2667,25 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
 
     ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
     _apply_absence_claim_guardrail(ctx)
+
+    # Shadow fitness check on deterministic renders (§3.9): observe-only —
+    # the provenance gate below is a no-op for these paths, so this is the
+    # only visibility into "right shape, wrong rows" failures. Never allowed
+    # to raise into the pipeline.
+    if ctx.summary_source in _DETERMINISTIC_SUMMARY_SOURCES:
+        try:
+            _fitness_tags = evaluate_render_fitness(ctx)
+        except Exception:
+            log.debug("render-fitness check failed", exc_info=True)
+            _fitness_tags = []
+        if _fitness_tags:
+            for _tag in _fitness_tags:
+                metrics.log_render_fitness(_tag)
+            trace_detail(
+                log, ctx, "stage_4_render_fitness", "violations",
+                tags=_fitness_tags, summary_source=ctx.summary_source,
+            )
+
     trace_detail(
         log,
         ctx,

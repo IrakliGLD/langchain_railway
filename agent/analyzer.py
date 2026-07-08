@@ -2594,8 +2594,10 @@ def enrich(ctx: QueryContext) -> QueryContext:
             future_year = max(int(year) for year in year_matches)
             ctx.trendline_extend_to = f"{future_year}-12-01"
         else:
-            from datetime import datetime
-            current_year = datetime.now().year
+            from datetime import datetime, timezone
+            # UTC explicitly: production runs UTC; keeps dev boxes in other
+            # timezones from computing a different "current year" at NYE.
+            current_year = datetime.now(timezone.utc).year
             horizon = _extract_forecast_horizon(ctx.query)
             ctx.trendline_extend_to = f"{current_year + horizon}-12-01"
 
@@ -2700,8 +2702,8 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
     if not numeric_cols:
         return
 
-    from context import COLUMN_LABELS
     from analysis.stats import is_intensive_metric
+    from context import COLUMN_LABELS
     lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
     for col in numeric_cols:
         series = ctx.df[col].dropna()

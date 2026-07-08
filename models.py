@@ -65,6 +65,7 @@ class QueryContext:
     conversation_history: Optional[List[Dict[str, str]]] = None
     trace_id: str = ""
     session_id: str = ""
+    previous_contract_snapshot: str = ""          # prior turn's routed contract (continuity); "" when absent
     resolved_query: str = ""                      # canonical_query_en or original query; set after Stage 0.2
     resolved_query_source: str = ""              # "llm_active_canonical" | "raw_query"
     question_analysis: Optional[QuestionAnalysis] = None
@@ -74,6 +75,7 @@ class QueryContext:
     vector_knowledge_error: str = ""
     vector_knowledge_source: str = ""
     vector_knowledge_prompt: str = ""
+    vector_retrieval_tier: str = ""              # "full" | "light" | "skip"; set in process_query
 
     # --- response policy (set once after Stage 0.2, authoritative for all later stages) ---
     response_mode: str = ""                       # ResponseMode value or "" before derivation
@@ -94,6 +96,8 @@ class QueryContext:
     evidence_gap: Optional[Any] = None  # EvidenceGap from evidence_validator (Phase 3)
 
     # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
+    evidence_anomaly: str = ""                   # anomaly note for the gated re-analysis; "" otherwise
+    reanalysis_attempted: bool = False           # guards the single re-analysis attempt per request
     evidence_plan: List[Dict[str, Any]] = dc_field(default_factory=list)
     evidence_plan_source: str = ""                # "deterministic" | "analyzer" | ""
     evidence_collected: Dict[str, Any] = dc_field(default_factory=dict)  # role -> {tool, df, cols, rows}

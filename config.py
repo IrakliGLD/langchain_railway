@@ -89,9 +89,11 @@ SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "").strip() or None
 
 # Thinking-budget cap for the router/question-analyzer stage.
 # Limits thinking tokens on Gemini 2.5 models to prevent latency spirals.
-# Default 2048 is enough for classification; set to 0 to disable thinking.
+# Default 1024 (lowered from 2048, 2026-07-07): classification rarely needs
+# more, and the budget is paid in latency+cost on every request; raise via
+# env if routing accuracy regresses. Set to 0 to disable thinking.
 # Non-thinking models silently ignore this parameter.
-_raw_tb = os.getenv("ROUTER_THINKING_BUDGET", "2048").strip()
+_raw_tb = os.getenv("ROUTER_THINKING_BUDGET", "1024").strip()
 ROUTER_THINKING_BUDGET: int | None = int(_raw_tb) if _raw_tb else None
 
 # Pipeline effort mode (Phase E / 14.9 steps 9-10).
@@ -105,6 +107,27 @@ if PIPELINE_MODE not in {"deep", "fast"}:
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")
+# Stage 0.8: prefetch secondary evidence tool calls concurrently (2 workers,
+# sized to the core/db.py pool budget of 5). Results are applied strictly in
+# plan order, so storage/log/trace order is identical to the serial path;
+# this is a kill switch, not a rollout gate.
+EVIDENCE_PARALLEL_SECONDARY = os.getenv("EVIDENCE_PARALLEL_SECONDARY", "true").lower() in ("1", "true", "yes", "on")
+# Stage 0.2 contract continuity (slice 1): inject the previous turn's routed
+# contract as a TRUSTED analyzer-prompt block so follow-ups ("and for 2023")
+# are interpreted as deltas. Default OFF — cutover criteria in
+# docs/active/query_pipeline_architecture.md §5.
+ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lower() in ("1", "true", "yes", "on")
+# Evidence-triggered re-analysis (design item 1): on surprising primary
+# evidence (empty frame / period gap), re-run Stage 0.2 ONCE with the anomaly
+# as trusted context and re-execute the plan. Detection + counters are always
+# on (shadow); the retry is gated here. Default OFF — enablement criteria in
+# docs/active/query_pipeline_architecture.md §5.
+ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
+# Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
+# hop) for the client IP. Default on — production always sits behind the
+# Railway edge, where the socket peer is the proxy and would collapse every
+# caller into one shared bucket. Set to false for direct-exposure deployments.
+TRUST_PROXY_CLIENT_IP = os.getenv("TRUST_PROXY_CLIENT_IP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")
@@ -117,11 +140,6 @@ ENABLE_EVALUATE_ENDPOINT = os.getenv("ENABLE_EVALUATE_ENDPOINT", "false").lower(
 ENABLE_VECTOR_KNOWLEDGE_HINTS = os.getenv("ENABLE_VECTOR_KNOWLEDGE_HINTS", "true").lower() in ("1", "true", "yes", "on")
 TRACE_TEXT_MAX_CHARS = max(120, int(os.getenv("TRACE_TEXT_MAX_CHARS", "800")))
 TRACE_MAX_LIST_ITEMS = max(1, int(os.getenv("TRACE_MAX_LIST_ITEMS", "8")))
-AGENT_MAX_ROUNDS = max(1, int(os.getenv("AGENT_MAX_ROUNDS", "3")))
-AGENT_TOOL_PREVIEW_ROWS = max(1, int(os.getenv("AGENT_TOOL_PREVIEW_ROWS", "10")))
-AGENT_TOOL_PREVIEW_MAX_CHARS = max(200, int(os.getenv("AGENT_TOOL_PREVIEW_MAX_CHARS", "3000")))
-AGENT_TOOL_TIMEOUT_SECONDS = max(1, int(os.getenv("AGENT_TOOL_TIMEOUT_SECONDS", "15")))
-AGENT_TOOL_RETRY_ATTEMPTS = max(1, int(os.getenv("AGENT_TOOL_RETRY_ATTEMPTS", "2")))
 PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "45000")))
 # Per-stage prompt budgets (Phase 2.b, 2026-05-13).  Both default to the
 # legacy single-knob PROMPT_BUDGET_MAX_CHARS so existing deployments keep

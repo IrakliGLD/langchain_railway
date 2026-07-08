@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, List, Literal, Protocol
 
 
@@ -222,10 +223,45 @@ class GeminiEmbeddingProvider:
         )[0]
 
 
+# Provider construction builds an SDK client (and its HTTP session) — reuse it
+# across requests instead of rebuilding per retrieval. Keyed by the env values
+# that determine construction, so a config change never serves a stale client.
+_PROVIDER_CACHE: dict[tuple[str, str, str], EmbeddingProvider] = {}
+_PROVIDER_CACHE_LOCK = threading.Lock()
+
+
+def _provider_cache_key(resolved_provider: str) -> tuple[str, str, str]:
+    return (
+        resolved_provider,
+        os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "").strip(),
+        os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "").strip(),
+    )
+
+
+def reset_embedding_provider_cache() -> None:
+    """Clear cached provider instances (tests / config reloads)."""
+    with _PROVIDER_CACHE_LOCK:
+        _PROVIDER_CACHE.clear()
+
+
 def get_embedding_provider(provider: str | None = None) -> EmbeddingProvider:
-    """Return the default embedding provider for vector knowledge."""
+    """Return the default embedding provider for vector knowledge.
+
+    Instances are cached per (provider, model, dimension) config so repeated
+    retrievals reuse one SDK client instead of constructing a new one per
+    request.
+    """
 
     resolved_provider = _resolved_provider(provider)
+    key = _provider_cache_key(resolved_provider)
+    with _PROVIDER_CACHE_LOCK:
+        cached = _PROVIDER_CACHE.get(key)
+    if cached is not None:
+        return cached
+    built: EmbeddingProvider
     if resolved_provider == "gemini":
-        return GeminiEmbeddingProvider()
-    return OpenAIEmbeddingProvider()
+        built = GeminiEmbeddingProvider()
+    else:
+        built = OpenAIEmbeddingProvider()
+    with _PROVIDER_CACHE_LOCK:
+        return _PROVIDER_CACHE.setdefault(key, built)

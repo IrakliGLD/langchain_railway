@@ -155,3 +155,34 @@ def append_exchange(session_id: str, question: str, answer: str) -> None:
         if len(history) > SESSION_HISTORY_MAX_TURNS:
             del history[:-SESSION_HISTORY_MAX_TURNS]
         payload["updated_at"] = now_ts
+
+
+# Contract continuity (architecture §3.2): the previous turn's routed-contract
+# snapshot rides on the same session record and TTL as history.
+_MAX_CONTRACT_SNAPSHOT_CHARS = 4000
+
+
+def set_last_contract(session_id: str, snapshot_json: str) -> None:
+    """Store the last authoritative routed-contract snapshot for the session."""
+    snapshot = str(snapshot_json or "")
+    if not session_id or not snapshot or len(snapshot) > _MAX_CONTRACT_SNAPSHOT_CHARS:
+        return
+    now_ts = time.time()
+    with _SESSION_LOCK:
+        payload = _SESSION_STORE.setdefault(
+            session_id,
+            {"updated_at": now_ts, "history": []},
+        )
+        payload["last_contract"] = snapshot
+        payload["updated_at"] = now_ts
+
+
+def get_last_contract(session_id: str) -> str:
+    """Return the stored contract snapshot, or "" when absent."""
+    if not session_id:
+        return ""
+    with _SESSION_LOCK:
+        payload = _SESSION_STORE.get(session_id)
+        if not payload:
+            return ""
+        return str(payload.get("last_contract", "") or "")

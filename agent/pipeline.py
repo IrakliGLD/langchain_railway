@@ -19,15 +19,20 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
+from datetime import date
 
 import pandas as pd
 from sqlalchemy import text
 
 from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_executor, summarizer
 from agent.evidence_validator import validate_evidence
+from agent.fixture_candidates import log_fixture_candidate
 from agent.frame_adapters import adapt_tool_result
 from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
+from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
@@ -37,11 +42,13 @@ from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
     ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
+    ENABLE_EVIDENCE_REANALYSIS,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
     ENABLE_TYPED_TOOLS,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
+    EVIDENCE_PARALLEL_SECONDARY,
     PIPELINE_MODE,
 )
 from contracts.question_analysis import (
@@ -576,6 +583,7 @@ def _cross_check_answer_kind(ctx) -> None:
         chosen = llm_kind
 
     metrics.log_analyzer_cross_check("disagreement")
+    log_fixture_candidate("cross_check_disagreement", ctx)
     log.warning(
         "answer_kind cross-check disagreement: llm=%s derived=%s chosen=%s "
         "(query_type=%s, query=%.80s)",
@@ -1613,6 +1621,18 @@ def _execute_evidence_step(
     return True
 
 
+def _prefetched_result_executor(result):
+    """Executor stand-in that returns an already-fetched tool result.
+
+    Lets the prefetch pass hand a concurrently-fetched result to
+    ``_execute_evidence_step`` through its ``executor=`` parameter, so the
+    normalise/store logic (and every log line it emits) runs unchanged.
+    """
+    def _executor(_invocation):
+        return result
+    return _executor
+
+
 def _run_secondary_evidence_loop(
     ctx: QueryContext,
     *,
@@ -1629,62 +1649,128 @@ def _run_secondary_evidence_loop(
     ``ctx.evidence_collected`` only), and finally joins secondary frames
     into ``ctx.df`` via ``merge_evidence_into_context``.
 
+    When ``EVIDENCE_PARALLEL_SECONDARY`` is on and two or more steps
+    remain, the pure-I/O tool calls are prefetched concurrently on a
+    2-worker pool (sized to the core/db.py budget of 5 connections),
+    but every ctx mutation still happens serially in plan order: each
+    prefetched result is handed to ``_execute_evidence_step`` through
+    its ``executor=`` parameter. Evidence storage order, log order,
+    trace shapes, and metric counters are therefore identical to the
+    serial path. One semantic shift: the loop budget bounds *waiting*
+    rather than *starting* — a step still running at the deadline is
+    marked ``evidence_loop_budget_exceeded`` (serially it would block
+    the loop unboundedly and starve later steps instead); its DB work
+    remains bounded by the statement timeout.
+
     Phase F.5.1.a moved this body out of ``evidence_planner`` into
     pipeline.py to remove the circular-import workaround that previously
     forced a lazy ``from agent.pipeline import _execute_evidence_step``
     inside the loop. ``evidence_planner.execute_remaining_evidence`` is
     preserved as a thin delegate that calls this function and passes its
     local ``execute_tool`` binding, so tests that monkey-patch
-    ``agent.evidence_planner.execute_tool`` continue to work.
+    ``agent.evidence_planner.execute_tool`` continue to work — the
+    prefetch pool submits that same binding.
     """
     remaining = [
         s for s in ctx.evidence_plan
         if not s.get("satisfied") and not s.get("error")
     ]
     cap = min(len(remaining), evidence_planner._EVIDENCE_LOOP_MAX_STEPS)
+    steps = remaining[:cap]
 
     budget = timeout_seconds or evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS
     deadline = time.time() + budget
 
-    for step in remaining[:cap]:
-        if time.time() > deadline:
-            step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
-            log.warning(
-                "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
-                budget, step["tool_name"], step.get("role"),
-            )
-            continue
-
-        invocation = ToolInvocation(
+    invocations = [
+        ToolInvocation(
             name=step["tool_name"],
             params=step["params"],
             confidence=0.85,
             reason=f"evidence_plan:{step['role']}",
         )
-        try:
-            _execute_evidence_step(
-                ctx,
-                invocation,
-                plan_step=step,
-                is_primary=False,
-                is_explanation=False,
-                stage_label="stage_0_8",
-                validate_relevance=False,
-                emit_tool_call_metric=False,
-                emit_tool_execute_trace=False,
-                executor=executor,
-            )
-            stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
-            log.info(
-                "Evidence loop: fetched %s via %s (%d rows)",
-                step["role"], invocation.name, stored_rows,
-            )
-        except Exception as exc:
-            step["error"] = str(exc)
-            log.warning(
-                "Evidence loop: step failed. role=%s tool=%s err=%s",
-                step["role"], step["tool_name"], exc,
-            )
+        for step in steps
+    ]
+
+    # Prefetch pass: start the pure-I/O tool calls concurrently. Results are
+    # applied strictly in plan order below, so parallelism never reorders ctx
+    # mutations.
+    pool = None
+    futures: list = [None] * len(steps)
+    if EVIDENCE_PARALLEL_SECONDARY and len(steps) >= 2:
+        pool = ThreadPoolExecutor(
+            max_workers=min(2, len(steps)),
+            thread_name_prefix="stage08-prefetch",
+        )
+        futures = [pool.submit(executor, inv) for inv in invocations]
+
+    try:
+        for step, invocation, future in zip(steps, invocations, futures):
+            step_executor = executor
+            if future is None:
+                # Serial path: the budget gates starting a step.
+                if time.time() > deadline:
+                    step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
+                    log.warning(
+                        "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
+                        budget, step["tool_name"], step.get("role"),
+                    )
+                    continue
+            else:
+                # Prefetched path: the budget bounds waiting for the result.
+                try:
+                    result = future.result(timeout=max(0.0, deadline - time.time()))
+                except FuturesTimeoutError as exc:
+                    if future.done():
+                        # The tool itself raised a TimeoutError (alias of the
+                        # futures timeout) — treat as a step failure, not budget.
+                        step["error"] = str(exc)
+                        log.warning(
+                            "Evidence loop: step failed. role=%s tool=%s err=%s",
+                            step["role"], step["tool_name"], exc,
+                        )
+                    else:
+                        step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
+                        log.warning(
+                            "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
+                            budget, step["tool_name"], step.get("role"),
+                        )
+                    continue
+                except Exception as exc:
+                    step["error"] = str(exc)
+                    log.warning(
+                        "Evidence loop: step failed. role=%s tool=%s err=%s",
+                        step["role"], step["tool_name"], exc,
+                    )
+                    continue
+                step_executor = _prefetched_result_executor(result)
+
+            try:
+                _execute_evidence_step(
+                    ctx,
+                    invocation,
+                    plan_step=step,
+                    is_primary=False,
+                    is_explanation=False,
+                    stage_label="stage_0_8",
+                    validate_relevance=False,
+                    emit_tool_call_metric=False,
+                    emit_tool_execute_trace=False,
+                    executor=step_executor,
+                )
+                stored_rows = len(ctx.evidence_collected.get(step["role"], {}).get("rows", []))
+                log.info(
+                    "Evidence loop: fetched %s via %s (%d rows)",
+                    step["role"], invocation.name, stored_rows,
+                )
+            except Exception as exc:
+                step["error"] = str(exc)
+                log.warning(
+                    "Evidence loop: step failed. role=%s tool=%s err=%s",
+                    step["role"], step["tool_name"], exc,
+                )
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     ctx = evidence_planner.merge_evidence_into_context(ctx)
     ctx.evidence_plan_complete = all(s.get("satisfied") for s in ctx.evidence_plan)
@@ -1974,6 +2060,104 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
             _should_route_tool_as_explanation(ctx),
         )
 
+    return ctx
+
+
+_DATA_SHAPED_ANSWER_KINDS = {
+    AnswerKind.SCALAR,
+    AnswerKind.LIST,
+    AnswerKind.TIMESERIES,
+    AnswerKind.COMPARISON,
+    AnswerKind.SCENARIO,
+    AnswerKind.FORECAST,
+}
+
+
+def _detect_evidence_anomaly(ctx: QueryContext) -> str | None:
+    """Detect surprising primary evidence after plan execution (§3.6).
+
+    Shadow signal for every request (counter + trace); the flag-gated
+    re-analysis consumes it. Only fires for authoritative, data-shaped
+    contracts — knowledge/clarify paths legitimately carry no tabular
+    evidence, and SQL-fallback requests are judged by the fallback, not here.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return None
+    qa = ctx.question_analysis
+    if qa is None or qa.answer_kind not in _DATA_SHAPED_ANSWER_KINDS:
+        return None
+    if not ctx.used_tool:
+        return None
+    if not ctx.rows:
+        return "primary_empty"
+    bounds = period_bounds_from_hint(qa)
+    if bounds:
+        span = df_date_span(ctx.df)
+        if span:
+            req_start = date.fromisoformat(bounds[0])
+            req_end = date.fromisoformat(bounds[1])
+            if span[1] < req_start or span[0] > req_end:
+                return "period_gap"
+    return None
+
+
+def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContext:
+    """One flag-gated re-analysis on surprising evidence (§3.6, design item 1).
+
+    Re-runs the SAME Stage 0.2 interpreter once with the anomaly attached as
+    trusted context, then rebuilds and re-executes the evidence plan.
+    ``reanalysis_attempted`` guards a single attempt per request. The vector
+    bundle from the first pass is deliberately kept — retrieval-tier changes
+    are out of scope for this slice.
+    """
+    t_stage = time.time()
+    ctx.reanalysis_attempted = True
+    ctx.evidence_anomaly = (
+        f"Prior execution anomaly: {anomaly}. The first interpretation "
+        "produced no usable evidence for the interpreted tool/period; "
+        "reconsider the interpretation."
+    )
+    prev_tool = str(ctx.tool_name or "")
+    prev_kind = (
+        ctx.question_analysis.answer_kind.value
+        if ctx.question_analysis and ctx.question_analysis.answer_kind
+        else ""
+    )
+
+    ctx = planner.analyze_question_active(ctx)
+    _finalize_answer_kind(ctx)
+
+    # Reset per-attempt evidence state to QueryContext defaults so the second
+    # execution starts exactly like a fresh request's.
+    ctx.used_tool = False
+    ctx.tool_name = None
+    ctx.tool_params = {}
+    ctx.tool_match_reason = ""
+    ctx.tool_confidence = 0.0
+    ctx.tool_fallback_reason = ""
+    ctx.df = pd.DataFrame()
+    ctx.rows = []
+    ctx.cols = []
+    ctx.evidence_collected = {}
+    ctx.evidence_plan = []
+    ctx.evidence_plan_complete = False
+    clear_provenance(ctx)
+
+    if ENABLE_EVIDENCE_PLANNER:
+        ctx = evidence_planner.build_evidence_plan(ctx)
+    ctx = _execute_evidence_plan(ctx)
+
+    new_kind = (
+        ctx.question_analysis.answer_kind.value
+        if ctx.question_analysis and ctx.question_analysis.answer_kind
+        else ""
+    )
+    _emit_trace_stage(
+        ctx, "stage_0_9_reanalysis", t_stage,
+        anomaly=anomaly,
+        tool_changed=(str(ctx.tool_name or "") != prev_tool),
+        kind_changed=(new_kind != prev_kind),
+    )
     return ctx
 
 
@@ -2411,6 +2595,7 @@ def process_query(
     conversation_history=None,
     trace_id: str = "",
     session_id: str = "",
+    previous_contract_snapshot: str = "",
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -2424,6 +2609,7 @@ def process_query(
         conversation_history=conversation_history,
         trace_id=trace_id,
         session_id=session_id,
+        previous_contract_snapshot=previous_contract_snapshot,
         clarify_selection_override=selected is not None,
     )
 
@@ -2495,6 +2681,7 @@ def process_query(
     _finalize_answer_kind(ctx)
 
     _retrieval_tier = _resolve_vector_tier(ctx)
+    ctx.vector_retrieval_tier = _retrieval_tier.value
 
     _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
 
@@ -2528,6 +2715,15 @@ def process_query(
     # full body — every trace shape, metric counter, and recovery path
     # is identical to the pre-§5.1.b form.
     ctx = _execute_evidence_plan(ctx)
+
+    # Stage 0.9: surprising-evidence detection (always) + flag-gated single
+    # re-analysis (§3.6, design item 1).
+    _anomaly = _detect_evidence_anomaly(ctx)
+    if _anomaly:
+        metrics.log_evidence_anomaly(_anomaly)
+        _emit_trace_stage(ctx, "stage_0_9_evidence_anomaly", time.time(), tag=_anomaly)
+        if ENABLE_EVIDENCE_REANALYSIS and not ctx.reanalysis_attempted:
+            ctx = _attempt_evidence_reanalysis(ctx, _anomaly)
 
     # Legacy agent loop removed (audit): with Stage 0.2 authoritative it never ran,
     # and analyzer-failure / no-tool cases fall through to the generate-plan/SQL

@@ -17,6 +17,26 @@ from core.query_classifier import classify_query_type
 log = logging.getLogger("Enai")
 
 
+def effective_primary_presentation(question_analysis) -> str | None:
+    """``visualization.primary_presentation`` with the uncertainty default applied.
+
+    The analyzer may leave ``primary_presentation`` null. For COMPARISON
+    answers the architecture prescribes degrading to ``chart_plus_table``
+    rather than a row-count-heuristic chart-only guess
+    (query_pipeline_architecture.md §5.6), so the reader gets both the chart
+    and the exact values when the contract is silent. Explicit presentations
+    (including ``text``/``table``) always win.
+    """
+    vis = getattr(question_analysis, "visualization", None)
+    presentation = getattr(getattr(vis, "primary_presentation", None), "value", None)
+    if presentation is not None:
+        return presentation
+    answer_kind = getattr(getattr(question_analysis, "answer_kind", None), "value", None)
+    if answer_kind == "comparison":
+        return "chart_plus_table"
+    return None
+
+
 def should_generate_chart(
     user_query: str,
     row_count: int,
@@ -45,7 +65,7 @@ def should_generate_chart(
 
         chart_requested = bool(getattr(vis, "chart_requested_by_user", False))
         chart_recommended = bool(getattr(vis, "chart_recommended", False))
-        primary_presentation = getattr(getattr(vis, "primary_presentation", None), "value", None)
+        primary_presentation = effective_primary_presentation(question_analysis)
 
         if response_mode == "knowledge_primary" and not explicit_chart_request and not chart_requested:
             log.info("Skipping chart: response_mode=knowledge_primary")

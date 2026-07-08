@@ -1618,10 +1618,14 @@ def test_truncation_selector_moves_history_last_only_for_clarify():
         "clarify",
     )
 
+    # Contract continuity (2026-07-07): the previous-contract block moves to
+    # the preserved end together with history for clarify turns.
+    _moved = {"UNTRUSTED_CONVERSATION_HISTORY", llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT}
     assert data_priority[0] == "UNTRUSTED_CONVERSATION_HISTORY"
     assert clarify_priority[-1] == "UNTRUSTED_CONVERSATION_HISTORY"
-    assert [name for name in clarify_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"] == [
-        name for name in data_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"
+    assert clarify_priority[-2] == llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT
+    assert [name for name in clarify_priority if name not in _moved] == [
+        name for name in data_priority if name not in _moved
     ]
 
 
@@ -1637,10 +1641,12 @@ def test_truncation_selector_preserves_knowledge_priority_for_clarify_overlay():
         "clarify",
     )
 
+    _moved = {"UNTRUSTED_CONVERSATION_HISTORY", llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT}
     assert knowledge_priority[-1] == "UNTRUSTED_TOPIC_CATALOG"
     assert clarify_priority[-1] == "UNTRUSTED_CONVERSATION_HISTORY"
-    assert [name for name in clarify_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"] == [
-        name for name in knowledge_priority if name != "UNTRUSTED_CONVERSATION_HISTORY"
+    assert clarify_priority[-2] == llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT
+    assert [name for name in clarify_priority if name not in _moved] == [
+        name for name in knowledge_priority if name not in _moved
     ]
 
 
@@ -1697,9 +1703,11 @@ def test_llm_analyze_question_clarify_reply_preserves_knowledge_priority_at_runt
     ]
     llm_core.llm_analyze_question("Day-ahead market", conversation_history=history)
 
+    _moved = {"UNTRUSTED_CONVERSATION_HISTORY", llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT}
     assert captured["truncation_priority"][-1] == "UNTRUSTED_CONVERSATION_HISTORY"
-    assert [name for name in captured["truncation_priority"] if name != "UNTRUSTED_CONVERSATION_HISTORY"] == [
-        name for name in llm_core._ANALYZER_TRUNCATION_KNOWLEDGE if name != "UNTRUSTED_CONVERSATION_HISTORY"
+    assert captured["truncation_priority"][-2] == llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT
+    assert [name for name in captured["truncation_priority"] if name not in _moved] == [
+        name for name in llm_core._ANALYZER_TRUNCATION_KNOWLEDGE if name not in _moved
     ]
     assert "UNTRUSTED_TOPIC_CATALOG" in captured["prompt"]
     assert "UNTRUSTED_TOOL_CATALOG" not in captured["prompt"]

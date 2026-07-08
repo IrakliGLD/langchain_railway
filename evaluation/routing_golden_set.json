@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "description": "Routing golden set (architecture 5.3). Each case pins the post-cross-check Stage 0.2 routing for a question whose correct routing is known — from documented fix series, catalog semantics, or reviewed production traces. Only assert fields you are confident about; omit the rest. Extend this file whenever a routing failure is fixed (pipeline-failure-diagnostics playbook): add the failing question with its now-correct expected fields so the fix cannot silently regress.",
+  "cases": [
+    {
+      "id": "r001",
+      "query": "What was the balancing electricity price in June 2024?",
+      "note": "single-value data lookup",
+      "expected": {"query_type": "data_retrieval", "answer_kind": "scalar"}
+    },
+    {
+      "id": "r002",
+      "query": "Show monthly balancing electricity prices for 2023",
+      "note": "period-range series",
+      "expected": {"query_type": "data_retrieval", "answer_kind": "timeseries"}
+    },
+    {
+      "id": "r003",
+      "query": "Why did the balancing electricity price change in March 2024?",
+      "note": "2026-05-09 fix series family: why-did-price-change",
+      "expected": {"query_type": "data_explanation", "answer_kind": "explanation"}
+    },
+    {
+      "id": "r004",
+      "query": "Who can trade on the electricity exchange?",
+      "note": "2026-05-09 fix series: legal-list exception (LIST + regulatory)",
+      "expected": {"answer_kind": "list", "preferred_path": "knowledge"}
+    },
+    {
+      "id": "r005",
+      "query": "What is the electricity market model in Georgia?",
+      "note": "conceptual definition",
+      "expected": {"query_type": "conceptual_definition", "answer_kind": "knowledge"}
+    },
+    {
+      "id": "r006",
+      "query": "Compare balancing electricity prices in 2023 vs 2024",
+      "note": "two-period comparison",
+      "expected": {"query_type": "comparison", "answer_kind": "comparison"}
+    },
+    {
+      "id": "r007",
+      "query": "Forecast balancing electricity prices for the next two years",
+      "note": "forecast family",
+      "expected": {"query_type": "forecast", "answer_kind": "forecast"}
+    },
+    {
+      "id": "r008",
+      "query": "What would happen to the balancing price if gas prices rose by 20%?",
+      "note": "scenario with quantitative anchor (2026-05-13 override gate)",
+      "expected": {"answer_kind": "scenario"}
+    },
+    {
+      "id": "r009",
+      "query": "List the regulated tariffs for generation companies",
+      "note": "regulated-tariff list (specialized direct answer upstream routing)",
+      "expected": {"answer_kind": "list"}
+    },
+    {
+      "id": "r010",
+      "query": "Which power plants have a share above 10 percent in balancing electricity?",
+      "note": "threshold share query (FilterCondition family)",
+      "expected": {"answer_kind": "list"}
+    },
+    {
+      "id": "r011",
+      "query": "How is the balancing electricity price calculated?",
+      "note": "methodology/regulatory knowledge",
+      "expected": {"answer_kind": "knowledge", "preferred_path": "knowledge"}
+    },
+    {
+      "id": "r012",
+      "query": "რა იყო საბალანსო ელექტროენერგიის ფასი 2024 წლის ივნისში?",
+      "note": "KA: balancing price June 2024 (scalar lookup)",
+      "expected": {"query_type": "data_retrieval", "answer_kind": "scalar"}
+    },
+    {
+      "id": "r013",
+      "query": "Почему изменилась цена балансирующей электроэнергии в марте 2024 года?",
+      "note": "RU: why did the balancing price change (explanation)",
+      "expected": {"query_type": "data_explanation", "answer_kind": "explanation"}
+    },
+    {
+      "id": "r014",
+      "query": "which sources have a share above 10 percent in balancing electricity and at what price?",
+      "note": "threshold share, spelled-out percent (audit 2026-07-08 finding #6 — must route like the % form)",
+      "expected": {"answer_kind": "list"}
+    },
+    {
+      "id": "c001",
+      "query": "and for 2023?",
+      "note": "continuity follow-up after r002 (monthly balancing prices); requires previous-contract injection — runner turn-chaining pending",
+      "skip_unless_continuity": true,
+      "expected": {"answer_kind": "timeseries"}
+    },
+    {
+      "id": "c002",
+      "query": "same but in USD",
+      "note": "continuity follow-up after r001 (June-2024 balancing price scalar); requires previous-contract injection — runner turn-chaining pending",
+      "skip_unless_continuity": true,
+      "expected": {"answer_kind": "scalar"}
+    },
+    {
+      "id": "c003",
+      "query": "და 2023 წელს?",
+      "note": "KA continuity follow-up ('and in 2023?') after r012; requires previous-contract injection — runner turn-chaining pending",
+      "skip_unless_continuity": true,
+      "expected": {"answer_kind": "scalar"}
+    }
+  ]
+}

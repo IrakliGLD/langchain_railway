@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -398,6 +400,32 @@ def _sparse_corpus_relaxed_similarity(
 _LIGHT_TIER_TOP_K = 2
 
 
+# Query-embedding memo: repeated questions skip the embedding API round trip.
+# Keyed by provider class + model so a config change never serves stale
+# vectors. Applied only to factory-built providers — explicitly injected
+# providers (tests, ingestion) always embed directly. Size <= 0 disables.
+_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, str], list[float]]" = OrderedDict()
+_QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
+
+
+def _embed_query_cached(provider, query_text: str) -> list[float]:
+    max_size = _int_env("VECTOR_QUERY_EMBEDDING_CACHE_SIZE", 256)
+    if max_size <= 0:
+        return provider.embed_query(query_text)
+    key = (type(provider).__name__, str(getattr(provider, "_model", "")), query_text)
+    with _QUERY_EMBEDDING_CACHE_LOCK:
+        cached = _QUERY_EMBEDDING_CACHE.get(key)
+        if cached is not None:
+            _QUERY_EMBEDDING_CACHE.move_to_end(key)
+            return list(cached)
+    embedding = provider.embed_query(query_text)
+    with _QUERY_EMBEDDING_CACHE_LOCK:
+        _QUERY_EMBEDDING_CACHE[key] = list(embedding)
+        while len(_QUERY_EMBEDDING_CACHE) > max_size:
+            _QUERY_EMBEDDING_CACHE.popitem(last=False)
+    return embedding
+
+
 def retrieve_vector_knowledge(
     query_text: str,
     *,
@@ -456,7 +484,9 @@ def retrieve_vector_knowledge(
             from knowledge.vector_embeddings import get_embedding_provider
 
             embedding_provider = get_embedding_provider()
-        query_embedding = embedding_provider.embed_query(query_text)
+            query_embedding = _embed_query_cached(embedding_provider, query_text)
+        else:
+            query_embedding = embedding_provider.embed_query(query_text)
         chunks = store.search_chunks(
             query_embedding=query_embedding,
             filters=filters,

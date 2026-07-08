@@ -33,6 +33,7 @@ from contracts.question_analysis import (
     ToolName,
 )
 from models import QueryContext
+from utils.metrics import metrics
 
 log = logging.getLogger("Enai")
 
@@ -48,13 +49,17 @@ _SHAPE_BLOCKS_FAST_PATH = frozenset({
     AnswerKind.SCENARIO,
 })
 
+# "%" or spelled-out "percent"/"pct" (audit 2026-07-08 finding #6: the
+# spelled-out form previously never matched). \b keeps "percentage" excluded.
+# KA/RU threshold phrasings stay fixture-driven (§5.9), not guessed here.
+_PCT = r"\s*(?:%|percent\b|pct\b)"
 _SHARE_THRESHOLD_PATTERNS = (
-    r"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+\d+(?:\.\d+)?\s*%",
-    r"(at least|not less than|minimum of)\s+\d+(?:\.\d+)?\s*%",
-    r"(less than|below|under|fewer than)\s+\d+(?:\.\d+)?\s*%",
-    r"(at most|no more than|maximum of)\s+\d+(?:\.\d+)?\s*%",
-    r"\d+(?:\.\d+)?\s*%\s+or\s+more",
-    r"\d+(?:\.\d+)?\s*%\s+or\s+less",
+    rf"(more than|above|over|exceed(?:ed|s|ing)?|greater than)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"(at least|not less than|minimum of)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"(less than|below|under|fewer than)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"(at most|no more than|maximum of)\s+\d+(?:\.\d+)?{_PCT}",
+    rf"\d+(?:\.\d+)?{_PCT}\s+or\s+more",
+    rf"\d+(?:\.\d+)?{_PCT}\s+or\s+less",
 )
 _SHARE_MONTH_LIST_HINTS = (
     "months where",
@@ -435,6 +440,19 @@ def _add_steps_from_rules(
     if primary_tool == ToolName.GET_BALANCING_COMPOSITION.value and (
         needs_driver or needs_correlation or threshold_share_with_prices
     ):
+        if threshold_share_with_prices:
+            # Ontology-migration shadow (§5 slice 1): measure whether the
+            # analyzer already emits get_prices for threshold-share queries.
+            # The planner rule stays authoritative until sustained agreement
+            # clears the cutover bar; only then is this rule deletable and
+            # the contract becomes the sole owner of the evidence ontology.
+            _analyzer_emitted = any(
+                t.name == ToolName.GET_PRICES.value
+                for t in (qa.tooling.candidate_tools or [])[1:]
+            )
+            metrics.log_evidence_rule_agreement(
+                "threshold_share_price_context", agree=_analyzer_emitted,
+            )
         if ToolName.GET_PRICES.value not in added_tools:
             params = _resolve_secondary_params(
                 qa, ToolName.GET_PRICES.value, raw_query, candidates, primary_params,
