@@ -10,6 +10,9 @@ For all data analysis, ALWAYS use the current model logic.
 In the future target model (planned ~July 2027), balancing price will no longer be a monthly weighted average. It will shift to hourly, marginal pricing under self-dispatch.  
 However, this document applies ONLY to the current model.
 
+**Exchange Transition Note:**
+From July 1, 2024 to July 1, 2027, GENEX day-ahead/intraday trading exists but does not replace monthly balancing. Exchange and direct-contract quantities reduce residual monthly balancing exposure; the balancing price and quantity are still calculated monthly. See `exchange_transition.md`.
+
 ---
 
 ## ESCO Buy vs. Sell Asymmetry (CRITICAL)
@@ -591,9 +594,11 @@ This is the canonical timeline of policy decisions that have shifted balancing-p
 - **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.
 - **Jan–Mar 2024 (temporary rule):** the Electricity (Capacity) Market Rules were temporarily changed for three months. During Jan–Mar 2024, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
 - **Jul 2024:** Exchange launched (GENEX) — added a new trading segment alongside balancing.
+- **Jul 2024-Jul 2027 transition:** Exchange trading is voluntary and limited to eligible Article 17^4 buyers/sellers; monthly balancing price and quantity still apply. See `exchange_transition.md`.
 - **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. This is one instance of a broader state-owned plant allocation pattern — see the *"State-owned plant allocation as a balancing-price-reduction lever"* subsection below for the full case list and detection methodology.
 - **2020 onwards:** Entity-level data available (no composition-based driver evidence before 2020).
 - **From May 2025:** Enguri/Vardnili tariffs increased to cover Abkhazia supply costs (see `market_structure.md` §14).
+- **May-Jul 2026 temporary surplus rule:** Article 60 creates a temporary surplus/production-restriction treatment. If PSO plants export during surplus, an equivalent volume from other plants may be settled through the balancing/direct-contract logic, with exceptions for PSO plants, GEP/PPA/CfD or mandatory ESCO-sale/CfD-compensation obligations, and exported portions. Treat this as a temporary 2026 allocation rule, not the normal price-formation rule.
 - **Jul 2027 (planned):** target market model launch (hourly marginal pricing under self-dispatch) — see `market_structure.md` §3 for the regime-break detail. Forecasts crossing this horizon must flag the structural break.
 
 ### State-owned plant allocation as a balancing-price-reduction lever (analytical inference)

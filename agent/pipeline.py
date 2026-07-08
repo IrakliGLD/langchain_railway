@@ -434,6 +434,9 @@ _MARKET_STRUCTURE_TOPICS = frozenset({
     KnowledgeTopicName.BALANCING_PRICE,
     KnowledgeTopicName.TARIFFS,
     KnowledgeTopicName.MARKET_STRUCTURE,
+    KnowledgeTopicName.DIRECT_CONTRACTS,
+    KnowledgeTopicName.CROSS_BORDER_TRADE,
+    KnowledgeTopicName.EXCHANGE_TRANSITION,
     KnowledgeTopicName.CFD_PPA,
     KnowledgeTopicName.PSO_TRADING,
 })

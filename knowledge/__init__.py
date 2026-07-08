@@ -72,8 +72,8 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "driver": ["balancing_price"],
     "composition": ["balancing_price", "market_structure"],
     "weighted": ["balancing_price"],
-    "imbalance": ["market_structure"],
-    "settlement": ["market_structure"],
+    "imbalance": ["market_structure", "exchange_transition"],
+    "settlement": ["market_structure", "exchange_transition"],
     "decomposition": ["balancing_price"],
     "contribution": ["balancing_price"],
 
@@ -106,6 +106,15 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "ppa": ["cfd_ppa"],
     "power purchase agreement": ["cfd_ppa"],
     "support scheme": ["cfd_ppa"],
+    "direct contract": ["direct_contracts", "market_structure"],
+    "direct contracts": ["direct_contracts", "market_structure"],
+    "bilateral contract": ["direct_contracts"],
+    "bilateral contracts": ["direct_contracts"],
+    "contractual application": ["direct_contracts"],
+    "contract registration": ["direct_contracts"],
+    "registered contract": ["direct_contracts"],
+    "project company": ["direct_contracts", "cfd_ppa"],
+    "guaranteed purchase": ["direct_contracts", "cfd_ppa"],
     "წახალისების სქემა": ["cfd_ppa"],
 
     # Currency / exchange rate
@@ -138,22 +147,38 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "generation mix": ["generation_mix"],
 
     # Trade / import / export
-    "import": ["market_structure", "currency_influence"],
-    "export": ["market_structure"],
+    "import": ["cross_border_trade", "market_structure", "currency_influence"],
+    "export": ["cross_border_trade", "market_structure"],
     "trade": ["market_structure"],
-    "იმპორტი": ["market_structure"],
-    "ექსპორტი": ["market_structure"],
-    "импорт": ["market_structure"],
-    "экспорт": ["market_structure"],
-    "interconnection": ["market_structure"],
-    "cross-border": ["market_structure"],
+    "transit": ["cross_border_trade"],
+    "იმპორტი": ["cross_border_trade", "market_structure"],
+    "ექსპორტი": ["cross_border_trade", "market_structure"],
+    "импорт": ["cross_border_trade", "market_structure"],
+    "экспорт": ["cross_border_trade", "market_structure"],
+    "interconnection": ["cross_border_trade", "market_structure"],
+    "cross-border": ["cross_border_trade", "market_structure"],
+    "cross border": ["cross_border_trade", "market_structure"],
+    "curtailment": ["cross_border_trade", "cfd_ppa"],
+    "surplus": ["cross_border_trade", "balancing_price"],
+    "atc": ["cross_border_trade"],
+    "ntc": ["cross_border_trade"],
+    "capacity allocation": ["cross_border_trade"],
 
     # Market participants
     "esco": ["market_structure"],
     "gse": ["market_structure"],
-    "genex": ["market_structure"],
+    "genex": ["exchange_transition", "market_structure"],
+    "exchange": ["exchange_transition", "market_structure"],
+    "day-ahead": ["exchange_transition", "market_structure"],
+    "day ahead": ["exchange_transition", "market_structure"],
+    "intraday": ["exchange_transition", "market_structure"],
+    "article 17": ["exchange_transition", "market_structure"],
+    "17^4": ["exchange_transition"],
+    "17⁴": ["exchange_transition"],
+    "eligible buyer": ["exchange_transition"],
+    "eligible seller": ["exchange_transition"],
     "geostat": ["market_structure"],
-    "participant": ["market_structure"],
+    "participant": ["market_structure", "exchange_transition"],
 
     # Forecasting
     "forecast": ["seasonal_patterns", "balancing_price", "sql_examples"],
@@ -174,9 +199,9 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "აფხაზეთ": ["market_structure"],
 
     # Direct customers
-    "direct customer": ["market_structure"],
-    "პირდაპირი მომხმარებელი": ["market_structure"],
-    "wholesale market": ["market_structure"],
+    "direct customer": ["market_structure", "exchange_transition", "direct_contracts"],
+    "პირდაპირი მომხმარებელი": ["market_structure", "exchange_transition", "direct_contracts"],
+    "wholesale market": ["market_structure", "exchange_transition", "direct_contracts"],
     "metallurg": ["market_structure"],
 
     # CPI
