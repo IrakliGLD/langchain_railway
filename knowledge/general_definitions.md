@@ -170,7 +170,7 @@ Regulated tariffs are **NOT support schemes**.
   - reduced curtailment exposure
   - imbalance risk emerges
 
-**Disambiguation:** The Electricity Market Concept Design regulation also uses "CfD" to describe a transitional compensation mechanism for existing regulated generators — compensating the difference between regulated tariff and market price during market reform. This is NOT the same as the renewable support scheme CfD. Context determines which meaning applies. See `cfd_ppa.md` Section 3.5 for details.
+**Disambiguation:** The Electricity Market Model Concept also uses "CfD" to describe a transitional compensation mechanism for existing regulated generators — compensating the difference between regulated tariff and market price during market reform. This is NOT the same as the renewable support scheme CfD. Context determines which meaning applies. See `cfd_ppa.md` Section 3.5 for details.
 
 ---
 
@@ -207,7 +207,7 @@ Qualified-enterprise status matters for direct contracts, balancing electricity 
 **Definition:** A public-service wholesale role used for support-scheme, public-service, and transition-settlement functions.
 
 **Georgia Context:**
-The Electricity Market Concept uses this role for renewable/PPA/GEP support, public-service supply needs, Abkhazia-related public-service supply, CfD/tariff-difference settlements, and special-fund flows. It is not ordinary competitive trading.
+The Electricity Market Model Concept uses this role for renewable/PPA/GEP support, public-service supply needs, Abkhazia-related public-service supply, CfD/tariff-difference settlements, and special-fund flows. It is not ordinary competitive trading.
 
 ---
 

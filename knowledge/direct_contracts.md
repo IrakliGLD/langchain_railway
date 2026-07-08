@@ -2,18 +2,18 @@
 
 ## Source Scope
 
-Primary source: final Transitory Market Rules, Chapter III:
+Primary source: final **Electricity (Capacity) Market Rules** (Ministerial Order No. 77, August 30, 2006), Chapter III:
 - Article 8: parties to direct contracts
 - Article 9: contract registration with the Dispatch Licensee and Market Operator
 - Article 9^1: import/export contract registration with the Dispatch Licensee
 - Article 10: contract and registration termination
 - Article 10^1: project-company direct contract registration
-- Article 10^2: exchange trading authorization during the Concept transition
+- Article 10^2: exchange trading authorization during the Electricity Market Model Concept transition
 
 Related sources:
-- Electricity Market Concept Article 17^4: transitional wholesale trading from July 1, 2024 to July 1, 2027
-- Transitory Market Rules Article 13: which contracted or residual quantities count as balancing electricity
-- Transitory Market Rules Article 14: how direct-contract prices enter ESCO buy-side and sell-side balancing-price formulas
+- Electricity Market Model Concept Article 17^4: transitional wholesale trading from July 1, 2024 to July 1, 2027
+- Electricity (Capacity) Market Rules Article 13: which contracted or residual quantities count as balancing electricity
+- Electricity (Capacity) Market Rules Article 14: how direct-contract prices enter ESCO buy-side and sell-side balancing-price formulas
 
 ---
 
@@ -134,8 +134,8 @@ Do not confuse a project-company preregistration with ordinary exchange particip
 
 ## 9. Exchange Link
 
-Article 10^2 points to the Concept Article 17^4 participant lists for exchange trading authorization. During the July 1, 2024 to July 1, 2027 transition:
-- only the eligible buyers and sellers named in Concept Article 17^4 may trade on the exchange
+Article 10^2 of the Electricity (Capacity) Market Rules points to the Article 17^4 participant lists in the Electricity Market Model Concept for exchange trading authorization. During the July 1, 2024 to July 1, 2027 transition:
+- only the eligible buyers and sellers named in Article 17^4 of the Electricity Market Model Concept may trade on the exchange
 - exchange trading is voluntary
 - direct contracts and balancing settlement continue in parallel
 

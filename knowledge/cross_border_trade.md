@@ -2,7 +2,7 @@
 
 ## Source Scope
 
-Primary source: final Transitory Market Rules, Chapter IV^1:
+Primary source: final **Electricity (Capacity) Market Rules** (Ministerial Order No. 77, August 30, 2006), Chapter IV^1:
 - Article 14^1: general conditions for import and export
 - Article 14^2: import/export during emergency situations
 - Articles 14^3-14^14: import, export, transit, applications, capacity allocation, priorities, and capacity concepts
@@ -10,7 +10,7 @@ Primary source: final Transitory Market Rules, Chapter IV^1:
 Related source:
 - Article 16^1: Dispatch Licensee / TSO powers to restrict cross-border flows and production in deficit, surplus, or emergency situations
 - Article 60: temporary 2026 surplus and production-restriction rule
-- Electricity Market Concept Article 17^4: exchange trading transition from July 1, 2024 to July 1, 2027
+- Electricity Market Model Concept Article 17^4: exchange trading transition from July 1, 2024 to July 1, 2027
 
 ---
 
@@ -24,7 +24,7 @@ Cross-border trade covers:
 - emergency import/export
 - curtailment or restriction of cross-border flows for system security
 
-It is not the same as domestic balancing electricity, though imports can enter balancing-price formation when sold as balancing electricity under the Transitory Market Rules.
+It is not the same as domestic balancing electricity, though imports can enter balancing-price formation when sold as balancing electricity under the Electricity (Capacity) Market Rules.
 
 ---
 
