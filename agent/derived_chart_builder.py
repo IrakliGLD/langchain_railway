@@ -26,10 +26,21 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from agent.chart_frame_builder import build_chart_frame_long, from_wide
-from context import COLUMN_LABELS
+from context import COLUMN_LABELS, DEMAND_TECH_TYPES, TRANSIT_TECH_TYPES
 from contracts.question_analysis import AnswerKind, MeasureTransform, SemanticRole
 
 log = logging.getLogger("Enai")
+
+# Demand-side / transit share columns. A generation-mix frame
+# (canonicalize_generation_mix_df) carries shares for BOTH supply and demand
+# type_tech values; charting the demand ones (share_export, share_losses,
+# share_direct customers, …) for a generation question is what produced the
+# "demand items shown" report (2026-07-09). We EXCLUDE these rather than
+# allow-list generation techs, so legitimate generation aggregates such as
+# "share_renewable" are never dropped.
+_NON_GENERATION_SHARE_COLS = frozenset(
+    f"share_{tech}" for tech in (*DEMAND_TECH_TYPES, *TRANSIT_TECH_TYPES)
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -221,9 +232,15 @@ def _label(col: str) -> str:
 
 
 def _resolve_time_key(df: pd.DataFrame) -> Optional[str]:
-    """Return the first date/year/month/time column in ``df``, or None."""
+    """Return the first date/year/month/time/period column in ``df``, or None.
+
+    "period" is the canonical time-column name from
+    canonicalize_generation_mix_df; omitting it made the decomposition
+    builder return None for generation-mix frames, forcing the broken
+    quantity-dump fallback (2026-07-09 chart report).
+    """
     for col in df.columns:
-        if any(k in col.lower() for k in ["date", "year", "month", "time"]):
+        if any(k in col.lower() for k in ["date", "year", "month", "time", "period"]):
             return col
     return None
 
@@ -613,6 +630,15 @@ def _build_decomposition_spec(
     share_cols = [c for c in num_cols if "share" in c.lower() or "component" in c.lower()]
     if not share_cols or not time_key:
         return None
+
+    # Coherent composition: drop demand-side / transit shares so a
+    # generation-mix frame charts only supply/generation categories. Applied
+    # only when it removes something and leaves a non-empty set, so
+    # decompositions with no demand shares (e.g. balancing composition) are
+    # untouched.
+    supply_shares = [c for c in share_cols if c not in _NON_GENERATION_SHARE_COLS]
+    if supply_shares and len(supply_shares) < len(share_cols):
+        share_cols = supply_shares
 
     prepared = df[[time_key] + share_cols].copy()
     prepared[time_key] = pd.to_datetime(prepared[time_key], errors="coerce")

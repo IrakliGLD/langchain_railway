@@ -260,22 +260,20 @@ def _build_grounding_corpus(ctx: QueryContext) -> str:
 
 
 def _add_aggregate_tokens(tokens: Set[str], ctx: QueryContext) -> None:
-    """Add column-level aggregates to grounding tokens for analyst-mode queries.
+    """Add column-level aggregates (sum/mean/min/max/count) to grounding tokens.
 
-    CfD and similar calculations produce derived values (strike * volume, etc.)
-    that don't exist in raw data rows.  By adding sum/mean/min/max/count of
-    each numeric column, we give the grounding check legitimate computed values
-    to match against — preventing false-positive failures while keeping the 90%
-    threshold intact for non-analyst queries.
+    Any answer that summarizes tabular data legitimately quotes column
+    aggregates — a descriptive "what can you say about X" (light mode) cites
+    means and totals just as an analyst-mode calculation does. Gating this on
+    analyst mode meant those aggregates were absent from the grounding corpus
+    for light-mode summaries, so the strict gate rejected correct answers
+    (2026-07-09 generation-mix trace: means 820/223/1049 unmatched → citation
+    fallback). Aggregates are computed from the real evidence frame, so adding
+    them for all modes preserves the gate's anti-hallucination property — a
+    fabricated number still cannot match unless it is a genuine column
+    aggregate of the data.
     """
     if ctx.df is None or ctx.df.empty:
-        return
-    qa = ctx.question_analysis
-    is_analyst = (
-        (qa is not None and qa.classification.analysis_mode.value == "analyst")
-        or ctx.mode == "analyst"
-    )
-    if not is_analyst:
         return
     for col in ctx.df.select_dtypes(include="number").columns:
         series = ctx.df[col].dropna()

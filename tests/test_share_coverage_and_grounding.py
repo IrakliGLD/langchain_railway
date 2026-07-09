@@ -94,6 +94,35 @@ def test_integers_are_untouched():
     assert tokens == {"42", "1000"}
 
 
+def test_aggregate_tokens_added_in_light_mode():
+    """2026-07-09: light-mode descriptive queries quote column means/sums; the
+    aggregate tokens must be present (no longer gated on analyst mode) so those
+    quotes can ground. Combined with rounding, the LLM's '820' matches."""
+    from models import QueryContext
+
+    ctx = QueryContext(query="what can you say about generation mix")
+    ctx.mode = "light"
+    ctx.df = pd.DataFrame({"quantity_hydro": [810.0, 820.94, 830.0, 819.0]})
+
+    tokens: set = set()
+    summarizer._add_aggregate_tokens(tokens, ctx)
+    # Mean ~819.985 present at full precision...
+    assert any(t.startswith("819") for t in tokens)
+    # ...and rounds to the LLM-quoted "820".
+    summarizer._add_rounded_source_variants(tokens)
+    assert "820" in tokens
+
+
+def test_aggregate_tokens_skipped_when_no_frame():
+    from models import QueryContext
+
+    ctx = QueryContext(query="x")
+    ctx.mode = "light"
+    tokens: set = set()
+    summarizer._add_aggregate_tokens(tokens, ctx)  # empty df → no-op, no raise
+    assert tokens == set()
+
+
 # ---------------------------------------------------------------------------
 # C — correlation already excludes zero-variance (constant) columns
 # ---------------------------------------------------------------------------
