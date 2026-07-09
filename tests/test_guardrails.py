@@ -522,6 +522,77 @@ def test_build_claim_provenance_matches_llm_one_decimal_rounded_stats_value():
     assert coverage == pytest.approx(1.0, rel=1e-6)
 
 
+def test_build_claim_provenance_matches_integer_rounded_stats_values():
+    """Text-source stats should ground natural integer rounding, not only
+    one/two-decimal rounding."""
+    stats_hint = "Hydro mean 820.122, max 1514.261; thermal mean 222.851, max 728.391"
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=[
+            "Hydro averaged 820 thousand MWh and reached 1,514 thousand MWh; "
+            "thermal averaged 223 thousand MWh and reached 728 thousand MWh."
+        ],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_build_claim_provenance_matches_integer_percent_from_ratio_text():
+    """Ratio values in text evidence should ground percentage prose."""
+    stats_hint = "May 2025 hydro share 0.982 and June 2025 hydro share 0.986"
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["Hydro generation was about 98% of domestic output in May and 98.6% in June."],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_build_claim_provenance_matches_coarse_rounded_large_text_values():
+    """Large non-year values in text evidence may be rounded to nearby tens in
+    prose ranges, while still requiring source support."""
+    stats_hint = "Winter imports ranged from 251 to 388 thousand MWh."
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["Winter imports were roughly 250 to 390 thousand MWh."],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_text_number_expansion_does_not_coarse_round_years():
+    tokens = summarizer._expand_text_number_token("2025")
+    assert "2025" in tokens
+    assert "2020" not in tokens
+    assert "2030" not in tokens
+
+
+def test_build_claim_provenance_still_rejects_unrelated_rounded_number():
+    stats_hint = "Winter imports ranged from 251 to 388 thousand MWh."
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["Winter imports reached 999 thousand MWh."],
+        cols=["value"],
+        rows=[(100,)],
+        stats_hint=stats_hint,
+    )
+
+    assert "999" in claim_entries[0]["unmatched_tokens"]
+    assert claim_entries[0]["is_fully_grounded"] is False
+    assert coverage == pytest.approx(0.0, rel=1e-6)
+
+
 def test_build_claim_provenance_matches_llm_higher_precision_cell_value():
     """The provenance gate must NOT fail when the LLM cites a data value at a
     different precision than the indexed 1-2 decimal expansion.
