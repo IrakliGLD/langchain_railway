@@ -360,7 +360,39 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
     _add_aggregate_tokens(tokens, ctx)
     _add_evidence_record_tokens(tokens, ctx)
     _add_join_provenance_tokens(tokens, ctx)
+    _add_rounded_source_variants(tokens)
     return tokens
+
+
+def _add_rounded_source_variants(tokens: Set[str]) -> None:
+    """Emit rounded forms (0/1/2 decimals) of every fractional source token.
+
+    The corpus holds full precision (``1514.2836``) while the LLM quotes a
+    rounded figure (``1,514 thousand MWh`` → token ``1514``); exact string
+    match then fails even though the answer faithfully rounded a real value
+    (2026-07-08 generation-mix trace: grounding rejected a correct answer,
+    missing ``1514``, ``1525``, …). Rounding down REAL source numbers lets
+    legitimate rounding match while preserving the gate's anti-hallucination
+    property — a fabricated number still cannot match unless a genuine source
+    value rounds to it. Mutates ``tokens`` in place.
+    """
+    variants: Set[str] = set()
+    for tok in tokens:
+        if "." not in tok:
+            continue  # integers carry no extra precision to round away
+        try:
+            dec = Decimal(tok)
+        except (InvalidOperation, ValueError):
+            continue
+        for places in (0, 1, 2):
+            try:
+                rounded = dec.quantize(Decimal(1).scaleb(-places))
+            except (InvalidOperation, ValueError):
+                continue
+            normalized = _normalize_number_token(format(rounded, "f"))
+            if normalized and len(normalized) > 1:
+                variants.add(normalized)
+    tokens.update(variants)
 
 
 # ---------------------------------------------------------------------------
