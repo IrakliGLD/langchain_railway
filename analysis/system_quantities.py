@@ -13,6 +13,17 @@ _DOMESTIC_GENERATION_TYPES = ("hydro", "thermal", "wind", "solar")
 _LOCAL_GENERATION_TYPES = ("hydro", "wind", "solar")
 _IMPORT_DEPENDENT_TYPES = ("thermal", "import")
 
+# A per-technology generation share is only meaningful when the period observes
+# at least this many generation techs. The long-form source records a row per
+# (period, tech) only when that tech has data — an ABSENT tech is unknown, not
+# zero (real zeros are stored as explicit 0 rows, e.g. import=0). So a period
+# that observes a single generation tech has an incomplete denominator, and
+# ``hydro / hydro = 100%`` is a data-coverage artifact, not a fact
+# (2026-07-08 report: share_hydro read as constant 100%). Such shares are set
+# to NA. Real-zero techs (0 rows) count as observed, so a genuine 100%-hydro
+# month with explicit thermal=0/wind=0 rows is preserved.
+_MIN_GENERATION_TECHS_FOR_SHARE = 2
+
 
 def infer_period_granularity(series: pd.Series) -> Optional[str]:
     """Infer whether a normalized timestamp series is yearly, monthly, or finer."""
@@ -131,6 +142,24 @@ def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
             share_col = f"share_{tech}"
             if share_col not in result.columns:
                 result[share_col] = result[col] / total_observed
+
+    # Coverage guard: NA any generation-tech share for periods that observe
+    # fewer than _MIN_GENERATION_TECHS_FOR_SHARE generation techs, so an
+    # incomplete-denominator "100%" is reported as unknown, not asserted as
+    # fact. See the _MIN_GENERATION_TECHS_FOR_SHARE note above.
+    gen_quantity_cols = [
+        f"quantity_{tech}" for tech in _DOMESTIC_GENERATION_TYPES
+        if f"quantity_{tech}" in result.columns
+    ]
+    gen_share_cols = [
+        f"share_{tech}" for tech in _DOMESTIC_GENERATION_TYPES
+        if f"share_{tech}" in result.columns
+    ]
+    if gen_quantity_cols and gen_share_cols:
+        observed_gen_techs = result[gen_quantity_cols].notna().sum(axis=1)
+        incomplete = observed_gen_techs < _MIN_GENERATION_TECHS_FOR_SHARE
+        if incomplete.any():
+            result.loc[incomplete, gen_share_cols] = pd.NA
 
     def _sum_columns(tech_types: Iterable[str], output_col: str) -> None:
         cols = [f"quantity_{tech}" for tech in tech_types if f"quantity_{tech}" in result.columns]

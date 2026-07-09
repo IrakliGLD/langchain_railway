@@ -2979,8 +2979,14 @@ def test_answer_clarify_offers_residual_bucket_options_for_underdefined_numeric_
     out = summarizer.answer_clarify(ctx)
 
     assert out.summary_source == "clarification_request"
-    assert "residual after excluding regulated Hydro Generation, regulated thermals, and deregulated Hydro Generation" in out.summary
-    assert "existing PPA/CfD/Import residual layer" in out.summary
+    # Natural lowercase "hydro" (the source template text), not the old
+    # "Hydro Generation" over-scrub artifact removed 2026-07-08. Note the
+    # source already wrote "regulated thermals" un-mangled — the bug only
+    # ever hit the bare word "hydro".
+    assert "residual after excluding regulated hydro, regulated thermals, and deregulated hydro" in out.summary
+    # Lowercase "import" (source template), not the removed "import"→"Import"
+    # over-scrub.
+    assert "existing PPA/CfD/import residual layer" in out.summary
 
 
 def test_clarify_selection_preserves_original_forecast_context():
