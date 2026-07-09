@@ -289,11 +289,17 @@ def _prepare_chart_source(
     df = ctx.df.copy()
     cols = list(ctx.cols or df.columns)
 
+    # "period" is the canonical time-column name emitted by
+    # canonicalize_generation_mix_df and the rest of the pipeline already
+    # treats it as a time key (analyzer, analysis/stats, frame_adapters).
+    # Omitting it here left the datetime column unrecognised → pd.to_numeric
+    # clobbered it to int64 nanoseconds and plotted it as a series
+    # (2026-07-09 generation-mix chart report).
     time_key = next(
         (
             c
             for c in cols
-            if any(k in c.lower() for k in ["date", "year", "month", "time"])
+            if any(k in c.lower() for k in ["date", "year", "month", "time", "period"])
         ),
         None,
     )
