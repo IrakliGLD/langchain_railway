@@ -692,7 +692,7 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
     as "not in source," even though semantically it is.
 
     DataFrame cells already get rounded-variant expansion via
-    ``_tokenize_cell_value`` (lines 460-463 of this file).  This
+    ``_tokenize_cell_value``.  This
     helper brings text sources to parity — same expansion logic.
 
     Expansion rules
@@ -700,8 +700,11 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
 
     For each raw token, returns the set containing:
       - the original token (always)
+      - the value rounded to 0 decimal places
       - the value rounded to 1 decimal place
       - the value rounded to 2 decimal places
+      - percentage forms for ratio-like values in [-1, 1]
+      - nearest-ten forms for large non-year values
       - unsigned versions of all the above (for "dropped by 5" matching "-5")
 
     Non-numeric or non-finite tokens pass through unchanged.
@@ -720,11 +723,13 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
     if not numeric.is_finite():
         return result
 
-    # Rounded variants at 1 and 2 decimal places.
-    for val in (round(numeric, 1), round(numeric, 2)):
-        t = _normalize_number_token(str(val))
-        if t:
-            result.add(t)
+    _add_decimal_rounding_variants(result, numeric, include_nearest_ten=True)
+
+    # Text evidence often carries ratios in stats/citation snippets while the
+    # model writes the same value as a percent. Keep this aligned with the live
+    # grounding-token path, which already expands ratio cells into percentages.
+    if abs(numeric) <= 1:
+        _add_decimal_rounding_variants(result, numeric * Decimal("100"))
 
     # Unsigned versions for ALL tokens generated so far.
     unsigned_extra: Set[str] = set()
@@ -733,6 +738,45 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
             unsigned_extra.add(t[1:])
     result.update(unsigned_extra)
     return result
+
+
+def _normalized_decimal_token(value: Decimal) -> Optional[str]:
+    return _normalize_number_token(format(value, "f"))
+
+
+def _is_year_like_integer(value: Decimal) -> bool:
+    if value != value.to_integral_value():
+        return False
+    try:
+        int_value = abs(int(value))
+    except (OverflowError, ValueError):
+        return False
+    return 1900 <= int_value <= 2100
+
+
+def _add_decimal_rounding_variants(
+    result: Set[str],
+    numeric: Decimal,
+    *,
+    include_nearest_ten: bool = False,
+) -> None:
+    for places in (0, 1, 2):
+        try:
+            rounded = numeric.quantize(Decimal(1).scaleb(-places))
+        except (InvalidOperation, ValueError):
+            continue
+        token = _normalized_decimal_token(rounded)
+        if token:
+            result.add(token)
+
+    if include_nearest_ten and abs(numeric) >= 100 and not _is_year_like_integer(numeric):
+        try:
+            rounded_ten = numeric.quantize(Decimal("1E+1"))
+        except (InvalidOperation, ValueError):
+            return
+        token = _normalized_decimal_token(rounded_ten)
+        if token:
+            result.add(token)
 
 
 def _rounded_match_variants(token: str) -> List[str]:
@@ -777,10 +821,7 @@ def _tokenize_cell_value(value: Any, *, emit_ratio_percent: bool = True) -> Set[
     # corpus that scopes this x100 expansion to genuine ratio/share columns.
     if emit_ratio_percent and abs(numeric) <= 1:
         percent_raw = numeric * Decimal("100")
-        for val in [percent_raw, round(percent_raw, 1), round(percent_raw, 2)]:
-            t = _normalize_number_token(str(val))
-            if t:
-                tokens.add(t)
+        _add_decimal_rounding_variants(tokens, percent_raw)
 
         # Truncation for ratios
         pr_str = str(percent_raw)
@@ -793,10 +834,7 @@ def _tokenize_cell_value(value: Any, *, emit_ratio_percent: bool = True) -> Set[
                         tokens.add(t)
 
     # 2. General rounding support for all numbers (including the primary value)
-    for val in [numeric, round(numeric, 1), round(numeric, 2)]:
-        t = _normalize_number_token(str(val))
-        if t:
-            tokens.add(t)
+    _add_decimal_rounding_variants(tokens, numeric, include_nearest_ten=True)
 
     # 3. General truncation
     num_str = str(numeric)
