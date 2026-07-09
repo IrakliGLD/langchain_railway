@@ -6,7 +6,7 @@ from typing import Iterable, List, Optional
 from sqlalchemy import bindparam, text
 
 from config import MAX_ROWS
-from context import TECH_TYPE_GROUPS
+from context import DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES, TRANSIT_TECH_TYPES
 
 from .common import get_sort_direction, normalize_date, normalize_limit, run_statement
 from .types import ToolResult
@@ -15,10 +15,23 @@ from .types import ToolResult
 ALLOWED_MODES = {"quantity", "share"}
 ALLOWED_GRANULARITY = {"monthly", "yearly"}
 ALLOWED_TYPES = (
-    set(TECH_TYPE_GROUPS["supply"].keys())
-    | set(TECH_TYPE_GROUPS["demand"].keys())
-    | {"transit", "self-cons"}
+    set(SUPPLY_TECH_TYPES)
+    | set(DEMAND_TECH_TYPES)
+    | set(TRANSIT_TECH_TYPES)
 )
+
+
+def _sql_literal_list(values: Iterable[str]) -> str:
+    literals = []
+    for value in values:
+        escaped = str(value).replace("'", "''")
+        literals.append(f"'{escaped}'")
+    return ", ".join(literals)
+
+
+_SUPPLY_TYPES_SQL = _sql_literal_list(SUPPLY_TECH_TYPES)
+_DEMAND_TYPES_SQL = _sql_literal_list(DEMAND_TECH_TYPES)
+_TRANSIT_TYPES_SQL = _sql_literal_list(TRANSIT_TECH_TYPES)
 
 
 # Validate requested technology filters before they reach SQL construction.
@@ -64,20 +77,26 @@ def get_generation_mix(
         period_expr = "date AS period"
         period_ref = "period"
 
-    where_parts = []
+    date_where_parts = []
     params = {"limit": limit}
 
     if start_date:
-        where_parts.append("date >= :start_date")
+        date_where_parts.append("date >= :start_date")
         params["start_date"] = start_date
     if end_date:
-        where_parts.append("date <= :end_date")
+        date_where_parts.append("date <= :end_date")
         params["end_date"] = end_date
-    if selected_types:
-        where_parts.append("type_tech IN :types")
-        params["types"] = selected_types
 
-    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    date_where_clause = ("WHERE " + " AND ".join(date_where_parts)) if date_where_parts else ""
+    type_filter_clause = ""
+    if selected_types:
+        params["types"] = selected_types
+        type_filter_clause = "WHERE type_tech IN :types"
+
+    quantity_where_parts = list(date_where_parts)
+    if selected_types:
+        quantity_where_parts.append("type_tech IN :types")
+    quantity_where_clause = ("WHERE " + " AND ".join(quantity_where_parts)) if quantity_where_parts else ""
 
     if mode == "share":
         sql = f"""
@@ -88,15 +107,43 @@ WITH base AS (
         type_tech,
         SUM(quantity_tech) AS quantity_tech
     FROM tech_quantity_view
-    {where_clause}
+    {date_where_clause}
     GROUP BY period, type_tech
+),
+classified AS (
+    SELECT
+        {period_ref},
+        type_tech,
+        quantity_tech,
+        CASE
+            WHEN type_tech IN ({_SUPPLY_TYPES_SQL}) THEN 'supply'
+            WHEN type_tech IN ({_DEMAND_TYPES_SQL}) THEN 'demand'
+            WHEN type_tech IN ({_TRANSIT_TYPES_SQL}) THEN 'transit'
+            ELSE 'other'
+        END AS tech_side
+    FROM base
+),
+with_shares AS (
+    SELECT
+        {period_ref},
+        type_tech,
+        quantity_tech,
+        ROUND(
+            quantity_tech / NULLIF(
+                SUM(quantity_tech) OVER (PARTITION BY {period_ref}, tech_side),
+                0
+            ),
+            4
+        ) AS share_tech
+    FROM classified
 )
 SELECT
     {period_ref},
     type_tech,
     quantity_tech,
-    ROUND(quantity_tech / NULLIF(SUM(quantity_tech) OVER (PARTITION BY {period_ref}), 0), 4) AS share_tech
-FROM base
+    share_tech
+FROM with_shares
+{type_filter_clause}
 ORDER BY {period_ref} {direction}, type_tech
 LIMIT :limit
 """.strip()
@@ -108,7 +155,7 @@ SELECT
     type_tech,
     SUM(quantity_tech) AS quantity_tech
 FROM tech_quantity_view
-{where_clause}
+{quantity_where_clause}
 GROUP BY period, type_tech
 ORDER BY period {direction}, type_tech
 LIMIT :limit

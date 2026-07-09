@@ -140,3 +140,66 @@ def test_correlation_excludes_constant_columns():
     # A constant column can have no Pearson correlation, so it is never a driver.
     for target, drivers in result.items():
         assert "share_hydro" not in drivers
+
+
+def test_supply_and_demand_shares_use_separate_denominators():
+    out = _canon([
+        ("2024-01-01", "hydro", 60.0),
+        ("2024-01-01", "thermal", 40.0),
+        ("2024-01-01", "abkhazeti", 20.0),
+        ("2024-01-01", "supply-distribution", 80.0),
+    ])
+    row = out.loc[out.index.str.startswith("2024-01")].iloc[0]
+
+    assert float(row["total_supply"]) == 100.0
+    assert float(row["total_demand"]) == 100.0
+    assert float(row["share_hydro"]) == 0.6
+    assert float(row["share_thermal"]) == 0.4
+    assert float(row["share_abkhazeti"]) == 0.2
+    assert float(row["share_supply-distribution"]) == 0.8
+
+
+def test_mixed_side_raw_shares_are_recomputed_by_side():
+    df = pd.DataFrame(
+        [
+            ("2024-01-01", "hydro", 60.0, 0.30),
+            ("2024-01-01", "thermal", 40.0, 0.20),
+            ("2024-01-01", "abkhazeti", 20.0, 0.10),
+            ("2024-01-01", "supply-distribution", 80.0, 0.40),
+        ],
+        columns=["date", "type_tech", "quantity_tech", "share_tech"],
+    )
+    out = canonicalize_generation_mix_df(df).set_index("period")
+    out.index = out.index.astype(str)
+    row = out.loc[out.index.str.startswith("2024-01")].iloc[0]
+
+    assert float(row["share_hydro"]) == 0.6
+    assert float(row["share_thermal"]) == 0.4
+    assert float(row["share_abkhazeti"]) == 0.2
+    assert float(row["share_supply-distribution"]) == 0.8
+
+
+def test_filtered_raw_share_is_preserved_when_denominator_is_not_visible():
+    df = pd.DataFrame(
+        [("2024-01-01", "hydro", 60.0, 0.55)],
+        columns=["date", "type_tech", "quantity_tech", "share_tech"],
+    )
+    out = canonicalize_generation_mix_df(df).set_index("period")
+    out.index = out.index.astype(str)
+    row = out.loc[out.index.str.startswith("2024-01")].iloc[0]
+
+    assert float(row["share_hydro"]) == 0.55
+
+
+def test_import_dependency_ratio_uses_supply_denominator():
+    out = _canon([
+        ("2024-01-01", "hydro", 50.0),
+        ("2024-01-01", "thermal", 25.0),
+        ("2024-01-01", "import", 25.0),
+        ("2024-01-01", "abkhazeti", 200.0),
+    ])
+    row = out.loc[out.index.str.startswith("2024-01")].iloc[0]
+
+    assert float(row["import_dependent_supply"]) == 50.0
+    assert float(row["total_supply"]) == 100.0
+    assert float(row["import_dependency_ratio"]) == 0.5
