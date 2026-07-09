@@ -103,7 +103,11 @@ def test_explicit_residual_component_query_filters_to_threshold_months():
     out = summarizer.summarize_data(ctx)
 
     assert out.summary_source == "deterministic_residual_weighted_price_direct"
-    assert "Renewable PPA + Import + Thermal Generation PPA + CfD Scheme" in out.summary
+    # "Thermal PPA" (thermal_ppa label), not "Thermal Generation PPA": the
+    # latter was an over-scrub artifact of the removed bare "thermal" →
+    # "Thermal Generation" VALUE_LABELS entry (2026-07-08). It now matches
+    # the answer's own header, which always rendered "Thermal PPA".
+    assert "Renewable PPA + Import + Thermal PPA + CfD Scheme" in out.summary
     assert "June 2020" in out.summary
     assert "July 2021" in out.summary
     assert "August 2021" not in out.summary

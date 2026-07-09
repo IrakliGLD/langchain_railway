@@ -144,22 +144,33 @@ TECH_TYPE_GROUPS = {
     },
 }
 
-# --- Value label mapping ---
+# --- Value label mapping (scrub_schema_mentions ONLY) ---
+# INVARIANT: every key here is replaced by a case-insensitive ``\b{key}\b``
+# substitution on LLM narrative output.  Therefore a key MUST be a
+# schema/identifier-shaped token (snake_case column value, acronym, hyphenated
+# code) that a user should never see raw — NEVER an ordinary English word.
+#
+# Bare common-English words are intentionally EXCLUDED (see the balancing
+# precedent + tests/test_context.py). Two failure modes they cause:
+#   1. Redundant doubling when the label appends a category noun the narrative
+#      already wrote: VALUE_LABELS["hydro"]="Hydro Generation" turned the
+#      LLM's "hydro generation" into "Hydro Generation generation"
+#      (2026-07-08 production report), and "transit"→"Transit Flows" would
+#      double "transit flows".
+#   2. Mid-sentence mangling: "balancing"→"Balancing Electricity" produced
+#      "the Balancing Electricity price".
+# Excluded bare words (kept in TECH_TYPE_GROUPS for classification, which uses
+# the KEYS only — see agent/tools/generation_tools.py): hydro, thermal, wind,
+# solar, import, export, transit, losses, direct customers, balancing.
+# These read perfectly well as-is, so exclusion is loss-free for scrubbing.
 VALUE_LABELS = {
-    **TECH_TYPE_GROUPS["demand"],
-    **TECH_TYPE_GROUPS["supply"],
-    "solar": "Solar Generation",
-    "transit": "Transit Flows",
+    # Proper noun / hyphenated code (not ordinary prose) — safe to relabel.
+    "abkhazeti": TECH_TYPE_GROUPS["demand"]["abkhazeti"],
+    "supply-distribution": TECH_TYPE_GROUPS["demand"]["supply-distribution"],
+    # Acronyms.
     "HPP": "Hydropower Plant",
     "TPP": "Thermal Power Plant",
-    # NOTE: "balancing" is intentionally omitted here.  scrub_schema_mentions
-    # does a case-insensitive \b{word}\b replace on LLM output; replacing the
-    # English participle "balancing" with the verbose label "Balancing
-    # Electricity" mangles narrative sentences (e.g. "the balancing price"
-    # → "the Balancing Electricity price", "for balancing purposes" → "for
-    # Balancing Electricity purposes").  The schema does not have a bare
-    # "balancing" column — SQL-side references use p_bal_*, bal_*, share_* —
-    # so removing this entry has no effect on schema scrubbing.
+    # snake_case / code-shaped composition tokens the LLM must not leak raw.
     "bilateral_exchange": "Bilateral Contracts & Exchange",
     "renewable_ppa": "Renewable PPA",
     "thermal_ppa": "Thermal PPA",

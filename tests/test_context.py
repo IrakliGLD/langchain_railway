@@ -169,6 +169,40 @@ class TestScrubSchemaMentions:
         # The label-replaced version must appear.
         assert "Share of Renewable PPA" in out or "Renewable PPA" in out
 
+    def test_generation_tech_words_not_doubled(self):
+        """Bare generation-tech words must survive scrubbing intact — no
+        'Hydro Generation generation' doubling (2026-07-08 production report)."""
+        from context import scrub_schema_mentions
+
+        before = (
+            "Increased hydro generation lowered prices, while thermal "
+            "generation and wind generation rose. Transit flows and "
+            "losses were stable; import and export shifted."
+        )
+        after = scrub_schema_mentions(before)
+        assert "Hydro Generation generation" not in after
+        assert "Thermal Generation generation" not in after
+        assert "Wind Generation generation" not in after
+        assert "Transit Flows flows" not in after
+        # The natural-language words themselves remain.
+        assert "hydro generation" in after
+        assert "thermal generation" in after
+        assert "wind generation" in after
+
+    def test_value_labels_excludes_bare_common_words(self):
+        """Guard: ordinary English words must never re-enter the scrubber map."""
+        from context import VALUE_LABELS
+
+        banned = {
+            "hydro", "thermal", "wind", "solar", "import", "export",
+            "transit", "losses", "direct customers", "balancing",
+        }
+        leaked = banned & set(VALUE_LABELS)
+        assert not leaked, (
+            f"VALUE_LABELS re-introduces over-eager bare-word scrubbing for "
+            f"{sorted(leaked)}; see the INVARIANT comment at VALUE_LABELS."
+        )
+
 
 class TestStripInlineCitationMarkers:
     """Inline citation tags leaked by the LLM must be removed from the answer."""
