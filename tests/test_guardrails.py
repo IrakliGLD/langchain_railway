@@ -2646,6 +2646,23 @@ def test_response_mode_fallback_heuristic_data(monkeypatch):
     assert out.is_conceptual is False
 
 
+def test_response_mode_target_model_no_analyzer_is_knowledge_primary():
+    """Target-model reform questions stay knowledge-primary if analyzer fails."""
+    from types import SimpleNamespace
+
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = SimpleNamespace(
+        has_authoritative_question_analysis=False,
+        query="Who are the winners and losers once the target model is implemented?",
+        effective_query="",
+        is_conceptual=False,
+    )
+
+    assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
+
+
 def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
     """Shadow analyzer must never influence routing — response_mode must use heuristic fallback."""
     from agent import pipeline

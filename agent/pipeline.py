@@ -179,6 +179,25 @@ _REGULATORY_CONCEPT_TOKENS = (
     "rule",
 )
 
+_TARGET_MODEL_KNOWLEDGE_TOKENS = (
+    "target model",
+    "target market",
+    "market reform",
+    "market model",
+    "self-dispatch",
+    "self dispatch",
+    "hourly imbalance",
+    "brp",
+    "balance responsible",
+)
+
+
+def _is_target_model_knowledge_query(query_text: str) -> bool:
+    query_lower = str(query_text or "").lower()
+    return bool(query_lower) and any(
+        token in query_lower for token in _TARGET_MODEL_KNOWLEDGE_TOKENS
+    )
+
 
 def _should_attempt_authoritative_router_fallback(ctx: QueryContext) -> bool:
     """Allow a narrow raw-router fallback after Stage 0.2 for technical concepts.
@@ -254,6 +273,11 @@ def _derive_response_mode(ctx: QueryContext) -> str:
         if qa_path == "knowledge":
             return ResponseMode.KNOWLEDGE_PRIMARY
         return ResponseMode.DATA_PRIMARY
+    query_text = " ".join(
+        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+    )
+    if _is_target_model_knowledge_query(query_text):
+        return ResponseMode.KNOWLEDGE_PRIMARY
     # No analyzer — use the heuristic already computed in prepare_context()
     return (
         ResponseMode.KNOWLEDGE_PRIMARY if ctx.is_conceptual

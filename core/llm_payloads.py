@@ -341,11 +341,48 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
             return "get_prices"
         return None
 
+    language = payload.get("language")
+    if isinstance(language, dict):
+        detected = language.pop("detected", None)
+        language.pop("confidence", None)
+        if detected is not None:
+            detected_text = str(detected or "").strip().lower()
+            if detected_text in {"en", "ka", "ru", "zh", "other"}:
+                language.setdefault("input_language", detected_text)
+                language.setdefault("answer_language", detected_text)
+
     classification = payload.get("classification")
     if isinstance(classification, dict):
         raw_ambiguities = payload.pop("ambiguities", None)
         if raw_ambiguities is not None and not classification.get("ambiguities"):
             classification["ambiguities"] = raw_ambiguities
+        raw_classification_topics = classification.pop("topic_candidates", None)
+        if raw_classification_topics is not None:
+            knowledge = payload.setdefault("knowledge", {})
+            if isinstance(knowledge, dict) and not knowledge.get("candidate_topics"):
+                sanitized_topics = _sanitize_topic_candidates(raw_classification_topics)
+                if sanitized_topics:
+                    knowledge["candidate_topics"] = sanitized_topics
+        # Candidate entity/metric lists are useful analyzer scratch space, but
+        # they are not part of the runtime contract. Drop them so one drifted
+        # advisory field does not discard the whole routing contract.
+        classification.pop("entity_candidates", None)
+        classification.pop("metric_candidates", None)
+
+    routing = payload.get("routing")
+    if isinstance(routing, dict):
+        if "requires_sql" in routing and "needs_sql" not in routing:
+            routing["needs_sql"] = bool(routing.get("requires_sql"))
+        if "requires_knowledge" in routing and "needs_knowledge" not in routing:
+            routing["needs_knowledge"] = bool(routing.get("requires_knowledge"))
+        if "requires_tools" in routing and "prefer_tool" not in routing:
+            routing["prefer_tool"] = bool(routing.get("requires_tools"))
+        fallback_path = routing.pop("fallback_path", None)
+        if fallback_path in {"knowledge", "tool", "sql", "clarify", "reject"}:
+            routing.setdefault("preferred_path", fallback_path)
+        routing.pop("requires_sql", None)
+        routing.pop("requires_knowledge", None)
+        routing.pop("requires_tools", None)
 
     knowledge = payload.get("knowledge")
     if isinstance(knowledge, dict):
@@ -361,6 +398,11 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
         direct_topics = knowledge.get("candidate_topics")
         if isinstance(direct_topics, list):
             knowledge["candidate_topics"] = _sanitize_topic_candidates(direct_topics)
+        # Observed drift from target-model comparison traces. These fields can
+        # help the model reason, but runtime routing only trusts candidate_topics.
+        knowledge.pop("retrieval_hints", None)
+        knowledge.pop("entity_types", None)
+        knowledge.pop("prefer_narrative", None)
 
     tooling = payload.get("tooling")
     if isinstance(tooling, dict):
@@ -436,6 +478,10 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
                     params_hint.pop("end_date", None)
                 else:
                     params_hint["end_date"] = coerced
+
+    analysis_requirements = payload.get("analysis_requirements")
+    if isinstance(analysis_requirements, dict):
+        analysis_requirements.pop("decomposition_requested", None)
 
     vis = payload.get("visualization")
     if not isinstance(vis, dict):
