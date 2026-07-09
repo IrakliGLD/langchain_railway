@@ -7,7 +7,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-from context import DEMAND_TECH_TYPES
+from context import DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES
 
 _DOMESTIC_GENERATION_TYPES = ("hydro", "thermal", "wind", "solar")
 _LOCAL_GENERATION_TYPES = ("hydro", "wind", "solar")
@@ -116,7 +116,8 @@ def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
         quantity.columns = [f"quantity_{col}" for col in quantity.columns]
         blocks.append(quantity)
 
-    if "share_tech" in working.columns:
+    has_raw_share_tech = "share_tech" in working.columns
+    if has_raw_share_tech:
         share = (
             working.pivot_table(
                 index=period_col,
@@ -135,13 +136,41 @@ def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
     result = pd.concat(blocks, axis=1).sort_index()
 
     quantity_cols = [col for col in result.columns if col.startswith("quantity_")]
+    computed_share_cols: set[str] = set()
     if quantity_cols:
-        total_observed = result[quantity_cols].sum(axis=1).replace(0, pd.NA)
-        for col in quantity_cols:
-            tech = col[len("quantity_"):]
-            share_col = f"share_{tech}"
-            if share_col not in result.columns:
-                result[share_col] = result[col] / total_observed
+        supply_quantity_cols = [f"quantity_{tech}" for tech in SUPPLY_TECH_TYPES if f"quantity_{tech}" in result.columns]
+        demand_quantity_cols = [f"quantity_{tech}" for tech in DEMAND_TECH_TYPES if f"quantity_{tech}" in result.columns]
+        has_mixed_market_sides = bool(supply_quantity_cols and demand_quantity_cols)
+        overwrite_raw_mixed_shares = has_raw_share_tech and has_mixed_market_sides
+
+        def _assign_side_shares(tech_types: Iterable[str]) -> None:
+            cols = [f"quantity_{tech}" for tech in tech_types if f"quantity_{tech}" in result.columns]
+            if not cols:
+                return
+            denominator = result[cols].sum(axis=1, min_count=1).replace(0, pd.NA)
+            for col in cols:
+                tech = col[len("quantity_"):]
+                share_col = f"share_{tech}"
+                if share_col not in result.columns or overwrite_raw_mixed_shares:
+                    result[share_col] = result[col] / denominator
+                    computed_share_cols.add(share_col)
+
+        _assign_side_shares(SUPPLY_TECH_TYPES)
+        _assign_side_shares(DEMAND_TECH_TYPES)
+
+        known_side_techs = set(SUPPLY_TECH_TYPES) | set(DEMAND_TECH_TYPES)
+        remaining_quantity_cols = [
+            col for col in quantity_cols
+            if col[len("quantity_"):] not in known_side_techs
+        ]
+        if remaining_quantity_cols:
+            total_remaining = result[remaining_quantity_cols].sum(axis=1, min_count=1).replace(0, pd.NA)
+            for col in remaining_quantity_cols:
+                tech = col[len("quantity_"):]
+                share_col = f"share_{tech}"
+                if share_col not in result.columns:
+                    result[share_col] = result[col] / total_remaining
+                    computed_share_cols.add(share_col)
 
     # Coverage guard: NA any generation-tech share for periods that observe
     # fewer than _MIN_GENERATION_TECHS_FOR_SHARE generation techs, so an
@@ -155,26 +184,26 @@ def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
         f"share_{tech}" for tech in _DOMESTIC_GENERATION_TYPES
         if f"share_{tech}" in result.columns
     ]
-    if gen_quantity_cols and gen_share_cols:
+    guarded_gen_share_cols = [col for col in gen_share_cols if col in computed_share_cols]
+    if gen_quantity_cols and guarded_gen_share_cols:
         observed_gen_techs = result[gen_quantity_cols].notna().sum(axis=1)
         incomplete = observed_gen_techs < _MIN_GENERATION_TECHS_FOR_SHARE
         if incomplete.any():
-            result.loc[incomplete, gen_share_cols] = pd.NA
+            result.loc[incomplete, guarded_gen_share_cols] = pd.NA
 
     def _sum_columns(tech_types: Iterable[str], output_col: str) -> None:
         cols = [f"quantity_{tech}" for tech in tech_types if f"quantity_{tech}" in result.columns]
         if cols:
-            result[output_col] = result[cols].sum(axis=1)
+            result[output_col] = result[cols].sum(axis=1, min_count=1)
 
     _sum_columns(DEMAND_TECH_TYPES, "total_demand")
     _sum_columns(_DOMESTIC_GENERATION_TYPES, "total_domestic_generation")
     _sum_columns(_LOCAL_GENERATION_TYPES, "local_generation")
     _sum_columns(_IMPORT_DEPENDENT_TYPES, "import_dependent_supply")
+    _sum_columns(SUPPLY_TECH_TYPES, "total_supply")
 
-    if "total_domestic_generation" in result.columns and "quantity_import" in result.columns:
-        result["total_supply"] = result["total_domestic_generation"] + result["quantity_import"]
-    if "import_dependent_supply" in result.columns and "total_demand" in result.columns:
-        denom = result["total_demand"].replace(0, pd.NA)
+    if "import_dependent_supply" in result.columns and "total_supply" in result.columns:
+        denom = result["total_supply"].replace(0, pd.NA)
         result["import_dependency_ratio"] = result["import_dependent_supply"] / denom
 
     result.index.name = "period"
