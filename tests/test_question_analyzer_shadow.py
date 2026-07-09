@@ -1383,3 +1383,45 @@ def test_q6_payload_end_to_end_validates():
     # Routing and classification fields survived unchanged.
     assert model.routing.preferred_path.value == "knowledge"
     assert model.classification.query_type.value == "factual_lookup"
+
+
+def test_target_model_drift_payload_end_to_end_validates():
+    """Observed target-model comparison drift should keep its useful signal."""
+    payload = _valid_payload()
+    payload["raw_query"] = "Who wins and loses once the target model is implemented?"
+    payload["canonical_query_en"] = payload["raw_query"]
+    payload["language"] = {"detected": "en", "confidence": 0.95}
+    payload["classification"].update(
+        {
+            "query_type": "comparison",
+            "topic_candidates": [{"name": "market_structure", "score": 0.95}],
+            "entity_candidates": ["target model", "market design"],
+            "metric_candidates": [],
+        }
+    )
+    payload["routing"] = {
+        "fallback_path": "knowledge",
+        "requires_sql": False,
+        "requires_knowledge": True,
+        "requires_tools": False,
+    }
+    payload["knowledge"] = {
+        "candidate_topics": [],
+        "retrieval_hints": ["target model winners and losers"],
+        "entity_types": ["market_design"],
+        "prefer_narrative": True,
+    }
+    payload["analysis_requirements"]["decomposition_requested"] = False
+
+    sanitized = llm_core._sanitize_question_analysis_payload(payload)
+    model = QuestionAnalysis.model_validate(sanitized)
+
+    assert model.language.input_language.value == "en"
+    assert model.language.answer_language.value == "en"
+    assert model.routing.preferred_path.value == "knowledge"
+    assert model.routing.needs_sql is False
+    assert model.routing.needs_knowledge is True
+    assert model.routing.prefer_tool is False
+    assert [topic.name.value for topic in model.knowledge.candidate_topics] == [
+        "market_structure"
+    ]

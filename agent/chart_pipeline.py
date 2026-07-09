@@ -16,7 +16,7 @@ import pandas as pd
 from agent.analyzer import METRIC_VALUE_ALIASES
 from agent.chart_frame_builder import build_chart_frame, from_wide
 from config import ENAI_CHART_LONGFORM
-from context import COLUMN_LABELS
+from context import COLUMN_LABELS, DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES, TRANSIT_TECH_TYPES
 from models import QueryContext
 from utils.trace_logging import trace_detail
 from visualization.chart_selector import (
@@ -60,6 +60,148 @@ _NORMALIZED_CHART_TYPES = {
     "stackedarea": "stackedbar",
     "stacked_area": "stackedbar",
 }
+
+_SUPPLY_CHART_METRIC_COLS = frozenset(
+    [f"quantity_{tech}".lower() for tech in SUPPLY_TECH_TYPES]
+    + [f"share_{tech}".lower() for tech in SUPPLY_TECH_TYPES]
+    + [
+        "total_supply",
+        "total_domestic_generation",
+        "local_generation",
+        "import_dependent_supply",
+        "import_dependency_ratio",
+    ]
+)
+_DEMAND_CHART_METRIC_COLS = frozenset(
+    [f"quantity_{tech}".lower() for tech in DEMAND_TECH_TYPES]
+    + [f"share_{tech}".lower() for tech in DEMAND_TECH_TYPES]
+    + ["total_demand"]
+)
+_TRANSIT_CHART_METRIC_COLS = frozenset(
+    [f"quantity_{tech}".lower() for tech in TRANSIT_TECH_TYPES]
+    + [f"share_{tech}".lower() for tech in TRANSIT_TECH_TYPES]
+)
+_SUPPLY_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in SUPPLY_TECH_TYPES)
+_DEMAND_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in DEMAND_TECH_TYPES)
+_TRANSIT_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in TRANSIT_TECH_TYPES)
+_SUPPLY_QUERY_TOKENS = (
+    "generation mix",
+    "generation",
+    "supply mix",
+    "power supply",
+    "electricity supply",
+    "import dependency",
+    "import dependence",
+    "energy security",
+    "self-sufficiency",
+)
+_DEMAND_QUERY_TOKENS = (
+    "demand",
+    "consumption",
+    "consumer",
+    "customer",
+    "customers",
+    "losses",
+    "export",
+)
+_TRANSIT_QUERY_TOKENS = ("transit",)
+_MIXED_ENERGY_QUERY_TOKENS = (
+    "supply and demand",
+    "demand and supply",
+    "generation and demand",
+    "demand and generation",
+    "energy balance",
+    "system balance",
+    "supply-demand",
+)
+
+
+def _resolve_energy_chart_side(query: str) -> Optional[str]:
+    query_lower = str(query or "").lower()
+    if not query_lower:
+        return None
+    if any(token in query_lower for token in _MIXED_ENERGY_QUERY_TOKENS):
+        return "mixed"
+    has_supply = any(token in query_lower for token in _SUPPLY_QUERY_TOKENS)
+    has_demand = any(token in query_lower for token in _DEMAND_QUERY_TOKENS)
+    has_transit = any(token in query_lower for token in _TRANSIT_QUERY_TOKENS)
+    if sum(bool(flag) for flag in (has_supply, has_demand, has_transit)) > 1:
+        return "mixed"
+    if has_supply:
+        return "supply"
+    if has_demand:
+        return "demand"
+    if has_transit:
+        return "transit"
+    return None
+
+
+def _metric_energy_side(col: str) -> Optional[str]:
+    col_lower = str(col or "").lower()
+    if col_lower in _SUPPLY_CHART_METRIC_COLS:
+        return "supply"
+    if col_lower in _DEMAND_CHART_METRIC_COLS:
+        return "demand"
+    if col_lower in _TRANSIT_CHART_METRIC_COLS:
+        return "transit"
+    return None
+
+
+def _filter_energy_side_rows(df: pd.DataFrame, side: Optional[str]) -> pd.DataFrame:
+    if side not in {"supply", "demand", "transit"} or df.empty:
+        return df
+    type_col = next((col for col in df.columns if col.lower() == "type_tech"), None)
+    if not type_col:
+        return df
+    allowed = {
+        "supply": _SUPPLY_CHART_TECHS,
+        "demand": _DEMAND_CHART_TECHS,
+        "transit": _TRANSIT_CHART_TECHS,
+    }[side]
+    mask = df[type_col].astype(str).str.strip().str.lower().isin(allowed)
+    if not bool(mask.any()):
+        # Every row is off-side: the query wording disagrees with the data the
+        # tool actually returned. Prefer showing that data over blanking the
+        # chart — build_chart drops an empty frame entirely.
+        return df
+    dropped = int((~mask).sum())
+    if dropped:
+        log.info(
+            "Filtered %d %s rows outside %s-side chart intent",
+            dropped,
+            type_col,
+            side,
+        )
+    return df.loc[mask].copy()
+
+
+def _filter_energy_side_num_cols(
+    query: str,
+    num_cols: List[str],
+) -> List[str]:
+    side = _resolve_energy_chart_side(query)
+    if side not in {"supply", "demand", "transit"}:
+        return list(num_cols)
+    side_coded = [col for col in num_cols if _metric_energy_side(col) is not None]
+    if not side_coded:
+        return list(num_cols)
+    filtered = [
+        col
+        for col in num_cols
+        if _metric_energy_side(col) in {None, side}
+    ]
+    if not filtered:
+        # Every numeric column is off-side. Don't hand build_chart an empty
+        # metric list (which suppresses the chart); keep the originals instead.
+        return list(num_cols)
+    dropped = [col for col in num_cols if col not in filtered]
+    if dropped:
+        log.info(
+            "Filtered chart metrics outside %s-side intent: %s",
+            side,
+            dropped,
+        )
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +430,16 @@ def _prepare_chart_source(
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, str], List[str], List[str]]:
     df = ctx.df.copy()
     cols = list(ctx.cols or df.columns)
+    # Resolve supply/demand intent from the same query text the response-mode
+    # router uses (raw query + resolved canonical query). Follow-ups and
+    # non-English queries carry their English intent tokens in effective_query
+    # rather than the raw query, so reading ctx.query alone would silently skip
+    # side filtering for exactly those cases.
+    chart_query = " ".join(
+        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+    )
+    energy_side = _resolve_energy_chart_side(chart_query)
+    df = _filter_energy_side_rows(df, energy_side)
 
     # "period" is the canonical time-column name emitted by
     # canonicalize_generation_mix_df and the rest of the pipeline already
@@ -332,7 +484,12 @@ def _prepare_chart_source(
     for col in cols:
         if col == time_key or col not in df.columns:
             continue
-        if any(hint in col.lower() for hint in categorical_hints):
+        col_lower = col.lower()
+        value_hinted = any(
+            hint in col_lower
+            for hint in ["quantity", "share", "price", "tariff", "value", "amount", "volume", "mw", "mwh"]
+        )
+        if any(hint in col_lower for hint in categorical_hints) and not value_hinted:
             df[col] = df[col].astype(str).replace("nan", None)
             continue
         try:
@@ -357,6 +514,7 @@ def _prepare_chart_source(
         and pd.api.types.is_numeric_dtype(df[col])
         and not re.search(r"\b(month|year)\b", col.lower())
     ]
+    num_cols = _filter_energy_side_num_cols(chart_query, num_cols)
     return df, time_key, label_map_all, categorical_cols, num_cols
 
 

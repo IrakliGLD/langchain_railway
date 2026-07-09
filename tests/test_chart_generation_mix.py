@@ -14,7 +14,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import pandas as pd
 
-from agent.chart_pipeline import _prepare_chart_source
+from agent.chart_pipeline import _prepare_chart_source, build_chart
 from agent.derived_chart_builder import _build_decomposition_spec, _resolve_time_key
 from models import QueryContext
 
@@ -98,3 +98,178 @@ def test_generation_aggregate_shares_are_kept():
     spec = _build_decomposition_spec(df, "period", num_cols, {c: c for c in df.columns})
     categories = {r["category"] for r in spec[0]["data"]}
     assert categories == {"share_renewable", "share_thermal", "share_hydro"}
+
+
+# ---------------------------------------------------------------------------
+# Bug C - generic chart path must also respect supply/demand side intent
+# ---------------------------------------------------------------------------
+
+def _wide_supply_demand_frame():
+    return pd.DataFrame({
+        "period": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
+        "quantity_hydro": [300.0, 320.0, 340.0],
+        "quantity_thermal": [180.0, 170.0, 160.0],
+        "quantity_import": [90.0, 80.0, 70.0],
+        "quantity_abkhazeti": [55.0, 56.0, 57.0],
+        "quantity_direct customers": [120.0, 122.0, 124.0],
+        "quantity_export": [40.0, 42.0, 44.0],
+        "total_supply": [570.0, 570.0, 570.0],
+        "total_demand": [215.0, 220.0, 225.0],
+    })
+
+
+def test_generation_mix_prepare_filters_demand_quantity_columns():
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="what can you say about Georgian generation mix?")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert "quantity_hydro" in num_cols
+    assert "quantity_thermal" in num_cols
+    assert "quantity_import" in num_cols
+    assert "total_supply" in num_cols
+    assert "quantity_abkhazeti" not in num_cols
+    assert "quantity_direct customers" not in num_cols
+    assert "quantity_export" not in num_cols
+    assert "total_demand" not in num_cols
+
+
+def test_demand_prepare_filters_supply_quantity_columns():
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="what can you say about electricity demand?")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert "quantity_abkhazeti" in num_cols
+    assert "quantity_direct customers" in num_cols
+    assert "quantity_export" in num_cols
+    assert "total_demand" in num_cols
+    assert "quantity_hydro" not in num_cols
+    assert "quantity_thermal" not in num_cols
+    assert "quantity_import" not in num_cols
+    assert "total_supply" not in num_cols
+
+
+def test_mixed_supply_and_demand_prepare_keeps_both_sides():
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="compare electricity supply and demand")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert "quantity_hydro" in num_cols
+    assert "quantity_abkhazeti" in num_cols
+    assert "total_supply" in num_cols
+    assert "total_demand" in num_cols
+
+
+def test_generation_mix_prepare_filters_long_type_tech_rows():
+    df = pd.DataFrame({
+        "period": pd.to_datetime([
+            "2024-01-01", "2024-01-01", "2024-01-01", "2024-01-01",
+        ]),
+        "type_tech": ["hydro", "thermal", "export", "direct customers"],
+        "quantity_tech": [300.0, 180.0, 40.0, 120.0],
+    })
+    ctx = QueryContext(query="Georgian generation mix")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert set(prepared["type_tech"]) == {"hydro", "thermal"}
+    assert num_cols == ["quantity_tech"]
+
+
+def test_generation_mix_rendered_chart_excludes_demand_series():
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="chart Georgian generation mix")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+    ctx.rows = list(df.itertuples(index=False, name=None))
+
+    out = build_chart(ctx)
+
+    assert out.chart_meta is not None
+    source_metrics = set(out.chart_meta["sourceMetrics"])
+    assert source_metrics <= {
+        "quantity_hydro",
+        "quantity_thermal",
+        "quantity_import",
+        "total_supply",
+    }
+    assert not {
+        "quantity_abkhazeti",
+        "quantity_direct customers",
+        "quantity_export",
+        "total_demand",
+    } & source_metrics
+
+
+# ---------------------------------------------------------------------------
+# Side resolution must read the resolved/effective query, not only ctx.query
+# ---------------------------------------------------------------------------
+
+def test_chart_side_uses_effective_query_when_semantically_locked():
+    """Intent tokens carried only by the resolved (English/canonical) query —
+    e.g. a follow-up or a translated query — must still drive side filtering."""
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="show it")  # no side tokens in the raw query
+    ctx.resolved_query = "Georgian generation mix"
+    ctx.semantic_locked = True
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert "quantity_hydro" in num_cols
+    assert "total_supply" in num_cols
+    assert "quantity_abkhazeti" not in num_cols
+    assert "quantity_direct customers" not in num_cols
+    assert "total_demand" not in num_cols
+
+
+# ---------------------------------------------------------------------------
+# Over-eager side resolution must not blank the chart
+# ---------------------------------------------------------------------------
+
+def test_supply_query_keeps_all_rows_when_every_row_is_demand():
+    """If a supply-worded query returns an all-demand frame, the row filter
+    must fall back to the full frame instead of emptying it (which would
+    suppress the chart in build_chart)."""
+    df = pd.DataFrame({
+        "period": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+        "type_tech": ["export", "direct customers"],
+        "quantity_tech": [40.0, 120.0],
+    })
+    ctx = QueryContext(query="Georgian generation mix")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert set(prepared["type_tech"]) == {"export", "direct customers"}
+    assert num_cols == ["quantity_tech"]
+
+
+def test_supply_query_keeps_metrics_when_every_column_is_demand():
+    """Same fallback for the wide path: a supply query over an all-demand
+    metric set must keep the metrics rather than return an empty list."""
+    df = pd.DataFrame({
+        "period": pd.to_datetime(["2024-01-01", "2024-02-01"]),
+        "quantity_abkhazeti": [55.0, 56.0],
+        "quantity_export": [40.0, 42.0],
+        "total_demand": [95.0, 98.0],
+    })
+    ctx = QueryContext(query="Georgian generation mix")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert set(num_cols) == {"quantity_abkhazeti", "quantity_export", "total_demand"}

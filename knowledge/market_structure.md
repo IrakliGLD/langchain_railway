@@ -176,6 +176,28 @@ This role should not be read as ordinary competitive trading by ESCO. It is a pu
 
 ---
 
+### 3.7 Winners / Losers Framing Under the Target Model
+
+Do not describe target-model winners and losers as absolute categories unless a cited source explicitly supports the claim. Frame outcomes conditionally by mechanism:
+
+- **Hourly imbalance exposure:** participants that can forecast, schedule, and balance accurately are better positioned; participants with large forecast errors or weak balancing capability face higher imbalance-cost risk.
+- **Flexibility:** flexible hydro, storage, demand response, aggregators, and dispatchable resources may benefit from time-dependent price signals and ancillary-service needs, if market rules let them monetize that flexibility.
+- **Forecasting capability:** intermittent generation and BRPs with poor forecasts are more exposed to imbalance charges; improved forecasting and portfolio aggregation can reduce that exposure.
+- **Hedging and contract design:** PPAs, CfDs, bilateral contracts, and supplier hedges can transfer or soften price risk. The effect depends on who carries imbalance responsibility, reference price design, strike/indexation terms, and settlement rules.
+- **Pass-through regulation:** consumers are not automatically winners or losers. Wholesale efficiency can improve, but retail effects depend on supplier hedging, regulated tariff design, social policy, and how costs are passed through.
+- **Current-model support roles:** ESCO/WPSO and support-scheme flows do not simply disappear; their role shifts toward public-service/support settlement rather than ordinary competitive trading.
+
+Preferred wording:
+- "better positioned" / "more exposed" / "could benefit if..." / "risk shifts toward..."
+
+Avoid unsupported wording:
+- "consumers win"
+- "thermal loses"
+- "renewables win"
+- "ESCO loses"
+
+---
+
 ## 4. Comparison with EU Practice
 
 ### Current Georgian Model
