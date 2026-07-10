@@ -268,6 +268,114 @@ def test_forecast_holds_fx_fixed_converting_usd_to_gel():
     )
 
 
+def test_forecast_series_includes_per_year_yearly_lines():
+    """2026-07-10 (trace 1d2d2ca6): the LLM narrates ANNUAL values for a
+    10-year forecast; with only summer/winter lines available it invents
+    (summer+winter)/2 averages that fail grounding. The series block must
+    carry an authoritative per-year 'yearly' projection line per currency."""
+    import re
+
+    from agent.analyzer import _generate_cagr_forecast
+    from agent.summarizer import _extract_number_tokens
+
+    rows = []
+    for year in range(2019, 2026):
+        for month in range(1, 13):
+            rows.append({
+                "date": pd.Timestamp(year=year, month=month, day=1),
+                "p_bal_gel": 100.0 + (year - 2019) * 1.0 + (month % 2) * 5.0,
+                "p_bal_usd": 35.0 + (year - 2019) * 1.5 + (month % 2) * 2.0,
+            })
+    df = pd.DataFrame(rows)
+
+    df_out, note = _generate_cagr_forecast(
+        df, "forecast balancing electricity price for next 10 years"
+    )
+
+    block = note[note.find("--- FORECAST SERIES (per year) ---"):]
+    gel_yearly = re.findall(r"^(\d{4}) GEL yearly = ([\d.]+)\s*$", block, re.MULTILINE)
+    usd_yearly = re.findall(r"^(\d{4}) USD yearly = ([\d.]+)\s*$", block, re.MULTILINE)
+    assert len(gel_yearly) == 10, f"expected 10 GEL yearly lines, got {gel_yearly!r}"
+    assert len(usd_yearly) == 10, f"expected 10 USD yearly lines, got {usd_yearly!r}"
+
+    # The yearly values must be tokenisable so quoting them passes grounding.
+    tokens = _extract_number_tokens(note)
+    for _, val in gel_yearly + usd_yearly:
+        norm = val.rstrip("0").rstrip(".")
+        assert val in tokens or norm in tokens, f"yearly value {val!r} not tokenisable"
+
+
+def _monthly_price_rows(year_start: int, year_end: int):
+    """Monthly GEL series with a deliberate regime break: flat before 2019,
+    trending after — so a fit window that includes the old regime produces a
+    different CAGR than the canonical window."""
+    rows = []
+    for year in range(year_start, year_end + 1):
+        for month in range(1, 13):
+            if year < 2019:
+                val = 300.0  # old flat regime — poisons a full-history fit
+            else:
+                val = 100.0 + (year - 2019) * 4.0 + (month % 2) * 5.0
+            rows.append({
+                "date": pd.Timestamp(year=year, month=month, day=1),
+                "p_bal_gel": val,
+            })
+    return rows
+
+
+def test_forecast_fit_window_deterministic_across_fetch_spans():
+    """2026-07-10 model-variance report: when the analyzer LLM fails, the
+    router fallback fetches the FULL history (132 rows vs 79) and the CAGR
+    baseline shifts (2.29% vs 1.09%) — same question, different forecast,
+    depending on which LLM/analyzer path ran. The fit window must be
+    deterministic: anchored at the last observation with the canonical
+    history width, regardless of how much history was fetched."""
+    from agent.analyzer import _generate_cagr_forecast
+
+    query = "forecast balancing electricity price for next 10 years"
+    df_long = pd.DataFrame(_monthly_price_rows(2015, 2025))
+    # The canonical window for a 10y horizon is 8 years anchored at the last
+    # observation's month: 2018-12-01..2025-12-01 — the same window the
+    # planner fetch expansion produces. The short frame simulates that fetch.
+    df_short = df_long[df_long["date"] >= pd.Timestamp("2018-12-01")].reset_index(drop=True)
+
+    out_long, note_long = _generate_cagr_forecast(df_long.copy(), query)
+    out_short, note_short = _generate_cagr_forecast(df_short.copy(), query)
+
+    # The long fetch is trimmed to the canonical window and says so.
+    assert "Fit window:" in note_long
+
+    # Identical CAGR statements...
+    def _cagr_line(note: str) -> str:
+        import re as _re
+        m = _re.search(r"Yearly CAGR=[^.]*\.", note)
+        assert m, f"no CAGR line in note: {note!r}"
+        return m.group(0)
+
+    assert _cagr_line(note_long) == _cagr_line(note_short)
+
+    # ...and identical projected forecast rows.
+    fc_long = out_long[out_long["is_forecast"] == True].reset_index(drop=True)  # noqa: E712
+    fc_short = out_short[out_short["is_forecast"] == True].reset_index(drop=True)  # noqa: E712
+    assert len(fc_long) == len(fc_short) > 0
+    assert (fc_long["p_bal_gel"] - fc_short["p_bal_gel"]).abs().max() < 1e-9
+
+
+def test_explicit_history_year_in_query_keeps_full_window():
+    """A user who pins the history scope ('based on data since 2015') keeps
+    the full fetched window — the canonical trim must not override an
+    explicit historical request."""
+    from agent.analyzer import _generate_cagr_forecast
+
+    df_long = pd.DataFrame(_monthly_price_rows(2015, 2025))
+    _, note = _generate_cagr_forecast(
+        df_long.copy(),
+        "forecast balancing electricity price for next 10 years based on data since 2015",
+    )
+
+    assert "Fit window:" not in note
+
+
 def test_cagr_projection_block_omitted_when_no_target_years():
     """Defensive: if ``_resolve_target_years`` produced no years (edge case),
     the block must not be appended."""

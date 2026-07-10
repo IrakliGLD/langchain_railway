@@ -21,6 +21,7 @@ from contracts.question_analysis import (
     AnswerKind,
     ChartFamily,
     ChartIntent,
+    DerivedMetricName,
     KnowledgeTopicName,
     MeasureTransform,
     PeriodInfo,
@@ -482,6 +483,30 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
     analysis_requirements = payload.get("analysis_requirements")
     if isinstance(analysis_requirements, dict):
         analysis_requirements.pop("decomposition_requested", None)
+        # Drop derived-metric entries with an unknown metric_name instead of
+        # letting one bad entry fail the whole QuestionAnalysis validation
+        # (2026-07-10 trace bf93fc92: metric_name='cagr' → schema error →
+        # heuristic fallback → divergent routing and forecast window). Same
+        # sanitize-don't-crash policy as chart_intent/visual_goal above.
+        raw_metrics = analysis_requirements.get("derived_metrics")
+        if isinstance(raw_metrics, list):
+            kept_metrics = []
+            for entry in raw_metrics:
+                if not isinstance(entry, dict):
+                    continue
+                metric_name = entry.get("metric_name")
+                if isinstance(metric_name, str):
+                    try:
+                        DerivedMetricName(metric_name)
+                    except ValueError:
+                        log.warning(
+                            "Sanitized unknown derived_metrics metric_name=%r (dropped entry)",
+                            metric_name,
+                        )
+                        continue
+                kept_metrics.append(entry)
+            if len(kept_metrics) != len(raw_metrics):
+                analysis_requirements["derived_metrics"] = kept_metrics
 
     vis = payload.get("visualization")
     if not isinstance(vis, dict):

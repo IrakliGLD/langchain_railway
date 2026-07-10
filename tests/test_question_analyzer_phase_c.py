@@ -859,6 +859,27 @@ def test_llm_analyze_question_preserves_valid_chart_hints(monkeypatch):
     assert [role.value for role in result.visualization.target_series] == ["observed", "derived"]
 
 
+def test_sanitize_drops_invalid_derived_metric_entries():
+    """2026-07-10 (trace bf93fc92): the analyzer LLM emitted metric_name='cagr'
+    (not a DerivedMetricName) and the WHOLE QuestionAnalysis failed schema
+    validation → heuristic fallback → divergent routing and a different
+    forecast window. One bad derived-metric entry must be dropped, not crash
+    the analysis; valid entries survive."""
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {"metric": "balancing", "metric_name": "trend_slope", "target_metric": "balancing"},
+        {"metric": "balancing", "metric_name": "cagr", "target_metric": "balancing"},
+    ]
+
+    sanitized = llm_core._sanitize_chart_hints(payload)
+
+    names = [
+        entry["metric_name"]
+        for entry in sanitized["analysis_requirements"]["derived_metrics"]
+    ]
+    assert names == ["trend_slope"]
+
+
 def test_sanitize_chart_hints_clears_semantic_hints_when_chart_not_requested():
     payload = _analytical_payload().model_dump(mode="json")
     payload["visualization"]["chart_requested_by_user"] = False
