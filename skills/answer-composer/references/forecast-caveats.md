@@ -51,6 +51,15 @@ If stats_hint contains "TRENDLINE FORECASTS", YOU MUST cite the forecast values 
 
 ALWAYS separate summer and winter forecasts (different driver mixes).
 
+## Forecast series citation rule (MANDATORY)
+
+When stats_hint contains "--- FORECAST SERIES (per year) ---", every forecast number you present MUST be copied verbatim from those lines:
+
+- Seasonal values: use the "summer" / "winter" line for that year and currency.
+- Annual values: use the "yearly" line for that year and currency.
+- NEVER average the summer and winter values yourself — the yearly projection is a separate CAGR path, not (summer+winter)/2, and self-computed averages are not in the evidence so they fail the grounding check.
+- Do not interpolate, extrapolate, or re-round beyond one decimal place.
+
 Additional rules:
 - If a balancing-price forecast extends toward or beyond **July 2027**, explicitly warn that the planned target model introduces a likely structural break in price formation.
 - When giving a simple trend-based balancing-price forecast, do **not** separately forecast the exchange rate unless the user explicitly asks for an FX scenario.

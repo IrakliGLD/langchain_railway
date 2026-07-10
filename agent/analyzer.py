@@ -30,7 +30,11 @@ from analysis.system_quantities import (
 from contracts.question_analysis import AnswerKind, ChartIntent, SemanticRole
 from core.query_executor import ENGINE
 from models import QueryContext
-from utils.forecasting import extract_excluded_years, extract_forecast_horizon_years
+from utils.forecasting import (
+    extract_excluded_years,
+    extract_forecast_horizon_years,
+    forecast_history_window_years,
+)
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -1853,6 +1857,59 @@ def _robust_endpoint_value(series: "pd.Series", *, window: int = 3, which: str) 
     raise ValueError(f"Unknown endpoint selector: {which!r}")
 
 
+# Minimum monthly points a trimmed fit window must retain; below this the
+# trim is skipped so short fetches keep every observation for the seasonal
+# CAGR split.
+_MIN_FIT_WINDOW_POINTS = 24
+
+
+def _trim_forecast_fit_window(
+    df: pd.DataFrame,
+    time_col: str,
+    time_granularity: Optional[str],
+    user_query: str,
+) -> Tuple[pd.DataFrame, str]:
+    """Trim the CAGR fit window to the canonical history width.
+
+    Different routing paths fetch different history spans for the same
+    forecast question (the analyzer path expands to the canonical window;
+    the router fallback fetches everything), and the CAGR baseline shifted
+    with the fetch (2026-07-10 model-variance report: 2.29% vs 1.09% for
+    the same query). Anchoring the fit at the LAST OBSERVATION with the
+    shared ``forecast_history_window_years`` policy makes the fit — and
+    therefore the forecast — identical regardless of the fetch span.
+
+    Skipped when the user explicitly pins a historical scope (a year at or
+    before the anchor year appears in the query), for yearly-granularity
+    frames, and when trimming would leave fewer than
+    ``_MIN_FIT_WINDOW_POINTS`` monthly points.
+    """
+    if str(time_granularity or "") == "year":
+        return df, ""
+    if df is None or df.empty:
+        return df, ""
+    anchor = df[time_col].max()
+    if pd.isna(anchor):
+        return df, ""
+    query_text = str(user_query or "")
+    explicit_years = {int(y) for y in re.findall(r"\b((?:19|20)\d{2})\b", query_text)}
+    if any(year <= int(anchor.year) for year in explicit_years):
+        return df, ""
+    horizon = _extract_forecast_horizon(query_text)
+    excluded = extract_excluded_years(query_text)
+    window_years = forecast_history_window_years(horizon, len(excluded))
+    window_start = pd.Timestamp(year=int(anchor.year) - window_years + 1, month=int(anchor.month), day=1)
+    trimmed = df[df[time_col] >= window_start]
+    if len(trimmed) == len(df) or len(trimmed) < _MIN_FIT_WINDOW_POINTS:
+        return df, ""
+    note = (
+        f"Fit window: {window_start.date().isoformat()}..{anchor.date().isoformat()} "
+        f"({len(trimmed)} of {len(df)} observations; older history excluded for a "
+        f"stable {window_years}-year fit)."
+    )
+    return trimmed.copy(), note
+
+
 def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.DataFrame, str]:
     """Generate CAGR-based forecast for price or quantity data.
 
@@ -1884,6 +1941,12 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
 
     data_type = _detect_data_type(value_col)
     note_parts = []
+
+    # Deterministic fit window: identical forecasts regardless of how much
+    # history the routing path happened to fetch.
+    df, fit_window_note = _trim_forecast_fit_window(df, time_col, time_granularity, user_query)
+    if fit_window_note:
+        note_parts.append(fit_window_note)
 
     def _strip_scratch(df_out: pd.DataFrame) -> pd.DataFrame:
         """Drop internal ``__forecast_*`` scratch columns before returning.
@@ -2310,6 +2373,24 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
                     series_lines.append(
                         f"{int(year)} {_ccy_label(vc)}{season_suffix} = {val:.2f}"
                     )
+            # Per-year YEARLY projections alongside the seasonal lines. A
+            # 10-year forecast is narrated as annual values; with only
+            # summer/winter available the LLM invents (summer+winter)/2
+            # averages that fail grounding (2026-07-10 report, trace
+            # 1d2d2ca6). These lines are the authoritative yearly-CAGR path —
+            # the same numbers as "--- CAGR PROJECTIONS ---" extended to
+            # every intermediate year.
+            if time_granularity != "year":
+                for y in target_years:
+                    for vc, stats in per_currency.items():
+                        if np.isnan(stats["cagr_y"]):
+                            continue
+                        yearly_val = stats["last_val"] * (
+                            (1 + stats["cagr_y"]) ** (y - stats["last_year"])
+                        )
+                        series_lines.append(
+                            f"{int(y)} {_ccy_label(vc)} yearly = {yearly_val:.2f}"
+                        )
             if len(series_lines) > 1:  # more than just the header
                 note_parts.append("\n".join(series_lines))
         return _strip_scratch(df_f), " ".join(note_parts)

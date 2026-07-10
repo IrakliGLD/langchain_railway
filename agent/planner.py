@@ -46,7 +46,11 @@ from core.llm import (
     make_gemini,
 )
 from models import QueryContext
-from utils.forecasting import extract_excluded_years, extract_forecast_horizon_years
+from utils.forecasting import (
+    extract_excluded_years,
+    extract_forecast_horizon_years,
+    forecast_history_window_years,
+)
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
 from utils.trace_logging import trace_detail
@@ -137,9 +141,7 @@ def _expand_forecast_history_window(
     query_text = (qa.canonical_query_en or raw_query or "").lower()
     horizon_years = extract_forecast_horizon_years(query_text)
     excluded_years = extract_excluded_years(query_text)
-    desired_history_years = max(5, min(8, horizon_years + 2))
-    if excluded_years:
-        desired_history_years = min(10, max(8, desired_history_years + len(excluded_years)))
+    desired_history_years = forecast_history_window_years(horizon_years, len(excluded_years))
 
     today = date.today()
     yearly_mode = str(granularity).lower() == "yearly"

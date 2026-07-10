@@ -67,6 +67,64 @@ def test_real_zero_techs_preserve_genuine_100pct():
 
 
 # ---------------------------------------------------------------------------
+# 2026-07-10 round — range hyphens are separators, not minus signs
+# (prod trace 872ca85f: claims quoting "2020-2025" / "60-65%" minted
+# ungrounded '-2025' / '-65' tokens and failed the provenance gate).
+# ---------------------------------------------------------------------------
+
+def test_range_hyphen_tokenizes_as_two_positive_numbers():
+    tokens = summarizer._extract_number_tokens(
+        "hydro rose during 2020-2025 to 60-65% of generation"
+    )
+    assert {"2020", "2025", "60", "65"} <= tokens
+    assert "-2025" not in tokens
+    assert "-65" not in tokens
+
+
+def test_genuine_negative_numbers_still_tokenize():
+    tokens = summarizer._extract_number_tokens(
+        "the change was -1.4 pp; the delta reached -160 GEL (-0.77 slope)"
+    )
+    assert "-1.4" in tokens
+    assert "-160" in tokens
+    assert "-0.77" in tokens
+
+
+def test_date_strings_do_not_mint_negative_tokens():
+    tokens = summarizer._extract_number_tokens("between 2024-01-15 and 2024-11-01")
+    assert "2024" in tokens
+    assert not any(t.startswith("-") for t in tokens)
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-10 round — LLMs round half-up; Decimal.quantize defaults to
+# banker's rounding (prod trace 1d2d2ca6: source 180.65 → LLM "180.7" but the
+# variant set only held "180.6").
+# ---------------------------------------------------------------------------
+
+def test_half_up_rounding_variants_match_llm_rounding():
+    tokens = {"180.65", "155.45"}
+    summarizer._add_rounded_source_variants(tokens)
+    # Both rounding conventions must be present so either style matches.
+    assert "180.7" in tokens  # half-up (typical LLM/human rounding)
+    assert "180.6" in tokens  # half-even (banker's)
+    assert "155.5" in tokens
+    assert "155.4" in tokens
+
+
+def test_claim_index_expansion_includes_half_up_variants():
+    variants = summarizer._expand_text_number_token("180.65")
+    assert "180.7" in variants
+    assert "180.6" in variants
+
+
+def test_claim_side_rounded_match_variants_include_half_up():
+    variants = summarizer._rounded_match_variants("44.365")
+    assert "44.37" in variants  # half-up
+    assert "44.36" in variants  # half-even
+
+
+# ---------------------------------------------------------------------------
 # Issue 1 — grounding rounding tolerance
 # ---------------------------------------------------------------------------
 

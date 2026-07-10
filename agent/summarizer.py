@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from numbers import Integral, Real
 from typing import Any, Dict, List, Optional, Set
 
@@ -48,7 +48,12 @@ from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
 
-_NUMBER_PATTERN = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+# The sign only counts when NOT directly preceded by a digit: in range prose
+# ("2020-2025", "60-65%") and ISO dates ("2024-01-15") the hyphen is a
+# separator, and parsing it as a minus minted ungrounded negative tokens
+# ('-2025', '-65') that failed the provenance gate (2026-07-10 report,
+# trace 872ca85f). Genuine negatives ("-1.4", "(-0.77)") keep their sign.
+_NUMBER_PATTERN = re.compile(r"(?<!\d)-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "segment")
 _MAX_REFS_PER_TOKEN = 4
 _MAX_REFS_PER_CLAIM = 12
@@ -383,13 +388,23 @@ def _add_rounded_source_variants(tokens: Set[str]) -> None:
         except (InvalidOperation, ValueError):
             continue
         for places in (0, 1, 2):
-            try:
-                rounded = dec.quantize(Decimal(1).scaleb(-places))
-            except (InvalidOperation, ValueError):
-                continue
-            normalized = _normalize_number_token(format(rounded, "f"))
-            if normalized and len(normalized) > 1:
-                variants.add(normalized)
+            # Emit BOTH rounding conventions: Decimal.quantize defaults to
+            # banker's rounding (180.65 → 180.6) while LLMs and humans round
+            # half-up (180.65 → 180.7); only the half-even variant existed and
+            # correct answers failed the strict gate (2026-07-10 report,
+            # trace 1d2d2ca6). Both are faithful roundings of a real source
+            # value, so the anti-hallucination property is preserved.
+            for rounding in (None, ROUND_HALF_UP):
+                try:
+                    if rounding is None:
+                        rounded = dec.quantize(Decimal(1).scaleb(-places))
+                    else:
+                        rounded = dec.quantize(Decimal(1).scaleb(-places), rounding=rounding)
+                except (InvalidOperation, ValueError):
+                    continue
+                normalized = _normalize_number_token(format(rounded, "f"))
+                if normalized and len(normalized) > 1:
+                    variants.add(normalized)
     tokens.update(variants)
 
 
@@ -760,14 +775,20 @@ def _add_decimal_rounding_variants(
     *,
     include_nearest_ten: bool = False,
 ) -> None:
+    # Both conventions: banker's (quantize default) and half-up (how LLMs and
+    # humans round). See _add_rounded_source_variants for the rationale.
     for places in (0, 1, 2):
-        try:
-            rounded = numeric.quantize(Decimal(1).scaleb(-places))
-        except (InvalidOperation, ValueError):
-            continue
-        token = _normalized_decimal_token(rounded)
-        if token:
-            result.add(token)
+        for rounding in (None, ROUND_HALF_UP):
+            try:
+                if rounding is None:
+                    rounded = numeric.quantize(Decimal(1).scaleb(-places))
+                else:
+                    rounded = numeric.quantize(Decimal(1).scaleb(-places), rounding=rounding)
+            except (InvalidOperation, ValueError):
+                continue
+            token = _normalized_decimal_token(rounded)
+            if token:
+                result.add(token)
 
     if include_nearest_ten and abs(numeric) >= 100 and not _is_year_like_integer(numeric):
         try:
@@ -796,9 +817,19 @@ def _rounded_match_variants(token: str) -> List[str]:
         return []
     variants: List[str] = []
     for places in (2, 1):
-        candidate = _normalize_number_token(str(round(numeric, places)))
-        if candidate and candidate != token and candidate not in variants:
-            variants.append(candidate)
+        # round(Decimal) is banker's rounding; also try half-up so a claim of
+        # "44.37" for source "44.365" matches (LLMs round half-up).
+        candidates = [str(round(numeric, places))]
+        try:
+            candidates.append(
+                format(numeric.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP), "f")
+            )
+        except (InvalidOperation, ValueError):
+            pass
+        for raw in candidates:
+            candidate = _normalize_number_token(raw)
+            if candidate and candidate != token and candidate not in variants:
+                variants.append(candidate)
     return variants
 
 
