@@ -379,6 +379,118 @@ def test_dispatcher_fallback_yoy_percent_change():
     assert result[1]["type"] == "bar"
 
 
+# ---------------------------------------------------------------------------
+# Dispatcher — anchored explanation override (2026-07-10 report)
+#
+# "Why did the balancing price change in July 2025?" charts must show the
+# periods the narrative talks about (same month across prior years, previous
+# month, anchor month) — not the whole 61-month derived-metrics fetch window —
+# and the composition driver as stacked columns.
+# ---------------------------------------------------------------------------
+
+
+def _why_frame() -> pd.DataFrame:
+    """61 monthly rows (2020-07..2025-07) shaped like the enriched balancing
+    frame: prices + entity shares + an aggregate share + a driver price."""
+    dates = pd.date_range("2020-07-01", "2025-07-01", freq="MS")
+    n = len(dates)
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "p_bal_gel": [140.0 + (i % 12) for i in range(n)],
+            "p_bal_usd": [52.0 + (i % 12) / 3 for i in range(n)],
+            "share_renewable_ppa": [0.80 - (i % 12) / 100 for i in range(n)],
+            "share_import": [0.05 + (i % 12) / 200 for i in range(n)],
+            "share_regulated_old_tpp": [0.10 for _ in range(n)],
+            "share_regulated_hpp": [0.05 for _ in range(n)],
+            "share_ppa_import_total": [0.85 for _ in range(n)],  # aggregate — excluded
+            "price_deregulated_hydro_gel": [90.0 + (i % 12) for i in range(n)],
+        }
+    )
+
+
+def _why_periods() -> list:
+    return [
+        pd.Timestamp(f"{year}-07-01") for year in range(2020, 2025)
+    ] + [pd.Timestamp("2025-06-01"), pd.Timestamp("2025-07-01")]
+
+
+def _make_explanation_ctx(df, periods):
+    ctx = _make_ctx_with_qa(df, answer_kind="explanation")
+    ctx.query = "why balancing electricity price changed in july 2025?"
+    ctx.why_chart_periods = list(periods)
+    return ctx
+
+
+def test_explanation_override_builds_focus_price_and_stacked_composition():
+    ctx = _make_explanation_ctx(_why_frame(), _why_periods())
+
+    result = dispatch_derived_chart(ctx)
+
+    assert result is not None
+    assert len(result) == 2
+
+    price_spec, composition_spec = result
+    # Spec A: discrete-period comparison → bar, one row per focus period.
+    assert price_spec["type"] == "bar"
+    assert len(price_spec["data"]) == 7
+    labels = [row["date"] for row in price_spec["data"]]
+    assert labels == ["2020-07", "2021-07", "2022-07", "2023-07", "2024-07", "2025-06", "2025-07"]
+
+    # Spec B: stacked composition over the SAME periods. Categories are
+    # display labels, so match by content rather than raw column names.
+    assert composition_spec["type"] == "stackedbar"
+    categories = {row["category"].lower() for row in composition_spec["data"]}
+    assert any("renewable" in c for c in categories)
+    assert any("import" in c for c in categories)
+    # Aggregate share must not enter the stack (it double-counts components).
+    assert not any("total" in c for c in categories)
+    dates_in_stack = {row["date"] for row in composition_spec["data"]}
+    assert dates_in_stack == set(labels)
+
+
+def test_explanation_override_prefers_query_currency():
+    ctx = _make_explanation_ctx(_why_frame(), _why_periods())
+    ctx.query = "why did the balancing price change in july 2025 in USD?"
+
+    result = dispatch_derived_chart(ctx)
+
+    assert result is not None
+    price_spec = result[0]
+    series_keys = {k for row in price_spec["data"] for k in row if k != "date"}
+    assert any("usd" in k.lower() for k in series_keys)
+    assert not any("gel" in k.lower() for k in series_keys)
+
+
+def test_explanation_override_falls_through_without_periods():
+    """No resolved focus periods (generic 'why do prices change?') → the
+    existing derived-metrics fallback path stays in charge."""
+    from types import SimpleNamespace
+
+    from contracts.question_analysis import DerivedMetricName
+
+    df = _ts_df(24)
+    dm = SimpleNamespace(metric_name=DerivedMetricName.YOY_PERCENT_CHANGE)
+    ctx = _make_ctx_with_qa(df, derived_metrics=[dm], answer_kind="explanation")
+
+    result = dispatch_derived_chart(ctx)
+
+    assert result is not None
+    assert result[1]["metadata"]["measureTransform"] == "yoy_pct"
+
+
+def test_explanation_override_falls_through_without_usable_columns():
+    """Focus periods present but the frame has neither price nor share
+    columns → fall through instead of emitting empty specs."""
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    df = pd.DataFrame({"date": dates, "cpi_index": [100.0 + i for i in range(6)]})
+    ctx = _make_explanation_ctx(df, [pd.Timestamp("2024-05-01"), pd.Timestamp("2024-06-01")])
+
+    result = dispatch_derived_chart(ctx)
+
+    assert result is None
+
+
 def test_dispatcher_fallback_skipped_when_explicit_transform():
     """When visualization.measure_transform is already explicitly set, the
     derived_metrics fallback must NOT override the explicit routing — the

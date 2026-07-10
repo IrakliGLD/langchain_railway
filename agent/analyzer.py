@@ -3008,6 +3008,20 @@ def _build_why_context(ctx: QueryContext) -> None:
 
     # 5-year historical month context
     historical_rows = _find_historical_month_rows(df, t_series_col, target_ts, lookback_years=5)
+
+    # Focus periods for anchored explanation charts: the same periods the
+    # narrative cites (same month across prior years, previous month, anchor)
+    # in chronological order. Consumed by dispatch_derived_chart so the chart
+    # shows the comparison the answer talks about instead of the whole
+    # derived-metrics fetch window (2026-07-10 report).
+    focus_periods: list[pd.Timestamp] = []
+    if not historical_rows.empty:
+        focus_periods.extend(pd.to_datetime(historical_rows[t_series_col]).tolist())
+    for candidate_ts in (prev_ts, target_ts):
+        if candidate_ts is not None and not pd.isna(candidate_ts):
+            focus_periods.append(pd.to_datetime(candidate_ts))
+    ctx.why_chart_periods = sorted({ts.normalize() for ts in focus_periods})
+
     regulated_plant_sales_df = pd.DataFrame()
     regulated_plant_sales_block: dict[str, Any] = {}
 

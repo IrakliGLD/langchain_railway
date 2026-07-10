@@ -678,6 +678,130 @@ def _build_decomposition_spec(
 
 
 # ---------------------------------------------------------------------------
+# Builder 3b: Anchored explanation focus periods (2026-07-10 report)
+# ---------------------------------------------------------------------------
+
+
+def _build_explanation_period_specs(
+    df: pd.DataFrame,
+    time_key: Optional[str],
+    num_cols: List[str],
+    label_map: Dict[str, str],
+    periods: List[Any],
+    user_query: Optional[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """Focus-period comparison charts for anchored "why" explanations.
+
+    An explanation of a single-month change fetches a wide window (5 years,
+    for MoM/YoY math), but the CHART should show the periods the narrative
+    actually cites: the same month across prior years, the previous month,
+    and the anchor month (``ctx.why_chart_periods``, resolved by the
+    why-context). Emits:
+
+    - Spec A: bar of the target price over the focus periods (discrete
+      period comparison, query-preferred currency).
+    - Spec B: stacked columns of the share composition over the same
+      periods — the composition shift is the primary balancing-price driver,
+      so it gets a first-class panel instead of being dropped by the series
+      cap (2026-07-10 report: only price lines over 61 months survived).
+
+    Returns None when no focus rows or no usable price/share columns exist,
+    so the dispatcher can fall through to the generic builders.
+    """
+    if not periods or not time_key or df is None or df.empty:
+        return None
+
+    working = df.copy()
+    working[time_key] = pd.to_datetime(working[time_key], errors="coerce")
+    working = working.dropna(subset=[time_key])
+    if working.empty:
+        return None
+
+    period_keys = {pd.Timestamp(p).to_period("M") for p in periods}
+    month_period = working[time_key].dt.to_period("M")
+    focus = working.loc[month_period.isin(period_keys)]
+    if focus.empty:
+        return None
+    focus = focus.sort_values(time_key)
+    focus = focus.loc[~focus[time_key].dt.to_period("M").duplicated(keep="last")]
+
+    dim_map = _infer_dim_map([c for c in num_cols if c in focus.columns])
+
+    price_cols = [c for c in dim_map if dim_map[c] == "price_tariff"]
+    balancing_cols = [
+        c for c in price_cols if "p_bal" in c.lower() or "balancing_price" in c.lower()
+    ]
+    candidates = balancing_cols or price_cols
+    keep_suffix = "_usd" if _prefers_usd(user_query) else "_gel"
+    currency_matched = [c for c in candidates if c.lower().endswith(keep_suffix)]
+    price_col = (currency_matched or candidates)[:1]
+
+    share_cols = [
+        c for c in dim_map
+        if dim_map[c] == "share" and not c.lower().endswith("_total")
+    ]
+
+    if not price_col and not share_cols:
+        return None
+
+    period_labels = focus[time_key].dt.strftime("%Y-%m").tolist()
+    specs: List[Dict[str, Any]] = []
+
+    if price_col:
+        col = price_col[0]
+        series_label = label_map.get(col, col)
+        data = []
+        for lbl, val in zip(period_labels, focus[col]):
+            data.append({"date": lbl, series_label: float(val) if pd.notna(val) else None})
+        specs.append(
+            {
+                "data": data,
+                "type": "bar",
+                "metadata": {
+                    "xAxisTitle": time_key,
+                    "yAxisTitle": series_label,
+                    "title": f"{series_label}: focus periods",
+                    "axisMode": "single",
+                    "labels": [series_label],
+                    "role": SemanticRole.OBSERVED.value,
+                },
+            }
+        )
+
+    if share_cols:
+        melted: List[Dict[str, Any]] = []
+        for _, row in focus.iterrows():
+            lbl = row[time_key].strftime("%Y-%m")
+            for col in share_cols:
+                val = row.get(col)
+                if pd.notna(val):
+                    melted.append(
+                        {
+                            "date": lbl,
+                            "category": label_map.get(col, col),
+                            "value": float(val),
+                        }
+                    )
+        if melted:
+            specs.append(
+                {
+                    "data": melted,
+                    "type": "stackedbar",
+                    "metadata": {
+                        "xAxisTitle": time_key,
+                        "yAxisTitle": "Share",
+                        "title": "Composition: focus periods",
+                        "axisMode": "single",
+                        "labels": [label_map.get(col, col) for col in share_cols],
+                        "role": SemanticRole.COMPONENT_PRIMARY.value,
+                    },
+                }
+            )
+
+    return specs or None
+
+
+# ---------------------------------------------------------------------------
 # Builder 4: Forecast observed vs projected
 # ---------------------------------------------------------------------------
 
@@ -895,6 +1019,24 @@ def dispatch_derived_chart(ctx: "QueryContext") -> Optional[List[Dict[str, Any]]
     if not num_cols:
         return None
     label_map = {col: _label(col) for col in df.columns if col != time_key}
+
+    # ---- Anchored explanation focus periods ----
+    # Takes precedence over the generic MoM/YoY panels for "why did X change
+    # in <month>" queries: the wide fetch window exists for derived-metric
+    # math, not for the chart. Falls through when the why-context resolved
+    # no anchor or the frame has no price/share columns.
+    why_periods = list(getattr(ctx, "why_chart_periods", None) or [])
+    if answer_kind == AnswerKind.EXPLANATION and why_periods:
+        explanation_specs = _build_explanation_period_specs(
+            df, time_key, num_cols, label_map, why_periods, _query
+        )
+        if explanation_specs:
+            log.info(
+                "dispatch_derived_chart: anchored explanation override (%d focus periods, %d specs)",
+                len(why_periods),
+                len(explanation_specs),
+            )
+            return explanation_specs
 
     # ---- MoM/YoY dual-panel ----
     if measure_transform in _MOM_YOY_TRANSFORMS:
