@@ -143,6 +143,12 @@ class QueryContext:
     correlation_results: Dict[str, Any] = dc_field(default_factory=dict)
     add_trendlines: bool = False
     trendline_extend_to: Optional[str] = None
+    # Focus periods resolved by the why-context for explanation queries
+    # (same month across prior years, previous month, anchor month) — the
+    # chart layer builds anchored comparison charts from these instead of
+    # plotting the whole derived-metrics fetch window (2026-07-10 report).
+    # ``pd.Timestamp`` values in chronological order; empty for non-why flows.
+    why_chart_periods: List[Any] = dc_field(default_factory=list)
 
     # --- shape routing (populated after Stage 0.2 regardless of analyzer state) ---
     # Resolved answer shape for Stage 3 enrichment: authoritative analyzer value
