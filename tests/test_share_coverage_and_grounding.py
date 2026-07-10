@@ -203,3 +203,106 @@ def test_import_dependency_ratio_uses_supply_denominator():
     assert float(row["import_dependent_supply"]) == 50.0
     assert float(row["total_supply"]) == 100.0
     assert float(row["import_dependency_ratio"]) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# D — types-filtered fetches must not mislabel partial sums as full-scope
+# totals (2026-07-10). get_generation_mix with a types filter (the default for
+# generation-mix questions, and named-tech questions like types=["hydro"])
+# yields a frame whose absent techs were EXCLUDED by the caller, not
+# unobserved in the data. Summing whatever remains under full-scope names
+# (total_supply, import_dependency_ratio, ...) fabricates values that the
+# summarizer and grounding quote as fact. A derived total is emitted only when
+# the fetch could observe every member tech: no filter, or a filter covering
+# the aggregate's full member set. Without a filter, column absence means the
+# tech was genuinely never observed (real zeros are stored as explicit rows),
+# so observed-member sums remain correct totals — that is why the unfiltered
+# tests above (e.g. test_supply_and_demand_shares_use_separate_denominators)
+# deliberately keep their pinned behavior.
+# ---------------------------------------------------------------------------
+
+def _canon_typed(rows, requested_types):
+    df = pd.DataFrame(rows, columns=["date", "type_tech", "quantity_tech"])
+    out = canonicalize_generation_mix_df(df, requested_types=requested_types)
+    out = out.set_index("period")
+    out.index = out.index.astype(str)
+    return out
+
+
+def test_generation_mix_filter_suppresses_supply_scope_aggregates():
+    out = _canon_typed(
+        [
+            ("2024-01-01", "hydro", 50.0),
+            ("2024-01-01", "thermal", 25.0),
+            ("2024-01-01", "wind", 15.0),
+            ("2024-01-01", "solar", 10.0),
+        ],
+        ["hydro", "thermal", "wind", "solar"],
+    )
+    # import/self-cons were filtered out: supply-scope aggregates would be
+    # partial sums wearing full-scope names (total_supply = 4 generation
+    # techs, import_dependent_supply = thermal alone).
+    assert "total_supply" not in out.columns
+    assert "import_dependent_supply" not in out.columns
+    assert "import_dependency_ratio" not in out.columns
+    # The filter covers every domestic-generation tech, so generation-scope
+    # aggregates are complete and must survive.
+    row = out.iloc[0]
+    assert float(row["total_domestic_generation"]) == 100.0
+    assert float(row["local_generation"]) == 75.0
+
+
+def test_named_tech_filter_suppresses_generation_scope_aggregates_too():
+    out = _canon_typed([("2024-01-01", "hydro", 50.0)], ["hydro"])
+    for col in (
+        "total_supply",
+        "total_domestic_generation",
+        "local_generation",
+        "import_dependent_supply",
+        "import_dependency_ratio",
+    ):
+        assert col not in out.columns
+    assert float(out.iloc[0]["quantity_hydro"]) == 50.0
+
+
+def test_thermal_only_filter_does_not_fabricate_dependency_ratio():
+    # Without the guard: import_dependent_supply = thermal, total_supply =
+    # thermal, so import_dependency_ratio = a constant 1.0 — pure artifact.
+    out = _canon_typed([("2024-01-01", "thermal", 25.0)], ["thermal"])
+    assert "import_dependent_supply" not in out.columns
+    assert "total_supply" not in out.columns
+    assert "import_dependency_ratio" not in out.columns
+
+
+def test_unfiltered_fetch_still_emits_full_scope_aggregates():
+    # requested_types=None (and, equivalently, an empty filter) keeps the
+    # pinned trust-the-frame behavior for unfiltered fetches.
+    out = _canon_typed(
+        [
+            ("2024-01-01", "hydro", 50.0),
+            ("2024-01-01", "thermal", 25.0),
+            ("2024-01-01", "import", 25.0),
+        ],
+        None,
+    )
+    row = out.iloc[0]
+    assert float(row["total_supply"]) == 100.0
+    assert float(row["import_dependent_supply"]) == 50.0
+    assert float(row["import_dependency_ratio"]) == 0.5
+
+
+def test_normalize_tool_dataframe_forwards_types_filter():
+    from analysis.system_quantities import normalize_tool_dataframe
+
+    df = pd.DataFrame(
+        [("2024-01-01", "hydro", 50.0), ("2024-01-01", "thermal", 25.0)],
+        columns=["date", "type_tech", "quantity_tech"],
+    )
+    guarded = normalize_tool_dataframe(
+        "get_generation_mix", df, params={"types": ["hydro", "thermal"]}
+    )
+    assert "total_supply" not in guarded.columns
+    assert "import_dependency_ratio" not in guarded.columns
+
+    trusted = normalize_tool_dataframe("get_generation_mix", df)
+    assert "total_supply" in trusted.columns

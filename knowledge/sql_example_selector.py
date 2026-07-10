@@ -483,16 +483,20 @@ Plan:
 ---SQL---
 SELECT
     time_month,
-    SUM(CASE WHEN type_tech = 'hydro' THEN quantity ELSE 0 END) as hydro_thousand_mwh,
-    SUM(CASE WHEN type_tech = 'thermal' THEN quantity ELSE 0 END) as thermal_thousand_mwh,
-    SUM(CASE WHEN type_tech = 'wind' THEN quantity ELSE 0 END) as wind_thousand_mwh,
-    SUM(CASE WHEN type_tech = 'solar' THEN quantity ELSE 0 END) as solar_thousand_mwh,
-    SUM(CASE WHEN type_tech = 'import' THEN quantity ELSE 0 END) as import_thousand_mwh
+    ROUND(SUM(CASE WHEN type_tech = 'hydro' THEN quantity ELSE 0 END) /
+          NULLIF(SUM(quantity), 0), 4) as hydro_share,
+    ROUND(SUM(CASE WHEN type_tech = 'thermal' THEN quantity ELSE 0 END) /
+          NULLIF(SUM(quantity), 0), 4) as thermal_share,
+    ROUND(SUM(CASE WHEN type_tech = 'wind' THEN quantity ELSE 0 END) /
+          NULLIF(SUM(quantity), 0), 4) as wind_share,
+    ROUND(SUM(CASE WHEN type_tech = 'solar' THEN quantity ELSE 0 END) /
+          NULLIF(SUM(quantity), 0), 4) as solar_share
 FROM tech_quantity_view
 WHERE time_month >= '2020-01' AND time_month <= '2024-12'
-  AND type_tech IN ('hydro', 'thermal', 'wind', 'solar', 'import')
+  AND type_tech IN ('hydro', 'thermal', 'wind', 'solar')
 GROUP BY time_month
 ORDER BY time_month;
+NOTE: Generation mix = COMPOSITION of domestic generation. The WHERE filter keeps only generation technologies, so SUM(quantity) is total generation and the hydro+thermal+wind+solar shares sum to 1 each month. Import and self-cons are NOT part of the generation mix — use quantity columns over the broader supply set for supply or import-dependence questions.
 
 EXAMPLE 6.2 - Hydro vs Thermal Comparison (Georgian):
 Query: "შეადარე ჰიდრო და თერმული გენერაცია 2023 წელს"

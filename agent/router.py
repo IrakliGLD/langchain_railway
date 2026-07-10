@@ -10,6 +10,7 @@ _TZ_GEORGIA = ZoneInfo("Asia/Tbilisi")
 
 from agent.tools.types import ToolInvocation
 from config import ROUTER_ENABLE_SEMANTIC_FALLBACK, ROUTER_SEMANTIC_GAP_THRESHOLD, ROUTER_SEMANTIC_MIN_SCORE
+from context import GENERATION_TECH_TYPES
 
 # Populated by _semantic_match_tool on each call so pipeline.py can
 # include scores in the miss-detail trace event.
@@ -136,7 +137,6 @@ def _build_semantic_invocation(
     score: float,
 ) -> Optional[ToolInvocation]:
     # Use the same parameter extractors as the direct router so fallback behavior stays deterministic.
-    has_share = any(t in query_lower for t in ["share", "shares", "proportion", "percentage", "percent"])
     has_balancing = any(t in query_lower for t in ["balancing", "p_bal", "balance market", "balancing electricity"])
     if tool_name == "get_tariffs":
         entities = extract_tariff_entities(query_lower)
@@ -171,17 +171,9 @@ def _build_semantic_invocation(
         )
 
     if tool_name == "get_generation_mix":
-        types = extract_generation_types(query_lower)
-        granularity = extract_granularity(query_lower)
         return ToolInvocation(
             name="get_generation_mix",
-            params={
-                "start_date": start_date,
-                "end_date": end_date,
-                "types": types or None,
-                "mode": "share" if has_share else "quantity",
-                "granularity": granularity,
-            },
+            params=build_generation_mix_params(query_lower, start_date, end_date),
             confidence=min(0.95, max(0.65, score)),
             reason=f"Semantic fallback matched generation intent (score={score:.2f})",
         )
@@ -483,6 +475,99 @@ def extract_tariff_entities(query_lower: str) -> List[str]:
     return [h for h in dict.fromkeys(hits) if h in ALLOWED_TARIFF_ENTITY_ALIASES]
 
 
+# --- Generation-mix intent (single authority for router, planner, charts) ---
+#
+# 2026-07-09 generation-mix report: "generation mix" questions were routed as
+# quantity dumps over the whole supply side (import/self-cons included) and
+# rendered as line charts. The vocabulary below is the one place that decides
+# (a) when a generation question is a COMPOSITION question (share mode) and
+# (b) when it is about domestic generation only (generation share basis),
+# so the keyword router, its semantic fallback, and the analyzer-driven
+# parameter resolver in agent/planner.py cannot drift apart.
+_GENERATION_SCOPE_TOKENS = ("generat", "გენერ", "генерац", "выработк")
+_COMPOSITION_INTENT_TOKENS = (
+    "mix", "composition", "structure", "breakdown",
+    "share", "proportion", "percentage", "percent",
+    "მიქს", "სტრუქტურ", "შემადგენლ", "წილ",
+    "микс", "структур", "состав", "доля", "доли", "долей",
+)
+# Wording that widens the scope back to the whole supply side (imports and
+# self-consumption belong in the picture for these questions).
+_SUPPLY_WIDE_TOKENS = (
+    "supply mix", "supply structure", "power supply", "electricity supply",
+    "energy supply", "total supply", "energy balance", "system balance",
+    "import depend", "energy security", "self-sufficiency",
+    "მიწოდებ", "поставк", "энергобаланс",
+)
+# Explicit quantity wording overrides the share implication of "mix".
+_EXPLICIT_QUANTITY_TOKENS = (
+    "quantity", "quantities", "mwh", "gwh", "megawatt", "gigawatt",
+    "volume", "volumes", "how much", "how many",
+    "რაოდენობ", "объем", "объём", "сколько",
+)
+
+
+def extract_generation_mix_intent(query_lower: str) -> bool:
+    """True when the query asks about the composition of domestic generation.
+
+    Requires both a generation token and a composition token, and no
+    supply-wide wording (supply mix, energy balance, import dependence,
+    energy security keep the broader supply scope).
+    """
+    q = str(query_lower or "").lower()
+    if not q:
+        return False
+    if not any(t in q for t in _GENERATION_SCOPE_TOKENS):
+        return False
+    if not any(t in q for t in _COMPOSITION_INTENT_TOKENS):
+        return False
+    if any(t in q for t in _SUPPLY_WIDE_TOKENS):
+        return False
+    return True
+
+
+def extract_generation_mode(query_lower: str) -> str:
+    """Resolve get_generation_mix mode: composition wording implies "share".
+
+    Explicit quantity wording (MWh, volumes, "how much") wins over the
+    share implication so "generation mix in MWh" stays a quantity request.
+    """
+    q = str(query_lower or "").lower()
+    has_composition = any(t in q for t in _COMPOSITION_INTENT_TOKENS)
+    has_quantity = any(t in q for t in _EXPLICIT_QUANTITY_TOKENS)
+    if has_composition and not has_quantity:
+        return "share"
+    return "quantity"
+
+
+def build_generation_mix_params(
+    query_lower: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Dict:
+    """Shared get_generation_mix parameter builder for both router paths.
+
+    Generation-mix intent narrows the default technology scope to
+    GENERATION_TECH_TYPES and, in share mode, switches the share basis to
+    total generation so the mix sums to 100% over hydro/thermal/wind/solar.
+    """
+    types = extract_generation_types(query_lower)
+    mode = extract_generation_mode(query_lower)
+    params: Dict = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "types": types or None,
+        "mode": mode,
+        "granularity": extract_granularity(query_lower),
+    }
+    if extract_generation_mix_intent(query_lower):
+        if not params["types"]:
+            params["types"] = list(GENERATION_TECH_TYPES)
+        if mode == "share" and set(params["types"]) <= set(GENERATION_TECH_TYPES):
+            params["share_basis"] = "generation"
+    return params
+
+
 def extract_generation_types(query_lower: str) -> List[str]:
     type_map = {
         "hydro": "hydro",
@@ -521,14 +606,12 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
     start_date, end_date = extract_date_range(q, is_explanation=is_explanation)
 
     composition_terms = ["share", "composition", "mix", "proportion", "წილი", "доля"]
-    explicit_share_terms = ["share", "proportion", "percentage", "percent", "წილი", "доля"]
     balancing_terms = ["balancing", "p_bal", "საბალანსო", "баланс"]
     tariff_terms = ["tariff", "ტარიფ", "тариф"]
-    generation_terms = ["generation", "technology", "type_tech", "demand", "consumption", "გენერ", "потреб"]
+    generation_terms = ["generation", "technology", "type_tech", "demand", "consumption", "გენერ", "генерац", "потреб"]
     price_terms = ["price", "p_bal", "p_dereg", "p_gcap", "xrate", "exchange rate", "ფასი", "цена", "курс"]
 
     has_composition = any(t in q for t in composition_terms)
-    has_share = any(t in q for t in explicit_share_terms)
     has_balancing = any(t in q for t in balancing_terms)
     has_tariff = any(t in q for t in tariff_terms)
     has_generation = any(t in q for t in generation_terms)
@@ -568,18 +651,9 @@ def match_tool(query: str, is_explanation: bool = False) -> Optional[ToolInvocat
 
     # 3) Generation mix / demand quantities
     if has_generation and not has_tariff:
-        types = extract_generation_types(q)
-        mode = "share" if has_share else "quantity"
-        granularity = extract_granularity(q)
         return ToolInvocation(
             name="get_generation_mix",
-            params={
-                "start_date": start_date,
-                "end_date": end_date,
-                "types": types or None,
-                "mode": mode,
-                "granularity": granularity,
-            },
+            params=build_generation_mix_params(q, start_date, end_date),
             confidence=0.85,
             reason="Matched generation/demand query",
         )

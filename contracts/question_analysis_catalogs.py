@@ -229,6 +229,13 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Generation mix or quantity by technology or type.",
         "avoid_for": "Tariffs, balancing price, and conceptual definitions.",
         "main_params": ["types", "mode", "granularity", "start_date", "end_date"],
+        "mode_values": ["quantity", "share"],
+        "mode_hint_rules": [
+            "mode=share for mix / composition / structure / share questions (the default reading of 'generation mix')",
+            "mode=quantity only for explicit volume questions (MWh, 'how much was generated')",
+            "generation-mix questions take types=['hydro', 'thermal', 'wind', 'solar'] — import and self-cons are not generation",
+            "leave types empty for supply-wide, import-dependence, energy-security, or demand questions",
+        ],
         "combined_with": [
             {"tool": "get_prices", "when": "correlating generation patterns with price movements"},
         ],
