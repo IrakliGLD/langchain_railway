@@ -15,8 +15,15 @@ import pandas as pd
 
 from agent.analyzer import METRIC_VALUE_ALIASES
 from agent.chart_frame_builder import build_chart_frame, from_wide
+from agent.router import extract_generation_mix_intent, extract_generation_mode
 from config import ENAI_CHART_LONGFORM
-from context import COLUMN_LABELS, DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES, TRANSIT_TECH_TYPES
+from context import (
+    COLUMN_LABELS,
+    DEMAND_TECH_TYPES,
+    GENERATION_TECH_TYPES,
+    SUPPLY_TECH_TYPES,
+    TRANSIT_TECH_TYPES,
+)
 from models import QueryContext
 from utils.trace_logging import trace_detail
 from visualization.chart_selector import (
@@ -41,6 +48,9 @@ for _canonical, _aliases in METRIC_VALUE_ALIASES.items():
 
 
 _DEFAULT_MAX_SERIES = 3
+# Compositions (all-share chart groups) keep up to the contract maximum so a
+# stacked mix is not chopped to an arbitrary 3 components.
+_COMPOSITION_MAX_SERIES = 8
 _AUTO_PANEL_DIMENSION_ORDER = [
     "price_tariff",
     "xrate",
@@ -84,6 +94,18 @@ _TRANSIT_CHART_METRIC_COLS = frozenset(
 _SUPPLY_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in SUPPLY_TECH_TYPES)
 _DEMAND_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in DEMAND_TECH_TYPES)
 _TRANSIT_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in TRANSIT_TECH_TYPES)
+# Generation scope (2026-07-09 report): a generation-mix question narrows past
+# the supply side to domestic generation — import/self-cons and supply-level
+# aggregates (total_supply, import_dependency_ratio) are not part of the mix.
+_GENERATION_CHART_METRIC_COLS = frozenset(
+    [f"quantity_{tech}".lower() for tech in GENERATION_TECH_TYPES]
+    + [f"share_{tech}".lower() for tech in GENERATION_TECH_TYPES]
+    + [
+        "total_domestic_generation",
+        "local_generation",
+    ]
+)
+_GENERATION_CHART_TECHS = frozenset(str(tech).strip().lower() for tech in GENERATION_TECH_TYPES)
 _SUPPLY_QUERY_TOKENS = (
     "generation mix",
     "generation",
@@ -128,6 +150,11 @@ def _resolve_energy_chart_side(query: str) -> Optional[str]:
     if sum(bool(flag) for flag in (has_supply, has_demand, has_transit)) > 1:
         return "mixed"
     if has_supply:
+        # Generation-mix intent narrows the supply side to generation techs
+        # (single authority: agent/router.py — same signal that switches the
+        # tool to share mode with the generation share basis).
+        if extract_generation_mix_intent(query_lower):
+            return "generation"
         return "supply"
     if has_demand:
         return "demand"
@@ -148,7 +175,7 @@ def _metric_energy_side(col: str) -> Optional[str]:
 
 
 def _filter_energy_side_rows(df: pd.DataFrame, side: Optional[str]) -> pd.DataFrame:
-    if side not in {"supply", "demand", "transit"} or df.empty:
+    if side not in {"supply", "demand", "transit", "generation"} or df.empty:
         return df
     type_col = next((col for col in df.columns if col.lower() == "type_tech"), None)
     if not type_col:
@@ -157,6 +184,7 @@ def _filter_energy_side_rows(df: pd.DataFrame, side: Optional[str]) -> pd.DataFr
         "supply": _SUPPLY_CHART_TECHS,
         "demand": _DEMAND_CHART_TECHS,
         "transit": _TRANSIT_CHART_TECHS,
+        "generation": _GENERATION_CHART_TECHS,
     }[side]
     mask = df[type_col].astype(str).str.strip().str.lower().isin(allowed)
     if not bool(mask.any()):
@@ -180,16 +208,24 @@ def _filter_energy_side_num_cols(
     num_cols: List[str],
 ) -> List[str]:
     side = _resolve_energy_chart_side(query)
-    if side not in {"supply", "demand", "transit"}:
+    if side not in {"supply", "demand", "transit", "generation"}:
         return list(num_cols)
     side_coded = [col for col in num_cols if _metric_energy_side(col) is not None]
     if not side_coded:
         return list(num_cols)
-    filtered = [
-        col
-        for col in num_cols
-        if _metric_energy_side(col) in {None, side}
-    ]
+    if side == "generation":
+        filtered = [
+            col
+            for col in num_cols
+            if col.lower() in _GENERATION_CHART_METRIC_COLS
+            or _metric_energy_side(col) is None
+        ]
+    else:
+        filtered = [
+            col
+            for col in num_cols
+            if _metric_energy_side(col) in {None, side}
+        ]
     if not filtered:
         # Every numeric column is off-side. Don't hand build_chart an empty
         # metric list (which suppresses the chart); keep the originals instead.
@@ -267,7 +303,7 @@ def relevance_score(col: str, query_lower: str) -> int:
         score += 10
     if any(k in query_lower for k in ["xrate", "exchange"]) and "xrate" in col_lower:
         score += 10
-    if any(k in query_lower for k in ["share", "composition"]) and "share" in col_lower:
+    if any(k in query_lower for k in ["share", "composition", "mix", "structure", "breakdown"]) and "share" in col_lower:
         score += 5
     if "tariff" in query_lower and "tariff" in col_lower:
         score += 5
@@ -425,19 +461,26 @@ def _apply_chart_override(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _chart_intent_query(ctx: QueryContext) -> str:
+    """Query text used for chart intent resolution (raw + resolved canonical).
+
+    Follow-ups and non-English queries carry their English intent tokens in
+    effective_query rather than the raw query, so reading ctx.query alone
+    would silently skip intent-driven filtering for exactly those cases.
+    """
+    return " ".join(
+        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+    )
+
+
 def _prepare_chart_source(
     ctx: QueryContext,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, str], List[str], List[str]]:
     df = ctx.df.copy()
     cols = list(ctx.cols or df.columns)
     # Resolve supply/demand intent from the same query text the response-mode
-    # router uses (raw query + resolved canonical query). Follow-ups and
-    # non-English queries carry their English intent tokens in effective_query
-    # rather than the raw query, so reading ctx.query alone would silently skip
-    # side filtering for exactly those cases.
-    chart_query = " ".join(
-        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
-    )
+    # router uses (raw query + resolved canonical query).
+    chart_query = _chart_intent_query(ctx)
     energy_side = _resolve_energy_chart_side(chart_query)
     df = _filter_energy_side_rows(df, energy_side)
 
@@ -602,9 +645,35 @@ def _resolve_chart_groups(
         if should_split:
             groups.extend(_auto_split_groups(num_cols))
         else:
-            groups.append({"metrics": list(num_cols), "source": "auto"})
+            auto_metrics = list(num_cols)
+            # Composition intent (mix/composition/structure wording) prefers
+            # the share view over its quantity twin: a canonicalized mix frame
+            # carries quantity_* and share_* for the same techs, and charting
+            # both mixes dimensions (2026-07-09 report — the 3-series cap then
+            # kept an arbitrary quantity subset). Only fires when the frame is
+            # a pure quantity+share family so driver frames (price + shares)
+            # keep their non-share series.
+            share_metrics = [col for col in auto_metrics if infer_dimension(col) == "share"]
+            non_share_metrics = [col for col in auto_metrics if col not in share_metrics]
+            # Aggregates on a mix frame (total_supply, import_dependency_ratio)
+            # infer as energy_qty/other; price/xrate/index series signal a
+            # driver frame instead, which must keep its non-share series.
+            _driver_dims = {"price_tariff", "xrate", "index"}
+            if (
+                share_metrics
+                and non_share_metrics
+                and not any(infer_dimension(col) in _driver_dims for col in non_share_metrics)
+                and extract_generation_mode(_chart_intent_query(ctx).lower()) == "share"
+            ):
+                log.info(
+                    "Composition intent: charting share columns only (%d of %d metrics)",
+                    len(share_metrics),
+                    len(auto_metrics),
+                )
+                auto_metrics = share_metrics
+            groups.append({"metrics": auto_metrics, "source": "auto"})
 
-    max_series = getattr(visualization, "max_series", None) or _DEFAULT_MAX_SERIES
+    requested_max_series = getattr(visualization, "max_series", None)
     sort_rule = getattr(getattr(visualization, "sort_rule", None), "value", None)
     top_n = getattr(visualization, "top_n", None)
     query_lower = ctx.query.lower()
@@ -618,6 +687,15 @@ def _resolve_chart_groups(
     for group in groups:
         metrics = list(group.get("metrics", []))
         preserve_order = group.get("source") == "plan"
+        if requested_max_series:
+            max_series = requested_max_series
+        elif metrics and all(infer_dimension(col) == "share" for col in metrics):
+            # A composition needs every component visible: the 3-series
+            # default exists for line readability, not stacked bars. The
+            # analyzer's explicit max_series still wins above.
+            max_series = _COMPOSITION_MAX_SERIES
+        else:
+            max_series = _DEFAULT_MAX_SERIES
         metrics = _limit_series(
             metrics,
             query_lower,

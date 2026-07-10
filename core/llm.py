@@ -1800,10 +1800,10 @@ _ANALYZER_CORE_RULES = """\
   - Example: "what documents are required to register as a wholesale market participant?" -> same routing.
   - Example: "what conditions must a generator meet to participate in the day-ahead market?" -> same routing.
 - Generation/supply trend + structure questions (data, not legal):
-  Questions of the form "trend and structure of [power supply|generation|generation mix|electricity supply]", "evolution and composition of [supply|generation]", "show how [supply|generation mix] changed over time" are `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `render_style=deterministic`, `candidate_tools=["get_balancing_composition"]`, `candidate_topics=["generation_mix", "market_structure"]`. The user wants the actual time-series data with composition, not a regulatory definition. Do NOT classify as `conceptual_definition` solely because the phrasing is general. Keep `render_style=deterministic` so vector retrieval is skipped and the summarizer grounds in the data preview, not in unrelated regulatory passages.
-  - Example: "what is the trend and structure of power supply?" -> `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `render_style=deterministic`, `candidate_tools=["get_balancing_composition"]`.
-  - Example: "show generation mix evolution over time" -> same routing, `render_style=deterministic`.
-  - Example: "how has the structure of electricity supply changed?" -> same routing, `render_style=deterministic`.
+  Questions of the form "trend and structure of [power supply|generation|generation mix|electricity supply]", "evolution and composition of [supply|generation]", "show how [supply|generation mix] changed over time" are `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `render_style=deterministic`, `candidate_tools=["get_generation_mix"]`, `candidate_topics=["generation_mix", "market_structure"]`. The user wants the actual time-series data with composition, not a regulatory definition. Do NOT classify as `conceptual_definition` solely because the phrasing is general. Keep `render_style=deterministic` so vector retrieval is skipped and the summarizer grounds in the data preview, not in unrelated regulatory passages. Physical generation/supply structure comes from `get_generation_mix` with `params_hint.mode="share"`; `get_balancing_composition` is only for the composition of BALANCING MARKET purchases (PPA, CfD, deregulated entities, import purchases).
+  - Example: "what is the trend and structure of power supply?" -> `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`, `render_style=deterministic`, `candidate_tools=["get_generation_mix"]` with `params_hint={"mode": "share"}`.
+  - Example: "show generation mix evolution over time" -> same routing, `render_style=deterministic`, `params_hint={"mode": "share", "types": ["hydro", "thermal", "wind", "solar"]}`, `visual_goal="composition"`.
+  - Example: "how has the structure of electricity supply changed?" -> same routing, `render_style=deterministic`, `params_hint={"mode": "share"}`.
 - Multi-clause queries with mixed definition + data intent (CRITICAL — do NOT classify as pure `conceptual_definition`):
   When a query contains multiple clauses (separated by commas, "and", or sentence boundaries) AND at least one clause contains an explicit data verb — `list`, `show`, `display`, `compare`, `count`, `average`, `top N`, `most recent`, `last quarter/month/year/week`, or a rolling-window anchor like "in/over the last X" — the query is NOT pure conceptual_definition even if another clause starts with "define", "what is", or "explain". The data clauses must drive routing: classify by the strongest data clause as `data_retrieval` (when listing or showing entities/values), `comparison` (when comparing entities/periods), or `data_explanation` (when explaining changes). Set `needs_multi_tool=true` when different clauses need different tools, and include any conceptual clause's topic in `candidate_topics` so the summarizer can address the definition alongside the data. Do NOT drop the data clauses and answer only the definition.
   - Example: "Define 'guaranteed source', list the three most recent guaranteed-source generators by name, and show their average sale price to ESCO in the last quarter." -> `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=list`, `needs_multi_tool=true`, `candidate_tools=["get_generation_mix", "get_tariffs"]`, `candidate_topics=["general_definitions", "market_structure"]`, `entity_scope="guaranteed_source"`.
@@ -1821,6 +1821,10 @@ _ANALYZER_CORE_RULES = """\
   - `balancing_price_gel`, `balancing_price_usd`
   - `xrate`
 - Express GEL/USD choice through `currency`, not by changing the metric name.
+- For `get_generation_mix`, `params_hint.mode` is `share` or `quantity`:
+  - `share` for mix / composition / structure / share questions (the default reading of "generation mix").
+  - `quantity` only when the user explicitly asks for volumes (MWh, "how much was generated").
+  - For generation-mix questions, hint `types=["hydro", "thermal", "wind", "solar"]` (import and self-consumption are not generation); leave `types` empty for supply-wide, import-dependence, energy-security, or demand questions.
 - `analysis_requirements.derived_metrics` must use only names from DERIVED_METRIC_CATALOG.
 - In `derived_metrics[].metric`, use the same vocabulary as tool params_hint.metric:
   `balancing`, `deregulated`, `guaranteed_capacity`, `exchange_rate` for price metrics.
@@ -1855,7 +1859,7 @@ _ANALYZER_SCENARIO_RULES = """\
 _ANALYZER_CHART_RULES = """\
 - `chart_requested_by_user` and `chart_recommended` must be booleans.
 - `primary_presentation`: optional, one of `chart`, `table`, `text`, `chart_plus_table`.
-- `visual_goal`: optional, one of `trend`, `compare`, `composition`, `decomposition`, `ranking`, `relationship`, `threshold_scan`.
+- `visual_goal`: optional, one of `trend`, `compare`, `composition`, `decomposition`, `ranking`, `relationship`, `threshold_scan`. Use `composition` for mix/structure/share-breakdown questions (renders stacked composition over time), not `trend`.
 - `measure_transform`: optional. Prefer:
   - `raw` for direct historical values
   - `share_of_total` for part-to-whole

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-from context import DEMAND_TECH_TYPES, SUPPLY_TECH_TYPES
+from context import DEMAND_TECH_TYPES, GENERATION_TECH_TYPES, SUPPLY_TECH_TYPES
 
-_DOMESTIC_GENERATION_TYPES = ("hydro", "thermal", "wind", "solar")
+_DOMESTIC_GENERATION_TYPES = tuple(GENERATION_TECH_TYPES)
 _LOCAL_GENERATION_TYPES = ("hydro", "wind", "solar")
 _IMPORT_DEPENDENT_TYPES = ("thermal", "import")
 
@@ -79,12 +79,26 @@ def normalize_period_series(series: pd.Series) -> pd.Series:
     return normalized
 
 
-def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
+def canonicalize_generation_mix_df(
+    df: pd.DataFrame,
+    requested_types: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
     """Pivot raw generation-mix rows into one analysis-ready row per period.
 
     The raw tool output is long-form: one ``type_tech`` row per period.
     For analytics, correlation, and grounding we need one row per period with
     canonical demand/supply aggregates.
+
+    ``requested_types`` is the ``types`` filter the tool was invoked with
+    (None/empty = unfiltered fetch). A derived total (total_supply,
+    import_dependent_supply, import_dependency_ratio, ...) is only emitted
+    when the fetch could observe every member tech of that total: a filter
+    that excludes members would leave a partial sum under a full-scope name —
+    e.g. the default generation-mix filter yields total_supply = four
+    generation techs and import_dependency_ratio = thermal / partial total —
+    which the summarizer and grounding then quote as fact (2026-07-10).
+    On an unfiltered fetch an absent tech was genuinely never observed (real
+    zeros arrive as explicit 0 rows), so observed-member sums are kept.
     """
 
     if df is None or df.empty or "type_tech" not in df.columns:
@@ -191,8 +205,15 @@ def canonicalize_generation_mix_df(df: pd.DataFrame) -> pd.DataFrame:
         if incomplete.any():
             result.loc[incomplete, guarded_gen_share_cols] = pd.NA
 
+    requested_types_set: Optional[set] = None
+    if requested_types:
+        requested_types_set = {str(t).strip().lower() for t in requested_types}
+
     def _sum_columns(tech_types: Iterable[str], output_col: str) -> None:
-        cols = [f"quantity_{tech}" for tech in tech_types if f"quantity_{tech}" in result.columns]
+        members = [str(tech).strip().lower() for tech in tech_types]
+        if requested_types_set is not None and not set(members) <= requested_types_set:
+            return
+        cols = [f"quantity_{tech}" for tech in members if f"quantity_{tech}" in result.columns]
         if cols:
             result[output_col] = result[cols].sum(axis=1, min_count=1)
 
@@ -251,18 +272,29 @@ def coerce_decimal_columns_to_float(df: pd.DataFrame) -> Tuple[pd.DataFrame, Lis
     return df, converted
 
 
-def normalize_tool_dataframe(tool_name: str, df: pd.DataFrame) -> pd.DataFrame:
+def normalize_tool_dataframe(
+    tool_name: str,
+    df: pd.DataFrame,
+    params: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
     """Apply tool-specific normalization before analytics consume a result frame.
 
     Always runs the Decimal→float64 coercion so that PostgreSQL ``numeric``
     columns become first-class numeric dtypes for ``select_dtypes(include=
     "number")`` consumers (per-column aggregates, grouping logic, chart
     builders, grounding-token extraction).
+
+    ``params`` should be the executed invocation's params: for
+    ``get_generation_mix`` the ``types`` filter drives which derived totals
+    are safe to emit (see ``canonicalize_generation_mix_df``). Callers that
+    omit it get trust-the-frame canonicalization, which mislabels partial
+    sums whenever the invocation was actually types-filtered.
     """
 
     if df is None or df.empty:
         return df
     df, _converted = coerce_decimal_columns_to_float(df)
     if tool_name == "get_generation_mix":
-        return canonicalize_generation_mix_df(df)
+        requested_types = (params or {}).get("types")
+        return canonicalize_generation_mix_df(df, requested_types=requested_types)
     return df

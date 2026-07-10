@@ -22,6 +22,8 @@ Runtime source of truth: [contracts/question_analysis_catalogs.py](../../../cont
 - Use for: generation mix or quantity by type
 - Do not use for: tariffs, balancing price, conceptual definitions
 - Main params: `types`, `mode`, `granularity`, `start_date`, `end_date`
+- `mode="share"` for mix/composition/structure questions; `mode="quantity"` only for explicit volumes
+- Generation-mix questions: `types=["hydro", "thermal", "wind", "solar"]` (import/self-cons are not generation); leave `types` empty for supply-wide/security/demand scope
 
 ## get_balancing_composition
 

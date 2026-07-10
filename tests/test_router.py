@@ -45,13 +45,74 @@ def test_match_balancing_composition_tool():
 
 
 def test_match_generation_mix_tool():
+    # 2026-07-09 generation-mix report: "generation mix" IS a composition
+    # question — share mode over generation techs only, not a quantity dump.
     inv = match_tool("Show generation mix by technology from 2020 to 2023")
     assert inv is not None
     assert inv.name == "get_generation_mix"
-    assert inv.params["mode"] == "quantity"
+    assert inv.params["mode"] == "share"
+    assert inv.params["types"] == ["hydro", "thermal", "wind", "solar"]
+    assert inv.params["share_basis"] == "generation"
     assert inv.params["granularity"] == "monthly"
     assert inv.params["start_date"] == "2020-01-01"
     assert inv.params["end_date"] == "2023-12-31"
+
+
+def test_match_generation_quantity_stays_quantity():
+    inv = match_tool("How much electricity generation was there in 2024?")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "quantity"
+    assert "share_basis" not in inv.params
+
+
+def test_generation_mix_explicit_quantities_override_share():
+    inv = match_tool("Show the generation mix in MWh for 2024")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "quantity"
+
+
+def test_generation_share_of_named_tech_uses_generation_basis():
+    inv = match_tool("What is the share of hydro in generation since 2020?")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "share"
+    assert inv.params["types"] == ["hydro"]
+    assert inv.params["share_basis"] == "generation"
+
+
+def test_supply_structure_keeps_side_basis():
+    inv = match_tool("How did the structure of electricity supply change since 2020? show generation too")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "share"
+    assert "share_basis" not in inv.params
+    assert inv.params["types"] is None
+
+
+def test_demand_structure_shares_keep_side_basis():
+    inv = match_tool("Show the structure of electricity consumption in 2024")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "share"
+    assert "share_basis" not in inv.params
+
+
+def test_generation_mix_georgian_wording_maps_to_share():
+    inv = match_tool("გენერაციის სტრუქტურა 2024 წელს")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "share"
+    assert inv.params["share_basis"] == "generation"
+
+
+def test_generation_mix_russian_wording_maps_to_share():
+    inv = match_tool("структура генерации электроэнергии в 2024 году")
+    assert inv is not None
+    assert inv.name == "get_generation_mix"
+    assert inv.params["mode"] == "share"
+    assert inv.params["share_basis"] == "generation"
 
 
 def test_match_generation_mix_tool_for_import_dependency():
@@ -59,6 +120,10 @@ def test_match_generation_mix_tool_for_import_dependency():
     assert inv is not None
     assert inv.name == "get_generation_mix"
     assert "semantic fallback" in (inv.reason or "").lower()
+    # Supply-security questions keep the broad supply scope: no generation
+    # narrowing, side-basis shares.
+    assert "share_basis" not in inv.params
+    assert inv.params["types"] == ["import"]
 
 
 def test_match_price_tool():

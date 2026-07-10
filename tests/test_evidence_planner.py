@@ -606,6 +606,66 @@ class TestResolveToolParams:
         assert params["start_date"] == "2020-06-01"
         assert params["end_date"] == "2025-06-01"
 
+    def test_generation_mix_question_defaults_to_share_and_generation_basis(self):
+        """2026-07-09 generation-mix report: mix wording implies share mode over
+        generation techs even when the analyzer emits no params_hint."""
+        payload = _make_qa_payload(
+            tools=[{"name": "get_generation_mix", "score": 0.9, "reason": "generation data"}],
+        )
+        payload["raw_query"] = "What can you say about the generation mix of Georgia?"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_generation_mix", payload["raw_query"])
+
+        assert params is not None
+        assert params["mode"] == "share"
+        assert params["types"] == ["hydro", "thermal", "wind", "solar"]
+        assert params["share_basis"] == "generation"
+
+    def test_generation_mix_explicit_quantity_hint_wins(self):
+        payload = _make_qa_payload(
+            tools=[
+                {
+                    "name": "get_generation_mix",
+                    "score": 0.9,
+                    "reason": "generation data",
+                    "params_hint": {"mode": "quantity"},
+                }
+            ],
+        )
+        payload["raw_query"] = "Show the generation mix over time"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(
+            qa,
+            "get_generation_mix",
+            payload["raw_query"],
+            hint=qa.tooling.candidate_tools[0].params_hint,
+        )
+
+        assert params is not None
+        assert params["mode"] == "quantity"
+        assert "share_basis" not in params
+        # Mix intent still narrows the default scope to generation techs.
+        assert params["types"] == ["hydro", "thermal", "wind", "solar"]
+
+    def test_supply_structure_question_keeps_side_basis(self):
+        payload = _make_qa_payload(
+            tools=[{"name": "get_generation_mix", "score": 0.9, "reason": "supply data"}],
+        )
+        payload["raw_query"] = "How did the structure of electricity supply and generation change?"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_generation_mix", payload["raw_query"])
+
+        assert params is not None
+        assert params["mode"] == "share"
+        assert "share_basis" not in params
+        assert "types" not in params
+
     def test_prices_with_correlation_adds_composition_and_tariffs(self):
         payload = _make_qa_payload(
             query_type="data_explanation",
@@ -1644,6 +1704,89 @@ class TestErrorSkipBehavior:
         assert "total_demand" in stored.columns
         assert "total_domestic_generation" in stored.columns
         assert "import_dependency_ratio" in stored.columns
+
+    def test_generation_mix_evidence_loop_forwards_types_filter(self, monkeypatch):
+        """2026-07-10: a types-filtered get_generation_mix step must reach
+        canonicalization WITH its filter so partial sums are not stored under
+        full-scope names (total_supply, import_dependency_ratio)."""
+
+        def _mock(_invocation):
+            df = pd.DataFrame(
+                {
+                    "period": [2023, 2023, 2023, 2023],
+                    "type_tech": ["hydro", "thermal", "wind", "solar"],
+                    "quantity_tech": [100.0, 50.0, 15.0, 5.0],
+                }
+            )
+            return df, list(df.columns), [tuple(r) for r in df.itertuples(index=False)]
+
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", _mock)
+
+        ctx = QueryContext(query="test")
+        ctx.tool_name = "get_prices"
+        ctx.df = pd.DataFrame({"date": ["2023-01-01"], "p_bal_gel": [50.0]})
+        ctx.cols = list(ctx.df.columns)
+        ctx.rows = [tuple(r) for r in ctx.df.itertuples(index=False)]
+        ctx.evidence_plan = [
+            {"role": "primary_data", "tool_name": "get_prices", "params": {}, "satisfied": True},
+            {
+                "role": "correlation_driver",
+                "tool_name": "get_generation_mix",
+                "params": {"types": ["hydro", "thermal", "wind", "solar"]},
+                "satisfied": False,
+            },
+        ]
+
+        ctx = execute_remaining_evidence(ctx)
+
+        stored = ctx.evidence_collected["correlation_driver"]["df"]
+        # Filter covers all domestic generation techs → complete, kept.
+        assert "total_domestic_generation" in stored.columns
+        # import/self-cons excluded by the filter → supply-scope aggregates
+        # would be mislabeled partial sums and must be suppressed.
+        assert "total_supply" not in stored.columns
+        assert "import_dependent_supply" not in stored.columns
+        assert "import_dependency_ratio" not in stored.columns
+
+
+def test_apply_tool_result_forwards_types_filter():
+    """2026-07-10: the shared router/analyzer/recovery attachment path must
+    pass the invocation's types filter into canonicalization so ctx.df never
+    carries partial sums under full-scope names."""
+    from agent.pipeline import _apply_tool_result
+    from agent.tools.types import ToolInvocation
+
+    df = pd.DataFrame(
+        [
+            ("2024-01-01", "hydro", 50.0),
+            ("2024-01-01", "thermal", 25.0),
+            ("2024-01-01", "wind", 15.0),
+            ("2024-01-01", "solar", 10.0),
+        ],
+        columns=["date", "type_tech", "quantity_tech"],
+    )
+    ctx = QueryContext(query="What can you say about the generation mix of Georgia?")
+    invocation = ToolInvocation(
+        name="get_generation_mix",
+        params={"mode": "quantity", "types": ["hydro", "thermal", "wind", "solar"]},
+        confidence=0.9,
+        reason="generation data",
+    )
+
+    ctx = _apply_tool_result(
+        ctx,
+        invocation,
+        df,
+        list(df.columns),
+        [tuple(r) for r in df.itertuples(index=False, name=None)],
+        is_explanation=False,
+    )
+
+    assert ctx.used_tool is True
+    assert "total_domestic_generation" in ctx.df.columns
+    assert "total_supply" not in ctx.df.columns
+    assert "import_dependent_supply" not in ctx.df.columns
+    assert "import_dependency_ratio" not in ctx.df.columns
 
 
 # ---------------------------------------------------------------------------

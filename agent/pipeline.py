@@ -1157,7 +1157,7 @@ def _apply_tool_result(
     relevance_query: str | None = None,
 ) -> QueryContext:
     """Attach a successful tool result to ctx and run shared post-processing."""
-    df = normalize_tool_dataframe(invocation.name, df)
+    df = normalize_tool_dataframe(invocation.name, df, params=invocation.params)
     ctx.df = df
     ctx.cols = list(df.columns)
     ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
@@ -1566,7 +1566,7 @@ def _execute_evidence_step(
     if emit_tool_execute_trace:
         _emit_trace_stage(ctx, tool_execute_trace, t_tool, tool=invocation.name, rows=len(rows))
 
-    df = normalize_tool_dataframe(invocation.name, df)
+    df = normalize_tool_dataframe(invocation.name, df, params=invocation.params)
 
     if is_primary:
         ctx.df = df

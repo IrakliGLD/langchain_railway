@@ -118,7 +118,10 @@ def _wide_supply_demand_frame():
     })
 
 
-def test_generation_mix_prepare_filters_demand_quantity_columns():
+def test_generation_mix_prepare_filters_to_generation_columns():
+    """2026-07-09 follow-up: a generation-mix question narrows past the supply
+    side to GENERATION techs — import/self-cons/total_supply are not part of
+    the generation mix."""
     df = _wide_supply_demand_frame()
     ctx = QueryContext(query="what can you say about Georgian generation mix?")
     ctx.df = df
@@ -128,11 +131,27 @@ def test_generation_mix_prepare_filters_demand_quantity_columns():
 
     assert "quantity_hydro" in num_cols
     assert "quantity_thermal" in num_cols
-    assert "quantity_import" in num_cols
-    assert "total_supply" in num_cols
+    assert "quantity_import" not in num_cols
+    assert "total_supply" not in num_cols
     assert "quantity_abkhazeti" not in num_cols
     assert "quantity_direct customers" not in num_cols
     assert "quantity_export" not in num_cols
+    assert "total_demand" not in num_cols
+
+
+def test_supply_scope_query_keeps_import_and_total_supply():
+    """Supply-wide wording (import dependence, electricity supply) keeps the
+    broad supply scope including import and total_supply."""
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="how dependent is Georgian electricity supply on import?")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
+    assert "quantity_hydro" in num_cols
+    assert "quantity_import" in num_cols
+    assert "total_supply" in num_cols
     assert "total_demand" not in num_cols
 
 
@@ -200,10 +219,10 @@ def test_generation_mix_rendered_chart_excludes_demand_series():
     assert source_metrics <= {
         "quantity_hydro",
         "quantity_thermal",
-        "quantity_import",
-        "total_supply",
     }
     assert not {
+        "quantity_import",
+        "total_supply",
         "quantity_abkhazeti",
         "quantity_direct customers",
         "quantity_export",
@@ -228,7 +247,9 @@ def test_chart_side_uses_effective_query_when_semantically_locked():
     _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
 
     assert "quantity_hydro" in num_cols
-    assert "total_supply" in num_cols
+    assert "quantity_thermal" in num_cols
+    assert "quantity_import" not in num_cols
+    assert "total_supply" not in num_cols
     assert "quantity_abkhazeti" not in num_cols
     assert "quantity_direct customers" not in num_cols
     assert "total_demand" not in num_cols
@@ -273,3 +294,88 @@ def test_supply_query_keeps_metrics_when_every_column_is_demand():
     _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
 
     assert set(num_cols) == {"quantity_abkhazeti", "quantity_export", "total_demand"}
+
+
+# ---------------------------------------------------------------------------
+# Bug D (2026-07-09 follow-up) — generation-mix questions must render the
+# GENERATION composition: share columns only, generation techs only, stacked
+# bars, and no 3-series cap chopping the component set.
+# ---------------------------------------------------------------------------
+
+def _canonicalized_mix_frame():
+    """Shape of canonicalize_generation_mix_df output for an unfiltered fetch:
+    quantity+share per supply tech plus derived aggregates. 12 monthly rows so
+    the legacy chart gate (rows >= 10 for open-ended queries) is satisfied,
+    matching real generation-mix responses (60+ months)."""
+    n = 12
+    periods = pd.date_range("2024-01-01", periods=n, freq="MS")
+    base = {
+        "quantity_hydro": 300.0,
+        "quantity_import": 90.0,
+        "quantity_self-cons": 10.0,
+        "quantity_solar": 5.0,
+        "quantity_thermal": 180.0,
+        "quantity_wind": 15.0,
+        "share_hydro": 0.50,
+        "share_import": 0.15,
+        "share_self-cons": 0.02,
+        "share_solar": 0.01,
+        "share_thermal": 0.30,
+        "share_wind": 0.02,
+        "total_supply": 600.0,
+        "total_domestic_generation": 500.0,
+        "local_generation": 320.0,
+        "import_dependent_supply": 270.0,
+        "import_dependency_ratio": 0.45,
+    }
+    data = {"period": periods}
+    for col, start in base.items():
+        step = 0.001 if start < 1 else 1.0
+        data[col] = [start + i * step for i in range(n)]
+    return pd.DataFrame(data)
+
+
+def _build(ctx_query: str) -> QueryContext:
+    df = _canonicalized_mix_frame()
+    ctx = QueryContext(query=ctx_query)
+    ctx.df = df
+    ctx.cols = list(df.columns)
+    ctx.rows = list(df.itertuples(index=False, name=None))
+    return build_chart(ctx)
+
+
+def test_generation_mix_chart_is_stacked_generation_shares():
+    out = _build("what can you say about the generation mix of Georgia?")
+
+    assert out.chart_meta is not None
+    assert out.chart_type == "stackedbar"
+    assert sorted(out.chart_meta["sourceMetrics"]) == [
+        "share_hydro",
+        "share_solar",
+        "share_thermal",
+        "share_wind",
+    ]
+
+
+def test_supply_mix_chart_keeps_all_supply_shares_stacked():
+    out = _build("show the electricity supply mix over time")
+
+    assert out.chart_meta is not None
+    assert out.chart_type == "stackedbar"
+    # All six supply components survive: composition groups are exempt from
+    # the 3-series readability cap.
+    assert sorted(out.chart_meta["sourceMetrics"]) == [
+        "share_hydro",
+        "share_import",
+        "share_self-cons",
+        "share_solar",
+        "share_thermal",
+        "share_wind",
+    ]
+
+
+def test_generation_quantities_stay_line_chart():
+    out = _build("show electricity generation quantities in MWh by technology over time")
+
+    assert out.chart_meta is not None
+    assert out.chart_type == "line"

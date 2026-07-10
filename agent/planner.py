@@ -19,6 +19,8 @@ from agent.router import (
     extract_balancing_entities,
     extract_currency,
     extract_date_range,
+    extract_generation_mix_intent,
+    extract_generation_mode,
     extract_generation_types,
     extract_price_metric,
     extract_tariff_entities,
@@ -26,6 +28,7 @@ from agent.router import (
 from agent.tools.composition_tools import ALLOWED_BALANCING_ENTITIES
 from agent.tools.types import ToolInvocation
 from config import ENABLE_CONTRACT_CONTINUITY, ENABLE_TRACE_DEBUG_ARTIFACTS
+from context import GENERATION_TECH_TYPES
 from contracts.question_analysis import (
     AnswerKind,
     PreferredPath,
@@ -407,7 +410,10 @@ def _apply_technical_indicator_bundle_guardrail(
                 "end_date": None,
                 "entities": [],
                 "types": [],
-                "mode": "quantity",
+                # Composition wording (generation mix/structure) keeps share
+                # mode; pinning "quantity" here would undo the mix routing
+                # (2026-07-09 report). Single authority: agent/router.py.
+                "mode": extract_generation_mode(primary_query.lower()),
             },
         }
     ]
@@ -522,7 +528,10 @@ def _apply_quantity_trend_guardrail(
                 "end_date": None,
                 "entities": [],
                 "types": [],
-                "mode": "quantity",
+                # Composition wording ("generation mix evolution") keeps share
+                # mode so the trend renders as a stacked composition; plain
+                # quantity trends stay "quantity". Single authority: router.
+                "mode": extract_generation_mode(primary_query.lower()),
             },
         }
     ]
@@ -2338,11 +2347,19 @@ def resolve_tool_params(
 
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)
-        mode = (getattr(hint, "mode", None) if hint else None) or "quantity"
+        # An explicit analyzer hint wins; otherwise composition wording implies
+        # share mode (single authority: agent/router.py, 2026-07-09 report).
+        mode = (getattr(hint, "mode", None) if hint else None) or extract_generation_mode(effective_query)
+        mode = str(mode).lower()
         raw_gran = getattr(hint, "granularity", None) if hint else None
         if not raw_gran and qa.sql_hints.period and qa.sql_hints.period.granularity:
             raw_gran = qa.sql_hints.period.granularity.value
         granularity = normalize_tool_granularity_hint(raw_gran) or "monthly"
+        if extract_generation_mix_intent(effective_query):
+            if not types:
+                types = list(GENERATION_TECH_TYPES)
+            if mode == "share" and set(types) <= set(GENERATION_TECH_TYPES):
+                params["share_basis"] = "generation"
         if types:
             params["types"] = types
         params.update({"mode": mode, "granularity": granularity})

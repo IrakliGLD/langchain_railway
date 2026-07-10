@@ -375,3 +375,8 @@ def strip_inline_citation_markers(text: str) -> str:
 SUPPLY_TECH_TYPES = list(dict.fromkeys(list(TECH_TYPE_GROUPS["supply"].keys()) + ["self-cons"]))
 DEMAND_TECH_TYPES = list(TECH_TYPE_GROUPS["demand"].keys())
 TRANSIT_TECH_TYPES = ["transit"]
+# Domestic generation technologies: the supply side minus non-generation
+# sources (import is purchased abroad, self-cons never reaches the grid).
+# "Generation mix" questions are about THIS set — supply mix / energy-balance /
+# import-dependence questions keep the broader SUPPLY_TECH_TYPES.
+GENERATION_TECH_TYPES = [t for t in SUPPLY_TECH_TYPES if t not in ("import", "self-cons")]
