@@ -82,13 +82,13 @@ NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com
 # answers get truncated.
 NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
-# Optional wall-clock bound per NVIDIA call, in seconds. Unset/0 = unbounded
-# (the pre-2026-07-08 behavior). When set, a slow shared-endpoint model (the
+# Wall-clock bound per NVIDIA call, in seconds. Defaults to 90; explicitly set
+# to 0 only when an unbounded call is intentionally required. A slow shared-endpoint model (the
 # z-ai/glm-5.2 incident: 113s analyzer + 192s summarizer calls at ~12 tok/s)
 # times out and falls back to OpenAI instead of holding the request for
 # minutes; max_retries drops to 1 because retrying a timeout on a slow model
 # only multiplies the wait (same rationale as the Gemini summarizer client).
-_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "").strip()
+_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "90").strip()
 NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this

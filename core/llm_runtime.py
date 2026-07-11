@@ -13,6 +13,7 @@ without migrating every ``monkeypatch.setattr(llm_core, ...)`` call site.
 import hashlib
 import logging
 import threading as _threading
+import time as _time
 from typing import Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -98,7 +99,7 @@ class LLMResponseCache:
     def __init__(
         self,
         max_size: int = 1000,
-        coalesce_timeout: float = 180.0,
+        coalesce_timeout: float = 95.0,
     ):
         self._cache: dict[str, str] = {}
         self._max_size = max_size
@@ -109,7 +110,7 @@ class LLMResponseCache:
         # Guards both _cache and _in_flight mutations.
         self._lock = _threading.Lock()
         # key → Event; set when the leader finishes (success or failure).
-        self._in_flight: dict[str, _threading.Event] = {}
+        self._in_flight: dict[str, tuple[_threading.Event, object, float]] = {}
 
     def _make_key(self, prompt: str) -> str:
         """Generate cache key from prompt hash."""
@@ -132,14 +133,15 @@ class LLMResponseCache:
                 log.info("✅ LLM cache HIT (hit rate: %.1f%%)", self.hit_rate() * 100)
                 return self._cache[key]
 
-            event = self._in_flight.get(key)
-            if event is None:
+            flight = self._in_flight.get(key)
+            if flight is None:
                 # True miss — no cached value, nobody computing it.
                 self._misses += 1
                 return None
 
         # Another thread is computing this key — wait for it.
         log.info("⏳ LLM cache: waiting for in-flight result (key=%.8s…)", key)
+        event, _token, _started_at = flight
         signaled = event.wait(timeout=self._coalesce_timeout)
 
         with self._lock:
@@ -158,21 +160,79 @@ class LLMResponseCache:
         self._misses += 1
         return None
 
-    def set(self, prompt: str, response: str):
+    def get_or_reserve(self, prompt: str) -> tuple[Optional[str], object | None]:
+        """Atomically return a cached value or reserve singleflight ownership.
+
+        The opaque token must be passed to :meth:`set` or
+        :meth:`cancel_in_flight`. A waiter can replace a timed-out owner, and a
+        late result from that stale owner is then discarded.
+        """
+
+        key = self._make_key(prompt)
+        deadline = _time.monotonic() + (self._coalesce_timeout * 2)
+        observed_flight = None
+        while True:
+            with self._lock:
+                if key in self._cache:
+                    self._hits += 1
+                    return self._cache[key], None
+                flight = self._in_flight.get(key)
+                if flight is None:
+                    token = object()
+                    self._in_flight[key] = (_threading.Event(), token, _time.monotonic())
+                    self._misses += 1
+                    return None, token
+
+            event, _token, _started_at = flight
+            if flight is not observed_flight:
+                log.info("LLM cache: waiting for in-flight result (key=%.8s...)", key)
+                observed_flight = flight
+            remaining = max(0.0, deadline - _time.monotonic())
+            signaled = event.wait(timeout=min(self._coalesce_timeout, remaining))
+
+            with self._lock:
+                result = self._cache.get(key)
+                if result is not None:
+                    self._coalesce_hits += 1
+                    return result, None
+                current = self._in_flight.get(key)
+                if not signaled and current is flight:
+                    replacement_token = object()
+                    replacement_event = _threading.Event()
+                    self._in_flight[key] = (
+                        replacement_event,
+                        replacement_token,
+                        _time.monotonic(),
+                    )
+                    event.set()
+                    self._misses += 1
+                    log.warning("LLM cache replaced stale in-flight owner (key=%.8s...)", key)
+                    return None, replacement_token
+
+            if _time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for coalesced LLM result key={key[:8]}")
+
+    def set(self, prompt: str, response: str, token: object | None = None):
         """Cache response for prompt and wake any waiting threads."""
         key = self._make_key(prompt)
 
         with self._lock:
+            current = self._in_flight.get(key)
+            if token is not None and (current is None or current[1] is not token):
+                log.warning("Discarding stale LLM cache result (key=%.8s...)", key)
+                return False
             if len(self._cache) >= self._max_size:
                 remove_count = max(1, self._max_size // 10)
                 for _ in range(remove_count):
                     self._cache.pop(next(iter(self._cache)), None)
                 log.info("🗑️ Cache eviction: removed %d oldest entries", remove_count)
             self._cache[key] = response
-            event = self._in_flight.pop(key, None)
+            flight = self._in_flight.pop(key, None)
 
-        if event is not None:
+        if flight is not None:
+            event = flight[0]
             event.set()  # Wake all waiters.
+        return True
 
     # --- coalescing lifecycle ---
 
@@ -182,16 +242,24 @@ class LLMResponseCache:
         key = self._make_key(prompt)
         with self._lock:
             if key not in self._in_flight:
-                self._in_flight[key] = _threading.Event()
+                token = object()
+                self._in_flight[key] = (_threading.Event(), token, _time.monotonic())
+                return token
+        return None
 
-    def cancel_in_flight(self, prompt: str):
+    def cancel_in_flight(self, prompt: str, token: object | None = None):
         """Remove the in-flight marker without caching a value.  Wakes any
         waiting threads so they can retry independently."""
         key = self._make_key(prompt)
         with self._lock:
-            event = self._in_flight.pop(key, None)
-        if event is not None:
+            current = self._in_flight.get(key)
+            if token is not None and (current is None or current[1] is not token):
+                return False
+            flight = self._in_flight.pop(key, None)
+        if flight is not None:
+            event = flight[0]
             event.set()
+        return True
 
     # --- stats ---
 

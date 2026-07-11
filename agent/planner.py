@@ -53,6 +53,7 @@ from utils.forecasting import (
 )
 from utils.language import detect_language, get_language_instruction
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution
+from utils.residual_price import is_implied_ppa_cfd_price_query
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -1858,8 +1859,104 @@ def prepare_context(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _build_implied_ppa_cfd_question_analysis(ctx: QueryContext) -> QuestionAnalysis:
+    """Build the authoritative contract for the negligible-import approximation."""
+
+    start_date, end_date = extract_date_range(ctx.query)
+    lang_code = ctx.lang_code or detect_language(ctx.query)
+    payload = {
+        "version": "question_analysis_v1",
+        "raw_query": ctx.query,
+        "canonical_query_en": (
+            "Find months where import is below the requested negligible-share threshold and calculate "
+            "the approximate weighted average PPA/CfD price from the balancing-price residual."
+        ),
+        "language": {"input_language": lang_code, "answer_language": lang_code},
+        "classification": {
+            "query_type": "data_retrieval",
+            "analysis_mode": "light",
+            "intent": "implied_ppa_cfd_price_approximation",
+            "needs_clarification": False,
+            "confidence": 1.0,
+            "ambiguities": [],
+        },
+        "routing": {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+            "needs_multi_tool": False,
+            "evidence_roles": ["primary_data"],
+        },
+        "knowledge": {"candidate_topics": []},
+        "tooling": {
+            "candidate_tools": [{
+                "name": "get_prices",
+                "score": 1.0,
+                "reason": "balancing prices anchor the deterministic PPA/CfD residual calculation",
+                "params_hint": {
+                    "metric": "balancing",
+                    "currency": "both",
+                    "granularity": "monthly",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "entities": [],
+                    "types": [],
+                },
+            }],
+        },
+        "sql_hints": {
+            "metric": "balancing",
+            "entities": [],
+            "aggregation": "monthly",
+            "dimensions": ["period", "price", "share"],
+            "period": None,
+            "filter": None,
+        },
+        "visualization": {
+            "chart_requested_by_user": False,
+            "chart_recommended": False,
+            "chart_confidence": 0.0,
+            "preferred_chart_family": None,
+            "primary_presentation": "table",
+            "visual_goal": "threshold_scan",
+            "measure_transform": "weighted_avg",
+            "time_grain": "month",
+        },
+        "analysis_requirements": {
+            "needs_driver_analysis": False,
+            "needs_trend_context": False,
+            "needs_correlation_context": False,
+            "derived_metrics": [],
+        },
+        "answer_kind": "timeseries",
+        "render_style": "deterministic",
+        "grouping": "by_period",
+        "entity_scope": "ppa_cfd_excluding_import_approximation",
+    }
+    return QuestionAnalysis.model_validate(payload)
+
+
 def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
     """Stage 0.2: Run structured question analysis and stamp its source."""
+
+    if source == "llm_active" and is_implied_ppa_cfd_price_query(ctx.query):
+        ctx.question_analysis = _build_implied_ppa_cfd_question_analysis(ctx)
+        ctx.question_analysis_error = ""
+        ctx.question_analysis_source = source
+        ctx.clarify_reason = ""
+        log.info("Applied deterministic implied PPA/CfD price contract; skipped question-analyzer LLM")
+        trace_detail(
+            log,
+            ctx,
+            "stage_0_2_question_analyzer",
+            "deterministic_contract",
+            source="implied_ppa_cfd_price_guardrail",
+            query_type="data_retrieval",
+            preferred_path="tool",
+            candidate_tools=["get_prices"],
+        )
+        return ctx
 
     prompt_validation = None
     if source == "llm_shadow" and ENABLE_TRACE_DEBUG_ARTIFACTS:

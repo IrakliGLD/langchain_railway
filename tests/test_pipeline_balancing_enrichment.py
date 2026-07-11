@@ -222,3 +222,33 @@ def test_balancing_driver_enrichment_adds_driver_context_for_explicit_residual_c
     assert "residual_contribution_ppa_import_gel" in out.cols
     assert "residual_contribution_ppa_import_usd" in out.cols
     assert "balancing_driver_context" in out.evidence_collected
+
+
+def test_balancing_driver_enrichment_recognizes_implied_ppa_cfd_query(monkeypatch):
+    monkeypatch.setattr(pipeline, "ENGINE", _FakeEngine())
+    monkeypatch.setattr(
+        pipeline,
+        "compute_entity_price_contributions",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-02-01"],
+                "share_import": [0.001, 0.003],
+                "share_renewable_ppa": [0.4, 0.4],
+                "share_thermal_ppa": [0.1, 0.1],
+                "share_cfd_scheme": [0.1, 0.1],
+                "known_price_coverage_ok": [True, True],
+                "residual_contribution_ppa_import_gel": [60.0, 66.0],
+            }
+        ),
+    )
+    ctx = _seed_ctx(
+        "Prices of regulated and deregulated plants are known. Find months where the share of import "
+        "in the balancing basket is less than 0.2% and calculate the weighted average PPA/CfD price."
+    )
+    invocation = ToolInvocation(name="get_prices", params={"metric": "balancing", "currency": "both"})
+
+    out = pipeline._enrich_prices_with_balancing_driver_context(ctx, invocation, is_explanation=False)
+
+    assert "known_price_coverage_ok" in out.cols
+    assert "residual_contribution_ppa_import_gel" in out.cols
+    assert "balancing_driver_context" in out.evidence_collected

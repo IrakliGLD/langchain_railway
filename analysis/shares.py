@@ -451,6 +451,14 @@ def compute_entity_price_contributions(
       COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_usd, 0)
         AS total_known_contributions_usd,
 
+      -- Residual calculations are valid only when every positive-share known bucket has a price.
+      CASE WHEN
+        (s.qty_dereg_hydro = 0 OR ep.price_deregulated_hydro_gel IS NOT NULL) AND
+        (s.qty_reg_hpp = 0 OR ep.price_regulated_hpp_gel IS NOT NULL) AND
+        (s.qty_reg_new_tpp = 0 OR ep.price_regulated_new_tpp_gel IS NOT NULL) AND
+        (s.qty_reg_old_tpp = 0 OR ep.price_regulated_old_tpp_gel IS NOT NULL)
+      THEN TRUE ELSE FALSE END AS known_price_coverage_ok,
+
       -- Residual (PPA + import contribution, not directly observable)
       p.p_bal_gel - (
         COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_gel, 0) +

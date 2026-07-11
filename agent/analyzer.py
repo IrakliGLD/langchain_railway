@@ -35,6 +35,7 @@ from utils.forecasting import (
     extract_forecast_horizon_years,
     forecast_history_window_years,
 )
+from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -1481,7 +1482,7 @@ def _extract_share_threshold(user_query: str) -> Optional[tuple[str, float, str]
             raw_value = float(match.group(2))
         except (TypeError, ValueError):
             continue
-        threshold = raw_value / 100.0 if raw_value > 1 else raw_value
+        threshold = normalize_share_threshold(raw_value, match.group(0))
         return operator, threshold, phrase
     return None
 

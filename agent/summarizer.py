@@ -44,6 +44,7 @@ from core.llm import (
 from models import GroundingPolicy, QueryContext, ResolutionPolicy
 from utils.language import get_grounding_fallback_message
 from utils.metrics import metrics
+from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -1920,6 +1921,7 @@ _RESIDUAL_THRESHOLD_RULES: list[tuple[str, str, str]] = [
 _RESIDUAL_DIRECT_INTENTS = frozenset({
     "residual_weighted_price_calculation",
     "residual_weighted_price_followup",
+    "implied_ppa_cfd_price_approximation",
 })
 _RESIDUAL_DIRECT_ANSWER_KINDS = frozenset({
     AnswerKind.SCALAR,
@@ -1971,7 +1973,7 @@ def _extract_residual_share_threshold(query: str) -> tuple[str, float, str] | No
             raw_value = float(raw_group)
         except (TypeError, ValueError):
             continue
-        threshold = raw_value / 100.0 if raw_value > 1 else raw_value
+        threshold = normalize_share_threshold(raw_value, match.group(0))
         return operator, threshold, phrase
     return None
 
@@ -2011,11 +2013,22 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     if not _residual_direct_answer_is_authorized(ctx):
         return None
 
+    intent = str(getattr(getattr(ctx.question_analysis, "classification", None), "intent", "") or "").lower()
+    is_ppa_cfd_approximation = intent == "implied_ppa_cfd_price_approximation"
+
     required_cols = {
         "share_ppa_import_total",
         "residual_contribution_ppa_import_gel",
         "residual_contribution_ppa_import_usd",
     }
+    if is_ppa_cfd_approximation:
+        required_cols.update({
+            "known_price_coverage_ok",
+            "share_import",
+            "share_renewable_ppa",
+            "share_thermal_ppa",
+            "share_cfd_scheme",
+        })
     if not required_cols.issubset(set(ctx.df.columns)):
         return None
 
@@ -2032,6 +2045,27 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     df["residual_contribution_ppa_import_usd"] = pd.to_numeric(
         df["residual_contribution_ppa_import_usd"], errors="coerce"
     )
+    if is_ppa_cfd_approximation:
+        approximation_share_cols = [
+            "share_import",
+            "share_renewable_ppa",
+            "share_thermal_ppa",
+            "share_cfd_scheme",
+        ]
+        for col in approximation_share_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["share_ppa_cfd_total"] = df[
+            ["share_renewable_ppa", "share_thermal_ppa", "share_cfd_scheme"]
+        ].sum(axis=1, min_count=3)
+        coverage_ok = df["known_price_coverage_ok"].map(
+            lambda value: value is True or str(value).strip().lower() in {"true", "1", "yes"}
+        )
+        df = df[coverage_ok]
+        if df.empty:
+            return (
+                "No months could be calculated because the retrieved data did not contain complete prices "
+                "for every positive-share regulated and deregulated bucket."
+            )
     df = df.dropna(subset=[date_col, "share_ppa_import_total"])
     df = df[df["share_ppa_import_total"] > 0]
     if df.empty:
@@ -2047,17 +2081,21 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     threshold_rule = _extract_residual_share_threshold(ctx.query)
     if threshold_rule:
         operator, threshold, phrase = threshold_rule
+        threshold_col = "share_import" if is_ppa_cfd_approximation else "share_ppa_import_total"
         if operator == "gt":
-            df = df[df["share_ppa_import_total"] > threshold]
+            df = df[df[threshold_col] > threshold]
         elif operator == "ge":
-            df = df[df["share_ppa_import_total"] >= threshold]
+            df = df[df[threshold_col] >= threshold]
         elif operator == "lt":
-            df = df[df["share_ppa_import_total"] < threshold]
+            df = df[df[threshold_col] < threshold]
         else:
-            df = df[df["share_ppa_import_total"] <= threshold]
+            df = df[df[threshold_col] <= threshold]
         if df.empty:
             threshold_pct = threshold * 100 if threshold <= 1 else threshold
             label = (
+                "import"
+                if is_ppa_cfd_approximation
+                else
                 "renewable PPA + import + thermal PPA + CfD scheme"
                 if _has_explicit_residual_component_query_signal(ctx.query)
                 else "the residual PPA/CfD/import layer"
@@ -2068,6 +2106,46 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
             )
 
     df = df.sort_values(date_col).copy()
+    if is_ppa_cfd_approximation:
+        df = df.dropna(subset=[
+            "share_import",
+            "share_ppa_cfd_total",
+            "residual_contribution_ppa_import_gel",
+            "residual_contribution_ppa_import_usd",
+        ])
+        df = df[df["share_ppa_cfd_total"] > 0]
+        if df.empty:
+            return None
+        df["implied_ppa_cfd_price_gel"] = (
+            df["residual_contribution_ppa_import_gel"] / df["share_ppa_cfd_total"]
+        )
+        df["implied_ppa_cfd_price_usd"] = (
+            df["residual_contribution_ppa_import_usd"] / df["share_ppa_cfd_total"]
+        )
+        lines = [
+            "**Approximate Weighted Average PPA/CfD Price**",
+            "",
+            "This is a monthly implied price for Renewable PPA + Thermal PPA + CfD Scheme. "
+            "It assumes the import contribution is zero in months passing the requested import-share filter.",
+            "",
+            "Formula: approximate PPA/CfD price = residual PPA/CfD/import contribution / PPA/CfD share.",
+            "Exact conditional formula: (residual contribution - import share × import price) / PPA/CfD share.",
+            "",
+        ]
+        if threshold_rule:
+            _operator, threshold, _phrase = threshold_rule
+            lines.append(f"Applied filter: import share {_phrase} {threshold * 100:.3g}%.")
+            lines.append("")
+        for _, row in df.iterrows():
+            period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
+            lines.append(
+                f"- {period_str}: import share {float(row['share_import']) * 100:.3f}%; "
+                f"PPA/CfD share {float(row['share_ppa_cfd_total']) * 100:.1f}%; "
+                f"approximate PPA/CfD price {float(row['implied_ppa_cfd_price_gel']):.1f} GEL/MWh "
+                f"({float(row['implied_ppa_cfd_price_usd']):.1f} USD/MWh)"
+            )
+        return "\n".join(lines)
+
     # Recover the implied weighted price by dividing the residual contribution by the residual share.
     df["remaining_weighted_price_gel"] = (
         df["residual_contribution_ppa_import_gel"] / df["share_ppa_import_total"]
@@ -2592,12 +2670,25 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             )
             ctx.share_summary_override = None
 
+    # Explicitly authorized calculations take precedence over the generic
+    # evidence-frame renderer, which can only display retrieved observations
+    # and cannot derive the requested residual price.
+    _residual_answer = _build_residual_weighted_price_direct_answer(ctx)
+
     # --- Generic renderer path (answer_kind + evidence frame) ---
     # Attempt the generic renderer FIRST when we have a canonical evidence frame
     # and a deterministic render_style.  Handles SCALAR, LIST, TIMESERIES,
     # COMPARISON, SCENARIO, and FORECAST answer kinds — no regex detection.
-    _generic_answer = _try_generic_renderer(ctx)
-    if _generic_answer is not None:
+    _generic_answer = None if _residual_answer is not None else _try_generic_renderer(ctx)
+    if _residual_answer is not None:
+        ctx.summary = _residual_answer
+        ctx.summary_source = "deterministic_residual_weighted_price_direct"
+        ctx.summary_claims = []
+        ctx.summary_citations = ["deterministic_residual_weighted_price_direct"]
+        ctx.summary_confidence = 0.95
+        metrics.log_deterministic_skip(ctx.summary_source)
+        log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
+    elif _generic_answer is not None:
         ctx.summary = _generic_answer
         ctx.summary_source = "generic_renderer"
         # The generic renderer is already deterministic over the evidence frame.
@@ -2630,14 +2721,6 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_confidence = 0.98
         metrics.log_deterministic_skip(ctx.summary_source)
         log.info("Deterministic regulated tariff list answer eligible; skipping Stage 4 LLM.")
-    elif (residual_answer := _build_residual_weighted_price_direct_answer(ctx)) is not None:
-        ctx.summary = residual_answer
-        ctx.summary_source = "deterministic_residual_weighted_price_direct"
-        ctx.summary_claims = []
-        ctx.summary_citations = ["deterministic_residual_weighted_price_direct"]
-        ctx.summary_confidence = 0.95
-        metrics.log_deterministic_skip(ctx.summary_source)
-        log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.
