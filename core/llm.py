@@ -1847,6 +1847,7 @@ _ANALYZER_CORE_RULES = """\
   `balancing`, `deregulated`, `guaranteed_capacity`, `exchange_rate` for price metrics.
   Exception: share-based metrics use column names: `share_import`, `share_thermal_ppa`, etc.
 - `analysis_requirements` should specify needed derived evidence, but must not compute any values.
+- For forecast questions, set `analysis_requirements.forecast_horizon_years` to the requested duration (1-20). This structured value is authoritative downstream.
 - Dates must use YYYY-MM-DD.
 """
 

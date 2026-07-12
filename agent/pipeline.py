@@ -31,7 +31,13 @@ from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_execu
 from agent.evidence_validator import validate_evidence
 from agent.fixture_candidates import log_fixture_candidate
 from agent.frame_adapters import adapt_tool_result
-from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
+from agent.provenance import (
+    build_provenance_refs,
+    clear_provenance,
+    sql_query_hash,
+    stamp_provenance,
+    tool_invocation_hash,
+)
 from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.tools import execute_tool
@@ -1232,9 +1238,10 @@ def _build_and_attach_evidence_frame(ctx: QueryContext, invocation: ToolInvocati
                 filter_cond = tc.params_hint.filter
                 break
 
-    prov_refs = []
-    if hasattr(ctx, "provenance") and ctx.provenance:
-        prov_refs = [p.get("query_hash", "") for p in ctx.provenance if isinstance(p, dict)]
+    # stamp_provenance() already bound the exact tool invocation and source
+    # rows. QueryContext has never had a ``provenance`` attribute; consulting
+    # it here silently produced empty canonical-frame provenance.
+    prov_refs = list(ctx.provenance_refs)
 
     frame = adapt_tool_result(
         tool_name=invocation.name,
@@ -1626,15 +1633,27 @@ def _execute_evidence_step(
                 None,
             )
         if matched_step:
+            stored_cols = list(ctx.cols if is_primary else df.columns)
+            stored_rows = (
+                list(ctx.rows) if is_primary
+                else [tuple(r) for r in df.itertuples(index=False, name=None)]
+            )
+            query_hash = tool_invocation_hash(invocation.name, invocation.params)
+            refs = build_provenance_refs(
+                stored_cols,
+                stored_rows,
+                source="tool",
+                query_hash=query_hash,
+                parent_refs=(ctx.provenance_refs if is_primary else ()),
+            )
             ctx.evidence_collected[matched_step["role"]] = {
                 "tool": invocation.name,
                 "params": dict(invocation.params),
                 "df": (ctx.df.copy() if is_primary else df),
-                "cols": list(ctx.cols if is_primary else df.columns),
-                "rows": (
-                    list(ctx.rows) if is_primary
-                    else [tuple(r) for r in df.itertuples(index=False, name=None)]
-                ),
+                "cols": stored_cols,
+                "rows": stored_rows,
+                "query_hash": query_hash,
+                "provenance_refs": refs,
             }
             matched_step["satisfied"] = True
             remaining = sum(1 for s in ctx.evidence_plan if not s.get("satisfied"))

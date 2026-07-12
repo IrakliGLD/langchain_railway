@@ -1,7 +1,7 @@
 # Comprehensive Audit Remediation Plan
 
 **Date:** 2026-07-11
-**Status:** P0 and P1 are locally verified and independently committed in both repository tracks. P1 production activation, deployed-source proof, and unavailable live-database/deployment checks remain operator follow-ups and do not block the independent repository commits. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), and [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md).
+**Status:** P0 and P1 are locally verified and independently committed in both repository tracks. P2.A backend is locally verified and ready for its independent commit; P2.B frontend remains open. P1 production activation, deployed-source proof, and unavailable live-database/deployment checks remain operator follow-ups and do not block the independent repository commits. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md), and [p2_execution_ledger_2026-07-13.md](p2_execution_ledger_2026-07-13.md).
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
@@ -413,13 +413,13 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H2
 **Effort/risk:** M / Medium
 
-- [ ] Define storage unit, canonical unit, display unit, conversion, compatible aggregations, precision, and filter semantics for every metric family.
-- [ ] Correct GEL/MWh to tetri/kWh and USD/MWh to cents/kWh conversion.
-- [ ] Correct thousand MWh to MWh conversion.
-- [ ] Correct ratio to percentage conversion.
-- [ ] Convert before filtering, deriving, comparing, and rendering.
-- [ ] Reject incompatible unit comparisons rather than guessing.
-- [ ] Replace tests that currently encode raw values as display values.
+- [x] Define storage unit, canonical unit, display unit, conversion, compatible aggregations, precision, and filter semantics for every metric family.
+- [x] Correct GEL/MWh to tetri/kWh and USD/MWh to cents/kWh conversion.
+- [x] Correct thousand MWh to MWh conversion.
+- [x] Correct ratio to percentage conversion.
+- [x] Convert before filtering, deriving, comparing, and rendering.
+- [x] Reject incompatible unit comparisons rather than guessing.
+- [x] Replace tests that currently encode raw values as display values.
 
 **Acceptance:**
 
@@ -436,12 +436,12 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H3
 **Effort/risk:** M / Medium
 
-- [ ] Parse, sort, and deduplicate by the documented period grain.
-- [ ] Count unique periods, not rows.
-- [ ] Use actual elapsed calendar time for CAGR.
-- [ ] Compute recent windows chronologically, regardless of source order.
-- [ ] Replace mixed numeric-column quick statistics with per-metric compatible results.
-- [ ] Correct the equal-values trend label.
+- [x] Parse, sort, and deduplicate by the documented period grain.
+- [x] Count unique periods, not rows.
+- [x] Use actual elapsed calendar time for CAGR.
+- [x] Compute recent windows chronologically, regardless of source order.
+- [x] Replace mixed numeric-column quick statistics with per-metric compatible results.
+- [x] Correct the equal-values trend label.
 
 **Acceptance:**
 
@@ -455,9 +455,9 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** M2
 **Effort/risk:** S–M / Low
 
-- [ ] Remove the nonexistent ctx.provenance path.
-- [ ] Bind actual query hashes and all contributing source hashes to canonical frames.
-- [ ] Define how merged/derived evidence carries multiple references.
+- [x] Remove the nonexistent ctx.provenance path.
+- [x] Bind actual query hashes and all contributing source hashes to canonical frames.
+- [x] Define how merged/derived evidence carries multiple references.
 
 **Acceptance:**
 
@@ -470,9 +470,9 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Findings:** M10, M12, M13
 **Effort/risk:** S–M / Low–Medium
 
-- [ ] Keep correlation fallback within the requested period and expose N, period, and uncertainty.
-- [ ] Make structured forecast horizon authoritative; normalize case and supported word forms as fallback.
-- [ ] Include provider, exact embedding model, dimension, normalization/version, and corpus version in cache keys.
+- [x] Keep correlation fallback within the requested period and expose N, period, and uncertainty.
+- [x] Make structured forecast horizon authoritative; normalize case and supported word forms as fallback.
+- [x] Include provider, exact embedding model, dimension, normalization/version, and corpus version in cache keys.
 
 **Acceptance:**
 
@@ -481,6 +481,8 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - Model/dimension/corpus changes cause embedding cache misses.
 
 ### P2 exit gate
+
+**Current state (2026-07-13):** P2.A passes all backend gates (1,385 tests). P2.B consumer-contract work is still open, so the overall P2 exit gate is not yet closed. H1 remains off.
 
 - Dimensional, statistical, filter, period-scope, and provenance golden tests pass.
 - Shadow comparisons explain every intentional numeric change.

@@ -1253,6 +1253,7 @@ def ask_post(
                 "summary_provenance_gate_reason": str(ctx.summary_provenance_gate_reason or ""),
                 "provenance_query_hash": str(ctx.provenance_query_hash or ""),
                 "provenance_source": str(ctx.provenance_source or ""),
+                "provenance_refs": list(getattr(ctx, "provenance_refs", []) or []),
                 "answer_provenance": build_answer_provenance(ctx),
             }
         )

@@ -140,7 +140,10 @@ def _expand_forecast_history_window(
         return start_date, end_date
 
     query_text = (qa.canonical_query_en or raw_query or "").lower()
-    horizon_years = extract_forecast_horizon_years(query_text)
+    horizon_years = extract_forecast_horizon_years(
+        query_text,
+        structured_horizon_years=qa.analysis_requirements.forecast_horizon_years,
+    )
     excluded_years = extract_excluded_years(query_text)
     desired_history_years = forecast_history_window_years(horizon_years, len(excluded_years))
 

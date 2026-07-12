@@ -1,0 +1,10 @@
+{
+  "registry_version": "1.0.0",
+  "cases": [
+    {"metric_id": "price.gel", "storage_value": 150.0, "canonical_value": 15.0, "canonical_unit": "tetri/kWh"},
+    {"metric_id": "price.usd", "storage_value": 100.0, "canonical_value": 10.0, "canonical_unit": "USD cents/kWh"},
+    {"metric_id": "energy.quantity", "storage_value": 1.5, "canonical_value": 1500.0, "canonical_unit": "MWh"},
+    {"metric_id": "ratio.share", "storage_value": 0.1, "canonical_value": 10.0, "canonical_unit": "%"},
+    {"metric_id": "tariff.gel", "storage_value": 150.0, "canonical_value": 150.0, "canonical_unit": "GEL/MWh"}
+  ]
+}

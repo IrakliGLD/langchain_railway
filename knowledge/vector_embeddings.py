@@ -70,6 +70,10 @@ class OpenAIEmbeddingProvider:
         from langchain_openai import OpenAIEmbeddings
 
         self._expected_dimension = _expected_dimension()
+        self._provider_name = "openai"
+        self._model = resolved_model
+        self._normalization_version = os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1"
+        self._corpus_version = os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1"
         client_kwargs = {"model": resolved_model, "api_key": api_key}
         if resolved_model.startswith("text-embedding-3"):
             client_kwargs["dimensions"] = self._expected_dimension
@@ -112,7 +116,10 @@ class GeminiEmbeddingProvider:
 
         self._expected_dimension = _expected_dimension()
         self._batch_size = _batch_size()
+        self._provider_name = "gemini"
         self._model = resolved_model
+        self._normalization_version = os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1"
+        self._corpus_version = os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1"
         self._legacy_model = (
             resolved_model
             if resolved_model.startswith("models/")
@@ -226,15 +233,30 @@ class GeminiEmbeddingProvider:
 # Provider construction builds an SDK client (and its HTTP session) — reuse it
 # across requests instead of rebuilding per retrieval. Keyed by the env values
 # that determine construction, so a config change never serves a stale client.
-_PROVIDER_CACHE: dict[tuple[str, str, str], EmbeddingProvider] = {}
+_PROVIDER_CACHE: dict[tuple[str, str, str, str, str, str], EmbeddingProvider] = {}
 _PROVIDER_CACHE_LOCK = threading.Lock()
 
 
-def _provider_cache_key(resolved_provider: str) -> tuple[str, str, str]:
+def _provider_cache_key(resolved_provider: str) -> tuple[str, str, str, str, str, str]:
+    default_model = "gemini-embedding-001" if resolved_provider == "gemini" else "text-embedding-3-small"
     return (
         resolved_provider,
-        os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "").strip(),
-        os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "").strip(),
+        os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", default_model).strip() or default_model,
+        str(_expected_dimension()),
+        os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1",
+        os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1",
+        str(_batch_size()),
+    )
+
+
+def embedding_cache_identity(provider: EmbeddingProvider) -> tuple[str, str, int, str, str]:
+    """Return every configuration dimension that makes vectors compatible."""
+    return (
+        str(getattr(provider, "_provider_name", type(provider).__name__)),
+        str(getattr(provider, "_model", "")),
+        int(getattr(provider, "_expected_dimension", _expected_dimension())),
+        str(getattr(provider, "_normalization_version", "v1")),
+        str(getattr(provider, "_corpus_version", "v1")),
     )
 
 
@@ -247,9 +269,9 @@ def reset_embedding_provider_cache() -> None:
 def get_embedding_provider(provider: str | None = None) -> EmbeddingProvider:
     """Return the default embedding provider for vector knowledge.
 
-    Instances are cached per (provider, model, dimension) config so repeated
-    retrievals reuse one SDK client instead of constructing a new one per
-    request.
+    Instances are cached per provider/model/dimension/normalization/corpus
+    identity (plus SDK batch size), so repeated retrievals reuse one SDK
+    client without surviving a relevant configuration change.
     """
 
     resolved_provider = _resolved_provider(provider)

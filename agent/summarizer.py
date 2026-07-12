@@ -2409,7 +2409,7 @@ def _build_scenario_frame(ctx: QueryContext) -> ScenarioFrame | None:
             "delta_aggregate": rec.get("delta_aggregate"),
             "delta_percent": rec.get("delta_percent"),
         })
-    return ScenarioFrame(rows=rows) if rows else None
+    return ScenarioFrame(rows=rows, provenance_refs=list(ctx.provenance_refs)) if rows else None
 
 
 def _build_forecast_frame_from_cagr_rows(ctx: QueryContext) -> tuple[str | None, list[dict[str, Any]]]:
@@ -2600,7 +2600,11 @@ def _build_forecast_frame(ctx: QueryContext) -> ForecastFrame | None:
     entries = _filter_relevant_forecast_entries(ctx, entries)
     if not entries:
         return None
-    return ForecastFrame(rows=entries, target_date=target_date)
+    return ForecastFrame(
+        rows=entries,
+        target_date=target_date,
+        provenance_refs=list(ctx.provenance_refs),
+    )
 
 
 def _allow_single_period_tariff_snapshot_render(

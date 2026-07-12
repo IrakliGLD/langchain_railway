@@ -132,6 +132,7 @@ class QueryContext:
     provenance_cols: list = dc_field(default_factory=list)
     provenance_query_hash: str = ""
     provenance_source: str = ""  # "sql" | "tool" | ""
+    provenance_refs: List[str] = dc_field(default_factory=list)
     sql_is_relevant: bool = True
     skip_chart_due_to_relevance: bool = False
 
@@ -141,6 +142,7 @@ class QueryContext:
     share_summary_override: Optional[str] = None
     analysis_evidence: List[Dict[str, Any]] = dc_field(default_factory=list)
     correlation_results: Dict[str, Any] = dc_field(default_factory=dict)
+    correlation_metadata: Dict[str, Any] = dc_field(default_factory=dict)
     add_trendlines: bool = False
     trendline_extend_to: Optional[str] = None
     # Focus periods resolved by the why-context for explanation queries

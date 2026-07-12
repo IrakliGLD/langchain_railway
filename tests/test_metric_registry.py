@@ -294,6 +294,22 @@ class TestComputeTrendSlope:
         result = compute_trend_slope({}, record, mctx)
         assert result is None
 
+    def test_trend_slope_is_chronological_and_order_invariant(self):
+        ordered = _make_df(months=5)
+        shuffled = ordered.sample(frac=1, random_state=11).reset_index(drop=True)
+        left_ctx = _make_context(ordered, months=5)
+        right_ctx = _make_context(shuffled, months=5)
+        left = compute_trend_slope(
+            {}, _base_record("trend_slope", "p_bal_gel", left_ctx.current_ts), left_ctx
+        )
+        right = compute_trend_slope(
+            {}, _base_record("trend_slope", "p_bal_gel", right_ctx.current_ts), right_ctx
+        )
+        assert left is not None and right is not None
+        assert left["trend_slope"] == right["trend_slope"]
+        assert left["period_start"] == right["period_start"]
+        assert left["period_end"] == right["period_end"]
+
 
 # ---------------------------------------------------------------------------
 # Scenario tests

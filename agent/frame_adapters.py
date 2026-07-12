@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import pandas as pd
 
+from agent.metric_units import METRIC_UNITS, UnitCompatibilityError
 from contracts.evidence_frames import (
     CanonicalFrame,
     ComparisonFrame,
@@ -35,6 +36,16 @@ _PRICE_METRIC_LABELS = {
     "p_gcap_gel": ("guaranteed_capacity_price", "GEL", "tetri/kWh"),
     "p_gcap_usd": ("guaranteed_capacity_price", "USD", "USD¢/kWh"),
     "xrate": ("exchange_rate", "GEL/USD", "GEL/USD"),
+}
+
+_PRICE_UNIT_CONTRACTS = {
+    "p_bal_gel": "price.gel",
+    "p_bal_usd": "price.usd",
+    "p_dereg_gel": "price.gel",
+    "p_dereg_usd": "price.usd",
+    "p_gcap_gel": "price.gel",
+    "p_gcap_usd": "price.usd",
+    "xrate": "exchange_rate.gel_usd",
 }
 
 _TARIFF_ENTITY_LABELS = {
@@ -116,25 +127,61 @@ def _metric_matches(row_metric: str, contract_metric: str) -> bool:
 
 
 def _apply_filter(rows: list[dict], filter_cond: Optional[FilterCondition]) -> list[dict]:
-    """Apply a value-based filter to observation rows (after fetch, before framing)."""
+    """Apply a dimensional filter after canonical conversion.
+
+    Rows for other metrics, and same-name rows in an incompatible currency,
+    remain untouched. If no matching row can interpret the explicit unit, fail
+    closed rather than comparing unrelated dimensions.
+    """
     if filter_cond is None:
-        return rows
+        return _without_internal_contracts(rows)
     op_fn = _FILTER_OPS.get(filter_cond.operator)
     if op_fn is None:
-        return rows
+        return _without_internal_contracts(rows)
     metric_key = filter_cond.metric
-    threshold = filter_cond.value
     filtered = []
+    matched = 0
+    compatible = 0
     for row in rows:
         val = row.get("value")
         row_metric = row.get("metric", "")
         if _metric_matches(row_metric, metric_key):
+            matched += 1
+            contract_id = row.get("_unit_contract")
+            try:
+                threshold = (
+                    METRIC_UNITS.get(contract_id).input_to_canonical(
+                        filter_cond.value, filter_cond.unit
+                    )
+                    if contract_id
+                    else float(filter_cond.value)
+                )
+            except UnitCompatibilityError:
+                filtered.append(row)
+                continue
+            compatible += 1
             if val is not None and op_fn(val, threshold):
                 filtered.append(row)
         else:
             # Keep rows for other metrics (filter applies only to specified metric).
             filtered.append(row)
-    return filtered
+    if matched and not compatible:
+        raise UnitCompatibilityError(
+            f"Filter unit {filter_cond.unit!r} is incompatible with metric {metric_key!r}"
+        )
+    return _without_internal_contracts(filtered)
+
+
+def _without_internal_contracts(rows: list[dict]) -> list[dict]:
+    return [
+        {key: value for key, value in row.items() if key != "_unit_contract"}
+        for row in rows
+    ]
+
+
+def _canonical_value(metric_id: str, value: float) -> tuple[float, str]:
+    definition = METRIC_UNITS.get(metric_id)
+    return definition.storage_to_canonical(value), definition.canonical_unit
 
 
 # ---------------------------------------------------------------------------
@@ -157,13 +204,16 @@ def adapt_prices(
             if col in df.columns:
                 val = raw_row.get(col)
                 if pd.notna(val):
+                    contract_id = _PRICE_UNIT_CONTRACTS[col]
+                    canonical_value, canonical_unit = _canonical_value(contract_id, val)
                     rows.append({
                         "period": period,
                         "entity_id": f"{metric}_{currency.lower()}",
                         "entity_label": f"{metric} ({currency})",
                         "metric": metric,
-                        "value": float(val),
-                        "unit": unit,
+                        "value": canonical_value,
+                        "unit": canonical_unit,
+                        "_unit_contract": contract_id,
                     })
 
     rows = _apply_filter(rows, filter_cond)
@@ -228,13 +278,16 @@ def adapt_tariffs(
                 alias = col.replace("_tariff_gel", "").replace("_tariff_usd", "")
                 label = _TARIFF_ENTITY_LABELS.get(alias, alias)
                 currency = "GEL" if "_gel" in col else "USD"
+                contract_id = f"tariff.{currency.lower()}"
+                canonical_value, canonical_unit = _canonical_value(contract_id, val)
                 rows.append({
                     "period": period,
                     "entity_id": alias,
                     "entity_label": label,
                     "metric": "tariff",
-                    "value": float(val),
-                    "unit": f"{currency}/MWh",
+                    "value": canonical_value,
+                    "unit": canonical_unit,
+                    "_unit_contract": contract_id,
                 })
 
     rows = _apply_filter(rows, filter_cond)
@@ -381,13 +434,13 @@ def adapt_generation_mix(
     """Convert get_generation_mix DataFrame into ObservationFrame."""
     rows: list[dict] = []
     prov = provenance_refs or []
-    canonical_metric_units = {
-        "total_demand": "MWh",
-        "total_domestic_generation": "MWh",
-        "local_generation": "MWh",
-        "import_dependent_supply": "MWh",
-        "total_supply": "MWh",
-        "import_dependency_ratio": "%",
+    canonical_metric_contracts = {
+        "total_demand": "energy.quantity",
+        "total_domestic_generation": "energy.quantity",
+        "local_generation": "energy.quantity",
+        "import_dependent_supply": "energy.quantity",
+        "total_supply": "energy.quantity",
+        "import_dependency_ratio": "ratio.share",
     }
 
     if "type_tech" not in df.columns:
@@ -403,34 +456,41 @@ def adapt_generation_mix(
                 val = raw_row.get(col)
                 if pd.isna(val):
                     continue
-                if col in canonical_metric_units:
+                if col in canonical_metric_contracts:
+                    contract_id = canonical_metric_contracts[col]
+                    canonical_value, canonical_unit = _canonical_value(contract_id, val)
                     rows.append({
                         "period": period,
                         "entity_id": "system",
                         "entity_label": "System",
                         "metric": col,
-                        "value": float(val),
-                        "unit": canonical_metric_units[col],
+                        "value": canonical_value,
+                        "unit": canonical_unit,
+                        "_unit_contract": contract_id,
                     })
                 elif col.startswith("quantity_"):
                     entity_id = col[len("quantity_"):]
+                    canonical_value, canonical_unit = _canonical_value("energy.quantity", val)
                     rows.append({
                         "period": period,
                         "entity_id": entity_id,
                         "entity_label": entity_id.replace("_", " ").title(),
                         "metric": "generation_quantity",
-                        "value": float(val),
-                        "unit": "MWh",
+                        "value": canonical_value,
+                        "unit": canonical_unit,
+                        "_unit_contract": "energy.quantity",
                     })
                 elif col.startswith("share_"):
                     entity_id = col[len("share_"):]
+                    canonical_value, canonical_unit = _canonical_value("ratio.share", val)
                     rows.append({
                         "period": period,
                         "entity_id": entity_id,
                         "entity_label": entity_id.replace("_", " ").title(),
                         "metric": "generation_share",
-                        "value": float(val),
-                        "unit": "%",
+                        "value": canonical_value,
+                        "unit": canonical_unit,
+                        "_unit_contract": "ratio.share",
                     })
         rows = _apply_filter(rows, filter_cond)
         return ObservationFrame(rows=rows, provenance_refs=prov)
@@ -442,22 +502,26 @@ def adapt_generation_mix(
         share = raw_row.get("share_tech")
 
         if pd.notna(qty):
+            canonical_value, canonical_unit = _canonical_value("energy.quantity", qty)
             rows.append({
                 "period": period,
                 "entity_id": tech_type,
                 "entity_label": tech_type.replace("_", " ").title(),
                 "metric": "generation_quantity",
-                "value": float(qty),
-                "unit": "MWh",
+                "value": canonical_value,
+                "unit": canonical_unit,
+                "_unit_contract": "energy.quantity",
             })
         if pd.notna(share):
+            canonical_value, canonical_unit = _canonical_value("ratio.share", share)
             rows.append({
                 "period": period,
                 "entity_id": tech_type,
                 "entity_label": tech_type.replace("_", " ").title(),
                 "metric": "generation_share",
-                "value": float(share),
-                "unit": "%",
+                "value": canonical_value,
+                "unit": canonical_unit,
+                "_unit_contract": "ratio.share",
             })
 
     rows = _apply_filter(rows, filter_cond)
@@ -486,13 +550,15 @@ def adapt_balancing_composition(
             if pd.notna(val):
                 label = _COMPOSITION_ENTITY_LABELS.get(col, col)
                 entity_id = col.replace("share_", "")
+                canonical_value, canonical_unit = _canonical_value("ratio.share", val)
                 rows.append({
                     "period": period,
                     "entity_id": entity_id,
                     "entity_label": label,
                     "metric": "balancing_share",
-                    "value": float(val),
-                    "unit": "%",
+                    "value": canonical_value,
+                    "unit": canonical_unit,
+                    "_unit_contract": "ratio.share",
                 })
 
     rows = _apply_filter(rows, filter_cond)

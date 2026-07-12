@@ -448,10 +448,16 @@ def _apply_chart_override(ctx: QueryContext) -> QueryContext:
     if ctx.chart_override_specs:
         charts = [dict(spec) for spec in ctx.chart_override_specs if spec]
         if charts:
+            if ctx.provenance_refs:
+                for chart in charts:
+                    chart["metadata"] = dict(chart.get("metadata") or {})
+                    chart["metadata"]["provenanceRefs"] = list(ctx.provenance_refs)
             _apply_chart_collection(ctx, charts)
             return ctx
 
     metadata = dict(ctx.chart_override_meta or {})
+    if ctx.provenance_refs:
+        metadata["provenanceRefs"] = list(ctx.provenance_refs)
     chart_spec = {
         "data": list(ctx.chart_override_data or []),
         "type": ctx.chart_override_type,
@@ -1010,6 +1016,8 @@ def _build_chart_spec(
 
     chart_data = labeled_df.to_dict("records")
     chart_meta = _build_chart_metadata(dims, chart_type, metrics, chart_labels, time_key)
+    if ctx.provenance_refs:
+        chart_meta["provenanceRefs"] = list(ctx.provenance_refs)
 
     transform_meta = dict(transform_meta or {})
     y_axis_override = transform_meta.pop("yAxisTitle", None)

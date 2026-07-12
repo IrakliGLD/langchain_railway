@@ -491,6 +491,79 @@ def _build_correlation_matrix_from_frame(df: pd.DataFrame) -> dict[str, dict[str
     return corr_results
 
 
+def _scope_correlation_frame(ctx: QueryContext, df: pd.DataFrame) -> pd.DataFrame:
+    """Limit fallback correlation evidence to the structured requested period."""
+    if df is None or df.empty or "date" not in df.columns:
+        return df
+    start_date = ctx.tool_params.get("start_date")
+    end_date = ctx.tool_params.get("end_date")
+    if ctx.has_authoritative_question_analysis:
+        period = ctx.question_analysis.sql_hints.period
+        if period is not None:
+            start_date = period.start_date or start_date
+            end_date = period.end_date or end_date
+    scoped = df.copy()
+    scoped["date"] = pd.to_datetime(scoped["date"], errors="coerce")
+    scoped = scoped.dropna(subset=["date"])
+    if start_date:
+        scoped = scoped[scoped["date"] >= pd.Timestamp(start_date)]
+    if end_date:
+        scoped = scoped[scoped["date"] <= pd.Timestamp(end_date)]
+    return scoped.sort_values("date")
+
+
+def _build_correlation_metadata(
+    df: pd.DataFrame,
+    results: dict[str, dict[str, float]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Expose pairwise N, exact period, and Fisher-interval uncertainty."""
+    if df is None or df.empty:
+        return {}
+    time_col = _find_time_series_column(df)
+    dates = (
+        pd.to_datetime(df[time_col], errors="coerce")
+        if time_col and time_col in df.columns else pd.Series(dtype="datetime64[ns]")
+    )
+    metadata: dict[str, dict[str, dict[str, Any]]] = {}
+    for target, drivers in results.items():
+        if target not in df.columns:
+            continue
+        target_meta: dict[str, dict[str, Any]] = {}
+        for driver, coefficient in drivers.items():
+            if driver not in df.columns:
+                continue
+            pair = pd.DataFrame({
+                "target": pd.to_numeric(df[target], errors="coerce"),
+                "driver": pd.to_numeric(df[driver], errors="coerce"),
+                "date": dates,
+            }).dropna(subset=["target", "driver"])
+            n = len(pair)
+            period_start = None
+            period_end = None
+            if "date" in pair and pair["date"].notna().any():
+                period_start = pair["date"].min().date().isoformat()
+                period_end = pair["date"].max().date().isoformat()
+            confidence_interval = None
+            if n > 3 and abs(float(coefficient)) < 1:
+                z = np.arctanh(float(coefficient))
+                margin = 1.96 / np.sqrt(n - 3)
+                confidence_interval = [
+                    round(float(np.tanh(z - margin)), 3),
+                    round(float(np.tanh(z + margin)), 3),
+                ]
+            uncertainty = "high" if n < 12 else ("moderate" if n < 36 else "lower")
+            target_meta[driver] = {
+                "sample_size": n,
+                "period_start": period_start,
+                "period_end": period_end,
+                "uncertainty": uncertainty,
+                "confidence_interval_95": confidence_interval,
+            }
+        if target_meta:
+            metadata[target] = target_meta
+    return metadata
+
+
 _SCENARIO_FALLBACK_PATTERNS: list[tuple[str, str, str]] = [
     # (regex, metric_name, factor_group_meaning)
     # "X% higher/lower" → scenario_scale
@@ -769,6 +842,7 @@ def _build_requested_analysis_evidence(
         yoy_ts=yoy_ts,
         yoy_shares=yoy_shares,
         correlation_results=ctx.correlation_results,
+        correlation_metadata=ctx.correlation_metadata,
     )
 
     # Dispatch each requested metric to the registry and keep only successful materializations.
@@ -1651,9 +1725,12 @@ def generate_share_summary(df: pd.DataFrame, plan: Dict[str, Any], user_query: s
 # Forecast helpers (moved from ask_post inner functions)
 # ---------------------------------------------------------------------------
 
-def _extract_forecast_horizon(query: str) -> int:
+def _extract_forecast_horizon(query: str, structured_horizon_years: int | None = None) -> int:
     """Extract forecast duration (in years) from user query."""
-    return extract_forecast_horizon_years(query)
+    return extract_forecast_horizon_years(
+        query,
+        structured_horizon_years=structured_horizon_years,
+    )
 
 
 def _cap_trendline_horizon_to_history_depth(
@@ -1869,6 +1946,7 @@ def _trim_forecast_fit_window(
     time_col: str,
     time_granularity: Optional[str],
     user_query: str,
+    structured_horizon_years: int | None = None,
 ) -> Tuple[pd.DataFrame, str]:
     """Trim the CAGR fit window to the canonical history width.
 
@@ -1896,7 +1974,7 @@ def _trim_forecast_fit_window(
     explicit_years = {int(y) for y in re.findall(r"\b((?:19|20)\d{2})\b", query_text)}
     if any(year <= int(anchor.year) for year in explicit_years):
         return df, ""
-    horizon = _extract_forecast_horizon(query_text)
+    horizon = _extract_forecast_horizon(query_text, structured_horizon_years)
     excluded = extract_excluded_years(query_text)
     window_years = forecast_history_window_years(horizon, len(excluded))
     window_start = pd.Timestamp(year=int(anchor.year) - window_years + 1, month=int(anchor.month), day=1)
@@ -1911,7 +1989,11 @@ def _trim_forecast_fit_window(
     return trimmed.copy(), note
 
 
-def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.DataFrame, str]:
+def _generate_cagr_forecast(
+    df_in: pd.DataFrame,
+    user_query: str,
+    structured_horizon_years: int | None = None,
+) -> Tuple[pd.DataFrame, str]:
     """Generate CAGR-based forecast for price or quantity data.
 
     When the input contains both ``p_bal_gel`` and ``p_bal_usd``, forecast
@@ -1945,7 +2027,13 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
 
     # Deterministic fit window: identical forecasts regardless of how much
     # history the routing path happened to fetch.
-    df, fit_window_note = _trim_forecast_fit_window(df, time_col, time_granularity, user_query)
+    df, fit_window_note = _trim_forecast_fit_window(
+        df,
+        time_col,
+        time_granularity,
+        user_query,
+        structured_horizon_years,
+    )
     if fit_window_note:
         note_parts.append(fit_window_note)
 
@@ -1966,7 +2054,7 @@ def _generate_cagr_forecast(df_in: pd.DataFrame, user_query: str) -> Tuple[pd.Da
         return f"Forecast skipped: only {yearly_count} usable yearly {noun} after normalization/filtering."
 
     def _resolve_target_years(last_year: int) -> list[int]:
-        horizon = _extract_forecast_horizon(user_query)
+        horizon = _extract_forecast_horizon(user_query, structured_horizon_years)
         yrs_in_q = re.findall(r"(20\d{2})", user_query)
         return sorted({int(y) for y in yrs_in_q if int(y) > last_year}) or [
             int(last_year) + i for i in range(1, horizon + 1)
@@ -2539,11 +2627,15 @@ def enrich(ctx: QueryContext) -> QueryContext:
             current_frame_results = _build_correlation_matrix_from_frame(ctx.df)
             if current_frame_results:
                 ctx.correlation_results.update(current_frame_results)
+                ctx.correlation_metadata.update(
+                    _build_correlation_metadata(ctx.df, current_frame_results)
+                )
 
             if not ctx.correlation_results:
                 with ENGINE.connect() as conn:
                     conn.execute(text("SET TRANSACTION READ ONLY"))
                     corr_df = build_balancing_correlation_df(conn)
+                corr_df = _scope_correlation_frame(ctx, corr_df)
 
                 allowed_targets = ["p_bal_gel", "p_bal_usd"]
                 allowed_drivers = [
@@ -2577,8 +2669,23 @@ def enrich(ctx: QueryContext) -> QueryContext:
                                 if seasonal_corr.notna().any():
                                     ctx.correlation_results[f"{target}_{label}"] = seasonal_corr.sort_values(ascending=False).round(3).to_dict()
 
+                fallback_results = {
+                    target: values
+                    for target, values in ctx.correlation_results.items()
+                    if target in corr_df.columns
+                }
+                ctx.correlation_metadata.update(
+                    _build_correlation_metadata(corr_df, fallback_results)
+                )
+
             if ctx.correlation_results:
-                ctx.stats_hint += "\n\n--- CORRELATION MATRIX ---\n" + json.dumps(ctx.correlation_results, indent=2)
+                ctx.stats_hint += "\n\n--- CORRELATION MATRIX ---\n" + json.dumps(
+                    {
+                        "values": ctx.correlation_results,
+                        "scope_and_uncertainty": ctx.correlation_metadata,
+                    },
+                    indent=2,
+                )
                 log.info(f"✅ Consolidated correlations computed: {list(ctx.correlation_results.keys())}")
             else:
                 log.info("⚠️ No valid correlations found")
@@ -2605,7 +2712,21 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     if answer_kind == AnswerKind.FORECAST and not ctx.df.empty:
         try:
-            ctx.df, _forecast_note = _generate_cagr_forecast(ctx.df, ctx.query)
+            structured_horizon = (
+                ctx.question_analysis.analysis_requirements.forecast_horizon_years
+                if ctx.has_authoritative_question_analysis else None
+            )
+            if structured_horizon is None:
+                ctx.df, _forecast_note = _generate_cagr_forecast(
+                    ctx.df,
+                    ctx.effective_query,
+                )
+            else:
+                ctx.df, _forecast_note = _generate_cagr_forecast(
+                    ctx.df,
+                    ctx.effective_query,
+                    structured_horizon,
+                )
             ctx.stats_hint += f"\n\n--- FORECAST NOTE ---\n{_forecast_note}"
             log.info(_forecast_note)
         except Exception as _e:
@@ -2680,7 +2801,11 @@ def enrich(ctx: QueryContext) -> QueryContext:
             # UTC explicitly: production runs UTC; keeps dev boxes in other
             # timezones from computing a different "current year" at NYE.
             current_year = datetime.now(timezone.utc).year
-            horizon = _extract_forecast_horizon(ctx.query)
+            structured_horizon = (
+                ctx.question_analysis.analysis_requirements.forecast_horizon_years
+                if ctx.has_authoritative_question_analysis else None
+            )
+            horizon = _extract_forecast_horizon(ctx.effective_query, structured_horizon)
             ctx.trendline_extend_to = f"{current_year + horizon}-12-01"
 
         # Phase D (2026-05-22) — cap horizon to history depth.

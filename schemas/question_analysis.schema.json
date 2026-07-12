@@ -26,6 +26,20 @@
           "title": "Needs Correlation Context",
           "type": "boolean"
         },
+        "forecast_horizon_years": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Forecast Horizon Years"
+        },
         "derived_metrics": {
           "items": {
             "$ref": "#/$defs/DerivedMetricRequest"
