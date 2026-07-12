@@ -54,6 +54,7 @@ import knowledge as knowledge_module
 
 # Phase 6: Pipeline
 from agent.answer_provenance import build_answer_provenance
+from agent.metric_units import METRIC_UNITS
 from agent.contract_continuity import continuity_snapshot_json
 from agent.pipeline import process_query
 from analysis.seasonal import compute_seasonal_average
@@ -1254,6 +1255,7 @@ def ask_post(
                 "provenance_query_hash": str(ctx.provenance_query_hash or ""),
                 "provenance_source": str(ctx.provenance_source or ""),
                 "provenance_refs": list(getattr(ctx, "provenance_refs", []) or []),
+                "metric_unit_registry_version": METRIC_UNITS.version,
                 "answer_provenance": build_answer_provenance(ctx),
             }
         )

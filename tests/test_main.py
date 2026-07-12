@@ -419,6 +419,7 @@ def test_ask_preserves_request_correlation_and_publishes_contract_version(monkey
     assert response.headers["X-Request-Id"] == request_id
     assert response.headers["X-Trace-Id"] == request_id
     assert response.headers["X-Enai-Contract-Version"] == "chat-gateway-v1"
+    assert response.json()["chart_metadata"]["metric_unit_registry_version"] == "1.0.0"
     _clear_rate_limit_buckets()
 
 
