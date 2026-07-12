@@ -15,7 +15,7 @@
 
 | Item | Result | Primary artifacts |
 |---|---|---|
-| P2.1 metric/unit registry | Versioned registry/schema/golden corpus; canonical adapters convert price, energy quantity, and ratios before filters; tariffs remain per-MWh | `contracts/metric_units_v1.json`, `contracts/metric_units_v1.schema.json`, `agent/metric_units.py`, `evaluation/metric_unit_golden_v1.json` |
+| P2.1 metric/unit registry | Versioned registry/schema/golden corpus with concrete source aliases/patterns for P2.B consumers; canonical adapters convert price, energy quantity, and ratios before filters; tariffs remain per-MWh | `contracts/metric_units_v1.json`, `contracts/metric_units_v1.schema.json`, `agent/metric_units.py`, `evaluation/metric_unit_golden_v1.json` |
 | P2.2 chronological statistics | Parsed/sorted/deduplicated periods, unique-period completeness, elapsed-year CAGR, chronological recent windows, per-metric quick stats, stable equal-value trend | `analysis/stats.py`, `analysis/seasonal_stats.py`, `agent/metric_registry.py` |
 | P2.3 provenance | Removed dead `ctx.provenance`; query and exact-source hashes flow through tool, merged, scenario, forecast, answer, and chart surfaces | `agent/provenance.py`, `agent/pipeline.py`, `agent/evidence_planner.py`, `agent/summarizer.py`, `agent/chart_pipeline.py` |
 | P2.4 scope/horizon/cache | Correlation fallback scoped to requested period with pairwise N/period/uncertainty; structured horizon authoritative; vector caches fully versioned | `agent/analyzer.py`, `utils/forecasting.py`, `knowledge/vector_embeddings.py`, `knowledge/vector_retrieval.py` |

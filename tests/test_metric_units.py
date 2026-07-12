@@ -39,3 +39,9 @@ def test_tariff_contract_does_not_convert_storage_values():
     tariff = METRIC_UNITS.get("tariff.gel")
     assert tariff.storage_to_canonical(150) == pytest.approx(150)
     assert tariff.canonical_unit == "GEL/MWh"
+
+
+def test_registry_publishes_frontend_resolvable_source_metric_aliases():
+    assert "p_bal_gel" in METRIC_UNITS.get("price.gel").source_metrics
+    assert "quantity_*" in METRIC_UNITS.get("energy.quantity").source_metric_patterns
+    assert "share_*" in METRIC_UNITS.get("ratio.share").source_metric_patterns

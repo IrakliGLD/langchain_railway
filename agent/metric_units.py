@@ -31,6 +31,8 @@ def normalize_unit(unit: str) -> str:
 @dataclass(frozen=True)
 class MetricUnitDefinition:
     metric_id: str
+    source_metrics: tuple[str, ...]
+    source_metric_patterns: tuple[str, ...]
     dimension: str
     storage_unit: str
     canonical_unit: str
@@ -76,6 +78,8 @@ class MetricUnitRegistry:
             }
             definition = MetricUnitDefinition(
                 metric_id=str(metric_id),
+                source_metrics=tuple(str(item) for item in raw["source_metrics"]),
+                source_metric_patterns=tuple(str(item) for item in raw["source_metric_patterns"]),
                 dimension=str(raw["dimension"]),
                 storage_unit=str(raw["storage_unit"]),
                 canonical_unit=str(raw["canonical_unit"]),

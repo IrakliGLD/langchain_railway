@@ -4,6 +4,8 @@
   "registry_version": "1.0.0",
   "metrics": {
     "price.gel": {
+      "source_metrics": ["p_bal_gel", "p_dereg_gel", "p_gcap_gel", "balancing_price_gel", "deregulated_price_gel", "guaranteed_capacity_price_gel"],
+      "source_metric_patterns": [],
       "dimension": "currency_gel_per_energy",
       "storage_unit": "GEL/MWh",
       "canonical_unit": "tetri/kWh",
@@ -18,6 +20,8 @@
       }
     },
     "price.usd": {
+      "source_metrics": ["p_bal_usd", "p_dereg_usd", "p_gcap_usd", "balancing_price_usd", "deregulated_price_usd", "guaranteed_capacity_price_usd"],
+      "source_metric_patterns": [],
       "dimension": "currency_usd_per_energy",
       "storage_unit": "USD/MWh",
       "canonical_unit": "USD cents/kWh",
@@ -34,6 +38,8 @@
       }
     },
     "tariff.gel": {
+      "source_metrics": ["tariff_gel"],
+      "source_metric_patterns": ["*_tariff_gel"],
       "dimension": "currency_gel_per_energy",
       "storage_unit": "GEL/MWh",
       "canonical_unit": "GEL/MWh",
@@ -48,6 +54,8 @@
       }
     },
     "tariff.usd": {
+      "source_metrics": ["tariff_usd"],
+      "source_metric_patterns": ["*_tariff_usd"],
       "dimension": "currency_usd_per_energy",
       "storage_unit": "USD/MWh",
       "canonical_unit": "USD/MWh",
@@ -64,6 +72,8 @@
       }
     },
     "energy.quantity": {
+      "source_metrics": ["quantity_tech", "generation_quantity", "total_demand", "total_domestic_generation", "local_generation", "import_dependent_supply", "total_supply"],
+      "source_metric_patterns": ["quantity_*"],
       "dimension": "energy",
       "storage_unit": "thousand MWh",
       "canonical_unit": "MWh",
@@ -78,6 +88,8 @@
       }
     },
     "ratio.share": {
+      "source_metrics": ["generation_share", "balancing_share", "import_dependency_ratio"],
+      "source_metric_patterns": ["share_*"],
       "dimension": "dimensionless_ratio",
       "storage_unit": "ratio",
       "canonical_unit": "%",
@@ -93,6 +105,8 @@
       }
     },
     "exchange_rate.gel_usd": {
+      "source_metrics": ["xrate", "exchange_rate"],
+      "source_metric_patterns": [],
       "dimension": "exchange_rate_gel_per_usd",
       "storage_unit": "GEL/USD",
       "canonical_unit": "GEL/USD",

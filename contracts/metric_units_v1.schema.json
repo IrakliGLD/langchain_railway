@@ -16,11 +16,13 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "dimension", "storage_unit", "canonical_unit", "display_unit",
+          "source_metrics", "source_metric_patterns", "dimension", "storage_unit", "canonical_unit", "display_unit",
           "to_canonical_factor", "compatible_aggregations", "precision",
           "filter_unit_aliases"
         ],
         "properties": {
+          "source_metrics": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "source_metric_patterns": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
           "dimension": {"type": "string", "minLength": 1},
           "storage_unit": {"type": "string", "minLength": 1},
           "canonical_unit": {"type": "string", "minLength": 1},
