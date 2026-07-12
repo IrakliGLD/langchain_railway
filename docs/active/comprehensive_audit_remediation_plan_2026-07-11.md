@@ -1,7 +1,7 @@
 # Comprehensive Audit Remediation Plan
 
 **Date:** 2026-07-11
-**Status:** P0 code is locally verified and independently committed in both repository tracks. Production activation and unavailable live-database/deployment checks remain operator follow-ups and do not block either repository commit. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md) and [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md).
+**Status:** P0 code is locally verified and independently committed in both repository tracks. P1.A, P1.1, and P1.2 are independently committed; P1.3 source migration is implemented locally but remains blocked from approval/commit by the missing generated Deno lock and immutable source manifest. Production activation and unavailable live-database/deployment checks remain operator follow-ups. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), and [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md).
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
