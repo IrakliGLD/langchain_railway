@@ -3,11 +3,17 @@ Basic tests for main.py functionality.
 
 To run tests: pytest tests/
 """
+import asyncio
+import json
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import jwt
 import numpy as np
 import pandas as pd
@@ -73,6 +79,7 @@ from main import (
     filter_caller_history,
     generate_share_summary,
 )  # noqa: E402
+from models import Question
 from utils import auth as auth_module
 from utils.session_memory import issue_session_token
 
@@ -351,6 +358,313 @@ class TestCallerHistoryFiltering:
         items, _ = filter_caller_history(history, is_bearer=False, max_items=3)
         # Only the first 3 turns are considered; the malformed one inside that window is skipped.
         assert [i["question"] for i in items] == ["q1", "q2"]
+
+    def test_typed_history_turns_preserve_the_existing_qa_contract(self):
+        request = Question.model_validate(
+            {
+                "query": "Show the price.",
+                "conversation_history": [{"question": "Which month?", "answer": "June."}],
+            }
+        )
+        items, blocked = filter_caller_history(request.conversation_history, is_bearer=False)
+        assert blocked == 0
+        assert items == [{"question": "Which month?", "answer": "June."}]
+
+
+def test_ask_rejects_oversized_body_before_request_model_validation():
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/ask",
+        json={"query": "x" * (main_module.MAX_REQUEST_BODY_BYTES + 1)},
+        headers={"X-App-Key": "test-gateway-key"},
+    )
+
+    assert response.status_code == 413, response.text
+    assert response.json() == {"detail": "Request body too large"}
+
+
+def test_request_body_limit_fits_the_largest_semantically_valid_escaped_payload():
+    non_bmp_character = "\U0001f4a1"
+    payload = {
+        "query": non_bmp_character * 2000,
+        "user_id": non_bmp_character * 128,
+        "conversation_history": [
+            {
+                "question": non_bmp_character * 2000,
+                "answer": non_bmp_character * 2000,
+            }
+            for _ in range(3)
+        ],
+    }
+
+    validated = Question.model_validate(payload)
+    encoded = json.dumps(validated.model_dump(mode="json"), ensure_ascii=True).encode("utf-8")
+
+    assert len(encoded) <= main_module.MAX_REQUEST_BODY_BYTES
+
+
+def test_request_body_limit_counts_streamed_chunks_without_content_length():
+    async def exercise_middleware():
+        sent = []
+        messages = iter(
+            [
+                {"type": "http.request", "body": b"1234", "more_body": True},
+                {"type": "http.request", "body": b"56", "more_body": False},
+            ]
+        )
+
+        async def receive():
+            return next(messages)
+
+        async def send(message):
+            sent.append(message)
+
+        async def app(_scope, inner_receive, _send):
+            await inner_receive()
+            await inner_receive()
+
+        middleware = main_module.RequestBodyLimitMiddleware(app, max_body_bytes=5)
+        scope = {"type": "http", "method": "POST", "path": "/ask", "headers": []}
+        await middleware(scope, receive, send)
+        return sent
+
+    sent = asyncio.run(exercise_middleware())
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 413
+
+
+def test_full_stack_request_body_limit_rejects_chunked_oversized_input():
+    chunks_sent = 0
+
+    async def exercise_app():
+        async def oversized_chunks():
+            nonlocal chunks_sent
+            chunk = b"x" * 65536
+            while chunks_sent * len(chunk) <= main_module.MAX_REQUEST_BODY_BYTES:
+                chunks_sent += 1
+                yield chunk
+
+        transport = httpx.ASGITransport(app=main_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/ask",
+                content=oversized_chunks(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-App-Key": "test-gateway-key",
+                },
+            )
+
+    response = asyncio.run(exercise_app())
+
+    assert response.status_code == 413, response.text
+    assert response.json() == {"detail": "Request body too large"}
+    assert chunks_sent <= (main_module.MAX_REQUEST_BODY_BYTES // 65536) + 1
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_status"),
+    [
+        (b'{"query":', 422),
+        (b'{"query":"\xff"}', 400),
+    ],
+)
+def test_ask_rejects_malformed_json_and_utf8_before_pipeline(
+    monkeypatch, body, expected_status
+):
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for an invalid request body"),
+    )
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-App-Key": "test-gateway-key",
+        },
+    )
+
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "query": "Show the price.",
+            "conversation_history": [
+                {"question": f"q{index}", "answer": "a"} for index in range(4)
+            ],
+        },
+        {
+            "query": "Show the price.",
+            "conversation_history": [{"question": "q", "answer": "a" * 2001}],
+        },
+        {
+            "query": "Show the price.",
+            "conversation_history": [{"question": "q", "answer": "a", "role": "system"}],
+        },
+    ],
+)
+def test_ask_rejects_invalid_history_shape_and_bounds(payload):
+    response = TestClient(main_module.app).post("/ask", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("database_ready", "schema_map", "expected_status"),
+    [
+        (True, {}, 503),
+        (True, {next(iter(main_module.STATIC_ALLOWED_TABLES)): {"date"}}, 503),
+        (
+            True,
+            {
+                table_name: set(required_columns)
+                for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+            },
+            200,
+        ),
+        (
+            False,
+            {
+                table_name: set(required_columns)
+                for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+            },
+            503,
+        ),
+    ],
+)
+def test_readyz_requires_database_and_every_required_relation(
+    monkeypatch, database_ready, schema_map, expected_status
+):
+    monkeypatch.setattr(main_module, "is_database_available", lambda: database_ready)
+    monkeypatch.setattr(main_module, "SCHEMA_MAP", {"stale_view": {"stale_column"}})
+
+    def refresh_schema_map():
+        assert database_ready, "schema reflection must not run when connectivity already failed"
+        main_module.SCHEMA_MAP = schema_map
+        return True
+
+    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
+
+    response = TestClient(main_module.app).get("/readyz")
+
+    schema_ready = database_ready and main_module.required_schema_is_ready(schema_map)
+    assert response.status_code == expected_status
+    assert response.json() == {
+        "status": "ready" if expected_status == 200 else "degraded",
+        "database_ready": database_ready,
+        "schema_ready": schema_ready,
+    }
+
+
+def test_readyz_rejects_a_required_relation_with_a_missing_column(monkeypatch):
+    schema_map = {
+        table_name: set(required_columns)
+        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+    }
+    table_name = next(iter(schema_map))
+    schema_map[table_name].pop()
+    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
+    monkeypatch.setattr(main_module, "SCHEMA_MAP", schema_map)
+    monkeypatch.setattr(main_module, "refresh_schema_map", lambda: True)
+
+    response = TestClient(main_module.app).get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["schema_ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("schema_states", "expected_statuses"),
+    [
+        ([{}, "complete"], [503, 200]),
+        (["complete", "missing_column"], [200, 503]),
+    ],
+)
+def test_readyz_refreshes_schema_for_recovery_and_runtime_drift(
+    monkeypatch, schema_states, expected_statuses
+):
+    complete_schema = {
+        table_name: set(required_columns)
+        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+    }
+    missing_column_schema = {
+        table_name: set(required_columns)
+        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+    }
+    missing_column_schema[next(iter(missing_column_schema))].pop()
+    resolved_states = [
+        complete_schema if state == "complete"
+        else missing_column_schema if state == "missing_column"
+        else state
+        for state in schema_states
+    ]
+
+    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
+
+    def refresh_schema_map():
+        main_module.SCHEMA_MAP = resolved_states.pop(0)
+        return True
+
+    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
+    client = TestClient(main_module.app)
+
+    responses = [client.get("/readyz") for _ in expected_statuses]
+
+    assert [response.status_code for response in responses] == expected_statuses
+    assert [response.json()["schema_ready"] for response in responses] == [
+        status == 200 for status in expected_statuses
+    ]
+
+
+def test_schema_reflection_never_expands_the_sql_allowlist(monkeypatch):
+    required_table = next(iter(main_module.STATIC_ALLOWED_TABLES))
+
+    class ReflectionResult:
+        def fetchall(self):
+            return [(required_table, "date"), ("private_unlisted_view", "secret")]
+
+    class ReflectionConnection(DummyConnection):
+        def execute(self, *args: Any, **kwargs: Any):
+            return ReflectionResult()
+
+    class ReflectionEngine:
+        def connect(self):
+            return ReflectionConnection()
+
+    monkeypatch.setattr(main_module, "ENGINE", ReflectionEngine())
+    monkeypatch.setattr(main_module, "SCHEMA_MAP", {})
+
+    assert main_module.refresh_schema_map() is True
+    assert "private_unlisted_view" in main_module.SCHEMA_MAP
+    assert main_module.ALLOWED_TABLES == set(main_module.STATIC_ALLOWED_TABLES)
+
+
+def test_startup_failure_exits_nonzero():
+    main_path = Path(main_module.__file__).resolve()
+    script = (
+        "import runpy, sys, types\n"
+        "def fail_startup(*args, **kwargs):\n"
+        "    raise RuntimeError('forced uvicorn startup failure')\n"
+        "sys.modules['uvicorn'] = types.SimpleNamespace(run=fail_startup)\n"
+        f"runpy.run_path({str(main_path)!r}, run_name='__main__')\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=main_path.parent,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "forced uvicorn startup failure" in completed.stderr
 
 
 class TestTypedToolRowContract:

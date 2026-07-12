@@ -54,7 +54,14 @@ log = logging.getLogger("Enai")
 # separator, and parsing it as a minus minted ungrounded negative tokens
 # ('-2025', '-65') that failed the provenance gate (2026-07-10 report,
 # trace 872ca85f). Genuine negatives ("-1.4", "(-0.77)") keep their sign.
-_NUMBER_PATTERN = re.compile(r"(?<!\d)-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+# Scientific notation is one token so values such as 1e9 cannot degrade into
+# individually ignored digits.
+_NUMBER_PATTERN = re.compile(
+    r"(?<![\d.])-?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
+    r"(?:[eE][+-]?\d+)?%?"
+)
+_MAX_NORMALIZED_NUMBER_TOKEN_CHARS = 128
+_HASHED_NUMBER_TOKEN_PREFIX = "decimal-sha256:"
 _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "segment")
 _MAX_REFS_PER_TOKEN = 4
 _MAX_REFS_PER_CLAIM = 12
@@ -217,6 +224,61 @@ _COLUMN_CITATION_PATTERN = re.compile(
 
 
 # Numeric grounding helpers normalize every number before provenance matching.
+def _hashed_number_token(canonical_value: str) -> str:
+    digest = hashlib.sha256(canonical_value.encode("utf-8")).hexdigest()
+    return f"{_HASHED_NUMBER_TOKEN_PREFIX}{digest}"
+
+
+def _canonicalize_finite_decimal(value: Decimal) -> str:
+    """Return an exact, bounded token without fixed-point exponent expansion."""
+    sign_bit, raw_digits, raw_exponent = value.as_tuple()
+    digits = list(raw_digits)
+    exponent = int(raw_exponent)
+
+    if not any(digits):
+        return "0"
+
+    # Decimal.normalize() applies the active precision context and can both
+    # round long coefficients and expand huge exponents when formatted with
+    # ``f``. Strip only exact trailing zeroes so equivalent spellings retain
+    # one canonical value without changing its precision.
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    digit_text = "".join(str(digit) for digit in digits)
+    sign = "-" if sign_bit else ""
+    decimal_position = len(digit_text) + exponent
+
+    if exponent >= 0:
+        fixed_length = len(sign) + len(digit_text) + exponent
+        if fixed_length <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS:
+            return f"{sign}{digit_text}{'0' * exponent}"
+    else:
+        fixed_length = (
+            len(sign) + len(digit_text) + 1
+            if decimal_position > 0
+            else len(sign) + 2 + (-decimal_position) + len(digit_text)
+        )
+        if fixed_length <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS:
+            if decimal_position > 0:
+                return f"{sign}{digit_text[:decimal_position]}.{digit_text[decimal_position:]}"
+            return f"{sign}0.{'0' * (-decimal_position)}{digit_text}"
+
+    adjusted_exponent = exponent + len(digit_text) - 1
+    mantissa = digit_text[0]
+    if len(digit_text) > 1:
+        mantissa = f"{mantissa}.{digit_text[1:]}"
+    compact = f"{sign}{mantissa}e{adjusted_exponent:+d}"
+    if len(compact) <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS:
+        return compact
+
+    # The source token already contains an oversized coefficient. Hash its
+    # exact canonical tuple so it remains matchable/fail-closed without being
+    # retained or copied through every provenance index.
+    return _hashed_number_token(f"{sign}{digit_text}e{exponent:+d}")
+
+
 def _normalize_number_token(raw_token: str) -> Optional[str]:
     token = (raw_token or "").strip().replace(",", "")
     if token.endswith("%"):
@@ -224,11 +286,19 @@ def _normalize_number_token(raw_token: str) -> Optional[str]:
     if not token:
         return None
     try:
-        normalized = format(Decimal(token).normalize(), "f")
+        numeric = Decimal(token)
     except (InvalidOperation, ValueError):
-        normalized = token
-    if "." in normalized:
-        normalized = normalized.rstrip("0").rstrip(".")
+        normalized = (
+            token
+            if len(token) <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS
+            else _hashed_number_token(token)
+        )
+    else:
+        normalized = (
+            _canonicalize_finite_decimal(numeric)
+            if numeric.is_finite()
+            else token
+        )
     if not normalized or normalized in {"-", "+", "."}:
         return None
     return normalized
@@ -238,7 +308,7 @@ def _extract_number_tokens(text: str) -> Set[str]:
     tokens: Set[str] = set()
     for match in _NUMBER_PATTERN.finditer(text or ""):
         normalized = _normalize_number_token(match.group(0))
-        if not normalized or len(normalized) <= 1:
+        if not normalized:
             continue
         tokens.add(normalized)
     return tokens
@@ -403,7 +473,7 @@ def _add_rounded_source_variants(tokens: Set[str]) -> None:
                         rounded = dec.quantize(Decimal(1).scaleb(-places), rounding=rounding)
                 except (InvalidOperation, ValueError):
                     continue
-                normalized = _normalize_number_token(format(rounded, "f"))
+                normalized = _normalize_number_token(str(rounded))
                 if normalized and len(normalized) > 1:
                     variants.add(normalized)
     tokens.update(variants)
@@ -757,14 +827,17 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
 
 
 def _normalized_decimal_token(value: Decimal) -> Optional[str]:
-    return _normalize_number_token(format(value, "f"))
+    return _normalize_number_token(str(value))
 
 
 def _is_year_like_integer(value: Decimal) -> bool:
     if value != value.to_integral_value():
         return False
+    absolute_value = abs(value)
+    if absolute_value < 1900 or absolute_value > 2100:
+        return False
     try:
-        int_value = abs(int(value))
+        int_value = int(absolute_value)
     except (OverflowError, ValueError):
         return False
     return 1900 <= int_value <= 2100
@@ -820,10 +893,13 @@ def _rounded_match_variants(token: str) -> List[str]:
     for places in (2, 1):
         # round(Decimal) is banker's rounding; also try half-up so a claim of
         # "44.37" for source "44.365" matches (LLMs round half-up).
-        candidates = [str(round(numeric, places))]
+        try:
+            candidates = [str(round(numeric, places))]
+        except (InvalidOperation, ValueError):
+            candidates = []
         try:
             candidates.append(
-                format(numeric.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP), "f")
+                str(numeric.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
             )
         except (InvalidOperation, ValueError):
             pass
@@ -1036,6 +1112,8 @@ def _build_claim_provenance(
                 unmatched_tokens.append(token)
                 continue
             matched_tokens.append(token)
+            if len(claim_refs) >= _MAX_REFS_PER_CLAIM:
+                continue
             for ref in refs[:_MAX_REFS_PER_TOKEN]:
                 ref_key = (ref["row_number"], ref["column"], str(ref["value"]))
                 if ref_key in seen_refs:
@@ -1045,8 +1123,6 @@ def _build_claim_provenance(
                 citation_anchors.append(f"claim_{claim_idx}:{ref['cell_id']}")
                 if len(claim_refs) >= _MAX_REFS_PER_CLAIM:
                     break
-            if len(claim_refs) >= _MAX_REFS_PER_CLAIM:
-                break
 
         if claim_tokens and not unmatched_tokens and claim_refs:
             grounded_numeric_claims += 1
@@ -1069,10 +1145,18 @@ def _build_claim_provenance(
 
 
 def _derive_claims_from_text(summary_text: str) -> List[str]:
-    claims = [line.strip(" -*\t") for line in (summary_text or "").splitlines() if line.strip()]
+    claims: List[str] = []
+    for line in (summary_text or "").splitlines():
+        if not line.strip():
+            continue
+        # List ordinals are presentation, not analytical claims. Remove them
+        # before number extraction while retaining every substantive line.
+        claim = re.sub(r"^\s*(?:(?:[-*•])\s+|\d+[.)]\s+)", "", line).strip()
+        if claim:
+            claims.append(claim)
     if not claims and summary_text.strip():
         claims = [summary_text.strip()]
-    return claims[:8]
+    return claims
 
 
 def _attach_claim_provenance(ctx: QueryContext) -> None:
@@ -1084,11 +1168,6 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         ctx.summary_claim_provenance = []
         ctx.summary_provenance_coverage = 0.0
         return
-    if not source_cols or not source_rows:
-        ctx.summary_claim_provenance = []
-        ctx.summary_provenance_coverage = 0.0
-        return
-
     claim_prov, coverage, anchors = _build_claim_provenance(
         claims,
         source_cols,
@@ -1155,7 +1234,14 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
         if _policy_val == GroundingPolicy.EVIDENCE_AWARE.value
         else PROVENANCE_MIN_COVERAGE
     )
-    gate_passed = coverage >= min_coverage
+    # The legacy text fallback has no structured claim contract. Its claims are
+    # derived from the complete returned text, so fail closed if even one
+    # numeric claim is ungrounded. Structured summaries retain the established
+    # coverage policy for explicitly derived analytical values.
+    legacy_text_fallback = ctx.summary_source == "legacy_text_fallback"
+    gate_passed = coverage >= min_coverage and (
+        not legacy_text_fallback or not has_ungrounded_claim
+    )
     if gate_passed:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "ok"
@@ -2843,7 +2929,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 vector_knowledge=vector_knowledge,
             )
             ctx.summary_source = "legacy_text_fallback"
-            ctx.summary_claims = []
+            ctx.summary_claims = _derive_claims_from_text(ctx.summary)
             ctx.summary_citations = ["legacy_text_fallback"]
             ctx.summary_confidence = 0.5
 

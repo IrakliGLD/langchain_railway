@@ -14,9 +14,26 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 
-from config import STATIC_ALLOWED_TABLES, validate_runtime_settings  # noqa: E402
+from config import (  # noqa: E402
+    MAX_REQUEST_BODY_BYTES,
+    STATIC_ALLOWED_TABLES,
+    _read_bounded_int_env,
+    validate_runtime_settings,
+)
 
 _READONLY_ROLE_SQL = Path(__file__).resolve().parents[1] / "scripts" / "least_privilege_api_role.sql"
+
+
+@pytest.mark.parametrize("raw_value", ["not-an-integer", "262143", "1048577"])
+def test_request_body_limit_configuration_fails_closed(monkeypatch, raw_value):
+    monkeypatch.setenv("TEST_BODY_LIMIT", raw_value)
+
+    with pytest.raises(RuntimeError, match="TEST_BODY_LIMIT"):
+        _read_bounded_int_env("TEST_BODY_LIMIT", 262144, 262144, 1048576)
+
+
+def test_request_body_limit_default_is_within_the_enforced_bounds():
+    assert 262144 <= MAX_REQUEST_BODY_BYTES <= 1048576
 
 
 def test_readonly_role_grants_match_whitelist():
@@ -91,20 +108,54 @@ def test_validate_runtime_settings_accepts_gateway_only_without_jwt_secret():
     )
 
 
-def test_validate_runtime_settings_accepts_auto_mode_with_jwt_secret():
+def test_validate_runtime_settings_blocks_direct_bearer_in_production():
+    with pytest.raises(RuntimeError, match="server-owned entitlement path"):
+        validate_runtime_settings(
+            supabase_db_url="postgresql://user:pass@localhost/db",
+            gateway_shared_secret="gateway",
+            session_signing_secret="session",
+            evaluate_admin_secret="evaluate",
+            auth_mode="gateway_and_bearer",
+            deployment_env="production",
+            supabase_jwt_secret="jwt-secret",
+            enable_evaluate_endpoint=False,
+            allow_evaluate_endpoint=False,
+            model_type="openai",
+            google_api_key=None,
+        )
+
+
+def test_validate_runtime_settings_allows_direct_bearer_only_in_test():
     validate_runtime_settings(
         supabase_db_url="postgresql://user:pass@localhost/db",
         gateway_shared_secret="gateway",
         session_signing_secret="session",
         evaluate_admin_secret="evaluate",
-        auth_mode="auto",
-        deployment_env="development",
+        auth_mode="gateway_and_bearer",
+        deployment_env="test",
         supabase_jwt_secret="jwt-secret",
         enable_evaluate_endpoint=False,
         allow_evaluate_endpoint=False,
         model_type="openai",
         google_api_key=None,
     )
+
+
+def test_validate_runtime_settings_rejects_implicit_auto_auth_mode():
+    with pytest.raises(RuntimeError, match="gateway_only, gateway_and_bearer"):
+        validate_runtime_settings(
+            supabase_db_url="postgresql://user:pass@localhost/db",
+            gateway_shared_secret="gateway",
+            session_signing_secret="session",
+            evaluate_admin_secret="evaluate",
+            auth_mode="auto",
+            deployment_env="development",
+            supabase_jwt_secret="jwt-secret",
+            enable_evaluate_endpoint=False,
+            allow_evaluate_endpoint=False,
+            model_type="openai",
+            google_api_key=None,
+        )
 
 
 def test_validate_runtime_settings_requires_explicit_opt_in_for_evaluate():

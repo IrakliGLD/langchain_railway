@@ -27,8 +27,9 @@ The targeted suite is defined and maintained in [`skills/developer-phased-audit/
 Set `ENAI_AUTH_MODE` explicitly in deployed environments:
 
 - **`gateway_only`** — trusted proxy / edge function callers that send `X-App-Key`. `SUPABASE_JWT_SECRET` may be present but bearer auth stays disabled.
-- **`gateway_and_bearer`** — direct `Authorization: Bearer <token>` calls are part of the boundary. `SUPABASE_JWT_SECRET` is mandatory.
-- **`auto`** — temporary compatibility mode during rollout. Bearer auth turns on only when `SUPABASE_JWT_SECRET` is present. **Migrate to an explicit mode**; do not leave production on `auto`.
+- **`gateway_and_bearer`** — direct `Authorization: Bearer <token>` calls are available only when `ENAI_DEPLOYMENT_ENV=test` and require `SUPABASE_JWT_SECRET`. Every non-test environment fails startup until direct callers share the server-owned entitlement path planned for P3.
+
+`auto` is invalid. The safe default is `gateway_only`, and merely configuring `SUPABASE_JWT_SECRET` never enables bearer authentication.
 
 ## Deployment Constraint: Single Replica
 
@@ -65,12 +66,13 @@ ALLOW_EVALUATE_ENDPOINT=false
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
 ASK_RATE_LIMIT_PREAUTH_PER_MINUTE=300
+MAX_REQUEST_BODY_BYTES=262144
 ```
 
-### Gateway + bearer
+### Test-only gateway + bearer
 
 ```bash
-ENAI_DEPLOYMENT_ENV=production
+ENAI_DEPLOYMENT_ENV=test
 ENAI_AUTH_MODE=gateway_and_bearer
 SUPABASE_JWT_SECRET=...
 ENAI_GATEWAY_SECRET=...
@@ -82,6 +84,7 @@ ALLOW_EVALUATE_ENDPOINT=false
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
 ASK_RATE_LIMIT_PREAUTH_PER_MINUTE=300
+MAX_REQUEST_BODY_BYTES=262144
 ```
 
 ## Prompt-Budget Env Vars (Phase 2.b, 2026-05-13)
@@ -130,11 +133,13 @@ ALLOW_EVALUATE_ENDPOINT=false
 ASK_RATE_LIMIT_GATEWAY_PER_MINUTE=300
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE=10
 ASK_RATE_LIMIT_PREAUTH_PER_MINUTE=300
+MAX_REQUEST_BODY_BYTES=262144
 ```
 
-For hybrid bearer mode also set:
+For test-only hybrid bearer mode also set (never use it in a deployed environment before P3):
 
 ```bash
+ENAI_DEPLOYMENT_ENV=test
 ENAI_AUTH_MODE=gateway_and_bearer
 SUPABASE_JWT_SECRET=<supabase-jwt-secret>
 ```
