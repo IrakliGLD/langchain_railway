@@ -343,6 +343,58 @@ def test_grounding_token_normalization_handles_large_and_decimal_values():
     assert "10" in tokens
 
 
+def test_grounding_tokenization_retains_single_digit_and_scientific_values():
+    tokens = summarizer._extract_number_tokens("Values were 9, 9.0, 1e9, .5, and -.5")
+    assert "9" in tokens
+    assert "1000000000" in tokens
+    assert "0.5" in tokens
+    assert "-0.5" in tokens
+
+
+@pytest.mark.parametrize(
+    ("raw_token", "expected"),
+    [
+        ("1e100000", "1e+100000"),
+        ("1e-100000", "1e-100000"),
+        ("-1e100000", "-1e+100000"),
+    ],
+)
+def test_grounding_token_normalization_bounds_extreme_exponents(raw_token, expected):
+    normalized = summarizer._normalize_number_token(raw_token)
+
+    assert normalized == expected
+    assert len(normalized) <= summarizer._MAX_NORMALIZED_NUMBER_TOKEN_CHARS
+
+
+def test_grounding_token_normalization_hashes_oversized_coefficients_without_dropping_them():
+    normalized = summarizer._normalize_number_token("9" * 1000)
+
+    assert normalized.startswith("decimal-sha256:")
+    assert len(normalized) <= summarizer._MAX_NORMALIZED_NUMBER_TOKEN_CHARS
+
+
+def test_grounding_token_extraction_deduplicates_repeated_extreme_exponents_without_expansion():
+    text = " ".join(["1e100000", "1e-100000"] * 500)
+
+    tokens = summarizer._extract_number_tokens(text)
+
+    assert tokens == {"1e+100000", "1e-100000"}
+    assert all(len(token) <= summarizer._MAX_NORMALIZED_NUMBER_TOKEN_CHARS for token in tokens)
+
+
+def test_claim_provenance_keeps_extreme_scientific_claims_fail_closed():
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The observed value was 1e100000."],
+        cols=["value"],
+        rows=[(1,)],
+    )
+
+    assert claim_entries[0]["matched_tokens"] == []
+    assert claim_entries[0]["unmatched_tokens"] == ["1e+100000"]
+    assert claim_entries[0]["is_fully_grounded"] is False
+    assert coverage == pytest.approx(0.0, rel=1e-6)
+
+
 def test_grounding_accepts_equivalent_decimal_format():
     ctx = QueryContext(
         query="Show latest balancing price",
@@ -705,6 +757,170 @@ def test_provenance_gate_blocks_partially_grounded_numeric_claims(monkeypatch):
     # Fallback is the localized grounding message (lang_code unset → English).
     assert "could not fully ground" in out.summary
     assert out.summary_citations == ["citation_gate_fallback"]
+
+
+@pytest.mark.parametrize(
+    ("fallback_text", "expected_source", "expected_reason"),
+    [
+        ("The observed value was 10.", "legacy_text_fallback", "ok"),
+        ("The observed series increased.", "legacy_text_fallback", "no_numeric_claims"),
+        ("The observed value was 999.", "citation_gate_fallback", None),
+    ],
+)
+def test_legacy_text_fallback_uses_normal_provenance_gate(
+    monkeypatch, fallback_text, expected_source, expected_reason
+):
+    def _raise_schema_failure(*_args, **_kwargs):
+        raise ValueError("invalid structured response")
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _raise_schema_failure)
+    monkeypatch.setattr(summarizer, "llm_summarize", lambda *_args, **_kwargs: fallback_text)
+
+    ctx = QueryContext(
+        query="Show the observed value",
+        preview="date value\n2024-01-01 10",
+        stats_hint="Rows: 1",
+        cols=["date", "value"],
+        rows=[("2024-01-01", 10)],
+        provenance_cols=["date", "value"],
+        provenance_rows=[("2024-01-01", 10)],
+        provenance_query_hash="fallback123",
+        provenance_source="sql",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == expected_source
+    if expected_source == "citation_gate_fallback":
+        assert out.summary_provenance_gate_passed is False
+        assert "could not fully ground" in out.summary
+    else:
+        assert out.summary_claims == [fallback_text]
+        assert out.summary_provenance_gate_passed is True
+        assert out.summary_provenance_gate_reason == expected_reason
+
+
+@pytest.mark.parametrize(
+    "fallback_text",
+    [
+        "The observed value was 9.",
+        "The observed value was 1e9.",
+        "\n".join([*("Safe narrative." for _ in range(8)), "Invented value: 999."]),
+        "\n".join([*("Grounded value: 10." for _ in range(4)), "Invented value: 999."]),
+    ],
+)
+def test_legacy_text_fallback_rejects_every_ungrounded_numeric_claim(
+    monkeypatch, fallback_text
+):
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid structured response")),
+    )
+    monkeypatch.setattr(summarizer, "llm_summarize", lambda *_args, **_kwargs: fallback_text)
+
+    ctx = QueryContext(
+        query="Show the observed value",
+        preview="date value\n2024-01-01 10",
+        stats_hint="Rows: 1",
+        cols=["date", "value"],
+        rows=[("2024-01-01", 10)],
+        provenance_cols=["date", "value"],
+        provenance_rows=[("2024-01-01", 10)],
+        provenance_query_hash="fallback-adversarial",
+        provenance_source="sql",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "citation_gate_fallback"
+    assert out.summary_provenance_gate_passed is False
+    assert "could not fully ground" in out.summary
+
+
+def test_legacy_text_fallback_rejects_numeric_claims_when_provenance_rows_are_missing(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid structured response")),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize",
+        lambda *_args, **_kwargs: "The observed value was 999.",
+    )
+
+    out = summarizer.summarize_data(
+        QueryContext(
+            query="Show the observed value",
+            preview="",
+            stats_hint="",
+            cols=[],
+            rows=[],
+            provenance_cols=[],
+            provenance_rows=[],
+        )
+    )
+
+    assert out.summary_source == "citation_gate_fallback"
+    assert out.summary_provenance_gate_passed is False
+
+
+def test_legacy_text_fallback_validates_tokens_beyond_the_reference_display_cap():
+    grounded_values = tuple(range(1, summarizer._MAX_REFS_PER_CLAIM + 1))
+    claim = " ".join([*(str(value) for value in grounded_values), "999"])
+    ctx = QueryContext(
+        query="List the values",
+        summary=claim,
+        summary_source="legacy_text_fallback",
+        summary_claims=[claim],
+        summary_confidence=0.5,
+        provenance_cols=[f"value_{value}" for value in grounded_values],
+        provenance_rows=[grounded_values],
+        provenance_query_hash="fallback-reference-cap",
+        provenance_source="sql",
+    )
+
+    summarizer._attach_claim_provenance(ctx)
+    assert "999" in ctx.summary_claim_provenance[0]["unmatched_tokens"]
+    assert len(ctx.summary_claim_provenance[0]["cell_refs"]) == summarizer._MAX_REFS_PER_CLAIM
+
+    summarizer._enforce_provenance_gate(ctx)
+
+    assert ctx.summary_provenance_gate_passed is False
+    assert ctx.summary_source == "citation_gate_fallback"
+
+
+def test_legacy_text_fallback_accepts_grounded_single_digit_claim(monkeypatch):
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid structured response")),
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize",
+        lambda *_args, **_kwargs: "The observed value was 9.",
+    )
+    ctx = QueryContext(
+        query="Show the observed value",
+        preview="date value\n2024-01-01 9",
+        stats_hint="Rows: 1",
+        cols=["date", "value"],
+        rows=[("2024-01-01", 9)],
+        provenance_cols=["date", "value"],
+        provenance_rows=[("2024-01-01", 9)],
+        provenance_query_hash="fallback-single-digit",
+        provenance_source="sql",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "legacy_text_fallback"
+    assert out.summary_provenance_gate_passed is True
+    assert out.summary_provenance_gate_reason == "ok"
 
 
 def test_share_fallback_restamps_provenance_and_passes_gate(monkeypatch):

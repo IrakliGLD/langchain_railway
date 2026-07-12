@@ -67,6 +67,7 @@ from knowledge.vector_retrieval import (
 from models import QueryContext, ResolutionPolicy, ResponseMode
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
+from utils.residual_price import is_implied_ppa_cfd_price_query
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -878,6 +879,8 @@ def _has_residual_weighted_price_signal(query: str) -> bool:
     query_lower = (query or "").strip().lower()
     if not query_lower:
         return False
+    if is_implied_ppa_cfd_price_query(query_lower):
+        return True
     calc_hit = any(
         signal in query_lower
         for signal in ("weighted average", "average price", "weighted avg", "mean price")

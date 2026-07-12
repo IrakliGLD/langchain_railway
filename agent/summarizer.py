@@ -44,6 +44,7 @@ from core.llm import (
 from models import GroundingPolicy, QueryContext, ResolutionPolicy
 from utils.language import get_grounding_fallback_message
 from utils.metrics import metrics
+from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -53,7 +54,14 @@ log = logging.getLogger("Enai")
 # separator, and parsing it as a minus minted ungrounded negative tokens
 # ('-2025', '-65') that failed the provenance gate (2026-07-10 report,
 # trace 872ca85f). Genuine negatives ("-1.4", "(-0.77)") keep their sign.
-_NUMBER_PATTERN = re.compile(r"(?<!\d)-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+# Scientific notation is one token so values such as 1e9 cannot degrade into
+# individually ignored digits.
+_NUMBER_PATTERN = re.compile(
+    r"(?<![\d.])-?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
+    r"(?:[eE][+-]?\d+)?%?"
+)
+_MAX_NORMALIZED_NUMBER_TOKEN_CHARS = 128
+_HASHED_NUMBER_TOKEN_PREFIX = "decimal-sha256:"
 _PROVENANCE_CONTEXT_COLS = ("date", "month", "year", "entity", "type_tech", "segment")
 _MAX_REFS_PER_TOKEN = 4
 _MAX_REFS_PER_CLAIM = 12
@@ -216,6 +224,61 @@ _COLUMN_CITATION_PATTERN = re.compile(
 
 
 # Numeric grounding helpers normalize every number before provenance matching.
+def _hashed_number_token(canonical_value: str) -> str:
+    digest = hashlib.sha256(canonical_value.encode("utf-8")).hexdigest()
+    return f"{_HASHED_NUMBER_TOKEN_PREFIX}{digest}"
+
+
+def _canonicalize_finite_decimal(value: Decimal) -> str:
+    """Return an exact, bounded token without fixed-point exponent expansion."""
+    sign_bit, raw_digits, raw_exponent = value.as_tuple()
+    digits = list(raw_digits)
+    exponent = int(raw_exponent)
+
+    if not any(digits):
+        return "0"
+
+    # Decimal.normalize() applies the active precision context and can both
+    # round long coefficients and expand huge exponents when formatted with
+    # ``f``. Strip only exact trailing zeroes so equivalent spellings retain
+    # one canonical value without changing its precision.
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    digit_text = "".join(str(digit) for digit in digits)
+    sign = "-" if sign_bit else ""
+    decimal_position = len(digit_text) + exponent
+
+    if exponent >= 0:
+        fixed_length = len(sign) + len(digit_text) + exponent
+        if fixed_length <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS:
+            return f"{sign}{digit_text}{'0' * exponent}"
+    else:
+        fixed_length = (
+            len(sign) + len(digit_text) + 1
+            if decimal_position > 0
+            else len(sign) + 2 + (-decimal_position) + len(digit_text)
+        )
+        if fixed_length <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS:
+            if decimal_position > 0:
+                return f"{sign}{digit_text[:decimal_position]}.{digit_text[decimal_position:]}"
+            return f"{sign}0.{'0' * (-decimal_position)}{digit_text}"
+
+    adjusted_exponent = exponent + len(digit_text) - 1
+    mantissa = digit_text[0]
+    if len(digit_text) > 1:
+        mantissa = f"{mantissa}.{digit_text[1:]}"
+    compact = f"{sign}{mantissa}e{adjusted_exponent:+d}"
+    if len(compact) <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS:
+        return compact
+
+    # The source token already contains an oversized coefficient. Hash its
+    # exact canonical tuple so it remains matchable/fail-closed without being
+    # retained or copied through every provenance index.
+    return _hashed_number_token(f"{sign}{digit_text}e{exponent:+d}")
+
+
 def _normalize_number_token(raw_token: str) -> Optional[str]:
     token = (raw_token or "").strip().replace(",", "")
     if token.endswith("%"):
@@ -223,11 +286,19 @@ def _normalize_number_token(raw_token: str) -> Optional[str]:
     if not token:
         return None
     try:
-        normalized = format(Decimal(token).normalize(), "f")
+        numeric = Decimal(token)
     except (InvalidOperation, ValueError):
-        normalized = token
-    if "." in normalized:
-        normalized = normalized.rstrip("0").rstrip(".")
+        normalized = (
+            token
+            if len(token) <= _MAX_NORMALIZED_NUMBER_TOKEN_CHARS
+            else _hashed_number_token(token)
+        )
+    else:
+        normalized = (
+            _canonicalize_finite_decimal(numeric)
+            if numeric.is_finite()
+            else token
+        )
     if not normalized or normalized in {"-", "+", "."}:
         return None
     return normalized
@@ -237,7 +308,7 @@ def _extract_number_tokens(text: str) -> Set[str]:
     tokens: Set[str] = set()
     for match in _NUMBER_PATTERN.finditer(text or ""):
         normalized = _normalize_number_token(match.group(0))
-        if not normalized or len(normalized) <= 1:
+        if not normalized:
             continue
         tokens.add(normalized)
     return tokens
@@ -402,7 +473,7 @@ def _add_rounded_source_variants(tokens: Set[str]) -> None:
                         rounded = dec.quantize(Decimal(1).scaleb(-places), rounding=rounding)
                 except (InvalidOperation, ValueError):
                     continue
-                normalized = _normalize_number_token(format(rounded, "f"))
+                normalized = _normalize_number_token(str(rounded))
                 if normalized and len(normalized) > 1:
                     variants.add(normalized)
     tokens.update(variants)
@@ -756,14 +827,17 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
 
 
 def _normalized_decimal_token(value: Decimal) -> Optional[str]:
-    return _normalize_number_token(format(value, "f"))
+    return _normalize_number_token(str(value))
 
 
 def _is_year_like_integer(value: Decimal) -> bool:
     if value != value.to_integral_value():
         return False
+    absolute_value = abs(value)
+    if absolute_value < 1900 or absolute_value > 2100:
+        return False
     try:
-        int_value = abs(int(value))
+        int_value = int(absolute_value)
     except (OverflowError, ValueError):
         return False
     return 1900 <= int_value <= 2100
@@ -819,10 +893,13 @@ def _rounded_match_variants(token: str) -> List[str]:
     for places in (2, 1):
         # round(Decimal) is banker's rounding; also try half-up so a claim of
         # "44.37" for source "44.365" matches (LLMs round half-up).
-        candidates = [str(round(numeric, places))]
+        try:
+            candidates = [str(round(numeric, places))]
+        except (InvalidOperation, ValueError):
+            candidates = []
         try:
             candidates.append(
-                format(numeric.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP), "f")
+                str(numeric.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
             )
         except (InvalidOperation, ValueError):
             pass
@@ -1035,6 +1112,8 @@ def _build_claim_provenance(
                 unmatched_tokens.append(token)
                 continue
             matched_tokens.append(token)
+            if len(claim_refs) >= _MAX_REFS_PER_CLAIM:
+                continue
             for ref in refs[:_MAX_REFS_PER_TOKEN]:
                 ref_key = (ref["row_number"], ref["column"], str(ref["value"]))
                 if ref_key in seen_refs:
@@ -1044,8 +1123,6 @@ def _build_claim_provenance(
                 citation_anchors.append(f"claim_{claim_idx}:{ref['cell_id']}")
                 if len(claim_refs) >= _MAX_REFS_PER_CLAIM:
                     break
-            if len(claim_refs) >= _MAX_REFS_PER_CLAIM:
-                break
 
         if claim_tokens and not unmatched_tokens and claim_refs:
             grounded_numeric_claims += 1
@@ -1068,10 +1145,18 @@ def _build_claim_provenance(
 
 
 def _derive_claims_from_text(summary_text: str) -> List[str]:
-    claims = [line.strip(" -*\t") for line in (summary_text or "").splitlines() if line.strip()]
+    claims: List[str] = []
+    for line in (summary_text or "").splitlines():
+        if not line.strip():
+            continue
+        # List ordinals are presentation, not analytical claims. Remove them
+        # before number extraction while retaining every substantive line.
+        claim = re.sub(r"^\s*(?:(?:[-*•])\s+|\d+[.)]\s+)", "", line).strip()
+        if claim:
+            claims.append(claim)
     if not claims and summary_text.strip():
         claims = [summary_text.strip()]
-    return claims[:8]
+    return claims
 
 
 def _attach_claim_provenance(ctx: QueryContext) -> None:
@@ -1083,11 +1168,6 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         ctx.summary_claim_provenance = []
         ctx.summary_provenance_coverage = 0.0
         return
-    if not source_cols or not source_rows:
-        ctx.summary_claim_provenance = []
-        ctx.summary_provenance_coverage = 0.0
-        return
-
     claim_prov, coverage, anchors = _build_claim_provenance(
         claims,
         source_cols,
@@ -1154,7 +1234,14 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
         if _policy_val == GroundingPolicy.EVIDENCE_AWARE.value
         else PROVENANCE_MIN_COVERAGE
     )
-    gate_passed = coverage >= min_coverage
+    # The legacy text fallback has no structured claim contract. Its claims are
+    # derived from the complete returned text, so fail closed if even one
+    # numeric claim is ungrounded. Structured summaries retain the established
+    # coverage policy for explicitly derived analytical values.
+    legacy_text_fallback = ctx.summary_source == "legacy_text_fallback"
+    gate_passed = coverage >= min_coverage and (
+        not legacy_text_fallback or not has_ungrounded_claim
+    )
     if gate_passed:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "ok"
@@ -1920,6 +2007,7 @@ _RESIDUAL_THRESHOLD_RULES: list[tuple[str, str, str]] = [
 _RESIDUAL_DIRECT_INTENTS = frozenset({
     "residual_weighted_price_calculation",
     "residual_weighted_price_followup",
+    "implied_ppa_cfd_price_approximation",
 })
 _RESIDUAL_DIRECT_ANSWER_KINDS = frozenset({
     AnswerKind.SCALAR,
@@ -1971,7 +2059,7 @@ def _extract_residual_share_threshold(query: str) -> tuple[str, float, str] | No
             raw_value = float(raw_group)
         except (TypeError, ValueError):
             continue
-        threshold = raw_value / 100.0 if raw_value > 1 else raw_value
+        threshold = normalize_share_threshold(raw_value, match.group(0))
         return operator, threshold, phrase
     return None
 
@@ -2011,11 +2099,22 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     if not _residual_direct_answer_is_authorized(ctx):
         return None
 
+    intent = str(getattr(getattr(ctx.question_analysis, "classification", None), "intent", "") or "").lower()
+    is_ppa_cfd_approximation = intent == "implied_ppa_cfd_price_approximation"
+
     required_cols = {
         "share_ppa_import_total",
         "residual_contribution_ppa_import_gel",
         "residual_contribution_ppa_import_usd",
     }
+    if is_ppa_cfd_approximation:
+        required_cols.update({
+            "known_price_coverage_ok",
+            "share_import",
+            "share_renewable_ppa",
+            "share_thermal_ppa",
+            "share_cfd_scheme",
+        })
     if not required_cols.issubset(set(ctx.df.columns)):
         return None
 
@@ -2032,6 +2131,27 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     df["residual_contribution_ppa_import_usd"] = pd.to_numeric(
         df["residual_contribution_ppa_import_usd"], errors="coerce"
     )
+    if is_ppa_cfd_approximation:
+        approximation_share_cols = [
+            "share_import",
+            "share_renewable_ppa",
+            "share_thermal_ppa",
+            "share_cfd_scheme",
+        ]
+        for col in approximation_share_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["share_ppa_cfd_total"] = df[
+            ["share_renewable_ppa", "share_thermal_ppa", "share_cfd_scheme"]
+        ].sum(axis=1, min_count=3)
+        coverage_ok = df["known_price_coverage_ok"].map(
+            lambda value: value is True or str(value).strip().lower() in {"true", "1", "yes"}
+        )
+        df = df[coverage_ok]
+        if df.empty:
+            return (
+                "No months could be calculated because the retrieved data did not contain complete prices "
+                "for every positive-share regulated and deregulated bucket."
+            )
     df = df.dropna(subset=[date_col, "share_ppa_import_total"])
     df = df[df["share_ppa_import_total"] > 0]
     if df.empty:
@@ -2047,17 +2167,21 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     threshold_rule = _extract_residual_share_threshold(ctx.query)
     if threshold_rule:
         operator, threshold, phrase = threshold_rule
+        threshold_col = "share_import" if is_ppa_cfd_approximation else "share_ppa_import_total"
         if operator == "gt":
-            df = df[df["share_ppa_import_total"] > threshold]
+            df = df[df[threshold_col] > threshold]
         elif operator == "ge":
-            df = df[df["share_ppa_import_total"] >= threshold]
+            df = df[df[threshold_col] >= threshold]
         elif operator == "lt":
-            df = df[df["share_ppa_import_total"] < threshold]
+            df = df[df[threshold_col] < threshold]
         else:
-            df = df[df["share_ppa_import_total"] <= threshold]
+            df = df[df[threshold_col] <= threshold]
         if df.empty:
             threshold_pct = threshold * 100 if threshold <= 1 else threshold
             label = (
+                "import"
+                if is_ppa_cfd_approximation
+                else
                 "renewable PPA + import + thermal PPA + CfD scheme"
                 if _has_explicit_residual_component_query_signal(ctx.query)
                 else "the residual PPA/CfD/import layer"
@@ -2068,6 +2192,46 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
             )
 
     df = df.sort_values(date_col).copy()
+    if is_ppa_cfd_approximation:
+        df = df.dropna(subset=[
+            "share_import",
+            "share_ppa_cfd_total",
+            "residual_contribution_ppa_import_gel",
+            "residual_contribution_ppa_import_usd",
+        ])
+        df = df[df["share_ppa_cfd_total"] > 0]
+        if df.empty:
+            return None
+        df["implied_ppa_cfd_price_gel"] = (
+            df["residual_contribution_ppa_import_gel"] / df["share_ppa_cfd_total"]
+        )
+        df["implied_ppa_cfd_price_usd"] = (
+            df["residual_contribution_ppa_import_usd"] / df["share_ppa_cfd_total"]
+        )
+        lines = [
+            "**Approximate Weighted Average PPA/CfD Price**",
+            "",
+            "This is a monthly implied price for Renewable PPA + Thermal PPA + CfD Scheme. "
+            "It assumes the import contribution is zero in months passing the requested import-share filter.",
+            "",
+            "Formula: approximate PPA/CfD price = residual PPA/CfD/import contribution / PPA/CfD share.",
+            "Exact conditional formula: (residual contribution - import share × import price) / PPA/CfD share.",
+            "",
+        ]
+        if threshold_rule:
+            _operator, threshold, _phrase = threshold_rule
+            lines.append(f"Applied filter: import share {_phrase} {threshold * 100:.3g}%.")
+            lines.append("")
+        for _, row in df.iterrows():
+            period_str = pd.to_datetime(row[date_col]).strftime("%B %Y")
+            lines.append(
+                f"- {period_str}: import share {float(row['share_import']) * 100:.3f}%; "
+                f"PPA/CfD share {float(row['share_ppa_cfd_total']) * 100:.1f}%; "
+                f"approximate PPA/CfD price {float(row['implied_ppa_cfd_price_gel']):.1f} GEL/MWh "
+                f"({float(row['implied_ppa_cfd_price_usd']):.1f} USD/MWh)"
+            )
+        return "\n".join(lines)
+
     # Recover the implied weighted price by dividing the residual contribution by the residual share.
     df["remaining_weighted_price_gel"] = (
         df["residual_contribution_ppa_import_gel"] / df["share_ppa_import_total"]
@@ -2592,12 +2756,25 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             )
             ctx.share_summary_override = None
 
+    # Explicitly authorized calculations take precedence over the generic
+    # evidence-frame renderer, which can only display retrieved observations
+    # and cannot derive the requested residual price.
+    _residual_answer = _build_residual_weighted_price_direct_answer(ctx)
+
     # --- Generic renderer path (answer_kind + evidence frame) ---
     # Attempt the generic renderer FIRST when we have a canonical evidence frame
     # and a deterministic render_style.  Handles SCALAR, LIST, TIMESERIES,
     # COMPARISON, SCENARIO, and FORECAST answer kinds — no regex detection.
-    _generic_answer = _try_generic_renderer(ctx)
-    if _generic_answer is not None:
+    _generic_answer = None if _residual_answer is not None else _try_generic_renderer(ctx)
+    if _residual_answer is not None:
+        ctx.summary = _residual_answer
+        ctx.summary_source = "deterministic_residual_weighted_price_direct"
+        ctx.summary_claims = []
+        ctx.summary_citations = ["deterministic_residual_weighted_price_direct"]
+        ctx.summary_confidence = 0.95
+        metrics.log_deterministic_skip(ctx.summary_source)
+        log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
+    elif _generic_answer is not None:
         ctx.summary = _generic_answer
         ctx.summary_source = "generic_renderer"
         # The generic renderer is already deterministic over the evidence frame.
@@ -2630,14 +2807,6 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         ctx.summary_confidence = 0.98
         metrics.log_deterministic_skip(ctx.summary_source)
         log.info("Deterministic regulated tariff list answer eligible; skipping Stage 4 LLM.")
-    elif (residual_answer := _build_residual_weighted_price_direct_answer(ctx)) is not None:
-        ctx.summary = residual_answer
-        ctx.summary_source = "deterministic_residual_weighted_price_direct"
-        ctx.summary_claims = []
-        ctx.summary_citations = ["deterministic_residual_weighted_price_direct"]
-        ctx.summary_confidence = 0.95
-        metrics.log_deterministic_skip(ctx.summary_source)
-        log.info("Deterministic residual weighted-price answer eligible; skipping Stage 4 LLM.")
     else:
         # Load domain knowledge for complex queries so the LLM can explain
         # causal mechanisms, not just describe data patterns.
@@ -2760,7 +2929,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 vector_knowledge=vector_knowledge,
             )
             ctx.summary_source = "legacy_text_fallback"
-            ctx.summary_claims = []
+            ctx.summary_claims = _derive_claims_from_text(ctx.summary)
             ctx.summary_citations = ["legacy_text_fallback"]
             ctx.summary_confidence = 0.5
 

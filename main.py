@@ -84,6 +84,7 @@ from config import (
     EVALUATE_ADMIN_SECRET,
     GATEWAY_SHARED_SECRET,
     GEMINI_MODEL,
+    MAX_REQUEST_BODY_BYTES,
     MODEL_TYPE,
     NVIDIA_MODEL,
     OPENAI_MODEL,
@@ -94,7 +95,13 @@ from config import (
 )
 
 # Schema & helpers
-from context import COLUMN_LABELS, DB_SCHEMA_DOC, DERIVED_LABELS, scrub_schema_mentions
+from context import (
+    COLUMN_LABELS,
+    DB_SCHEMA_DICT,
+    DB_SCHEMA_DOC,
+    DERIVED_LABELS,
+    scrub_schema_mentions,
+)
 from core.llm import (
     classify_query_type,
     get_primary_model_name,
@@ -154,16 +161,7 @@ logging.getLogger("uvicorn.access").addFilter(_DropUvicornAccess404())
 knowledge_module.load_knowledge()
 
 resolved_auth_mode = "gateway_and_bearer" if ENABLE_PUBLIC_BEARER_AUTH else "gateway_only"
-if ENAI_AUTH_MODE == "auto":
-    if ENABLE_PUBLIC_BEARER_AUTH:
-        log.warning(
-            "ENAI_AUTH_MODE=auto resolved to %s because SUPABASE_JWT_SECRET is set; set ENAI_AUTH_MODE explicitly",
-            resolved_auth_mode,
-        )
-    else:
-        log.info("ENAI_AUTH_MODE=auto resolved to %s", resolved_auth_mode)
-else:
-    log.info("Auth mode enabled: %s", resolved_auth_mode)
+log.info("Auth mode enabled: %s", resolved_auth_mode)
 
 if ENABLE_METRICS_ENDPOINT:
     log.warning("/metrics endpoint enabled; keep it admin-only and network-restricted")
@@ -227,6 +225,18 @@ _ = should_inject_balancing_pivot  # noqa: F811
 # Database Schema Reflection
 # -----------------------------
 SCHEMA_MAP: Dict[str, set] = {}
+REQUIRED_SCHEMA_COLUMNS = {
+    table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
+    for table_name in STATIC_ALLOWED_TABLES
+}
+
+
+def required_schema_is_ready(schema_map: Dict[str, set]) -> bool:
+    """Return whether every allow-listed relation exposes its required columns."""
+    return all(
+        required_columns.issubset(set(schema_map.get(table_name) or set()))
+        for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items()
+    )
 
 
 def refresh_schema_map() -> bool:
@@ -252,19 +262,16 @@ def refresh_schema_map() -> bool:
             schema_map.setdefault(str(view_name).lower(), set()).add(str(column_name).lower())
 
         SCHEMA_MAP = schema_map
-        if schema_map:
-            ALLOWED_TABLES.clear()
-            ALLOWED_TABLES.update(schema_map.keys())
-        else:
-            ALLOWED_TABLES.clear()
-            ALLOWED_TABLES.update(STATIC_ALLOWED_TABLES)
+        # Reflection describes availability; it must never expand the explicit
+        # SQL security allow-list when an unrelated materialized view appears.
+        # The allow-list is initialized from STATIC_ALLOWED_TABLES and is not
+        # mutated during refresh, avoiding a transient empty set under
+        # concurrent readiness probes.
         log.info("Schema reflection complete: %s views", len(SCHEMA_MAP))
         return True
     except Exception as exc:
         SCHEMA_MAP = {}
-        ALLOWED_TABLES.clear()
-        ALLOWED_TABLES.update(STATIC_ALLOWED_TABLES)
-        log.warning("Schema reflection unavailable at startup: %s", exc)
+        log.warning("Schema reflection unavailable: %s", exc)
         return False
 
 
@@ -315,7 +322,7 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
 
 
 def filter_caller_history(
-    raw_history: Optional[List[Dict[str, Any]]],
+    raw_history: Optional[List[Any]],
     *,
     is_bearer: bool,
     max_item_chars: int = 2000,
@@ -334,6 +341,8 @@ def filter_caller_history(
     items: List[Dict[str, str]] = []
     blocked = 0
     for turn in (raw_history or [])[:max_items]:
+        if hasattr(turn, "model_dump"):
+            turn = turn.model_dump()
         if not (isinstance(turn, dict) and turn.get("question")):
             continue
         question = str(turn.get("question", ""))[:max_item_chars]
@@ -474,6 +483,69 @@ def _check_user_rate_limit(subject_id: str) -> bool:
         max_requests=ASK_RATE_LIMIT_PUBLIC_PER_MINUTE,
     )
 
+class RequestBodyLimitMiddleware:
+    """Reject oversized /ask bodies before FastAPI reads or validates them."""
+
+    def __init__(self, app: Any, max_body_bytes: int) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != "/ask"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                response = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+                await response(scope, receive, send)
+                return
+            if declared_size < 0:
+                response = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+                await response(scope, receive, send)
+                return
+            if declared_size > self.max_body_bytes:
+                response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+                await response(scope, receive, send)
+                return
+
+        body = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            message_type = message.get("type")
+            if message_type == "http.disconnect":
+                return
+            if message_type != "http.request":
+                continue
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > self.max_body_bytes:
+                response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+                await response(scope, receive, send)
+                return
+            body.extend(chunk)
+            more_body = bool(message.get("more_body", False))
+
+        replayed = False
+
+        async def replay_receive() -> Dict[str, Any]:
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+
 # Request ID middleware for observability and debugging
 class RequestIDMiddleware(BaseHTTPMiddleware):
     """Add unique request ID to each request for tracing and debugging."""
@@ -494,6 +566,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         log.log(level, f"[{request_id}] {request.method} {request.url.path} → {response.status_code}")
         return response
 
+app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=MAX_REQUEST_BODY_BYTES)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -557,15 +630,21 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    """Readiness probe: DB connectivity + schema reflection health."""
+    """Readiness probe: live DB connectivity plus current required schema."""
     db_ready = is_database_available()
-    schema_ready = bool(SCHEMA_MAP)
+    schema_refreshed = refresh_schema_map() if db_ready else False
+    schema_ready = bool(
+        db_ready
+        and schema_refreshed
+        and required_schema_is_ready(SCHEMA_MAP)
+    )
+    ready = db_ready and schema_ready
     payload = {
-        "status": "ready" if db_ready else "degraded",
+        "status": "ready" if ready else "degraded",
         "database_ready": db_ready,
         "schema_ready": schema_ready,
     }
-    if db_ready:
+    if ready:
         return payload
     return JSONResponse(status_code=503, content=payload)
 
@@ -1160,5 +1239,7 @@ if __name__ == "__main__":
         uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
     except ImportError:
         log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
-    except Exception as e:
-        log.error(f"FATAL: Uvicorn server failed to start: {e}")
+        raise
+    except Exception:
+        log.exception("FATAL: Uvicorn server failed to start")
+        raise

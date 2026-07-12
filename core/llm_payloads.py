@@ -22,6 +22,7 @@ from contracts.question_analysis import (
     ChartFamily,
     ChartIntent,
     DerivedMetricName,
+    DimensionName,
     KnowledgeTopicName,
     MeasureTransform,
     PeriodInfo,
@@ -35,6 +36,14 @@ from contracts.question_analysis import (
 )
 
 log = logging.getLogger("Enai")
+
+_KNOWN_DIMENSION_NAMES = {item.value for item in DimensionName}
+_DIMENSION_DRIFT_ALIASES = {
+    "balancing": DimensionName.PRICE.value,
+    "ppa_cfd_price": DimensionName.PRICE.value,
+    "regulated": DimensionName.REGULATION_STATUS.value,
+    "deregulated": DimensionName.REGULATION_STATUS.value,
+}
 
 
 def _extract_json_payload(raw_text: str) -> dict:
@@ -437,6 +446,18 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
     if isinstance(sql_hints, dict):
         if sql_hints.get("dimensions") is None:
             sql_hints["dimensions"] = []
+        raw_dimensions = sql_hints.get("dimensions")
+        if isinstance(raw_dimensions, list):
+            sanitized_dimensions: list[str] = []
+            for raw_dimension in raw_dimensions:
+                dimension = str(raw_dimension or "").strip().lower()
+                if dimension.startswith("share_"):
+                    dimension = DimensionName.SHARE.value
+                else:
+                    dimension = _DIMENSION_DRIFT_ALIASES.get(dimension, dimension)
+                if dimension in _KNOWN_DIMENSION_NAMES and dimension not in sanitized_dimensions:
+                    sanitized_dimensions.append(dimension)
+            sql_hints["dimensions"] = sanitized_dimensions
         period = sql_hints.get("period")
         if isinstance(period, dict):
             # Phase 2 (2026-05-16): coerce relative tokens like "12m" / "now"

@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from contracts.evidence_frames import CanonicalFrame
 from contracts.intent_lexicon import (
@@ -260,6 +260,15 @@ class QueryContext:
         return share_like_query or share_like_intent
 
 
+class ConversationTurn(BaseModel):
+    """One caller-supplied Q&A pair accepted by the chat API."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    question: str = Field(..., min_length=1, max_length=2000)
+    answer: str = Field(default="", max_length=2000)
+
+
 class Question(BaseModel):
     """
     User question model for /ask endpoint.
@@ -270,9 +279,10 @@ class Question(BaseModel):
         conversation_history: Optional list of previous Q&A pairs for context
     """
     query: str = Field(..., max_length=2000, description="Natural language query")
-    user_id: Optional[str] = None
-    conversation_history: Optional[List[Dict[str, str]]] = Field(
+    user_id: Optional[str] = Field(default=None, max_length=128)
+    conversation_history: Optional[List[ConversationTurn]] = Field(
         default=None,
+        max_length=3,
         description="Last 1-3 Q&A pairs: [{'question': '...', 'answer': '...'}]"
     )
 

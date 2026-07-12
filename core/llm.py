@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, ValidationError
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 import knowledge as knowledge_module
 from config import (
@@ -218,14 +218,35 @@ def _cache_mark_in_flight(cache_input: str):
     """Safely call mark_in_flight — no-op if cache is a test mock without it."""
     fn = getattr(llm_cache, "mark_in_flight", None)
     if fn is not None:
-        fn(cache_input)
+        return fn(cache_input)
+    return None
 
 
-def _cache_cancel_in_flight(cache_input: str):
+def _cache_get_or_reserve(cache_input: str):
+    """Use atomic singleflight when available, retaining compatibility with test caches."""
+    fn = getattr(llm_cache, "get_or_reserve", None)
+    if fn is not None:
+        return fn(cache_input)
+    cached = llm_cache.get(cache_input)
+    if cached:
+        return cached, None
+    return None, _cache_mark_in_flight(cache_input)
+
+
+def _cache_set(cache_input: str, response: str, token=None):
+    if getattr(llm_cache, "get_or_reserve", None) is not None:
+        return llm_cache.set(cache_input, response, token=token)
+    return llm_cache.set(cache_input, response)
+
+
+def _cache_cancel_in_flight(cache_input: str, token=None):
     """Safely call cancel_in_flight — no-op if cache is a test mock without it."""
     fn = getattr(llm_cache, "cancel_in_flight", None)
     if fn is not None:
-        fn(cache_input)
+        if getattr(llm_cache, "get_or_reserve", None) is not None:
+            return fn(cache_input, token=token)
+        return fn(cache_input)
+    return None
 
 
 # Backward compatibility aliases (factories live in core/llm_runtime.py;
@@ -907,12 +928,10 @@ def llm_generate_plan_and_sql(
         f"sql_generation_v4|{user_query}|{planning_query}|{analysis_mode}|{lang_instruction}|"
         f"{_compact_json(analyzer_hint_payload)}|{vector_knowledge}|skills={ENABLE_SKILL_PROMPTS_PLANNER}"
     )
-    cached_response = llm_cache.get(cache_input)
+    cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
         log.info("📝 Plan/SQL: (cached)")
         return cached_response
-
-    _cache_mark_in_flight(cache_input)
 
     # Phase 1C: Include domain reasoning as internal step
     system = (
@@ -1199,9 +1218,9 @@ SELECT ...
         )
         combined_output = message.content.strip()
         # Phase 1B Optimization: Cache the response
-        llm_cache.set(cache_input, combined_output)
+        _cache_set(cache_input, combined_output, cache_token)
     except Exception:
-        _cache_cancel_in_flight(cache_input)
+        _cache_cancel_in_flight(cache_input, cache_token)
         raise
 
     return combined_output
@@ -1247,11 +1266,9 @@ def llm_summarize(
         f"summary_text_v2|{user_query}|{data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|{domain_knowledge}|{vector_knowledge}"
     )
-    cached_response = llm_cache.get(cache_input)
+    cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
         return cached_response
-
-    _cache_mark_in_flight(cache_input)
 
     system = (
         "Provide a DETAILED analytical answer based on the data preview and statistics. "
@@ -1708,9 +1725,9 @@ SYSTEM_GUIDANCE (authoritative rules):
         )
         out = message.content.strip()
         # Phase 1 Optimization: Cache the response for future identical requests
-        llm_cache.set(cache_input, out)
+        _cache_set(cache_input, out, cache_token)
     except Exception:
-        _cache_cancel_in_flight(cache_input)
+        _cache_cancel_in_flight(cache_input, cache_token)
         raise
 
     return out
@@ -2685,7 +2702,12 @@ def _select_analyzer_truncation_priority(
     return _move_history_to_end(base_priority, prompt_context.prompt_profile)
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(min=1, max=4),
+    retry=retry_if_not_exception_type(ValueError),
+    reraise=True,
+)
 def llm_analyze_question(
     user_query: str,
     conversation_history: Optional[list] = None,
@@ -2715,12 +2737,10 @@ def llm_analyze_question(
         f"prev={previous_contract}|"
         f"anom={evidence_anomaly_note}"
     )
-    cached_response = llm_cache.get(cache_input)
+    cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
         payload = _sanitize_question_analysis_payload(_extract_json_payload(cached_response))
         return QuestionAnalysis.model_validate(payload)
-
-    _cache_mark_in_flight(cache_input)
 
     system = (
         "You are a question analyzer for a Georgian energy market assistant. "
@@ -2789,9 +2809,9 @@ def llm_analyze_question(
         except ValidationError as exc:
             raise ValueError(f"Question-analysis schema validation failed: {exc}") from exc
 
-        llm_cache.set(cache_input, result.model_dump_json())
+        _cache_set(cache_input, result.model_dump_json(), cache_token)
     except Exception:
-        _cache_cancel_in_flight(cache_input)
+        _cache_cancel_in_flight(cache_input, cache_token)
         raise
     return result
 
@@ -2864,12 +2884,10 @@ def llm_summarize_structured(
         f"vk={vk_doc_types}|sh={skill_hash}|"
         f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}"
     )
-    cached_response = llm_cache.get(cache_input)
+    cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
         payload = _extract_json_payload(cached_response)
         return SummaryEnvelope.model_validate(payload)
-
-    _cache_mark_in_flight(cache_input)
 
     grounding_rule = (
         "STRICT GROUNDING: Every numeric value in answer/claims must appear verbatim in DATA_PREVIEW or STATISTICS. "
@@ -3333,9 +3351,9 @@ Citation format rules:
         except ValidationError as exc:
             raise ValueError(f"Structured summary schema validation failed: {exc}") from exc
 
-        llm_cache.set(cache_input, envelope.model_dump_json())
+        _cache_set(cache_input, envelope.model_dump_json(), cache_token)
     except Exception:
-        _cache_cancel_in_flight(cache_input)
+        _cache_cancel_in_flight(cache_input, cache_token)
         raise
     return envelope
 

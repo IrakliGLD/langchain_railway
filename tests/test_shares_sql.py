@@ -58,6 +58,7 @@ def test_compute_entity_price_contributions_includes_usd_columns_and_date_filter
     assert "AS contribution_deregulated_hydro_usd" in sql
     assert "AS total_known_contributions_usd" in sql
     assert "AS residual_contribution_ppa_import_usd" in sql
+    assert "AS known_price_coverage_ok" in sql
     assert "t.date >= :start_date" in sql
     assert "t.date <= :end_date" in sql
     assert "p.date >= :start_date" in sql

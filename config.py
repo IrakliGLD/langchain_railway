@@ -42,12 +42,24 @@ def _read_secret_env(*names: str):
     return None
 
 
+def _read_bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read an integer environment setting and fail closed outside safe bounds."""
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
 # API Security
 # Prefer the new ENAI_* names; fall back to the earlier split-secret names during rollout.
 GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
 SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSION_SIGNING_SECRET")
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
-ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "auto").strip().lower() or "auto")
+ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
 # Phase 13 rollout flag. When "1"/"true", chart_pipeline attaches a long-form
 # ChartFrame payload under chart_meta["longFrame"] for frontend consumers.
@@ -55,15 +67,11 @@ ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().l
 # adopts the new shape.
 ENAI_CHART_LONGFORM = os.getenv("ENAI_CHART_LONGFORM", "0").strip().lower() in ("1", "true", "yes", "on")
 # Supabase JWT secret for local bearer-token verification.
-# Explicit bearer mode requires ENAI_AUTH_MODE=gateway_and_bearer.
-# Compatibility mode ENAI_AUTH_MODE=auto keeps bearer auth enabled when
-# SUPABASE_JWT_SECRET is present, but operators should migrate to an explicit
-# auth mode.
+# Direct bearer authentication is an explicit security-boundary decision.
+# Merely configuring SUPABASE_JWT_SECRET must never enable it implicitly.
 SUPABASE_JWT_SECRET = _read_secret_env("SUPABASE_JWT_SECRET")
 ALLOW_EVALUATE_ENDPOINT = os.getenv("ALLOW_EVALUATE_ENDPOINT", "false").lower() in ("1", "true", "yes", "on")
-ENABLE_PUBLIC_BEARER_AUTH = ENAI_AUTH_MODE == "gateway_and_bearer" or (
-    ENAI_AUTH_MODE == "auto" and bool(SUPABASE_JWT_SECRET)
-)
+ENABLE_PUBLIC_BEARER_AUTH = ENAI_AUTH_MODE == "gateway_and_bearer"
 
 # LLM Configuration
 # MODEL_TYPE selects the active provider: "gemini" (default), "openai", or "nvidia".
@@ -82,13 +90,13 @@ NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com
 # answers get truncated.
 NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
-# Optional wall-clock bound per NVIDIA call, in seconds. Unset/0 = unbounded
-# (the pre-2026-07-08 behavior). When set, a slow shared-endpoint model (the
+# Wall-clock bound per NVIDIA call, in seconds. Defaults to 90; explicitly set
+# to 0 only when an unbounded call is intentionally required. A slow shared-endpoint model (the
 # z-ai/glm-5.2 incident: 113s analyzer + 192s summarizer calls at ~12 tok/s)
 # times out and falls back to OpenAI instead of holding the request for
 # minutes; max_retries drops to 1 because retrying a timeout on a slow model
 # only multiplies the wait (same rationale as the Gemini summarizer client).
-_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "").strip()
+_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "90").strip()
 NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
@@ -117,6 +125,15 @@ if PIPELINE_MODE not in {"deep", "fast"}:
 
 # Query Limits
 MAX_ROWS = int(os.getenv("MAX_ROWS", "5000"))
+# 256 KiB fits a maximally valid Question payload even when every non-BMP
+# character is represented as a JSON surrogate-pair escape. The 1 MiB ceiling
+# prevents configuration drift from silently disabling pre-parse containment.
+MAX_REQUEST_BODY_BYTES = _read_bounded_int_env(
+    "MAX_REQUEST_BODY_BYTES",
+    262144,
+    minimum=262144,
+    maximum=1048576,
+)
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")
 # Stage 0.8: prefetch secondary evidence tool calls concurrently (2 workers,
@@ -241,12 +258,12 @@ def validate_runtime_settings(
     google_api_key: str | None,
     nvidia_api_key: str | None = None,
 ) -> None:
-    valid_auth_modes = {"auto", "gateway_only", "gateway_and_bearer"}
+    valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
 
     if auth_mode not in valid_auth_modes:
         raise RuntimeError(
-            "Invalid ENAI_AUTH_MODE. Expected one of: auto, gateway_only, gateway_and_bearer"
+            "Invalid ENAI_AUTH_MODE. Expected one of: gateway_only, gateway_and_bearer"
         )
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
@@ -262,6 +279,11 @@ def validate_runtime_settings(
         raise RuntimeError("Missing ENAI_EVALUATE_SECRET (or legacy EVALUATE_ADMIN_SECRET)")
     if auth_mode == "gateway_and_bearer" and not supabase_jwt_secret:
         raise RuntimeError("ENAI_AUTH_MODE=gateway_and_bearer requires SUPABASE_JWT_SECRET")
+    if auth_mode == "gateway_and_bearer" and deployment_env != "test":
+        raise RuntimeError(
+            "ENAI_AUTH_MODE=gateway_and_bearer is temporarily restricted to test environments "
+            "until direct callers use the server-owned entitlement path"
+        )
     if enable_evaluate_endpoint:
         if deployment_env not in {"development", "test"}:
             raise RuntimeError(
