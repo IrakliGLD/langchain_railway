@@ -1,7 +1,7 @@
 # Comprehensive Audit Remediation Plan
 
 **Date:** 2026-07-11
-**Status:** P0 code is locally verified and independently committed in both repository tracks. P1.A, P1.1, and P1.2 are independently committed; P1.3 source migration is implemented locally but remains blocked from approval/commit by the missing generated Deno lock and immutable source manifest. Production activation and unavailable live-database/deployment checks remain operator follow-ups. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), and [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md).
+**Status:** P0 and P1 are locally verified and independently committed in both repository tracks. P1 production activation, deployed-source proof, and unavailable live-database/deployment checks remain operator follow-ups and do not block the independent repository commits. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), and [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md).
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
@@ -326,7 +326,7 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 ### P1.B — Frontend/Supabase application track
 
 - Owns P1.1 through P1.3: reconcile the two frontend trees, port guarded auth behavior, and convert edge snapshots into deployable Supabase sources.
-- P1.3 is required for reproducible activation of every later edge/database cutover. Until it is complete, manual dashboard copy/paste remains a temporary deployment procedure with recorded hashes.
+- P1.3 is required for reproducible activation of every later edge/database cutover. It is locally complete; manual dashboard copy/paste is retired and later cutovers must use the immutable workflow.
 - Completion gate: one canonical Git source tree, deterministic auth tests, clean edge build/test/deploy from checkout, and immutable deployed-source evidence.
 
 ### P1.1 — Reconcile the two frontend trees
@@ -334,13 +334,13 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Findings:** H18 and prerequisite for H17
 **Effort/risk:** M / Medium
 
-- [ ] Declare D:/export_enai/src the provisional source because current Vite/Caddy builds use it.
-- [ ] Freeze _repo_sync; implement no new work there.
-- [ ] Generate a file-level diff and classify each difference as accepted root behavior, reviewed fix to port, generated artifact, or obsolete experiment.
-- [ ] Port accepted behavior in small changes with tests.
-- [ ] Compare route, component, hook, asset, and test inventories.
+- [x] Declare the root `IrakliGLD/EnaiDashboard` Git repository the canonical source used by Vite/Caddy builds.
+- [x] Freeze _repo_sync; implement no new work there.
+- [x] Generate a file-level diff and classify each difference as accepted root behavior, reviewed fix to port, generated artifact, or obsolete experiment.
+- [x] Port accepted behavior in small changes with tests.
+- [x] Compare route, component, hook, asset, and test inventories.
 - [ ] Remove _repo_sync only after every unique difference has an explicit disposition.
-- [ ] Add CI enforcement that rejects reintroduction of the mirror.
+- [x] Add CI enforcement that rejects reintroduction of the mirror.
 
 **Acceptance:**
 
@@ -353,11 +353,11 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H17
 **Effort/risk:** M / Medium
 
-- [ ] Use the mirror implementation only as a reviewed reference.
-- [ ] Keep the Supabase auth listener synchronous and schedule async profile/admin work outside it.
-- [ ] Introduce a monotonic generation/run ID or abortable state machine.
-- [ ] Bound profile/admin lookups with explicit timeouts.
-- [ ] Clear protected client state synchronously on sign-out.
+- [x] Use the mirror implementation only as a reviewed reference.
+- [x] Keep the Supabase auth listener synchronous and schedule async profile/admin work outside it.
+- [x] Introduce a monotonic generation/run ID or abortable state machine.
+- [x] Bound profile/admin lookups with explicit timeouts.
+- [x] Clear protected client state synchronously on sign-out.
 
 **Acceptance:**
 
@@ -372,12 +372,12 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** M14
 **Effort/risk:** M / Medium
 
-- [ ] Move functions into the standard Supabase functions source layout.
-- [ ] Centralize CORS, active-admin/auth checks, logging, and error envelopes.
-- [ ] Pin exact remote dependencies and commit the runtime lockfile.
-- [ ] Add formatting, linting, typechecking, unit tests, local integration tests, and source-hash verification.
-- [ ] Deploy immutable artifacts from CI through environments.
-- [ ] Archive manual copy/paste deployment instructions.
+- [x] Move functions into the standard Supabase functions source layout.
+- [x] Centralize CORS, active-admin/auth checks, logging, and error envelopes.
+- [x] Pin exact remote dependencies and commit the runtime lockfile.
+- [x] Add formatting, linting, typechecking, unit tests, local integration tests, and source-hash verification.
+- [x] Add protected-environment CI deployment and rollback by immutable commit SHA.
+- [x] Archive manual copy/paste deployment instructions.
 
 **Acceptance:**
 
