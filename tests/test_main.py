@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -78,6 +79,7 @@ from main import (
     fetch_balancing_share_panel,
     filter_caller_history,
     generate_share_summary,
+    resolve_request_id,
 )  # noqa: E402
 from models import Question
 from utils import auth as auth_module
@@ -381,6 +383,85 @@ def test_ask_rejects_oversized_body_before_request_model_validation():
 
     assert response.status_code == 413, response.text
     assert response.json() == {"detail": "Request body too large"}
+
+
+def test_request_id_preserves_safe_edge_correlation_id():
+    request_id = "req-frontend.123:attempt_1"
+    assert resolve_request_id(request_id) == request_id
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [None, "", " leading-space", "line\nbreak", "x" * 129, "slash/not-allowed"],
+)
+def test_request_id_replaces_missing_or_unsafe_values(candidate):
+    generated = resolve_request_id(candidate)
+    assert generated != candidate
+    assert str(uuid.UUID(generated)) == generated
+
+
+def test_ask_preserves_request_correlation_and_publishes_contract_version(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _clear_rate_limit_buckets()
+    request_id = "req-edge-123"
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": request_id,
+            "X-Enai-Contract-Version": main_module.CHAT_GATEWAY_CONTRACT_VERSION,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Request-Id"] == request_id
+    assert response.headers["X-Trace-Id"] == request_id
+    assert response.headers["X-Enai-Contract-Version"] == "chat-gateway-v1"
+    _clear_rate_limit_buckets()
+
+
+def test_ask_rejects_declared_contract_mismatch_before_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for a contract mismatch"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-contract-mismatch",
+            "X-Enai-Contract-Version": "chat-gateway-v999",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Unsupported chat gateway contract version"}
+    assert response.headers["X-Request-Id"] == "req-contract-mismatch"
+    assert response.headers["X-Enai-Contract-Version"] == "chat-gateway-v1"
+    _clear_rate_limit_buckets()
+
+
+def test_published_chat_gateway_contract_matches_runtime_models():
+    contract_path = Path(main_module.__file__).parent / "contracts" / "chat_gateway_v1.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+
+    assert contract["contract_version"] == main_module.CHAT_GATEWAY_CONTRACT_VERSION
+    assert contract["transport"]["gateway_maximum_body_bytes"] <= main_module.MAX_REQUEST_BODY_BYTES
+    assert contract["transport"]["backend_minimum_body_limit_bytes"] == 262144
+    assert contract["request"]["query"]["maximum_characters"] == 2000
+    assert contract["request"]["conversation_history"]["maximum_turns"] == 3
+    assert contract["request"]["conversation_history"]["item"]["question"]["maximum_characters"] == 2000
+    assert contract["request"]["conversation_history"]["item"]["answer"]["maximum_characters"] == 2000
+
+    question_schema = Question.model_json_schema()
+    assert question_schema["properties"]["query"]["maxLength"] == 2000
+    assert question_schema["properties"]["conversation_history"]["anyOf"][0]["maxItems"] == 3
 
 
 def test_request_body_limit_fits_the_largest_semantically_valid_escaped_payload():

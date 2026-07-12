@@ -1,0 +1,80 @@
+{
+  "contract_version": "chat-gateway-v1",
+  "transport": {
+    "method": "POST",
+    "path": "/ask",
+    "content_type": "application/json",
+    "gateway_maximum_body_bytes": 262144,
+    "backend_limit_environment_variable": "MAX_REQUEST_BODY_BYTES",
+    "backend_minimum_body_limit_bytes": 262144
+  },
+  "authentication": {
+    "production_mode": "gateway_only",
+    "header": "X-App-Key",
+    "secret_environment_variable": "ENAI_GATEWAY_SECRET",
+    "direct_bearer_status": "test_only_until_p3"
+  },
+  "correlation": {
+    "request_header": "X-Request-Id",
+    "response_header": "X-Request-Id",
+    "trace_response_header": "X-Trace-Id",
+    "accepted_pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    "invalid_or_missing_behavior": "replace_with_uuid"
+  },
+  "versioning": {
+    "request_header": "X-Enai-Contract-Version",
+    "response_header": "X-Enai-Contract-Version",
+    "request_header_required_during_p1": false,
+    "declared_mismatch_status": 409
+  },
+  "request": {
+    "query": {
+      "type": "string",
+      "required": true,
+      "minimum_trimmed_characters": 1,
+      "maximum_characters": 2000
+    },
+    "user_id": {
+      "type": ["string", "null"],
+      "required": false,
+      "maximum_characters": 128
+    },
+    "conversation_history": {
+      "type": ["array", "null"],
+      "required": false,
+      "maximum_turns": 3,
+      "item": {
+        "additional_properties": false,
+        "question": {
+          "type": "string",
+          "required": true,
+          "minimum_trimmed_characters": 1,
+          "maximum_characters": 2000
+        },
+        "answer": {
+          "type": "string",
+          "required": false,
+          "maximum_characters": 2000
+        }
+      }
+    },
+    "legacy_ignored_fields": ["service_tier"]
+  },
+  "success_response": {
+    "required_fields": {
+      "answer": "string",
+      "execution_time": "number"
+    },
+    "optional_fields": {
+      "charts": "array|null",
+      "chart_data": "array|null",
+      "chart_type": "string|null",
+      "chart_metadata": "object|null"
+    }
+  },
+  "response_headers": {
+    "X-Session-Token": "opaque backend session token; edge forwarding is deferred to P3/P6",
+    "X-LLM-Total-Tokens": "gateway-only internal telemetry",
+    "X-LLM-Estimated-Cost-USD": "gateway-only internal telemetry"
+  }
+}
