@@ -288,6 +288,20 @@ def refresh_schema_map() -> bool:
 # Single source of truth for the app version (Q5, 2026-06-10 — the file-header
 # comment and FastAPI(version=...) previously disagreed: "v20.0" vs "18.6").
 __version__ = "20.0"
+CHAT_GATEWAY_CONTRACT_VERSION = "chat-gateway-v1"
+_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def resolve_request_id(candidate: Optional[str]) -> str:
+    """Preserve a safe caller correlation ID or create a new UUID.
+
+    Request IDs are observability metadata, never authentication material. The
+    restricted alphabet prevents control-character/log-injection problems while
+    retaining UUIDs and the browser's ``req-...`` fallback format.
+    """
+    if candidate and _SAFE_REQUEST_ID_RE.fullmatch(candidate):
+        return candidate
+    return str(uuid.uuid4())
 
 
 @asynccontextmanager
@@ -548,23 +562,26 @@ class RequestBodyLimitMiddleware:
 
 # Request ID middleware for observability and debugging
 class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Add unique request ID to each request for tracing and debugging."""
+    """Preserve a safe correlation ID and publish the gateway contract version."""
 
     async def dispatch(self, request: Request, call_next):
-        request_id = str(uuid.uuid4())
-        request_id_var.set(request_id)
+        request_id = resolve_request_id(request.headers.get("x-request-id"))
+        context_token = request_id_var.set(request_id)
 
         try:
             response = await call_next(request)
         except Exception as e:
             log.error(f"[{request_id}] {request.method} {request.url.path} error: {e}")
             raise
-
-        response.headers["X-Request-ID"] = request_id
-        matched = request.scope.get("route") is not None
-        level = logging.INFO if matched else logging.DEBUG
-        log.log(level, f"[{request_id}] {request.method} {request.url.path} → {response.status_code}")
-        return response
+        else:
+            response.headers["X-Request-ID"] = request_id
+            response.headers["X-Enai-Contract-Version"] = CHAT_GATEWAY_CONTRACT_VERSION
+            matched = request.scope.get("route") is not None
+            level = logging.INFO if matched else logging.DEBUG
+            log.log(level, f"[{request_id}] {request.method} {request.url.path} → {response.status_code}")
+            return response
+        finally:
+            request_id_var.reset(context_token)
 
 app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=MAX_REQUEST_BODY_BYTES)
 app.add_middleware(RequestIDMiddleware)
@@ -573,8 +590,22 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,  # Specific origins from environment (SECURITY FIX)
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],  # Only needed methods
-    allow_headers=["Content-Type", "x-app-key", "Authorization", "x-session-token"],  # Only needed headers
-    expose_headers=["X-Request-ID", "X-Trace-ID", "X-Session-Token", "X-LLM-Total-Tokens", "X-LLM-Estimated-Cost-USD"],
+    allow_headers=[
+        "Content-Type",
+        "x-app-key",
+        "Authorization",
+        "x-session-token",
+        "x-request-id",
+        "x-enai-contract-version",
+    ],
+    expose_headers=[
+        "X-Request-ID",
+        "X-Trace-ID",
+        "X-Session-Token",
+        "X-Enai-Contract-Version",
+        "X-LLM-Total-Tokens",
+        "X-LLM-Estimated-Cost-USD",
+    ],
 )
 
 # -----------------------------
@@ -955,6 +986,7 @@ def ask_post(
     q: Question,
     x_app_key: Optional[str] = Header(None, alias='X-App-Key'),
     x_session_token: Optional[str] = Header(None, alias='X-Session-Token'),
+    x_enai_contract_version: Optional[str] = Header(None, alias='X-Enai-Contract-Version'),
     authorization: Optional[str] = Header(None, alias='Authorization'),
 ):
     t0 = time.time()
@@ -1009,6 +1041,22 @@ def ask_post(
         )
         raise
     request.state.caller = caller
+
+    # Keep the declaration optional while the backend and edge deploy
+    # independently. Once a caller declares a version, fail closed before any
+    # model or database work if it is not supported.
+    if x_enai_contract_version is not None and not hmac.compare_digest(
+        x_enai_contract_version,
+        CHAT_GATEWAY_CONTRACT_VERSION,
+    ):
+        _finalize_request_telemetry()
+        log_security_event(
+            "unsupported_gateway_contract",
+            request=request,
+            provided_version=x_enai_contract_version,
+            supported_version=CHAT_GATEWAY_CONTRACT_VERSION,
+        )
+        raise HTTPException(status_code=409, detail="Unsupported chat gateway contract version")
 
     if caller.auth_mode == "gateway":
         if not _check_gateway_rate_limit(request):
