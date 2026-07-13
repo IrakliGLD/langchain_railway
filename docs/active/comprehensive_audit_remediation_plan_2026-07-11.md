@@ -498,6 +498,20 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - Verify signed actor/session/request context, treat all history as untrusted, preserve request identity, enforce safe typed errors, and remove the temporary test-only direct-bearer restriction only after the shared entitlement authority exists.
 - Commit independently behind compatible versioned contracts; do not enable a new direct-bearer mode until P3.B's database/edge authority is deployed.
 
+**Backend implementation status (2026-07-13):**
+
+- [x] Verify the P3.B HMAC over contract/request/actor/session/issue time, reject partial/tampered/stale/future assertions, and add bounded same-operation replay protection.
+- [x] Provide an `optional` → `required` assertion rollout gate so the two repositories remain independently deployable.
+- [x] Bind edge and direct-bearer session tokens to the authenticated actor; derive stable opaque sessions from verified edge actor/session pairs.
+- [x] Preserve the external request ID, allocate a distinct backend span, and publish both identifiers without using them as authorization inputs.
+- [x] Treat gateway/database/session/bearer history as untrusted and render it through escaped non-instructional prompt boundaries.
+- [x] Reject unknown Ask v1 fields, explicitly reject `service_tier`, and publish a safe typed error envelope.
+- [ ] Deploy P3.B schema/edge authority, observe verified assertions, then set `ENAI_GATEWAY_ACTOR_ASSERTION_MODE=required` in backend staging and production.
+- [ ] Keep direct bearer test-only until a backend direct caller can use that same deployed authority. P3.A intentionally does not remove the safety restriction yet.
+- [ ] Keep one backend replica until P5/P7 externalize replay/session state and multi-process tests pass.
+
+Deployment, verification, rollback, and complementary manual work are recorded in [`p3a_backend_activation_runbook_2026-07-13.md`](p3a_backend_activation_runbook_2026-07-13.md).
+
 ### P3.B — Frontend/Supabase application track
 
 - Owns P3.1 and P3.3, the database/edge/persistence portions of P3.2, P3.4, P3.6, P3.7, and P3.8, plus browser removal of authoritative charging/persistence.
@@ -611,9 +625,9 @@ Cutover order:
 **Finding:** H10
 **Effort/risk:** M / Medium
 
-- [ ] Apply history firewalling, control-character handling, and explicit untrusted prompt boundaries regardless of transport.
-- [ ] Preserve role structure and maximum turn/field limits.
-- [ ] Add stored-history prompt-injection cases to the security gate.
+- [x] Apply history firewalling, control-character handling, and explicit untrusted prompt boundaries regardless of transport.
+- [x] Preserve role structure and maximum turn/field limits.
+- [x] Add stored-history prompt-injection cases to the security gate.
 
 **Acceptance:**
 
@@ -628,9 +642,9 @@ Cutover order:
 - [ ] Add turn ID, request ID, explicit role/sequence ordinal, and deterministic ordering.
 - [ ] Store chart data/metadata as native JSONB.
 - [ ] Provide a temporary legacy-string reader and an idempotent bounded migration.
-- [ ] Forward a signed actor assertion and bind session/conversation tokens to that actor.
-- [ ] Preserve the external request ID and create a separate internal span ID.
-- [ ] Define versioned Ask request/response schemas; stop silently ignoring service tier.
+- [x] Forward a signed actor assertion and bind session/conversation tokens to that actor.
+- [x] Preserve the external request ID and create a separate internal span ID.
+- [x] Define versioned Ask request/response schemas; stop silently ignoring service tier.
 
 **Acceptance:**
 
@@ -663,8 +677,8 @@ Cutover order:
 
 - [ ] Check every Supabase data/error result.
 - [ ] Define fail-open/fail-closed decisions: profile/quota checks fail closed; optional history may degrade explicitly.
-- [ ] Publish a safe error envelope with code, safe message, retryable flag, and request ID.
-- [ ] Preserve real backend status categories instead of mapping all non-2xx responses to 502.
+- [x] Publish a safe error envelope with code, safe message, retryable flag, and request ID.
+- [x] Preserve real backend status categories instead of mapping all non-2xx responses to 502.
 
 **Acceptance:**
 

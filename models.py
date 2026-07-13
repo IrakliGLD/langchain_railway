@@ -277,11 +277,20 @@ class Question(BaseModel):
 
     Attributes:
         query: Natural language query in English, Georgian, or Russian
-        user_id: Optional user identifier for tracking
+        user_id: Legacy non-authoritative correlation label; never identity
         conversation_history: Optional list of previous Q&A pairs for context
     """
+    # chat-gateway-v1 rejects unknown fields. In particular, browser/edge
+    # ``service_tier`` labels are not authorization inputs and are no longer
+    # silently discarded.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     query: str = Field(..., max_length=2000, description="Natural language query")
-    user_id: Optional[str] = Field(default=None, max_length=128)
+    user_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Legacy non-authoritative label; ignored for identity and authorization",
+    )
     conversation_history: Optional[List[ConversationTurn]] = Field(
         default=None,
         max_length=3,
@@ -308,12 +317,33 @@ class APIResponse(BaseModel):
         chart_metadata: Optional metadata about the chart
         execution_time: Total execution time in seconds
     """
+    model_config = ConfigDict(extra="forbid")
+
     answer: str
     charts: Optional[List[Dict[str, Any]]] = None
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None
     chart_metadata: Optional[Dict[str, Any]] = None
     execution_time: float
+
+
+class APIErrorDetail(BaseModel):
+    """Stable, public-safe /ask error details for chat-gateway-v1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
+    retryable: bool
+    request_id: str
+
+
+class APIErrorResponse(BaseModel):
+    """Versioned /ask error envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: APIErrorDetail
 
 
 class MetricsResponse(BaseModel):

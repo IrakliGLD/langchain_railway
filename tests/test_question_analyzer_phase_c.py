@@ -1732,8 +1732,11 @@ def test_llm_analyze_question_clarify_reply_preserves_knowledge_priority_at_runt
     ]
     assert "UNTRUSTED_TOPIC_CATALOG" in captured["prompt"]
     assert "UNTRUSTED_TOOL_CATALOG" not in captured["prompt"]
-    assert "Q1: Who is eligible to participate in the electricity exchange?" in captured["prompt"]
-    assert "A1: Which market did you mean?" in captured["prompt"]
+    assert (
+        "<USER_TEXT>Who is eligible to participate in the electricity exchange?</USER_TEXT>"
+        in captured["prompt"]
+    )
+    assert "<ASSISTANT_TEXT>Which market did you mean?</ASSISTANT_TEXT>" in captured["prompt"]
 
 
 def test_llm_analyze_question_system_prompt_scopes_untrusted_blocks(monkeypatch):

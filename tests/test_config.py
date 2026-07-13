@@ -108,6 +108,24 @@ def test_validate_runtime_settings_accepts_gateway_only_without_jwt_secret():
     )
 
 
+def test_validate_runtime_settings_rejects_unknown_actor_assertion_mode():
+    with pytest.raises(RuntimeError, match="ENAI_GATEWAY_ACTOR_ASSERTION_MODE"):
+        validate_runtime_settings(
+            supabase_db_url="postgresql://user:pass@localhost/db",
+            gateway_shared_secret="gateway",
+            session_signing_secret="session",
+            evaluate_admin_secret="evaluate",
+            auth_mode="gateway_only",
+            deployment_env="production",
+            supabase_jwt_secret=None,
+            enable_evaluate_endpoint=False,
+            allow_evaluate_endpoint=False,
+            model_type="openai",
+            google_api_key=None,
+            gateway_actor_assertion_mode="disabled",
+        )
+
+
 def test_validate_runtime_settings_blocks_direct_bearer_in_production():
     with pytest.raises(RuntimeError, match="server-owned entitlement path"):
         validate_runtime_settings(

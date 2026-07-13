@@ -41,6 +41,8 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -54,8 +56,8 @@ import knowledge as knowledge_module
 
 # Phase 6: Pipeline
 from agent.answer_provenance import build_answer_provenance
-from agent.metric_units import METRIC_UNITS
 from agent.contract_continuity import continuity_snapshot_json
+from agent.metric_units import METRIC_UNITS
 from agent.pipeline import process_query
 from analysis.seasonal import compute_seasonal_average
 from analysis.seasonal_stats import calculate_seasonal_stats, detect_monthly_timeseries, format_seasonal_stats
@@ -116,7 +118,7 @@ from core.llm import (
 from core.query_executor import ENGINE, execute_sql_safely, is_database_available
 from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
 from guardrails.firewall import build_safe_refusal_message, inspect_query
-from models import APIResponse, MetricsResponse, Question
+from models import APIErrorResponse, APIResponse, MetricsResponse, Question
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
 
@@ -172,8 +174,9 @@ if ENABLE_EVALUATE_ENDPOINT:
 if not ENABLE_PUBLIC_BEARER_AUTH and SUPABASE_JWT_SECRET and ENAI_AUTH_MODE == "gateway_only":
     log.info("SUPABASE_JWT_SECRET loaded but bearer auth is disabled by ENAI_AUTH_MODE")
 
-# Request ID tracking for observability
+# Request and internal span tracking for observability
 request_id_var: ContextVar[str] = ContextVar("request_id", default="")
+span_id_var: ContextVar[str] = ContextVar("span_id", default="")
 
 # CORS Configuration: Parse allowed origins from environment
 # Default to localhost for development if not specified
@@ -305,6 +308,16 @@ def resolve_request_id(candidate: Optional[str]) -> str:
     return str(uuid.uuid4())
 
 
+def create_internal_span_id() -> str:
+    """Allocate a backend-local span distinct from the end-to-end request ID."""
+    return f"span-{uuid.uuid4().hex}"
+
+
+def resolve_parent_span_id(candidate: Optional[str]) -> str:
+    """Accept a safe upstream span only as non-authoritative trace metadata."""
+    return candidate if candidate and _SAFE_REQUEST_ID_RE.fullmatch(candidate) else ""
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """Startup hook: prime schema cache and validate skills.
@@ -322,11 +335,111 @@ app = FastAPI(title="Enai Analyst (Gemini)", version=__version__, lifespan=_life
 security_log = logging.getLogger("EnaiSecurity")
 
 
+class AskAPIError(HTTPException):
+    """An intentional /ask failure with a stable public error contract."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=message)
+        self.code = code
+        self.retryable = retryable
+
+
+_ASK_ERROR_DEFAULTS: Dict[int, Tuple[str, str, bool]] = {
+    400: ("INVALID_REQUEST", "Invalid request", False),
+    401: ("AUTHENTICATION_REQUIRED", "Authentication required", False),
+    403: ("FORBIDDEN", "Request forbidden", False),
+    404: ("NOT_FOUND", "Resource not found", False),
+    408: ("REQUEST_TIMEOUT", "Request timed out", True),
+    409: ("REQUEST_CONFLICT", "Request conflict", False),
+    413: ("REQUEST_TOO_LARGE", "Request body too large", False),
+    422: ("VALIDATION_FAILED", "Request validation failed", False),
+    429: ("RATE_LIMITED", "Rate limit exceeded", True),
+    500: ("INTERNAL_ERROR", "Internal server error", False),
+    502: ("UPSTREAM_FAILURE", "Upstream service failed", True),
+    503: ("SERVICE_UNAVAILABLE", "Service unavailable", True),
+    504: ("UPSTREAM_TIMEOUT", "Upstream service timed out", True),
+}
+ASK_ERROR_RESPONSES = {
+    status_code: {
+        "model": APIErrorResponse,
+        "description": message,
+    }
+    for status_code, (_code, message, _retryable) in _ASK_ERROR_DEFAULTS.items()
+    if status_code != 404
+}
+
+
+def _ask_error_payload(
+    *,
+    status_code: int,
+    request_id: str,
+    code: Optional[str] = None,
+    message: Optional[str] = None,
+    retryable: Optional[bool] = None,
+) -> Dict[str, Any]:
+    default_code, default_message, default_retryable = _ASK_ERROR_DEFAULTS.get(
+        status_code,
+        ("REQUEST_FAILED", "Request failed", False),
+    )
+    envelope = APIErrorResponse.model_validate(
+        {
+            "error": {
+                "code": code or default_code,
+                "message": message or default_message,
+                "retryable": default_retryable if retryable is None else retryable,
+                "request_id": request_id,
+            }
+        }
+    )
+    return envelope.model_dump(mode="json")
+
+
+@app.exception_handler(HTTPException)
+async def _safe_ask_http_error(request: Request, exc: HTTPException):
+    if request.url.path != "/ask":
+        return await http_exception_handler(request, exc)
+    code = exc.code if isinstance(exc, AskAPIError) else None
+    retryable = exc.retryable if isinstance(exc, AskAPIError) else None
+    message = str(exc.detail) if isinstance(exc, AskAPIError) else None
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_ask_error_payload(
+            status_code=exc.status_code,
+            request_id=request_id_var.get() or resolve_request_id(None),
+            code=code,
+            message=message,
+            retryable=retryable,
+        ),
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _safe_ask_validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path != "/ask":
+        return await request_validation_exception_handler(request, exc)
+    return JSONResponse(
+        status_code=422,
+        content=_ask_error_payload(
+            status_code=422,
+            request_id=request_id_var.get() or resolve_request_id(None),
+        ),
+    )
+
+
 def log_security_event(event_type: str, request: Optional[Request] = None, **details: Any) -> None:
     """Emit structured security logs for audit pipelines."""
     payload: Dict[str, Any] = {
         "event_type": event_type,
         "request_id": request_id_var.get() or "",
+        "span_id": span_id_var.get() or "",
         "path": request.url.path if request else "",
         "method": request.method if request else "",
         "client_ip": (request.client.host if request and request.client else ""),
@@ -339,7 +452,7 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
 def filter_caller_history(
     raw_history: Optional[List[Any]],
     *,
-    is_bearer: bool,
+    is_bearer: Optional[bool] = None,
     max_item_chars: int = 2000,
     max_items: int = 3,
 ) -> Tuple[List[Dict[str, str]], int]:
@@ -347,11 +460,9 @@ def filter_caller_history(
 
     Returns (history_items, blocked_count).
 
-    Gateway-mode history is server-loaded by the edge function and trusted, so it
-    is only length-capped (preserving prior behavior). In public-bearer mode the
-    history is client-controlled and untrusted (audit S6): each turn's question
-    and answer are run through the firewall — turns that trip a block rule are
-    dropped, and surviving text is replaced with its sanitized form.
+    Every transport is untrusted, including edge-loaded database history and
+    in-process session history. ``is_bearer`` remains as an ignored compatibility
+    argument for callers compiled against the P1 helper signature.
     """
     items: List[Dict[str, str]] = []
     blocked = 0
@@ -362,20 +473,22 @@ def filter_caller_history(
             continue
         question = str(turn.get("question", ""))[:max_item_chars]
         answer = str(turn.get("answer", ""))[:max_item_chars]
-        if is_bearer:
-            q_decision = inspect_query(question)
-            a_decision = inspect_query(answer)
-            if q_decision.action == "block" or a_decision.action == "block":
-                blocked += 1
-                continue
-            question = q_decision.sanitized_query
-            answer = a_decision.sanitized_query
+        q_decision = inspect_query(question)
+        a_decision = inspect_query(answer)
+        if q_decision.action == "block" or a_decision.action == "block":
+            blocked += 1
+            continue
+        question = q_decision.sanitized_query
+        answer = a_decision.sanitized_query
         items.append({"question": question, "answer": answer})
     return items, blocked
 
 # Caller-aware rate limiting: key by authenticated identity when available,
 # fall back to IP for unauthenticated/rejected traffic.
-def _rate_limit_key(request: Request) -> str:
+def _rate_limit_key(
+    request: Request,
+    caller: Optional[CallerContext] = None,
+) -> str:
     """Derive rate-limit key from auth headers (pre-authentication peek).
 
     Only the gateway secret is cheap enough to verify here (constant-time
@@ -383,6 +496,12 @@ def _rate_limit_key(request: Request) -> str:
     as the key would let attackers forge unlimited buckets with random
     strings.  All non-gateway traffic is keyed by IP address.
     """
+    if caller and caller.actor_assertion_verified and caller.actor_id and caller.session_id:
+        actor_session_hash = hashlib.sha256(
+            f"{caller.actor_id}\n{caller.session_id}".encode("utf-8")
+        ).hexdigest()[:16]
+        return f"gateway_actor_session:{actor_session_hash}"
+
     app_key = request.headers.get("x-app-key") or ""
     if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
         session_token = (request.headers.get("x-session-token") or "").strip()
@@ -479,10 +598,13 @@ def _check_preauth_rate_limit(request: Request) -> bool:
     )
 
 
-def _check_gateway_rate_limit(request: Request) -> bool:
+def _check_gateway_rate_limit(
+    request: Request,
+    caller: Optional[CallerContext] = None,
+) -> bool:
     """Apply the gateway limiter using a verified session-aware key."""
     return _check_sliding_window_rate_limit(
-        subject_id=_rate_limit_key(request),
+        subject_id=_rate_limit_key(request, caller),
         buckets=_gateway_rate_buckets,
         bucket_lock=_gateway_rate_lock,
         max_requests=ASK_RATE_LIMIT_GATEWAY_PER_MINUTE,
@@ -520,15 +642,37 @@ class RequestBodyLimitMiddleware:
             try:
                 declared_size = int(content_length)
             except (TypeError, ValueError):
-                response = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+                response = JSONResponse(
+                    _ask_error_payload(
+                        status_code=400,
+                        request_id=request_id_var.get() or resolve_request_id(None),
+                        code="INVALID_CONTENT_LENGTH",
+                        message="Invalid Content-Length",
+                    ),
+                    status_code=400,
+                )
                 await response(scope, receive, send)
                 return
             if declared_size < 0:
-                response = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+                response = JSONResponse(
+                    _ask_error_payload(
+                        status_code=400,
+                        request_id=request_id_var.get() or resolve_request_id(None),
+                        code="INVALID_CONTENT_LENGTH",
+                        message="Invalid Content-Length",
+                    ),
+                    status_code=400,
+                )
                 await response(scope, receive, send)
                 return
             if declared_size > self.max_body_bytes:
-                response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+                response = JSONResponse(
+                    _ask_error_payload(
+                        status_code=413,
+                        request_id=request_id_var.get() or resolve_request_id(None),
+                    ),
+                    status_code=413,
+                )
                 await response(scope, receive, send)
                 return
 
@@ -543,7 +687,13 @@ class RequestBodyLimitMiddleware:
                 continue
             chunk = message.get("body", b"")
             if len(body) + len(chunk) > self.max_body_bytes:
-                response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+                response = JSONResponse(
+                    _ask_error_payload(
+                        status_code=413,
+                        request_id=request_id_var.get() or resolve_request_id(None),
+                    ),
+                    status_code=413,
+                )
                 await response(scope, receive, send)
                 return
             body.extend(chunk)
@@ -563,26 +713,48 @@ class RequestBodyLimitMiddleware:
 
 # Request ID middleware for observability and debugging
 class RequestIDMiddleware(BaseHTTPMiddleware):
-    """Preserve a safe correlation ID and publish the gateway contract version."""
+    """Preserve request identity and allocate a separate backend span."""
 
     async def dispatch(self, request: Request, call_next):
         request_id = resolve_request_id(request.headers.get("x-request-id"))
-        context_token = request_id_var.set(request_id)
+        span_id = create_internal_span_id()
+        parent_span_id = resolve_parent_span_id(request.headers.get("x-enai-span-id"))
+        request.state.parent_span_id = parent_span_id
+        request_token = request_id_var.set(request_id)
+        span_token = span_id_var.set(span_id)
 
         try:
             response = await call_next(request)
-        except Exception as e:
-            log.error(f"[{request_id}] {request.method} {request.url.path} error: {e}")
+        except Exception as exc:
+            log.error(
+                "[%s/%s] %s %s error_class=%s",
+                request_id,
+                span_id,
+                request.method,
+                request.url.path,
+                type(exc).__name__,
+            )
             raise
         else:
             response.headers["X-Request-ID"] = request_id
+            response.headers["X-Trace-ID"] = span_id
+            response.headers["X-Enai-Span-ID"] = span_id
             response.headers["X-Enai-Contract-Version"] = CHAT_GATEWAY_CONTRACT_VERSION
             matched = request.scope.get("route") is not None
             level = logging.INFO if matched else logging.DEBUG
-            log.log(level, f"[{request_id}] {request.method} {request.url.path} → {response.status_code}")
+            log.log(
+                level,
+                "[%s/%s] %s %s → %s",
+                request_id,
+                span_id,
+                request.method,
+                request.url.path,
+                response.status_code,
+            )
             return response
         finally:
-            request_id_var.reset(context_token)
+            span_id_var.reset(span_token)
+            request_id_var.reset(request_token)
 
 app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=MAX_REQUEST_BODY_BYTES)
 app.add_middleware(RequestIDMiddleware)
@@ -598,10 +770,16 @@ app.add_middleware(
         "x-session-token",
         "x-request-id",
         "x-enai-contract-version",
+        "x-enai-actor-id",
+        "x-enai-session-id",
+        "x-enai-actor-issued-at",
+        "x-enai-actor-signature",
+        "x-enai-span-id",
     ],
     expose_headers=[
         "X-Request-ID",
         "X-Trace-ID",
+        "X-Enai-Span-ID",
         "X-Session-Token",
         "X-Enai-Contract-Version",
         "X-LLM-Total-Tokens",
@@ -980,7 +1158,7 @@ def generate_html_report(summary: Dict[str, Any], results: List[Dict[str, Any]],
 
 
 
-@app.post('/ask', response_model=APIResponse)
+@app.post('/ask', response_model=APIResponse, responses=ASK_ERROR_RESPONSES)
 def ask_post(
     request: Request,
     response: Response,
@@ -988,11 +1166,17 @@ def ask_post(
     x_app_key: Optional[str] = Header(None, alias='X-App-Key'),
     x_session_token: Optional[str] = Header(None, alias='X-Session-Token'),
     x_enai_contract_version: Optional[str] = Header(None, alias='X-Enai-Contract-Version'),
+    x_enai_actor_id: Optional[str] = Header(None, alias='X-Enai-Actor-Id'),
+    x_enai_session_id: Optional[str] = Header(None, alias='X-Enai-Session-Id'),
+    x_enai_actor_issued_at: Optional[str] = Header(None, alias='X-Enai-Actor-Issued-At'),
+    x_enai_actor_signature: Optional[str] = Header(None, alias='X-Enai-Actor-Signature'),
     authorization: Optional[str] = Header(None, alias='Authorization'),
 ):
     t0 = time.time()
-    trace_id = request_id_var.get() or str(uuid.uuid4())
+    request_id = request_id_var.get() or resolve_request_id(None)
+    trace_id = span_id_var.get() or create_internal_span_id()
     response.headers["X-Trace-ID"] = trace_id
+    response.headers["X-Enai-Span-ID"] = trace_id
     metrics.start_request_telemetry(trace_id)
     request_llm_telemetry = None
 
@@ -1025,12 +1209,18 @@ def ask_post(
     if not _check_preauth_rate_limit(request):
         _finalize_request_telemetry()
         log_security_event("preauth_rate_limit_exceeded", request=request)
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        raise AskAPIError(429, "RATE_LIMITED", "Rate limit exceeded", retryable=True)
 
     try:
         caller: CallerContext = authenticate_request(
             x_app_key=x_app_key,
             authorization=authorization,
+            request_id=request_id,
+            contract_version=CHAT_GATEWAY_CONTRACT_VERSION,
+            x_actor_id=x_enai_actor_id,
+            x_actor_session_id=x_enai_session_id,
+            x_actor_issued_at=x_enai_actor_issued_at,
+            x_actor_signature=x_enai_actor_signature,
         )
     except HTTPException:
         _finalize_request_telemetry()
@@ -1042,6 +1232,20 @@ def ask_post(
         )
         raise
     request.state.caller = caller
+    if q.user_id is not None:
+        log_security_event(
+            "non_authoritative_user_id_ignored",
+            request=request,
+            supplied=True,
+        )
+    if caller.auth_mode == "gateway":
+        log.info(
+            "Gateway actor assertion: verified=%s request_id=%s span_id=%s parent_span_id=%s",
+            caller.actor_assertion_verified,
+            request_id,
+            trace_id,
+            getattr(request.state, "parent_span_id", ""),
+        )
 
     # Keep the declaration optional while the backend and edge deploy
     # independently. Once a caller declares a version, fail closed before any
@@ -1057,17 +1261,21 @@ def ask_post(
             provided_version=x_enai_contract_version,
             supported_version=CHAT_GATEWAY_CONTRACT_VERSION,
         )
-        raise HTTPException(status_code=409, detail="Unsupported chat gateway contract version")
+        raise AskAPIError(
+            409,
+            "UNSUPPORTED_CONTRACT_VERSION",
+            "Unsupported chat gateway contract version",
+        )
 
     if caller.auth_mode == "gateway":
-        if not _check_gateway_rate_limit(request):
+        if not _check_gateway_rate_limit(request, caller):
             _finalize_request_telemetry()
             log_security_event(
                 "gateway_rate_limit_exceeded",
                 request=request,
-                rate_limit_key=_rate_limit_key(request),
+                rate_limit_key=_rate_limit_key(request, caller),
             )
-            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            raise AskAPIError(429, "RATE_LIMITED", "Rate limit exceeded", retryable=True)
     else:
         if not _check_user_rate_limit(caller.subject_id):
             _finalize_request_telemetry()
@@ -1076,7 +1284,7 @@ def ask_post(
                 request=request,
                 subject_id=caller.subject_id,
             )
-            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            raise AskAPIError(429, "RATE_LIMITED", "Rate limit exceeded", retryable=True)
 
     # Referer validation
     referer = request.headers.get('referer') or request.headers.get('Referer')
@@ -1091,7 +1299,7 @@ def ask_post(
                 request=request,
                 referer=referer,
             )
-            raise HTTPException(status_code=403, detail='Forbidden')
+            raise AskAPIError(403, "FORBIDDEN_ORIGIN", "Request forbidden")
         if not any(referer_origin == origin.rstrip('/') for origin in ALLOWED_ORIGINS):
             _finalize_request_telemetry()
             log.warning(f'Blocked request with disallowed Referer: {referer_origin}')
@@ -1100,7 +1308,7 @@ def ask_post(
                 request=request,
                 referer=referer_origin,
             )
-            raise HTTPException(status_code=403, detail='Forbidden')
+            raise AskAPIError(403, "FORBIDDEN_ORIGIN", "Request forbidden")
 
     slot_acquired = request_backpressure_gate.try_acquire()
     if not slot_acquired:
@@ -1111,12 +1319,21 @@ def ask_post(
             request=request,
             max_concurrent=get_resilience_snapshot()["request_backpressure"]["max_concurrent"],
         )
-        raise HTTPException(status_code=503, detail="Service busy. Please retry shortly.")
+        raise AskAPIError(
+            503,
+            "CAPACITY_EXHAUSTED",
+            "Service busy. Please retry shortly.",
+            retryable=True,
+        )
 
     try:
         session_id, session_token, reused_existing_session = get_or_issue_session(
             x_session_token,
             SESSION_SIGNING_SECRET,
+            actor_id=caller.actor_id,
+            authoritative_session_id=(
+                caller.session_id if caller.actor_assertion_verified else None
+            ),
         )
         response.headers["X-Session-Token"] = session_token
         if x_session_token and not reused_existing_session:
@@ -1125,38 +1342,44 @@ def ask_post(
                 request=request,
                 provided=True,
             )
-        bound_history = get_history(session_id)
+        stored_history = get_history(session_id, actor_id=caller.actor_id)
+
+        # All history sources are hostile prompt data, including server-loaded
+        # database turns and this process's own cached copy. Inspect both the
+        # persisted/session path and the current transport before choosing one.
+        bound_history, blocked_stored_turns = filter_caller_history(stored_history)
+        caller_history, blocked_caller_turns = filter_caller_history(
+            q.conversation_history,
+            max_item_chars=2000,
+        )
+        blocked_history_turns = blocked_stored_turns + blocked_caller_turns
+        if blocked_history_turns:
+            log_security_event(
+                "untrusted_history_turn_blocked",
+                request=request,
+                subject_id=caller.subject_id,
+                stored_turns=blocked_stored_turns,
+                caller_turns=blocked_caller_turns,
+            )
 
         # If the in-process session has no history yet (e.g. first request after
         # deploy or session expiry) but the edge function provided server-loaded
         # history from the chat_history table, use it as a seed.  This bridges
         # the gap where the edge function cannot forward session tokens but *can*
         # load persisted turns from the database on behalf of the authenticated user.
-        _MAX_HISTORY_ITEM_CHARS = 2000  # ~500 tokens per item, 6 items max
-        if not bound_history and q.conversation_history:
-            bound_history, blocked_history_turns = filter_caller_history(
-                q.conversation_history,
-                is_bearer=(caller.auth_mode == "public_bearer"),
-                max_item_chars=_MAX_HISTORY_ITEM_CHARS,
-            )
-            if blocked_history_turns:
-                log_security_event(
-                    "bearer_history_turn_blocked",
-                    request=request,
-                    subject_id=caller.subject_id,
-                    blocked_turns=blocked_history_turns,
-                )
+        if not bound_history and caller_history:
+            bound_history = caller_history
             if bound_history:
-                seed_history(session_id, bound_history)
+                seed_history(session_id, bound_history, actor_id=caller.actor_id)
                 log.info(
-                    "Seeded session history from edge-function-provided turns. "
-                    "session_id=%s turns=%d",
-                    session_id, len(bound_history),
+                    "Seeded actor-bound session history. session_hash=%s turns=%d",
+                    hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+                    len(bound_history),
                 )
-        elif q.conversation_history and bound_history:
+        elif caller_history and bound_history:
             # Session already has history — ignore the client-provided duplicate
             log.debug(
-                "Ignoring edge-function history; session already has %d turns.",
+                "Ignoring duplicate caller history; session already has %d turns.",
                 len(bound_history),
             )
 
@@ -1211,7 +1434,10 @@ def ask_post(
                 conversation_history=bound_history,
                 trace_id=trace_id,
                 session_id=session_id,
-                previous_contract_snapshot=get_last_contract(session_id),
+                previous_contract_snapshot=get_last_contract(
+                    session_id,
+                    actor_id=caller.actor_id,
+                ),
             )
         except HTTPException:
             _finalize_request_telemetry()
@@ -1222,16 +1448,20 @@ def ask_post(
             log_security_event(
                 "pipeline_execution_failure",
                 request=request,
-                error=str(e),
+                error_class=type(e).__name__,
             )
             # Generic detail for every auth mode: the exception is already in
             # the server log (log.exception above) and the security event.
-            raise HTTPException(status_code=500, detail="Query processing failed")
+            raise AskAPIError(
+                500,
+                "QUERY_PROCESSING_FAILED",
+                "Query processing failed",
+            )
 
-        append_exchange(session_id, query_text, ctx.summary)
+        append_exchange(session_id, query_text, ctx.summary, actor_id=caller.actor_id)
         _contract_snapshot = continuity_snapshot_json(ctx)
         if _contract_snapshot:
-            set_last_contract(session_id, _contract_snapshot)
+            set_last_contract(session_id, _contract_snapshot, actor_id=caller.actor_id)
         req_usage = _finalize_request_telemetry()
 
         exec_time = time.time() - t0
@@ -1242,6 +1472,7 @@ def ask_post(
         response_chart_meta.update(
             {
                 "trace_id": trace_id,
+                "request_id": request_id,
                 "stage_timings_ms": dict(ctx.stage_timings_ms),
                 "llm_telemetry": req_usage,
                 "session_bound_history_turns": len(bound_history),

@@ -7,11 +7,10 @@ canonical-frame rollout gate is enabled in a later phase.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "contracts" / "metric_units_v1.json"
 
