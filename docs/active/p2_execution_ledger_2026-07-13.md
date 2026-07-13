@@ -1,15 +1,15 @@
 # P2 execution ledger — 2026-07-13
 
-**Status:** P2.A backend locally complete and independently verified; P2.B frontend pending
+**Status:** P2.A backend and P2.B frontend locally complete, independently verified, and independently committed
 
-**Release state:** The backend analytical-truth prerequisites are ready for an independent commit/deploy. Do not enable H1 canonical-frame enforcement. Overall P2 closes only after the frontend consumes the same versioned unit contract and passes its consumer gates.
+**Release state:** The local P2 implementation gate is closed. Both applications remain independently deployable and communicate only through the deployed HTTP/API response contract. Do not enable H1 canonical-frame enforcement; production smoke/shadow evidence and the P4 entry review remain required.
 
 ## Repository state
 
 | Track | Repository | Branch | State |
 |---|---|---|---|
-| P2.A backend | `D:/Enaiapp/langchain_railway` | `refactor/review-phase-fixes` | Locally complete; this ledger ships in the P2.A implementation commit |
-| P2.B frontend | `D:/Enaiapp/p0_frontend_commit_repo` | `fix/p0-remediation` | Pending |
+| P2.A backend | `D:/Enaiapp/langchain_railway` | `refactor/review-phase-fixes` | Complete: `19a369b`, `37129e1`, `bcdb56a` |
+| P2.B frontend | frontend repository (`EnaiDashboard.git`) | `fix/p0-remediation` | Complete: `fa20c98` |
 
 ## P2.A delivered scope
 
@@ -42,24 +42,33 @@
 - `git diff --check` passed; line-ending notices are repository/platform normalization warnings.
 - No live database was required. Per operator instruction, live-data/deployment verification is deferred.
 
+## P2.B delivered scope and verification
+
+- Vendored registry version `1.0.0` is consumed by dashboard labels, builder axes/tariffs, chat-chart axes/tooltips, precision, compatibility validation, and filter conversion helpers.
+- The frontend build verifies the canonical hash and its browser-compatible generated artifact entirely inside the frontend repository. It never reads a backend checkout or filesystem path.
+- Historical responses without a registry version remain compatible while H1 is off. Responses declaring an unsupported version keep the answer text but suppress the chart with an explicit warning.
+- Frontend contract gate passed; ESLint passed; production Vite build passed; **342 tests passed**, 0 failed.
+- A repository-path scan found no `langchain_railway`, `D:/Enaiapp`, `D:/export_enai`, or sibling-backend references in frontend runtime/build/test inputs.
+
 ## Manual deployment and activation instructions
 
-1. Deploy the P2.A backend commit (or a reviewed descendant) through the normal Railway/backend pipeline.
-2. Keep canonical evidence enforcement/H1 in its current off or non-authoritative state. P2.A corrects its prerequisites but does not authorize the P4 cutover.
-3. Add explicit backend environment versions:
+1. Deploy backend commit `bcdb56a` (or a reviewed descendant containing `19a369b` and `37129e1`) through the normal Railway/backend pipeline.
+2. Deploy frontend commit `fa20c98` (or a reviewed descendant) through the frontend's own pipeline. Do not copy files between repositories or make either deployment mount/read the other checkout.
+3. The two P2 deployments are order-tolerant: the new frontend accepts historical unversioned responses and registry `1.0.0`; an unknown declared version fails closed for charts while preserving answer text. Deploying backend first gives the clearest smoke-test evidence.
+4. Keep canonical evidence enforcement/H1 in its current off or non-authoritative state. P2 corrects its prerequisites but does not authorize the P4 cutover.
+5. Add explicit backend environment versions:
    - `VECTOR_KNOWLEDGE_NORMALIZATION_VERSION=v1`
    - `VECTOR_KNOWLEDGE_CORPUS_VERSION=v1`
    The code defaults both to `v1`, so omission does not break startup; explicit values make cache and ingestion identity auditable.
-4. Whenever either version, embedding provider, exact model, or dimension changes:
+6. Whenever either version, embedding provider, exact model, or dimension changes:
    - update the environment value;
    - re-ingest/rebuild the vector corpus using that same configuration;
    - deploy the backend;
    - run a known-query retrieval smoke test before production traffic.
-5. Do not copy files to Supabase for P2.A. This track changes only the backend repository.
+7. Run a production chat smoke query that returns one price chart and one quantity/share chart. Confirm the response declares `chart_metadata.metric_unit_registry_version = "1.0.0"`, answer text remains visible, axes/tooltips show the declared units, and the browser console has no contract warning.
+8. No Supabase database migration, edge-function copy/deploy, new frontend environment variable, or direct repository-file integration is required for P2.
 
 ## Complementary work still required
 
-- P2.B must consume registry version `1.0.0` for UI labels, axes, tables, exports, filters, precision, and validation. It must not create an independent conversion table.
-- Frontend deployment must reject or safely fall back on an unsupported registry version.
 - P4 entry review must confirm both P2 tracks, production shadow comparisons, and rollback readiness before enabling H1.
-- If older clients assume raw price numbers while displaying tetri/cents labels, deploy P2.B compatibility handling before making canonical-frame output authoritative.
+- Production smoke/shadow comparisons must confirm intentional unit changes and historical-client behavior before making canonical-frame output authoritative.

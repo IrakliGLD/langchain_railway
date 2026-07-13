@@ -1,7 +1,7 @@
 # Comprehensive Audit Remediation Plan
 
 **Date:** 2026-07-11
-**Status:** P0 and P1 are locally verified and independently committed in both repository tracks. P2.A backend is locally verified and ready for its independent commit; P2.B frontend remains open. P1 production activation, deployed-source proof, and unavailable live-database/deployment checks remain operator follow-ups and do not block the independent repository commits. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md), and [p2_execution_ledger_2026-07-13.md](p2_execution_ledger_2026-07-13.md).
+**Status:** P0, P1, P2.A, and P2.B are locally verified and independently committed in their repository tracks. P1/P2 production activation, deployed-source proof, and unavailable live-database/deployment checks remain operator follow-ups and do not block the independent repository commits. H1 remains off until P4. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md), and [p2_execution_ledger_2026-07-13.md](p2_execution_ledger_2026-07-13.md).
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
@@ -482,7 +482,7 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 
 ### P2 exit gate
 
-**Current state (2026-07-13):** P2.A passes all backend gates (1,385 tests). P2.B consumer-contract work is still open, so the overall P2 exit gate is not yet closed. H1 remains off.
+**Current state (2026-07-13):** P2.A passes all backend gates (1,385 tests). P2.B passes lint, production build, the internal contract-integrity gate, and all 342 frontend tests. The local P2 implementation gate is closed; production smoke/shadow evidence remains a manual deployment attestation. H1 remains off until the P4 entry review.
 
 - Dimensional, statistical, filter, period-scope, and provenance golden tests pass.
 - Shadow comparisons explain every intentional numeric change.
