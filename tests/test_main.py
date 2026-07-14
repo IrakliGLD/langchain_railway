@@ -629,6 +629,152 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     _clear_rate_limit_buckets()
 
 
+def test_ask_accepts_gateway_budget_and_passes_deadline_to_pipeline(monkeypatch):
+    request_id = "req-p5-deadline"
+    captured = {}
+
+    def _capture_pipeline(**kwargs):
+        captured["pipeline"] = kwargs
+        return _fake_query_context()
+
+    monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
+    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": request_id,
+            "X-Enai-Contract-Version": main_module.CHAT_GATEWAY_CONTRACT_VERSION,
+            "X-Enai-Request-Budget-Ms": "90000",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    deadline = captured["pipeline"]["request_deadline"]
+    assert deadline.budget_ms == 90000
+    assert deadline.retry_owner == "backend"
+    assert response.headers["X-Enai-Request-Budget-Ms"] == "90000"
+    assert response.headers["X-Enai-Retry-Owner"] == "backend"
+    assert 0 < int(response.headers["X-Enai-Deadline-Remaining-Ms"]) <= 90000
+    assert response.json()["chart_metadata"]["request_deadline"]["retry_owner"] == "backend"
+    _clear_rate_limit_buckets()
+
+
+def test_ask_rejects_exhausted_gateway_budget_before_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run after deadline exhaustion"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-p5-deadline-expired",
+            "X-Enai-Request-Budget-Ms": "0",
+        },
+    )
+
+    assert response.status_code == 408
+    assert response.json()["error"] == {
+        "code": "REQUEST_DEADLINE_EXCEEDED",
+        "message": "Request deadline exceeded",
+        "retryable": True,
+        "request_id": "req-p5-deadline-expired",
+    }
+    _clear_rate_limit_buckets()
+
+
+def test_ask_caps_excessive_gateway_budget(monkeypatch):
+    captured = {}
+
+    def _capture_pipeline(**kwargs):
+        captured["pipeline"] = kwargs
+        return _fake_query_context()
+
+    monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
+    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Enai-Request-Budget-Ms": "999999",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["pipeline"]["request_deadline"].budget_ms == main_module.ASK_MAX_REQUEST_BUDGET_MS
+    assert response.headers["X-Enai-Request-Budget-Ms"] == str(
+        main_module.ASK_MAX_REQUEST_BUDGET_MS
+    )
+    _clear_rate_limit_buckets()
+
+
+def test_ask_rejects_invalid_gateway_budget_before_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for an invalid budget"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-p5-invalid-budget",
+            "X-Enai-Request-Budget-Ms": "not-an-integer",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "INVALID_REQUEST_BUDGET",
+        "message": "Invalid request budget",
+        "retryable": False,
+        "request_id": "req-p5-invalid-budget",
+    }
+    _clear_rate_limit_buckets()
+
+
+def test_ask_maps_pipeline_deadline_expiry_to_typed_408(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+
+    def _expired_pipeline(**_kwargs):
+        raise main_module.RequestDeadlineExceeded("stage_4_summarize_data")
+
+    monkeypatch.setattr(main_module, "process_query", _expired_pipeline)
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-p5-late-expiry",
+        },
+    )
+
+    assert response.status_code == 408
+    assert response.json()["error"] == {
+        "code": "REQUEST_DEADLINE_EXCEEDED",
+        "message": "Request deadline exceeded",
+        "retryable": True,
+        "request_id": "req-p5-late-expiry",
+    }
+    _clear_rate_limit_buckets()
+
+
 def test_ask_rejects_tampered_signed_actor_before_pipeline(monkeypatch):
     request_id = "req-p3-tampered-actor"
     issued_at = int(time.time())
@@ -705,6 +851,11 @@ def test_published_chat_gateway_contract_matches_runtime_models():
     assert contract["request"]["conversation_history"]["item"]["answer"]["maximum_characters"] == 2000
     assert contract["request"]["additional_properties"] is False
     assert contract["request"]["unknown_field_policy"] == "reject_422"
+    assert contract["deadline"]["request_budget_header"] == "X-Enai-Request-Budget-Ms"
+    assert contract["deadline"]["retry_owner_response_header"] == "X-Enai-Retry-Owner"
+    assert contract["deadline"]["retry_owner"] == "backend"
+    assert contract["deadline"]["default_budget_ms"] == main_module.ASK_DEFAULT_REQUEST_BUDGET_MS
+    assert contract["deadline"]["maximum_budget_ms"] == main_module.ASK_MAX_REQUEST_BUDGET_MS
     assert contract["authentication"]["actor_assertion"]["signed_payload_lines"] == [
         "contract_version",
         "request_id",

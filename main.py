@@ -77,6 +77,8 @@ from analysis.stats import quick_stats, rows_to_preview
 # former star import hid this dependency surface behind a ruff ignore)
 from config import (
     ALLOWED_TABLES,
+    ASK_DEFAULT_REQUEST_BUDGET_MS,
+    ASK_MAX_REQUEST_BUDGET_MS,
     ASK_RATE_LIMIT_GATEWAY_PER_MINUTE,
     ASK_RATE_LIMIT_PREAUTH_PER_MINUTE,
     ASK_RATE_LIMIT_PUBLIC_PER_MINUTE,
@@ -125,6 +127,12 @@ from utils.language import detect_language, get_language_instruction
 # Phase 2: Core modules
 from utils.metrics import metrics
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution, validate_sql_relevance
+from utils.request_deadline import (
+    MINIMUM_START_BUDGET_MS,
+    InvalidRequestBudget,
+    RequestDeadlineExceeded,
+    build_request_deadline,
+)
 from utils.resilience import get_resilience_snapshot, request_backpressure_gate
 from utils.session_memory import (
     append_exchange,
@@ -770,6 +778,7 @@ app.add_middleware(
         "x-session-token",
         "x-request-id",
         "x-enai-contract-version",
+        "x-enai-request-budget-ms",
         "x-enai-actor-id",
         "x-enai-session-id",
         "x-enai-actor-issued-at",
@@ -782,6 +791,9 @@ app.add_middleware(
         "X-Enai-Span-ID",
         "X-Session-Token",
         "X-Enai-Contract-Version",
+        "X-Enai-Request-Budget-Ms",
+        "X-Enai-Deadline-Remaining-Ms",
+        "X-Enai-Retry-Owner",
         "X-LLM-Total-Tokens",
         "X-LLM-Estimated-Cost-USD",
     ],
@@ -1166,6 +1178,7 @@ def ask_post(
     x_app_key: Optional[str] = Header(None, alias='X-App-Key'),
     x_session_token: Optional[str] = Header(None, alias='X-Session-Token'),
     x_enai_contract_version: Optional[str] = Header(None, alias='X-Enai-Contract-Version'),
+    x_enai_request_budget_ms: Optional[str] = Header(None, alias='X-Enai-Request-Budget-Ms'),
     x_enai_actor_id: Optional[str] = Header(None, alias='X-Enai-Actor-Id'),
     x_enai_session_id: Optional[str] = Header(None, alias='X-Enai-Session-Id'),
     x_enai_actor_issued_at: Optional[str] = Header(None, alias='X-Enai-Actor-Issued-At'),
@@ -1173,6 +1186,7 @@ def ask_post(
     authorization: Optional[str] = Header(None, alias='Authorization'),
 ):
     t0 = time.time()
+    request_started_monotonic = time.monotonic()
     request_id = request_id_var.get() or resolve_request_id(None)
     trace_id = span_id_var.get() or create_internal_span_id()
     response.headers["X-Trace-ID"] = trace_id
@@ -1266,6 +1280,40 @@ def ask_post(
             "UNSUPPORTED_CONTRACT_VERSION",
             "Unsupported chat gateway contract version",
         )
+    try:
+        request_deadline = build_request_deadline(
+            x_enai_request_budget_ms,
+            default_budget_ms=ASK_DEFAULT_REQUEST_BUDGET_MS,
+            maximum_budget_ms=ASK_MAX_REQUEST_BUDGET_MS,
+            now_monotonic=request_started_monotonic,
+        )
+    except InvalidRequestBudget:
+        _finalize_request_telemetry()
+        log_security_event(
+            "invalid_request_budget",
+            request=request,
+            supplied=bool(x_enai_request_budget_ms),
+        )
+        raise AskAPIError(400, "INVALID_REQUEST_BUDGET", "Invalid request budget")
+
+    try:
+        request_deadline.ensure_remaining(
+            "pipeline_start",
+            minimum_ms=MINIMUM_START_BUDGET_MS,
+        )
+    except RequestDeadlineExceeded:
+        _finalize_request_telemetry()
+        log_security_event("request_deadline_exhausted", request=request, stage="pipeline_start")
+        raise AskAPIError(
+            408,
+            "REQUEST_DEADLINE_EXCEEDED",
+            "Request deadline exceeded",
+            retryable=True,
+        )
+
+    response.headers["X-Enai-Request-Budget-Ms"] = str(request_deadline.budget_ms)
+    response.headers["X-Enai-Deadline-Remaining-Ms"] = str(request_deadline.remaining_ms())
+    response.headers["X-Enai-Retry-Owner"] = request_deadline.retry_owner
 
     if caller.auth_mode == "gateway":
         if not _check_gateway_rate_limit(request, caller):
@@ -1408,6 +1456,7 @@ def ask_post(
                     "guardrail_risk_score": firewall_decision.risk_score,
                     "trace_id": trace_id,
                     "llm_telemetry": req_usage,
+                    "request_deadline": request_deadline.public_metadata(),
                 },
                 execution_time=exec_time,
             )
@@ -1438,6 +1487,20 @@ def ask_post(
                     session_id,
                     actor_id=caller.actor_id,
                 ),
+                request_deadline=request_deadline,
+            )
+        except RequestDeadlineExceeded as exc:
+            _finalize_request_telemetry()
+            log_security_event(
+                "request_deadline_exhausted",
+                request=request,
+                stage=exc.stage,
+            )
+            raise AskAPIError(
+                408,
+                "REQUEST_DEADLINE_EXCEEDED",
+                "Request deadline exceeded",
+                retryable=True,
             )
         except HTTPException:
             _finalize_request_telemetry()
@@ -1488,9 +1551,11 @@ def ask_post(
                 "provenance_refs": list(getattr(ctx, "provenance_refs", []) or []),
                 "metric_unit_registry_version": METRIC_UNITS.version,
                 "answer_provenance": build_answer_provenance(ctx),
+                "request_deadline": request_deadline.public_metadata(),
             }
         )
 
+        response.headers["X-Enai-Deadline-Remaining-Ms"] = str(request_deadline.remaining_ms())
         return APIResponse(
             answer=ctx.summary,
             charts=(getattr(ctx, "charts", None) or None),

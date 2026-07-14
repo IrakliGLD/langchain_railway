@@ -55,6 +55,20 @@
     "request_header_required_during_p1": false,
     "declared_mismatch_status": 409
   },
+  "deadline": {
+    "request_budget_header": "X-Enai-Request-Budget-Ms",
+    "request_budget_semantics": "remaining milliseconds at backend ingress; backend converts it to one monotonic deadline",
+    "optional_for_legacy_gateways": true,
+    "default_budget_environment_variable": "ASK_DEFAULT_REQUEST_BUDGET_MS",
+    "maximum_budget_environment_variable": "ASK_MAX_REQUEST_BUDGET_MS",
+    "default_budget_ms": 110000,
+    "maximum_budget_ms": 115000,
+    "remaining_budget_response_header": "X-Enai-Deadline-Remaining-Ms",
+    "retry_owner_response_header": "X-Enai-Retry-Owner",
+    "retry_owner": "backend",
+    "exhausted_status": 408,
+    "exhausted_code": "REQUEST_DEADLINE_EXCEEDED"
+  },
   "request": {
     "additional_properties": false,
     "query": {
@@ -105,6 +119,9 @@
   },
   "response_headers": {
     "X-Session-Token": "opaque backend session token cryptographically bound to the verified actor when known",
+    "X-Enai-Request-Budget-Ms": "effective capped backend request budget",
+    "X-Enai-Deadline-Remaining-Ms": "remaining backend budget when the response is created",
+    "X-Enai-Retry-Owner": "backend for chat-gateway-v1",
     "X-LLM-Total-Tokens": "gateway-only internal telemetry",
     "X-LLM-Estimated-Cost-USD": "gateway-only internal telemetry"
   },

@@ -148,6 +148,18 @@ MAX_REQUEST_BODY_BYTES = _read_bounded_int_env(
     minimum=262144,
     maximum=1048576,
 )
+ASK_DEFAULT_REQUEST_BUDGET_MS = _read_bounded_int_env(
+    "ASK_DEFAULT_REQUEST_BUDGET_MS",
+    110000,
+    minimum=1000,
+    maximum=300000,
+)
+ASK_MAX_REQUEST_BUDGET_MS = _read_bounded_int_env(
+    "ASK_MAX_REQUEST_BUDGET_MS",
+    115000,
+    minimum=ASK_DEFAULT_REQUEST_BUDGET_MS,
+    maximum=300000,
+)
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")
 # Stage 0.8: prefetch secondary evidence tool calls concurrently (2 workers,
