@@ -119,7 +119,7 @@ Recommended frontend-only order, prioritizing impact and low change risk:
 | FB.1 | P6.3 and P6.7 | **Locally complete in frontend commit `b69831a`.** Centralized safe UI errors/config/bootstrap/route boundaries and consolidated the toast implementation. | Uses the already deployed P3 safe error envelope. No backend code or new backend field was required. Deploy the frontend commit through the normal frontend release process and run browser smoke before production attestation. |
 | FB.2 | P6.2 | **Locally complete in frontend commit `da652da`.** Legacy chart data/metadata readers, new-write shape enforcement, generated additive patch, bounded concurrent-safe migration, restricted quarantine, privacy export coverage, and regression tests are implemented. | Frontend/Supabase only. Apply the generated patch, deploy the edge/frontend commit, run migration batches to zero, validate constraints, and smoke legacy/new turns before production attestation. Live database execution was unavailable locally and remains a manual verification item. |
 | FB.3 | P6.4 | **Locally complete in frontend commit `c007fb1`.** Dashboard loading is single-flight, actor-isolated, atomic, freshness/range-aware, stale-response safe, and explicit about optional degradation and retry. | Frontend-only implementation; P3 lease and billing semantics are unchanged. Deploy and browser-smoke cache hits, range changes, optional failure, critical refresh failure, actor change, and retry before production attestation. |
-| FB.4 | P6.5 | Complete WCAG 2.2 AA automation and manual keyboard/screen-reader/zoom review. | Frontend only. |
+| FB.4 | P6.5 | **Implementation complete in frontend commit `0624f91`; release verification remains open.** Accessible control/state semantics, chart equivalents, modal fullscreen behavior, contrast corrections, and axe automation are implemented. | Frontend only. Deploy the commit, run the credentialed dashboard/chat/admin axe suites, and complete the documented keyboard/screen-reader/zoom/viewport matrix before production attestation. |
 | FB.5 | P6.6 | Add bounded cursor-based admin listing, server-side search/filtering, cancellation, and large-user tests in Supabase edge/database plus UI. | Frontend/Supabase only; no analytics-backend change is required. |
 | FB.6 | P5.B independent subset | Remove duplicate browser retries; add bounded browser/edge aborts, safe retry classification, `Retry-After` handling, and same-request-ID reuse. | End-to-end absolute deadline propagation and final retry ownership cannot close until P5.A publishes/implements the compatible backend deadline contract. |
 | FB.7 | P7.B independent subset | Minimize browser/edge logs, harden frontend/edge packaging, scan the production bundle/dependencies, and preserve deploy/rollback evidence. | Supabase least-privilege changes must be checked against the backend relation/function inventory before grants or network access used by the backend are changed. P7 phase-wide attestation still needs P7.A. |
@@ -1064,12 +1064,16 @@ P3 finding disposition:
 **Target:** WCAG 2.2 AA for affected routes
 **Effort/risk:** M–L / Low–Medium
 
-- [ ] Name every icon-only action.
-- [ ] Expose toggle state semantically.
-- [ ] Provide chart summaries and accessible data tables/equivalents.
-- [ ] Implement fullscreen charts as real dialogs with focus trapping/restoration and Escape.
-- [ ] Verify focus, headings, live status/errors, contrast, touch size, zoom, and responsive behavior.
-- [ ] Add automated scans plus keyboard/screen-reader review.
+- [x] Name every icon-only action in the affected route/component scope.
+- [x] Expose toggle state semantically.
+- [x] Provide chart summaries and bounded, paged accessible data tables/equivalents.
+- [x] Implement fullscreen charts as real dialogs with focus trapping/restoration and Escape.
+- [x] Implement focus restoration, route headings, live status/error semantics, and contrast corrections; verify login/public-dashboard contrast locally.
+- [ ] Complete manual touch-size, keyboard, screen-reader, 200-percent zoom, and responsive viewport verification on the deployed build.
+- [x] Add automated axe scans for login, public/authenticated dashboards, chat, and admin.
+- [ ] Run the credentialed authenticated/dashboard/chat/admin scans against staging and archive release evidence.
+
+**Frontend implementation evidence (2026-07-14):** Independent frontend commit `0624f91` adds stable accessible names and pressed state, route headings and live/error semantics, chart canvas summaries plus value/unit/period table equivalents paged at 100 rows, and a Radix modal fullscreen chart with Escape, focus trapping, and explicit focus restoration. It also corrects failing dark/light contrast tokens and active-control surfaces, adds WCAG 2.0/2.1/2.2 A/AA axe coverage to the existing live-browser workflow, and documents activation and manual review in frontend `docs/active/fb4_accessibility_activation_runbook_2026-07-14.md`. Verification passed with `npm run lint`, all `406` JS/JSX tests, a production build, and a local production-preview axe run with no serious/critical findings on login or the public dashboard. Authenticated dashboard/chat and admin scans skipped locally because live smoke credentials were intentionally unavailable; the keyboard/screen-reader/touch/zoom/viewport matrix also remains release evidence and is not represented as complete.
 
 **Acceptance:**
 
