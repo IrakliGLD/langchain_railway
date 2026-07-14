@@ -79,3 +79,40 @@ def test_detect_monthly_timeseries_returns_none_for_all_null_time_values():
     )
 
     assert detect_monthly_timeseries(df) is None
+
+
+def test_duplicate_entities_do_not_make_an_incomplete_year_complete():
+    rows = []
+    for month in range(1, 7):
+        for entity in ("hydro", "thermal"):
+            rows.append({"date": f"2024-{month:02d}", "entity": entity, "generation": 10.0})
+    stats = calculate_seasonal_stats(pd.DataFrame(rows), "date", "generation")
+    assert stats["last_year_months"] == 6
+    assert stats["incomplete_last_year"] is True
+    assert stats["missing_period_count"] == 6
+
+
+def test_recent_window_is_order_invariant_and_chronological():
+    ordered = _monthly("p_bal_gel", base=100.0, per_year=10.0)
+    shuffled = ordered.sample(frac=1, random_state=7).reset_index(drop=True)
+    left = calculate_seasonal_stats(ordered, "date", "p_bal_gel")
+    right = calculate_seasonal_stats(shuffled, "date", "p_bal_gel")
+    assert left["recent_12m_growth"] == right["recent_12m_growth"]
+    assert left["overall_growth_pct"] == right["overall_growth_pct"]
+
+
+def test_cagr_uses_elapsed_calendar_years_when_middle_years_are_missing():
+    df = pd.DataFrame(
+        [
+            {"date": f"2020-{month:02d}", "p_bal_gel": 100.0}
+            for month in range(1, 13)
+        ]
+        + [
+            {"date": f"2024-{month:02d}", "p_bal_gel": 146.41}
+            for month in range(1, 13)
+        ]
+    )
+    stats = calculate_seasonal_stats(df, "date", "p_bal_gel")
+    assert stats["years_span"] == 4
+    assert stats["cagr"] == 10.0
+    assert stats["missing_years"] == [2021, 2022, 2023]

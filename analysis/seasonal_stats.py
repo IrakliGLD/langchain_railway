@@ -13,6 +13,8 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from analysis.system_quantities import normalize_period_series_with_granularity
+
 log = logging.getLogger("Enai")
 
 
@@ -103,39 +105,71 @@ def calculate_seasonal_stats(
     agg = "mean" if intensive else "sum"
     stats['aggregate_kind'] = "average" if intensive else "total"
 
-    # Parse year and month
-    df = df.copy()
-    df['_year'] = df[time_col].astype(str).str[:4].astype(int)
-    df['_month'] = df[time_col].astype(str).str[5:7].astype(int)
+    # Parse, sort, and collapse to one analytical value per unique period.
+    # Exact duplicate source rows are removed first; multiple entity rows in an
+    # extensive series are then summed, while intensive levels are averaged.
+    df = df.copy().drop_duplicates()
+    df[time_col], granularity = normalize_period_series_with_granularity(df[time_col])
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[time_col, value_col]).sort_values(time_col)
+    if df.empty:
+        return stats
+
+    period_freq = "Y" if granularity == "year" else "M"
+    df['_period'] = df[time_col].dt.to_period(period_freq)
+    period_values = df.groupby('_period', sort=True)[value_col].agg(agg)
+    series = period_values.rename(value_col).reset_index()
+    series['_date'] = series['_period'].dt.to_timestamp()
+    series['_year'] = series['_date'].dt.year
+    series['_month'] = series['_date'].dt.month
 
     # 1. Yearly values (mean for intensive prices, sum for extensive quantities)
-    yearly_totals = df.groupby('_year')[value_col].agg(agg).sort_index()
+    yearly_totals = series.groupby('_year')[value_col].agg(agg).sort_index()
 
-    # 2. Detect incomplete years
-    months_per_year = df.groupby('_year').size()
-    last_year = yearly_totals.index[-1]
-    last_year_months = months_per_year[last_year]
+    # 2. Detect incomplete/missing periods using unique calendar periods, not rows.
+    months_per_year = series.groupby('_year')['_period'].nunique().sort_index()
+    last_year = int(yearly_totals.index[-1])
+    last_year_months = int(months_per_year[last_year])
 
-    is_incomplete_last_year = last_year_months < 12
+    expected_per_year = 1 if granularity == "year" else 12
+    is_incomplete_last_year = last_year_months < expected_per_year
     stats['incomplete_last_year'] = is_incomplete_last_year
-    stats['last_year_months'] = int(last_year_months)
+    stats['last_year_months'] = last_year_months
 
-    # Keep incomplete trailing years out of multi-year growth comparisons.
-    complete_years = yearly_totals.iloc[:-1] if is_incomplete_last_year else yearly_totals
+    if granularity == "year":
+        expected_periods = pd.period_range(series['_period'].min(), series['_period'].max(), freq="Y")
+    else:
+        first_expected = pd.Period(f"{int(series['_year'].min())}-01", freq="M")
+        last_expected = pd.Period(f"{int(series['_year'].max())}-12", freq="M")
+        expected_periods = pd.period_range(first_expected, last_expected, freq="M")
+    observed_periods = set(series['_period'].tolist())
+    missing_periods = [str(period) for period in expected_periods if period not in observed_periods]
+    stats['missing_period_count'] = len(missing_periods)
+    stats['missing_periods'] = missing_periods
+
+    complete_year_ids = months_per_year[months_per_year >= expected_per_year].index
+    complete_years = yearly_totals.loc[yearly_totals.index.isin(complete_year_ids)]
 
     if len(complete_years) >= 2:
         first_year_total = complete_years.iloc[0]
         last_year_total = complete_years.iloc[-1]
-        years_span = len(complete_years) - 1
+        first_year = int(complete_years.index[0])
+        last_complete_year = int(complete_years.index[-1])
+        years_span = last_complete_year - first_year
 
         # Overall growth (complete years only)
         overall_growth_pct = ((last_year_total - first_year_total) / first_year_total * 100) if first_year_total > 0 else 0
         stats['overall_growth_pct'] = round(overall_growth_pct, 1)
-        stats['first_year'] = int(complete_years.index[0])
-        stats['last_year'] = int(complete_years.index[-1])
+        stats['first_year'] = first_year
+        stats['last_year'] = last_complete_year
         stats['first_year_total'] = round(first_year_total, 1)
         stats['last_year_total'] = round(last_year_total, 1)
         stats['years_span'] = years_span
+        observed_years = set(int(year) for year in yearly_totals.index)
+        stats['missing_years'] = [
+            year for year in range(first_year, last_complete_year + 1)
+            if year not in observed_years
+        ]
 
         # Average annual growth rate (CAGR)
         if years_span > 0 and first_year_total > 0:
@@ -145,10 +179,10 @@ def calculate_seasonal_stats(
     # Compare each observed month only against the same month in the prior year.
     yoy_growth_rates = []
 
-    for year in df['_year'].unique()[1:]:  # Skip first year (no previous year)
-        for month in df[df['_year'] == year]['_month'].unique():
-            current = df[(df['_year'] == year) & (df['_month'] == month)][value_col]
-            previous = df[(df['_year'] == year - 1) & (df['_month'] == month)][value_col]
+    for year in sorted(series['_year'].unique())[1:]:  # Skip first year (no previous year)
+        for month in sorted(series[series['_year'] == year]['_month'].unique()):
+            current = series[(series['_year'] == year) & (series['_month'] == month)][value_col]
+            previous = series[(series['_year'] == year - 1) & (series['_month'] == month)][value_col]
 
             if len(current) > 0 and len(previous) > 0:
                 current_val = current.iloc[0]
@@ -164,7 +198,7 @@ def calculate_seasonal_stats(
         stats['yoy_growth_std'] = round(np.std(yoy_growth_rates), 1)
 
     # Summarize the recurring seasonal shape by averaging each calendar month.
-    monthly_avg = df.groupby('_month')[value_col].mean().sort_index()
+    monthly_avg = series.groupby('_month')[value_col].mean().sort_index()
 
     if len(monthly_avg) >= 12:
         peak_month = monthly_avg.idxmax()
@@ -180,9 +214,9 @@ def calculate_seasonal_stats(
         stats['seasonality_pct'] = round(seasonality_pct, 1)
 
     # 6. Recent trend (last 12 months vs previous 12 months, if available)
-    if len(df) >= 24:
-        recent_12 = df.tail(12)[value_col].agg(agg)
-        previous_12 = df.iloc[-24:-12][value_col].agg(agg)
+    if granularity != "year" and len(series) >= 24:
+        recent_12 = series.tail(12)[value_col].agg(agg)
+        previous_12 = series.iloc[-24:-12][value_col].agg(agg)
 
         if previous_12 > 0:
             recent_trend_pct = ((recent_12 - previous_12) / previous_12) * 100
@@ -241,5 +275,20 @@ def format_seasonal_stats(stats: Dict[str, any]) -> str:
     if stats.get('incomplete_last_year', False):
         lines.append(f"- ⚠️ IMPORTANT: Last year has only {stats['last_year_months']} months of data "
                     f"(incomplete year - excluded from trend calculations)")
+
+    if stats.get('missing_period_count', 0):
+        sample = ", ".join(stats.get('missing_periods', [])[:6])
+        suffix = "..." if stats['missing_period_count'] > 6 else ""
+        lines.append(
+            f"- ⚠️ Missing calendar periods: {stats['missing_period_count']} "
+            f"({sample}{suffix}); growth uses complete observed years only."
+        )
+
+    if stats.get('missing_years'):
+        lines.append(
+            "- ⚠️ Missing calendar years inside the CAGR span: "
+            + ", ".join(str(year) for year in stats['missing_years'])
+            + ". CAGR uses actual elapsed calendar years."
+        )
 
     return "\n".join(lines)

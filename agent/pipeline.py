@@ -31,7 +31,13 @@ from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_execu
 from agent.evidence_validator import validate_evidence
 from agent.fixture_candidates import log_fixture_candidate
 from agent.frame_adapters import adapt_tool_result
-from agent.provenance import clear_provenance, sql_query_hash, stamp_provenance, tool_invocation_hash
+from agent.provenance import (
+    build_provenance_refs,
+    clear_provenance,
+    sql_query_hash,
+    stamp_provenance,
+    tool_invocation_hash,
+)
 from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.tools import execute_tool
@@ -59,6 +65,7 @@ from contracts.question_analysis import (
     RenderStyle,
 )
 from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
+from core.db_gateway import database_connection
 from core.query_executor import ENGINE
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
@@ -67,10 +74,24 @@ from knowledge.vector_retrieval import (
 from models import QueryContext, ResolutionPolicy, ResponseMode
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
+from utils.request_deadline import RequestDeadlineExceeded
 from utils.residual_price import is_implied_ppa_cfd_price_query
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
+
+
+def _remaining_request_seconds(ctx: QueryContext, stage: str) -> float | None:
+    deadline = getattr(ctx, "request_deadline", None)
+    if deadline is None:
+        return None
+    deadline.ensure_remaining(stage)
+    return deadline.remaining_seconds()
+
+
+def _require_request_budget(ctx: QueryContext, stage: str) -> None:
+    _remaining_request_seconds(ctx, stage)
+
 
 _EXPLANATION_ROUTING_SIGNALS = (
     "why",
@@ -1046,7 +1067,7 @@ def _enrich_prices_with_balancing_driver_context(
         return _enrich_prices_with_composition(ctx, invocation, is_explanation)
 
     try:
-        with ENGINE.connect() as conn:
+        with database_connection(ENGINE, operation="evidence_enrichment") as conn:
             conn.execute(text("SET TRANSACTION READ ONLY"))
             driver_df = compute_entity_price_contributions(
                 conn,
@@ -1232,9 +1253,10 @@ def _build_and_attach_evidence_frame(ctx: QueryContext, invocation: ToolInvocati
                 filter_cond = tc.params_hint.filter
                 break
 
-    prov_refs = []
-    if hasattr(ctx, "provenance") and ctx.provenance:
-        prov_refs = [p.get("query_hash", "") for p in ctx.provenance if isinstance(p, dict)]
+    # stamp_provenance() already bound the exact tool invocation and source
+    # rows. QueryContext has never had a ``provenance`` attribute; consulting
+    # it here silently produced empty canonical-frame provenance.
+    prov_refs = list(ctx.provenance_refs)
 
     frame = adapt_tool_result(
         tool_name=invocation.name,
@@ -1626,15 +1648,27 @@ def _execute_evidence_step(
                 None,
             )
         if matched_step:
+            stored_cols = list(ctx.cols if is_primary else df.columns)
+            stored_rows = (
+                list(ctx.rows) if is_primary
+                else [tuple(r) for r in df.itertuples(index=False, name=None)]
+            )
+            query_hash = tool_invocation_hash(invocation.name, invocation.params)
+            refs = build_provenance_refs(
+                stored_cols,
+                stored_rows,
+                source="tool",
+                query_hash=query_hash,
+                parent_refs=(ctx.provenance_refs if is_primary else ()),
+            )
             ctx.evidence_collected[matched_step["role"]] = {
                 "tool": invocation.name,
                 "params": dict(invocation.params),
                 "df": (ctx.df.copy() if is_primary else df),
-                "cols": list(ctx.cols if is_primary else df.columns),
-                "rows": (
-                    list(ctx.rows) if is_primary
-                    else [tuple(r) for r in df.itertuples(index=False, name=None)]
-                ),
+                "cols": stored_cols,
+                "rows": stored_rows,
+                "query_hash": query_hash,
+                "provenance_refs": refs,
             }
             matched_step["satisfied"] = True
             remaining = sum(1 for s in ctx.evidence_plan if not s.get("satisfied"))
@@ -1708,7 +1742,11 @@ def _run_secondary_evidence_loop(
     cap = min(len(remaining), evidence_planner._EVIDENCE_LOOP_MAX_STEPS)
     steps = remaining[:cap]
 
-    budget = timeout_seconds or evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS
+    budget = (
+        evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS
+        if timeout_seconds is None
+        else max(0.0, timeout_seconds)
+    )
     deadline = time.time() + budget
 
     invocations = [
@@ -1846,6 +1884,7 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
     SQL fall-through for plan/router-source failures) fires under the
     same conditions as before. Pure refactor.
     """
+    _require_request_budget(ctx, "stage_0_5_evidence")
     from utils.resilience import db_circuit_breaker
     # Advisory peek only. The real DB probe is owned by core.query_executor's
     # guarded allow_request()/record_* pair; calling allow_request() here would
@@ -2068,7 +2107,16 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
         s.get("satisfied") for s in ctx.evidence_plan
     ):
         t_stage_0_8 = time.time()
-        ctx = evidence_planner.execute_remaining_evidence(ctx)
+        remaining_seconds = _remaining_request_seconds(ctx, "stage_0_8_evidence_loop")
+        loop_timeout_seconds = (
+            None
+            if remaining_seconds is None
+            else min(evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS, remaining_seconds)
+        )
+        ctx = evidence_planner.execute_remaining_evidence(
+            ctx,
+            timeout_seconds=loop_timeout_seconds,
+        )
         _emit_trace_stage(
             ctx, "stage_0_8_evidence_loop", t_stage_0_8,
             complete=ctx.evidence_plan_complete,
@@ -2360,26 +2408,6 @@ def _run_vector_knowledge_stage(
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
         ctx.vector_knowledge_error = bundle.error
 
-        # Cross-notify circuit breaker on DB-layer failures from vector store.
-        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
-        # may surface "OperationalError" with varied messages like "timeout expired",
-        # "connection timed out", "could not connect", etc.
-        if bundle.error:
-            _err_lower = str(bundle.error).lower()
-            _is_db_failure = any(kw in _err_lower for kw in (
-                "connectiontimeout", "operationalerror", "timeout",
-                "could not connect", "connection refused", "connection reset",
-            ))
-            if _is_db_failure:
-                from utils.resilience import db_circuit_breaker
-                db_circuit_breaker.record_failure()
-                log.warning(
-                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
-                    db_circuit_breaker._failure_count,
-                    db_circuit_breaker.failure_threshold,
-                    bundle.error,
-                )
-
         packed_vector_knowledge = (
             pack_vector_knowledge_for_prompt(bundle)
             if not bundle.error
@@ -2626,6 +2654,7 @@ def process_query(
     trace_id: str = "",
     session_id: str = "",
     previous_contract_snapshot: str = "",
+    request_deadline=None,
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -2639,6 +2668,7 @@ def process_query(
         conversation_history=conversation_history,
         trace_id=trace_id,
         session_id=session_id,
+        request_deadline=request_deadline,
         previous_contract_snapshot=previous_contract_snapshot,
         clarify_selection_override=selected is not None,
     )
@@ -2652,12 +2682,14 @@ def process_query(
         _emit_trace_stage(ctx, stage_name, started_at, **extra)
 
     # Stage 0: cheap preparation
+    _require_request_budget(ctx, "stage_0_prepare_context")
     t_stage = time.time()
     ctx = planner.prepare_context(ctx)
     _trace_stage("stage_0_prepare_context", t_stage, conceptual=ctx.is_conceptual, lang=ctx.lang_code)
 
     # Stage 0.2: structured question analysis
     if ENABLE_QUESTION_ANALYZER_SHADOW or ENABLE_QUESTION_ANALYZER_HINTS:
+        _require_request_budget(ctx, "stage_0_2_question_analyzer")
         t_stage = time.time()
         analyzer_mode = "active" if ENABLE_QUESTION_ANALYZER_HINTS else "shadow"
         if ENABLE_QUESTION_ANALYZER_HINTS:
@@ -2713,16 +2745,19 @@ def process_query(
     _retrieval_tier = _resolve_vector_tier(ctx)
     ctx.vector_retrieval_tier = _retrieval_tier.value
 
+    _require_request_budget(ctx, "stage_0_3_vector_knowledge")
     _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
 
     _apply_response_mode(ctx)
 
+    _require_request_budget(ctx, "stage_4_early_answer")
     _res = _early_answer_clarify(ctx)
     ctx = _res.ctx
     if _res.terminal:
         return ctx
 
     # Conceptual short-circuit
+    _require_request_budget(ctx, "stage_4_early_conceptual_answer")
     _res = _early_answer_conceptual(ctx)
     ctx = _res.ctx
     if _res.terminal:
@@ -2730,6 +2765,7 @@ def process_query(
 
     # Stage 0.4: expand the authoritative analyzer output into the exact datasets we still need.
     if ENABLE_EVIDENCE_PLANNER:
+        _require_request_budget(ctx, "stage_0_4_evidence_plan")
         t_stage = time.time()
         ctx = evidence_planner.build_evidence_plan(ctx)
         _trace_stage(
@@ -2753,11 +2789,13 @@ def process_query(
         metrics.log_evidence_anomaly(_anomaly)
         _emit_trace_stage(ctx, "stage_0_9_evidence_anomaly", time.time(), tag=_anomaly)
         if ENABLE_EVIDENCE_REANALYSIS and not ctx.reanalysis_attempted:
+            _require_request_budget(ctx, "stage_0_9_evidence_reanalysis")
             ctx = _attempt_evidence_reanalysis(ctx, _anomaly)
 
     # Legacy agent loop removed (audit): with Stage 0.2 authoritative it never ran,
     # and analyzer-failure / no-tool cases fall through to the generate-plan/SQL
     # fallback below (a more capable path than the retired keyword-driven loop).
+    _require_request_budget(ctx, "stage_1_generate_sql")
     _res = _run_generate_sql_stage(ctx)
     ctx = _res.ctx
     if _res.terminal:
@@ -2783,6 +2821,7 @@ def process_query(
         )
 
     # Stage 3: enrich
+    _require_request_budget(ctx, "stage_3_analyzer_enrich")
     t_stage = time.time()
     ctx = analyzer.enrich(ctx)
     if ctx.rows and ctx.cols and set(ctx.cols) - set(ctx.provenance_cols or []):
@@ -2818,6 +2857,7 @@ def process_query(
         missing_evidence_for_metrics=list(ctx.missing_evidence_for_metrics or []),
     )
 
+    _require_request_budget(ctx, "stage_4_missing_evidence_answer")
     _res = _check_missing_evidence_stage(ctx)
     ctx = _res.ctx
     if _res.terminal:
@@ -2841,6 +2881,7 @@ def process_query(
             )
 
     # Stage 4: summarize
+    _require_request_budget(ctx, "stage_4_summarize_data")
     t_stage = time.time()
     ctx = summarizer.summarize_data(ctx)
     _trace_stage(
@@ -2854,6 +2895,7 @@ def process_query(
     log.info("Stage 4 complete | summary generated")
 
     # Stage 5: chart
+    _require_request_budget(ctx, "stage_5_chart_build")
     t_stage = time.time()
     ctx = chart_pipeline.build_chart(ctx)
     _trace_stage("stage_5_chart_build", t_stage, chart_type=ctx.chart_type or "")

@@ -602,6 +602,7 @@ class AnalysisRequirementsInfo(BaseModel):
     needs_driver_analysis: bool = False
     needs_trend_context: bool = False
     needs_correlation_context: bool = False
+    forecast_horizon_years: Optional[int] = Field(default=None, ge=1, le=20)
     derived_metrics: List[DerivedMetricRequest] = Field(default_factory=list, max_length=12)
 
 

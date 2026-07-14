@@ -14,15 +14,13 @@ from typing import Any, List, Tuple
 import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy import text
-from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
 
 from config import MAX_RESULT_SIZE_MB, MAX_ROWS
 
 # ENGINE + DB_URL live in core/db.py (leaf) now; re-exported here for back-compat so
 # every `from core.query_executor import ENGINE` (and its test monkeypatches) keeps working.
 from core.db import DB_URL, ENGINE, coerce_to_psycopg_url  # noqa: F401
-from utils.metrics import metrics
-from utils.resilience import db_circuit_breaker
+from core.db_gateway import database_connection
 
 log = logging.getLogger("Enai")
 
@@ -69,19 +67,11 @@ def is_database_available() -> bool:
     This must never raise during startup paths; readiness endpoints can call it
     and return degraded status instead of crashing process initialization.
     """
-    allowed, reason = db_circuit_breaker.allow_request()
-    if not allowed:
-        metrics.log_circuit_open("db")
-        log.warning("Database availability check skipped due to open circuit: %s", reason)
-        return False
-
     try:
-        with ENGINE.connect() as conn:
+        with database_connection(ENGINE, operation="readiness_probe") as conn:
             conn.execute(text("SELECT 1"))
-        db_circuit_breaker.record_success()
         return True
-    except SQLAlchemyError as exc:
-        db_circuit_breaker.record_failure()
+    except Exception as exc:
         log.warning("Database readiness check failed: %s", exc)
         return False
 
@@ -114,45 +104,31 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
         >>> print(f"Returned {len(rows)} rows in {elapsed:.2f}s")
     """
     start = time.time()
-    allowed, reason = db_circuit_breaker.allow_request()
-    if not allowed:
-        metrics.log_circuit_open("db")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Database temporarily unavailable (circuit breaker: {reason}). Please retry shortly.",
-        )
+    with database_connection(ENGINE, operation="fallback_sql") as conn:
+        # Phase 1D: Enforce read-only mode
+        conn.execute(text("SET TRANSACTION READ ONLY"))
 
-    try:
-        with ENGINE.connect() as conn:
-            # Phase 1D: Enforce read-only mode
-            conn.execute(text("SET TRANSACTION READ ONLY"))
+        # Execute query with incremental fetch to limit memory pressure.
+        # LIMIT is already enforced upstream by plan_validate_repair(),
+        # but fetchmany provides a defense-in-depth safety net.
+        result = conn.execute(text(sql))
+        cols = list(result.keys())
+        rows = []
+        _BATCH = 1000
+        while True:
+            batch = result.fetchmany(_BATCH)
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(rows) >= MAX_ROWS:
+                log.warning(
+                    "Row safety cap hit (%d rows), truncating result", len(rows),
+                )
+                rows = rows[:MAX_ROWS]
+                break
 
-            # Execute query with incremental fetch to limit memory pressure.
-            # LIMIT is already enforced upstream by plan_validate_repair(),
-            # but fetchmany provides a defense-in-depth safety net.
-            result = conn.execute(text(sql))
-            cols = list(result.keys())
-            rows = []
-            _BATCH = 1000
-            while True:
-                batch = result.fetchmany(_BATCH)
-                if not batch:
-                    break
-                rows.extend(batch)
-                if len(rows) >= MAX_ROWS:
-                    log.warning(
-                        "Row safety cap hit (%d rows), truncating result", len(rows),
-                    )
-                    rows = rows[:MAX_ROWS]
-                    break
-
-            # Convert to DataFrame for compatibility
-            df = pd.DataFrame(rows, columns=cols)
-    except (OperationalError, DatabaseError, SQLAlchemyError):
-        db_circuit_breaker.record_failure()
-        raise
-    else:
-        db_circuit_breaker.record_success()
+        # Convert to DataFrame for compatibility
+        df = pd.DataFrame(rows, columns=cols)
 
     elapsed = time.time() - start
 

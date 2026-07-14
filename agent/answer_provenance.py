@@ -46,6 +46,7 @@ def build_answer_provenance(ctx) -> dict:
         "answer_path": _answer_path(str(getattr(ctx, "summary_source", "") or "")),
         "summary_source": str(getattr(ctx, "summary_source", "") or ""),
         "data_source": str(getattr(ctx, "provenance_source", "") or ""),
+        "provenance_refs": list(getattr(ctx, "provenance_refs", []) or []),
         "tool_name": str(getattr(ctx, "tool_name", "") or "") if used_tool else "",
         "used_sql": bool(getattr(ctx, "safe_sql", "")) and not used_tool,
         "retrieval_tier": str(getattr(ctx, "vector_retrieval_tier", "") or ""),

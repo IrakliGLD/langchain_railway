@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "metric_units_v1.schema.json",
+  "title": "Enai metric unit registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "registry_version", "metrics"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "registry_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "metrics": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_metrics", "source_metric_patterns", "dimension", "storage_unit", "canonical_unit", "display_unit",
+          "to_canonical_factor", "compatible_aggregations", "precision",
+          "filter_unit_aliases"
+        ],
+        "properties": {
+          "source_metrics": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "source_metric_patterns": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "dimension": {"type": "string", "minLength": 1},
+          "storage_unit": {"type": "string", "minLength": 1},
+          "canonical_unit": {"type": "string", "minLength": 1},
+          "display_unit": {"type": "string", "minLength": 1},
+          "to_canonical_factor": {"type": "number", "exclusiveMinimum": 0},
+          "compatible_aggregations": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"enum": ["sum", "mean", "min", "max", "median"]}
+          },
+          "precision": {"type": "integer", "minimum": 0, "maximum": 12},
+          "filter_unit_aliases": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": "number", "exclusiveMinimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

@@ -39,6 +39,7 @@ class MetricContext:
     yoy_ts: Optional[pd.Timestamp]
     yoy_shares: dict[str, float]
     correlation_results: dict[str, dict[str, float]]
+    correlation_metadata: dict[str, dict[str, Any]] = dc.field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -250,17 +251,23 @@ def compute_correlation(
                 break
     if corr_value is None:
         return None
+    metadata = mctx.correlation_metadata.get(resolved_target, {}).get(resolved_metric, {})
+    sample_size = int(metadata.get("sample_size", len(mctx.df)))
 
     record.update({
         "metric": resolved_metric,
         "target_metric": resolved_target,
         "correlation_value": round(float(corr_value), 6),
-        "formula": f"corr({resolved_metric}, {resolved_target}) over available series",
+        "formula": f"corr({resolved_metric}, {resolved_target}) over pairwise-complete requested-period observations",
         "source_column": resolved_metric,
-        "source_row_count": len(mctx.df),
+        "source_row_count": sample_size,
+        "period_start": metadata.get("period_start"),
+        "period_end": metadata.get("period_end"),
+        "uncertainty": metadata.get("uncertainty", "unknown"),
+        "confidence_interval_95": metadata.get("confidence_interval_95"),
         "source_cells": [
-            {"column": resolved_metric, "role": "source_series", "row_count": len(mctx.df)},
-            {"column": resolved_target, "role": "target_series", "row_count": len(mctx.df)},
+            {"column": resolved_metric, "role": "source_series", "row_count": sample_size},
+            {"column": resolved_target, "role": "target_series", "row_count": sample_size},
         ],
     })
     return record
@@ -279,13 +286,20 @@ def compute_trend_slope(
     value_col = next((c for c in candidates if c in df.columns), None)
     if value_col is None or len(df) < 2:
         return None
-    numeric_series = pd.to_numeric(df[value_col], errors="coerce")
-    valid = numeric_series.notna()
-    if valid.sum() < 2:
+    working = df[[mctx.time_col, value_col]].copy()
+    working[mctx.time_col] = pd.to_datetime(working[mctx.time_col], errors="coerce")
+    working[value_col] = pd.to_numeric(working[value_col], errors="coerce")
+    working = (
+        working.dropna(subset=[mctx.time_col, value_col])
+        .drop_duplicates()
+        .groupby(mctx.time_col, as_index=False, sort=True)[value_col]
+        .mean()
+    )
+    if len(working) < 2:
         return None
     # Fit a simple linear trend over ordered observations to summarize direction and pace.
-    x = np.arange(valid.sum(), dtype=float)
-    y = numeric_series[valid].astype(float).to_numpy()
+    x = np.arange(len(working), dtype=float)
+    y = working[value_col].astype(float).to_numpy()
     slope = np.polyfit(x, y, deg=1)[0]
     season_label = f" ({season})" if season and season != "full" else ""
     record.update({
@@ -293,12 +307,14 @@ def compute_trend_slope(
         "season": season if season and season != "full" else None,
         "formula": f"linear_slope({metric}){season_label} over ordered observations",
         "source_column": value_col,
-        "source_row_count": int(valid.sum()),
+        "source_row_count": len(working),
+        "period_start": str(working[mctx.time_col].iloc[0]),
+        "period_end": str(working[mctx.time_col].iloc[-1]),
         "source_cells": [
             {
                 "column": value_col,
                 "role": "trend_series",
-                "row_count": int(valid.sum()),
+                "row_count": len(working),
                 "min_value": round(float(y.min()), 6),
                 "max_value": round(float(y.max()), 6),
             },

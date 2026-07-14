@@ -418,7 +418,7 @@ _LIGHT_TIER_TOP_K = 2
 # Keyed by provider class + model so a config change never serves stale
 # vectors. Applied only to factory-built providers — explicitly injected
 # providers (tests, ingestion) always embed directly. Size <= 0 disables.
-_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, str], list[float]]" = OrderedDict()
+_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, int, str, str, str], list[float]]" = OrderedDict()
 _QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
 
 
@@ -426,7 +426,9 @@ def _embed_query_cached(provider, query_text: str) -> list[float]:
     max_size = _int_env("VECTOR_QUERY_EMBEDDING_CACHE_SIZE", 256)
     if max_size <= 0:
         return provider.embed_query(query_text)
-    key = (type(provider).__name__, str(getattr(provider, "_model", "")), query_text)
+    from knowledge.vector_embeddings import embedding_cache_identity
+
+    key = (*embedding_cache_identity(provider), query_text)
     with _QUERY_EMBEDDING_CACHE_LOCK:
         cached = _QUERY_EMBEDDING_CACHE.get(key)
         if cached is not None:
@@ -438,6 +440,12 @@ def _embed_query_cached(provider, query_text: str) -> list[float]:
         while len(_QUERY_EMBEDDING_CACHE) > max_size:
             _QUERY_EMBEDDING_CACHE.popitem(last=False)
     return embedding
+
+
+def reset_query_embedding_cache() -> None:
+    """Clear memoized query vectors after configuration or corpus changes."""
+    with _QUERY_EMBEDDING_CACHE_LOCK:
+        _QUERY_EMBEDDING_CACHE.clear()
 
 
 def retrieve_vector_knowledge(

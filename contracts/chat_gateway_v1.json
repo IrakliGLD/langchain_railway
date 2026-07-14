@@ -12,12 +12,40 @@
     "production_mode": "gateway_only",
     "header": "X-App-Key",
     "secret_environment_variable": "ENAI_GATEWAY_SECRET",
-    "direct_bearer_status": "test_only_until_p3"
+    "direct_bearer_status": "test_only_until_shared_entitlement_authority_is_deployed",
+    "actor_assertion": {
+      "rollout_mode_environment_variable": "ENAI_GATEWAY_ACTOR_ASSERTION_MODE",
+      "rollout_modes": ["optional", "required"],
+      "actor_header": "X-Enai-Actor-Id",
+      "session_header": "X-Enai-Session-Id",
+      "issued_at_header": "X-Enai-Actor-Issued-At",
+      "signature_header": "X-Enai-Actor-Signature",
+      "signature_algorithm": "HMAC-SHA256 lowercase hex",
+      "signed_payload_lines": [
+        "contract_version",
+        "request_id",
+        "actor_id",
+        "session_id",
+        "issued_at_unix_seconds"
+      ],
+      "test_vector": {
+        "secret": "test-gateway-key",
+        "request_id": "req-contract-vector",
+        "actor_id": "8b865c43-6fed-4f91-8fca-180b04acb897",
+        "session_id": "bd5bc07e-c79c-47c3-a611-07947df9eaf0",
+        "issued_at": 1800000000,
+        "signature": "b98e7cdaf3dd1ee68f07857cd43933c5f3c327fec387b26491cad9f01e8e18ce"
+      },
+      "maximum_age_environment_variable": "ENAI_GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS",
+      "partial_invalid_stale_future_or_tampered_behavior": "reject_401"
+    }
   },
   "correlation": {
     "request_header": "X-Request-Id",
     "response_header": "X-Request-Id",
-    "trace_response_header": "X-Trace-Id",
+    "internal_span_response_headers": ["X-Trace-Id", "X-Enai-Span-Id"],
+    "upstream_span_request_header": "X-Enai-Span-Id",
+    "request_and_internal_span_are_distinct": true,
     "accepted_pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
     "invalid_or_missing_behavior": "replace_with_uuid"
   },
@@ -27,7 +55,22 @@
     "request_header_required_during_p1": false,
     "declared_mismatch_status": 409
   },
+  "deadline": {
+    "request_budget_header": "X-Enai-Request-Budget-Ms",
+    "request_budget_semantics": "remaining milliseconds at backend ingress; backend converts it to one monotonic deadline",
+    "optional_for_legacy_gateways": true,
+    "default_budget_environment_variable": "ASK_DEFAULT_REQUEST_BUDGET_MS",
+    "maximum_budget_environment_variable": "ASK_MAX_REQUEST_BUDGET_MS",
+    "default_budget_ms": 110000,
+    "maximum_budget_ms": 115000,
+    "remaining_budget_response_header": "X-Enai-Deadline-Remaining-Ms",
+    "retry_owner_response_header": "X-Enai-Retry-Owner",
+    "retry_owner": "backend",
+    "exhausted_status": 408,
+    "exhausted_code": "REQUEST_DEADLINE_EXCEEDED"
+  },
   "request": {
+    "additional_properties": false,
     "query": {
       "type": "string",
       "required": true,
@@ -37,7 +80,8 @@
     "user_id": {
       "type": ["string", "null"],
       "required": false,
-      "maximum_characters": 128
+      "maximum_characters": 128,
+      "semantics": "legacy_non_authoritative_label_ignored_for_identity_and_authorization"
     },
     "conversation_history": {
       "type": ["array", "null"],
@@ -58,7 +102,8 @@
         }
       }
     },
-    "legacy_ignored_fields": ["service_tier"]
+    "unknown_field_policy": "reject_422",
+    "service_tier_policy": "reject_as_unknown_and_never_use_for_authorization"
   },
   "success_response": {
     "required_fields": {
@@ -73,8 +118,28 @@
     }
   },
   "response_headers": {
-    "X-Session-Token": "opaque backend session token; edge forwarding is deferred to P3/P6",
+    "X-Session-Token": "opaque backend session token cryptographically bound to the verified actor when known",
+    "X-Enai-Request-Budget-Ms": "effective capped backend request budget",
+    "X-Enai-Deadline-Remaining-Ms": "remaining backend budget when the response is created",
+    "X-Enai-Retry-Owner": "backend for chat-gateway-v1",
     "X-LLM-Total-Tokens": "gateway-only internal telemetry",
     "X-LLM-Estimated-Cost-USD": "gateway-only internal telemetry"
+  },
+  "error_response": {
+    "shape": {
+      "error": {
+        "code": "stable machine-readable string",
+        "message": "public-safe string",
+        "retryable": "boolean",
+        "request_id": "end-to-end request identifier"
+      }
+    },
+    "unknown_internal_exception_details": "never_returned",
+    "status_classes": [400, 401, 403, 408, 409, 413, 422, 429, 500, 502, 503, 504]
+  },
+  "history_security": {
+    "all_transports_untrusted": true,
+    "firewalled_sources": ["gateway_database_history", "backend_session_history", "direct_bearer_history"],
+    "prompt_boundary": "escaped explicit UNTRUSTED_CONVERSATION_HISTORY block"
   }
 }

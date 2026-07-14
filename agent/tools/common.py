@@ -9,6 +9,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from config import MAX_ROWS
+from core.db_gateway import database_connection
 from core.query_executor import ENGINE, check_dataframe_memory
 
 from .types import ToolResult
@@ -72,7 +73,7 @@ def last_day_of_month(year: int, month: int) -> str:
 def run_text_query(sql: str, params: Optional[Dict[str, Any]] = None) -> ToolResult:
     """Execute read-only SQL text and return (df, cols, rows)."""
     params = params or {}
-    with ENGINE.connect() as conn:
+    with database_connection(ENGINE, operation="typed_tool_query") as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
         result = conn.execute(text(sql), params)
         rows = [tuple(r) for r in result.fetchall()]
@@ -86,7 +87,7 @@ def run_text_query(sql: str, params: Optional[Dict[str, Any]] = None) -> ToolRes
 def run_statement(statement: Any, params: Optional[Dict[str, Any]] = None) -> ToolResult:
     """Execute a SQLAlchemy statement object and return (df, cols, rows)."""
     params = params or {}
-    with ENGINE.connect() as conn:
+    with database_connection(ENGINE, operation="typed_tool_statement") as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
         result = conn.execute(statement, params)
         rows = [tuple(r) for r in result.fetchall()]

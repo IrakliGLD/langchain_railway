@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import re
 
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+
 _EXCLUDED_YEAR_PATTERN = re.compile(
     r"(?:exclude|excluding|without|except|omit|omitting|do not use|don't use|not use)"
     r"[^0-9]{0,30}"
@@ -12,16 +20,28 @@ _EXCLUDED_YEAR_PATTERN = re.compile(
 )
 
 
-def extract_forecast_horizon_years(query: str) -> int:
-    """Extract the requested forecast horizon in years from free text."""
+def extract_forecast_horizon_years(
+    query: str,
+    *,
+    structured_horizon_years: int | None = None,
+) -> int:
+    """Resolve horizon with structured analysis authoritative over text fallback."""
+
+    if structured_horizon_years is not None:
+        return min(max(int(structured_horizon_years), 1), 20)
 
     if not query:
         return 3
 
-    match = re.search(r"(\d+)\s*-?year", query)
+    normalized = str(query).strip().lower()
+    match = re.search(r"\b(\d+)\s*-?\s*years?\b", normalized, re.IGNORECASE)
     if match:
         return min(max(int(match.group(1)), 1), 20)
-    if "decade" in query.lower():
+    word_pattern = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
+    word_match = re.search(rf"\b({word_pattern})\s*-?\s*years?\b", normalized, re.IGNORECASE)
+    if word_match:
+        return _NUMBER_WORDS[word_match.group(1).lower()]
+    if "decade" in normalized:
         return 10
     return 3
 

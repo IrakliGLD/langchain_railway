@@ -24,8 +24,8 @@ from contracts.question_analysis import FilterCondition, FilterOperator  # noqa:
 def _price_df():
     return pd.DataFrame({
         "date": ["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"],
-        "p_bal_gel": [10.0, 17.5, 9.0, 22.0],
-        "p_dereg_gel": [8.0, 12.0, 14.0, 19.0],
+        "p_bal_gel": [100.0, 175.0, 90.0, 220.0],
+        "p_dereg_gel": [80.0, 120.0, 140.0, 190.0],
     })
 
 
@@ -74,3 +74,36 @@ def test_metric_matches_recognizes_contract_vocabulary():
     assert frame_adapters._metric_matches("balancing_price", "")
     # Unknown contract metric does not match unrelated rows.
     assert not frame_adapters._metric_matches("balancing_price", "deregulated")
+
+
+def test_storage_unit_filter_is_converted_before_comparison():
+    filt = FilterCondition(
+        metric="balancing",
+        operator=FilterOperator.GT,
+        value=150.0,
+        unit="GEL/MWh",
+    )
+    frame = frame_adapters.adapt_prices(_price_df(), filter_cond=filt)
+    values = [r["value"] for r in frame.rows if r["metric"] == "balancing_price"]
+    assert values == [17.5, 22.0]
+
+
+def test_generation_and_share_adapters_convert_before_rendering():
+    df = pd.DataFrame({
+        "period": ["2024-01-01"],
+        "type_tech": ["hydro"],
+        "quantity_tech": [1.5],
+        "share_tech": [0.1],
+    })
+    frame = frame_adapters.adapt_generation_mix(df)
+    quantity = next(r for r in frame.rows if r["metric"] == "generation_quantity")
+    share = next(r for r in frame.rows if r["metric"] == "generation_share")
+    assert (quantity["value"], quantity["unit"]) == (1500.0, "MWh")
+    assert (share["value"], share["unit"]) == (10.0, "%")
+
+
+def test_tariff_adapter_keeps_per_mwh_values_unchanged():
+    df = pd.DataFrame({"date": ["2024-01-01"], "enguri_tariff_gel": [150.0]})
+    frame = frame_adapters.adapt_tariffs(df)
+    assert frame.rows[0]["value"] == 150.0
+    assert frame.rows[0]["unit"] == "GEL/MWh"

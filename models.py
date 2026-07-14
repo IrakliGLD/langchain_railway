@@ -65,6 +65,7 @@ class QueryContext:
     conversation_history: Optional[List[Dict[str, str]]] = None
     trace_id: str = ""
     session_id: str = ""
+    request_deadline: Optional[Any] = None
     previous_contract_snapshot: str = ""          # prior turn's routed contract (continuity); "" when absent
     resolved_query: str = ""                      # canonical_query_en or original query; set after Stage 0.2
     resolved_query_source: str = ""              # "llm_active_canonical" | "raw_query"
@@ -132,6 +133,7 @@ class QueryContext:
     provenance_cols: list = dc_field(default_factory=list)
     provenance_query_hash: str = ""
     provenance_source: str = ""  # "sql" | "tool" | ""
+    provenance_refs: List[str] = dc_field(default_factory=list)
     sql_is_relevant: bool = True
     skip_chart_due_to_relevance: bool = False
 
@@ -141,6 +143,7 @@ class QueryContext:
     share_summary_override: Optional[str] = None
     analysis_evidence: List[Dict[str, Any]] = dc_field(default_factory=list)
     correlation_results: Dict[str, Any] = dc_field(default_factory=dict)
+    correlation_metadata: Dict[str, Any] = dc_field(default_factory=dict)
     add_trendlines: bool = False
     trendline_extend_to: Optional[str] = None
     # Focus periods resolved by the why-context for explanation queries
@@ -275,11 +278,20 @@ class Question(BaseModel):
 
     Attributes:
         query: Natural language query in English, Georgian, or Russian
-        user_id: Optional user identifier for tracking
+        user_id: Legacy non-authoritative correlation label; never identity
         conversation_history: Optional list of previous Q&A pairs for context
     """
+    # chat-gateway-v1 rejects unknown fields. In particular, browser/edge
+    # ``service_tier`` labels are not authorization inputs and are no longer
+    # silently discarded.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     query: str = Field(..., max_length=2000, description="Natural language query")
-    user_id: Optional[str] = Field(default=None, max_length=128)
+    user_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Legacy non-authoritative label; ignored for identity and authorization",
+    )
     conversation_history: Optional[List[ConversationTurn]] = Field(
         default=None,
         max_length=3,
@@ -306,12 +318,33 @@ class APIResponse(BaseModel):
         chart_metadata: Optional metadata about the chart
         execution_time: Total execution time in seconds
     """
+    model_config = ConfigDict(extra="forbid")
+
     answer: str
     charts: Optional[List[Dict[str, Any]]] = None
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None
     chart_metadata: Optional[Dict[str, Any]] = None
     execution_time: float
+
+
+class APIErrorDetail(BaseModel):
+    """Stable, public-safe /ask error details for chat-gateway-v1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
+    retryable: bool
+    request_id: str
+
+
+class APIErrorResponse(BaseModel):
+    """Versioned /ask error envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: APIErrorDetail
 
 
 class MetricsResponse(BaseModel):

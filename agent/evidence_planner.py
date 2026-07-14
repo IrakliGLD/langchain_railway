@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from agent.planner import resolve_tool_params
+from agent.provenance import build_provenance_refs, sql_query_hash
 from agent.shape_requirements import get_requirement
 from agent.tools import execute_tool
 from agent.tools.tariff_tools import TARIFF_ENTITY_ALIASES
@@ -977,6 +978,10 @@ def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:
     if ctx.df.empty:
         return ctx
 
+    parent_refs = list(ctx.provenance_refs)
+    if primary_evidence:
+        parent_refs.extend(primary_evidence.get("provenance_refs", []))
+
     for role, evidence in ctx.evidence_collected.items():
         if role == EvidenceRole.PRIMARY_DATA.value:
             continue  # primary is already ctx.df (either original or promoted)
@@ -984,16 +989,29 @@ def merge_evidence_into_context(ctx: QueryContext) -> QueryContext:
         if secondary_df is None or (isinstance(secondary_df, pd.DataFrame) and secondary_df.empty):
             continue
         secondary_tool = evidence.get("tool", "")
+        secondary_refs = list(evidence.get("provenance_refs", []))
+        parent_refs.extend(secondary_refs)
 
         ctx.df, provenance = join_evidence_with_provenance(
             ctx.df, secondary_df, primary_tool, secondary_tool,
         )
         if provenance is not None:
             provenance["role"] = role
+            provenance["provenance_refs"] = list(dict.fromkeys(secondary_refs))
             ctx.join_provenance.append(provenance)
 
     # Refresh cols/rows after merge
     ctx.cols = list(ctx.df.columns)
     ctx.rows = [tuple(r) for r in ctx.df.itertuples(index=False, name=None)]
+    merge_hash = sql_query_hash("|".join(sorted(set(parent_refs))) + "|evidence_join")
+    ctx.provenance_refs = build_provenance_refs(
+        ctx.cols,
+        ctx.rows,
+        source="derived_join",
+        query_hash=merge_hash,
+        parent_refs=parent_refs,
+    )
+    if ctx.evidence_frame is not None:
+        ctx.evidence_frame.provenance_refs = list(ctx.provenance_refs)
 
     return ctx

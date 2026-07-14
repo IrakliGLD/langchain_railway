@@ -6,6 +6,13 @@ import pytest
 from knowledge import vector_embeddings
 
 
+@pytest.fixture(autouse=True)
+def _isolate_provider_cache():
+    vector_embeddings.reset_embedding_provider_cache()
+    yield
+    vector_embeddings.reset_embedding_provider_cache()
+
+
 def test_resolved_provider_accepts_gemini_aliases():
     assert vector_embeddings._resolved_provider("gemini") == "gemini"
     assert vector_embeddings._resolved_provider("google") == "gemini"
@@ -250,3 +257,43 @@ def test_get_embedding_provider_caches_instance_per_config(monkeypatch):
         assert fourth is not third
     finally:
         vector_embeddings.reset_embedding_provider_cache()
+
+
+def test_query_embedding_cache_identity_includes_all_vector_compatibility_fields(monkeypatch):
+    from knowledge.vector_retrieval import _embed_query_cached, reset_query_embedding_cache
+
+    class FakeProvider:
+        _provider_name = "openai"
+        _model = "model-a"
+        _expected_dimension = 3
+        _normalization_version = "norm-v1"
+        _corpus_version = "corpus-v1"
+
+        def __init__(self):
+            self.calls = 0
+
+        def embed_query(self, _text):
+            self.calls += 1
+            return [float(self.calls)] * self._expected_dimension
+
+    monkeypatch.setenv("VECTOR_QUERY_EMBEDDING_CACHE_SIZE", "16")
+    provider = FakeProvider()
+    reset_query_embedding_cache()
+    try:
+        first = _embed_query_cached(provider, "same query")
+        assert _embed_query_cached(provider, "same query") == first
+        assert provider.calls == 1
+
+        provider._model = "model-b"
+        _embed_query_cached(provider, "same query")
+        provider._expected_dimension = 4
+        _embed_query_cached(provider, "same query")
+        provider._normalization_version = "norm-v2"
+        _embed_query_cached(provider, "same query")
+        provider._corpus_version = "corpus-v2"
+        _embed_query_cached(provider, "same query")
+        provider._provider_name = "gemini"
+        _embed_query_cached(provider, "same query")
+        assert provider.calls == 6
+    finally:
+        reset_query_embedding_cache()

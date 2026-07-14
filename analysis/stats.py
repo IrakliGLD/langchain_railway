@@ -151,6 +151,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
             log.warning(f"⚠️ Column {time_col} could not be converted to datetime, skipping trend")
             return "\n".join(out)
 
+        df = df.dropna(subset=[time_col]).drop_duplicates().sort_values(time_col)
         df['__year'] = df[time_col].dt.year
 
         if time_granularity != "year":
@@ -161,7 +162,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                     .nunique()
                     .sort_index()
                 )
-                incomplete_years = months_per_year[months_per_year < 10].index.tolist()
+                incomplete_years = months_per_year[months_per_year < 12].index.tolist()
                 if incomplete_years:
                     log.info(
                         "Excluding incomplete years from trend calculation (granularity=%s): %s",
@@ -180,19 +181,32 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
             # Ensure we are comparing two different years
             if first_full_year != last_full_year:
 
-                # Filter data for the first and last full years
-                df_first = df[df['__year'] == first_full_year]
-                df_last = df[df['__year'] == last_full_year]
-
-                # Get the mean of all numeric values for these years
-                # Using .values.mean() to get single average across all values
-                mean_first_year = df_first[numeric_cols].values.mean()
-                mean_last_year = df_last[numeric_cols].values.mean()
-
-                # Express the overall change relative to the first comparable full year.
-                change = ((mean_last_year - mean_first_year) / mean_first_year * 100) if mean_first_year != 0 else 0
-                trend = "increasing" if mean_last_year > mean_first_year else "decreasing"
-                out.append(f"Trend (Yearly Avg, {first_full_year}→{last_full_year}): {trend} ({change:.1f}%)")
+                # Compare each metric independently. Combining prices,
+                # quantities, shares, and rates into one mean is dimensionally
+                # meaningless and can reverse the apparent trend.
+                for col in numeric_cols:
+                    intensive = is_intensive_metric(col)
+                    aggregate_kind = "Avg" if intensive else "Total"
+                    df_first = df.loc[df['__year'] == first_full_year, col]
+                    df_last = df.loc[df['__year'] == last_full_year, col]
+                    first_value = df_first.mean() if intensive else df_first.sum(min_count=1)
+                    last_value = df_last.mean() if intensive else df_last.sum(min_count=1)
+                    if pd.isna(first_value) or pd.isna(last_value):
+                        continue
+                    change = (
+                        (last_value - first_value) / first_value * 100
+                        if first_value != 0 else np.nan
+                    )
+                    if np.isclose(last_value, first_value, rtol=1e-9, atol=1e-12):
+                        trend = "stable"
+                    else:
+                        trend = "increasing" if last_value > first_value else "decreasing"
+                    change_text = f"{change:.1f}%" if np.isfinite(change) else "undefined from zero baseline"
+                    metric_part = f", {col}" if len(numeric_cols) > 1 else ""
+                    out.append(
+                        f"Trend (Yearly {aggregate_kind}{metric_part}, "
+                        f"{first_full_year}→{last_full_year}): {trend} ({change_text})"
+                    )
 
                 # --- Seasonal split (Summer vs Winter) with CAGR ---
                 try:
@@ -209,7 +223,7 @@ def quick_stats(rows: List[Tuple], cols: List[str]) -> str:
                         df_y = df_season.groupby('__year')[col].mean().dropna()
                         if len(df_y) >= 2:
                             first, last = df_y.iloc[0], df_y.iloc[-1]
-                            n = len(df_y) - 1
+                            n = int(df_y.index[-1]) - int(df_y.index[0])
                             return ((last / first) ** (1 / n) - 1) * 100 if first > 0 else np.nan
                         return np.nan
 

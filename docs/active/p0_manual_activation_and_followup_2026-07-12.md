@@ -300,7 +300,7 @@ Also verify manually:
 
 | Setting/cutover | Safe value now | Change only after | Required complementary evidence |
 |---|---|---|---|
-| `ENAI_AUTH_MODE` | `gateway_only` | P3.A/P3.B | Direct callers use the same active-status, entitlement, idempotency, and persistence authority. |
+| `ENAI_AUTH_MODE` | `gateway_only` | A later direct-bearer integration after P3.A/P3.B is deployed | P3.B protects the edge path, but direct bearer must first call the same active-status, entitlement, idempotency, and persistence authority. P3.A intentionally keeps it test-only. |
 | `ENABLE_EVIDENCE_REANALYSIS` | `false` | P4.5 | Mode-transition suite proves all dependent state is recomputed once with no stale evidence. |
 | Canonical evidence enforcement | off/shadow only | P2.A then P4.A | Correct unit/provenance corpus, frame finalization, chart parity, staged comparison telemetry. |
 | Backend replicas/workers | one | P5.6/P7.4 | External actor-bound shared state and two-process failure tests pass. |

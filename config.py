@@ -61,6 +61,20 @@ SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSIO
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
+# P3.A rollout gate for the edge-signed actor/session/request assertion.
+# ``optional`` accepts independently deployed P1 gateways while verifying any
+# assertion that is present. Switch to ``required`` only after the P3.B edge
+# artifact is deployed and its signed requests are visible in backend logs.
+GATEWAY_ACTOR_ASSERTION_MODE = (
+    os.getenv("ENAI_GATEWAY_ACTOR_ASSERTION_MODE", "optional").strip().lower()
+    or "optional"
+)
+GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS = _read_bounded_int_env(
+    "ENAI_GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS",
+    120,
+    minimum=30,
+    maximum=900,
+)
 # Phase 13 rollout flag. When "1"/"true", chart_pipeline attaches a long-form
 # ChartFrame payload under chart_meta["longFrame"] for frontend consumers.
 # Default off so wire format stays wide until the frontend renderer
@@ -133,6 +147,18 @@ MAX_REQUEST_BODY_BYTES = _read_bounded_int_env(
     262144,
     minimum=262144,
     maximum=1048576,
+)
+ASK_DEFAULT_REQUEST_BUDGET_MS = _read_bounded_int_env(
+    "ASK_DEFAULT_REQUEST_BUDGET_MS",
+    110000,
+    minimum=1000,
+    maximum=300000,
+)
+ASK_MAX_REQUEST_BUDGET_MS = _read_bounded_int_env(
+    "ASK_MAX_REQUEST_BUDGET_MS",
+    115000,
+    minimum=ASK_DEFAULT_REQUEST_BUDGET_MS,
+    maximum=300000,
 )
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")
@@ -257,6 +283,7 @@ def validate_runtime_settings(
     model_type: str,
     google_api_key: str | None,
     nvidia_api_key: str | None = None,
+    gateway_actor_assertion_mode: str = "optional",
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -268,6 +295,10 @@ def validate_runtime_settings(
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
             "Invalid ENAI_DEPLOYMENT_ENV. Expected one of: development, staging, production, test"
+        )
+    if gateway_actor_assertion_mode not in {"optional", "required"}:
+        raise RuntimeError(
+            "Invalid ENAI_GATEWAY_ACTOR_ASSERTION_MODE. Expected one of: optional, required"
         )
     if not supabase_db_url:
         raise RuntimeError("Missing SUPABASE_DB_URL")
@@ -317,6 +348,7 @@ validate_runtime_settings(
     model_type=MODEL_TYPE,
     google_api_key=GOOGLE_API_KEY,
     nvidia_api_key=NVIDIA_API_KEY,
+    gateway_actor_assertion_mode=GATEWAY_ACTOR_ASSERTION_MODE,
 )
 
 # ===================================================================

@@ -31,6 +31,16 @@ Set `ENAI_AUTH_MODE` explicitly in deployed environments:
 
 `auto` is invalid. The safe default is `gateway_only`, and merely configuring `SUPABASE_JWT_SECRET` never enables bearer authentication.
 
+### P3 gateway actor assertion
+
+The P3.B edge function signs the contract version, request ID, authenticated actor ID, Supabase session ID, and Unix issue time with the same secret used for `X-App-Key`. The backend verifies the assertion before model/database work and selects an opaque actor-bound session.
+
+- `ENAI_GATEWAY_ACTOR_ASSERTION_MODE=optional` is the independent-deployment default. A request with no actor assertion is temporarily accepted, but any partial, malformed, stale, future, replayed, or tampered assertion is rejected.
+- `ENAI_GATEWAY_ACTOR_ASSERTION_MODE=required` rejects legacy gateway requests that send no assertion. Enable it only after the tracked P3.B `chat-with-enerbot` function is deployed and backend logs show `Gateway actor assertion: verified=True` for real traffic.
+- `ENAI_GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS=120` controls freshness and is constrained to 30–900 seconds.
+
+Keep `ENAI_AUTH_MODE=gateway_only`. Direct bearer remains test-only because local JWT verification alone cannot enforce the deployed active-user, entitlement, idempotency, and persistence authority.
+
 ## Deployment Constraint: Single Replica
 
 Run **exactly one worker process / one replica** (`uvicorn` default single worker; do not add
@@ -57,6 +67,8 @@ ENAI_DEPLOYMENT_ENV=test          # CI
 ```bash
 ENAI_DEPLOYMENT_ENV=production
 ENAI_AUTH_MODE=gateway_only
+ENAI_GATEWAY_ACTOR_ASSERTION_MODE=required  # use optional only during the coordinated P3 rollout
+ENAI_GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS=120
 ENAI_GATEWAY_SECRET=...
 ENAI_SESSION_SIGNING_SECRET=...
 ENAI_EVALUATE_SECRET=...
@@ -74,6 +86,8 @@ MAX_REQUEST_BODY_BYTES=262144
 ```bash
 ENAI_DEPLOYMENT_ENV=test
 ENAI_AUTH_MODE=gateway_and_bearer
+ENAI_GATEWAY_ACTOR_ASSERTION_MODE=optional
+ENAI_GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS=120
 SUPABASE_JWT_SECRET=...
 ENAI_GATEWAY_SECRET=...
 ENAI_SESSION_SIGNING_SECRET=...
@@ -127,6 +141,8 @@ curl -X POST http://localhost:8000/ask \
 ```bash
 ENAI_DEPLOYMENT_ENV=development
 ENAI_AUTH_MODE=gateway_only
+ENAI_GATEWAY_ACTOR_ASSERTION_MODE=optional
+ENAI_GATEWAY_ACTOR_ASSERTION_MAX_AGE_SECONDS=120
 ENABLE_METRICS_ENDPOINT=false
 ENABLE_EVALUATE_ENDPOINT=false
 ALLOW_EVALUATE_ENDPOINT=false
