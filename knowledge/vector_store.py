@@ -19,6 +19,7 @@ from contracts.vector_knowledge import (
     VectorChunkRecord,
     VectorRetrievalFilters,
 )
+from core.db_gateway import database_connection
 
 log = logging.getLogger("Enai")
 
@@ -219,7 +220,9 @@ def _check_phase_b1_columns_present() -> bool:
     if _phase_b1_columns_present:
         return True
     try:
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_schema_probe", begin=True
+        ) as conn:
             rows = conn.execute(
                 text(
                     """
@@ -609,7 +612,9 @@ class KnowledgeVectorStore:
 
     def count_active_documents(self) -> int:
         sql = text(f"select count(*) from {self.schema}.documents where is_active = true")
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_document_count", begin=True
+        ) as conn:
             return int(conn.execute(sql).scalar_one())
 
     def upsert_document(self, document: DocumentRegistration) -> str:
@@ -649,7 +654,9 @@ class KnowledgeVectorStore:
         )
         params = document.model_dump(mode="json")
         params["metadata"] = json.dumps(params["metadata"])
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_document_upsert", begin=True
+        ) as conn:
             result = conn.execute(sql, params).scalar_one()
         return str(result)
 
@@ -665,7 +672,9 @@ class KnowledgeVectorStore:
             raise ValueError("chunks and embeddings length mismatch")
         for idx, embedding in enumerate(embeddings):
             _validate_embedding_length(embedding, label=f"chunk_embedding[{idx}]")
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_chunk_replace", begin=True
+        ) as conn:
             conn.execute(
                 text(f"delete from {self.schema}.document_chunks where document_id = :document_id"),
                 {"document_id": document_id},
@@ -809,7 +818,9 @@ class KnowledgeVectorStore:
         )
         if bind_params:
             sql = sql.bindparams(*bind_params)
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_search", begin=True
+        ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
         # Use a relaxed floor for the candidate pool so that chunks with
@@ -910,7 +921,9 @@ class KnowledgeVectorStore:
             where d.is_active = true
             """
         )
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_chunk_fetch", begin=True
+        ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
         return [_row_to_chunk_record(row, similarity_score=None) for row in rows]
@@ -997,7 +1010,9 @@ class KnowledgeVectorStore:
               and c.article_number <> ''
             """
         )
-        with _resolve_engine().begin() as conn:
+        with database_connection(
+            _resolve_engine(), operation="vector_reference_fetch", begin=True
+        ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
         return [_row_to_chunk_record(row, similarity_score=None) for row in rows]

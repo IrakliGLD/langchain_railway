@@ -107,6 +107,7 @@ from context import (
     DERIVED_LABELS,
     scrub_schema_mentions,
 )
+from core.db_gateway import database_connection
 from core.llm import (
     classify_query_type,
     get_primary_model_name,
@@ -255,7 +256,7 @@ def refresh_schema_map() -> bool:
     """Best-effort schema reflection; never raises to caller."""
     global SCHEMA_MAP
     try:
-        with ENGINE.connect() as conn:
+        with database_connection(ENGINE, operation="schema_reflection") as conn:
             result = conn.execute(
                 text(
                     """

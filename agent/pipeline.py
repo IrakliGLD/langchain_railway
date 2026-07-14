@@ -65,6 +65,7 @@ from contracts.question_analysis import (
     RenderStyle,
 )
 from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
+from core.db_gateway import database_connection
 from core.query_executor import ENGINE
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
@@ -1066,7 +1067,7 @@ def _enrich_prices_with_balancing_driver_context(
         return _enrich_prices_with_composition(ctx, invocation, is_explanation)
 
     try:
-        with ENGINE.connect() as conn:
+        with database_connection(ENGINE, operation="evidence_enrichment") as conn:
             conn.execute(text("SET TRANSACTION READ ONLY"))
             driver_df = compute_entity_price_contributions(
                 conn,
@@ -2406,26 +2407,6 @@ def _run_vector_knowledge_stage(
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
         ctx.vector_knowledge_error = bundle.error
-
-        # Cross-notify circuit breaker on DB-layer failures from vector store.
-        # Match broadly: psycopg wraps as "ConnectionTimeout", but SQLAlchemy
-        # may surface "OperationalError" with varied messages like "timeout expired",
-        # "connection timed out", "could not connect", etc.
-        if bundle.error:
-            _err_lower = str(bundle.error).lower()
-            _is_db_failure = any(kw in _err_lower for kw in (
-                "connectiontimeout", "operationalerror", "timeout",
-                "could not connect", "connection refused", "connection reset",
-            ))
-            if _is_db_failure:
-                from utils.resilience import db_circuit_breaker
-                db_circuit_breaker.record_failure()
-                log.warning(
-                    "Stage 0.3 DB failure → circuit breaker notified (failures=%d/%d): %.120s",
-                    db_circuit_breaker._failure_count,
-                    db_circuit_breaker.failure_threshold,
-                    bundle.error,
-                )
 
         packed_vector_knowledge = (
             pack_vector_knowledge_for_prompt(bundle)
