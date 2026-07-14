@@ -1,7 +1,7 @@
 # Comprehensive Audit Remediation Plan
 
 **Date:** 2026-07-11
-**Status:** P0, P1, P2.A, and P2.B are locally verified and independently committed in their repository tracks. P1/P2 production activation, deployed-source proof, and unavailable live-database/deployment checks remain operator follow-ups and do not block the independent repository commits. H1 remains off until P4. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md), and [p2_execution_ledger_2026-07-13.md](p2_execution_ledger_2026-07-13.md).
+**Status:** P0, P1, P2, and P3 implementation tracks are independently committed. P3.A backend commit `5883228` and P3.B frontend commit `59b4d64` are deployed; the frontend formatting/manifest repair `3244ed1` is merged in frontend `main` at `5ae2b9b`. The operator confirmed completion of the P3.A/P3.B staging, production, smoke, soak, reconciliation, assertion-enforcement, and legacy-grant-revocation steps on 2026-07-13. P3 is complete under the supported gateway-only, one-backend-replica operating mode. Frontend-first package FB.1 (P6.3 and P6.7) is locally complete in independent frontend commit `b69831a`; deployment/browser smoke is not yet recorded here. Direct bearer remains intentionally disabled and horizontal scaling remains intentionally blocked until their later P5/P7 gates. H1 remains off until P4. Non-P3 production attestations that were not explicitly confirmed remain governed by their existing ledgers. See [p0_execution_ledger_2026-07-11.md](p0_execution_ledger_2026-07-11.md), [p0_manual_activation_and_followup_2026-07-12.md](p0_manual_activation_and_followup_2026-07-12.md), [p1_execution_ledger_2026-07-12.md](p1_execution_ledger_2026-07-12.md), and [p2_execution_ledger_2026-07-13.md](p2_execution_ledger_2026-07-13.md).
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
@@ -104,6 +104,33 @@ The critical dependency chain is:
 P1 and P2 may run in parallel after P0. P3 depends on P1 for reproducible edge delivery. P4 depends on P2. P5 should use the idempotency and identity established in P3. P6 consumes the shared contracts created in P3/P4. P8 starts only after behavior is locked by regression tests.
 
 Every major phase below is split into an `.A` backend track and a `.B` frontend/Supabase track. The detailed numbered packages remain the authoritative acceptance criteria; the track sections assign those packages and their cross-service obligations to a repository.
+
+### Frontend-first continuation after P3
+
+The backend application may remain frozen at P3.A while independently executable frontend/Supabase work continues. All changes in this sequence belong to the `EnaiDashboard` repository; they must not import, mount, read, generate from, or otherwise rely on files in the backend checkout. A cross-service contract must be versioned and committed into each repository through its normal release process.
+
+If a frontend item discovers that the deployed HTTP contract lacks a required field or behavior, stop that item at its consumer boundary and record the backend dependency. Do not invent browser-derived authority, duplicate backend analytics, or add a permissive fallback merely to claim frontend completion.
+
+Recommended frontend-only order, prioritizing impact and low change risk:
+
+| Order | Frontend/Supabase package | Work that can proceed without backend source changes | Remaining dependency or gate |
+|---|---|---|---|
+| FB.0 | P0.B/P1.B/P2.B carry-forward attestations | Dispose of legacy privacy exports under owner approval; verify branch protection/required checks, deployed edge hashes, canonical hosting source, browser smoke, and P2 unit-contract smoke; archive obsolete local copies only after their active-use status is proven. | Some checks observe the deployed backend, but no backend code change is required. Do not treat an unobserved live check as passed. |
+| FB.1 | P6.3 and P6.7 | **Locally complete in frontend commit `b69831a`.** Centralized safe UI errors/config/bootstrap/route boundaries and consolidated the toast implementation. | Uses the already deployed P3 safe error envelope. No backend code or new backend field was required. Deploy the frontend commit through the normal frontend release process and run browser smoke before production attestation. |
+| FB.2 | P6.2 | Finish legacy JSONB scalar reading, idempotent bounded migration/quarantine, and compatibility-window evidence. | Frontend/Supabase only. New P3 writes are already native JSONB and deterministically ordered. |
+| FB.3 | P6.4 | Make dashboard loading single-flight, atomic, freshness-aware, and stale-response safe while preserving P3 leases. | Frontend/Supabase only; do not change lease or billing semantics. |
+| FB.4 | P6.5 | Complete WCAG 2.2 AA automation and manual keyboard/screen-reader/zoom review. | Frontend only. |
+| FB.5 | P6.6 | Add bounded cursor-based admin listing, server-side search/filtering, cancellation, and large-user tests in Supabase edge/database plus UI. | Frontend/Supabase only; no analytics-backend change is required. |
+| FB.6 | P5.B independent subset | Remove duplicate browser retries; add bounded browser/edge aborts, safe retry classification, `Retry-After` handling, and same-request-ID reuse. | End-to-end absolute deadline propagation and final retry ownership cannot close until P5.A publishes/implements the compatible backend deadline contract. |
+| FB.7 | P7.B independent subset | Minimize browser/edge logs, harden frontend/edge packaging, scan the production bundle/dependencies, and preserve deploy/rollback evidence. | Supabase least-privilege changes must be checked against the backend relation/function inventory before grants or network access used by the backend are changed. P7 phase-wide attestation still needs P7.A. |
+| FB.8 | P8.B | Refactor frontend/edge modules incrementally behind characterization tests; consolidate test infrastructure; perform the deferred Vite/esbuild major upgrade as a separate change. | Start after the affected P6 behaviors are locked. No backend source change is required. |
+
+Frontend packages that cannot be fully closed while backend work is frozen:
+
+- **P4.B:** adapters, persistence slots, and disabled UI fixtures may be prepared, but activation and final consumer tests require P4.A's versioned canonical result/outcome/chart/provenance contract.
+- **P6.1:** code-generation infrastructure may be prepared, but the generated DTO migration requires P6.A's complete OpenAPI/JSON Schema source. A hand-copied substitute is not acceptable.
+- **P5.B integration gate:** frontend-local timeout/retry work may commit independently, but the one-deadline end-to-end acceptance requires P5.A.
+- **P7.2/P7.4 shared gates:** frontend/Supabase hardening can proceed independently, but least-privilege revocation and multi-replica/shared-state acceptance require backend usage evidence and P7.A/P5.A coordination. They do not authorize one repository to read the other's files.
 
 ## 6. Phase summary
 
@@ -339,7 +366,7 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - [x] Generate a file-level diff and classify each difference as accepted root behavior, reviewed fix to port, generated artifact, or obsolete experiment.
 - [x] Port accepted behavior in small changes with tests.
 - [x] Compare route, component, hook, asset, and test inventories.
-- [ ] Remove _repo_sync only after every unique difference has an explicit disposition.
+- [ ] Archive/remove obsolete local export or mirror copies only after every unique difference has an explicit disposition and the active checkout/deployment source is recorded. Do not delete a directory merely because its local name is `_repo_sync` if it is the operator's current clone of the canonical GitHub repository.
 - [x] Add CI enforcement that rejects reintroduction of the mirror.
 
 **Acceptance:**
@@ -492,10 +519,12 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 
 **Goal:** move all authoritative security, billing, and persistence decisions to trusted server/database boundaries.
 
+**Current state (2026-07-13): Complete.** Backend commit `5883228` and frontend/Supabase commit `59b4d64` implement the two independent tracks. Frontend formatting/manifest repair `3244ed1` is merged into frontend `main` at `5ae2b9b`. The operator confirmed the additive and revoke migrations, immutable edge deployment, frontend deployment, staging/production smoke and soak, reconciliation, verified actor assertions, backend `required` mode, and post-revocation checks. Gateway-only auth and one backend replica remain supported safety constraints; they are not unfinished P3 work.
+
 ### P3.A — Backend application track
 
 - Owns the backend portions of P3.2, P3.4, P3.5, P3.6, and P3.8.
-- Verify signed actor/session/request context, treat all history as untrusted, preserve request identity, enforce safe typed errors, and remove the temporary test-only direct-bearer restriction only after the shared entitlement authority exists.
+- Verify signed actor/session/request context, treat all history as untrusted, preserve request identity, enforce safe typed errors, and keep direct bearer disabled until a later explicitly approved path can call the same active-status, entitlement, idempotency, and persistence authority.
 - Commit independently behind compatible versioned contracts; do not enable a new direct-bearer mode until P3.B's database/edge authority is deployed.
 
 **Backend implementation status (2026-07-13):**
@@ -506,9 +535,9 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - [x] Preserve the external request ID, allocate a distinct backend span, and publish both identifiers without using them as authorization inputs.
 - [x] Treat gateway/database/session/bearer history as untrusted and render it through escaped non-instructional prompt boundaries.
 - [x] Reject unknown Ask v1 fields, explicitly reject `service_tier`, and publish a safe typed error envelope.
-- [ ] Deploy P3.B schema/edge authority, observe verified assertions, then set `ENAI_GATEWAY_ACTOR_ASSERTION_MODE=required` in backend staging and production.
-- [ ] Keep direct bearer test-only until a backend direct caller can use that same deployed authority. P3.A intentionally does not remove the safety restriction yet.
-- [ ] Keep one backend replica until P5/P7 externalize replay/session state and multi-process tests pass.
+- [x] Deploy P3.B schema/edge authority, observe verified assertions, then set `ENAI_GATEWAY_ACTOR_ASSERTION_MODE=required` in backend staging and production.
+- [x] Keep direct bearer disabled outside tests. Enabling it is a future product/scaling change that requires the same deployed authority; it is not required to close P3 safely.
+- [x] Keep one backend replica until P5/P7 externalize replay/session state and multi-process tests pass. This remains an ongoing deployment invariant.
 
 Deployment, verification, rollback, and complementary manual work are recorded in [`p3a_backend_activation_runbook_2026-07-13.md`](p3a_backend_activation_runbook_2026-07-13.md).
 
@@ -517,6 +546,14 @@ Deployment, verification, rollback, and complementary manual work are recorded i
 - Owns P3.1 and P3.3, the database/edge/persistence portions of P3.2, P3.4, P3.6, P3.7, and P3.8, plus browser removal of authoritative charging/persistence.
 - Deliver additive schema/RLS/RPCs first, shadow and reconcile, switch edge persistence, switch the browser consumer, then revoke legacy grants.
 - P1.B deployable edge sources are a hard prerequisite; P3.B must not be activated from untracked manual snapshots.
+
+**Frontend/Supabase implementation and activation status (2026-07-13):**
+
+- [x] Merge the P3.B entitlement/administration/frontend authority implementation and the required Deno-format/source-manifest repair into frontend `main`.
+- [x] Apply the additive authority migration in staging and production.
+- [x] Deploy the immutable edge source set and the matching frontend release.
+- [x] Complete smoke, soak, stale-operation review, counter reconciliation, and failure/privacy checks.
+- [x] Apply the final legacy-authority revoke migration and repeat the protected chat/dashboard/admin checks.
 
 ### P3.1 — Add entitlement and idempotency primitives
 
@@ -536,12 +573,12 @@ Design an additive entitlement-operation ledger containing:
 
 Requirements:
 
-- [ ] Request IDs are unique and actor-bound.
-- [ ] Replays by the same actor are idempotent; cross-actor replays are denied.
-- [ ] Reservation atomically locks/checks status and quota.
-- [ ] Caller timestamps, IDs, tiers, and response metadata cannot affect billing.
-- [ ] Only trusted server/database functions mutate the ledger.
-- [ ] Current counters reconcile at cutover; do not fabricate per-request history.
+- [x] Request IDs are unique and actor-bound.
+- [x] Replays by the same actor are idempotent; cross-actor replays are denied.
+- [x] Reservation atomically locks/checks status and quota.
+- [x] Caller timestamps, IDs, tiers, and response metadata cannot affect billing.
+- [x] Only trusted server/database functions mutate the ledger.
+- [x] Current counters reconcile at cutover; do not fabricate per-request history.
 
 ### P3.2 — Move chat charging and persistence to the edge/server
 
@@ -587,12 +624,12 @@ Cutover order:
 **Finding:** H6
 **Effort/risk:** L / High
 
-- [ ] Define exactly what consumes one unit.
-- [ ] Atomically reserve a unit and issue an actor-bound, short-lived query lease.
-- [ ] Require the lease on protected dataset, inventory, and hourly RPCs.
-- [ ] Ensure pagination under one lease charges once.
-- [ ] Revoke or guard raw unmetered RPC access.
-- [ ] Do not charge operations that never acquire a lease/data snapshot.
+- [x] Define exactly what consumes one unit.
+- [x] Atomically reserve a unit and issue an actor-bound, short-lived query lease.
+- [x] Require the lease on protected dataset, inventory, and hourly RPCs.
+- [x] Ensure pagination under one lease charges once.
+- [x] Revoke or guard raw unmetered RPC access.
+- [x] Do not charge operations that never acquire a lease/data snapshot.
 
 **Acceptance:**
 
@@ -606,12 +643,12 @@ Cutover order:
 **Findings:** H7, H8, H9
 **Effort/risk:** M–L / Medium–High
 
-- [ ] Create one server/database authority for active-user and active-admin checks.
-- [ ] Use it from edge and direct bearer paths.
-- [ ] Serialize role/status/delete operations.
-- [ ] Enforce at least one active administrator transactionally, including concurrent demotions.
-- [ ] Require recent authentication/MFA for destructive administration if supported.
-- [ ] Revoke sessions on pause/demotion.
+- [x] Create one server/database authority for active-user and active-admin checks.
+- [x] Use it from every enabled production path. Direct bearer remains disabled rather than bypassing the authority.
+- [x] Serialize role/status/delete operations.
+- [x] Enforce at least one active administrator transactionally, including concurrent demotions.
+- [x] Require recent authentication for destructive administration using the available session authentication timestamp.
+- [x] Revoke sessions on pause/demotion.
 
 **Acceptance:**
 
@@ -639,9 +676,9 @@ Cutover order:
 **Findings:** M5, M6, M7
 **Effort/risk:** L / High
 
-- [ ] Add turn ID, request ID, explicit role/sequence ordinal, and deterministic ordering.
-- [ ] Store chart data/metadata as native JSONB.
-- [ ] Provide a temporary legacy-string reader and an idempotent bounded migration.
+- [x] Add turn ID, request ID, explicit role/sequence ordinal, and deterministic ordering.
+- [x] Store all new chart data/metadata as native JSONB through server-owned persistence.
+- [x] Provide the temporary legacy chart-data reader. Complete coverage of legacy string scalars plus the idempotent bounded migration/quarantine remains explicitly owned by P6.2 and is not a P3 authority-cutover blocker.
 - [x] Forward a signed actor assertion and bind session/conversation tokens to that actor.
 - [x] Preserve the external request ID and create a separate internal span ID.
 - [x] Define versioned Ask request/response schemas; stop silently ignoring service tier.
@@ -659,10 +696,10 @@ Cutover order:
 **Finding:** M16
 **Effort/risk:** M / Medium
 
-- [ ] Record an append-only attempt event before the mutation.
-- [ ] Commit expected rejection/failure outcomes without re-raising away the audit insert.
-- [ ] Use an idempotent saga for external Auth deletion plus database cleanup.
-- [ ] Correlate started, succeeded, failed, and compensated outcomes.
+- [x] Record an append-only attempt event before the mutation.
+- [x] Commit expected rejection/failure outcomes without re-raising away the audit insert.
+- [x] Use an idempotent saga for external Auth deletion plus database cleanup.
+- [x] Correlate started, succeeded, failed, and compensated outcomes.
 
 **Acceptance:**
 
@@ -675,8 +712,8 @@ Cutover order:
 **Finding:** M8
 **Effort/risk:** M / Low–Medium
 
-- [ ] Check every Supabase data/error result.
-- [ ] Define fail-open/fail-closed decisions: profile/quota checks fail closed; optional history may degrade explicitly.
+- [x] Check every Supabase data/error result in the P3 authority, entitlement, persistence, lease, and administration paths. The broader browser-wide safe-error/render audit remains P6.3.
+- [x] Define fail-open/fail-closed decisions: profile/quota checks fail closed; optional history may degrade explicitly.
 - [x] Publish a safe error envelope with code, safe message, retryable flag, and request ID.
 - [x] Preserve real backend status categories instead of mapping all non-2xx responses to 502.
 
@@ -687,11 +724,29 @@ Cutover order:
 
 ### P3 exit gate
 
-- No authoritative entitlement or security decision depends on browser input.
-- Old direct quota/persistence grants are revoked after compatibility soak.
-- Active-status and last-admin invariants hold under concurrency.
-- Stored history is treated as untrusted.
-- Reconciliation reports no unexplained charge, turn, or audit mismatch.
+**Exit state (2026-07-13): Passed by committed automated evidence plus operator attestation.**
+
+- [x] No authoritative entitlement or security decision depends on browser input.
+- [x] Old direct quota/persistence grants are revoked after compatibility soak.
+- [x] Active-status and last-admin invariants hold under concurrency.
+- [x] Stored history is treated as untrusted.
+- [x] Reconciliation reports no unexplained charge, turn, or audit mismatch.
+
+P3 does not authorize direct bearer or multi-replica backend operation. It also does not claim completion of the P6 generated-contract, full legacy-JSON migration, or browser-wide error/UX work.
+
+P3 finding disposition:
+
+| Finding | P3 disposition | Later work that remains |
+|---|---|---|
+| H5, H6 | Closed: chat and dashboard authority is server/database-owned and legacy browser grants are revoked. | P5 improves deadline/retry behavior without reopening authority. |
+| H7 | Closed for the supported deployment: production is gateway-only and verified assertions are required. | A direct-bearer product mode remains disabled unless a future design integrates the same authority. |
+| H8, H9 | Closed: active-admin, recent-authentication, session-revocation, serialization, and last-active-admin invariants are enforced. | P6.6 bounds administration listing; it does not alter authority. |
+| H10 | Closed: all history is bounded and untrusted at the backend prompt boundary. | P6.2 removes legacy persistence compatibility debt. |
+| M5 | P3 identity/versioning portion closed. | P6.1 still replaces the hand-maintained bridge with generated complete DTOs. |
+| M6 | Closed: actor, session, request, edge span, and backend span identities are preserved and bound. | P5/P7 externalize state before scaling. |
+| M7 | P3 new-write/native-JSONB and deterministic-order portion closed. | P6.2 completes legacy scalar migration/quarantine. |
+| M8 | P3 authority/edge safe-error portion closed. | P6.3 completes browser-wide mapping, bootstrap, render validation, and error boundaries. |
+| M16 | Closed: administration attempts and terminal outcomes are durable and deletion is an idempotent saga. | P7 retains/minimizes operational logs without mutating the append-only audit record. |
 
 ## 11. P4 — Canonical pipeline activation and chart/plan alignment
 
@@ -950,9 +1005,9 @@ Cutover order:
 **Finding:** M7, frontend half of P3.6
 **Effort/risk:** M / Medium
 
-- [ ] Stop pre-stringifying JSONB.
-- [ ] Read legacy string scalars during the compatibility window.
-- [ ] Render turns using explicit turn/sequence order.
+- [x] Stop pre-stringifying JSONB for all new P3 server-authoritative persistence.
+- [ ] Read every supported legacy string scalar during the compatibility window; P3 includes chart-data compatibility but full chart-metadata coverage remains to be verified and completed.
+- [x] Render new and legacy turns using explicit turn/sequence order with deterministic fallbacks.
 - [ ] Migrate valid legacy JSON strings idempotently; quarantine malformed values.
 
 **Acceptance:**
@@ -966,12 +1021,14 @@ Cutover order:
 **Findings:** M8, M19
 **Effort/risk:** M / Low–Medium
 
-- [ ] Map typed errors to safe copy plus request ID.
-- [ ] Suppress intentional abort noise.
-- [ ] Validate public configuration at build/deploy time.
-- [ ] Render a safe config-error screen instead of throwing before React.
-- [ ] Add route error boundaries and an explicit 404.
-- [ ] Validate dates, charts, and API payloads before rendering.
+- [x] Map typed errors to safe copy plus request ID.
+- [x] Suppress intentional abort noise.
+- [x] Validate public configuration at build/deploy time.
+- [x] Render a safe config-error screen instead of throwing before React.
+- [x] Add route error boundaries and an explicit 404.
+- [x] Validate dates, charts, and API payloads before rendering.
+
+**Frontend implementation evidence (2026-07-14):** Independent frontend commit `b69831a` introduces centralized public-config, public-error, and render-safety modules; applies safe typed copy to authentication, administration, chat, dashboard, and builder failure paths; contains malformed history/admin/chart payloads; adds a bootstrap configuration screen, route error boundary, and explicit 404; and makes the CI production build supply deliberate non-secret validation placeholders. `npm run lint`, all `376` JS/JSX tests, and a production `npm run build` passed. A build with missing required public configuration was also verified to fail closed. No backend source or contract change was needed. Frontend deployment and browser smoke remain release-operation evidence, not implementation blockers.
 
 **Acceptance:**
 
@@ -1038,9 +1095,11 @@ Cutover order:
 **Finding:** L4
 **Effort/risk:** S / Low
 
-- [ ] Keep one toast implementation.
-- [ ] Strip internal callbacks before spreading DOM/Radix props.
-- [ ] Test create, update, dismiss, and cleanup.
+- [x] Keep one toast implementation.
+- [x] Strip internal callbacks before spreading DOM/Radix props.
+- [x] Test create, update, dismiss, suppressed notifications, and cleanup.
+
+**Frontend implementation evidence (2026-07-14):** Commit `b69831a` removes the duplicate hook, keeps one external toast store, delegates Radix close lifecycle to the store, prevents suppressed aborts from creating blank notifications, and covers create/update/dismiss/close/global cleanup/final-unmount behavior.
 
 ### P6 exit gate
 
