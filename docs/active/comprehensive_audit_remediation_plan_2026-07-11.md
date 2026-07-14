@@ -20,6 +20,23 @@ This remains the governing plan and does not authorize a production cutover by i
 - Checks that require a live database, deployed edge function, production secret, traffic log, or hosting control plane are manual attestation items when those systems are unavailable. They are marked `Manual verification pending`, not treated as local code failures.
 - Cross-repository behavior becomes active only after every dependency in the activation runbook is deployed with compatible versions.
 
+### Status semantics and current blockers
+
+Checkboxes in this plan now track the narrow acceptance item beside them. A checked item means the implementation or documentation artifact is complete according to local evidence; it does not imply production deployment, live-database execution, branch-protection configuration, or privacy-owner approval unless that item explicitly says so. Manual/live items stay unchecked until the operator records evidence.
+
+| Area | Current state | Remaining blocker or manual gate |
+|---|---|---|
+| P0.A backend | Code is locally verified and committed in backend commit `e667f6b`; the later plan/ledger update is `675b497`. | Operator must record live flags, replica/worker count, access-log direct-bearer inventory, Railway deployment identity, `/readyz` behavior, gateway-secret parity, and platform restart/probe evidence. |
+| P0.B frontend/Supabase | Code is locally verified and committed in frontend commit `3a8ceda`. | Operator/privacy owner must dispose of legacy privacy exports, apply/verify DB changes against a live database, deploy compatible Edge/browser artifacts, verify deployed hashes/RLS/grants/branch protection, and run browser/privacy smoke. |
+| P1.A/P1.B | Local implementation is complete and committed; edge functions now have reproducible source layout and immutable deployment workflow. | Archive/remove obsolete local copies only after active deployment source is proven; record deployed backend/frontend/edge SHAs and staging/production source-hash evidence. |
+| P2.A/P2.B | Local implementation is complete and committed; H1 remains intentionally off. | Production smoke/shadow evidence and P4 entry review remain manual; do not enable universal canonical-frame enforcement from P2 alone. |
+| P3.A/P3.B | Operator confirmed staging, production, smoke, soak, reconciliation, assertion enforcement, and legacy-grant revocation on 2026-07-13. P3 is complete for gateway-only, one-backend-replica operation. | Direct bearer remains disabled, and horizontal scaling remains blocked until their P5/P7 gates pass. |
+| P4.A/P4.B | Not implemented. | P4.A must publish the canonical evidence/outcome/chart/provenance contract before P4.B consumer activation. H1 stays off and evidence re-analysis stays disabled. |
+| P5.A/P5.B | Request-boundary deadline foundation is complete in backend `a199c88`; frontend timeout/retry work is complete in `9bbe444`; Edge-to-backend budget propagation is complete in `a61de51`; DB gateway is complete in backend `ba8dd11`. | P5.1 still needs per-call DB/provider timeout injection, cooperative cancellation, and duplicate-execution/charge evidence. P5.3-P5.6 remain open. Staging failure injection and deployment evidence are manual. |
+| P6.A/P6.B | P6.2-P6.7 frontend implementation packages are locally complete or implementation-complete as noted in each section. | P6.1 is blocked on the backend-generated OpenAPI/JSON Schema contract. P6.2/P6.6 live DB migrations, P6.5 credentialed/manual accessibility evidence, browser smoke, and deployments remain manual. |
+| P7.A/P7.B | Frontend/Supabase FB.7 subset is implementation-complete in `5fa8be1`. | P7.A backend hardening, P7.2 least-privilege role/grant revocation, P7.4 shared-state/scaling acceptance, production artifact evidence, smoke, rollback evidence, and privacy/log-retention attestations remain open. |
+| P8.A/P8.B | Not started beyond the FB.7 generated-artifact verifier repair and prior toast consolidation. | Start only after affected behavior is locked with characterization tests; Vite/esbuild major upgrade remains a separate P8.B item. |
+
 ## 1. Sources and interpretation
 
 This plan reconciles:
@@ -176,12 +193,15 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 
 ### P0.1 — Establish the issue ledger and baseline
 
-- [ ] Create one ticket for every H, M, and L identifier in the coverage matrix below.
-- [ ] Record current flags, replica/worker count, database pool settings, deployed edge hashes, authentication mode, and direct-bearer traffic.
-- [ ] Keep canonical evidence enforcement and evidence re-analysis off.
-- [ ] Capture clean backend and frontend test/lint/build baselines from pinned runtimes.
-- [ ] Record which production checks cannot be verified locally: deployed RLS/grants, edge parity, provider timeouts, and live least-privilege identity.
-- [ ] Verify previously recorded internal fixes rather than reopening them without evidence.
+- [x] Create a repository-local issue ledger for every H, M, and L identifier in the coverage matrix below.
+- [ ] Assign named owners, reviewers, milestones, and external tickets where the project tracker is authoritative.
+- [x] Record local flags, database pool settings, authentication mode, known deployment unknowns, and lock/runtime evidence.
+- [ ] Record live replica/worker count, deployed edge hashes, production direct-bearer traffic, RLS/grants, and least-privilege identity from the deployed services.
+- [x] Keep canonical evidence enforcement and evidence re-analysis off.
+- [x] Capture clean backend and frontend test/lint/build baselines from available local runtimes.
+- [ ] Capture pinned CI/deployment baselines from the production Node/Python runtimes.
+- [x] Record which production checks cannot be verified locally: deployed RLS/grants, edge parity, provider timeouts, and live least-privilege identity.
+- [x] Verify previously recorded internal fixes rather than reopening them without evidence.
 
 **Done when:** every finding has a named owner, evidence link, acceptance test, rollback owner, and state of Open, In progress, Verified, or Deferred with approved reason.
 
@@ -190,12 +210,13 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Findings:** M24 and the internal branch-protection recommendation
 **Effort/risk:** S / Low
 
-- [ ] Fix the four current frontend lint errors.
-- [ ] Eliminate unresolved React act warnings and the invalid dismiss DOM property warning.
-- [ ] Configure tests to fail on unexpected React errors, unhandled rejections, and console errors.
-- [ ] Require database regression tests for release/protected branches; missing TEST_DATABASE_URL must fail a release workflow.
+- [x] Fix the four current frontend lint errors.
+- [x] Eliminate unresolved React act warnings and the invalid dismiss DOM property warning.
+- [x] Configure tests to fail on unexpected React errors, unhandled rejections, and console errors.
+- [x] Require database regression tests for release/protected branches; missing TEST_DATABASE_URL must fail a release workflow.
 - [ ] Turn on branch protection and make backend/frontend required checks non-bypassable for normal merges.
-- [ ] Record exact Node, npm, Python, and dependency-lock inputs used by CI.
+- [x] Record exact Node, npm, Python, and dependency-lock inputs used by local verification and intended CI.
+- [ ] Record successful protected-branch CI evidence on pinned production runtimes.
 
 **Acceptance:**
 
@@ -208,11 +229,12 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H20
 **Effort/risk:** S / Low, with Privacy approval
 
-- [ ] Inventory current export artifacts, repository history, shared archives, CI artifacts, and backups without copying payloads into new locations.
+- [x] Inventory current export artifacts visible in the repository/export tree without copying payloads into new locations.
+- [ ] Inventory repository history, shared archives, CI artifacts, and backups under Privacy-owner supervision.
 - [ ] Move retained exports into encrypted, access-controlled incident/fulfilment storage.
-- [ ] Do not delete existing exports until the Privacy owner decides whether incident evidence or fulfilment records must be preserved.
-- [ ] Make future exports write outside the repository with restrictive ACLs, encryption, expiry, and an auditable deletion step.
-- [ ] Ignore privacy export paths, temporary reports, and real environment files; retain only reviewed examples.
+- [x] Do not delete existing exports until the Privacy owner decides whether incident evidence or fulfilment records must be preserved.
+- [x] Make future exports write outside the repository with restrictive ACLs, encryption, expiry, and an auditable deletion step.
+- [x] Ignore privacy export paths, temporary reports, and real environment files; retain only reviewed examples.
 - [ ] Rotate credentials only if investigation finds actual secret exposure.
 
 **Acceptance:**
@@ -228,10 +250,11 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H19
 **Effort/risk:** S–M / Low–Medium
 
-- [ ] Remove the deletion path that disables the audit-protection trigger or deletes subject/actor audit rows.
+- [x] Remove the deletion path that disables the audit-protection trigger or deletes subject/actor audit rows.
 - [ ] Decide whether deleted users remain as UUIDs or become stable pseudonymous identifiers.
-- [ ] Ensure foreign keys do not force audit deletion.
-- [ ] Align the deletion response and privacy runbook with retained audit behavior.
+- [x] Ensure foreign keys do not force audit deletion in the committed additive patch and regression contract.
+- [ ] Execute the audit-retention regression against a live `TEST_DATABASE_URL` and deploy/verify the migration.
+- [x] Align the deletion response and privacy runbook with retained audit behavior.
 
 **Acceptance:**
 
@@ -245,10 +268,11 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H8
 **Effort/risk:** S / Low–Medium
 
-- [ ] Add active-status verification to every current admin edge function and is-admin.
-- [ ] Enumerate every administrative endpoint in one regression test.
-- [ ] Prepare a service-role break-glass procedure before deployment so a configuration mistake cannot permanently lock out operators.
-- [ ] Schedule centralization under P3 after reproducible edge sources exist.
+- [x] Add active-status verification to every current admin edge function and is-admin.
+- [x] Enumerate every administrative endpoint in one regression test.
+- [x] Prepare a service-role break-glass procedure before deployment so a configuration mistake cannot permanently lock out operators.
+- [x] Schedule centralization under P3 after reproducible edge sources exist.
+- [ ] Deploy the matching edge functions and verify paused-admin 403 behavior plus deployed source hashes.
 
 **Acceptance:**
 
@@ -261,10 +285,11 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H7
 **Effort/risk:** S configuration plus traffic analysis / Medium
 
-- [ ] Inventory legitimate direct /ask bearer clients from trusted access logs.
-- [ ] If none exist, explicitly set gateway-only mode and restrict backend network exposure where possible.
-- [ ] If direct bearer is required, do not leave it exempt: schedule it for the same active-status and transactional entitlement service as the edge path in P3.
-- [ ] Document the decision; do not rely on auto mode to choose the security boundary.
+- [ ] Inventory legitimate direct /ask bearer clients from trusted production access logs.
+- [x] If none exist, explicitly set gateway-only mode and restrict backend network exposure where possible.
+- [x] If direct bearer is required, do not leave it exempt: schedule it for the same active-status and transactional entitlement service as the edge path in P3.
+- [x] Document the decision; do not rely on auto mode to choose the security boundary.
+- [ ] Verify the deployed environment is gateway-only and record network exposure.
 
 **Acceptance:**
 
@@ -278,9 +303,9 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H11
 **Effort/risk:** S / Low–Medium
 
-- [ ] Apply the existing claim-derivation mechanism to legacy fallback text.
-- [ ] Run fallback claims through the normal provenance gate.
-- [ ] Return an explicit degraded-evidence result when numeric claims cannot be grounded.
+- [x] Apply the existing claim-derivation mechanism to legacy fallback text.
+- [x] Run fallback claims through the normal provenance gate.
+- [x] Return an explicit degraded-evidence result when numeric claims cannot be grounded.
 - [ ] Observe rejection/disagreement in shadow mode briefly before enforcement if production fallback volume is material.
 
 **Acceptance:**
@@ -294,10 +319,11 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H16, with H10 history trust completed in P3
 **Effort/risk:** S–M / Low
 
-- [ ] Add proxy/ASGI and edge request-size limits.
-- [ ] Preserve the live Q&A history contract with a typed question/answer turn model, forbid extra fields, allow at most three turns, and enforce per-field limits. The edge alone maps stored role/content rows into this contract.
-- [ ] Return stable 413/validation responses.
-- [ ] Add memory/latency tests for oversized and malformed bodies.
+- [x] Add ASGI and edge request-size limits.
+- [ ] Verify the production proxy/platform request cap and memory/latency behavior under deployed load.
+- [x] Preserve the live Q&A history contract with a typed question/answer turn model, forbid extra fields, allow at most three turns, and enforce per-field limits. The edge alone maps stored role/content rows into this contract.
+- [x] Return stable 413/validation responses.
+- [x] Add memory/latency tests for oversized and malformed bodies.
 
 **Acceptance:**
 
@@ -309,9 +335,10 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** H4
 **Effort/risk:** S / Low
 
-- [ ] Define missing-value semantics: finite zero is valid; null, undefined, NaN, and infinity are missing.
-- [ ] Apply the same denominator rule to price and tariff aggregation.
-- [ ] Define whether each published metric is a simple or weighted average.
+- [x] Define missing-value semantics: finite zero is valid; null, undefined, NaN, and infinity are missing.
+- [x] Apply the same denominator rule to price and tariff aggregation.
+- [x] Define whether each published metric is a simple or weighted average.
+- [ ] Confirm production telemetry/browser smoke after deploying the frontend commit.
 
 **Acceptance:**
 
@@ -325,9 +352,10 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 **Finding:** M17
 **Effort/risk:** S / Low
 
-- [ ] Return non-200 when any required readiness dependency, including schema reflection, is unavailable.
-- [ ] Distinguish optional/degraded components explicitly.
-- [ ] Let fatal startup exceptions terminate with a nonzero exit code.
+- [x] Return non-200 when any required readiness dependency, including schema reflection, is unavailable.
+- [x] Distinguish optional/degraded components explicitly.
+- [x] Let fatal startup exceptions terminate with a nonzero exit code.
+- [ ] Verify deployed platform probe/restart behavior and readiness-query cost.
 
 **Acceptance:**
 
@@ -335,6 +363,8 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - Startup failure exits nonzero and triggers normal platform restart/failure detection.
 
 ### P0 exit gate
+
+**Current state (2026-07-14):** Local P0 implementation is complete and committed for both repositories. The phase cannot be called production-complete until privacy-owner disposition, live database/edge/Railway/GitHub checks, branch protection, deployed source hashes, and browser smoke evidence are recorded.
 
 - All P0 tests and release checks pass.
 - Privacy exports are no longer generated under the repository.
@@ -417,6 +447,8 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - The previous signed artifact can be redeployed by hash.
 
 ### P1 exit gate
+
+**Current state (2026-07-14):** P1.A and P1.B are locally complete and committed. Remaining blockers are deployment evidence, immutable source-hash proof, staging/production smoke, and cautious retirement of obsolete local copies after the active checkout/deployment source is proven.
 
 - One frontend source tree exists.
 - The auth race regression suite is green.
@@ -768,6 +800,8 @@ P3 finding disposition:
 - Render degraded/clarification/policy/transient outcomes distinctly and add consumer contract tests for multiple charts and provenance.
 - Frontend code may commit before enforcement, but UI behavior activates only when P4.A advertises a compatible contract/mode.
 
+**Current blocker (2026-07-14):** P4 is not started. P4.B cannot be marked fixed until P4.A publishes a versioned canonical result/outcome/chart/provenance contract and backend fixtures. H1 remains disabled and evidence re-analysis remains off.
+
 ### P4.1 — Introduce one evidence finalization routine
 
 **Finding:** H1
@@ -878,10 +912,13 @@ P3 finding disposition:
 **Effort/risk:** L / Medium–High
 
 - [x] Define one absolute monotonic deadline at the trusted request boundary.
-- [ ] Propagate remaining time to browser/edge/backend/DB/model calls.
-- [ ] Assign retry ownership to one layer.
-- [ ] Add explicit provider and edge timeouts, abort signals, jitter, Retry-After handling, and status classification.
-- [ ] Make all permitted retries reuse the same actor-bound request ID.
+- [x] Propagate the request budget across browser, edge, and backend request-boundary contracts.
+- [ ] Propagate remaining time into DB and model-provider calls and ensure already-running work cooperatively stops where possible.
+- [x] Assign browser/edge/backend retry ownership through the published safe response/header contract.
+- [x] Add explicit browser and edge timeouts, abort signals, bounded `Retry-After` handling, and status classification.
+- [ ] Add explicit DB/provider timeouts, jitter policy, and provider-side cancellation/reconciliation.
+- [x] Make all permitted browser/edge retries reuse the same actor-bound request ID.
+- [ ] Prove end-to-end that timeout/ambiguous-delivery cases do not duplicate model execution or charges outside the idempotency policy.
 
 **Acceptance:**
 
@@ -980,6 +1017,8 @@ P3 finding disposition:
 
 ### P5 exit gate
 
+**Current state (2026-07-14):** P5 is partially complete. P5.1 request-boundary/edge/browser work and P5.2 database gateway are implemented, but P5.1 per-call cancellation/evidence and P5.3-P5.6 remain open. Keep one backend replica and do not claim end-to-end duplicate-charge protection until the remaining failure-injection evidence exists.
+
 - Total work, time, retries, DB concurrency, provider breaker state, and session ownership are bounded and observable.
 - Load and failure-injection tests pass.
 - One-replica enforcement remains until external state passes its integration suite.
@@ -1008,6 +1047,8 @@ P3 finding disposition:
 - [ ] Include complete charts, answer provenance/trust state, request ID, and approved session fields.
 - [ ] Remove or formally implement service tier as a server-derived field.
 - [ ] Keep internal telemetry out of the public DTO.
+
+**Current blocker (2026-07-14):** P6.1 remains open because P6.A has not yet published the complete backend OpenAPI/JSON Schema source. Frontend code-generation may be prepared, but generated DTO migration and final consumer tests must wait for that source contract; hand-copied substitutes are not acceptable.
 
 **Acceptance:**
 
@@ -1127,6 +1168,8 @@ P3 finding disposition:
 
 ### P6 exit gate
 
+**Current state (2026-07-14):** P6.2 through P6.7 are locally implemented as recorded above, but P6 is not phase-complete. P6.1 is blocked by P6.A's generated backend contract, and P6.2/P6.5/P6.6 still require live database/deployment/accessibility/browser evidence.
+
 - The frontend consumes the complete validated API.
 - Auth/dashboard/chat state is deterministic.
 - Errors are safe and recoverable.
@@ -1158,6 +1201,8 @@ P3 finding disposition:
 - [ ] Hash or minimize actor/session identifiers.
 - [ ] Remove raw query/answer previews from routine logs and make fixture capture opt-in, sampled, and access-controlled.
 - [ ] Define vendor log retention, access, export, deletion, and incident response.
+
+**Current state (2026-07-14):** The frontend/Supabase FB.7 subset minimizes browser and edge operational logging, but the phase-wide P7.1 checklist remains open for backend telemetry, vendor-log retention, production access/export/deletion policy, and deployed evidence.
 
 **Acceptance:**
 
@@ -1196,6 +1241,8 @@ P3 finding disposition:
 - [ ] Correct stale Pydantic/driver comments.
 - [ ] Generate an SBOM/image manifest where policy allows.
 
+**Current state (2026-07-14):** Frontend artifact verification, packaging excludes, production dependency audit, and SBOM generation are implemented in FB.7. Backend runtime packaging, non-root/pinned image evidence, authoritative deployment-path decision, and production artifact promotion evidence remain open under P7.A/P7.5.
+
 **Acceptance:**
 
 - Clean no-cache build succeeds.
@@ -1226,6 +1273,8 @@ P3 finding disposition:
 - [ ] Record rollback commands and owners without embedding secrets.
 
 ### P7 exit gate
+
+**Current state (2026-07-14):** P7 is not complete. The frontend/Supabase implementation subset is locally complete, but backend hardening, least-privilege database identity, production artifact promotion, smoke, rollback evidence, and privacy/log-retention attestations are still blockers.
 
 - Privacy/logging inventory is complete.
 - Least privilege is proven in staging and production.
