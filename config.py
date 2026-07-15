@@ -178,6 +178,17 @@ ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lo
 # on (shadow); the retry is gated here. Default OFF — enablement criteria in
 # docs/active/query_pipeline_architecture.md §5.
 ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
+# P4.1 (finding H1): one evidence-finalization routine on every evidence path.
+#   off     — legacy behavior: frames attach only on the analyzer recovery path.
+#   shadow  — frames are built + validated everywhere but stored as telemetry
+#             only (ctx.evidence_frame_shadow); rendering behavior unchanged.
+#   enforce — frames attach on every path; the generic deterministic renderer
+#             becomes reachable for normal tool execution.
+# Default "shadow": behavior-neutral, and produces the comparison telemetry the
+# P4 exit gate requires (house pattern: detection always on, cutover gated).
+EVIDENCE_FINALIZATION_MODE = (
+    os.getenv("ENAI_EVIDENCE_FINALIZATION_MODE", "shadow").strip().lower() or "shadow"
+)
 # Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
 # hop) for the client IP. Default on — production always sits behind the
 # Railway edge, where the socket peer is the proxy and would collapse every
@@ -284,6 +295,7 @@ def validate_runtime_settings(
     google_api_key: str | None,
     nvidia_api_key: str | None = None,
     gateway_actor_assertion_mode: str = "optional",
+    evidence_finalization_mode: str = "shadow",
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -291,6 +303,10 @@ def validate_runtime_settings(
     if auth_mode not in valid_auth_modes:
         raise RuntimeError(
             "Invalid ENAI_AUTH_MODE. Expected one of: gateway_only, gateway_and_bearer"
+        )
+    if evidence_finalization_mode not in {"off", "shadow", "enforce"}:
+        raise RuntimeError(
+            "Invalid ENAI_EVIDENCE_FINALIZATION_MODE. Expected one of: off, shadow, enforce"
         )
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
@@ -349,6 +365,7 @@ validate_runtime_settings(
     google_api_key=GOOGLE_API_KEY,
     nvidia_api_key=NVIDIA_API_KEY,
     gateway_actor_assertion_mode=GATEWAY_ACTOR_ASSERTION_MODE,
+    evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
 )
 
 # ===================================================================

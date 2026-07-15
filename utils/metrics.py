@@ -70,6 +70,10 @@ class Metrics:
         # Surprising-evidence detections after plan execution (§3.6):
         # "primary_empty", "period_gap".
         self.evidence_anomaly_events = {}
+        # P4.1 evidence-finalization outcomes (finding H1). Keys are
+        # "<stage>:<action>" ("stage_0_5_primary:shadow_built"); this is the
+        # comparison telemetry read at the P4 exit gate before enforcement.
+        self.evidence_finalization_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -332,6 +336,11 @@ class Metrics:
         key = (tag or "unknown").strip().lower() or "unknown"
         self.evidence_anomaly_events[key] = self.evidence_anomaly_events.get(key, 0) + 1
 
+    def log_evidence_finalization(self, stage: str, action: str) -> None:
+        """Track P4.1 evidence-finalization outcomes per checkpoint (finding H1)."""
+        key = f"{(stage or 'unknown').strip().lower()}:{(action or 'unknown').strip().lower()}"
+        self.evidence_finalization_events[key] = self.evidence_finalization_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -424,6 +433,7 @@ class Metrics:
             "render_fitness_events": dict(self.render_fitness_events),
             "evidence_rule_agreement_events": dict(self.evidence_rule_agreement_events),
             "evidence_anomaly_events": dict(self.evidence_anomaly_events),
+            "evidence_finalization_events": dict(self.evidence_finalization_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

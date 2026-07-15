@@ -27,10 +27,8 @@ from datetime import date
 import pandas as pd
 from sqlalchemy import text
 
-from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_executor, summarizer
-from agent.evidence_validator import validate_evidence
+from agent import analyzer, chart_pipeline, evidence_finalizer, evidence_planner, planner, sql_executor, summarizer
 from agent.fixture_candidates import log_fixture_candidate
-from agent.frame_adapters import adapt_tool_result
 from agent.provenance import (
     build_provenance_refs,
     clear_provenance,
@@ -1233,69 +1231,22 @@ def _apply_tool_result(
 
 
 def _build_and_attach_evidence_frame(ctx: QueryContext, invocation: ToolInvocation) -> None:
-    """Build a canonical evidence frame from the tool result and attach to ctx.
+    """Attach a canonical evidence frame from a recovered tool result.
 
-    The frame is stored on ctx.evidence_frame for use by the generic renderer
-    in Stage 4.  This is additive — the raw df/cols/rows remain untouched for
-    backward compatibility with Stage 3 enrichment and existing summarizer paths.
+    Legacy call site (analyzer tool recovery). Since P4.1 this delegates to the
+    single ``evidence_finalizer.finalize_evidence`` routine with
+    ``legacy_attach=True`` so it attaches in every finalization mode — the
+    recovery path built frames in production before P4.1, and ``off``/``shadow``
+    must remain byte-identical to that deployed behavior. Normal execution now
+    finalizes through the same routine (see ``_execute_evidence_plan``).
     """
-    if ctx.df is None or ctx.df.empty:
-        return
-
-    answer_kind = None
-    filter_cond = None
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        answer_kind = qa.answer_kind
-        # Extract filter from the matching tool candidate's params_hint
-        for tc in qa.tooling.candidate_tools:
-            if tc.name.value == invocation.name and tc.params_hint is not None:
-                filter_cond = tc.params_hint.filter
-                break
-
-    # stamp_provenance() already bound the exact tool invocation and source
-    # rows. QueryContext has never had a ``provenance`` attribute; consulting
-    # it here silently produced empty canonical-frame provenance.
-    prov_refs = list(ctx.provenance_refs)
-
-    frame = adapt_tool_result(
+    evidence_finalizer.finalize_evidence(
+        ctx,
+        stage="recovery_apply_tool_result",
         tool_name=invocation.name,
-        df=ctx.df,
-        provenance_refs=prov_refs,
-        filter_cond=filter_cond,
-        answer_kind=answer_kind,
+        tool_params=dict(invocation.params),
+        legacy_attach=True,
     )
-    if frame is not None:
-        ctx.evidence_frame = frame
-        log.info(
-            "Built canonical evidence frame: type=%s rows=%d (tool=%s)",
-            type(frame).__name__,
-            len(frame.rows),
-            invocation.name,
-        )
-
-        # Phase 3: validate evidence against answer_kind requirements.
-        gap = validate_evidence(frame, answer_kind)
-        if gap is not None:
-            if gap.correctable:
-                log.warning(
-                    "Evidence gap (correctable): %s — downstream may re-plan or degrade",
-                    gap,
-                )
-                ctx.evidence_gap = gap
-                trace_detail(log, ctx, "evidence", "evidence_gap_correctable",
-                             answer_kind=str(gap.answer_kind), reason=gap.reason)
-            else:
-                log.warning(
-                    "Evidence gap (not correctable): %s — degrading render_style to narrative",
-                    gap,
-                )
-                ctx.evidence_gap = gap
-                trace_detail(log, ctx, "evidence", "evidence_gap_not_correctable",
-                             answer_kind=str(gap.answer_kind), reason=gap.reason)
-                # Degrade: let LLM narrative handle the mismatch.
-                if ctx.has_authoritative_question_analysis:
-                    ctx.question_analysis.render_style = RenderStyle.NARRATIVE
 
 
 def _attempt_analyzer_tool_recovery(
@@ -2138,6 +2089,12 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
             _should_route_tool_as_explanation(ctx),
         )
 
+    # P4.1 (finding H1): finalize the canonical evidence frame from the settled
+    # primary + secondary + balancing-enrichment state. This is the normal-path
+    # counterpart to the recovery-path attachment, superseding any stale frame a
+    # mid-execution recovery may have left. Gated by ENAI_EVIDENCE_FINALIZATION_MODE.
+    evidence_finalizer.safe_finalize(ctx, stage="stage_0_8_settled")
+
     return ctx
 
 
@@ -2220,6 +2177,9 @@ def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContex
     ctx.evidence_plan = []
     ctx.evidence_plan_complete = False
     clear_provenance(ctx)
+    # P4.1: the first attempt's evidence is discarded — drop any frame it built
+    # so a stale frame can never survive into the re-executed plan.
+    evidence_finalizer.safe_invalidate(ctx, stage="stage_0_9_reanalysis", reason="reanalysis_reset")
 
     if ENABLE_EVIDENCE_PLANNER:
         ctx = evidence_planner.build_evidence_plan(ctx)
@@ -2846,6 +2806,11 @@ def process_query(
         correlation_keys=list(ctx.correlation_results.keys()),
     )
     log.info("Stage 3 complete | analysis enrichment done")
+
+    # P4.1 (finding H1): re-finalize after Stage 3 enrichment, which is the last
+    # step that mutates the tabular evidence before Stage 4 rendering. The frame
+    # the generic renderer sees now reflects the fully enriched evidence.
+    evidence_finalizer.safe_finalize(ctx, stage="stage_3_enriched")
 
     ctx.missing_evidence_for_metrics = _missing_requested_evidence(ctx)
     trace_detail(

@@ -95,6 +95,11 @@ class QueryContext:
     # --- canonical evidence frame (Phase 2: built during evidence collection) ---
     evidence_frame: Optional[CanonicalFrame] = None
     evidence_gap: Optional[Any] = None  # EvidenceGap from evidence_validator (Phase 3)
+    # P4.1 evidence finalization (finding H1): shadow-mode frame, the checkpoint
+    # that produced the current frame, and the per-request finalization event log.
+    evidence_frame_shadow: Optional[CanonicalFrame] = None
+    evidence_frame_stage: str = ""
+    evidence_finalization_events: List[Dict[str, Any]] = dc_field(default_factory=list)
 
     # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
     evidence_anomaly: str = ""                   # anomaly note for the gated re-analysis; "" otherwise
