@@ -46,6 +46,24 @@ class GroundingPolicy(str, Enum):
     NOT_APPLICABLE = "not_applicable"
 
 
+class TerminalOutcome(str, Enum):
+    """Distinct terminal outcomes a request can end in (P4.4, finding H12).
+
+    Before this taxonomy, an unavailable dataset (invalid/irrelevant generated
+    SQL on a data-primary request) was answered with ``answer_conceptual`` —
+    a plausible domain narrative that masked the data failure. These outcomes
+    are now modeled separately so a data failure is reported as a data failure,
+    never as a conceptual success.
+    """
+
+    DATA_ANSWER = "data_answer"                  # grounded answer from evidence
+    CONCEPTUAL_ANSWER = "conceptual_answer"      # legitimate knowledge/definition answer
+    EVIDENCE_UNAVAILABLE = "evidence_unavailable"  # data was requested but could not be retrieved
+    CLARIFICATION_REQUIRED = "clarification_required"
+    POLICY_BLOCKED = "policy_blocked"            # firewall / guardrail refusal
+    TRANSIENT_FAILURE = "transient_failure"      # infrastructure/transient error
+
+
 # ---------------------------------------------------------------------------
 # QueryContext: mutable state object that flows through the pipeline stages
 # ---------------------------------------------------------------------------
@@ -100,6 +118,13 @@ class QueryContext:
     evidence_frame_shadow: Optional[CanonicalFrame] = None
     evidence_frame_stage: str = ""
     evidence_finalization_events: List[Dict[str, Any]] = dc_field(default_factory=list)
+    # P4.3 (M1): which evidence source Stage 5 charted and whether a canonical
+    # filter was applied — surfaced on chart metadata so answer/chart identity
+    # is auditable and a raw-df fallback is never silent.
+    chart_evidence_identity: Dict[str, Any] = dc_field(default_factory=dict)
+    # P4.4 (H12): the distinct terminal outcome this request ended in. "" until
+    # a terminal stage sets it (TerminalOutcome value).
+    terminal_outcome: str = ""
 
     # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
     evidence_anomaly: str = ""                   # anomaly note for the gated re-analysis; "" otherwise

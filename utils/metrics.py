@@ -78,6 +78,15 @@ class Metrics:
         # "<rule>:<severity>" plus "<rule>:enforced" when enforcement fires;
         # sizes the reject blast radius before ENAI_PLAN_VALIDATION_MODE=enforce.
         self.plan_validation_events = {}
+        # P4.3 chart-source selection (finding M1). Keys are the source label
+        # ("raw_ctx_df", "canonical_frame_filtered", "canonical_frame_aligned",
+        # "raw_ctx_df_frame_unmatched", "derived_override"); makes a raw-df
+        # fallback observable instead of silent.
+        self.chart_source_events = {}
+        # P4.4 terminal outcomes (finding H12). Keys are TerminalOutcome values;
+        # distinguishes an evidence-unavailable degrade from a conceptual answer
+        # so a data failure is never counted as a conceptual success.
+        self.terminal_outcome_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -350,6 +359,16 @@ class Metrics:
         key = f"{(rule or 'unknown').strip().lower()}:{(severity or 'unknown').strip().lower()}"
         self.plan_validation_events[key] = self.plan_validation_events.get(key, 0) + 1
 
+    def log_chart_source(self, source: str) -> None:
+        """Track P4.3 chart-source selection per source label (finding M1)."""
+        key = (source or "unknown").strip().lower() or "unknown"
+        self.chart_source_events[key] = self.chart_source_events.get(key, 0) + 1
+
+    def log_terminal_outcome(self, outcome: str) -> None:
+        """Track P4.4 terminal outcomes per kind (finding H12)."""
+        key = (outcome or "unknown").strip().lower() or "unknown"
+        self.terminal_outcome_events[key] = self.terminal_outcome_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -444,6 +463,8 @@ class Metrics:
             "evidence_anomaly_events": dict(self.evidence_anomaly_events),
             "evidence_finalization_events": dict(self.evidence_finalization_events),
             "plan_validation_events": dict(self.plan_validation_events),
+            "chart_source_events": dict(self.chart_source_events),
+            "terminal_outcome_events": dict(self.terminal_outcome_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),
