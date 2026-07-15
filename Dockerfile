@@ -28,7 +28,6 @@ COPY --chown=enai:enai contracts ./contracts
 COPY --chown=enai:enai core ./core
 COPY --chown=enai:enai guardrails ./guardrails
 COPY --chown=enai:enai knowledge ./knowledge
-COPY --chown=enai:enai prompts ./prompts
 COPY --chown=enai:enai schemas ./schemas
 COPY --chown=enai:enai skills ./skills
 COPY --chown=enai:enai utils ./utils

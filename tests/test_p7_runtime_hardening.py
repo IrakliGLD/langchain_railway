@@ -184,6 +184,7 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
     assert "requirements-dev.txt" not in dockerfile
     assert "USER enai" in dockerfile
     assert "COPY . ." not in dockerfile
+    assert "prompts ./prompts" not in dockerfile
 
 
 def test_docker_context_and_railway_config_are_fail_closed():
