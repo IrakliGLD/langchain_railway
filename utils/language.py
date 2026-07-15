@@ -91,3 +91,35 @@ def get_grounding_fallback_message(lang_code: str) -> str:
         ),
     }
     return messages.get(lang_code, messages["en"])
+
+
+def get_evidence_unavailable_message(lang_code: str) -> str:
+    """Localized transparent message for a data request whose evidence could
+    not be retrieved (P4.4, finding H12).
+
+    Deliberately carries NO figures: a data-primary request whose SQL failed
+    validation or relevance must not be dressed up as a plausible domain
+    narrative with invented numbers. It states the limitation honestly and
+    invites a refinement. Default English for unknown codes.
+
+    Args:
+        lang_code: Language code ('ka', 'ru', or 'en').
+    """
+    messages = {
+        "ka": (
+            "ამ კითხვისთვის საჭირო მონაცემების მოძიება ვერ მოხერხდა, "
+            "ამიტომ რიცხობრივ პასუხს ვერ დავასაბუთებ. გთხოვთ, დააზუსტოთ "
+            "მაჩვენებელი, პერიოდი ან ერთეული და სცადოთ თავიდან."
+        ),
+        "ru": (
+            "Не удалось получить данные, необходимые для этого запроса, "
+            "поэтому обоснованный числовой ответ невозможен. Пожалуйста, "
+            "уточните показатель, период или объект и попробуйте снова."
+        ),
+        "en": (
+            "I could not retrieve the data required for this request, so I "
+            "cannot give a grounded numeric answer. Please refine the metric, "
+            "period, or entity and try again."
+        ),
+    }
+    return messages.get(lang_code, messages["en"])

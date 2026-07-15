@@ -7102,7 +7102,11 @@ def test_build_chart_prefers_override_without_raw_rows():
 
     assert out.chart_data == ctx.chart_override_data
     assert out.chart_type == "line"
-    assert out.chart_meta == ctx.chart_override_meta
+    # Override meta is preserved; P4.3 additionally stamps canonical evidence
+    # identity (derived overrides are built from canonical analysis evidence).
+    for key, value in ctx.chart_override_meta.items():
+        assert out.chart_meta[key] == value
+    assert out.chart_meta["evidenceSource"] == "derived_override"
 
 
 def test_build_chart_prefers_override_over_raw_heuristics():
@@ -7126,7 +7130,11 @@ def test_build_chart_prefers_override_over_raw_heuristics():
 
     assert out.chart_type == "stackedbar"
     assert out.chart_data == ctx.chart_override_data
-    assert out.chart_meta == ctx.chart_override_meta
+    # Override meta is preserved; P4.3 additionally stamps canonical evidence
+    # identity (derived overrides are built from canonical analysis evidence).
+    for key, value in ctx.chart_override_meta.items():
+        assert out.chart_meta[key] == value
+    assert out.chart_meta["evidenceSource"] == "derived_override"
 
 
 def test_scenario_scale_computation():

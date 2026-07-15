@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -59,6 +58,7 @@ from agent.answer_provenance import build_answer_provenance
 from agent.contract_continuity import continuity_snapshot_json
 from agent.metric_units import METRIC_UNITS
 from agent.pipeline import process_query
+from agent.public_metadata import build_public_response_metadata, project_public_charts
 from analysis.seasonal import compute_seasonal_average
 from analysis.seasonal_stats import calculate_seasonal_stats, detect_monthly_timeseries, format_seasonal_stats
 from analysis.shares import (
@@ -118,16 +118,33 @@ from core.llm import (
     make_gemini,
     make_openai,
 )
-from core.query_executor import ENGINE, execute_sql_safely, is_database_available
+from core.query_executor import (
+    ENGINE,
+    execute_sql_safely,
+    get_database_runtime_identity,
+    is_database_available,
+)
 from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
 from guardrails.firewall import build_safe_refusal_message, inspect_query
-from models import APIErrorResponse, APIResponse, MetricsResponse, Question
+from models import (
+    CHAT_GATEWAY_CONTRACT_VERSION,
+    APIErrorResponse,
+    APIResponse,
+    MetricsResponse,
+    Question,
+)
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
 
 # Phase 2: Core modules
 from utils.metrics import metrics
+from utils.privacy_logging import (
+    PrivacyLogFilter,
+    hash_private_identifier,
+    sanitize_security_details,
+)
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution, validate_sql_relevance
+from utils.rate_limits import InMemoryRateLimitRepository
 from utils.request_deadline import (
     MINIMUM_START_BUDGET_MS,
     InvalidRequestBudget,
@@ -157,6 +174,7 @@ from visualization.chart_selector import detect_column_types, infer_dimension, s
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("Enai")
+log.addFilter(PrivacyLogFilter())
 
 
 class _DropUvicornAccess404(logging.Filter):
@@ -301,7 +319,9 @@ def refresh_schema_map() -> bool:
 # Single source of truth for the app version (Q5, 2026-06-10 — the file-header
 # comment and FastAPI(version=...) previously disagreed: "v20.0" vs "18.6").
 __version__ = "20.0"
-CHAT_GATEWAY_CONTRACT_VERSION = "chat-gateway-v1"
+# CHAT_GATEWAY_CONTRACT_VERSION now lives with the contract models in models.py
+# (P6.A) so the published schema artifact and its drift test can read it without
+# importing the FastAPI app. Re-exported here for the existing call sites.
 _SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -451,8 +471,11 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
         "span_id": span_id_var.get() or "",
         "path": request.url.path if request else "",
         "method": request.method if request else "",
-        "client_ip": (request.client.host if request and request.client else ""),
-        "details": details,
+        "client_ip": hash_private_identifier(
+            request.client.host if request and request.client else "",
+            namespace="client_ip",
+        ),
+        "details": sanitize_security_details(details),
     }
     metrics.log_security_event(event_type)
     security_log.warning(json.dumps(payload, ensure_ascii=True, sort_keys=True))
@@ -530,49 +553,10 @@ def _rate_limit_key(
     return f"ip:{get_remote_address(request)}"
 
 
-# Post-auth and pre-auth rate limiters. Simple sliding-window counters in
-# process memory.
-_preauth_rate_buckets: Dict[str, List[float]] = {}
-_preauth_rate_lock = threading.Lock()
-_gateway_rate_buckets: Dict[str, List[float]] = {}
-_gateway_rate_lock = threading.Lock()
-_user_rate_buckets: Dict[str, List[float]] = {}
-_user_rate_lock = threading.Lock()
-
-
-# Amortized bucket eviction: without it, subjects that stop sending keep an
-# entry forever and each bucket map grows with every distinct IP/session the
-# process ever sees. Swept at most once per interval, per bucket map.
-_BUCKET_SWEEP_INTERVAL_SECONDS = 300.0
-_bucket_last_sweep: Dict[int, float] = {}
-
-
-def _check_sliding_window_rate_limit(
-    *,
-    subject_id: str,
-    buckets: Dict[str, List[float]],
-    bucket_lock: threading.Lock,
-    max_requests: int,
-    window_seconds: float = 60.0,
-) -> bool:
-    """Return True when the subject stays within the sliding-window budget."""
-    now = time.time()
-    with bucket_lock:
-        if now - _bucket_last_sweep.get(id(buckets), 0.0) > _BUCKET_SWEEP_INTERVAL_SECONDS:
-            _bucket_last_sweep[id(buckets)] = now
-            stale = [
-                key for key, stamps in buckets.items()
-                if not stamps or now - stamps[-1] >= window_seconds
-            ]
-            for key in stale:
-                del buckets[key]
-        timestamps = [t for t in buckets.get(subject_id, []) if now - t < window_seconds]
-        if len(timestamps) >= max_requests:
-            buckets[subject_id] = timestamps
-            return False
-        timestamps.append(now)
-        buckets[subject_id] = timestamps
-        return True
+# One process-local repository owns post-auth and pre-auth sliding-window
+# state. Request authentication/key derivation stays in this API boundary;
+# storage, locking, and bounded eviction are hidden behind the P8.A interface.
+_rate_limit_repository = InMemoryRateLimitRepository()
 
 
 def _preauth_client_ip(request: Request) -> str:
@@ -599,10 +583,9 @@ def _preauth_client_ip(request: Request) -> str:
 
 def _check_preauth_rate_limit(request: Request) -> bool:
     """Apply a coarse per-client guard before auth to dampen abusive bursts."""
-    return _check_sliding_window_rate_limit(
-        subject_id=f"ip:{_preauth_client_ip(request)}",
-        buckets=_preauth_rate_buckets,
-        bucket_lock=_preauth_rate_lock,
+    return _rate_limit_repository.consume(
+        "preauth",
+        f"ip:{_preauth_client_ip(request)}",
         max_requests=ASK_RATE_LIMIT_PREAUTH_PER_MINUTE,
     )
 
@@ -612,20 +595,18 @@ def _check_gateway_rate_limit(
     caller: Optional[CallerContext] = None,
 ) -> bool:
     """Apply the gateway limiter using a verified session-aware key."""
-    return _check_sliding_window_rate_limit(
-        subject_id=_rate_limit_key(request, caller),
-        buckets=_gateway_rate_buckets,
-        bucket_lock=_gateway_rate_lock,
+    return _rate_limit_repository.consume(
+        "gateway",
+        _rate_limit_key(request, caller),
         max_requests=ASK_RATE_LIMIT_GATEWAY_PER_MINUTE,
     )
 
 
 def _check_user_rate_limit(subject_id: str) -> bool:
     """Return True if the user is within their per-minute rate limit."""
-    return _check_sliding_window_rate_limit(
-        subject_id=subject_id,
-        buckets=_user_rate_buckets,
-        bucket_lock=_user_rate_lock,
+    return _rate_limit_repository.consume(
+        "user",
+        subject_id,
         max_requests=ASK_RATE_LIMIT_PUBLIC_PER_MINUTE,
     )
 
@@ -890,6 +871,7 @@ def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
         if callable(checked_out_fn):
             checked_out = checked_out_fn()
 
+    runtime_identity = get_database_runtime_identity()
     return {
         "status": "healthy",
         "metrics": metrics.get_stats(),
@@ -904,6 +886,7 @@ def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
         "database": {
             "pool_size": pool_size,
             "checked_out": checked_out,
+            "runtime_identity": runtime_identity.protected_metadata(),
         },
         "resilience": get_resilience_snapshot(),
     }
@@ -1212,7 +1195,10 @@ def ask_post(
                 ",".join(request_llm_telemetry.get("models", {}).keys()),
                 request_llm_telemetry.get("trace_id", ""),
                 _caller.auth_mode if _caller else "unknown",
-                _caller.subject_id if _caller else "unknown",
+                hash_private_identifier(
+                    _caller.subject_id if _caller else "unknown",
+                    namespace="subject",
+                ),
             )
         # Only expose LLM usage headers to gateway callers (internal).
         _caller = getattr(request.state, "caller", None)
@@ -1446,19 +1432,26 @@ def ask_post(
             exec_time = time.time() - t0
             metrics.log_request(exec_time)
             req_usage = _finalize_request_telemetry()
+            public_guardrail_metadata = build_public_response_metadata(
+                None,
+                request_id=request_id,
+                trace_id=trace_id,
+                metric_unit_registry_version=METRIC_UNITS.version,
+                request_deadline=request_deadline.public_metadata(),
+                answer_provenance=build_answer_provenance(None),
+                protected_telemetry={"llm_telemetry": req_usage},
+                guardrail={
+                    "action": firewall_decision.action,
+                    "reason": firewall_decision.reason,
+                    "risk_score": firewall_decision.risk_score,
+                },
+            )
             return APIResponse(
                 answer=build_safe_refusal_message(firewall_decision),
                 charts=None,
                 chart_data=None,
                 chart_type=None,
-                chart_metadata={
-                    "guardrail_action": firewall_decision.action,
-                    "guardrail_reason": firewall_decision.reason,
-                    "guardrail_risk_score": firewall_decision.risk_score,
-                    "trace_id": trace_id,
-                    "llm_telemetry": req_usage,
-                    "request_deadline": request_deadline.public_metadata(),
-                },
+                chart_metadata=public_guardrail_metadata,
                 execution_time=exec_time,
             )
 
@@ -1532,34 +1525,26 @@ def ask_post(
         metrics.log_request(exec_time)
         log.info(f'Finished request in {exec_time:.2f}s')
 
-        response_chart_meta = dict(ctx.chart_meta or {})
-        response_chart_meta.update(
-            {
-                "trace_id": trace_id,
-                "request_id": request_id,
+        response_chart_meta = build_public_response_metadata(
+            ctx,
+            request_id=request_id,
+            trace_id=trace_id,
+            metric_unit_registry_version=METRIC_UNITS.version,
+            request_deadline=request_deadline.public_metadata(),
+            answer_provenance=build_answer_provenance(ctx),
+            protected_telemetry={
                 "stage_timings_ms": dict(ctx.stage_timings_ms),
                 "llm_telemetry": req_usage,
                 "session_bound_history_turns": len(bound_history),
                 "summary_claims": list(ctx.summary_claims or []),
-                "summary_citations": list(ctx.summary_citations or []),
-                "summary_confidence": float(ctx.summary_confidence),
-                "summary_provenance_coverage": float(ctx.summary_provenance_coverage),
                 "summary_claim_provenance": list(ctx.summary_claim_provenance or []),
-                "summary_provenance_gate_passed": bool(ctx.summary_provenance_gate_passed),
-                "summary_provenance_gate_reason": str(ctx.summary_provenance_gate_reason or ""),
-                "provenance_query_hash": str(ctx.provenance_query_hash or ""),
-                "provenance_source": str(ctx.provenance_source or ""),
-                "provenance_refs": list(getattr(ctx, "provenance_refs", []) or []),
-                "metric_unit_registry_version": METRIC_UNITS.version,
-                "answer_provenance": build_answer_provenance(ctx),
-                "request_deadline": request_deadline.public_metadata(),
-            }
+            },
         )
 
         response.headers["X-Enai-Deadline-Remaining-Ms"] = str(request_deadline.remaining_ms())
         return APIResponse(
             answer=ctx.summary,
-            charts=(getattr(ctx, "charts", None) or None),
+            charts=(project_public_charts(getattr(ctx, "charts", None)) or None),
             chart_data=ctx.chart_data,
             chart_type=ctx.chart_type,
             chart_metadata=response_chart_meta,

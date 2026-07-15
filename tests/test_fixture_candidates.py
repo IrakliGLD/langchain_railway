@@ -6,6 +6,8 @@ import json
 import logging
 import os
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -15,6 +17,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from types import SimpleNamespace
 
+from agent import fixture_candidates as fixture_candidates_module
 from agent.fixture_candidates import MARKER, log_fixture_candidate, routed_fields_snapshot
 from evaluation.harvest_fixture_candidates import parse_candidates, to_cases
 
@@ -23,6 +26,22 @@ def _emit_and_capture(caplog, trigger: str, ctx) -> list[str]:
     with caplog.at_level(logging.INFO, logger="Enai"):
         log_fixture_candidate(trigger, ctx)
     return [rec.getMessage() for rec in caplog.records if MARKER in rec.getMessage()]
+
+
+@pytest.fixture(autouse=True)
+def _enable_local_fixture_capture(monkeypatch):
+    monkeypatch.setattr(fixture_candidates_module, "FIXTURE_CAPTURE_MODE", "raw")
+    monkeypatch.setattr(fixture_candidates_module, "FIXTURE_CAPTURE_SAMPLE_RATE", 1.0)
+
+
+def test_fixture_capture_is_off_by_default(monkeypatch, caplog):
+    monkeypatch.setattr(fixture_candidates_module, "FIXTURE_CAPTURE_MODE", "off")
+    lines = _emit_and_capture(
+        caplog,
+        "cross_check_disagreement",
+        SimpleNamespace(query="must stay private", question_analysis=None, trace_id="trace-off"),
+    )
+    assert lines == []
 
 
 def test_emission_round_trips_through_harvester(caplog):

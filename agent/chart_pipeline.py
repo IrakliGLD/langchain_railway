@@ -24,7 +24,9 @@ from context import (
     SUPPLY_TECH_TYPES,
     TRANSIT_TECH_TYPES,
 )
+from contracts.evidence_frames import ObservationFrame
 from models import QueryContext
+from utils.metrics import metrics
 from utils.trace_logging import trace_detail
 from visualization.chart_selector import (
     effective_primary_presentation,
@@ -440,24 +442,47 @@ def _reset_chart_outputs(ctx: QueryContext) -> None:
     ctx.chart_meta = None
 
 
+def _attach_evidence_identity(chart_meta: Dict[str, Any], identity: Dict[str, Any]) -> None:
+    """Stamp P4.3 evidence-source identity onto one chart's metadata (M1).
+
+    Makes the answer/chart relationship auditable: which source was charted
+    and whether a canonical filter narrowed it. Absent identity (older paths)
+    is a no-op.
+    """
+    if not identity:
+        return
+    chart_meta["evidenceSource"] = identity.get("source", "")
+    chart_meta["evidenceFilterApplied"] = bool(identity.get("filterApplied", False))
+    if identity.get("unit"):
+        chart_meta["evidenceUnit"] = identity["unit"]
+
+
 def _apply_chart_override(ctx: QueryContext) -> QueryContext:
     # Multi-spec override takes precedence so derived-chart builders (scenario
     # multi-panel, MoM/YoY observed+delta, seasonal, forecast observed-vs-projected)
     # can surface multiple coordinated charts. Fall back to the legacy
     # single-spec shape (chart_override_data/_type/_meta) when no list is set.
+    # Derived overrides are built from canonical analysis evidence (scenario /
+    # MoM-YoY / seasonal / forecast builders), so their identity is the
+    # canonical derived spec itself (P4.3, M1).
+    override_identity = {"source": "derived_override", "filterApplied": False}
+    ctx.chart_evidence_identity = override_identity
+
     if ctx.chart_override_specs:
         charts = [dict(spec) for spec in ctx.chart_override_specs if spec]
         if charts:
-            if ctx.provenance_refs:
-                for chart in charts:
-                    chart["metadata"] = dict(chart.get("metadata") or {})
+            for chart in charts:
+                chart["metadata"] = dict(chart.get("metadata") or {})
+                if ctx.provenance_refs:
                     chart["metadata"]["provenanceRefs"] = list(ctx.provenance_refs)
+                _attach_evidence_identity(chart["metadata"], override_identity)
             _apply_chart_collection(ctx, charts)
             return ctx
 
     metadata = dict(ctx.chart_override_meta or {})
     if ctx.provenance_refs:
         metadata["provenanceRefs"] = list(ctx.provenance_refs)
+    _attach_evidence_identity(metadata, override_identity)
     chart_spec = {
         "data": list(ctx.chart_override_data or []),
         "type": ctx.chart_override_type,
@@ -479,10 +504,104 @@ def _chart_intent_query(ctx: QueryContext) -> str:
     )
 
 
+def _normalize_period_keys(values) -> Optional[List[str]]:
+    """Normalize period values to comparable string keys, or None if unsafe.
+
+    Handles the two grains the pipeline emits: ISO dates and year-only values.
+    Year-only ints (1900–2100) are mapped to "YYYY" rather than run through
+    pd.to_datetime — which would treat them as nanosecond epochs (the same
+    trap the year-column guard below avoids). Returns None when the values
+    cannot be normalized cleanly, so the caller falls back to the full frame
+    rather than risk a wrong match.
+    """
+    keys: List[str] = []
+    for raw in values:
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        # Year-only ("2024" / 2024 / 2024.0)
+        year_match = re.fullmatch(r"(\d{4})(?:\.0)?", text)
+        if year_match and 1900 <= int(year_match.group(1)) <= 2100:
+            keys.append(year_match.group(1))
+            continue
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        keys.append(parsed.strftime("%Y-%m-%d"))
+    return keys
+
+
+def _select_chart_source(ctx: QueryContext) -> pd.DataFrame:
+    """Choose the chart's evidence source and record its identity (P4.3, M1).
+
+    Charts must not silently disagree with the canonical answer. When a
+    finalized ObservationFrame is attached (evidence finalization in enforce
+    mode, or the recovery path) and it narrowed the period set — i.e. a filter
+    dropped periods — the chart is restricted to the frame's periods so the
+    chart shows the same rows the answer used. Otherwise the raw ctx.df is the
+    source, and that fallback is recorded (counter + chart identity metadata)
+    rather than applied silently.
+
+    The restriction is intentionally conservative: it fires only when every
+    frame period matches a df period and the frame set is a strict subset, and
+    never empties the chart. When a frame is present by default it is not
+    (finalization is shadow by default), so this leaves the deployed chart
+    path byte-identical until enforce mode is turned on.
+    """
+    df = ctx.df.copy()
+    frame = getattr(ctx, "evidence_frame", None)
+    identity: Dict[str, Any] = {
+        "source": "raw_ctx_df",
+        "filterApplied": False,
+        "frameType": type(frame).__name__ if frame is not None else "",
+    }
+
+    if isinstance(frame, ObservationFrame) and not frame.is_empty():
+        units = sorted({str(r.get("unit") or "") for r in frame.rows if r.get("unit")})
+        identity["unit"] = units[0] if len(units) == 1 else ",".join(units)
+        identity["frameStage"] = getattr(ctx, "evidence_frame_stage", "")
+        frame_periods = _normalize_period_keys(frame.periods)
+
+        time_key = next(
+            (c for c in (ctx.cols or df.columns)
+             if any(k in str(c).lower() for k in ["date", "year", "month", "time", "period"])),
+            None,
+        )
+        df_periods = (
+            _normalize_period_keys(df[time_key].tolist())
+            if time_key is not None and time_key in df.columns
+            else None
+        )
+
+        if frame_periods and df_periods is not None:
+            frame_set = set(frame_periods)
+            df_set = set(df_periods)
+            if frame_set and frame_set < df_set:
+                # A filter narrowed the evidence: align the chart to it.
+                keep_mask = [key in frame_set for key in df_periods]
+                restricted = df.loc[keep_mask]
+                if not restricted.empty:
+                    df = restricted.copy()
+                    identity["source"] = "canonical_frame_filtered"
+                    identity["filterApplied"] = True
+            elif frame_set == df_set:
+                identity["source"] = "canonical_frame_aligned"
+            else:
+                # Frame present but periods don't cleanly match the df; keep
+                # the full df and make the mismatch visible, never silent.
+                identity["source"] = "raw_ctx_df_frame_unmatched"
+
+    ctx.chart_evidence_identity = identity
+    metrics.log_chart_source(identity["source"])
+    return df
+
+
 def _prepare_chart_source(
     ctx: QueryContext,
 ) -> Tuple[pd.DataFrame, Optional[str], Dict[str, str], List[str], List[str]]:
-    df = ctx.df.copy()
+    df = _select_chart_source(ctx)
     cols = list(ctx.cols or df.columns)
     # Resolve supply/demand intent from the same query text the response-mode
     # router uses (raw query + resolved canonical query).
@@ -1018,6 +1137,7 @@ def _build_chart_spec(
     chart_meta = _build_chart_metadata(dims, chart_type, metrics, chart_labels, time_key)
     if ctx.provenance_refs:
         chart_meta["provenanceRefs"] = list(ctx.provenance_refs)
+    _attach_evidence_identity(chart_meta, ctx.chart_evidence_identity)
 
     transform_meta = dict(transform_meta or {})
     y_axis_override = transform_meta.pop("yAxisTitle", None)

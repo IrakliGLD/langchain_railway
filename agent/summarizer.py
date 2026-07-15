@@ -41,8 +41,8 @@ from core.llm import (
     llm_summarize,
     llm_summarize_structured,
 )
-from models import GroundingPolicy, QueryContext, ResolutionPolicy
-from utils.language import get_grounding_fallback_message
+from models import GroundingPolicy, QueryContext, ResolutionPolicy, TerminalOutcome
+from utils.language import get_evidence_unavailable_message, get_grounding_fallback_message
 from utils.metrics import metrics
 from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
@@ -643,10 +643,9 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     if not source_tokens:
         log.warning(
             "🔬 Grounding fail (no source tokens): answer has %d number tokens but evidence "
-            "corpus is empty. policy=%s answer_tokens_preview=%s",
+            "corpus is empty. policy=%s",
             len(answer_tokens),
             grounding_policy,
-            sorted(answer_tokens)[:20],
         )
         return False
 
@@ -668,13 +667,13 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
         missing = [t for t in answer_tokens if t not in source_tokens]
         log.warning(
             "🔬 Grounding fail: matched %d/%d tokens (ratio=%.2f, threshold=%.2f, policy=%s). "
-            "Missing tokens (first 20 sorted): %s",
+            "missing_token_count=%d",
             matched,
             len(answer_tokens),
             match_ratio,
             min_ratio,
             grounding_policy,
-            sorted(missing)[:20],
+            len(missing),
         )
     _maybe_log_grounding_shadow(envelope, ctx)
     return passed
@@ -1540,6 +1539,41 @@ def answer_clarify(ctx: QueryContext) -> QueryContext:
 
 
 # Clarification/conceptual answers bypass numeric grounding and cite background knowledge only.
+def answer_evidence_unavailable(ctx: QueryContext) -> QueryContext:
+    """Terminal degraded answer for a data request whose evidence is unavailable.
+
+    P4.4 (finding H12): when a data-primary request's generated SQL fails
+    validation or relevance, the pipeline used to call ``answer_conceptual``,
+    dressing an unavailable dataset as a plausible domain narrative. This
+    deterministic path instead states the limitation honestly and, because the
+    message is a fixed template rather than LLM output, structurally cannot
+    invent numeric claims. Anti-retry-storm behavior is preserved: this is a
+    normal HTTP 200 answer, not a 4xx that would trigger client retries.
+
+    Reads: ctx.lang_code, ctx.skip_sql_reason
+    Writes: ctx.summary, summary_source, summary_claims, grounding/gate state,
+            ctx.terminal_outcome.
+    """
+    ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
+    ctx.summary_domain_knowledge = ""
+    ctx.summary = get_evidence_unavailable_message(getattr(ctx, "lang_code", "") or "en")
+    ctx.summary_source = "evidence_unavailable"
+    ctx.summary_claims = []
+    ctx.summary_citations = ["evidence_unavailable"]
+    ctx.summary_confidence = 0.2
+    ctx.summary_claim_provenance = []
+    ctx.summary_provenance_coverage = 0.0
+    ctx.summary_provenance_gate_passed = True
+    ctx.summary_provenance_gate_reason = "not_applicable_evidence_unavailable"
+    ctx.terminal_outcome = TerminalOutcome.EVIDENCE_UNAVAILABLE.value
+    metrics.log_terminal_outcome(TerminalOutcome.EVIDENCE_UNAVAILABLE.value)
+    log.info(
+        "Terminal outcome: evidence_unavailable (data-primary request, reason=%s)",
+        ctx.skip_sql_reason or "unspecified",
+    )
+    return ctx
+
+
 def answer_conceptual(ctx: QueryContext) -> QueryContext:
     """Generate an answer for conceptual/definitional questions (no SQL).
 

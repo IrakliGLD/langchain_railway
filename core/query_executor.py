@@ -9,13 +9,14 @@ Handles:
 """
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, List, Tuple
 
 import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from config import MAX_RESULT_SIZE_MB, MAX_ROWS
+from config import DATABASE_RUNTIME_ROLE, MAX_RESULT_SIZE_MB, MAX_ROWS
 
 # ENGINE + DB_URL live in core/db.py (leaf) now; re-exported here for back-compat so
 # every `from core.query_executor import ENGINE` (and its test monkeypatches) keeps working.
@@ -23,6 +24,33 @@ from core.db import DB_URL, ENGINE, coerce_to_psycopg_url  # noqa: F401
 from core.db_gateway import database_connection
 
 log = logging.getLogger("Enai")
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseRuntimeIdentity:
+    """Protected result of the runtime-role/read-only readiness probe."""
+
+    current_user: str
+    expected_user: str
+    default_transaction_read_only: bool
+
+    @property
+    def ready(self) -> bool:
+        if not self.expected_user:
+            return bool(self.current_user)
+        return (
+            self.current_user == self.expected_user
+            and self.default_transaction_read_only
+        )
+
+    def protected_metadata(self) -> dict[str, Any]:
+        return {
+            "current_user": self.current_user,
+            "expected_user": self.expected_user,
+            "role_matches": self.current_user == self.expected_user,
+            "default_transaction_read_only": self.default_transaction_read_only,
+            "ready": self.ready,
+        }
 
 
 def check_dataframe_memory(df: pd.DataFrame, max_mb: int = None) -> None:
@@ -61,19 +89,48 @@ def check_dataframe_memory(df: pd.DataFrame, max_mb: int = None) -> None:
     log.info(f"✅ Memory check passed: {memory_mb:.2f} MB / {max_mb} MB limit")
 
 
+def get_database_runtime_identity() -> DatabaseRuntimeIdentity:
+    """Probe connection identity without exposing it on public endpoints."""
+
+    try:
+        with database_connection(ENGINE, operation="runtime_identity_probe", begin=True) as conn:
+            row = conn.execute(
+                text(
+                    "select current_user as current_user, "
+                    "current_setting('default_transaction_read_only') as default_read_only"
+                )
+            ).mappings().one()
+        return DatabaseRuntimeIdentity(
+            current_user=str(row["current_user"]),
+            expected_user=DATABASE_RUNTIME_ROLE,
+            default_transaction_read_only=str(row["default_read_only"]).lower() == "on",
+        )
+    except Exception as exc:
+        log.warning(
+            "Database runtime identity probe failed. error_class=%s",
+            type(exc).__name__,
+        )
+        return DatabaseRuntimeIdentity(
+            current_user="",
+            expected_user=DATABASE_RUNTIME_ROLE,
+            default_transaction_read_only=False,
+        )
+
+
 def is_database_available() -> bool:
     """Best-effort database readiness check.
 
     This must never raise during startup paths; readiness endpoints can call it
     and return degraded status instead of crashing process initialization.
     """
-    try:
-        with database_connection(ENGINE, operation="readiness_probe") as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception as exc:
-        log.warning("Database readiness check failed: %s", exc)
-        return False
+    identity = get_database_runtime_identity()
+    if not identity.ready:
+        log.warning(
+            "Database readiness identity mismatch. role_matches=%s read_only_default=%s",
+            identity.current_user == identity.expected_user,
+            identity.default_transaction_read_only,
+        )
+    return identity.ready
 
 
 def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFrame, List[str], List[Any], float]:

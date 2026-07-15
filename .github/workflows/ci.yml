@@ -39,8 +39,11 @@ jobs:
       - name: Run formal red-team score gate
         run: python -m guardrails.redteam_gate --min-score 0.92 --min-block-rate 1.0 --max-false-block-rate 0.02 --min-grounding-detect-rate 1.0 --min-grounding-accept-rate 1.0
 
-      # Coverage floor: production-code coverage measured at 72.2% on 2026-06-10
-      # (tests/scripts omitted via [tool.coverage.run] in pyproject.toml).
+      - name: Enforce focused state and database-boundary coverage
+        run: pytest -q tests/test_rate_limit_repository.py tests/test_p7_runtime_hardening.py --cov=utils.rate_limits --cov=core.query_executor --cov-report=term-missing --cov-fail-under=95
+
+      # Coverage floor: production-code coverage measured at 82.11% on 2026-07-15
+      # (1,549 tests; tests/scripts omitted via [tool.coverage.run] in pyproject.toml).
       # Raise the floor as coverage improves; never lower it to make a PR pass.
       - name: Run full tests with coverage floor
-        run: pytest -q --cov=. --cov-report=term --cov-fail-under=70
+        run: pytest -q --cov=. --cov-report=term --cov-fail-under=80

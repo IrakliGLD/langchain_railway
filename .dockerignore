@@ -1,0 +1,47 @@
+# Secrets and local configuration
+.env
+.env*
+!.env.example
+*.pem
+*.key
+
+# VCS and editor state
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Python caches, virtual environments, and build products
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Non-runtime source and operational artifacts
+tests/
+docs/
+evaluation/
+scripts/
+docs_to_ingest/
+privacy_exports/
+privacy-reports/
+reports/
+exports/
+.tmp/
+*.log
+*.tmp
+*.bak
+evaluation_dataset.json
+requirements-dev.txt
+verify_b1_migration.py
+ingest_all_documents.py
+ingest_one_document.py
+evaluation_engine.py

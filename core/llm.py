@@ -429,6 +429,18 @@ def get_llm_for_stage(
         if not stage_model or stage_model == GEMINI_MODEL:
             return get_primary_llm()
 
+        # P5.4 (finding M11): stage models are Gemini-specific. When the active
+        # provider is not Gemini, a stage override must not silently swap the
+        # request onto a different provider — use the primary client instead.
+        if MODEL_TYPE != "gemini":
+            log.warning(
+                "Stage model override %s requested but MODEL_TYPE=%s; "
+                "using the active provider's primary client.",
+                stage_model,
+                MODEL_TYPE,
+            )
+            return get_primary_llm()
+
         if not GOOGLE_API_KEY:
             log.warning(
                 "Stage model override %s requested but GOOGLE_API_KEY is missing; "

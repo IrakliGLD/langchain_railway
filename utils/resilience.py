@@ -173,6 +173,10 @@ class RequestBackpressureGate:
             }
 
 
+# One breaker per provider. NVIDIA has its own (P5.4, finding M11): before this
+# it fell through get_llm_breaker's unknown-key default to the OpenAI breaker,
+# so an NVIDIA outage could open/reset OpenAI's state and vice versa. Keys must
+# match _provider_from_model_name()'s provider keys in core/llm.py.
 _llm_breakers = {
     "openai": CircuitBreaker(
         name="llm_openai",
@@ -181,6 +185,11 @@ _llm_breakers = {
     ),
     "gemini": CircuitBreaker(
         name="llm_gemini",
+        failure_threshold=LLM_CB_FAILURE_THRESHOLD,
+        reset_timeout_seconds=LLM_CB_RESET_TIMEOUT_SECONDS,
+    ),
+    "nvidia": CircuitBreaker(
+        name="llm_nvidia",
         failure_threshold=LLM_CB_FAILURE_THRESHOLD,
         reset_timeout_seconds=LLM_CB_RESET_TIMEOUT_SECONDS,
     ),

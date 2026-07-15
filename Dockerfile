@@ -1,22 +1,39 @@
-# Dockerfile v1.6
-# Python 3.11 for compatibility with langsmith/pydantic v1
-# Python 3.12 has breaking changes in typing.ForwardRef._evaluate() that cause pydantic v1 to fail
-FROM python:3.11-slim
+# P7.A authoritative Railway runtime image.
+# Python patch release and multi-platform manifest are both pinned.  Update the
+# tag and digest together after rebuilding, scanning, and smoke-testing.
+FROM python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 
-# No system packages required: psycopg2-binary and psycopg[binary] bundle libpq,
-# and every other pinned dependency ships a manylinux wheel (no compiler needed).
-# This removes the previous `apt-get install libpq-dev gcc` layer, which both
-# bloated the image and was the source of an apt-fetch build failure (exit 100).
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
-# Set working directory
+RUN groupadd --gid 10001 enai \
+    && useradd --uid 10001 --gid enai --create-home --shell /usr/sbin/nologin enai
+
 WORKDIR /app
 
-# Copy requirements first (for caching)
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# Runtime dependencies only.  Development/test/scanning tools never enter the
+# production image.
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --requirement requirements.txt
 
-# Copy application code
-COPY . .
+# Explicit runtime allow-list: no repository-wide COPY and no tests, reports,
+# exports, VCS data, operator scripts, or local environment files.
+COPY --chown=enai:enai main.py config.py context.py models.py ./
+COPY --chown=enai:enai agent ./agent
+COPY --chown=enai:enai analysis ./analysis
+COPY --chown=enai:enai config_metrics ./config_metrics
+COPY --chown=enai:enai contracts ./contracts
+COPY --chown=enai:enai core ./core
+COPY --chown=enai:enai guardrails ./guardrails
+COPY --chown=enai:enai knowledge ./knowledge
+COPY --chown=enai:enai prompts ./prompts
+COPY --chown=enai:enai schemas ./schemas
+COPY --chown=enai:enai skills ./skills
+COPY --chown=enai:enai utils ./utils
+COPY --chown=enai:enai visualization ./visualization
 
-# Run the application via Python entrypoint (handles PORT from environment)
+USER enai
+EXPOSE 8000
 CMD ["python", "main.py"]

@@ -61,6 +61,25 @@ SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSIO
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
+# P7.A database identity gate. Staging/production must connect as the
+# dedicated read-only role; development/test can leave the value empty.
+DATABASE_RUNTIME_ROLE = os.getenv(
+    "ENAI_DB_RUNTIME_ROLE",
+    "enai_api_readonly" if ENAI_DEPLOYMENT_ENV in {"staging", "production"} else "",
+).strip()
+# Raw routing-fixture capture is a local/test-only diagnostic. Production
+# observability remains content-free even when other debug traces are enabled.
+FIXTURE_CAPTURE_MODE = os.getenv("ENAI_FIXTURE_CAPTURE_MODE", "off").strip().lower() or "off"
+try:
+    FIXTURE_CAPTURE_SAMPLE_RATE = float(os.getenv("ENAI_FIXTURE_CAPTURE_SAMPLE_RATE", "0"))
+except ValueError as exc:
+    raise RuntimeError("ENAI_FIXTURE_CAPTURE_SAMPLE_RATE must be a number") from exc
+if FIXTURE_CAPTURE_MODE not in {"off", "raw"}:
+    raise RuntimeError("ENAI_FIXTURE_CAPTURE_MODE must be one of: off, raw")
+if not 0.0 <= FIXTURE_CAPTURE_SAMPLE_RATE <= 1.0:
+    raise RuntimeError("ENAI_FIXTURE_CAPTURE_SAMPLE_RATE must be between 0 and 1")
+if FIXTURE_CAPTURE_MODE == "raw" and ENAI_DEPLOYMENT_ENV not in {"development", "test"}:
+    raise RuntimeError("Raw fixture capture is restricted to development and test")
 # P3.A rollout gate for the edge-signed actor/session/request assertion.
 # ``optional`` accepts independently deployed P1 gateways while verifying any
 # assertion that is present. Switch to ``required`` only after the P3.B edge
@@ -112,6 +131,16 @@ NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 # only multiplies the wait (same rationale as the Gemini summarizer client).
 _raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "90").strip()
 NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
+
+# P5.1 (finding H13): OpenAI had no explicit per-call timeout, so a stalled
+# OpenAI call — whether primary or the universal fallback — could hold a request
+# open indefinitely, defeating the end-to-end deadline. Bound it like Gemini
+# (120s default) and NVIDIA; a timeout drops retries to 1 so a slow call fails
+# over once rather than multiplying the wait. Set 0 to intentionally unbound.
+_raw_openai_timeout = os.getenv("OPENAI_TIMEOUT_SECONDS", "120").strip()
+OPENAI_TIMEOUT_SECONDS: float | None = (
+    float(_raw_openai_timeout) if _raw_openai_timeout and float(_raw_openai_timeout) > 0 else None
+)
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
@@ -178,6 +207,35 @@ ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lo
 # on (shadow); the retry is gated here. Default OFF — enablement criteria in
 # docs/active/query_pipeline_architecture.md §5.
 ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
+# P4.1 (finding H1): one evidence-finalization routine on every evidence path.
+#   off     — legacy behavior: frames attach only on the analyzer recovery path.
+#   shadow  — frames are built + validated everywhere but stored as telemetry
+#             only (ctx.evidence_frame_shadow); rendering behavior unchanged.
+#   enforce — frames attach on every path; the generic deterministic renderer
+#             becomes reachable for normal tool execution.
+# Default "shadow": behavior-neutral, and produces the comparison telemetry the
+# P4 exit gate requires (house pattern: detection always on, cutover gated).
+EVIDENCE_FINALIZATION_MODE = (
+    os.getenv("ENAI_EVIDENCE_FINALIZATION_MODE", "shadow").strip().lower() or "shadow"
+)
+# P4.2 (finding M3): plan validation against the answer contract.
+#   warn    — typed issues are computed, logged, and counted; behavior unchanged.
+#   enforce — reject-severity issues terminal-clarify BEFORE any tool/DB call.
+# Default "warn" keeps the documented warning-only behavior until the operator
+# reviews shadow counters and cuts over.
+PLAN_VALIDATION_MODE = (
+    os.getenv("ENAI_PLAN_VALIDATION_MODE", "warn").strip().lower() or "warn"
+)
+# P4.4 (finding H12): honest terminal outcomes. When enabled, a data-primary
+# request whose generated SQL fails validation/relevance returns a transparent
+# evidence-unavailable answer (no numeric claims) instead of a conceptual
+# narrative that masks the data failure. The terminal-outcome taxonomy and its
+# shadow telemetry are always on regardless of this flag; only the user-facing
+# routing change is gated. Default OFF until the operator reviews the
+# evidence_unavailable_shadow counter and cuts over.
+ENABLE_HONEST_TERMINAL_OUTCOMES = os.getenv(
+    "ENAI_ENABLE_HONEST_TERMINAL_OUTCOMES", "false"
+).strip().lower() in ("1", "true", "yes", "on")
 # Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
 # hop) for the client IP. Default on — production always sits behind the
 # Railway edge, where the socket peer is the proxy and would collapse every
@@ -284,6 +342,9 @@ def validate_runtime_settings(
     google_api_key: str | None,
     nvidia_api_key: str | None = None,
     gateway_actor_assertion_mode: str = "optional",
+    evidence_finalization_mode: str = "shadow",
+    plan_validation_mode: str = "warn",
+    openai_api_key: str | None = None,
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -291,6 +352,14 @@ def validate_runtime_settings(
     if auth_mode not in valid_auth_modes:
         raise RuntimeError(
             "Invalid ENAI_AUTH_MODE. Expected one of: gateway_only, gateway_and_bearer"
+        )
+    if evidence_finalization_mode not in {"off", "shadow", "enforce"}:
+        raise RuntimeError(
+            "Invalid ENAI_EVIDENCE_FINALIZATION_MODE. Expected one of: off, shadow, enforce"
+        )
+    if plan_validation_mode not in {"warn", "enforce"}:
+        raise RuntimeError(
+            "Invalid ENAI_PLAN_VALIDATION_MODE. Expected one of: warn, enforce"
         )
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
@@ -333,6 +402,11 @@ def validate_runtime_settings(
         raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
     if model_type == "nvidia" and not nvidia_api_key:
         raise RuntimeError("MODEL_TYPE=nvidia but NVIDIA_API_KEY is missing")
+    # P5.4 (finding M11): OpenAI-primary deployments previously started without
+    # a key and failed at first use; every selected provider now validates its
+    # credential at startup like the other two.
+    if model_type == "openai" and not openai_api_key:
+        raise RuntimeError("MODEL_TYPE=openai but OPENAI_API_KEY is missing")
 
 
 validate_runtime_settings(
@@ -349,6 +423,9 @@ validate_runtime_settings(
     google_api_key=GOOGLE_API_KEY,
     nvidia_api_key=NVIDIA_API_KEY,
     gateway_actor_assertion_mode=GATEWAY_ACTOR_ASSERTION_MODE,
+    evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
+    plan_validation_mode=PLAN_VALIDATION_MODE,
+    openai_api_key=OPENAI_API_KEY,
 )
 
 # ===================================================================

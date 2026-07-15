@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -194,6 +195,16 @@ def build_evidence_plan(ctx: QueryContext) -> QueryContext:
 
     ctx.evidence_plan = steps
     ctx.evidence_plan_source = "deterministic" if steps else ""
+    # P4.2 (finding M3): validate the expanded plan against the answer
+    # contract and publish the typed result on the context. Deterministic
+    # repairs (e.g. _repair_list_tariff_entities) run during expansion, so
+    # this single validation pass always sees the repaired plan. Enforcement
+    # of reject-severity issues happens in the pipeline stage gated by
+    # ENAI_PLAN_VALIDATION_MODE; this function never mutates the plan.
+    validation = _validate_plan_against_answer_kind(steps, qa, ctx.query)
+    ctx.plan_validation = validation
+    for issue in validation.issues:
+        metrics.log_plan_validation(issue.rule, issue.severity)
     return ctx
 
 
@@ -279,9 +290,8 @@ def _expand_evidence_steps(
             steps, added_tools, qa, raw_query, candidates, primary_params,
         )
 
-    # Validate that planned steps can satisfy the expected answer shape.
-    _validate_plan_against_answer_kind(steps, qa, raw_query)
-
+    # Validation runs in build_evidence_plan (P4.2) so single-step fast-path
+    # plans are covered too and the typed result lands on the context.
     return steps
 
 
@@ -516,23 +526,78 @@ def _add_steps_from_comparison(
 
 
 # ---------------------------------------------------------------------------
-# Plan validation against answer_kind
+# Plan validation against answer_kind (P4.2, finding M3)
 # ---------------------------------------------------------------------------
+
+# Severity vocabulary for plan-validation issues.
+SEVERITY_WARN = "warn"      # advisory: execution can still legitimately satisfy the contract
+SEVERITY_REJECT = "reject"  # the plan provably cannot satisfy the answer contract
+
+
+@dataclass
+class PlanValidationIssue:
+    """One typed finding from plan validation."""
+
+    rule: str
+    severity: str
+    message: str
+
+
+@dataclass
+class PlanValidationResult:
+    """Typed outcome of validating an evidence plan against the answer contract.
+
+    ``rejects`` are issues where the planned evidence provably cannot satisfy
+    the contract shape; ``warnings`` are advisory signals — execution may
+    still succeed via tool defaults, post-execution evidence validation, or
+    the generic renderer's own opt-out. Deterministic repairs (currently the
+    LIST-tariff entity expansion in ``_repair_list_tariff_entities``) run
+    during plan expansion, BEFORE validation — so a repaired plan is what
+    gets validated, and it is validated exactly once.
+    """
+
+    issues: List[PlanValidationIssue] = field(default_factory=list)
+
+    def add(self, rule: str, severity: str, message: str) -> None:
+        self.issues.append(PlanValidationIssue(rule=rule, severity=severity, message=message))
+
+    @property
+    def rejects(self) -> List[PlanValidationIssue]:
+        return [issue for issue in self.issues if issue.severity == SEVERITY_REJECT]
+
+    @property
+    def warnings(self) -> List[PlanValidationIssue]:
+        return [issue for issue in self.issues if issue.severity == SEVERITY_WARN]
+
+    def as_event(self) -> Dict[str, Any]:
+        return {
+            "issues": [
+                {"rule": issue.rule, "severity": issue.severity, "message": issue.message}
+                for issue in self.issues
+            ],
+        }
+
 
 def _validate_plan_against_answer_kind(
     steps: List[Dict[str, Any]],
     qa: QuestionAnalysis,
     raw_query: str,
-) -> None:
+) -> PlanValidationResult:
     """Check that planned evidence steps can produce the expected answer shape.
 
-    Logs warnings for mismatches so they are visible in shadow-mode before any
-    plans are actually rejected.  Does NOT remove or reject steps — only
-    augments or warns.  This keeps the change safe for incremental rollout,
-    matches the pipeline's graceful-degradation philosophy, and leaves final
-    shape enforcement to ``evidence_validator.py`` (post-execution) and the
-    generic renderer (which returns None when an evidence frame can't satisfy
-    the answer contract).
+    Returns a typed :class:`PlanValidationResult` and keeps emitting the same
+    warning log lines. This function never mutates or rejects steps itself —
+    enforcement of reject-severity issues is the pipeline's job, gated by
+    ``ENAI_PLAN_VALIDATION_MODE`` (default ``warn`` = observe only, matching
+    the previously documented warning-only behavior).
+
+    Severity policy: a condition is ``reject`` only when the planned evidence
+    provably cannot satisfy the contract (a COMPARISON that explicitly pins a
+    single period for a single comparand; a SCENARIO with nothing to
+    compute). Missing-date-range and enumeration conditions stay ``warn``
+    because tools legitimately default to recent-history windows and
+    post-execution evidence validation covers the shape (a plan-time reject
+    there would break "recent prices"-style queries that succeed today).
 
     Rules checked:
     - COMPARISON → multiple evidence sources, multi-entity primary params,
@@ -560,9 +625,10 @@ def _validate_plan_against_answer_kind(
       plan is likewise suspicious — narrative answers typically need
       supporting context beyond the primary dataset.
     """
+    result = PlanValidationResult()
     answer_kind = qa.answer_kind
     if answer_kind is None or not steps:
-        return
+        return result
     render_style = qa.render_style
 
     primary = steps[0]
@@ -591,6 +657,28 @@ def _validate_plan_against_answer_kind(
             and not inherently_multi
             and not has_multi_period
         ):
+            degenerate_range = bool(start_date and end_date and start_date == end_date)
+            if degenerate_range:
+                # Reject: the plan explicitly pins ONE period for ONE
+                # comparand from ONE source — no execution outcome can
+                # produce a faithful comparison.
+                result.add(
+                    "comparison_single_point_range",
+                    SEVERITY_REJECT,
+                    "COMPARISON plan pins a single explicit period for a "
+                    "single comparand",
+                )
+            else:
+                # Warn only: with no explicit range the tool's default
+                # recent-history window still yields multi-period rows that
+                # compute_mom / the generic renderer can compare, and the
+                # post-execution evidence validator covers the residual.
+                result.add(
+                    "comparison_single_source",
+                    SEVERITY_WARN,
+                    "COMPARISON plan has a single source with single/no "
+                    "entity and no explicit multi-period range",
+                )
             log.warning(
                 "Plan validation: answer_kind=COMPARISON but plan has single "
                 "source with single/no entity and no multi-period range. "
@@ -604,6 +692,13 @@ def _validate_plan_against_answer_kind(
         end_date = primary_params.get("end_date")
         has_date_range = bool(start_date and end_date)
         if requirement.requires_date_range and not has_date_range:
+            # Warn only: tools default to a recent-history window (DESC +
+            # LIMIT), which legitimately yields a renderable series.
+            result.add(
+                "timeseries_missing_range",
+                SEVERITY_WARN,
+                "TIMESERIES primary step lacks an explicit date range",
+            )
             log.warning(
                 "Plan validation: answer_kind=TIMESERIES but primary step "
                 "lacks date range. query=%.80s",
@@ -612,6 +707,11 @@ def _validate_plan_against_answer_kind(
         elif requirement.requires_multi_period_range and start_date == end_date:
             # A single-point "range" is a SCALAR, not a TIMESERIES — flag it
             # so downstream callers know the answer kind may be mis-shaped.
+            result.add(
+                "timeseries_single_point_range",
+                SEVERITY_WARN,
+                "TIMESERIES primary step range is a single point",
+            )
             log.warning(
                 "Plan validation: answer_kind=TIMESERIES but primary step "
                 "range is a single point (start_date == end_date). "
@@ -623,6 +723,13 @@ def _validate_plan_against_answer_kind(
         requirement = get_requirement(AnswerKind.FORECAST)
         has_date_range = bool(primary_params.get("start_date") and primary_params.get("end_date"))
         if requirement.requires_date_range and not has_date_range:
+            # Warn only: the forecast fit-window expansion supplies history
+            # downstream even when the plan carries no explicit range.
+            result.add(
+                "forecast_missing_range",
+                SEVERITY_WARN,
+                "FORECAST primary step lacks an explicit date range",
+            )
             log.warning(
                 "Plan validation: answer_kind=FORECAST but primary step "
                 "lacks date range. query=%.80s",
@@ -637,6 +744,13 @@ def _validate_plan_against_answer_kind(
         derived = qa.analysis_requirements.derived_metrics or []
         has_scenario = any(m.metric_name in _SCENARIO_METRIC_NAMES for m in derived)
         if not has_scenario:
+            # Reject: the deterministic scenario engine has nothing to
+            # compute, so any numeric scenario answer would be ungrounded.
+            result.add(
+                "scenario_missing_metric",
+                SEVERITY_REJECT,
+                "SCENARIO contract has no scenario-family derived metric",
+            )
             log.warning(
                 "Plan validation: answer_kind=SCENARIO but no scenario-family "
                 "derived metric found. query=%.80s",
@@ -650,6 +764,14 @@ def _validate_plan_against_answer_kind(
         # default that silently omits some regulated plants.  Flag that case
         # so the planner's LIST-repair (or missing entity_scope) is visible.
         if primary_tool == ToolName.GET_TARIFFS.value and not entities:
+            # Warn only, and note the repair already ran: _repair_list_tariff_entities
+            # executes during expansion, so reaching this point means no
+            # entity_scope alias was available to expand.
+            result.add(
+                "list_tariffs_default_subset",
+                SEVERITY_WARN,
+                "LIST get_tariffs has no entities after repair; default subset applies",
+            )
             log.warning(
                 "Plan validation: answer_kind=LIST, tool=get_tariffs, no entities "
                 "and no entity_scope alias to expand. Result will use default "
@@ -663,6 +785,12 @@ def _validate_plan_against_answer_kind(
             ToolName.GET_TARIFFS.value,
         }
         if not entities and not inherently_enumerated:
+            result.add(
+                "list_not_enumerated",
+                SEVERITY_WARN,
+                "LIST primary step has no entities and tool is not "
+                "inherently entity-enumerated",
+            )
             log.warning(
                 "Plan validation: answer_kind=LIST but primary step has no "
                 "entities and tool is not inherently entity-enumerated. "
@@ -688,6 +816,11 @@ def _validate_plan_against_answer_kind(
             if step.get("role") in _NARRATIVE_AUGMENTATION_ROLES
         ]
         if narrative_steps:
+            result.add(
+                "deterministic_with_narrative_steps",
+                SEVERITY_WARN,
+                "render_style=DETERMINISTIC plan carries narrative-augmentation steps",
+            )
             log.warning(
                 "Plan validation: render_style=DETERMINISTIC but plan has "
                 "%d narrative-augmentation step(s) (%s). query=%.80s",
@@ -702,6 +835,12 @@ def _validate_plan_against_answer_kind(
             AnswerKind.SCENARIO,
         }
         if answer_kind in _NARRATIVE_ANSWER_KINDS and len(steps) == 1:
+            result.add(
+                "narrative_single_step",
+                SEVERITY_WARN,
+                "render_style=NARRATIVE with an inherently narrative "
+                "answer_kind but only primary data planned",
+            )
             log.warning(
                 "Plan validation: render_style=NARRATIVE and "
                 "answer_kind=%s but plan has only primary data "
@@ -712,8 +851,11 @@ def _validate_plan_against_answer_kind(
 
     # Phase 16 (§16.4.7): visualization cross-check.  Runs after all
     # answer_kind checks so it always fires when a visualization contract
-    # is present.
+    # is present. Stays log-only by documented design (enforcement of
+    # presentation downgrades is a separate future policy flag).
     _cross_check_visualization(steps, qa, raw_query)
+
+    return result
 
 
 def _cross_check_visualization(

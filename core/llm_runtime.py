@@ -30,6 +30,7 @@ from config import (
     NVIDIA_TIMEOUT_SECONDS,
     OPENAI_API_KEY,
     OPENAI_MODEL,
+    OPENAI_TIMEOUT_SECONDS,
 )
 
 log = logging.getLogger("Enai")
@@ -322,13 +323,23 @@ def get_openai() -> ChatOpenAI:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
     if _openai_llm is None:
-        _openai_llm = ChatOpenAI(
+        client_kwargs = dict(
             model=OPENAI_MODEL,
             temperature=0,
             openai_api_key=OPENAI_API_KEY,
-            max_retries=2  # Limit retries to prevent quota exhaustion
+            max_retries=2,  # Limit retries to prevent quota exhaustion
         )
-        log.info("✅ OpenAI LLM instance cached (max_retries=2)")
+        if OPENAI_TIMEOUT_SECONDS:
+            # P5.1 (H13): a bounded call keeps a stalled OpenAI request from
+            # holding the end-to-end deadline; drop retries to 1 so a timeout
+            # fails over once instead of multiplying the wait.
+            client_kwargs["request_timeout"] = OPENAI_TIMEOUT_SECONDS
+            client_kwargs["max_retries"] = 1
+        _openai_llm = ChatOpenAI(**client_kwargs)
+        log.info(
+            "✅ OpenAI LLM instance cached (timeout=%s, max_retries=%s)",
+            OPENAI_TIMEOUT_SECONDS or "unbounded", client_kwargs["max_retries"],
+        )
     return _openai_llm
 
 

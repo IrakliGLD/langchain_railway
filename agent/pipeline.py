@@ -27,10 +27,8 @@ from datetime import date
 import pandas as pd
 from sqlalchemy import text
 
-from agent import analyzer, chart_pipeline, evidence_planner, planner, sql_executor, summarizer
-from agent.evidence_validator import validate_evidence
+from agent import analyzer, chart_pipeline, evidence_finalizer, evidence_planner, planner, sql_executor, summarizer
 from agent.fixture_candidates import log_fixture_candidate
-from agent.frame_adapters import adapt_tool_result
 from agent.provenance import (
     build_provenance_refs,
     clear_provenance,
@@ -49,6 +47,7 @@ from config import (
     ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
     ENABLE_EVIDENCE_REANALYSIS,
+    ENABLE_HONEST_TERMINAL_OUTCOMES,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
     ENABLE_TYPED_TOOLS,
@@ -56,6 +55,7 @@ from config import (
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
     EVIDENCE_PARALLEL_SECONDARY,
     PIPELINE_MODE,
+    PLAN_VALIDATION_MODE,
 )
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
@@ -71,8 +71,9 @@ from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
 )
-from models import QueryContext, ResolutionPolicy, ResponseMode
+from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
+from utils.privacy_logging import hash_private_identifier
 from utils.query_validation import validate_tool_relevance
 from utils.request_deadline import RequestDeadlineExceeded
 from utils.residual_price import is_implied_ppa_cfd_price_query
@@ -1233,69 +1234,22 @@ def _apply_tool_result(
 
 
 def _build_and_attach_evidence_frame(ctx: QueryContext, invocation: ToolInvocation) -> None:
-    """Build a canonical evidence frame from the tool result and attach to ctx.
+    """Attach a canonical evidence frame from a recovered tool result.
 
-    The frame is stored on ctx.evidence_frame for use by the generic renderer
-    in Stage 4.  This is additive — the raw df/cols/rows remain untouched for
-    backward compatibility with Stage 3 enrichment and existing summarizer paths.
+    Legacy call site (analyzer tool recovery). Since P4.1 this delegates to the
+    single ``evidence_finalizer.finalize_evidence`` routine with
+    ``legacy_attach=True`` so it attaches in every finalization mode — the
+    recovery path built frames in production before P4.1, and ``off``/``shadow``
+    must remain byte-identical to that deployed behavior. Normal execution now
+    finalizes through the same routine (see ``_execute_evidence_plan``).
     """
-    if ctx.df is None or ctx.df.empty:
-        return
-
-    answer_kind = None
-    filter_cond = None
-    if ctx.has_authoritative_question_analysis:
-        qa = ctx.question_analysis
-        answer_kind = qa.answer_kind
-        # Extract filter from the matching tool candidate's params_hint
-        for tc in qa.tooling.candidate_tools:
-            if tc.name.value == invocation.name and tc.params_hint is not None:
-                filter_cond = tc.params_hint.filter
-                break
-
-    # stamp_provenance() already bound the exact tool invocation and source
-    # rows. QueryContext has never had a ``provenance`` attribute; consulting
-    # it here silently produced empty canonical-frame provenance.
-    prov_refs = list(ctx.provenance_refs)
-
-    frame = adapt_tool_result(
+    evidence_finalizer.finalize_evidence(
+        ctx,
+        stage="recovery_apply_tool_result",
         tool_name=invocation.name,
-        df=ctx.df,
-        provenance_refs=prov_refs,
-        filter_cond=filter_cond,
-        answer_kind=answer_kind,
+        tool_params=dict(invocation.params),
+        legacy_attach=True,
     )
-    if frame is not None:
-        ctx.evidence_frame = frame
-        log.info(
-            "Built canonical evidence frame: type=%s rows=%d (tool=%s)",
-            type(frame).__name__,
-            len(frame.rows),
-            invocation.name,
-        )
-
-        # Phase 3: validate evidence against answer_kind requirements.
-        gap = validate_evidence(frame, answer_kind)
-        if gap is not None:
-            if gap.correctable:
-                log.warning(
-                    "Evidence gap (correctable): %s — downstream may re-plan or degrade",
-                    gap,
-                )
-                ctx.evidence_gap = gap
-                trace_detail(log, ctx, "evidence", "evidence_gap_correctable",
-                             answer_kind=str(gap.answer_kind), reason=gap.reason)
-            else:
-                log.warning(
-                    "Evidence gap (not correctable): %s — degrading render_style to narrative",
-                    gap,
-                )
-                ctx.evidence_gap = gap
-                trace_detail(log, ctx, "evidence", "evidence_gap_not_correctable",
-                             answer_kind=str(gap.answer_kind), reason=gap.reason)
-                # Degrade: let LLM narrative handle the mismatch.
-                if ctx.has_authoritative_question_analysis:
-                    ctx.question_analysis.render_style = RenderStyle.NARRATIVE
 
 
 def _attempt_analyzer_tool_recovery(
@@ -1586,8 +1540,18 @@ def _execute_evidence_step(
     # backward-compatibility with its monkeypatched test suite.
     _execute = executor or execute_tool
     df, cols, rows = _execute(invocation)
+    _tool_duration = time.time() - t_tool
     if emit_tool_call_metric:
-        metrics.log_tool_call(time.time() - t_tool)
+        metrics.log_tool_call(_tool_duration)
+    # P5.5 (finding L1): per-source observability. Secondary Stage 0.8 calls
+    # keep the legacy total untouched (emit_tool_call_metric=False) but are no
+    # longer invisible — calls and latency are counted per tool under a
+    # primary/secondary dimension.
+    metrics.log_tool_call_source(
+        invocation.name,
+        "primary" if is_primary else "secondary",
+        _tool_duration,
+    )
     if emit_tool_execute_trace:
         _emit_trace_stage(ctx, tool_execute_trace, t_tool, tool=invocation.name, rows=len(rows))
 
@@ -2138,6 +2102,12 @@ def _execute_evidence_plan(ctx: QueryContext) -> QueryContext:
             _should_route_tool_as_explanation(ctx),
         )
 
+    # P4.1 (finding H1): finalize the canonical evidence frame from the settled
+    # primary + secondary + balancing-enrichment state. This is the normal-path
+    # counterpart to the recovery-path attachment, superseding any stale frame a
+    # mid-execution recovery may have left. Gated by ENAI_EVIDENCE_FINALIZATION_MODE.
+    evidence_finalizer.safe_finalize(ctx, stage="stage_0_8_settled")
+
     return ctx
 
 
@@ -2179,14 +2149,24 @@ def _detect_evidence_anomaly(ctx: QueryContext) -> str | None:
     return None
 
 
-def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContext:
+def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> "StageResult":
     """One flag-gated re-analysis on surprising evidence (§3.6, design item 1).
 
-    Re-runs the SAME Stage 0.2 interpreter once with the anomaly attached as
-    trusted context, then rebuilds and re-executes the evidence plan.
-    ``reanalysis_attempted`` guards a single attempt per request. The vector
-    bundle from the first pass is deliberately kept — retrieval-tier changes
-    are out of scope for this slice.
+    P4.5 (finding M4): re-analysis re-runs Stage 0.2 with the anomaly as trusted
+    context AND re-runs the *entire* post-analysis dependent slice — resolved
+    query, answer-kind finalization, retrieval tier + vector knowledge, response
+    mode + derived-metric setup, the knowledge/clarify short-circuits, plan
+    build + validation, and evidence execution — mirroring the same ordered
+    sequence ``process_query`` runs after Stage 0.2. This is the correctness
+    fix over the earlier slice, which reran only analysis + plan: a
+    reclassification to KNOWLEDGE/CLARIFY previously continued in stale
+    data-mode state and never reached the conceptual/clarify terminal.
+
+    Returns a :class:`StageResult`. ``terminal=True`` when the fresh
+    classification short-circuits (knowledge answer, clarification, or a
+    plan-validation reject); the caller returns that answer instead of
+    continuing the data path. ``reanalysis_attempted`` guarantees this runs at
+    most once per request.
     """
     t_stage = time.time()
     ctx.reanalysis_attempted = True
@@ -2201,12 +2181,14 @@ def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContex
         if ctx.question_analysis and ctx.question_analysis.answer_kind
         else ""
     )
+    prev_mode = str(ctx.response_mode or "")
 
+    # 1. Re-run the Stage 0.2 interpreter with the anomaly as trusted context.
     ctx = planner.analyze_question_active(ctx)
-    _finalize_answer_kind(ctx)
 
-    # Reset per-attempt evidence state to QueryContext defaults so the second
-    # execution starts exactly like a fresh request's.
+    # 2. Reset per-attempt evidence AND terminal/mode state so the second pass
+    #    starts exactly like a fresh request and cannot inherit a stale data-mode
+    #    decision (skip_sql, resolution policy, terminal outcome).
     ctx.used_tool = False
     ctx.tool_name = None
     ctx.tool_params = {}
@@ -2219,24 +2201,74 @@ def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContex
     ctx.evidence_collected = {}
     ctx.evidence_plan = []
     ctx.evidence_plan_complete = False
+    ctx.plan_validation = None
+    ctx.skip_sql = False
+    ctx.skip_sql_reason = ""
+    ctx.resolution_policy = ""
+    ctx.clarify_reason = ""
+    ctx.terminal_outcome = ""
     clear_provenance(ctx)
+    # The first attempt's evidence is discarded — drop any frame it built so a
+    # stale frame can never survive into the re-executed plan.
+    evidence_finalizer.safe_invalidate(ctx, stage="stage_0_9_reanalysis", reason="reanalysis_reset")
 
+    def _reanalysis_trace(terminal_reason: str) -> None:
+        new_kind = (
+            ctx.question_analysis.answer_kind.value
+            if ctx.question_analysis and ctx.question_analysis.answer_kind
+            else ""
+        )
+        _emit_trace_stage(
+            ctx, "stage_0_9_reanalysis", t_stage,
+            anomaly=anomaly,
+            tool_changed=(str(ctx.tool_name or "") != prev_tool),
+            kind_changed=(new_kind != prev_kind),
+            mode_changed=(str(ctx.response_mode or "") != prev_mode),
+            terminal_reason=terminal_reason,
+        )
+
+    # 3. Re-run the post-analysis dependent slice (mirrors process_query after
+    #    Stage 0.2). Recomputing resolved query, retrieval tier, vector
+    #    knowledge, and response mode is exactly what lets a data->knowledge or
+    #    data->clarify reclassification take effect (M4).
+    routing_query, routing_query_source = _derive_resolved_query(ctx)
+    ctx.resolved_query = routing_query
+    ctx.resolved_query_source = routing_query_source
+    if routing_query_source == "llm_active_canonical":
+        ctx.semantic_locked = True
+    _finalize_answer_kind(ctx)
+
+    _retrieval_tier = _resolve_vector_tier(ctx)
+    ctx.vector_retrieval_tier = _retrieval_tier.value
+    _require_request_budget(ctx, "stage_0_9_reanalysis_vector")
+    _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
+
+    _apply_response_mode(ctx)
+
+    # 4. Honor the short-circuits the fresh classification may now trigger.
+    _res = _early_answer_clarify(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        _reanalysis_trace("clarify")
+        return StageResult(ctx, terminal=True)
+    _res = _early_answer_conceptual(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        _reanalysis_trace("knowledge")
+        return StageResult(ctx, terminal=True)
+
+    # 5. Rebuild + validate the plan, then re-execute evidence.
     if ENABLE_EVIDENCE_PLANNER:
         ctx = evidence_planner.build_evidence_plan(ctx)
+        _res = _enforce_plan_validation_stage(ctx)
+        ctx = _res.ctx
+        if _res.terminal:
+            _reanalysis_trace("plan_validation_reject")
+            return StageResult(ctx, terminal=True)
     ctx = _execute_evidence_plan(ctx)
 
-    new_kind = (
-        ctx.question_analysis.answer_kind.value
-        if ctx.question_analysis and ctx.question_analysis.answer_kind
-        else ""
-    )
-    _emit_trace_stage(
-        ctx, "stage_0_9_reanalysis", t_stage,
-        anomaly=anomaly,
-        tool_changed=(str(ctx.tool_name or "") != prev_tool),
-        kind_changed=(new_kind != prev_kind),
-    )
-    return ctx
+    _reanalysis_trace("continue")
+    return StageResult(ctx, terminal=False)
 
 
 def _finalize_answer_kind(ctx: QueryContext) -> None:
@@ -2546,6 +2578,8 @@ def _early_answer_clarify(ctx: QueryContext) -> StageResult:
             ctx.clarify_reason = "analyzer_preferred_path_clarify"
     t_stage = time.time()
     ctx = summarizer.answer_clarify(ctx)
+    ctx.terminal_outcome = TerminalOutcome.CLARIFICATION_REQUIRED.value
+    metrics.log_terminal_outcome(TerminalOutcome.CLARIFICATION_REQUIRED.value)
     _emit_trace_stage(ctx, "stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
     return StageResult(ctx, terminal=True)
 
@@ -2560,7 +2594,51 @@ def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
         return StageResult(ctx, terminal=False)
     t_stage = time.time()
     ctx = summarizer.answer_conceptual(ctx)
+    ctx.terminal_outcome = TerminalOutcome.CONCEPTUAL_ANSWER.value
+    metrics.log_terminal_outcome(TerminalOutcome.CONCEPTUAL_ANSWER.value)
     _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+    return StageResult(ctx, terminal=True)
+
+
+def _enforce_plan_validation_stage(ctx: QueryContext) -> StageResult:
+    """P4.2 (finding M3): act on reject-severity plan-validation issues.
+
+    Runs immediately after Stage 0.4 so an unsatisfiable plan makes ZERO
+    tool/DB calls. In the default ``warn`` mode this stage is a pass-through
+    — the typed result and counters exist, behavior is unchanged. In
+    ``enforce`` mode a plan whose evidence provably cannot satisfy the answer
+    contract terminal-clarifies instead of executing: the user picks a
+    direction rather than receiving an answer shaped like something the
+    evidence cannot support. Never loops: validation ran exactly once during
+    Stage 0.4 (after plan repairs) and this stage only reads the result.
+    """
+    validation = getattr(ctx, "plan_validation", None)
+    rejects = list(getattr(validation, "rejects", []) or [])
+    if not rejects:
+        return StageResult(ctx, terminal=False)
+    if PLAN_VALIDATION_MODE != "enforce":
+        # Shadow visibility: counters were already logged per-issue by
+        # build_evidence_plan; nothing else to do in warn mode.
+        return StageResult(ctx, terminal=False)
+
+    first = rejects[0]
+    for issue in rejects:
+        metrics.log_plan_validation(issue.rule, "enforced")
+    ctx.resolution_policy = ResolutionPolicy.CLARIFY
+    ctx.clarify_reason = f"plan_validation_{first.rule}"
+    t_stage = time.time()
+    ctx = summarizer.answer_clarify(ctx)
+    ctx.terminal_outcome = TerminalOutcome.CLARIFICATION_REQUIRED.value
+    metrics.log_terminal_outcome(TerminalOutcome.CLARIFICATION_REQUIRED.value)
+    _emit_trace_stage(
+        ctx, "stage_0_4_plan_validation_clarify", t_stage,
+        rule=first.rule,
+        rejects=[issue.rule for issue in rejects],
+    )
+    log.info(
+        "Plan validation enforcement: clarifying before execution. rule=%s rejects=%d",
+        first.rule, len(rejects),
+    )
     return StageResult(ctx, terminal=True)
 
 
@@ -2581,10 +2659,14 @@ def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
         log.info("Stage 1 complete | conceptual=%s | skip_sql=%s", ctx.is_conceptual, ctx.skip_sql)
 
         if ctx.is_conceptual or ctx.skip_sql:
+            # Pre-execution skip: the planner's should_skip_sql_execution
+            # decided this query needs no SQL — a legitimate conceptual route,
+            # not a data failure.
             if ctx.skip_sql and not ctx.is_conceptual:
                 log.info("Skipping SQL path: %s", ctx.skip_sql_reason)
             t_stage = time.time()
             ctx = summarizer.answer_conceptual(ctx)
+            ctx.terminal_outcome = ctx.terminal_outcome or TerminalOutcome.CONCEPTUAL_ANSWER.value
             _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
             return StageResult(ctx, terminal=True)
 
@@ -2593,14 +2675,43 @@ def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
         _emit_trace_stage(ctx, "stage_2_sql_execute", t_stage, rows=len(ctx.rows), cols=len(ctx.cols))
         log.info("Stage 2 complete | rows=%s | cols=%s", len(ctx.rows), len(ctx.cols))
         if ctx.skip_sql:
+            # Post-execution skip: validate_and_execute set skip_sql because the
+            # generated SQL failed validation or relevance — a data failure
+            # (finding H12). On a data-primary request this must not be dressed
+            # up as a conceptual success.
             log.info("Stage 2 blocked by policy: %s", ctx.skip_sql_reason)
             t_stage = time.time()
-            ctx = summarizer.answer_conceptual(ctx)
-            _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+            ctx = _answer_skipped_sql_data_failure(ctx)
+            _emit_trace_stage(
+                ctx, "stage_4_conceptual_summary", t_stage,
+                terminal_outcome=ctx.terminal_outcome,
+            )
             return StageResult(ctx, terminal=True)
     else:
         log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
     return StageResult(ctx, terminal=False)
+
+
+def _answer_skipped_sql_data_failure(ctx: QueryContext) -> QueryContext:
+    """Answer a request whose generated SQL was skipped after a failed attempt.
+
+    P4.4 (finding H12). A data-primary request that reaches this point wanted
+    data, but the generated SQL failed validation/relevance. The honest outcome
+    is evidence-unavailable, not a conceptual narrative with invented numbers.
+    The classification and its shadow counter are always recorded; the
+    user-facing routing change is gated by ENABLE_HONEST_TERMINAL_OUTCOMES so
+    the operator can size the blast radius (evidence_unavailable_shadow) before
+    cutover. Anti-retry-storm behavior is unchanged either way (HTTP 200).
+    """
+    is_data_primary = ctx.response_mode != ResponseMode.KNOWLEDGE_PRIMARY
+    if is_data_primary:
+        metrics.log_terminal_outcome(f"{TerminalOutcome.EVIDENCE_UNAVAILABLE.value}_shadow")
+        if ENABLE_HONEST_TERMINAL_OUTCOMES:
+            return summarizer.answer_evidence_unavailable(ctx)
+    ctx = summarizer.answer_conceptual(ctx)
+    ctx.terminal_outcome = ctx.terminal_outcome or TerminalOutcome.CONCEPTUAL_ANSWER.value
+    metrics.log_terminal_outcome(ctx.terminal_outcome)
+    return ctx
 
 
 def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
@@ -2637,6 +2748,8 @@ def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
             )
             t_stage = time.time()
             ctx = summarizer.answer_clarify(ctx)
+            ctx.terminal_outcome = TerminalOutcome.CLARIFICATION_REQUIRED.value
+            metrics.log_terminal_outcome(TerminalOutcome.CLARIFICATION_REQUIRED.value)
             _emit_trace_stage(
                 ctx,
                 "stage_4_clarify_summary",
@@ -2661,7 +2774,10 @@ def process_query(
     selected = _detect_clarify_selection(query, conversation_history)
     if selected:
         query = _rewrite_query_for_clarify_selection(selected, conversation_history)
-        log.info("Clarification selection detected; rewriting query to: %s", query)
+        log.info(
+            "Clarification selection detected. rewritten_query_hash=%s",
+            hash_private_identifier(query, namespace="query"),
+        )
 
     ctx = QueryContext(
         query=query,
@@ -2775,6 +2891,14 @@ def process_query(
             tools=[s["tool_name"] for s in ctx.evidence_plan],
         )
 
+        # P4.2 (M3): reject-severity contract mismatches clarify BEFORE any
+        # tool/DB call when ENAI_PLAN_VALIDATION_MODE=enforce; pass-through
+        # (typed result + counters only) in the default warn mode.
+        _res = _enforce_plan_validation_stage(ctx)
+        ctx = _res.ctx
+        if _res.terminal:
+            return ctx
+
     # Stage 0.5 / 0.6 / 0.7 / 0.8: primary execution (strategy chain) +
     # secondary evidence loop + driver-context enrichment, all in one
     # consolidated function. See _execute_evidence_plan above for the
@@ -2790,7 +2914,13 @@ def process_query(
         _emit_trace_stage(ctx, "stage_0_9_evidence_anomaly", time.time(), tag=_anomaly)
         if ENABLE_EVIDENCE_REANALYSIS and not ctx.reanalysis_attempted:
             _require_request_budget(ctx, "stage_0_9_evidence_reanalysis")
-            ctx = _attempt_evidence_reanalysis(ctx, _anomaly)
+            _res = _attempt_evidence_reanalysis(ctx, _anomaly)
+            ctx = _res.ctx
+            # A reclassification to knowledge/clarify (or a plan-validation
+            # reject) during re-analysis is terminal — the fresh mode owns the
+            # answer instead of the pipeline continuing in stale data mode (M4).
+            if _res.terminal:
+                return ctx
 
     # Legacy agent loop removed (audit): with Stage 0.2 authoritative it never ran,
     # and analyzer-failure / no-tool cases fall through to the generate-plan/SQL
@@ -2847,6 +2977,11 @@ def process_query(
     )
     log.info("Stage 3 complete | analysis enrichment done")
 
+    # P4.1 (finding H1): re-finalize after Stage 3 enrichment, which is the last
+    # step that mutates the tabular evidence before Stage 4 rendering. The frame
+    # the generic renderer sees now reflects the fully enriched evidence.
+    evidence_finalizer.safe_finalize(ctx, stage="stage_3_enriched")
+
     ctx.missing_evidence_for_metrics = _missing_requested_evidence(ctx)
     trace_detail(
         log,
@@ -2900,5 +3035,11 @@ def process_query(
     ctx = chart_pipeline.build_chart(ctx)
     _trace_stage("stage_5_chart_build", t_stage, chart_type=ctx.chart_type or "")
     log.info("Stage 5 complete | chart_type=%s", ctx.chart_type)
+
+    # P4.4 (H12): a grounded answer produced from evidence is the data_answer
+    # terminal outcome (unless a Stage-4 fallback already set a distinct one).
+    if not ctx.terminal_outcome:
+        ctx.terminal_outcome = TerminalOutcome.DATA_ANSWER.value
+        metrics.log_terminal_outcome(TerminalOutcome.DATA_ANSWER.value)
 
     return ctx

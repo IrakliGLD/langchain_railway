@@ -1,46 +1,67 @@
--- Least-privilege read-only role for the Enai analyst API (audit S7).
+-- P7.A least-privilege read-only role for the Enai analytics backend.
 --
--- WHY: the backend connects to Postgres via a direct connection string
--- (SUPABASE_DB_URL), NOT via PostgREST. Row-Level Security on the
--- anon/authenticated roles therefore does NOT gate this connection — whatever
--- role is embedded in the URL governs access. Today that is a broadly
--- privileged role, so the ONLY thing preventing writes or reads of
--- non-whitelisted tables (e.g. auth.users) is the app-layer table whitelist
--- plus the per-transaction `SET TRANSACTION READ ONLY`. This migration moves
--- that boundary into the database: a role whose sole privilege is SELECT on the
--- whitelisted analytical relations. With it in place, the app-layer whitelist
--- and the read-only transaction become genuine defense-in-depth.
+-- Apply this complete file as a database owner/admin.  All changes run in one
+-- transaction, so a statement failure cannot leave a partially configured
+-- role.  A missing role is deliberately created NOLOGIN so no placeholder
+-- password can accidentally become a credential.  An existing role retains
+-- its current LOGIN state and password while its privileges and defaults are
+-- converged to this policy.
 --
--- HOW TO APPLY (Supabase):
---   1. Open the project's SQL editor (or use your migration tooling).
---   2. Replace CHANGE_ME_STRONG_SECRET with a strong generated password.
---   3. Run this script.
---   4. Point SUPABASE_DB_URL at this role:
---        postgresql://enai_api_readonly:<password>@<host>:<port>/<db>
---   5. Verify with the checks at the bottom of this file.
+-- Only for a newly created role, generate a strong password outside source
+-- control and run this one statement separately in the Supabase SQL editor:
 --
--- The ingestion path (ingest_all_documents.py, which WRITES to the knowledge
--- schema) must use a SEPARATE, write-capable role/connection — never this one.
+--   ALTER ROLE enai_api_readonly LOGIN PASSWORD '<generated secret>';
+--
+-- Put the resulting connection URL only in Railway SUPABASE_DB_URL.  Set
+-- ENAI_DB_RUNTIME_ROLE=enai_api_readonly (the production default) and retain a
+-- separate write-capable credential for offline knowledge ingestion.
 
--- 1. Role (idempotent). Store the password only in SUPABASE_DB_URL.
+BEGIN;
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'enai_api_readonly') THEN
-    CREATE ROLE enai_api_readonly LOGIN PASSWORD 'CHANGE_ME_STRONG_SECRET';
+    -- The omitted cluster-level attributes default to NOSUPERUSER,
+    -- NOREPLICATION, and NOBYPASSRLS.  Hosted Supabase administrators are not
+    -- true superusers and therefore cannot restate those negative attributes
+    -- later with ALTER ROLE.
+    CREATE ROLE enai_api_readonly NOLOGIN NOINHERIT;
   END IF;
 END
 $$;
 
--- 2. Strip inherited/default privileges, then grant only what the request path needs.
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM enai_api_readonly;
-REVOKE ALL ON SCHEMA public FROM enai_api_readonly;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles
+    WHERE rolname = 'enai_api_readonly'
+      AND (rolsuper OR rolreplication OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION
+      'enai_api_readonly has SUPERUSER, REPLICATION, or BYPASSRLS; remove the unsafe attribute with an authorized administrator before applying this policy';
+  END IF;
+END
+$$;
 
-GRANT CONNECT ON DATABASE postgres TO enai_api_readonly;  -- adjust if the DB name is not "postgres"
+ALTER ROLE enai_api_readonly NOINHERIT NOCREATEDB NOCREATEROLE;
+ALTER ROLE enai_api_readonly CONNECTION LIMIT 5;
+ALTER ROLE enai_api_readonly SET default_transaction_read_only = on;
+ALTER ROLE enai_api_readonly SET statement_timeout = '30s';
+ALTER ROLE enai_api_readonly SET lock_timeout = '5s';
+ALTER ROLE enai_api_readonly SET idle_in_transaction_session_timeout = '30s';
+
+REVOKE ALL ON DATABASE postgres FROM enai_api_readonly;
+GRANT CONNECT ON DATABASE postgres TO enai_api_readonly;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM enai_api_readonly;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM enai_api_readonly;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM enai_api_readonly;
+REVOKE ALL ON SCHEMA public FROM enai_api_readonly;
 GRANT USAGE ON SCHEMA public TO enai_api_readonly;
 
--- 3. SELECT on exactly the whitelisted analytical relations.
---    This list MUST stay in sync with config.STATIC_ALLOWED_TABLES
---    (enforced by tests/test_config.py::test_readonly_role_grants_match_whitelist).
+-- This list MUST stay byte-for-byte aligned with config.STATIC_ALLOWED_TABLES;
+-- tests/test_config.py enforces the relation set.
 GRANT SELECT ON
     public.dates_mv,
     public.entities_mv,
@@ -53,26 +74,28 @@ GRANT SELECT ON
     public.mv_balancing_trade_with_tariff
 TO enai_api_readonly;
 
--- 4. Vector knowledge retrieval (read path) reads these two tables in the
---    `knowledge` schema (knowledge/vector_store.py). Grant read-only access.
+REVOKE ALL ON ALL TABLES IN SCHEMA knowledge FROM enai_api_readonly;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA knowledge FROM enai_api_readonly;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA knowledge FROM enai_api_readonly;
+REVOKE ALL ON SCHEMA knowledge FROM enai_api_readonly;
 GRANT USAGE ON SCHEMA knowledge TO enai_api_readonly;
 GRANT SELECT ON knowledge.documents, knowledge.document_chunks TO enai_api_readonly;
 
--- 5. Deliberately NOT granted: any write privilege, sequence usage, or access to
---    other schemas (auth, storage, extensions, vault, ...). Do not add them here.
+-- PostgreSQL PUBLIC privileges are inherited by every role and cannot be
+-- overridden with a per-role deny.  Do not globally revoke PUBLIC function or
+-- schema grants from this backend migration: Supabase/PostgREST consumers may
+-- rely on them.  Inventory and revoke/re-grant those privileges using the P7.A
+-- runbook across both independently deployed applications before attestation.
 
--- NOTE on views: standard Postgres views run with owner privileges
--- (security_invoker = off, the default), so SELECT on the view/matview above is
--- sufficient and the role does NOT need access to their base tables. If any of
--- these relations is later recreated as a `security_invoker = on` view, this
--- role will also need SELECT on that view's base tables — re-verify after any
--- such change.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+    EXECUTE 'REVOKE ALL ON SCHEMA auth FROM enai_api_readonly';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'storage') THEN
+    EXECUTE 'REVOKE ALL ON SCHEMA storage FROM enai_api_readonly';
+  END IF;
+END
+$$;
 
--- ---------------------------------------------------------------------------
--- VERIFICATION (run while connected AS enai_api_readonly):
---   SELECT 1 FROM public.price_with_usd LIMIT 1;   -- expect: succeeds
---   SELECT 1 FROM knowledge.document_chunks LIMIT 1;-- expect: succeeds
---   SELECT 1 FROM auth.users LIMIT 1;              -- expect: permission denied
---   CREATE TEMP TABLE t(x int);                    -- expect: permission denied
---   INSERT INTO public.price_with_usd DEFAULT VALUES; -- expect: permission denied
--- ---------------------------------------------------------------------------
+COMMIT;
