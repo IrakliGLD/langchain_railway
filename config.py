@@ -113,6 +113,16 @@ NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 _raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "90").strip()
 NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
 
+# P5.1 (finding H13): OpenAI had no explicit per-call timeout, so a stalled
+# OpenAI call — whether primary or the universal fallback — could hold a request
+# open indefinitely, defeating the end-to-end deadline. Bound it like Gemini
+# (120s default) and NVIDIA; a timeout drops retries to 1 so a slow call fails
+# over once rather than multiplying the wait. Set 0 to intentionally unbound.
+_raw_openai_timeout = os.getenv("OPENAI_TIMEOUT_SECONDS", "120").strip()
+OPENAI_TIMEOUT_SECONDS: float | None = (
+    float(_raw_openai_timeout) if _raw_openai_timeout and float(_raw_openai_timeout) > 0 else None
+)
+
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
 # empty) to inherit the global default.  Only Gemini model names are supported

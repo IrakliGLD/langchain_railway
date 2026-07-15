@@ -151,5 +151,49 @@ class TestStageOverrideProviderHonesty:
         assert result is primary
 
 
+# ---------------------------------------------------------------------------
+# P5.1 (H13): OpenAI now has an explicit, bounded per-call timeout
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAITimeout:
+    def _patch_client(self, monkeypatch):
+        from core import llm_runtime
+
+        captured = {}
+
+        class _FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(llm_runtime, "ChatOpenAI", _FakeChatOpenAI)
+        monkeypatch.setattr(llm_runtime, "OPENAI_API_KEY", "k")
+        monkeypatch.setattr(llm_runtime, "_openai_llm", None)
+        return llm_runtime, captured
+
+    def test_timeout_bounds_call_and_drops_retries(self, monkeypatch):
+        llm_runtime, captured = self._patch_client(monkeypatch)
+        monkeypatch.setattr(llm_runtime, "OPENAI_TIMEOUT_SECONDS", 120.0)
+
+        llm_runtime.get_openai()
+
+        assert captured["request_timeout"] == 120.0
+        assert captured["max_retries"] == 1
+
+    def test_unbounded_when_timeout_disabled(self, monkeypatch):
+        llm_runtime, captured = self._patch_client(monkeypatch)
+        monkeypatch.setattr(llm_runtime, "OPENAI_TIMEOUT_SECONDS", None)
+
+        llm_runtime.get_openai()
+
+        assert "request_timeout" not in captured
+        assert captured["max_retries"] == 2
+
+    def test_default_timeout_is_bounded(self):
+        import config
+
+        assert config.OPENAI_TIMEOUT_SECONDS == 120.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
