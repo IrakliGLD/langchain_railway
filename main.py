@@ -121,7 +121,13 @@ from core.llm import (
 from core.query_executor import ENGINE, execute_sql_safely, is_database_available
 from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
 from guardrails.firewall import build_safe_refusal_message, inspect_query
-from models import APIErrorResponse, APIResponse, MetricsResponse, Question
+from models import (
+    CHAT_GATEWAY_CONTRACT_VERSION,
+    APIErrorResponse,
+    APIResponse,
+    MetricsResponse,
+    Question,
+)
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
 
@@ -301,7 +307,9 @@ def refresh_schema_map() -> bool:
 # Single source of truth for the app version (Q5, 2026-06-10 — the file-header
 # comment and FastAPI(version=...) previously disagreed: "v20.0" vs "18.6").
 __version__ = "20.0"
-CHAT_GATEWAY_CONTRACT_VERSION = "chat-gateway-v1"
+# CHAT_GATEWAY_CONTRACT_VERSION now lives with the contract models in models.py
+# (P6.A) so the published schema artifact and its drift test can read it without
+# importing the FastAPI app. Re-exported here for the existing call sites.
 _SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 

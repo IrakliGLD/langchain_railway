@@ -1,0 +1,226 @@
+{
+  "contract_version": "chat-gateway-v1",
+  "description": "Versioned request/response/error contract for the Enai chat gateway. Generated from models.py by scripts/export_chat_gateway_contract.py; do not edit by hand.",
+  "endpoint": "/ask",
+  "schemas": {
+    "APIErrorResponse": {
+      "$defs": {
+        "APIErrorDetail": {
+          "additionalProperties": false,
+          "description": "Stable, public-safe /ask error details for chat-gateway-v1.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "retryable": {
+              "title": "Retryable",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "request_id"
+          ],
+          "title": "APIErrorDetail",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Versioned /ask error envelope.",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/APIErrorDetail"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "APIErrorResponse",
+      "type": "object"
+    },
+    "APIResponse": {
+      "additionalProperties": false,
+      "description": "API response model for /ask endpoint.\n\nAttributes:\n    answer: Natural language answer to the query\n    chart_data: Optional chart data as list of dictionaries\n    chart_type: Optional chart type (line, bar, pie, stackedbar, etc.)\n    chart_metadata: Optional metadata about the chart\n    execution_time: Total execution time in seconds",
+      "properties": {
+        "answer": {
+          "title": "Answer",
+          "type": "string"
+        },
+        "chart_data": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chart Data"
+        },
+        "chart_metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chart Metadata"
+        },
+        "chart_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chart Type"
+        },
+        "charts": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Charts"
+        },
+        "execution_time": {
+          "title": "Execution Time",
+          "type": "number"
+        }
+      },
+      "required": [
+        "answer",
+        "execution_time"
+      ],
+      "title": "APIResponse",
+      "type": "object"
+    },
+    "ConversationTurn": {
+      "additionalProperties": false,
+      "description": "One caller-supplied Q&A pair accepted by the chat API.",
+      "properties": {
+        "answer": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Answer",
+          "type": "string"
+        },
+        "question": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "title": "ConversationTurn",
+      "type": "object"
+    },
+    "Question": {
+      "$defs": {
+        "ConversationTurn": {
+          "additionalProperties": false,
+          "description": "One caller-supplied Q&A pair accepted by the chat API.",
+          "properties": {
+            "answer": {
+              "default": "",
+              "maxLength": 2000,
+              "title": "Answer",
+              "type": "string"
+            },
+            "question": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "title": "ConversationTurn",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "User question model for /ask endpoint.\n\nAttributes:\n    query: Natural language query in English, Georgian, or Russian\n    user_id: Legacy non-authoritative correlation label; never identity\n    conversation_history: Optional list of previous Q&A pairs for context",
+      "properties": {
+        "conversation_history": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ConversationTurn"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Last 1-3 Q&A pairs: [{'question': '...', 'answer': '...'}]",
+          "title": "Conversation History"
+        },
+        "query": {
+          "description": "Natural language query",
+          "maxLength": 2000,
+          "title": "Query",
+          "type": "string"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legacy non-authoritative label; ignored for identity and authorization",
+          "title": "User Id"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "Question",
+      "type": "object"
+    }
+  }
+}
