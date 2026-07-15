@@ -307,9 +307,7 @@ def _set_public_bearer_auth(monkeypatch, enabled: bool) -> None:
 
 
 def _clear_rate_limit_buckets() -> None:
-    main_module._preauth_rate_buckets.clear()
-    main_module._gateway_rate_buckets.clear()
-    main_module._user_rate_buckets.clear()
+    main_module._rate_limit_repository.clear()
 
 
 class TestQuickStats:
@@ -1939,20 +1937,17 @@ def test_preauth_buckets_are_per_client_not_shared(monkeypatch):
 def test_sliding_window_evicts_stale_subjects(monkeypatch):
     """Finding #4: subjects that stop sending must not occupy the bucket map
     forever."""
-    _clear_rate_limit_buckets()
-    now = time.time()
-    main_module._preauth_rate_buckets["ip:stale"] = [now - 3600.0]
-    main_module._preauth_rate_buckets["ip:empty"] = []
-    # Force the sweep to be due.
-    main_module._bucket_last_sweep[id(main_module._preauth_rate_buckets)] = 0.0
+    now = [time.time()]
+    repository = main_module.InMemoryRateLimitRepository(time_fn=lambda: now[0])
+    monkeypatch.setattr(main_module, "_rate_limit_repository", repository)
+    assert repository.consume("preauth", "ip:stale", max_requests=2) is True
+    now[0] += 3601.0
 
     fresh = _make_request({"X-Forwarded-For": "203.0.113.9"})
     monkeypatch.setattr(main_module, "TRUST_PROXY_CLIENT_IP", True)
     assert main_module._check_preauth_rate_limit(fresh) is True
 
-    assert "ip:stale" not in main_module._preauth_rate_buckets
-    assert "ip:empty" not in main_module._preauth_rate_buckets
-    assert "ip:203.0.113.9" in main_module._preauth_rate_buckets
+    assert repository.protected_snapshot()["subjects_by_namespace"]["preauth"] == 1
 
 
 def test_pipeline_failure_detail_is_generic_for_all_modes(monkeypatch):

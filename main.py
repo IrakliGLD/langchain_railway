@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -145,6 +144,7 @@ from utils.privacy_logging import (
     sanitize_security_details,
 )
 from utils.query_validation import is_conceptual_question, should_skip_sql_execution, validate_sql_relevance
+from utils.rate_limits import InMemoryRateLimitRepository
 from utils.request_deadline import (
     MINIMUM_START_BUDGET_MS,
     InvalidRequestBudget,
@@ -553,49 +553,10 @@ def _rate_limit_key(
     return f"ip:{get_remote_address(request)}"
 
 
-# Post-auth and pre-auth rate limiters. Simple sliding-window counters in
-# process memory.
-_preauth_rate_buckets: Dict[str, List[float]] = {}
-_preauth_rate_lock = threading.Lock()
-_gateway_rate_buckets: Dict[str, List[float]] = {}
-_gateway_rate_lock = threading.Lock()
-_user_rate_buckets: Dict[str, List[float]] = {}
-_user_rate_lock = threading.Lock()
-
-
-# Amortized bucket eviction: without it, subjects that stop sending keep an
-# entry forever and each bucket map grows with every distinct IP/session the
-# process ever sees. Swept at most once per interval, per bucket map.
-_BUCKET_SWEEP_INTERVAL_SECONDS = 300.0
-_bucket_last_sweep: Dict[int, float] = {}
-
-
-def _check_sliding_window_rate_limit(
-    *,
-    subject_id: str,
-    buckets: Dict[str, List[float]],
-    bucket_lock: threading.Lock,
-    max_requests: int,
-    window_seconds: float = 60.0,
-) -> bool:
-    """Return True when the subject stays within the sliding-window budget."""
-    now = time.time()
-    with bucket_lock:
-        if now - _bucket_last_sweep.get(id(buckets), 0.0) > _BUCKET_SWEEP_INTERVAL_SECONDS:
-            _bucket_last_sweep[id(buckets)] = now
-            stale = [
-                key for key, stamps in buckets.items()
-                if not stamps or now - stamps[-1] >= window_seconds
-            ]
-            for key in stale:
-                del buckets[key]
-        timestamps = [t for t in buckets.get(subject_id, []) if now - t < window_seconds]
-        if len(timestamps) >= max_requests:
-            buckets[subject_id] = timestamps
-            return False
-        timestamps.append(now)
-        buckets[subject_id] = timestamps
-        return True
+# One process-local repository owns post-auth and pre-auth sliding-window
+# state. Request authentication/key derivation stays in this API boundary;
+# storage, locking, and bounded eviction are hidden behind the P8.A interface.
+_rate_limit_repository = InMemoryRateLimitRepository()
 
 
 def _preauth_client_ip(request: Request) -> str:
@@ -622,10 +583,9 @@ def _preauth_client_ip(request: Request) -> str:
 
 def _check_preauth_rate_limit(request: Request) -> bool:
     """Apply a coarse per-client guard before auth to dampen abusive bursts."""
-    return _check_sliding_window_rate_limit(
-        subject_id=f"ip:{_preauth_client_ip(request)}",
-        buckets=_preauth_rate_buckets,
-        bucket_lock=_preauth_rate_lock,
+    return _rate_limit_repository.consume(
+        "preauth",
+        f"ip:{_preauth_client_ip(request)}",
         max_requests=ASK_RATE_LIMIT_PREAUTH_PER_MINUTE,
     )
 
@@ -635,20 +595,18 @@ def _check_gateway_rate_limit(
     caller: Optional[CallerContext] = None,
 ) -> bool:
     """Apply the gateway limiter using a verified session-aware key."""
-    return _check_sliding_window_rate_limit(
-        subject_id=_rate_limit_key(request, caller),
-        buckets=_gateway_rate_buckets,
-        bucket_lock=_gateway_rate_lock,
+    return _rate_limit_repository.consume(
+        "gateway",
+        _rate_limit_key(request, caller),
         max_requests=ASK_RATE_LIMIT_GATEWAY_PER_MINUTE,
     )
 
 
 def _check_user_rate_limit(subject_id: str) -> bool:
     """Return True if the user is within their per-minute rate limit."""
-    return _check_sliding_window_rate_limit(
-        subject_id=subject_id,
-        buckets=_user_rate_buckets,
-        bucket_lock=_user_rate_lock,
+    return _rate_limit_repository.consume(
+        "user",
+        subject_id,
         max_requests=ASK_RATE_LIMIT_PUBLIC_PER_MINUTE,
     )
 
