@@ -47,6 +47,7 @@ from config import (
     ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
     ENABLE_EVIDENCE_REANALYSIS,
+    ENABLE_HONEST_TERMINAL_OUTCOMES,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
     ENABLE_TYPED_TOOLS,
@@ -70,7 +71,7 @@ from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
 )
-from models import QueryContext, ResolutionPolicy, ResponseMode
+from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
 from utils.query_validation import validate_tool_relevance
 from utils.request_deadline import RequestDeadlineExceeded
@@ -2507,6 +2508,8 @@ def _early_answer_clarify(ctx: QueryContext) -> StageResult:
             ctx.clarify_reason = "analyzer_preferred_path_clarify"
     t_stage = time.time()
     ctx = summarizer.answer_clarify(ctx)
+    ctx.terminal_outcome = TerminalOutcome.CLARIFICATION_REQUIRED.value
+    metrics.log_terminal_outcome(TerminalOutcome.CLARIFICATION_REQUIRED.value)
     _emit_trace_stage(ctx, "stage_4_clarify_summary", t_stage, reason=ctx.clarify_reason)
     return StageResult(ctx, terminal=True)
 
@@ -2521,6 +2524,8 @@ def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
         return StageResult(ctx, terminal=False)
     t_stage = time.time()
     ctx = summarizer.answer_conceptual(ctx)
+    ctx.terminal_outcome = TerminalOutcome.CONCEPTUAL_ANSWER.value
+    metrics.log_terminal_outcome(TerminalOutcome.CONCEPTUAL_ANSWER.value)
     _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
     return StageResult(ctx, terminal=True)
 
@@ -2553,6 +2558,8 @@ def _enforce_plan_validation_stage(ctx: QueryContext) -> StageResult:
     ctx.clarify_reason = f"plan_validation_{first.rule}"
     t_stage = time.time()
     ctx = summarizer.answer_clarify(ctx)
+    ctx.terminal_outcome = TerminalOutcome.CLARIFICATION_REQUIRED.value
+    metrics.log_terminal_outcome(TerminalOutcome.CLARIFICATION_REQUIRED.value)
     _emit_trace_stage(
         ctx, "stage_0_4_plan_validation_clarify", t_stage,
         rule=first.rule,
@@ -2582,10 +2589,14 @@ def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
         log.info("Stage 1 complete | conceptual=%s | skip_sql=%s", ctx.is_conceptual, ctx.skip_sql)
 
         if ctx.is_conceptual or ctx.skip_sql:
+            # Pre-execution skip: the planner's should_skip_sql_execution
+            # decided this query needs no SQL — a legitimate conceptual route,
+            # not a data failure.
             if ctx.skip_sql and not ctx.is_conceptual:
                 log.info("Skipping SQL path: %s", ctx.skip_sql_reason)
             t_stage = time.time()
             ctx = summarizer.answer_conceptual(ctx)
+            ctx.terminal_outcome = ctx.terminal_outcome or TerminalOutcome.CONCEPTUAL_ANSWER.value
             _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
             return StageResult(ctx, terminal=True)
 
@@ -2594,14 +2605,43 @@ def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
         _emit_trace_stage(ctx, "stage_2_sql_execute", t_stage, rows=len(ctx.rows), cols=len(ctx.cols))
         log.info("Stage 2 complete | rows=%s | cols=%s", len(ctx.rows), len(ctx.cols))
         if ctx.skip_sql:
+            # Post-execution skip: validate_and_execute set skip_sql because the
+            # generated SQL failed validation or relevance — a data failure
+            # (finding H12). On a data-primary request this must not be dressed
+            # up as a conceptual success.
             log.info("Stage 2 blocked by policy: %s", ctx.skip_sql_reason)
             t_stage = time.time()
-            ctx = summarizer.answer_conceptual(ctx)
-            _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
+            ctx = _answer_skipped_sql_data_failure(ctx)
+            _emit_trace_stage(
+                ctx, "stage_4_conceptual_summary", t_stage,
+                terminal_outcome=ctx.terminal_outcome,
+            )
             return StageResult(ctx, terminal=True)
     else:
         log.info("Stage 2 bypassed | tool=%s | rows=%s", ctx.tool_name, len(ctx.rows))
     return StageResult(ctx, terminal=False)
+
+
+def _answer_skipped_sql_data_failure(ctx: QueryContext) -> QueryContext:
+    """Answer a request whose generated SQL was skipped after a failed attempt.
+
+    P4.4 (finding H12). A data-primary request that reaches this point wanted
+    data, but the generated SQL failed validation/relevance. The honest outcome
+    is evidence-unavailable, not a conceptual narrative with invented numbers.
+    The classification and its shadow counter are always recorded; the
+    user-facing routing change is gated by ENABLE_HONEST_TERMINAL_OUTCOMES so
+    the operator can size the blast radius (evidence_unavailable_shadow) before
+    cutover. Anti-retry-storm behavior is unchanged either way (HTTP 200).
+    """
+    is_data_primary = ctx.response_mode != ResponseMode.KNOWLEDGE_PRIMARY
+    if is_data_primary:
+        metrics.log_terminal_outcome(f"{TerminalOutcome.EVIDENCE_UNAVAILABLE.value}_shadow")
+        if ENABLE_HONEST_TERMINAL_OUTCOMES:
+            return summarizer.answer_evidence_unavailable(ctx)
+    ctx = summarizer.answer_conceptual(ctx)
+    ctx.terminal_outcome = ctx.terminal_outcome or TerminalOutcome.CONCEPTUAL_ANSWER.value
+    metrics.log_terminal_outcome(ctx.terminal_outcome)
+    return ctx
 
 
 def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
@@ -2638,6 +2678,8 @@ def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
             )
             t_stage = time.time()
             ctx = summarizer.answer_clarify(ctx)
+            ctx.terminal_outcome = TerminalOutcome.CLARIFICATION_REQUIRED.value
+            metrics.log_terminal_outcome(TerminalOutcome.CLARIFICATION_REQUIRED.value)
             _emit_trace_stage(
                 ctx,
                 "stage_4_clarify_summary",
@@ -2914,5 +2956,11 @@ def process_query(
     ctx = chart_pipeline.build_chart(ctx)
     _trace_stage("stage_5_chart_build", t_stage, chart_type=ctx.chart_type or "")
     log.info("Stage 5 complete | chart_type=%s", ctx.chart_type)
+
+    # P4.4 (H12): a grounded answer produced from evidence is the data_answer
+    # terminal outcome (unless a Stage-4 fallback already set a distinct one).
+    if not ctx.terminal_outcome:
+        ctx.terminal_outcome = TerminalOutcome.DATA_ANSWER.value
+        metrics.log_terminal_outcome(TerminalOutcome.DATA_ANSWER.value)
 
     return ctx

@@ -197,6 +197,16 @@ EVIDENCE_FINALIZATION_MODE = (
 PLAN_VALIDATION_MODE = (
     os.getenv("ENAI_PLAN_VALIDATION_MODE", "warn").strip().lower() or "warn"
 )
+# P4.4 (finding H12): honest terminal outcomes. When enabled, a data-primary
+# request whose generated SQL fails validation/relevance returns a transparent
+# evidence-unavailable answer (no numeric claims) instead of a conceptual
+# narrative that masks the data failure. The terminal-outcome taxonomy and its
+# shadow telemetry are always on regardless of this flag; only the user-facing
+# routing change is gated. Default OFF until the operator reviews the
+# evidence_unavailable_shadow counter and cuts over.
+ENABLE_HONEST_TERMINAL_OUTCOMES = os.getenv(
+    "ENAI_ENABLE_HONEST_TERMINAL_OUTCOMES", "false"
+).strip().lower() in ("1", "true", "yes", "on")
 # Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
 # hop) for the client IP. Default on — production always sits behind the
 # Railway edge, where the socket peer is the proxy and would collapse every
