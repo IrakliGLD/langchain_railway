@@ -18,8 +18,10 @@ known-first-party = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = "test_*.py"
-python_functions = "test_*"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["-v", "--tb=short"]
 
 [tool.coverage.run]
 # Measure production code only — test files and operational scripts would

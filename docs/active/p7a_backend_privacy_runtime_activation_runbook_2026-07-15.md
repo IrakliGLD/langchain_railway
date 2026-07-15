@@ -1,8 +1,8 @@
 # P7.A Backend Privacy and Runtime Activation Runbook
 
-**Date:** 2026-07-15  
-**Repository:** `D:/Enaiapp/langchain_railway`  
-**Scope:** backend only; this repository neither reads nor deploys files from the independent frontend/Supabase repository  
+**Date:** 2026-07-15
+**Repository:** `D:/Enaiapp/langchain_railway`
+**Scope:** backend only; this repository neither reads nor deploys files from the independent frontend/Supabase repository
 **Local state:** implementation can be committed independently; every live item below remains unverified until its evidence is recorded
 
 ## 1. What becomes active automatically
