@@ -195,6 +195,8 @@ def test_docker_context_and_railway_config_are_fail_closed():
     assert railway["build"]["builder"] == "DOCKERFILE"
     assert railway["build"]["dockerfilePath"] == "Dockerfile"
     assert railway["deploy"]["healthcheckPath"] == "/readyz"
+    assert railway["deploy"]["overlapSeconds"] == 0
+    assert railway["deploy"]["drainingSeconds"] == 30
     assert "buildCommand" not in railway["build"]
 
 
