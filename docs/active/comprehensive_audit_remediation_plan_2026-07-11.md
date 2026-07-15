@@ -6,7 +6,7 @@
 **Latest backend update (2026-07-14):** P5.A request-boundary deadline foundation is implementation-complete in backend commit `a199c88`. `/ask` now converts the optional gateway budget header into one capped monotonic deadline, exposes safe remaining-budget/retry-owner metadata, returns typed `408 REQUEST_DEADLINE_EXCEEDED` responses, and checks remaining time before expensive pipeline stages. The versioned gateway contract, regression tests, and `p5a_backend_deadline_activation_runbook_2026-07-14.md` are included. Defaults activate without a new backend environment variable, and frontend commit `a61de51` sends the compatible budget header. This is not full P5.1 completion: per-call DB/provider timeout injection, cooperative cancellation of already-running calls, and end-to-end duplicate-charge/failure-injection evidence remain open.
 **Latest frontend complement (2026-07-14):** Independent frontend commit `a61de51` now derives a backend budget from the existing Edge exchange timeout, reserves a five-second Edge response margin, caps the transmitted budget at `115000` milliseconds, and sends `X-Enai-Request-Budget-Ms` on the existing signed backend request. No browser runtime, database schema, backend source, or cross-repository file dependency changed. Edge deployment and staging/production failure-injection evidence remain manual; per-call DB/provider cancellation and duplicate-execution/charge evidence still keep P5.1 open.
 **Latest P5.2 update (2026-07-14):** Backend commit `ba8dd11` routes fallback SQL, typed tools, vector operations, analyzer/pipeline enrichment, readiness, and schema reflection through one classified database gateway. Only transient SQLSTATE/infrastructure failures affect the breaker; syntax, schema, constraint, validation, and content errors do not. The gateway prevents connection acquisition while open and removes the vector path's duplicate string-matched breaker notification. No frontend or database migration is required.
-**Latest backend phase update (2026-07-15):** P4.A implementation is complete in backend commits `b69ea2b`, `9da08e7`, `c2d19a8`, `286ecba`, and `7bb8d02`; the behavior-changing gates intentionally remain at `shadow`, `warn`, or `off` until their production evidence gates pass. P5.4/P5.5 are complete in `2c9e12b`, the explicit OpenAI timeout slice of P5.1 is complete in `d9ec12b`, and the versioned P6.A chat-gateway schema is complete in `55e61c9`. P7.A is locally implementation-complete in `4e7d0bb`; live database identity/credential revocation, PUBLIC/network grants, exact-image promotion, dependency scan, one-replica topology, rollback, and privacy/vendor-retention evidence remain manual. P8.A's first behavior-neutral extraction is complete in `c8bd654`, and its pytest/coverage/assessment debt slice is complete in `245aa1b`. P8 remains incremental: further god-module extractions, the Stage 0.7 production-counter decision, LIGHT latency evidence, and two-stable-release flag cleanup remain open.
+**Latest backend phase update (2026-07-15):** P4.A implementation is complete in backend commits `b69ea2b`, `9da08e7`, `c2d19a8`, `286ecba`, and `7bb8d02`; the behavior-changing gates intentionally remain at `shadow`, `warn`, or `off` until their production evidence gates pass. P5.4/P5.5 are complete in `2c9e12b`, the explicit OpenAI timeout slice of P5.1 is complete in `d9ec12b`, and the versioned P6.A chat-gateway schema source is complete in `55e61c9`. P7.A's local privacy/runtime/packaging package is committed in `4e7d0bb`, but the P7.A track remains partial because live database identity/credential revocation, PUBLIC/network grants, exact-image promotion, dependency scan, one-replica topology, rollback, privacy/vendor-retention evidence, and any future shared-state implementation are still open. P8.A's first behavior-neutral extraction is complete in `c8bd654`, and its pytest/coverage/assessment debt slice is complete in `245aa1b`; the P8.A track remains incremental because further god-module extractions, remaining high-risk coverage, the Stage 0.7 production-counter decision, LIGHT latency evidence, and two-stable-release flag cleanup remain open.
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
@@ -35,7 +35,7 @@ Checkboxes in this plan now track the narrow acceptance item beside them. A chec
 | P4.A/P4.B | P4.A backend implementation is complete in `b69ea2b`, `9da08e7`, `c2d19a8`, `286ecba`, and `7bb8d02`. | Production cutover evidence remains open for the default `shadow`/`warn`/`off` gates; P4.B consumer activation/verification remains an independent frontend track. |
 | P5.A/P5.B | Request-boundary deadline foundation is complete in backend `a199c88`; DB gateway in `ba8dd11`; provider/breaker/metrics work in `2c9e12b`; OpenAI timeout slice in `d9ec12b`; frontend timeout/retry in `9bbe444`; Edge budget propagation in `a61de51`. | P5.1 still needs remaining per-call DB/provider timeout propagation, cooperative cancellation, and end-to-end duplicate-execution/charge evidence. P5.3 session/shared-state work and live failure-injection/deployment evidence remain open. |
 | P6.A/P6.B | The backend versioned chat-gateway JSON Schema artifact/export/drift test is complete in `55e61c9`; P6.2-P6.7 frontend packages are locally complete or implementation-complete as recorded below. | Frontend generated-consumer compatibility/deployment evidence, P6.2/P6.6 live DB migrations, P6.5 credentialed/manual accessibility evidence, and browser smoke remain manual/independent. |
-| P7.A/P7.B | P7.A is locally implementation-complete in backend `4e7d0bb`; FB.7 is implementation-complete in frontend `5fa8be1`. | Live least-privilege identity/revocation, PUBLIC/network grants, dependency/image evidence, exact artifact promotion, one-replica topology, smoke/rollback, vendor retention, and privacy-log canaries remain open. Multi-replica scaling remains blocked. |
+| P7.A/P7.B | P7.A's local privacy/runtime/packaging package is complete in backend `4e7d0bb`; rate-limit state extraction supporting the future scaling boundary is in `c8bd654`. FB.7 is implementation-complete in frontend `5fa8be1`. | P7.A is still partial: live least-privilege identity/revocation, PUBLIC/network grants, dependency/image evidence, exact artifact promotion, one-replica topology, smoke/rollback, vendor retention, privacy-log canaries, and any approved multi-replica shared-state implementation remain open. |
 | P8.A/P8.B | P8.A completed one behavior-neutral repository extraction in `c8bd654` and the pytest/coverage/assessment slice in `245aa1b`; P8.B has the prior generated-artifact/toast debt reductions. | Further backend/frontend extraction is incremental. Stage 0.7 counters, LIGHT latency/correctness evidence, two-release flag cleanup, and the Vite/esbuild major upgrade remain open. |
 
 ## 1. Sources and interpretation
@@ -814,7 +814,7 @@ P3 finding disposition:
 - [x] Return a typed finalization/gap result.
 - [x] Add off, shadow, and enforce modes for the rollout.
 
-**Backend implementation evidence:** Commit `b69ea2b`; default remains `shadow` pending rollout evidence.
+**Backend implementation evidence:** Commit `b69ea2b` (P4.1, H1) adds `agent/evidence_finalizer.py` as the single finalization routine on every primary, recovery, merge, and enrichment evidence path; stale frames are invalidated in every mode; rollout modes are `off`, `shadow`, and `enforce`, with default `shadow` pending production evidence.
 
 **Acceptance:**
 
@@ -835,7 +835,7 @@ P3 finding disposition:
 - [x] Validate answer shape, tool capability, evidence roles, units, entities, and periods before any external call when enforcement is enabled.
 - [x] Repair once, clarify, or reject; never loop indefinitely.
 
-**Backend implementation evidence:** Commit `9da08e7`; default remains `warn` pending rollout evidence.
+**Backend implementation evidence:** Commit `9da08e7` (P4.2, M3) introduces typed `PlanValidationResult` and a gated enforcement stage that clarifies before any tool/database call when enforcement is enabled; default remains `warn` pending rollout evidence.
 
 **Acceptance:**
 
@@ -852,7 +852,7 @@ P3 finding disposition:
 - [x] Permit raw ctx.df only through an explicit, measured fallback.
 - [x] Attach evidence/filter/unit/provenance identity to each chart.
 
-**Backend implementation evidence:** Commit `c2d19a8`.
+**Backend implementation evidence:** Commit `c2d19a8` (P4.3, M1) makes `_select_chart_source` prefer the finalized frame; any raw-DataFrame fallback is measured and surfaced on chart metadata rather than occurring silently.
 
 **Acceptance:**
 
@@ -868,7 +868,7 @@ P3 finding disposition:
 - [x] Preserve the anti-retry-storm behavior without pretending unavailable data is conceptual evidence.
 - [x] Prohibit numeric claims on evidence-unavailable outcomes.
 
-**Backend implementation evidence:** Commit `286ecba`; the user-facing behavior gate remains default-off pending rollout evidence.
+**Backend implementation evidence:** Commit `286ecba` (P4.4, H12) adds the `TerminalOutcome` taxonomy and maps a data-primary SQL failure to a deterministic evidence-unavailable answer while preserving anti-retry-storm behavior; the user-facing behavior gate remains default-off pending rollout evidence.
 
 **Acceptance:**
 
@@ -885,7 +885,7 @@ P3 finding disposition:
 - [x] Preserve only immutable request/auth state.
 - [x] Keep re-analysis default-off until production activation is approved; mode-transition tests are implemented.
 
-**Backend implementation evidence:** Commit `7bb8d02`.
+**Backend implementation evidence:** Commit `7bb8d02` (P4.5, M4) reruns the full post-analysis slice during re-analysis; data-to-knowledge and data-to-clarification reclassification terminate correctly instead of continuing with stale data-path state. Re-analysis remains default-off pending production activation.
 
 **Acceptance:**
 
@@ -942,6 +942,8 @@ P3 finding disposition:
 
 **Backend implementation evidence (2026-07-14):** Independent backend commit `a199c88` adds the optional `X-Enai-Request-Budget-Ms` gateway header, caps it to a backend-controlled maximum, derives one monotonic deadline from request ingress, exposes `X-Enai-Deadline-Remaining-Ms` and `X-Enai-Retry-Owner`, returns safe typed deadline errors, and checks remaining time before expensive pipeline stages. It also corrects zero-second evidence-loop timeout handling, publishes the backward-compatible contract, and adds activation/rollback instructions in `docs/active/p5a_backend_deadline_activation_runbook_2026-07-14.md`. Verification passed with Ruff, `182` focused API/pipeline tests, `280` guardrail tests, and the full `1,422`-test suite; two initial pytest fixture errors caused by denied access to the Windows shared temp directory passed when rerun against a repository-local temp directory. No frontend source or deployment was changed.
 
+**Additional backend P5.1 slice (2026-07-15):** Commit `d9ec12b` (H13) adds an explicit OpenAI request timeout with a default of `120` seconds. This closes the OpenAI per-request timeout slice only; remaining-time propagation into every DB/provider call, cooperative cancellation/reconciliation, jitter policy, and end-to-end duplicate-execution/charge evidence remain open.
+
 **Frontend deadline-propagation evidence (2026-07-14):** Independent frontend commit `a61de51` preserves the existing `CHAT_BACKEND_TIMEOUT_MS` behavior, derives the backend request budget as the smaller of the Edge timeout minus `5000` milliseconds and the published `115000`-millisecond backend maximum, and sends it through `X-Enai-Request-Budget-Ms`. The immutable Edge source manifest is `fb8ead8dd412618adb398668e1df51085a287be926db73e62b94d809a14b9001`; the independent rollout and rollback procedure is `docs/active/fb8_backend_deadline_propagation_runbook_2026-07-14.md`. Verification passed with the full Edge manifest/format/lint/type-check gate and all `19` Deno tests, all `442` frontend tests, frontend lint, production build and artifact verification, all generated database-patch verifiers, and a zero-vulnerability production dependency audit. The credentialed Supabase privacy check was not run because live credentials were unavailable. No backend repository file was read at runtime or added as a build/deployment dependency.
 
 ### P5.2 — Route all database work through one gateway
@@ -988,7 +990,7 @@ P3 finding disposition:
 - [x] Validate every selected provider at startup.
 - [x] Ensure NVIDIA and OpenAI do not share state.
 
-**Backend implementation evidence (2026-07-15):** Commit `2c9e12b` gives NVIDIA its own breaker, validates selected OpenAI credentials at startup, and prevents stage overrides from silently swapping provider ownership.
+**Backend implementation evidence (2026-07-15):** Commit `2c9e12b` (P5.4, M11) gives NVIDIA its own breaker, validates the selected OpenAI provider key at startup, and ensures stage overrides never swap the configured provider.
 
 **Acceptance:**
 
@@ -1004,7 +1006,7 @@ P3 finding disposition:
 - [x] Emit per-source Stage 0.8 metrics with a primary/secondary dimension.
 - [x] Store hashes/counters rather than raw query/answer content.
 
-**Backend implementation evidence (2026-07-15):** Commit `2c9e12b` makes metric updates/snapshots thread-safe and adds per-source tool observability without storing raw query/answer content.
+**Backend implementation evidence (2026-07-15):** Commit `2c9e12b` (P5.5, M22 and L1) makes metric updates and snapshots thread-safe and adds per-source tool observability without storing raw query/answer content.
 
 **Acceptance:**
 
@@ -1063,7 +1065,7 @@ P3 finding disposition:
 - [ ] Remove or formally implement service tier as a server-derived field.
 - [ ] Keep internal telemetry out of the public DTO.
 
-**Current state (2026-07-15):** Backend commit `55e61c9` publishes a deterministic versioned `/ask` JSON Schema artifact, exporter, and byte-drift test, so P6.B no longer lacks a source artifact. P6.1 remains open: chart and chart-metadata portions are still permissive object shapes, the frontend generated DTO/runtime-validation migration is not recorded here, and end-to-end multiple-chart/provenance consumer tests and deployment evidence remain required. Hand-copied substitutes are not acceptable.
+**Current state (2026-07-15):** Backend commit `55e61c9` (P6.A, M5) publishes `contracts/chat_gateway_v1.schema.json`, the deterministic `scripts/export_chat_gateway_contract.py` exporter, and a byte-drift regression test, so P6.B no longer lacks a versioned `/ask` source artifact. P6.1 remains open: chart and chart-metadata portions are still permissive object shapes, the frontend generated DTO/runtime-validation migration is not recorded here, and end-to-end multiple-chart/provenance consumer tests and deployment evidence remain required. Hand-copied substitutes are not acceptable.
 
 **Acceptance:**
 
@@ -1198,6 +1200,17 @@ P3 finding disposition:
 - Owns backend logging/telemetry minimization in P7.1, runtime database identity in P7.2, backend container/dependency artifacts in P7.3, backend shared-state/scaling work in P7.4, and its P7.5 attestations.
 - Prove the runtime database role, one-replica topology, non-root/pinned artifact, secret rotation, denial probes, and deploy/rollback identity.
 
+#### P7.A backend subtask status (2026-07-15)
+
+| Subtask | Status | Implemented/fixed | Still required |
+|---|---|---|---|
+| P7.1 logging and public telemetry | **Partial** | `4e7d0bb`: allow-listed public response metadata; protected/internal telemetry removed from caller-visible DTOs; private actor/session/IP values hashed; routine raw query/answer/SQL previews redacted; raw fixture capture default-off, sampled, opt-in, and limited to development/test. | Attest that token/cost/model/stage telemetry storage is access-controlled; define and approve vendor retention, access, export, deletion, and incident procedures; run deployed synthetic log-canary scans. |
+| P7.2 least-privilege database identity | **Partial** | `4e7d0bb`: exact relation inventory; dedicated read-only role script; no source-controlled password; staging/production runtime-role/read-only readiness check; protected identity metrics; rollback-safe allowed/denied probe script and runbook. | Create/canary the live role, run probes against staging/production, inventory and revoke/re-grant unnecessary `PUBLIC` privileges, restrict network access, rotate the runtime URL, and revoke the old broad credential after rollback. |
+| P7.3 packaging and deployment artifacts | **Local implementation complete; live evidence open** | `4e7d0bb`: strict `.dockerignore`; separate development dependencies; pinned Python image digest; non-root UID/GID; explicit runtime-only `COPY`; Docker selected as the Railway path; exact-SHA SBOM/audit/manifest/archive/checksum workflow. | Run the clean image build and dependency audit, inspect the image, promote the exact tested artifact, smoke it, and retain rollback evidence. |
+| P7.4 state and scaling | **Partial/deferred** | `c8bd654`: process-local sliding-window rate-limit state extracted behind `InMemoryRateLimitRepository`, with locking, bounded eviction, aggregate-only diagnostics, and an interface suitable for a later shared implementation. | Prove exactly one live worker/replica now. If scaling is approved, implement shared session, continuity, rate-limit, and idempotency repositories with TTL/failure policies and pass multi-process/failure tests. Multi-replica operation remains prohibited. |
+| P7.5 dependency/deployment assurance | **Partial** | `4e7d0bb`: exact-SHA evidence workflow, SBOM/audit inputs, immutable manifest/archive/checksums, non-root/excluded-artifact checks, rollback/smoke runbook; unavailable local scanning is explicitly `Unverified`. | Execute and review the workflow for staging/production; verify deployed RLS, edge hashes, secrets, grants, replica count, artifact identity, rollback commands, and named owners. |
+| P7 exit gate | **Open** | Local backend and frontend hardening packages exist independently. | Complete privacy inventory, least-privilege proof, clean promoted-artifact proof, deployment parity, topology, smoke, and rollback attestations. |
+
 ### P7.B — Frontend/Supabase application track
 
 - Owns browser/edge/Supabase logging minimization in P7.1, Supabase grants/RLS and network controls in P7.2, frontend/edge packaging and immutable deployment in P7.3, any frontend shared-state integration in P7.4, and its P7.5 attestations.
@@ -1293,7 +1306,7 @@ P3 finding disposition:
 
 ### P7 exit gate
 
-**Current state (2026-07-15):** P7.A backend implementation is locally complete in `4e7d0bb` and P7.B's frontend/Supabase subset is locally complete in `5fa8be1`. P7 is not phase-complete: live least-privilege identity/credential revocation, PUBLIC/network grants, exact artifact promotion, dependency/image evidence, one-replica topology, smoke/rollback, privacy-log canaries, and vendor retention/access/export/deletion attestations remain blockers.
+**Current state (2026-07-15):** P7.A's local privacy/runtime/packaging package is complete in `4e7d0bb`, and its process-local rate-limit repository extraction is in `c8bd654`; P7.B's frontend/Supabase subset is locally complete in `5fa8be1`. P7.A and the phase-wide P7 gate remain partial: live least-privilege identity/credential revocation, PUBLIC/network grants, exact artifact promotion, dependency/image evidence, one-replica topology, smoke/rollback, privacy-log canaries, vendor retention/access/export/deletion attestations, and any approved multi-replica shared-state implementation remain blockers.
 
 - Privacy/logging inventory is complete.
 - Least privilege is proven in staging and production.
@@ -1308,6 +1321,20 @@ Start only after the affected behaviors have characterization and regression tes
 
 - Owns backend extractions in P8.1 and backend/pytest/coverage/counter debt in P8.2.
 - Extract one stable deep interface per change with behavior-neutral golden, provenance, tool-call, and timing checks.
+
+#### P8.A backend subtask status (2026-07-15)
+
+| Subtask | Status | Implemented/fixed | Still required |
+|---|---|---|---|
+| P8.1 deep-module extraction | **First extraction complete; track open** | `c8bd654`: extracted process-local rate-limit storage/locking/eviction from `main.py` behind `InMemoryRateLimitRepository`; retained authentication, key derivation, limits, schemas, one-replica semantics, and golden/provenance/deadline behavior; added boundary tests. | Continue one behavior-neutral extraction at a time for remaining oversized interpretation, evidence, derivation, rendering, session/entitlement, `main.py`, `core/llm.py`, planner, pipeline, and summarizer responsibilities. |
+| P8.2 L2 pytest authority | **Complete** | `245aa1b`: removed `pytest.ini`; `pyproject.toml` is the sole discovery/addopts authority. | No implementation blocker; retain the single authority. |
+| P8.2 L3 runtime documentation | **Complete for current Docker path** | `4e7d0bb` and `245aa1b`: corrected runtime guidance and retained Docker as the authoritative Railway path. | Revalidate documentation whenever the base image or deployment path changes. |
+| P8.2 coverage redistribution | **Partial** | `245aa1b`: global CI floor raised from 70% to 80% after measured 82.11%; focused 95% floors added for rate-limit state and query executor; final local suite `1,549` passed. | Add risk-driven tests for remaining weak/high-risk `main.py`, `core/llm.py`, `core/llm_runtime.py`, and additional pipeline branches without chasing coverage numerically. |
+| P8.2 Stage 0.7 strategy decision | **Open/manual evidence** | Counter names and collection procedure documented. No strategy was deleted. | Record representative production counter deltas/traces and obtain owner approval before any removal. |
+| P8.2 LIGHT retrieval overlap | **Open/manual evidence** | Existing behavior preserved and required latency/correctness measurements documented. | Collect per-tier latency, cost, relevance, grounding, provenance, and answer-quality evidence before changing retrieval. |
+| P8.2 rollout-flag retirement | **Open** | Flags and required telemetry/release ledger identified. No flag was removed. | Complete two stable production releases for each candidate behavior, retain telemetry, and prove rollback before removal. |
+| P8.2 A-F reassessment | **Complete** | `245aa1b`: current evidence-based backend assessment recorded; overall grade **B**. | Re-run after the remaining live P7/P8 evidence and structural work materially change the risk profile. |
+| P8.A track completion | **Open** | The first extraction and the current test/debt slice are committed independently. | Finish additional incremental extractions, remaining high-risk coverage, and the three evidence-dependent cleanup decisions above. |
 
 **Backend implementation evidence (2026-07-15):** Commit `c8bd654` performs one behavior-neutral extraction of the process-local sliding-window store behind `InMemoryRateLimitRepository`; authentication, key derivation, limits, schemas, and one-replica semantics remain unchanged. Commit `245aa1b` makes `pyproject.toml` the sole pytest authority, adds 95% focused state/database-boundary coverage gates, raises the measured global floor from 70% to 80%, and records deferred live decisions plus a current A-F assessment in `p8a_backend_assessment_and_deferred_gates_2026-07-15.md`. Final local evidence is `1,549` passing tests, `82.11%` production-code coverage, and clean Ruff/diff checks.
 
