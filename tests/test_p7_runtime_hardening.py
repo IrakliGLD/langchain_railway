@@ -196,6 +196,7 @@ def test_docker_context_and_railway_config_are_fail_closed():
     railway = json.loads((ROOT / "railway.json").read_text(encoding="utf-8"))
     assert railway["build"]["builder"] == "DOCKERFILE"
     assert railway["build"]["dockerfilePath"] == "Dockerfile"
+    assert railway["deploy"]["startCommand"] == "python main.py"
     assert railway["deploy"]["healthcheckPath"] == "/readyz"
     assert railway["deploy"]["overlapSeconds"] == 0
     assert railway["deploy"]["drainingSeconds"] == 30
