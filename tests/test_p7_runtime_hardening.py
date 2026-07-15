@@ -183,6 +183,7 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
     assert "COPY requirements.txt" in dockerfile
     assert "requirements-dev.txt" not in dockerfile
     assert "USER enai" in dockerfile
+    assert "EXPOSE 3000" in dockerfile
     assert "COPY . ." not in dockerfile
     assert "prompts ./prompts" not in dockerfile
 

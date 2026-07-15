@@ -15,6 +15,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 
 from config import (  # noqa: E402
+    HTTP_SERVER_PORT,
     MAX_REQUEST_BODY_BYTES,
     STATIC_ALLOWED_TABLES,
     _read_bounded_int_env,
@@ -34,6 +35,10 @@ def test_request_body_limit_configuration_fails_closed(monkeypatch, raw_value):
 
 def test_request_body_limit_default_is_within_the_enforced_bounds():
     assert 262144 <= MAX_REQUEST_BODY_BYTES <= 1048576
+
+
+def test_http_server_port_defaults_to_fixed_railway_target():
+    assert HTTP_SERVER_PORT == 3000
 
 
 def test_readonly_role_grants_match_whitelist():

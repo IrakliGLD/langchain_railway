@@ -61,6 +61,10 @@ SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSIO
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
+# The Railway service uses a fixed target port.  Keep the application bind
+# independent of Railway's injected dynamic PORT value so the process and
+# healthcheck target cannot silently diverge.
+HTTP_SERVER_PORT = _read_bounded_int_env("ENAI_HTTP_PORT", 3000, 1024, 65535)
 # P7.A database identity gate. Staging/production must connect as the
 # dedicated read-only role; development/test can leave the value empty.
 DATABASE_RUNTIME_ROLE = os.getenv(
