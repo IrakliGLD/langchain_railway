@@ -2138,14 +2138,24 @@ def _detect_evidence_anomaly(ctx: QueryContext) -> str | None:
     return None
 
 
-def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContext:
+def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> "StageResult":
     """One flag-gated re-analysis on surprising evidence (§3.6, design item 1).
 
-    Re-runs the SAME Stage 0.2 interpreter once with the anomaly attached as
-    trusted context, then rebuilds and re-executes the evidence plan.
-    ``reanalysis_attempted`` guards a single attempt per request. The vector
-    bundle from the first pass is deliberately kept — retrieval-tier changes
-    are out of scope for this slice.
+    P4.5 (finding M4): re-analysis re-runs Stage 0.2 with the anomaly as trusted
+    context AND re-runs the *entire* post-analysis dependent slice — resolved
+    query, answer-kind finalization, retrieval tier + vector knowledge, response
+    mode + derived-metric setup, the knowledge/clarify short-circuits, plan
+    build + validation, and evidence execution — mirroring the same ordered
+    sequence ``process_query`` runs after Stage 0.2. This is the correctness
+    fix over the earlier slice, which reran only analysis + plan: a
+    reclassification to KNOWLEDGE/CLARIFY previously continued in stale
+    data-mode state and never reached the conceptual/clarify terminal.
+
+    Returns a :class:`StageResult`. ``terminal=True`` when the fresh
+    classification short-circuits (knowledge answer, clarification, or a
+    plan-validation reject); the caller returns that answer instead of
+    continuing the data path. ``reanalysis_attempted`` guarantees this runs at
+    most once per request.
     """
     t_stage = time.time()
     ctx.reanalysis_attempted = True
@@ -2160,12 +2170,14 @@ def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContex
         if ctx.question_analysis and ctx.question_analysis.answer_kind
         else ""
     )
+    prev_mode = str(ctx.response_mode or "")
 
+    # 1. Re-run the Stage 0.2 interpreter with the anomaly as trusted context.
     ctx = planner.analyze_question_active(ctx)
-    _finalize_answer_kind(ctx)
 
-    # Reset per-attempt evidence state to QueryContext defaults so the second
-    # execution starts exactly like a fresh request's.
+    # 2. Reset per-attempt evidence AND terminal/mode state so the second pass
+    #    starts exactly like a fresh request and cannot inherit a stale data-mode
+    #    decision (skip_sql, resolution policy, terminal outcome).
     ctx.used_tool = False
     ctx.tool_name = None
     ctx.tool_params = {}
@@ -2178,27 +2190,74 @@ def _attempt_evidence_reanalysis(ctx: QueryContext, anomaly: str) -> QueryContex
     ctx.evidence_collected = {}
     ctx.evidence_plan = []
     ctx.evidence_plan_complete = False
+    ctx.plan_validation = None
+    ctx.skip_sql = False
+    ctx.skip_sql_reason = ""
+    ctx.resolution_policy = ""
+    ctx.clarify_reason = ""
+    ctx.terminal_outcome = ""
     clear_provenance(ctx)
-    # P4.1: the first attempt's evidence is discarded — drop any frame it built
-    # so a stale frame can never survive into the re-executed plan.
+    # The first attempt's evidence is discarded — drop any frame it built so a
+    # stale frame can never survive into the re-executed plan.
     evidence_finalizer.safe_invalidate(ctx, stage="stage_0_9_reanalysis", reason="reanalysis_reset")
 
+    def _reanalysis_trace(terminal_reason: str) -> None:
+        new_kind = (
+            ctx.question_analysis.answer_kind.value
+            if ctx.question_analysis and ctx.question_analysis.answer_kind
+            else ""
+        )
+        _emit_trace_stage(
+            ctx, "stage_0_9_reanalysis", t_stage,
+            anomaly=anomaly,
+            tool_changed=(str(ctx.tool_name or "") != prev_tool),
+            kind_changed=(new_kind != prev_kind),
+            mode_changed=(str(ctx.response_mode or "") != prev_mode),
+            terminal_reason=terminal_reason,
+        )
+
+    # 3. Re-run the post-analysis dependent slice (mirrors process_query after
+    #    Stage 0.2). Recomputing resolved query, retrieval tier, vector
+    #    knowledge, and response mode is exactly what lets a data->knowledge or
+    #    data->clarify reclassification take effect (M4).
+    routing_query, routing_query_source = _derive_resolved_query(ctx)
+    ctx.resolved_query = routing_query
+    ctx.resolved_query_source = routing_query_source
+    if routing_query_source == "llm_active_canonical":
+        ctx.semantic_locked = True
+    _finalize_answer_kind(ctx)
+
+    _retrieval_tier = _resolve_vector_tier(ctx)
+    ctx.vector_retrieval_tier = _retrieval_tier.value
+    _require_request_budget(ctx, "stage_0_9_reanalysis_vector")
+    _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
+
+    _apply_response_mode(ctx)
+
+    # 4. Honor the short-circuits the fresh classification may now trigger.
+    _res = _early_answer_clarify(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        _reanalysis_trace("clarify")
+        return StageResult(ctx, terminal=True)
+    _res = _early_answer_conceptual(ctx)
+    ctx = _res.ctx
+    if _res.terminal:
+        _reanalysis_trace("knowledge")
+        return StageResult(ctx, terminal=True)
+
+    # 5. Rebuild + validate the plan, then re-execute evidence.
     if ENABLE_EVIDENCE_PLANNER:
         ctx = evidence_planner.build_evidence_plan(ctx)
+        _res = _enforce_plan_validation_stage(ctx)
+        ctx = _res.ctx
+        if _res.terminal:
+            _reanalysis_trace("plan_validation_reject")
+            return StageResult(ctx, terminal=True)
     ctx = _execute_evidence_plan(ctx)
 
-    new_kind = (
-        ctx.question_analysis.answer_kind.value
-        if ctx.question_analysis and ctx.question_analysis.answer_kind
-        else ""
-    )
-    _emit_trace_stage(
-        ctx, "stage_0_9_reanalysis", t_stage,
-        anomaly=anomaly,
-        tool_changed=(str(ctx.tool_name or "") != prev_tool),
-        kind_changed=(new_kind != prev_kind),
-    )
-    return ctx
+    _reanalysis_trace("continue")
+    return StageResult(ctx, terminal=False)
 
 
 def _finalize_answer_kind(ctx: QueryContext) -> None:
@@ -2841,7 +2900,13 @@ def process_query(
         _emit_trace_stage(ctx, "stage_0_9_evidence_anomaly", time.time(), tag=_anomaly)
         if ENABLE_EVIDENCE_REANALYSIS and not ctx.reanalysis_attempted:
             _require_request_budget(ctx, "stage_0_9_evidence_reanalysis")
-            ctx = _attempt_evidence_reanalysis(ctx, _anomaly)
+            _res = _attempt_evidence_reanalysis(ctx, _anomaly)
+            ctx = _res.ctx
+            # A reclassification to knowledge/clarify (or a plan-validation
+            # reject) during re-analysis is terminal — the fresh mode owns the
+            # answer instead of the pipeline continuing in stale data mode (M4).
+            if _res.terminal:
+                return ctx
 
     # Legacy agent loop removed (audit): with Stage 0.2 authoritative it never ran,
     # and analyzer-failure / no-tool cases fall through to the generate-plan/SQL
