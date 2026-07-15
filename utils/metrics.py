@@ -74,6 +74,10 @@ class Metrics:
         # "<stage>:<action>" ("stage_0_5_primary:shadow_built"); this is the
         # comparison telemetry read at the P4 exit gate before enforcement.
         self.evidence_finalization_events = {}
+        # P4.2 plan-validation issues (finding M3). Keys are
+        # "<rule>:<severity>" plus "<rule>:enforced" when enforcement fires;
+        # sizes the reject blast radius before ENAI_PLAN_VALIDATION_MODE=enforce.
+        self.plan_validation_events = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -341,6 +345,11 @@ class Metrics:
         key = f"{(stage or 'unknown').strip().lower()}:{(action or 'unknown').strip().lower()}"
         self.evidence_finalization_events[key] = self.evidence_finalization_events.get(key, 0) + 1
 
+    def log_plan_validation(self, rule: str, severity: str) -> None:
+        """Track P4.2 plan-validation issues per rule (finding M3)."""
+        key = f"{(rule or 'unknown').strip().lower()}:{(severity or 'unknown').strip().lower()}"
+        self.plan_validation_events[key] = self.plan_validation_events.get(key, 0) + 1
+
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -434,6 +443,7 @@ class Metrics:
             "evidence_rule_agreement_events": dict(self.evidence_rule_agreement_events),
             "evidence_anomaly_events": dict(self.evidence_anomaly_events),
             "evidence_finalization_events": dict(self.evidence_finalization_events),
+            "plan_validation_events": dict(self.plan_validation_events),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

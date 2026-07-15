@@ -106,6 +106,9 @@ class QueryContext:
     reanalysis_attempted: bool = False           # guards the single re-analysis attempt per request
     evidence_plan: List[Dict[str, Any]] = dc_field(default_factory=list)
     evidence_plan_source: str = ""                # "deterministic" | "analyzer" | ""
+    # P4.2 (M3): typed PlanValidationResult from evidence_planner; None until
+    # Stage 0.4 runs with an authoritative analysis.
+    plan_validation: Optional[Any] = None
     evidence_collected: Dict[str, Any] = dc_field(default_factory=dict)  # role -> {tool, df, cols, rows}
     evidence_plan_complete: bool = False
     join_provenance: List[Dict[str, Any]] = dc_field(default_factory=list)  # join metadata per merge

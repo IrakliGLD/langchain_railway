@@ -189,6 +189,14 @@ ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lo
 EVIDENCE_FINALIZATION_MODE = (
     os.getenv("ENAI_EVIDENCE_FINALIZATION_MODE", "shadow").strip().lower() or "shadow"
 )
+# P4.2 (finding M3): plan validation against the answer contract.
+#   warn    — typed issues are computed, logged, and counted; behavior unchanged.
+#   enforce — reject-severity issues terminal-clarify BEFORE any tool/DB call.
+# Default "warn" keeps the documented warning-only behavior until the operator
+# reviews shadow counters and cuts over.
+PLAN_VALIDATION_MODE = (
+    os.getenv("ENAI_PLAN_VALIDATION_MODE", "warn").strip().lower() or "warn"
+)
 # Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
 # hop) for the client IP. Default on — production always sits behind the
 # Railway edge, where the socket peer is the proxy and would collapse every
@@ -296,6 +304,7 @@ def validate_runtime_settings(
     nvidia_api_key: str | None = None,
     gateway_actor_assertion_mode: str = "optional",
     evidence_finalization_mode: str = "shadow",
+    plan_validation_mode: str = "warn",
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -307,6 +316,10 @@ def validate_runtime_settings(
     if evidence_finalization_mode not in {"off", "shadow", "enforce"}:
         raise RuntimeError(
             "Invalid ENAI_EVIDENCE_FINALIZATION_MODE. Expected one of: off, shadow, enforce"
+        )
+    if plan_validation_mode not in {"warn", "enforce"}:
+        raise RuntimeError(
+            "Invalid ENAI_PLAN_VALIDATION_MODE. Expected one of: warn, enforce"
         )
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
@@ -366,6 +379,7 @@ validate_runtime_settings(
     nvidia_api_key=NVIDIA_API_KEY,
     gateway_actor_assertion_mode=GATEWAY_ACTOR_ASSERTION_MODE,
     evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
+    plan_validation_mode=PLAN_VALIDATION_MODE,
 )
 
 # ===================================================================

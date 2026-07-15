@@ -54,6 +54,7 @@ from config import (
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
     EVIDENCE_PARALLEL_SECONDARY,
     PIPELINE_MODE,
+    PLAN_VALIDATION_MODE,
 )
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
@@ -2524,6 +2525,46 @@ def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
     return StageResult(ctx, terminal=True)
 
 
+def _enforce_plan_validation_stage(ctx: QueryContext) -> StageResult:
+    """P4.2 (finding M3): act on reject-severity plan-validation issues.
+
+    Runs immediately after Stage 0.4 so an unsatisfiable plan makes ZERO
+    tool/DB calls. In the default ``warn`` mode this stage is a pass-through
+    — the typed result and counters exist, behavior is unchanged. In
+    ``enforce`` mode a plan whose evidence provably cannot satisfy the answer
+    contract terminal-clarifies instead of executing: the user picks a
+    direction rather than receiving an answer shaped like something the
+    evidence cannot support. Never loops: validation ran exactly once during
+    Stage 0.4 (after plan repairs) and this stage only reads the result.
+    """
+    validation = getattr(ctx, "plan_validation", None)
+    rejects = list(getattr(validation, "rejects", []) or [])
+    if not rejects:
+        return StageResult(ctx, terminal=False)
+    if PLAN_VALIDATION_MODE != "enforce":
+        # Shadow visibility: counters were already logged per-issue by
+        # build_evidence_plan; nothing else to do in warn mode.
+        return StageResult(ctx, terminal=False)
+
+    first = rejects[0]
+    for issue in rejects:
+        metrics.log_plan_validation(issue.rule, "enforced")
+    ctx.resolution_policy = ResolutionPolicy.CLARIFY
+    ctx.clarify_reason = f"plan_validation_{first.rule}"
+    t_stage = time.time()
+    ctx = summarizer.answer_clarify(ctx)
+    _emit_trace_stage(
+        ctx, "stage_0_4_plan_validation_clarify", t_stage,
+        rule=first.rule,
+        rejects=[issue.rule for issue in rejects],
+    )
+    log.info(
+        "Plan validation enforcement: clarifying before execution. rule=%s rejects=%d",
+        first.rule, len(rejects),
+    )
+    return StageResult(ctx, terminal=True)
+
+
 def _run_generate_sql_stage(ctx: QueryContext) -> StageResult:
     """Legacy fallback: generate + execute SQL (or short-circuit to a conceptual answer).
 
@@ -2734,6 +2775,14 @@ def process_query(
             source=ctx.evidence_plan_source,
             tools=[s["tool_name"] for s in ctx.evidence_plan],
         )
+
+        # P4.2 (M3): reject-severity contract mismatches clarify BEFORE any
+        # tool/DB call when ENAI_PLAN_VALIDATION_MODE=enforce; pass-through
+        # (typed result + counters only) in the default warn mode.
+        _res = _enforce_plan_validation_stage(ctx)
+        ctx = _res.ctx
+        if _res.terminal:
+            return ctx
 
     # Stage 0.5 / 0.6 / 0.7 / 0.8: primary execution (strategy chain) +
     # secondary evidence loop + driver-context enrichment, all in one
