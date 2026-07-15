@@ -1539,8 +1539,18 @@ def _execute_evidence_step(
     # backward-compatibility with its monkeypatched test suite.
     _execute = executor or execute_tool
     df, cols, rows = _execute(invocation)
+    _tool_duration = time.time() - t_tool
     if emit_tool_call_metric:
-        metrics.log_tool_call(time.time() - t_tool)
+        metrics.log_tool_call(_tool_duration)
+    # P5.5 (finding L1): per-source observability. Secondary Stage 0.8 calls
+    # keep the legacy total untouched (emit_tool_call_metric=False) but are no
+    # longer invisible — calls and latency are counted per tool under a
+    # primary/secondary dimension.
+    metrics.log_tool_call_source(
+        invocation.name,
+        "primary" if is_primary else "secondary",
+        _tool_duration,
+    )
     if emit_tool_execute_trace:
         _emit_trace_stage(ctx, tool_execute_trace, t_tool, tool=invocation.name, rows=len(rows))
 

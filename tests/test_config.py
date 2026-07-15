@@ -71,6 +71,7 @@ def test_validate_runtime_settings_requires_jwt_secret_for_bearer_mode():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
         )
 
@@ -88,6 +89,7 @@ def test_validate_runtime_settings_blocks_evaluate_outside_dev_or_test():
             enable_evaluate_endpoint=True,
             allow_evaluate_endpoint=True,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
         )
 
@@ -104,6 +106,7 @@ def test_validate_runtime_settings_accepts_gateway_only_without_jwt_secret():
         enable_evaluate_endpoint=False,
         allow_evaluate_endpoint=False,
         model_type="openai",
+        openai_api_key="test-openai-key",
         google_api_key=None,
     )
 
@@ -121,6 +124,7 @@ def test_validate_runtime_settings_rejects_unknown_actor_assertion_mode():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
             gateway_actor_assertion_mode="disabled",
         )
@@ -139,6 +143,7 @@ def test_validate_runtime_settings_rejects_unknown_evidence_finalization_mode():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
             evidence_finalization_mode="on",
         )
@@ -157,6 +162,7 @@ def test_validate_runtime_settings_accepts_valid_evidence_finalization_modes():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
             evidence_finalization_mode=mode,
         )
@@ -175,6 +181,7 @@ def test_validate_runtime_settings_rejects_unknown_plan_validation_mode():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
             plan_validation_mode="strict",
         )
@@ -193,6 +200,7 @@ def test_validate_runtime_settings_accepts_valid_plan_validation_modes():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
             plan_validation_mode=mode,
         )
@@ -211,6 +219,7 @@ def test_validate_runtime_settings_blocks_direct_bearer_in_production():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
         )
 
@@ -227,6 +236,7 @@ def test_validate_runtime_settings_allows_direct_bearer_only_in_test():
         enable_evaluate_endpoint=False,
         allow_evaluate_endpoint=False,
         model_type="openai",
+        openai_api_key="test-openai-key",
         google_api_key=None,
     )
 
@@ -244,6 +254,7 @@ def test_validate_runtime_settings_rejects_implicit_auto_auth_mode():
             enable_evaluate_endpoint=False,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
         )
 
@@ -261,6 +272,7 @@ def test_validate_runtime_settings_requires_explicit_opt_in_for_evaluate():
             enable_evaluate_endpoint=True,
             allow_evaluate_endpoint=False,
             model_type="openai",
+            openai_api_key="test-openai-key",
             google_api_key=None,
         )
 
@@ -277,5 +289,6 @@ def test_validate_runtime_settings_allows_evaluate_with_explicit_opt_in_in_test(
         enable_evaluate_endpoint=True,
         allow_evaluate_endpoint=True,
         model_type="openai",
+        openai_api_key="test-openai-key",
         google_api_key=None,
     )

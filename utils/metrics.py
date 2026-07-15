@@ -2,10 +2,17 @@
 Metrics tracking for observability.
 
 Simple in-memory metrics for monitoring application performance.
+
+Thread-safety (P5.5, finding M22): requests run concurrently on the FastAPI
+threadpool, so every mutation of the shared aggregates and every snapshot is
+serialized behind one lock via ``@_synchronized``. Per-request token telemetry
+lives in a ContextVar (request-local) and needs no lock of its own.
 """
+import functools
 import hashlib
 import logging
 import re
+import threading
 from contextvars import ContextVar
 from typing import Any, Dict
 
@@ -14,10 +21,27 @@ log = logging.getLogger("Enai")
 _request_usage_var: ContextVar[Dict[str, Any] | None] = ContextVar("request_usage_var", default=None)
 
 
+def _synchronized(method):
+    """Serialize a Metrics method on the instance lock (P5.5, finding M22).
+
+    Applied to every method that mutates shared aggregates and to the
+    ``get_stats`` snapshot so counters cannot lose updates and snapshots are
+    internally consistent. Methods must not call other synchronized methods
+    (plain, non-reentrant lock — verified: none do).
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Metrics:
     """Simple metrics tracker for observability."""
 
     def __init__(self):
+        # P5.5 (M22): one lock serializes shared-aggregate mutations/snapshots.
+        self._lock = threading.Lock()
         self.request_count = 0
         self.llm_call_count = 0
         self.sql_query_count = 0
@@ -87,6 +111,12 @@ class Metrics:
         # distinguishes an evidence-unavailable degrade from a conceptual answer
         # so a data failure is never counted as a conceptual success.
         self.terminal_outcome_events = {}
+        # P5.5 (finding L1): per-source tool observability. Stage 0.8 secondary
+        # evidence calls were previously invisible (suppressed to avoid
+        # double-counting the legacy total); these break calls and latency out
+        # by "<tool>:<primary|secondary>" without touching tool_call_count.
+        self.tool_calls_by_source = {}
+        self.tool_time_by_source = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
         self.llm_completion_tokens = 0
@@ -102,6 +132,7 @@ class Metrics:
         self.total_tool_time = 0.0
         self.total_request_time = 0.0
 
+    @_synchronized
     def log_request(self, duration: float):
         """Log a request with its duration."""
         self.request_count += 1
@@ -109,29 +140,47 @@ class Metrics:
         avg_time = self.total_request_time / self.request_count
         log.info(f"📊 Metrics: requests={self.request_count}, avg_time={avg_time:.2f}s")
 
+    @_synchronized
     def log_llm_call(self, duration: float):
         """Log an LLM API call with its duration."""
         self.llm_call_count += 1
         self.total_llm_time += duration
 
+    @_synchronized
     def log_sql_query(self, duration: float):
         """Log a SQL query with its duration."""
         self.sql_query_count += 1
         self.total_sql_time += duration
 
+    @_synchronized
     def log_tool_call(self, duration: float):
         """Log a typed tool execution with its duration."""
         self.tool_call_count += 1
         self.total_tool_time += duration
 
+    @_synchronized
+    def log_tool_call_source(self, tool: str, source: str, duration: float) -> None:
+        """Track per-tool calls/latency with a primary/secondary dimension (P5.5, L1).
+
+        Additive observability: the legacy ``tool_call_count`` total keeps its
+        primary-only semantics; this counter makes Stage 0.8 secondary evidence
+        work visible without double-counting it there.
+        """
+        key = f"{(tool or 'unknown').strip().lower()}:{(source or 'unknown').strip().lower()}"
+        self.tool_calls_by_source[key] = self.tool_calls_by_source.get(key, 0) + 1
+        self.tool_time_by_source[key] = self.tool_time_by_source.get(key, 0.0) + max(0.0, float(duration))
+
+    @_synchronized
     def log_tool_error(self):
         """Log an error in typed tool execution."""
         self.tool_error_count += 1
 
+    @_synchronized
     def log_agent_round(self):
         """Log a single agent loop round."""
         self.agent_round_count += 1
 
+    @_synchronized
     def log_agent_exit(self, outcome: str):
         """Log terminal outcome for the agent loop."""
         normalized = (outcome or "").strip().lower()
@@ -142,10 +191,12 @@ class Metrics:
         elif normalized == "fallback_exit":
             self.agent_fallback_exit_count += 1
 
+    @_synchronized
     def log_agent_preview(self, char_count: int):
         """Track prompt payload size added by tool previews."""
         self.total_agent_preview_chars += max(0, int(char_count))
 
+    @_synchronized
     def log_stage(self, stage_name: str, duration_ms: float):
         """Track per-stage timings for distributed tracing views."""
         key = (stage_name or "unknown").strip().lower() or "unknown"
@@ -153,6 +204,7 @@ class Metrics:
         self.stage_count_by_name[key] = self.stage_count_by_name.get(key, 0) + 1
         self.stage_total_time_ms[key] = self.stage_total_time_ms.get(key, 0.0) + duration_ms
 
+    @_synchronized
     def log_security_event(self, event_type: str):
         """Track structured security/audit events."""
         key = (event_type or "unknown").strip().lower() or "unknown"
@@ -173,6 +225,7 @@ class Metrics:
             }
         )
 
+    @_synchronized
     def log_llm_usage(
         self,
         model_name: str,
@@ -265,6 +318,7 @@ class Metrics:
         _request_usage_var.set(None)
         return snapshot
 
+    @_synchronized
     def log_firewall_decision(self, action: str):
         """Track Stage-0 firewall outcomes."""
         normalized = (action or "").strip().lower()
@@ -275,18 +329,22 @@ class Metrics:
         else:
             self.firewall_allow_count += 1
 
+    @_synchronized
     def log_summary_schema_failure(self):
         """Track summarizer schema validation failures."""
         self.summary_schema_failure_count += 1
 
+    @_synchronized
     def log_summary_grounding_failure(self):
         """Track ungrounded summary outputs."""
         self.summary_grounding_failure_count += 1
 
+    @_synchronized
     def log_provenance_gate_failure(self):
         """Track citation-grade provenance gate failures."""
         self.provenance_gate_failure_count += 1
 
+    @_synchronized
     def log_deterministic_skip(self, source: str):
         """Track deterministic answer paths that skip Stage 4 LLM."""
         key = (source or "unknown").strip().lower() or "unknown"
@@ -295,6 +353,7 @@ class Metrics:
             self.deterministic_summary_skips_by_source.get(key, 0) + 1
         )
 
+    @_synchronized
     def log_stage_0_7(self, event: str) -> None:
         """Track Stage 0.7 (analyzer tool route fallback) hit rate.
 
@@ -314,6 +373,7 @@ class Metrics:
         elif normalized == "used_result":
             self.stage_0_7_used_result_count += 1
 
+    @_synchronized
     def log_analyzer_cross_check(self, event: str) -> None:
         """Track answer-kind cross-check outcomes (A5).
 
@@ -329,11 +389,13 @@ class Metrics:
         key = (event or "unknown").strip().lower() or "unknown"
         self.analyzer_cross_check_events[key] = self.analyzer_cross_check_events.get(key, 0) + 1
 
+    @_synchronized
     def log_render_fitness(self, tag: str) -> None:
         """Track shadow fitness violations on deterministic renders (§3.9)."""
         key = (tag or "unknown").strip().lower() or "unknown"
         self.render_fitness_events[key] = self.render_fitness_events.get(key, 0) + 1
 
+    @_synchronized
     def log_evidence_rule_agreement(self, rule: str, agree: bool) -> None:
         """Track planner-rule vs analyzer-emission agreement (ontology migration).
 
@@ -344,31 +406,37 @@ class Metrics:
         key = f"{(rule or 'unknown').strip().lower()}:{'agree' if agree else 'disagree'}"
         self.evidence_rule_agreement_events[key] = self.evidence_rule_agreement_events.get(key, 0) + 1
 
+    @_synchronized
     def log_evidence_anomaly(self, tag: str) -> None:
         """Track surprising-evidence detections (§3.6); sizes the re-analysis blast radius."""
         key = (tag or "unknown").strip().lower() or "unknown"
         self.evidence_anomaly_events[key] = self.evidence_anomaly_events.get(key, 0) + 1
 
+    @_synchronized
     def log_evidence_finalization(self, stage: str, action: str) -> None:
         """Track P4.1 evidence-finalization outcomes per checkpoint (finding H1)."""
         key = f"{(stage or 'unknown').strip().lower()}:{(action or 'unknown').strip().lower()}"
         self.evidence_finalization_events[key] = self.evidence_finalization_events.get(key, 0) + 1
 
+    @_synchronized
     def log_plan_validation(self, rule: str, severity: str) -> None:
         """Track P4.2 plan-validation issues per rule (finding M3)."""
         key = f"{(rule or 'unknown').strip().lower()}:{(severity or 'unknown').strip().lower()}"
         self.plan_validation_events[key] = self.plan_validation_events.get(key, 0) + 1
 
+    @_synchronized
     def log_chart_source(self, source: str) -> None:
         """Track P4.3 chart-source selection per source label (finding M1)."""
         key = (source or "unknown").strip().lower() or "unknown"
         self.chart_source_events[key] = self.chart_source_events.get(key, 0) + 1
 
+    @_synchronized
     def log_terminal_outcome(self, outcome: str) -> None:
         """Track P4.4 terminal outcomes per kind (finding H12)."""
         key = (outcome or "unknown").strip().lower() or "unknown"
         self.terminal_outcome_events[key] = self.terminal_outcome_events.get(key, 0) + 1
 
+    @_synchronized
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -379,6 +447,7 @@ class Metrics:
         else:
             self.router_miss_count += 1
 
+    @_synchronized
     def log_tool_fallback_intent(self, query: str, reason: str):
         """Track long-tail fallback intents for typed-tool coverage expansion."""
         text = (query or "").strip().lower()
@@ -392,19 +461,23 @@ class Metrics:
         key = f"{(reason or 'unknown').strip().lower()}|{signature}"
         self.tool_fallback_intents[key] = self.tool_fallback_intents.get(key, 0) + 1
 
+    @_synchronized
     def log_relevance_block(self):
         """Track hard relevance guardrail blocks."""
         self.relevance_block_count += 1
 
+    @_synchronized
     def log_load_shed(self):
         """Track rejected requests due to backpressure gate."""
         self.load_shed_count += 1
 
+    @_synchronized
     def log_circuit_open(self, component: str):
         """Track fail-fast events due to open circuit breaker."""
         key = (component or "unknown").strip().lower() or "unknown"
         self.circuit_open_events[key] = self.circuit_open_events.get(key, 0) + 1
 
+    @_synchronized
     def log_session_history_context(self, turns: int):
         """Track whether requests arrive with conversation history."""
         turns = max(0, int(turns or 0))
@@ -414,10 +487,12 @@ class Metrics:
         else:
             self.session_history_without_count += 1
 
+    @_synchronized
     def log_error(self):
         """Log an error occurrence."""
         self.error_count += 1
 
+    @_synchronized
     def get_stats(self) -> dict:
         """
         Get current metrics statistics.
@@ -465,6 +540,8 @@ class Metrics:
             "plan_validation_events": dict(self.plan_validation_events),
             "chart_source_events": dict(self.chart_source_events),
             "terminal_outcome_events": dict(self.terminal_outcome_events),
+            "tool_calls_by_source": dict(self.tool_calls_by_source),
+            "tool_time_by_source": dict(self.tool_time_by_source),
             "tool_fallback_intents_top": dict(
                 sorted(
                     self.tool_fallback_intents.items(),

@@ -315,6 +315,7 @@ def validate_runtime_settings(
     gateway_actor_assertion_mode: str = "optional",
     evidence_finalization_mode: str = "shadow",
     plan_validation_mode: str = "warn",
+    openai_api_key: str | None = None,
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -372,6 +373,11 @@ def validate_runtime_settings(
         raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
     if model_type == "nvidia" and not nvidia_api_key:
         raise RuntimeError("MODEL_TYPE=nvidia but NVIDIA_API_KEY is missing")
+    # P5.4 (finding M11): OpenAI-primary deployments previously started without
+    # a key and failed at first use; every selected provider now validates its
+    # credential at startup like the other two.
+    if model_type == "openai" and not openai_api_key:
+        raise RuntimeError("MODEL_TYPE=openai but OPENAI_API_KEY is missing")
 
 
 validate_runtime_settings(
@@ -390,6 +396,7 @@ validate_runtime_settings(
     gateway_actor_assertion_mode=GATEWAY_ACTOR_ASSERTION_MODE,
     evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
     plan_validation_mode=PLAN_VALIDATION_MODE,
+    openai_api_key=OPENAI_API_KEY,
 )
 
 # ===================================================================
