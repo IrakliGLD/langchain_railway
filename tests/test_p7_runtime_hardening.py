@@ -161,6 +161,8 @@ def test_runtime_role_script_is_read_only_and_covers_denial_controls():
 
     assert "alter role enai_api_readonly set default_transaction_read_only = on" in sql
     assert "alter role enai_api_readonly noinherit" in sql
+    assert "rolsuper or rolreplication or rolbypassrls" in sql
+    assert "alter role enai_api_readonly noinherit nosuperuser" not in sql
     assert "grant select on" in sql
     assert "grant insert" not in sql
     assert "grant update" not in sql

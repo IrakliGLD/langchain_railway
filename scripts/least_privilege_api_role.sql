@@ -1,9 +1,14 @@
 -- P7.A least-privilege read-only role for the Enai analytics backend.
 --
--- Apply this as a database owner/admin.  The role is deliberately created
--- NOLOGIN so no placeholder password can accidentally become a credential.
--- After this script succeeds, generate a strong password outside source
--- control and run this one statement manually in the Supabase SQL editor:
+-- Apply this complete file as a database owner/admin.  All changes run in one
+-- transaction, so a statement failure cannot leave a partially configured
+-- role.  A missing role is deliberately created NOLOGIN so no placeholder
+-- password can accidentally become a credential.  An existing role retains
+-- its current LOGIN state and password while its privileges and defaults are
+-- converged to this policy.
+--
+-- Only for a newly created role, generate a strong password outside source
+-- control and run this one statement separately in the Supabase SQL editor:
 --
 --   ALTER ROLE enai_api_readonly LOGIN PASSWORD '<generated secret>';
 --
@@ -11,16 +16,35 @@
 -- ENAI_DB_RUNTIME_ROLE=enai_api_readonly (the production default) and retain a
 -- separate write-capable credential for offline knowledge ingestion.
 
+BEGIN;
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'enai_api_readonly') THEN
-    CREATE ROLE enai_api_readonly
-      NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+    -- The omitted cluster-level attributes default to NOSUPERUSER,
+    -- NOREPLICATION, and NOBYPASSRLS.  Hosted Supabase administrators are not
+    -- true superusers and therefore cannot restate those negative attributes
+    -- later with ALTER ROLE.
+    CREATE ROLE enai_api_readonly NOLOGIN NOINHERIT;
   END IF;
 END
 $$;
 
-ALTER ROLE enai_api_readonly NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles
+    WHERE rolname = 'enai_api_readonly'
+      AND (rolsuper OR rolreplication OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION
+      'enai_api_readonly has SUPERUSER, REPLICATION, or BYPASSRLS; remove the unsafe attribute with an authorized administrator before applying this policy';
+  END IF;
+END
+$$;
+
+ALTER ROLE enai_api_readonly NOINHERIT NOCREATEDB NOCREATEROLE;
 ALTER ROLE enai_api_readonly CONNECTION LIMIT 5;
 ALTER ROLE enai_api_readonly SET default_transaction_read_only = on;
 ALTER ROLE enai_api_readonly SET statement_timeout = '30s';
@@ -73,3 +97,5 @@ BEGIN
   END IF;
 END
 $$;
+
+COMMIT;
