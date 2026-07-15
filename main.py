@@ -89,6 +89,7 @@ from config import (
     EVALUATE_ADMIN_SECRET,
     GATEWAY_SHARED_SECRET,
     GEMINI_MODEL,
+    HTTP_SERVER_PORT,
     MAX_REQUEST_BODY_BYTES,
     MODEL_TYPE,
     NVIDIA_MODEL,
@@ -1565,11 +1566,10 @@ def ask_post(
 if __name__ == "__main__":
     try:
         import uvicorn
-        port = int(os.getenv("PORT", 8000))
 
         # CRITICAL: host '0.0.0.0' is required for container accessibility
-        log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{port}")
-        uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+        log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{HTTP_SERVER_PORT}")
+        uvicorn.run("main:app", host="0.0.0.0", port=HTTP_SERVER_PORT, log_level="info")
     except ImportError:
         log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
         raise

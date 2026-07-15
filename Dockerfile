@@ -34,5 +34,5 @@ COPY --chown=enai:enai utils ./utils
 COPY --chown=enai:enai visualization ./visualization
 
 USER enai
-EXPOSE 8000
+EXPOSE 3000
 CMD ["python", "main.py"]
