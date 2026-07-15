@@ -93,6 +93,21 @@ class TestSchemaConsistency:
             f"Columns missing from COLUMN_LABELS: {missing}"
         )
 
+    def test_energy_balance_contract_matches_deployed_materialized_view(self):
+        """Readiness and SQL planning must use the deployed energy-balance columns."""
+        from context import DB_SCHEMA_DICT, DB_SCHEMA_DOC
+
+        assert DB_SCHEMA_DICT["views"]["energy_balance_long_mv"]["columns"] == [
+            "year",
+            "sector",
+            "energy_source",
+            "volume_tj",
+        ]
+        assert (
+            "- energy_balance_long_mv(year, sector, energy_source, volume_tj)"
+            in DB_SCHEMA_DOC
+        )
+
     def test_no_phantom_views_in_schema_doc(self):
         """No view in DB_SCHEMA_DOC should be absent from STATIC_ALLOWED_TABLES."""
         import re

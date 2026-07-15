@@ -49,8 +49,9 @@ COLUMN_LABELS = {
 
     # energy_balance_long_mv
     "year": "Year",
-    "category": "Energy Balance Category",
-    "value": "Value",
+    "sector": "Energy Balance Sector",
+    "energy_source": "Energy Source",
+    "volume_tj": "Energy Volume (TJ)",
 }
 
 # ----------------------------------------------------------
@@ -206,7 +207,7 @@ DB_SCHEMA_DICT = {
             "desc": "Electricity Trade Volumes (Derived)",
         },
         "energy_balance_long_mv": {
-            "columns": ["year", "category", "value"],
+            "columns": ["year", "sector", "energy_source", "volume_tj"],
             "desc": "Annual Energy Balance",
         },
         "monthly_cpi_mv": {
@@ -241,6 +242,7 @@ DB_SCHEMA_DOC = """
 - mv_balancing_trade_with_tariff(month, entity, entity_code, tariff_gel, balancing_quantity)
 - tech_quantity_view(date, type_tech, quantity_tech)
 - trade_derived_entities(date, entity, segment, quantity)
+- energy_balance_long_mv(year, sector, energy_source, volume_tj)
 
 **CRITICAL: Exact column values (case-sensitive, including spaces/hyphens):**
 
