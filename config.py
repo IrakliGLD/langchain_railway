@@ -61,6 +61,25 @@ SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSIO
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
+# P7.A database identity gate. Staging/production must connect as the
+# dedicated read-only role; development/test can leave the value empty.
+DATABASE_RUNTIME_ROLE = os.getenv(
+    "ENAI_DB_RUNTIME_ROLE",
+    "enai_api_readonly" if ENAI_DEPLOYMENT_ENV in {"staging", "production"} else "",
+).strip()
+# Raw routing-fixture capture is a local/test-only diagnostic. Production
+# observability remains content-free even when other debug traces are enabled.
+FIXTURE_CAPTURE_MODE = os.getenv("ENAI_FIXTURE_CAPTURE_MODE", "off").strip().lower() or "off"
+try:
+    FIXTURE_CAPTURE_SAMPLE_RATE = float(os.getenv("ENAI_FIXTURE_CAPTURE_SAMPLE_RATE", "0"))
+except ValueError as exc:
+    raise RuntimeError("ENAI_FIXTURE_CAPTURE_SAMPLE_RATE must be a number") from exc
+if FIXTURE_CAPTURE_MODE not in {"off", "raw"}:
+    raise RuntimeError("ENAI_FIXTURE_CAPTURE_MODE must be one of: off, raw")
+if not 0.0 <= FIXTURE_CAPTURE_SAMPLE_RATE <= 1.0:
+    raise RuntimeError("ENAI_FIXTURE_CAPTURE_SAMPLE_RATE must be between 0 and 1")
+if FIXTURE_CAPTURE_MODE == "raw" and ENAI_DEPLOYMENT_ENV not in {"development", "test"}:
+    raise RuntimeError("Raw fixture capture is restricted to development and test")
 # P3.A rollout gate for the edge-signed actor/session/request assertion.
 # ``optional`` accepts independently deployed P1 gateways while verifying any
 # assertion that is present. Switch to ``required`` only after the P3.B edge

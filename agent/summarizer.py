@@ -643,10 +643,9 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
     if not source_tokens:
         log.warning(
             "🔬 Grounding fail (no source tokens): answer has %d number tokens but evidence "
-            "corpus is empty. policy=%s answer_tokens_preview=%s",
+            "corpus is empty. policy=%s",
             len(answer_tokens),
             grounding_policy,
-            sorted(answer_tokens)[:20],
         )
         return False
 
@@ -668,13 +667,13 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
         missing = [t for t in answer_tokens if t not in source_tokens]
         log.warning(
             "🔬 Grounding fail: matched %d/%d tokens (ratio=%.2f, threshold=%.2f, policy=%s). "
-            "Missing tokens (first 20 sorted): %s",
+            "missing_token_count=%d",
             matched,
             len(answer_tokens),
             match_ratio,
             min_ratio,
             grounding_policy,
-            sorted(missing)[:20],
+            len(missing),
         )
     _maybe_log_grounding_shadow(envelope, ctx)
     return passed

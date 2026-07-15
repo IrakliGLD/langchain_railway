@@ -414,7 +414,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
 
     # --- Execute SQL ---
     try:
-        log.info(f"🔍 Executing SQL:\n{safe_sql}")
+        log.info("Executing SQL. sql_hash=%s", sql_query_hash(safe_sql))
         df, cols, rows, elapsed = execute_sql_safely(safe_sql)
         from utils.metrics import metrics
         metrics.log_sql_query(elapsed)
@@ -469,7 +469,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             error=str(e),
             sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
         )
-        log.error(f"⚠️ Database operational error: {e}")
+        log.error("Database operational error. error_class=%s", type(e).__name__)
         raise
 
     except DatabaseError as e:
@@ -528,10 +528,10 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
                     query_hash=sql_query_hash(ctx.safe_sql),
                 )
             else:
-                log.exception("SQL execution failed (UndefinedColumn)")
+                log.error("SQL execution failed. error_class=UndefinedColumn")
                 raise
         else:
-            log.exception("SQL execution failed (DatabaseError)")
+            log.error("SQL execution failed. error_class=%s", type(e).__name__)
             raise
 
     except SQLAlchemyError as e:
@@ -546,7 +546,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             error=str(e),
             sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
         )
-        log.exception("SQLAlchemy error occurred")
+        log.error("SQLAlchemy error occurred. error_class=%s", type(e).__name__)
         raise
 
     except Exception as e:
@@ -561,7 +561,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
             error=str(e),
             sql_hash=sql_query_hash(ctx.safe_sql or safe_sql),
         )
-        log.exception("Unexpected error during SQL execution")
+        log.error("Unexpected SQL execution error. error_class=%s", type(e).__name__)
         raise
 
     return ctx

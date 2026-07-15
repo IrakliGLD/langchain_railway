@@ -73,6 +73,7 @@ from knowledge.vector_retrieval import (
 )
 from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
+from utils.privacy_logging import hash_private_identifier
 from utils.query_validation import validate_tool_relevance
 from utils.request_deadline import RequestDeadlineExceeded
 from utils.residual_price import is_implied_ppa_cfd_price_query
@@ -2773,7 +2774,10 @@ def process_query(
     selected = _detect_clarify_selection(query, conversation_history)
     if selected:
         query = _rewrite_query_for_clarify_selection(selected, conversation_history)
-        log.info("Clarification selection detected; rewriting query to: %s", query)
+        log.info(
+            "Clarification selection detected. rewritten_query_hash=%s",
+            hash_private_identifier(query, namespace="query"),
+        )
 
     ctx = QueryContext(
         query=query,

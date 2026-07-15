@@ -2207,7 +2207,12 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
                 else {"intent": "general", "target": "", "period": ""}
             )
 
-    log.info(f"Plan: {ctx.plan}")
+    log.info(
+        "Plan ready. intent=%s has_target=%s has_period=%s",
+        str(ctx.plan.get("intent") or "") if isinstance(ctx.plan, dict) else "unknown",
+        bool(ctx.plan.get("target")) if isinstance(ctx.plan, dict) else False,
+        bool(ctx.plan.get("period")) if isinstance(ctx.plan, dict) else False,
+    )
     trace_detail(
         log,
         ctx,

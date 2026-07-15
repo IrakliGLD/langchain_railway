@@ -114,16 +114,16 @@ def simple_table_whitelist_check(sql: str) -> None:
     except ParseError as e:
         # If the SQL is too broken to parse (e.g., truly invalid SQL), reject it.
         # For security, any unparseable query should be rejected.
-        log.error(f"SQL PARSE ERROR: {e}")
+        log.error("SQL parse rejected. error_class=%s", type(e).__name__)
         raise HTTPException(
             status_code=400,
-            detail=f"❌ SQL Validation Error (Parse Failed): The query could not be reliably parsed for security review. Details: {e}"
+            detail="SQL validation failed: the query could not be parsed safely."
         )
     except HTTPException:
         # Re-raise HTTPException as-is
         raise
     except Exception as e:
-        log.error(f"Unexpected error during SQL parsing: {e}")
+        log.error("Unexpected SQL parsing error. error_class=%s", type(e).__name__)
         # Reject on any other unexpected error
         raise HTTPException(
             status_code=400,

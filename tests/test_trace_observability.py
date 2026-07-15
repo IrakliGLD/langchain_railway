@@ -103,7 +103,10 @@ def test_question_analyzer_emits_validated_trace(monkeypatch, caplog):
     assert validated["stage"] == "stage_0_2_question_analyzer"
     assert validated["extra"]["source"] == "llm_active"
     assert validated["extra"]["candidate_topics"] == ["market_structure"]
-    assert validated["extra"]["canonical_query_en"] == "What is GENEX?"
+    canonical = validated["extra"]["canonical_query_en"]
+    assert canonical["redacted"] is True
+    assert canonical["length"] == len("What is GENEX?")
+    assert "What is GENEX?" not in json.dumps(validated)
 
 
 def test_why_context_emits_signal_trace(monkeypatch, caplog):
