@@ -97,6 +97,23 @@ class TestSkippedSqlRouting:
         assert ctx.terminal_outcome == TerminalOutcome.EVIDENCE_UNAVAILABLE.value
         assert not re.search(r"\d", ctx.summary)
 
+    def test_enabled_holdback_keeps_legacy_conceptual_route(self, monkeypatch):
+        monkeypatch.setattr(pipeline, "ENABLE_HONEST_TERMINAL_OUTCOMES", True)
+
+        def _fake_conceptual(ctx):
+            ctx.summary = "A conceptual narrative."
+            ctx.summary_source = "conceptual"
+            return ctx
+
+        monkeypatch.setattr(pipeline.summarizer, "answer_conceptual", _fake_conceptual)
+        ctx = self._data_primary_ctx()
+        ctx.p4_rollout_decisions["honest_terminal_outcomes"] = False
+
+        out = pipeline._answer_skipped_sql_data_failure(ctx)
+
+        assert out.summary_source == "conceptual"
+        assert out.terminal_outcome == TerminalOutcome.CONCEPTUAL_ANSWER.value
+
     def test_knowledge_primary_stays_conceptual_even_when_enabled(self, monkeypatch):
         monkeypatch.setattr(pipeline, "ENABLE_HONEST_TERMINAL_OUTCOMES", True)
         def _fake_conceptual(ctx):

@@ -165,6 +165,17 @@ def test_enforce_mode_attaches_frame_on_normal_path():
     assert ctx.evidence_frame.provenance_refs
 
 
+def test_enforce_mode_holdback_builds_shadow_without_attaching():
+    _set_mode("enforce")
+    ctx = _price_ctx()
+    ctx.p4_rollout_decisions["evidence_finalization"] = False
+    result = evidence_finalizer.finalize_evidence(ctx, stage="stage_0_8_settled")
+    assert result.mode == "shadow"
+    assert result.action == evidence_finalizer.ACTION_SHADOW_BUILT
+    assert ctx.evidence_frame is None
+    assert isinstance(ctx.evidence_frame_shadow, ObservationFrame)
+
+
 def test_enforce_mode_degrades_render_style_on_noncorrectable_gap(monkeypatch):
     _set_mode("enforce")
     ctx = _price_ctx()

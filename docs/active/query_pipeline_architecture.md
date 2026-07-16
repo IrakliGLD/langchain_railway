@@ -2,7 +2,7 @@
 
 Technical reference for the `langchain_railway` query pipeline. Describes the current runtime, the Ideal Decision Tree it targets, and the structural work that is still open.
 
-**Last updated:** 2026-07-08 (design-gap closures: answer provenance, render-fitness shadow, self-growing golden set, contract continuity [flag off], ontology-agreement shadow, evidence re-analysis [flag off]. Earlier 2026-07-07: truth pass — agent-loop deletion, `core/` split, `process_query` decomposition; efficiency pass — Stage 0.8 prefetch, embedding caching, `tool_adapter` removal)
+**Last updated:** 2026-07-16 (F3 request-scoped deterministic canaries for P4 behavior activation and P4.B distinct terminal-outcome rendering. Earlier updates retain the analyzer/evidence architecture history below.)
 **Source of truth:** the code referenced inline below. When this document and the code disagree, the code wins — update this document.
 
 ---
@@ -38,7 +38,8 @@ HTTP /ask
   → Stage 0.8     secondary evidence loop (additional plan steps)
                   → balancing driver-context enrichment (post-loop, conditional)
   → Stage 0.9     surprising-evidence detection (always; counters/trace)
-                  → flag-gated ONE re-analysis (ENABLE_EVIDENCE_REANALYSIS)
+                  → flag-gated ONE re-analysis (ENABLE_EVIDENCE_REANALYSIS
+                    plus ENAI_EVIDENCE_REANALYSIS_PERCENT)
   → Stages 1/2    legacy SQL fallback (only when typed tools didn't produce
                   primary data; the agent loop that used to sit before this
                   was deleted — §3.7)
@@ -265,7 +266,7 @@ When primary execution produced a usable result (`ctx.used_tool` and `ctx.tool_n
 
 #### Stage 0.9 — Evidence-anomaly detection + gated re-analysis (2026-07-07)
 
-After `_execute_evidence_plan` returns, `_detect_evidence_anomaly` checks data-shaped, authoritative contracts for surprising primary evidence: `primary_empty` (tool succeeded, zero rows) and `period_gap` (rendered rows entirely outside the requested period, reusing `agent/render_fitness.py`). Detection is always on — `evidence_anomaly_events` counters plus a `stage_0_9_evidence_anomaly` trace size the blast radius. Behind `ENABLE_EVIDENCE_REANALYSIS` (default OFF), `_attempt_evidence_reanalysis` runs **one** retry: the SAME Stage 0.2 interpreter re-runs with the anomaly attached as a `TRUSTED_EVIDENCE_ANOMALY` block (cache-key participating), the finalize cross-check re-applies, per-attempt evidence state resets to defaults, and the plan rebuilds and re-executes. `reanalysis_attempted` guards against loops; the vector bundle from the first pass is kept (tier changes out of scope). This closes the open-loop gap without reintroducing an agent loop — one interpretation, of more information. Enablement criteria: §5.8.
+After `_execute_evidence_plan` returns, `_detect_evidence_anomaly` checks data-shaped, authoritative contracts for surprising primary evidence: `primary_empty` (tool succeeded, zero rows) and `period_gap` (rendered rows entirely outside the requested period, reusing `agent/render_fitness.py`). Detection is always on — `evidence_anomaly_events` counters plus a `stage_0_9_evidence_anomaly` trace size the blast radius. Behind `ENABLE_EVIDENCE_REANALYSIS` (default OFF), `_attempt_evidence_reanalysis` runs **one** retry: the SAME Stage 0.2 interpreter re-runs with the anomaly attached as a `TRUSTED_EVIDENCE_ANOMALY` block (cache-key participating), the finalize cross-check re-applies, per-attempt evidence state resets to defaults, and the plan rebuilds and re-executes. `reanalysis_attempted` guards against loops; the vector bundle from the first pass is kept (tier changes out of scope). This closes the open-loop gap without reintroducing an agent loop — one interpretation, of more information. Enablement criteria: §5.8. F3 adds a deterministic request cohort, so enabling the master flag with `ENAI_EVIDENCE_REANALYSIS_PERCENT=5` activates only the selected actors while holdbacks keep detection-only behavior.
 
 ### 3.7 Stages 1/2 — Legacy SQL Fallback
 
@@ -394,6 +395,33 @@ on 2026-06-10 (owner decision: no new runtime infrastructure — see
 `medium_fix_plan_2026-06-10.md` P5). If horizontal scaling ever becomes necessary, that
 decision is the one to revisit *first*; do not scale out without it.
 
+## 4.2 Request-scoped P4 rollout
+
+Behavior-changing P4 features are assigned once when `QueryContext` is created by
+[`agent/p4_rollout.py`](../../agent/p4_rollout.py). Assignment is deterministic
+and isolated per gate. The key precedence is gateway-verified actor ID, signed
+server session ID, then request ID. Raw identifiers and hashes never enter
+metrics. A partial rollout without a stable identifier is ineligible and fails
+closed into the gate's holdback behavior.
+
+The master controls remain authoritative and keep their safe defaults:
+`ENAI_EVIDENCE_FINALIZATION_MODE=shadow`,
+`ENAI_PLAN_VALIDATION_MODE=warn`,
+`ENAI_ENABLE_HONEST_TERMINAL_OUTCOMES=false`, and
+`ENABLE_EVIDENCE_REANALYSIS=false`. When a master control requests active
+behavior, its corresponding integer percentage
+(`ENAI_EVIDENCE_FINALIZATION_ENFORCE_PERCENT`,
+`ENAI_PLAN_VALIDATION_ENFORCE_PERCENT`,
+`ENAI_HONEST_TERMINAL_OUTCOMES_PERCENT`, or
+`ENAI_EVIDENCE_REANALYSIS_PERCENT`) selects 0–100 percent of stable traffic.
+Percentages default to 100 so explicitly enabling an existing master control
+retains its historical all-traffic meaning. Holdbacks resolve respectively to
+shadow, warn, legacy conceptual routing, and anomaly detection without retry.
+
+`p4_rollout_events` exposes only `<gate>:<active|holdback|disabled|ineligible>`
+counts. Production order and rollback evidence are defined in
+[`p4_f3_canonical_pipeline_activation_runbook_2026-07-16.md`](p4_f3_canonical_pipeline_activation_runbook_2026-07-16.md).
+
 ---
 
 ## 5. What Still Needs to Be Fixed
@@ -470,7 +498,7 @@ Storage of the previous turn's routed-contract snapshot is live (§3.2); prompt 
 
 ### 5.8 Evidence-Triggered Re-Analysis (detection live, retry gated)
 
-Anomaly detection and counters are live (§3.6 Stage 0.9); the single retry sits behind `ENABLE_EVIDENCE_REANALYSIS` (default off). **Enablement:** two weeks of `evidence_anomaly_events` from production to size the blast radius (expected rare — these are the residue of routing errors), the routing golden set green with the flag on, then enable. Rollback is an env flip. If anomaly rates are high, that is §5.3 analyzer-quality work first — the retry is a safety net, not a crutch.
+Anomaly detection and counters are live (§3.6 Stage 0.9); the single retry sits behind `ENABLE_EVIDENCE_REANALYSIS` (default off) and the deterministic `ENAI_EVIDENCE_REANALYSIS_PERCENT` cohort. **Enablement:** two weeks of `evidence_anomaly_events` from production to size the blast radius (expected rare — these are the residue of routing errors), the routing golden set green with the flag on, then 0 → 5 → 25 → 100 percent in separate observation windows. Holdbacks continue detection without retry. Rollback is setting the master flag false. If anomaly rates are high, that is §5.3 analyzer-quality work first — the retry is a safety net, not a crutch.
 
 ### 5.9 Evidence-Ontology Consolidation (migration, shadow since 2026-07-07)
 

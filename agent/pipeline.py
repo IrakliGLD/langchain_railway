@@ -29,6 +29,14 @@ from sqlalchemy import text
 
 from agent import analyzer, chart_pipeline, evidence_finalizer, evidence_planner, planner, sql_executor, summarizer
 from agent.fixture_candidates import log_fixture_candidate
+from agent.p4_rollout import (
+    GATE_EVIDENCE_FINALIZATION,
+    GATE_EVIDENCE_REANALYSIS,
+    GATE_HONEST_TERMINAL_OUTCOMES,
+    GATE_PLAN_VALIDATION,
+    build_rollout_decisions,
+    gate_is_active,
+)
 from agent.provenance import (
     build_provenance_refs,
     clear_provenance,
@@ -53,8 +61,12 @@ from config import (
     ENABLE_TYPED_TOOLS,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
+    EVIDENCE_FINALIZATION_ENFORCE_PERCENT,
     EVIDENCE_PARALLEL_SECONDARY,
+    EVIDENCE_REANALYSIS_PERCENT,
+    HONEST_TERMINAL_OUTCOMES_PERCENT,
     PIPELINE_MODE,
+    PLAN_VALIDATION_ENFORCE_PERCENT,
     PLAN_VALIDATION_MODE,
 )
 from contracts.question_analysis import (
@@ -2616,7 +2628,10 @@ def _enforce_plan_validation_stage(ctx: QueryContext) -> StageResult:
     rejects = list(getattr(validation, "rejects", []) or [])
     if not rejects:
         return StageResult(ctx, terminal=False)
-    if PLAN_VALIDATION_MODE != "enforce":
+    if (
+        PLAN_VALIDATION_MODE != "enforce"
+        or not gate_is_active(ctx, GATE_PLAN_VALIDATION, default=True)
+    ):
         # Shadow visibility: counters were already logged per-issue by
         # build_evidence_plan; nothing else to do in warn mode.
         return StageResult(ctx, terminal=False)
@@ -2706,7 +2721,10 @@ def _answer_skipped_sql_data_failure(ctx: QueryContext) -> QueryContext:
     is_data_primary = ctx.response_mode != ResponseMode.KNOWLEDGE_PRIMARY
     if is_data_primary:
         metrics.log_terminal_outcome(f"{TerminalOutcome.EVIDENCE_UNAVAILABLE.value}_shadow")
-        if ENABLE_HONEST_TERMINAL_OUTCOMES:
+        if (
+            ENABLE_HONEST_TERMINAL_OUTCOMES
+            and gate_is_active(ctx, GATE_HONEST_TERMINAL_OUTCOMES, default=True)
+        ):
             return summarizer.answer_evidence_unavailable(ctx)
     ctx = summarizer.answer_conceptual(ctx)
     ctx.terminal_outcome = ctx.terminal_outcome or TerminalOutcome.CONCEPTUAL_ANSWER.value
@@ -2768,6 +2786,8 @@ def process_query(
     session_id: str = "",
     previous_contract_snapshot: str = "",
     request_deadline=None,
+    actor_id: str = "",
+    request_id: str = "",
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -2787,6 +2807,29 @@ def process_query(
         request_deadline=request_deadline,
         previous_contract_snapshot=previous_contract_snapshot,
         clarify_selection_override=selected is not None,
+        p4_rollout_decisions=build_rollout_decisions(
+            {
+                GATE_EVIDENCE_FINALIZATION: (
+                    evidence_finalizer.EVIDENCE_FINALIZATION_MODE == "enforce",
+                    EVIDENCE_FINALIZATION_ENFORCE_PERCENT,
+                ),
+                GATE_PLAN_VALIDATION: (
+                    PLAN_VALIDATION_MODE == "enforce",
+                    PLAN_VALIDATION_ENFORCE_PERCENT,
+                ),
+                GATE_HONEST_TERMINAL_OUTCOMES: (
+                    ENABLE_HONEST_TERMINAL_OUTCOMES,
+                    HONEST_TERMINAL_OUTCOMES_PERCENT,
+                ),
+                GATE_EVIDENCE_REANALYSIS: (
+                    ENABLE_EVIDENCE_REANALYSIS,
+                    EVIDENCE_REANALYSIS_PERCENT,
+                ),
+            },
+            actor_id=actor_id,
+            session_id=session_id,
+            request_id=request_id,
+        ),
     )
 
     # `_trace_stage` is a thin wrapper around the module-level helper that
@@ -2912,7 +2955,11 @@ def process_query(
     if _anomaly:
         metrics.log_evidence_anomaly(_anomaly)
         _emit_trace_stage(ctx, "stage_0_9_evidence_anomaly", time.time(), tag=_anomaly)
-        if ENABLE_EVIDENCE_REANALYSIS and not ctx.reanalysis_attempted:
+        if (
+            ENABLE_EVIDENCE_REANALYSIS
+            and gate_is_active(ctx, GATE_EVIDENCE_REANALYSIS, default=True)
+            and not ctx.reanalysis_attempted
+        ):
             _require_request_budget(ctx, "stage_0_9_evidence_reanalysis")
             _res = _attempt_evidence_reanalysis(ctx, _anomaly)
             ctx = _res.ctx

@@ -111,6 +111,10 @@ class Metrics:
         # distinguishes an evidence-unavailable degrade from a conceptual answer
         # so a data failure is never counted as a conceptual success.
         self.terminal_outcome_events = {}
+        # F3: one assignment event per P4 gate and request. Keys are
+        # "<gate>:<active|holdback|disabled|ineligible>". No actor, session,
+        # request identifier, or hash is retained.
+        self.p4_rollout_events = {}
         # P5.5 (finding L1): per-source tool observability. Stage 0.8 secondary
         # evidence calls were previously invisible (suppressed to avoid
         # double-counting the legacy total); these break calls and latency out
@@ -437,6 +441,15 @@ class Metrics:
         self.terminal_outcome_events[key] = self.terminal_outcome_events.get(key, 0) + 1
 
     @_synchronized
+    def log_p4_rollout(self, gate: str, status: str) -> None:
+        """Track effective P4 rollout assignments without identity material."""
+        key = (
+            f"{(gate or 'unknown').strip().lower()}:"
+            f"{(status or 'unknown').strip().lower()}"
+        )
+        self.p4_rollout_events[key] = self.p4_rollout_events.get(key, 0) + 1
+
+    @_synchronized
     def log_router_match(self, match_type: str):
         """Track router coverage by match type."""
         normalized = (match_type or "").strip().lower()
@@ -540,6 +553,7 @@ class Metrics:
             "plan_validation_events": dict(self.plan_validation_events),
             "chart_source_events": dict(self.chart_source_events),
             "terminal_outcome_events": dict(self.terminal_outcome_events),
+            "p4_rollout_events": dict(self.p4_rollout_events),
             "tool_calls_by_source": dict(self.tool_calls_by_source),
             "tool_time_by_source": dict(self.tool_time_by_source),
             "tool_fallback_intents_top": dict(

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from agent.evidence_validator import EvidenceGap, validate_evidence
 from agent.frame_adapters import adapt_tool_result
+from agent.p4_rollout import GATE_EVIDENCE_FINALIZATION, gate_is_active
 from config import EVIDENCE_FINALIZATION_MODE as _CONFIG_MODE
 from contracts.question_analysis import RenderStyle
 from utils.metrics import metrics
@@ -67,6 +68,17 @@ ACTION_SKIPPED_EMPTY = "skipped_empty"      # no rows to frame
 ACTION_SKIPPED_NO_TOOL = "skipped_no_tool"  # evidence has no tool identity (SQL fallback)
 ACTION_SKIPPED_NO_ADAPTER = "skipped_no_adapter"  # tool has no frame adapter
 ACTION_INVALIDATED = "invalidated"          # stale frame cleared
+
+
+def _effective_mode(ctx: "QueryContext") -> str:
+    """Resolve enforce -> enforce/shadow for this request's stable cohort."""
+    if EVIDENCE_FINALIZATION_MODE != "enforce":
+        return EVIDENCE_FINALIZATION_MODE
+    return (
+        "enforce"
+        if gate_is_active(ctx, GATE_EVIDENCE_FINALIZATION, default=True)
+        else "shadow"
+    )
 
 
 @dataclass
@@ -153,7 +165,7 @@ def invalidate_frame(ctx: "QueryContext", *, stage: str, reason: str) -> Optiona
     ctx.evidence_frame_stage = ""
     result = FinalizationResult(
         stage=stage,
-        mode=EVIDENCE_FINALIZATION_MODE,
+        mode=_effective_mode(ctx),
         action=ACTION_INVALIDATED,
         detail={"reason": reason, "had_attached": had_frame, "had_shadow": had_shadow},
     )
@@ -185,7 +197,7 @@ def finalize_evidence(
     The returned FinalizationResult is also appended (as a dict event) to
     ``ctx.evidence_finalization_events`` and counted in metrics.
     """
-    mode = EVIDENCE_FINALIZATION_MODE
+    mode = _effective_mode(ctx)
     resolved_tool = (tool_name or ctx.tool_name or "").strip()
 
     if mode == "off" and not legacy_attach:

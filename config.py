@@ -239,6 +239,12 @@ ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lo
 # on (shadow); the retry is gated here. Default OFF — enablement criteria in
 # docs/active/query_pipeline_architecture.md §5.
 ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
+# F3: percentage gates are evaluated per trusted actor/session/request. A
+# value of 100 preserves the historical meaning of explicitly enabling the
+# master flag; operators can set 5/25/100 for a deterministic canary.
+EVIDENCE_REANALYSIS_PERCENT = _read_bounded_int_env(
+    "ENAI_EVIDENCE_REANALYSIS_PERCENT", 100, minimum=0, maximum=100,
+)
 # P4.1 (finding H1): one evidence-finalization routine on every evidence path.
 #   off     — legacy behavior: frames attach only on the analyzer recovery path.
 #   shadow  — frames are built + validated everywhere but stored as telemetry
@@ -250,6 +256,9 @@ ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lo
 EVIDENCE_FINALIZATION_MODE = (
     os.getenv("ENAI_EVIDENCE_FINALIZATION_MODE", "shadow").strip().lower() or "shadow"
 )
+EVIDENCE_FINALIZATION_ENFORCE_PERCENT = _read_bounded_int_env(
+    "ENAI_EVIDENCE_FINALIZATION_ENFORCE_PERCENT", 100, minimum=0, maximum=100,
+)
 # P4.2 (finding M3): plan validation against the answer contract.
 #   warn    — typed issues are computed, logged, and counted; behavior unchanged.
 #   enforce — reject-severity issues terminal-clarify BEFORE any tool/DB call.
@@ -257,6 +266,9 @@ EVIDENCE_FINALIZATION_MODE = (
 # reviews shadow counters and cuts over.
 PLAN_VALIDATION_MODE = (
     os.getenv("ENAI_PLAN_VALIDATION_MODE", "warn").strip().lower() or "warn"
+)
+PLAN_VALIDATION_ENFORCE_PERCENT = _read_bounded_int_env(
+    "ENAI_PLAN_VALIDATION_ENFORCE_PERCENT", 100, minimum=0, maximum=100,
 )
 # P4.4 (finding H12): honest terminal outcomes. When enabled, a data-primary
 # request whose generated SQL fails validation/relevance returns a transparent
@@ -268,6 +280,9 @@ PLAN_VALIDATION_MODE = (
 ENABLE_HONEST_TERMINAL_OUTCOMES = os.getenv(
     "ENAI_ENABLE_HONEST_TERMINAL_OUTCOMES", "false"
 ).strip().lower() in ("1", "true", "yes", "on")
+HONEST_TERMINAL_OUTCOMES_PERCENT = _read_bounded_int_env(
+    "ENAI_HONEST_TERMINAL_OUTCOMES_PERCENT", 100, minimum=0, maximum=100,
+)
 # Pre-auth rate limiting: trust the platform proxy's X-Forwarded-For (last
 # hop) for the client IP. Default on — production always sits behind the
 # Railway edge, where the socket peer is the proxy and would collapse every
