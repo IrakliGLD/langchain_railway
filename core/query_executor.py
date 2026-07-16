@@ -93,7 +93,7 @@ def get_database_runtime_identity() -> DatabaseRuntimeIdentity:
     """Probe connection identity without exposing it on public endpoints."""
 
     try:
-        with database_connection(ENGINE, operation="runtime_identity_probe", begin=True) as conn:
+        with database_connection(ENGINE, operation="runtime_identity_probe", begin=True, read_only=True) as conn:
             row = conn.execute(
                 text(
                     "select current_user as current_user, "
@@ -161,9 +161,7 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
         >>> print(f"Returned {len(rows)} rows in {elapsed:.2f}s")
     """
     start = time.time()
-    with database_connection(ENGINE, operation="fallback_sql") as conn:
-        # Phase 1D: Enforce read-only mode
-        conn.execute(text("SET TRANSACTION READ ONLY"))
+    with database_connection(ENGINE, operation="fallback_sql", read_only=True) as conn:
 
         # Execute query with incremental fetch to limit memory pressure.
         # LIMIT is already enforced upstream by plan_validate_repair(),

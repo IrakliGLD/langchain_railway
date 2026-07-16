@@ -221,7 +221,7 @@ def _check_phase_b1_columns_present() -> bool:
         return True
     try:
         with database_connection(
-            _resolve_engine(), operation="vector_schema_probe", begin=True
+            _resolve_engine(), operation="vector_schema_probe", begin=True, read_only=True
         ) as conn:
             rows = conn.execute(
                 text(
@@ -613,7 +613,7 @@ class KnowledgeVectorStore:
     def count_active_documents(self) -> int:
         sql = text(f"select count(*) from {self.schema}.documents where is_active = true")
         with database_connection(
-            _resolve_engine(), operation="vector_document_count", begin=True
+            _resolve_engine(), operation="vector_document_count", begin=True, read_only=True
         ) as conn:
             return int(conn.execute(sql).scalar_one())
 
@@ -819,7 +819,7 @@ class KnowledgeVectorStore:
         if bind_params:
             sql = sql.bindparams(*bind_params)
         with database_connection(
-            _resolve_engine(), operation="vector_search", begin=True
+            _resolve_engine(), operation="vector_search", begin=True, read_only=True
         ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
@@ -922,7 +922,7 @@ class KnowledgeVectorStore:
             """
         )
         with database_connection(
-            _resolve_engine(), operation="vector_chunk_fetch", begin=True
+            _resolve_engine(), operation="vector_chunk_fetch", begin=True, read_only=True
         ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
@@ -1011,7 +1011,7 @@ class KnowledgeVectorStore:
             """
         )
         with database_connection(
-            _resolve_engine(), operation="vector_reference_fetch", begin=True
+            _resolve_engine(), operation="vector_reference_fetch", begin=True, read_only=True
         ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 

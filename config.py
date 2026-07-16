@@ -164,6 +164,11 @@ NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 _raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "90").strip()
 NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
 
+_raw_gemini_timeout = os.getenv("GEMINI_TIMEOUT_SECONDS", "120").strip()
+GEMINI_TIMEOUT_SECONDS: float | None = (
+    float(_raw_gemini_timeout) if _raw_gemini_timeout and float(_raw_gemini_timeout) > 0 else None
+)
+
 # P5.1 (finding H13): OpenAI had no explicit per-call timeout, so a stalled
 # OpenAI call — whether primary or the universal fallback — could hold a request
 # open indefinitely, defeating the end-to-end deadline. Bound it like Gemini
@@ -220,6 +225,26 @@ ASK_MAX_REQUEST_BUDGET_MS = _read_bounded_int_env(
     115000,
     minimum=ASK_DEFAULT_REQUEST_BUDGET_MS,
     maximum=300000,
+)
+# F4/P5.1: reserve enough time for connection/query cancellation, response
+# serialization, and request telemetry after the final external call returns.
+REQUEST_CLEANUP_ALLOWANCE_MS = _read_bounded_int_env(
+    "ENAI_REQUEST_CLEANUP_ALLOWANCE_MS", 3000, minimum=250, maximum=15000,
+)
+DB_STATEMENT_TIMEOUT_MS = _read_bounded_int_env(
+    "ENAI_DB_STATEMENT_TIMEOUT_MS", 30000, minimum=100, maximum=120000,
+)
+DB_POOL_TIMEOUT_SECONDS = _read_bounded_int_env(
+    "ENAI_DB_POOL_TIMEOUT_SECONDS", 2, minimum=1, maximum=10,
+)
+DB_CONNECT_TIMEOUT_SECONDS = _read_bounded_int_env(
+    "ENAI_DB_CONNECT_TIMEOUT_SECONDS", 3, minimum=1, maximum=10,
+)
+PROVIDER_MINIMUM_START_BUDGET_MS = _read_bounded_int_env(
+    "ENAI_PROVIDER_MINIMUM_START_BUDGET_MS", 500, minimum=100, maximum=5000,
+)
+PROVIDER_RETRY_JITTER_MAX_MS = _read_bounded_int_env(
+    "ENAI_PROVIDER_RETRY_JITTER_MAX_MS", 250, minimum=0, maximum=2000,
 )
 ENABLE_TYPED_TOOLS = os.getenv("ENABLE_TYPED_TOOLS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_EVIDENCE_PLANNER = os.getenv("ENABLE_EVIDENCE_PLANNER", "true").lower() in ("1", "true", "yes", "on")

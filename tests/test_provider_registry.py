@@ -97,10 +97,10 @@ def test_nvidia_timeout_env_bounds_client_and_drops_retries(monkeypatch):
     monkeypatch.setattr(llm_runtime, "NVIDIA_TIMEOUT_SECONDS", 90.0)
     bounded = llm_runtime.get_nvidia()
     assert bounded.request_timeout == 90.0
-    assert bounded.max_retries == 1
+    assert bounded.max_retries == 0
 
     monkeypatch.setattr(llm_runtime, "_nvidia_llm", None)
     monkeypatch.setattr(llm_runtime, "NVIDIA_TIMEOUT_SECONDS", None)
     unbounded = llm_runtime.get_nvidia()
     assert unbounded.request_timeout is None
-    assert unbounded.max_retries == 2
+    assert unbounded.max_retries == 0

@@ -21,8 +21,10 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import date
+from functools import wraps
 
 import pandas as pd
 from sqlalchemy import text
@@ -87,7 +89,10 @@ from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
 from utils.privacy_logging import hash_private_identifier
 from utils.query_validation import validate_tool_relevance
-from utils.request_deadline import RequestDeadlineExceeded
+from utils.request_deadline import (
+    RequestDeadlineExceeded,
+    bind_request_execution_scope,
+)
 from utils.residual_price import is_implied_ppa_cfd_price_query
 from utils.trace_logging import trace_detail
 
@@ -1080,8 +1085,7 @@ def _enrich_prices_with_balancing_driver_context(
         return _enrich_prices_with_composition(ctx, invocation, is_explanation)
 
     try:
-        with database_connection(ENGINE, operation="evidence_enrichment") as conn:
-            conn.execute(text("SET TRANSACTION READ ONLY"))
+        with database_connection(ENGINE, operation="evidence_enrichment", read_only=True) as conn:
             driver_df = compute_entity_price_contributions(
                 conn,
                 start_date=invocation.params.get("start_date"),
@@ -1718,12 +1722,13 @@ def _run_secondary_evidence_loop(
     cap = min(len(remaining), evidence_planner._EVIDENCE_LOOP_MAX_STEPS)
     steps = remaining[:cap]
 
+    configured_budget = float(evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS)
     budget = (
-        evidence_planner.EVIDENCE_LOOP_BUDGET_SECONDS
+        configured_budget
         if timeout_seconds is None
-        else max(0.0, timeout_seconds)
+        else min(configured_budget, max(0.0, timeout_seconds))
     )
-    deadline = time.time() + budget
+    deadline = time.monotonic() + budget
 
     invocations = [
         ToolInvocation(
@@ -1745,14 +1750,17 @@ def _run_secondary_evidence_loop(
             max_workers=min(2, len(steps)),
             thread_name_prefix="stage08-prefetch",
         )
-        futures = [pool.submit(executor, inv) for inv in invocations]
+        futures = [
+            pool.submit(copy_context().run, executor, inv)
+            for inv in invocations
+        ]
 
     try:
         for step, invocation, future in zip(steps, invocations, futures):
             step_executor = executor
             if future is None:
                 # Serial path: the budget gates starting a step.
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
                     log.warning(
                         "Evidence loop budget exhausted (%.1fs); skipping step: tool=%s role=%s",
@@ -1762,7 +1770,7 @@ def _run_secondary_evidence_loop(
             else:
                 # Prefetched path: the budget bounds waiting for the result.
                 try:
-                    result = future.result(timeout=max(0.0, deadline - time.time()))
+                    result = future.result(timeout=max(0.0, deadline - time.monotonic()))
                 except FuturesTimeoutError as exc:
                     if future.done():
                         # The tool itself raised a TimeoutError (alias of the
@@ -2779,7 +2787,7 @@ def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
     return StageResult(ctx, terminal=False)
 
 
-def process_query(
+def _process_query_impl(
     query: str,
     conversation_history=None,
     trace_id: str = "",
@@ -3090,3 +3098,31 @@ def process_query(
         metrics.log_terminal_outcome(TerminalOutcome.DATA_ANSWER.value)
 
     return ctx
+
+@wraps(_process_query_impl)
+def process_query(
+    query: str,
+    conversation_history=None,
+    trace_id: str = "",
+    session_id: str = "",
+    previous_contract_snapshot: str = "",
+    request_deadline=None,
+    actor_id: str = "",
+    request_id: str = "",
+) -> QueryContext:
+    """Bind the trusted request identity/deadline around every deep I/O call."""
+    with bind_request_execution_scope(
+        deadline=request_deadline,
+        request_id=request_id,
+        actor_id=actor_id,
+    ):
+        return _process_query_impl(
+            query,
+            conversation_history=conversation_history,
+            trace_id=trace_id,
+            session_id=session_id,
+            previous_contract_snapshot=previous_contract_snapshot,
+            request_deadline=request_deadline,
+            actor_id=actor_id,
+            request_id=request_id,
+        )

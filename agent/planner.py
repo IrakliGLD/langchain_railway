@@ -11,8 +11,6 @@ from calendar import monthrange
 from datetime import date
 from typing import Optional
 
-from tenacity import retry, stop_after_attempt, wait_exponential
-
 from agent.aggregation import detect_aggregation_intent
 from agent.analyzer import BALANCING_SHARE_METADATA
 from agent.router import (
@@ -1767,7 +1765,6 @@ def _extract_plan_and_sql(combined_output: str) -> tuple[dict, str]:
     return normalized_plan, normalized_sql
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=4), reraise=True)
 def _generate_plan_and_sql_with_retry(
     user_query: str,
     analysis_mode: str,
@@ -1775,6 +1772,7 @@ def _generate_plan_and_sql_with_retry(
     question_analysis: Optional[QuestionAnalysis] = None,
     vector_knowledge: str = "",
 ) -> tuple[dict, str]:
+    """Generate once; normalize a malformed plan without another provider call."""
     kwargs = dict(
         user_query=user_query,
         analysis_mode=analysis_mode,
@@ -1784,8 +1782,29 @@ def _generate_plan_and_sql_with_retry(
     if vector_knowledge:
         kwargs["vector_knowledge"] = vector_knowledge
     combined_output = llm_generate_plan_and_sql(**kwargs)
-    return _extract_plan_and_sql(combined_output)
-
+    separator = "---SQL---"
+    if separator not in combined_output:
+        raise ValueError("LLM output malformed: missing '---SQL---' separator")
+    plan_text, raw_sql = combined_output.split(separator, 1)
+    normalized_sql = raw_sql.strip()
+    if not normalized_sql:
+        raise ValueError("LLM output malformed: SQL part is empty")
+    try:
+        parsed_plan = json.loads(plan_text.strip())
+    except json.JSONDecodeError:
+        parsed_plan = {}
+    if not isinstance(parsed_plan, dict):
+        parsed_plan = {}
+    normalized_plan = {
+        "intent": str(parsed_plan.get("intent", "general")),
+        "target": str(parsed_plan.get("target", "")),
+        "period": str(parsed_plan.get("period", "")),
+    }
+    if "chart_strategy" in parsed_plan:
+        normalized_plan["chart_strategy"] = str(parsed_plan.get("chart_strategy", ""))
+    if isinstance(parsed_plan.get("chart_groups"), list):
+        normalized_plan["chart_groups"] = parsed_plan["chart_groups"]
+    return normalized_plan, normalized_sql
 
 # Legacy plan/SQL generation remains as the fallback when tool routing is insufficient.
 def _build_plan_from_question_analysis(qa: QuestionAnalysis) -> dict[str, object]:
@@ -2132,81 +2151,27 @@ def generate_plan(ctx: QueryContext) -> QueryContext:
         else None
     )
 
-    # Generate the fallback plan and SQL together so both stay semantically aligned.
-    try:
-        retry_kwargs = dict(
-            user_query=ctx.query,
-            analysis_mode=ctx.mode,
-            lang_instruction=ctx.lang_instruction,
-            question_analysis=(
-                ctx.question_analysis
-                if authoritative_qa
-                else None
-            ),
-        )
-        vector_knowledge = (
-            ctx.vector_knowledge_prompt
-            if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
-            else ""
-        )
-        if vector_knowledge:
-            retry_kwargs["vector_knowledge"] = vector_knowledge
-        generated_plan, ctx.raw_sql = _generate_plan_and_sql_with_retry(**retry_kwargs)
-        ctx.plan = (
-            _merge_non_semantic_plan_fields(authoritative_plan, generated_plan)
-            if authoritative_plan is not None
-            else generated_plan
-        )
-
-    except Exception as exc:
-        log.warning("Strict plan parsing failed after retries, attempting SQL salvage: %s", exc)
-        kwargs = dict(
-            user_query=ctx.query,
-            analysis_mode=ctx.mode,
-            lang_instruction=ctx.lang_instruction,
-            question_analysis=(
-                ctx.question_analysis
-                if authoritative_qa
-                else None
-            ),
-        )
-        vector_knowledge = (
-            ctx.vector_knowledge_prompt
-            if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
-            else ""
-        )
-        if vector_knowledge:
-            kwargs["vector_knowledge"] = vector_knowledge
-        combined_output = llm_generate_plan_and_sql(**kwargs)
-        separator = "---SQL---"
-        if separator not in combined_output:
-            log.exception("Combined Plan/SQL generation failed (missing separator)")
-            raise
-        plan_text, raw_sql = combined_output.split(separator, 1)
-        ctx.raw_sql = raw_sql.strip()
-        if not ctx.raw_sql:
-            log.exception("Combined Plan/SQL generation failed (empty SQL)")
-            raise ValueError("LLM output malformed: SQL part is empty")
-        try:
-            parsed_plan = json.loads(plan_text.strip())
-            generated_plan = (
-                parsed_plan
-                if isinstance(parsed_plan, dict)
-                else {"intent": "general", "target": "", "period": ""}
-            )
-            ctx.plan = (
-                _merge_non_semantic_plan_fields(authoritative_plan, generated_plan)
-                if authoritative_plan is not None
-                else generated_plan
-            )
-        except json.JSONDecodeError:
-            log.warning("Plan JSON decoding failed, defaulting to general plan.")
-            ctx.plan = (
-                dict(authoritative_plan)
-                if authoritative_plan is not None
-                else {"intent": "general", "target": "", "period": ""}
-            )
-
+    # Generate once. A malformed plan can be normalized from that same response;
+    # provider or delivery failures are never hidden behind a second model call.
+    generation_kwargs = dict(
+        user_query=ctx.query,
+        analysis_mode=ctx.mode,
+        lang_instruction=ctx.lang_instruction,
+        question_analysis=(ctx.question_analysis if authoritative_qa else None),
+    )
+    vector_knowledge = (
+        ctx.vector_knowledge_prompt
+        if ctx.vector_knowledge is not None and ctx.vector_knowledge_source == "vector_active"
+        else ""
+    )
+    if vector_knowledge:
+        generation_kwargs["vector_knowledge"] = vector_knowledge
+    generated_plan, ctx.raw_sql = _generate_plan_and_sql_with_retry(**generation_kwargs)
+    ctx.plan = (
+        _merge_non_semantic_plan_fields(authoritative_plan, generated_plan)
+        if authoritative_plan is not None
+        else generated_plan
+    )
     log.info(
         "Plan ready. intent=%s has_target=%s has_period=%s",
         str(ctx.plan.get("intent") or "") if isinstance(ctx.plan, dict) else "unknown",
