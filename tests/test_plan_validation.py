@@ -320,6 +320,17 @@ class TestEnforcementStage:
         key = "comparison_single_point_range:enforced"
         assert metrics.plan_validation_events.get(key, 0) == before.get(key, 0) + 1
 
+    def test_enforce_mode_holdback_remains_warning_only(self, monkeypatch):
+        monkeypatch.setattr(pipeline, "PLAN_VALIDATION_MODE", "enforce")
+        ctx = QueryContext(query="compare balancing price")
+        ctx.plan_validation = _reject_result()
+        ctx.p4_rollout_decisions["plan_validation"] = False
+
+        res = pipeline._enforce_plan_validation_stage(ctx)
+
+        assert res.terminal is False
+        assert ctx.summary == ""
+
     def test_enforce_mode_ignores_warn_only_result(self, monkeypatch):
         monkeypatch.setattr(pipeline, "PLAN_VALIDATION_MODE", "enforce")
         ctx = QueryContext(query="recent prices")

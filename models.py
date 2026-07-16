@@ -125,6 +125,10 @@ class QueryContext:
     # P4.4 (H12): the distinct terminal outcome this request ended in. "" until
     # a terminal stage sets it (TerminalOutcome value).
     terminal_outcome: str = ""
+    # F3: deterministic, privacy-safe P4 rollout decisions. Values are typed
+    # RolloutDecision objects owned by agent.p4_rollout; kept as Any here to
+    # avoid making the shared request model depend on an orchestration module.
+    p4_rollout_decisions: Dict[str, Any] = dc_field(default_factory=dict)
 
     # --- evidence plan (set after Stage 0.4, consumed by evidence loop) ---
     evidence_anomaly: str = ""                   # anomaly note for the gated re-analysis; "" otherwise

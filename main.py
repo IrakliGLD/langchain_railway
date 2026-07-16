@@ -1576,6 +1576,8 @@ def ask_post(
                     actor_id=caller.actor_id,
                 ),
                 request_deadline=request_deadline,
+                actor_id=caller.actor_id,
+                request_id=request_id,
             )
         except RequestDeadlineExceeded as exc:
             _finalize_request_telemetry()
