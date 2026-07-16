@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import (
     DBAPIError,
@@ -22,7 +23,9 @@ from sqlalchemy.exc import (
     TimeoutError as SQLAlchemyTimeoutError,
 )
 
+from config import DB_STATEMENT_TIMEOUT_MS, REQUEST_CLEANUP_ALLOWANCE_MS
 from utils.metrics import metrics
+from utils.request_deadline import current_request_execution_scope
 from utils.resilience import db_circuit_breaker
 
 log = logging.getLogger("Enai")
@@ -84,6 +87,7 @@ def database_connection(
     *,
     operation: str,
     begin: bool = False,
+    read_only: bool = False,
 ) -> Iterator[Connection]:
     """Yield one breaker-guarded connection or transaction.
 
@@ -97,8 +101,34 @@ def database_connection(
         raise _circuit_open_error(reason)
 
     try:
+        scope = current_request_execution_scope()
+        deadline = scope.deadline if scope is not None else None
+        if deadline is not None:
+            deadline.ensure_remaining(
+                f"db_{operation}_checkout",
+                minimum_ms=REQUEST_CLEANUP_ALLOWANCE_MS + 1,
+            )
         manager = engine.begin() if begin else engine.connect()
         with manager as connection:
+            # PostgreSQL requires SET TRANSACTION to be the first statement in
+            # a transaction. Apply it before the request-local timeout.
+            if read_only:
+                connection.execute(text("SET TRANSACTION READ ONLY"), {})
+            statement_timeout_ms = DB_STATEMENT_TIMEOUT_MS
+            if deadline is not None:
+                statement_timeout_ms = deadline.bounded_timeout_ms(
+                    f"db_{operation}_statement",
+                    configured_timeout_ms=DB_STATEMENT_TIMEOUT_MS,
+                    cleanup_allowance_ms=REQUEST_CLEANUP_ALLOWANCE_MS,
+                )
+            # Bind-safe and transaction-local: a pooled connection cannot leak
+            # one request's timeout to the next request.
+            execute = getattr(connection, "execute", None)
+            if callable(execute):
+                execute(
+                    text("select set_config('statement_timeout', :timeout_ms, true)"),
+                    {"timeout_ms": str(statement_timeout_ms)},
+                )
             yield connection
     except BaseException as error:
         if is_transient_database_error(error):

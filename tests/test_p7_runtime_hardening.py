@@ -136,6 +136,7 @@ def test_query_executor_fetches_in_batches_and_caps_rows(monkeypatch):
 
     @contextmanager
     def _connection(*_args, **_kwargs):
+        connection.execute("SET TRANSACTION READ ONLY")
         yield connection
 
     clock = iter([10.0, 10.25])

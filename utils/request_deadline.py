@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Iterator
 
 MINIMUM_START_BUDGET_MS = 250
 
@@ -56,6 +59,36 @@ class RequestDeadline:
         if self.remaining_ms() < minimum_ms:
             raise RequestDeadlineExceeded(stage)
 
+    def bounded_timeout_ms(
+        self,
+        stage: str,
+        *,
+        configured_timeout_ms: int,
+        cleanup_allowance_ms: int,
+        minimum_start_ms: int = MINIMUM_START_BUDGET_MS,
+    ) -> int:
+        """Return the safe external-call budget or fail before starting it."""
+        available_ms = self.remaining_ms() - max(0, cleanup_allowance_ms)
+        if available_ms < minimum_start_ms:
+            raise RequestDeadlineExceeded(stage)
+        return min(max(1, int(configured_timeout_ms)), available_ms)
+
+    def bounded_timeout_seconds(
+        self,
+        stage: str,
+        *,
+        configured_timeout_seconds: float,
+        cleanup_allowance_ms: int,
+        minimum_start_ms: int = MINIMUM_START_BUDGET_MS,
+    ) -> float:
+        timeout_ms = self.bounded_timeout_ms(
+            stage,
+            configured_timeout_ms=max(1, math.floor(configured_timeout_seconds * 1000)),
+            cleanup_allowance_ms=cleanup_allowance_ms,
+            minimum_start_ms=minimum_start_ms,
+        )
+        return timeout_ms / 1000.0
+
     def public_metadata(self) -> dict[str, int | str]:
         return {
             "budget_ms": self.budget_ms,
@@ -89,3 +122,43 @@ def build_request_deadline(
         now_monotonic=now_monotonic,
         source=source,
     )
+
+@dataclass(frozen=True, slots=True)
+class RequestExecutionScope:
+    """Privacy-safe identity and deadline propagated to deep I/O boundaries."""
+
+    deadline: RequestDeadline | None
+    request_id: str
+    actor_binding: str
+
+
+_REQUEST_EXECUTION_SCOPE: ContextVar[RequestExecutionScope | None] = ContextVar(
+    "enai_request_execution_scope", default=None
+)
+
+
+def current_request_execution_scope() -> RequestExecutionScope | None:
+    return _REQUEST_EXECUTION_SCOPE.get()
+
+
+@contextmanager
+def bind_request_execution_scope(
+    *,
+    deadline: RequestDeadline | None,
+    request_id: str = "",
+    actor_id: str = "",
+) -> Iterator[RequestExecutionScope]:
+    # Import lazily so this dependency-light primitive does not create a
+    # config/privacy import cycle during application startup.
+    from utils.privacy_logging import hash_private_identifier
+
+    scope = RequestExecutionScope(
+        deadline=deadline,
+        request_id=str(request_id or ""),
+        actor_binding=hash_private_identifier(actor_id, namespace="actor"),
+    )
+    token = _REQUEST_EXECUTION_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _REQUEST_EXECUTION_SCOPE.reset(token)

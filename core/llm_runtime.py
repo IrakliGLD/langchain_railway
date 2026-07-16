@@ -10,6 +10,7 @@ monkeypatch by module path (``llm_cache``, ``_invoke_with_resilience``,
 the implementation layer beneath them. Do not move patched symbols here
 without migrating every ``monkeypatch.setattr(llm_core, ...)`` call site.
 """
+
 import hashlib
 import logging
 import threading as _threading
@@ -21,6 +22,7 @@ from langchain_openai import ChatOpenAI
 
 from config import (
     GEMINI_MODEL,
+    GEMINI_TIMEOUT_SECONDS,
     GOOGLE_API_KEY,
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
@@ -31,9 +33,25 @@ from config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
     OPENAI_TIMEOUT_SECONDS,
+    PROVIDER_MINIMUM_START_BUDGET_MS,
+    REQUEST_CLEANUP_ALLOWANCE_MS,
 )
 
 log = logging.getLogger("Enai")
+
+
+def _bounded_coalesce_wait_seconds(configured_seconds: float) -> float:
+    from utils.request_deadline import current_request_execution_scope
+
+    scope = current_request_execution_scope()
+    if scope is None or scope.deadline is None:
+        return configured_seconds
+    return scope.deadline.bounded_timeout_seconds(
+        "llm_coalesce_wait",
+        configured_timeout_seconds=configured_seconds,
+        cleanup_allowance_ms=REQUEST_CLEANUP_ALLOWANCE_MS,
+        minimum_start_ms=PROVIDER_MINIMUM_START_BUDGET_MS,
+    )
 
 
 def _to_int(value) -> int:
@@ -59,8 +77,12 @@ def _extract_token_usage(message) -> tuple[int, int, int]:
     if isinstance(response_metadata, dict):
         token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
         if isinstance(token_usage, dict):
-            prompt_tokens = max(prompt_tokens, _to_int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens")))
-            completion_tokens = max(completion_tokens, _to_int(token_usage.get("completion_tokens") or token_usage.get("output_tokens")))
+            prompt_tokens = max(
+                prompt_tokens, _to_int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens"))
+            )
+            completion_tokens = max(
+                completion_tokens, _to_int(token_usage.get("completion_tokens") or token_usage.get("output_tokens"))
+            )
             total_tokens = max(total_tokens, _to_int(token_usage.get("total_tokens")))
 
     if total_tokens <= 0:
@@ -75,6 +97,7 @@ def _extract_token_usage(message) -> tuple[int, int, int]:
 # -----------------------------
 # LLM Response Cache (Phase 1 Optimization + Request Coalescing)
 # -----------------------------
+
 
 class LLMResponseCache:
     """Thread-safe in-memory cache with request coalescing for LLM responses.
@@ -115,7 +138,7 @@ class LLMResponseCache:
 
     def _make_key(self, prompt: str) -> str:
         """Generate cache key from prompt hash."""
-        return hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]
+        return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
 
     # --- core API (backward-compatible) ---
 
@@ -143,7 +166,7 @@ class LLMResponseCache:
         # Another thread is computing this key — wait for it.
         log.info("⏳ LLM cache: waiting for in-flight result (key=%.8s…)", key)
         event, _token, _started_at = flight
-        signaled = event.wait(timeout=self._coalesce_timeout)
+        signaled = event.wait(timeout=_bounded_coalesce_wait_seconds(self._coalesce_timeout))
 
         with self._lock:
             result = self._cache.get(key)
@@ -170,7 +193,7 @@ class LLMResponseCache:
         """
 
         key = self._make_key(prompt)
-        deadline = _time.monotonic() + (self._coalesce_timeout * 2)
+        deadline = _time.monotonic() + _bounded_coalesce_wait_seconds(self._coalesce_timeout * 2)
         observed_flight = None
         while True:
             with self._lock:
@@ -296,7 +319,7 @@ def get_gemini() -> ChatGoogleGenerativeAI:
     Note: convert_system_message_to_human=True is required because Gemini
     doesn't natively support SystemMessages in the LangChain interface.
 
-    Retry configuration: max_retries=2 to prevent quota exhaustion from
+    Retry configuration: max_retries=1 to prevent quota exhaustion from
     aggressive retry behavior (default is 6 retries with exponential backoff).
     """
     global _gemini_llm
@@ -306,10 +329,10 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             google_api_key=GOOGLE_API_KEY,
             temperature=0,
             convert_system_message_to_human=True,
-            max_retries=2,  # Limit retries to prevent quota exhaustion
-            timeout=120     # Allow up to 120s for large prompts (default is 60s)
+            max_retries=1,  # attempts includes the first call: no SDK retry
+            timeout=max(1, int((GEMINI_TIMEOUT_SECONDS or 120.0) * 1000)),
         )
-        log.info("✅ Gemini LLM instance cached (max_retries=2, timeout=120s)")
+        log.info("✅ Gemini LLM instance cached (max_retries=1, timeout=120s)")
     return _gemini_llm
 
 
@@ -327,18 +350,19 @@ def get_openai() -> ChatOpenAI:
             model=OPENAI_MODEL,
             temperature=0,
             openai_api_key=OPENAI_API_KEY,
-            max_retries=2,  # Limit retries to prevent quota exhaustion
+            max_retries=0,  # application owns the only safe fallback
         )
         if OPENAI_TIMEOUT_SECONDS:
             # P5.1 (H13): a bounded call keeps a stalled OpenAI request from
             # holding the end-to-end deadline; drop retries to 1 so a timeout
             # fails over once instead of multiplying the wait.
             client_kwargs["request_timeout"] = OPENAI_TIMEOUT_SECONDS
-            client_kwargs["max_retries"] = 1
+            client_kwargs["max_retries"] = 0
         _openai_llm = ChatOpenAI(**client_kwargs)
         log.info(
             "✅ OpenAI LLM instance cached (timeout=%s, max_retries=%s)",
-            OPENAI_TIMEOUT_SECONDS or "unbounded", client_kwargs["max_retries"],
+            OPENAI_TIMEOUT_SECONDS or "request-deadline-bound",
+            client_kwargs["max_retries"],
         )
     return _openai_llm
 
@@ -364,19 +388,21 @@ def get_nvidia() -> ChatOpenAI:
             max_tokens=NVIDIA_MAX_TOKENS,
             openai_api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_BASE_URL,
-            max_retries=2,  # Limit retries to prevent quota exhaustion
+            max_retries=0,  # application owns the only safe fallback
         )
         if NVIDIA_TIMEOUT_SECONDS:
             # Bounded call: a timeout must reach the OpenAI fallback after ONE
             # attempt — retrying a slow model just multiplies the wait (see the
             # NVIDIA_TIMEOUT_SECONDS comment in config.py).
             client_kwargs["request_timeout"] = NVIDIA_TIMEOUT_SECONDS
-            client_kwargs["max_retries"] = 1
+            client_kwargs["max_retries"] = 0
         _nvidia_llm = ChatOpenAI(**client_kwargs)
         log.info(
-            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, "
-            "timeout=%s, max_retries=%s)",
-            NVIDIA_MODEL, NVIDIA_MAX_TOKENS, NVIDIA_TEMPERATURE,
-            NVIDIA_TIMEOUT_SECONDS or "unbounded", client_kwargs["max_retries"],
+            "✅ NVIDIA LLM instance cached (model=%s, max_tokens=%s, temperature=%s, timeout=%s, max_retries=%s)",
+            NVIDIA_MODEL,
+            NVIDIA_MAX_TOKENS,
+            NVIDIA_TEMPERATURE,
+            NVIDIA_TIMEOUT_SECONDS or "request-deadline-bound",
+            client_kwargs["max_retries"],
         )
     return _nvidia_llm

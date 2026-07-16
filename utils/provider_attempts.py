@@ -1,0 +1,182 @@
+"""Actor-bound, content-free provider execution reconciliation."""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+from utils.request_deadline import current_request_execution_scope
+
+log = logging.getLogger("Enai")
+
+
+class ProviderDeliveryDisposition(str, Enum):
+    STARTED = "started"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+    AMBIGUOUS = "ambiguous"
+    PERMANENT_FAILURE = "permanent_failure"
+
+
+class ProviderExecutionError(RuntimeError):
+    """Typed provider failure used to decide whether fallback is safe."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        stage: str,
+        disposition: ProviderDeliveryDisposition,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.stage = stage
+        self.disposition = disposition
+
+    @property
+    def safe_to_retry(self) -> bool:
+        return self.disposition == ProviderDeliveryDisposition.REJECTED
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAttemptToken:
+    key: str
+    provider: str
+    stage: str
+    request_id: str
+    actor_binding: str
+    bound: bool
+
+
+@dataclass(slots=True)
+class _AttemptRecord:
+    state: ProviderDeliveryDisposition
+    updated_monotonic: float
+
+
+_ATTEMPT_TTL_SECONDS = 600.0
+_ATTEMPT_MAX_ENTRIES = 4096
+_ATTEMPTS: dict[str, _AttemptRecord] = {}
+_ATTEMPT_LOCK = threading.Lock()
+
+
+def _cleanup_locked(now: float) -> None:
+    expired = [key for key, record in _ATTEMPTS.items() if now - record.updated_monotonic >= _ATTEMPT_TTL_SECONDS]
+    for key in expired:
+        _ATTEMPTS.pop(key, None)
+    while len(_ATTEMPTS) >= _ATTEMPT_MAX_ENTRIES:
+        oldest = min(_ATTEMPTS, key=lambda key: _ATTEMPTS[key].updated_monotonic)
+        _ATTEMPTS.pop(oldest, None)
+
+
+def claim_provider_attempt(provider: str, stage: str) -> ProviderAttemptToken:
+    """Claim one provider/stage execution for the bound actor/request."""
+    scope = current_request_execution_scope()
+    request_id = scope.request_id if scope is not None else ""
+    actor_binding = scope.actor_binding if scope is not None else ""
+    bound = bool(request_id and actor_binding)
+    if not bound:
+        return ProviderAttemptToken("", provider, stage, request_id, actor_binding, False)
+
+    key = f"{actor_binding}|{request_id}|{provider}|{stage}"
+    now = time.monotonic()
+    with _ATTEMPT_LOCK:
+        _cleanup_locked(now)
+        existing = _ATTEMPTS.get(key)
+        if existing is not None:
+            disposition = (
+                ProviderDeliveryDisposition.AMBIGUOUS
+                if existing.state
+                in {
+                    ProviderDeliveryDisposition.STARTED,
+                    ProviderDeliveryDisposition.AMBIGUOUS,
+                }
+                else existing.state
+            )
+            raise ProviderExecutionError(
+                "provider execution already recorded for actor-bound request",
+                provider=provider,
+                stage=stage,
+                disposition=disposition,
+            )
+        _ATTEMPTS[key] = _AttemptRecord(ProviderDeliveryDisposition.STARTED, now)
+
+    log.info(
+        "Provider execution attempt started. provider=%s stage=%s request_id=%s actor_binding=%s",
+        provider,
+        stage,
+        request_id,
+        actor_binding,
+    )
+    return ProviderAttemptToken(key, provider, stage, request_id, actor_binding, True)
+
+
+def finish_provider_attempt(
+    token: ProviderAttemptToken,
+    disposition: ProviderDeliveryDisposition,
+) -> None:
+    if token.bound:
+        with _ATTEMPT_LOCK:
+            record = _ATTEMPTS.get(token.key)
+            if record is not None:
+                record.state = disposition
+                record.updated_monotonic = time.monotonic()
+    log.info(
+        "Provider execution attempt finished. provider=%s stage=%s request_id=%s actor_binding=%s disposition=%s",
+        token.provider,
+        token.stage,
+        token.request_id,
+        token.actor_binding,
+        disposition.value,
+    )
+
+
+def classify_provider_failure(error: BaseException) -> ProviderDeliveryDisposition:
+    """Conservatively distinguish rejected, permanent, and ambiguous delivery."""
+    if isinstance(error, ProviderExecutionError):
+        return error.disposition
+    status = getattr(error, "status_code", None)
+    if status is None:
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+    try:
+        status_code = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+
+    # A rate-limit response proves this attempt was rejected before execution.
+    if status_code == 429:
+        return ProviderDeliveryDisposition.REJECTED
+    if status_code in {400, 401, 403, 404, 405, 422}:
+        return ProviderDeliveryDisposition.PERMANENT_FAILURE
+    # Network errors, timeouts, and 5xx responses can arrive after the provider
+    # accepted work. Treat them as ambiguous and never blindly retry them.
+    return ProviderDeliveryDisposition.AMBIGUOUS
+
+
+def wrap_provider_failure(
+    error: BaseException,
+    *,
+    provider: str,
+    stage: str,
+    disposition: ProviderDeliveryDisposition | None = None,
+) -> ProviderExecutionError:
+    if isinstance(error, ProviderExecutionError):
+        return error
+    resolved = disposition or classify_provider_failure(error)
+    return ProviderExecutionError(
+        f"provider call failed: {type(error).__name__}",
+        provider=provider,
+        stage=stage,
+        disposition=resolved,
+    )
+
+
+def reset_provider_attempts_for_tests() -> None:
+    with _ATTEMPT_LOCK:
+        _ATTEMPTS.clear()

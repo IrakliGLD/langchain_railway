@@ -73,8 +73,7 @@ def last_day_of_month(year: int, month: int) -> str:
 def run_text_query(sql: str, params: Optional[Dict[str, Any]] = None) -> ToolResult:
     """Execute read-only SQL text and return (df, cols, rows)."""
     params = params or {}
-    with database_connection(ENGINE, operation="typed_tool_query") as conn:
-        conn.execute(text("SET TRANSACTION READ ONLY"))
+    with database_connection(ENGINE, operation="typed_tool_query", read_only=True) as conn:
         result = conn.execute(text(sql), params)
         rows = [tuple(r) for r in result.fetchall()]
         cols = list(result.keys())
@@ -87,8 +86,7 @@ def run_text_query(sql: str, params: Optional[Dict[str, Any]] = None) -> ToolRes
 def run_statement(statement: Any, params: Optional[Dict[str, Any]] = None) -> ToolResult:
     """Execute a SQLAlchemy statement object and return (df, cols, rows)."""
     params = params or {}
-    with database_connection(ENGINE, operation="typed_tool_statement") as conn:
-        conn.execute(text("SET TRANSACTION READ ONLY"))
+    with database_connection(ENGINE, operation="typed_tool_statement", read_only=True) as conn:
         result = conn.execute(statement, params)
         rows = [tuple(r) for r in result.fetchall()]
         cols = list(result.keys())

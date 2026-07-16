@@ -2523,8 +2523,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
     if share_query_detected:
         try:
-            with database_connection(ENGINE, operation="share_enrichment") as conn:
-                conn.execute(text("SET TRANSACTION READ ONLY"))
+            with database_connection(ENGINE, operation="share_enrichment", read_only=True) as conn:
                 resolved_df, used_fallback = ensure_share_dataframe(ctx.df, conn)
             if used_fallback:
                 log.warning("🔄 Share query lacked usable rows — using deterministic balancing share pivot.")
@@ -2633,8 +2632,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
                 )
 
             if not ctx.correlation_results:
-                with database_connection(ENGINE, operation="share_correlation") as conn:
-                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                with database_connection(ENGINE, operation="share_correlation", read_only=True) as conn:
                     corr_df = build_balancing_correlation_df(conn)
                 corr_df = _scope_correlation_frame(ctx, corr_df)
 
@@ -3156,8 +3154,7 @@ def _build_why_context(ctx: QueryContext) -> None:
         plant_window = [ts for ts in [prev_ts, target_ts] if ts is not None]
         if plant_window:
             try:
-                with database_connection(ENGINE, operation="scenario_enrichment") as conn:
-                    conn.execute(text("SET TRANSACTION READ ONLY"))
+                with database_connection(ENGINE, operation="scenario_enrichment", read_only=True) as conn:
                     regulated_plant_sales_df = compute_regulated_plant_sales(
                         conn,
                         start_date=min(plant_window).strftime("%Y-%m-%d"),
@@ -3208,8 +3205,7 @@ def _build_why_context(ctx: QueryContext) -> None:
     else:
         # Fall back to deterministic panel
         try:
-            with database_connection(ENGINE, operation="regulated_sales_enrichment") as conn:
-                conn.execute(text("SET TRANSACTION READ ONLY"))
+            with database_connection(ENGINE, operation="regulated_sales_enrichment", read_only=True) as conn:
                 share_panel = fetch_balancing_share_panel(conn)
         except Exception:
             share_panel = pd.DataFrame()

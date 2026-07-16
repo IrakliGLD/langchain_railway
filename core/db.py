@@ -10,7 +10,12 @@ import urllib.parse
 from sqlalchemy import create_engine
 from sqlalchemy.pool import QueuePool
 
-from config import SUPABASE_DB_URL
+from config import (
+    DB_CONNECT_TIMEOUT_SECONDS,
+    DB_POOL_TIMEOUT_SECONDS,
+    DB_STATEMENT_TIMEOUT_MS,
+    SUPABASE_DB_URL,
+)
 
 log = logging.getLogger("Enai")
 
@@ -51,13 +56,13 @@ ENGINE = create_engine(
     poolclass=QueuePool,
     pool_size=3,           # Conservative: avoids PgBouncer saturation under concurrent load
     max_overflow=2,        # Total max: 5 connections from this engine
-    pool_timeout=30,
+    pool_timeout=DB_POOL_TIMEOUT_SECONDS,
     pool_pre_ping=True,
     pool_recycle=300,      # 5 min: recycle before PgBouncer kills idle connections
     connect_args={
-        "connect_timeout": 10,  # Fail fast: 10s is sufficient for Supabase TCP handshake
-        # Phase 1D Security: Database-level query timeout (30 seconds max)
-        "options": "-c statement_timeout=30000",  # 30s in milliseconds
+        "connect_timeout": DB_CONNECT_TIMEOUT_SECONDS,
+        # Default; request calls replace it transaction-locally from remaining budget.
+        "options": f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS}",
         # PgBouncer compatibility: disable psycopg auto-prepared statements
         # to avoid "prepared statement already exists" errors in transaction-pooled mode.
         # Required for engine unification with vector_store (Fix 3).

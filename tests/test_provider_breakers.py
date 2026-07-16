@@ -178,7 +178,7 @@ class TestOpenAITimeout:
         llm_runtime.get_openai()
 
         assert captured["request_timeout"] == 120.0
-        assert captured["max_retries"] == 1
+        assert captured["max_retries"] == 0
 
     def test_unbounded_when_timeout_disabled(self, monkeypatch):
         llm_runtime, captured = self._patch_client(monkeypatch)
@@ -187,7 +187,7 @@ class TestOpenAITimeout:
         llm_runtime.get_openai()
 
         assert "request_timeout" not in captured
-        assert captured["max_retries"] == 2
+        assert captured["max_retries"] == 0
 
     def test_default_timeout_is_bounded(self):
         import config
