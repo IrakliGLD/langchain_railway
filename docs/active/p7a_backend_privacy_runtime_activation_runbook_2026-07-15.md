@@ -14,7 +14,7 @@ After the backend commit is deployed:
 - trace/session/private identifiers are reduced to keyed fingerprints while request/trace/span correlation remains available;
 - readiness rejects a staging/production database connection whose `current_user` is not the configured runtime role or whose default transaction mode is not read-only;
 - the Dockerfile is the only Railway build path, uses a pinned base-image digest, runs as UID/GID `10001`, and copies only runtime sources;
-- Railway remains configured for one in-process state owner. Do not increase workers or replicas during P7.A activation.
+- direct startup initializes `main.py` once, configured HTTP worker counts other than one fail startup, and readiness schema reflection is bounded by a success TTL, failure retry interval, and single-flight lock. Do not increase Railway replicas during P7.A activation.
 
 The code does **not** create a live database login, change Railway variables, rotate credentials, configure vendor retention, prove a replica count, or deploy an image. Those are operator actions.
 
@@ -27,11 +27,22 @@ Set these in the matching Railway environment; never paste their values into thi
 | `ENAI_DEPLOYMENT_ENV` | `staging` or `production`, matching the target. |
 | `SUPABASE_DB_URL` | Connection URL that authenticates as the dedicated `enai_api_readonly` login. |
 | `ENAI_DB_RUNTIME_ROLE` | `enai_api_readonly`; set it explicitly even though this is the staging/production default. |
+| `ENAI_HTTP_WORKERS` | `1`; set explicitly. `WEB_CONCURRENCY` and `UVICORN_WORKERS` must be unset or `1`. Any other value intentionally fails startup while state is process-local. |
+| `ENAI_HTTP_PORT` | `3000`, matching the Railway service target/network port. |
+| `ENAI_SCHEMA_READINESS_CACHE_TTL_SECONDS` | `60` unless an observed production requirement justifies a reviewed value between 5 and 3600 seconds. A schema change may take at most this interval to affect readiness. |
+| `ENAI_SCHEMA_READINESS_RETRY_INTERVAL_SECONDS` | `10` unless an observed outage requirement justifies a reviewed value between 1 and 300 seconds. Readiness stays 503 between failed reflection retries. |
 | `ENAI_LOG_HASH_KEY` | Independent random secret, at least 32 bytes. Rotation intentionally breaks fingerprint continuity. If absent, the session-signing secret is used as a compatibility fallback. |
 | `ENAI_FIXTURE_CAPTURE_MODE` | `off` (default). Production rejects `raw`. |
 | `ENAI_FIXTURE_CAPTURE_SAMPLE_RATE` | `0`. |
 
 Keep the existing application/provider/authentication secrets. Rotate them under the normal secret-rotation procedure; do not combine every secret rotation with the database-role cutover unless rollback ownership is clear.
+
+After deploying the F1 runtime batch:
+
+1. Confirm the startup banner, knowledge-file load, schema reflection, and skill-cache warmup each occur once for the process; duplicate startup initialization is a failure.
+2. Call `/readyz` repeatedly for longer than the configured success TTL. In healthy state, schema-reflection completion should occur at most once per TTL per process, not once per probe.
+3. During an approved failure-injection window, make reflection fail and confirm `/readyz` remains 503 while reflection attempts occur at most once per retry interval per process.
+4. Export the Railway service control-plane settings proving exactly one replica and disabled autoscaling. The one-worker source guard does not constrain replica count.
 
 ## 3. Create and canary the database role
 
@@ -130,15 +141,17 @@ Run automated canary scans against staging logs using synthetic email, UUID, JWT
 
 ## 7. Evidence ledger
 
+Evidence below records operator-confirmed production actions only. No staging database is available, so the production canary does not imply staging evidence. Unobserved smoke and control-plane settings remain pending rather than being inferred from deployment success.
+
 | Gate | Staging evidence | Production evidence | Owner/status |
 |---|---|---|---|
-| Dedicated DB role and denial probes | Pending | Pending | Manual verification pending |
+| Dedicated DB role and denial probes | Not available (no staging database) | Operator confirmed `enai_api_readonly` identity/read-only and allowed/denied probes; production `/readyz` passed on 2026-07-16 | Production verified; staging unavailable |
 | Old broad credential revoked | N/A until canary | Pending | Manual verification pending |
 | PUBLIC/network grant inventory | Pending | Pending | Manual verification pending |
 | Exact-SHA workflow/SBOM/audit | Pending | Pending | Manual verification pending |
 | Non-root/excluded-artifact inspection | Pending | Pending | Manual verification pending |
-| `/healthz`, `/readyz`, `/ask`, `/metrics` smoke | Pending | Pending | Manual verification pending |
-| One replica/one worker | Pending | Pending | Manual verification pending |
+| `/healthz`, `/readyz`, `/ask`, `/metrics` smoke | Pending | Railway startup and `/readyz` passed; `/healthz`, authenticated `/ask`, rejection, and `/metrics` evidence not recorded | Partial; manual verification pending |
+| One replica/one worker | Pending | Baseline deployment output showed one Uvicorn process and a `1/1` healthcheck. F1 enforces one configured worker in source, but its deployment and the replica/autoscaling control-plane export are not recorded. | Partial; deploy F1 and retain control-plane attestation |
 | Rollback rehearsal and owners | Pending | Pending | Manual verification pending |
 | Vendor retention/access/export/deletion | Pending | Pending | Privacy-owner approval pending |
 | Synthetic log canary scan | Pending | Pending | Manual verification pending |
