@@ -25,14 +25,24 @@ os.environ.setdefault("OPENAI_API_KEY", "export-openai-key")
 
 from contracts.chat_gateway_contract import (  # noqa: E402
     CONTRACT_ARTIFACT_PATH,
+    V2_CONTRACT_ARTIFACT_PATH,
     serialize_contract_document,
+)
+from models import (  # noqa: E402
+    CHAT_GATEWAY_CONTRACT_VERSION,
+    CHAT_GATEWAY_V2_CONTRACT_VERSION,
 )
 
 
 def main() -> None:
-    payload = serialize_contract_document()
-    CONTRACT_ARTIFACT_PATH.write_text(payload, encoding="utf-8")
-    print(f"Wrote {CONTRACT_ARTIFACT_PATH} ({len(payload)} bytes)")
+    artifacts = (
+        (CHAT_GATEWAY_CONTRACT_VERSION, CONTRACT_ARTIFACT_PATH),
+        (CHAT_GATEWAY_V2_CONTRACT_VERSION, V2_CONTRACT_ARTIFACT_PATH),
+    )
+    for contract_version, artifact_path in artifacts:
+        payload = serialize_contract_document(contract_version=contract_version)
+        artifact_path.write_text(payload, encoding="utf-8")
+        print(f"Wrote {artifact_path} ({len(payload)} bytes)")
 
 
 if __name__ == "__main__":

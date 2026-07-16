@@ -112,6 +112,7 @@ from context import (
     DERIVED_LABELS,
     scrub_schema_mentions,
 )
+from contracts.chat_gateway_v2 import build_chat_gateway_v2_response
 from core.db_gateway import database_connection
 from core.llm import (
     classify_query_type,
@@ -133,10 +134,13 @@ from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_
 from guardrails.firewall import build_safe_refusal_message, inspect_query
 from models import (
     CHAT_GATEWAY_CONTRACT_VERSION,
+    CHAT_GATEWAY_V2_CONTRACT_VERSION,
+    SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS,
     APIErrorResponse,
     APIResponse,
     MetricsResponse,
     Question,
+    TerminalOutcome,
 )
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
@@ -788,7 +792,12 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             response.headers["X-Request-ID"] = request_id
             response.headers["X-Trace-ID"] = span_id
             response.headers["X-Enai-Span-ID"] = span_id
-            response.headers["X-Enai-Contract-Version"] = CHAT_GATEWAY_CONTRACT_VERSION
+            declared_contract = request.headers.get("x-enai-contract-version")
+            response.headers["X-Enai-Contract-Version"] = (
+                declared_contract
+                if declared_contract in SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS
+                else CHAT_GATEWAY_CONTRACT_VERSION
+            )
             matched = request.scope.get("route") is not None
             level = logging.INFO if matched else logging.DEBUG
             log.log(
@@ -1266,17 +1275,44 @@ def ask_post(
             response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
         return request_llm_telemetry
 
+    def _v2_response(payload) -> JSONResponse:
+        result = JSONResponse(
+            content=payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
+        for header_name, header_value in response.headers.items():
+            if header_name.lower().startswith("x-"):
+                result.headers[header_name] = header_value
+        return result
+
     if not _check_preauth_rate_limit(request):
         _finalize_request_telemetry()
         log_security_event("preauth_rate_limit_exceeded", request=request)
         raise AskAPIError(429, "RATE_LIMITED", "Rate limit exceeded", retryable=True)
+
+    selected_contract_version = (
+        x_enai_contract_version or CHAT_GATEWAY_CONTRACT_VERSION
+    )
+    if selected_contract_version not in SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS:
+        _finalize_request_telemetry()
+        log_security_event(
+            "unsupported_gateway_contract",
+            request=request,
+            provided_version=selected_contract_version,
+            supported_versions=sorted(SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS),
+        )
+        raise AskAPIError(
+            409,
+            "UNSUPPORTED_CONTRACT_VERSION",
+            "Unsupported chat gateway contract version",
+        )
+    request.state.chat_gateway_contract_version = selected_contract_version
 
     try:
         caller: CallerContext = authenticate_request(
             x_app_key=x_app_key,
             authorization=authorization,
             request_id=request_id,
-            contract_version=CHAT_GATEWAY_CONTRACT_VERSION,
+            contract_version=selected_contract_version,
             x_actor_id=x_enai_actor_id,
             x_actor_session_id=x_enai_session_id,
             x_actor_issued_at=x_enai_actor_issued_at,
@@ -1307,25 +1343,6 @@ def ask_post(
             getattr(request.state, "parent_span_id", ""),
         )
 
-    # Keep the declaration optional while the backend and edge deploy
-    # independently. Once a caller declares a version, fail closed before any
-    # model or database work if it is not supported.
-    if x_enai_contract_version is not None and not hmac.compare_digest(
-        x_enai_contract_version,
-        CHAT_GATEWAY_CONTRACT_VERSION,
-    ):
-        _finalize_request_telemetry()
-        log_security_event(
-            "unsupported_gateway_contract",
-            request=request,
-            provided_version=x_enai_contract_version,
-            supported_version=CHAT_GATEWAY_CONTRACT_VERSION,
-        )
-        raise AskAPIError(
-            409,
-            "UNSUPPORTED_CONTRACT_VERSION",
-            "Unsupported chat gateway contract version",
-        )
     try:
         request_deadline = build_request_deadline(
             x_enai_request_budget_ms,
@@ -1505,8 +1522,23 @@ def ask_post(
                     "risk_score": firewall_decision.risk_score,
                 },
             )
+            safe_answer = build_safe_refusal_message(firewall_decision)
+            if selected_contract_version == CHAT_GATEWAY_V2_CONTRACT_VERSION:
+                return _v2_response(
+                    build_chat_gateway_v2_response(
+                        None,
+                        answer=safe_answer,
+                        request_id=request_id,
+                        execution_time=exec_time,
+                        answer_provenance=build_answer_provenance(None),
+                        session_continuity_available=bool(
+                            reused_existing_session or bound_history
+                        ),
+                        terminal_outcome=TerminalOutcome.POLICY_BLOCKED,
+                    )
+                )
             return APIResponse(
-                answer=build_safe_refusal_message(firewall_decision),
+                answer=safe_answer,
                 charts=None,
                 chart_data=None,
                 chart_type=None,
@@ -1601,6 +1633,20 @@ def ask_post(
         )
 
         response.headers["X-Enai-Deadline-Remaining-Ms"] = str(request_deadline.remaining_ms())
+        if selected_contract_version == CHAT_GATEWAY_V2_CONTRACT_VERSION:
+            return _v2_response(
+                build_chat_gateway_v2_response(
+                    ctx,
+                    answer=ctx.summary,
+                    request_id=request_id,
+                    execution_time=exec_time,
+                    answer_provenance=build_answer_provenance(ctx),
+                    session_continuity_available=bool(
+                        reused_existing_session or bound_history
+                    ),
+                )
+            )
+
         return APIResponse(
             answer=ctx.summary,
             charts=(project_public_charts(getattr(ctx, "charts", None)) or None),

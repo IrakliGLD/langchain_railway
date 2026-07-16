@@ -580,6 +580,44 @@ def test_ask_preserves_request_correlation_and_publishes_contract_version(monkey
     _clear_rate_limit_buckets()
 
 
+def test_ask_publishes_strict_additive_v2_without_changing_v1(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _clear_rate_limit_buckets()
+    request_id = "req-edge-v2-123"
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": request_id,
+            "X-Enai-Contract-Version": main_module.CHAT_GATEWAY_V2_CONTRACT_VERSION,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Enai-Contract-Version"] == "chat-gateway-v2"
+    payload = response.json()
+    assert set(payload) == {
+        "contract_version",
+        "answer",
+        "terminal_outcome",
+        "charts",
+        "provenance",
+        "trust",
+        "request_id",
+        "session",
+        "execution_time",
+    }
+    assert payload["contract_version"] == "chat-gateway-v2"
+    assert payload["request_id"] == request_id
+    assert payload["terminal_outcome"] == "data_answer"
+    assert payload["charts"] == []
+    assert "chart_metadata" not in payload
+    assert "service_tier" not in payload
+    _clear_rate_limit_buckets()
+
+
 def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatch):
     request_id = "req-p3-signed-context"
     issued_at = int(time.time())

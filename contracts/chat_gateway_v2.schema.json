@@ -1,0 +1,1100 @@
+{
+  "contract_version": "chat-gateway-v2",
+  "description": "Versioned request/response/error contract for the Enai chat gateway. Generated from models.py by scripts/export_chat_gateway_contract.py; do not edit by hand.",
+  "endpoint": "/ask",
+  "schemas": {
+    "APIErrorResponse": {
+      "$defs": {
+        "APIErrorDetail": {
+          "additionalProperties": false,
+          "description": "Stable, public-safe /ask error details for chat-gateway-v1.",
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "retryable": {
+              "title": "Retryable",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "request_id"
+          ],
+          "title": "APIErrorDetail",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Versioned /ask error envelope.",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/APIErrorDetail"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "APIErrorResponse",
+      "type": "object"
+    },
+    "ChatGatewayV2Response": {
+      "$defs": {
+        "AnalyzerProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "answer_kind": {
+              "title": "Answer Kind",
+              "type": "string"
+            },
+            "authoritative": {
+              "title": "Authoritative",
+              "type": "boolean"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "query_type": {
+              "title": "Query Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "authoritative",
+            "query_type",
+            "answer_kind",
+            "confidence"
+          ],
+          "title": "AnalyzerProvenance",
+          "type": "object"
+        },
+        "AnswerProvenance": {
+          "additionalProperties": false,
+          "properties": {
+            "analyzer": {
+              "$ref": "#/$defs/AnalyzerProvenance"
+            },
+            "answer_path": {
+              "title": "Answer Path",
+              "type": "string"
+            },
+            "data_source": {
+              "title": "Data Source",
+              "type": "string"
+            },
+            "grounding_gate": {
+              "$ref": "#/$defs/GroundingGate"
+            },
+            "provenance_refs": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Provenance Refs",
+              "type": "array"
+            },
+            "retrieval_tier": {
+              "title": "Retrieval Tier",
+              "type": "string"
+            },
+            "summary_source": {
+              "title": "Summary Source",
+              "type": "string"
+            },
+            "tool_name": {
+              "title": "Tool Name",
+              "type": "string"
+            },
+            "used_sql": {
+              "title": "Used Sql",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "answer_path",
+            "summary_source",
+            "data_source",
+            "provenance_refs",
+            "tool_name",
+            "used_sql",
+            "retrieval_tier",
+            "analyzer",
+            "grounding_gate"
+          ],
+          "title": "AnswerProvenance",
+          "type": "object"
+        },
+        "AxisSide": {
+          "enum": [
+            "left",
+            "right"
+          ],
+          "title": "AxisSide",
+          "type": "string"
+        },
+        "ChartIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/EvidenceIdentity"
+            },
+            "filter_applied": {
+              "title": "Filter Applied",
+              "type": "boolean"
+            },
+            "period": {
+              "$ref": "#/$defs/PeriodIdentity"
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unit"
+            }
+          },
+          "required": [
+            "filter_applied",
+            "period",
+            "evidence"
+          ],
+          "title": "ChartIdentity",
+          "type": "object"
+        },
+        "ChartMetadata": {
+          "additionalProperties": false,
+          "properties": {
+            "aggregation": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Aggregation"
+            },
+            "axisMode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "single",
+                    "dual"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Axismode"
+            },
+            "companionTable": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CompanionTable"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "evidenceFilterApplied": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Evidencefilterapplied"
+            },
+            "evidenceSource": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Evidencesource"
+            },
+            "evidenceUnit": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Evidenceunit"
+            },
+            "groupIndex": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Groupindex"
+            },
+            "groupSource": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Groupsource"
+            },
+            "has_projection": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Has Projection"
+            },
+            "labels": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Labels"
+            },
+            "longFrame": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Longframe"
+            },
+            "longFrameColumns": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Longframecolumns"
+            },
+            "measureTransform": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Measuretransform"
+            },
+            "projection_to": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Projection To"
+            },
+            "provenanceRefs": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provenancerefs"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Role"
+            },
+            "seasonLabels": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Seasonlabels"
+            },
+            "seriesConfig": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "$ref": "#/$defs/ChartSeriesConfig"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Seriesconfig"
+            },
+            "sourceMetrics": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sourcemetrics"
+            },
+            "timeGrain": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Timegrain"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
+            },
+            "trendlines": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/Trendline"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Trendlines"
+            },
+            "visualGoal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Visualgoal"
+            },
+            "xAxisTitle": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Xaxistitle"
+            },
+            "yAxisLeft": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Yaxisleft"
+            },
+            "yAxisRight": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Yaxisright"
+            },
+            "yAxisTitle": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Yaxistitle"
+            }
+          },
+          "title": "ChartMetadata",
+          "type": "object"
+        },
+        "ChartSeriesConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "dashStyle": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Dashstyle"
+            },
+            "stack": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Stack"
+            },
+            "type": {
+              "$ref": "#/$defs/SeriesType"
+            },
+            "yAxis": {
+              "$ref": "#/$defs/AxisSide"
+            }
+          },
+          "required": [
+            "type",
+            "yAxis"
+          ],
+          "title": "ChartSeriesConfig",
+          "type": "object"
+        },
+        "ChartSpec": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "items": {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              "title": "Data",
+              "type": "array"
+            },
+            "identity": {
+              "$ref": "#/$defs/ChartIdentity"
+            },
+            "metadata": {
+              "$ref": "#/$defs/ChartMetadata"
+            },
+            "type": {
+              "$ref": "#/$defs/ChartType"
+            }
+          },
+          "required": [
+            "type",
+            "data",
+            "metadata",
+            "identity"
+          ],
+          "title": "ChartSpec",
+          "type": "object"
+        },
+        "ChartType": {
+          "enum": [
+            "line",
+            "bar",
+            "pie",
+            "dualaxis",
+            "stackedbar"
+          ],
+          "title": "ChartType",
+          "type": "string"
+        },
+        "CompanionTable": {
+          "additionalProperties": false,
+          "properties": {
+            "columns": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "rows": {
+              "items": {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              "title": "Rows",
+              "type": "array"
+            }
+          },
+          "required": [
+            "columns",
+            "rows"
+          ],
+          "title": "CompanionTable",
+          "type": "object"
+        },
+        "EvidenceIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "refs": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Refs",
+              "type": "array"
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Source"
+            }
+          },
+          "title": "EvidenceIdentity",
+          "type": "object"
+        },
+        "GroundingGate": {
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Coverage",
+              "type": "number"
+            },
+            "passed": {
+              "title": "Passed",
+              "type": "boolean"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "passed",
+            "reason",
+            "coverage"
+          ],
+          "title": "GroundingGate",
+          "type": "object"
+        },
+        "PeriodIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End"
+            },
+            "grain": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Grain"
+            },
+            "start": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start"
+            }
+          },
+          "title": "PeriodIdentity",
+          "type": "object"
+        },
+        "PublicSessionState": {
+          "additionalProperties": false,
+          "properties": {
+            "continuity_available": {
+              "title": "Continuity Available",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "continuity_available"
+          ],
+          "title": "PublicSessionState",
+          "type": "object"
+        },
+        "SeriesType": {
+          "enum": [
+            "line",
+            "bar"
+          ],
+          "title": "SeriesType",
+          "type": "string"
+        },
+        "TerminalOutcome": {
+          "description": "Distinct terminal outcomes a request can end in (P4.4, finding H12).\n\nBefore this taxonomy, an unavailable dataset (invalid/irrelevant generated\nSQL on a data-primary request) was answered with ``answer_conceptual`` \u2014\na plausible domain narrative that masked the data failure. These outcomes\nare now modeled separately so a data failure is reported as a data failure,\nnever as a conceptual success.",
+          "enum": [
+            "data_answer",
+            "conceptual_answer",
+            "evidence_unavailable",
+            "clarification_required",
+            "policy_blocked",
+            "transient_failure"
+          ],
+          "title": "TerminalOutcome",
+          "type": "string"
+        },
+        "Trendline": {
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "title": "Column",
+              "type": "string"
+            },
+            "data": {
+              "$ref": "#/$defs/TrendlineData"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "original_label": {
+              "title": "Original Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column",
+            "label",
+            "data",
+            "original_label"
+          ],
+          "title": "Trendline",
+          "type": "object"
+        },
+        "TrendlineData": {
+          "additionalProperties": false,
+          "properties": {
+            "dates": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Dates",
+              "type": "array"
+            },
+            "equation": {
+              "title": "Equation",
+              "type": "string"
+            },
+            "intercept": {
+              "title": "Intercept",
+              "type": "number"
+            },
+            "r_squared": {
+              "title": "R Squared",
+              "type": "number"
+            },
+            "slope": {
+              "title": "Slope",
+              "type": "number"
+            },
+            "values": {
+              "items": {
+                "type": "number"
+              },
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "dates",
+            "values",
+            "equation",
+            "r_squared",
+            "slope",
+            "intercept"
+          ],
+          "title": "TrendlineData",
+          "type": "object"
+        },
+        "TrustState": {
+          "additionalProperties": false,
+          "properties": {
+            "citations": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Citations",
+              "type": "array"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "grounding_passed": {
+              "title": "Grounding Passed",
+              "type": "boolean"
+            },
+            "grounding_reason": {
+              "title": "Grounding Reason",
+              "type": "string"
+            },
+            "provenance_coverage": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Provenance Coverage",
+              "type": "number"
+            }
+          },
+          "required": [
+            "confidence",
+            "provenance_coverage",
+            "grounding_passed",
+            "grounding_reason",
+            "citations"
+          ],
+          "title": "TrustState",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "title": "Answer",
+          "type": "string"
+        },
+        "charts": {
+          "items": {
+            "$ref": "#/$defs/ChartSpec"
+          },
+          "title": "Charts",
+          "type": "array"
+        },
+        "contract_version": {
+          "const": "chat-gateway-v2",
+          "default": "chat-gateway-v2",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "execution_time": {
+          "minimum": 0.0,
+          "title": "Execution Time",
+          "type": "number"
+        },
+        "provenance": {
+          "$ref": "#/$defs/AnswerProvenance"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/PublicSessionState"
+        },
+        "terminal_outcome": {
+          "$ref": "#/$defs/TerminalOutcome"
+        },
+        "trust": {
+          "$ref": "#/$defs/TrustState"
+        }
+      },
+      "required": [
+        "answer",
+        "terminal_outcome",
+        "charts",
+        "provenance",
+        "trust",
+        "request_id",
+        "session",
+        "execution_time"
+      ],
+      "title": "ChatGatewayV2Response",
+      "type": "object"
+    },
+    "ConversationTurn": {
+      "additionalProperties": false,
+      "description": "One caller-supplied Q&A pair accepted by the chat API.",
+      "properties": {
+        "answer": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Answer",
+          "type": "string"
+        },
+        "question": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "title": "ConversationTurn",
+      "type": "object"
+    },
+    "Question": {
+      "$defs": {
+        "ConversationTurn": {
+          "additionalProperties": false,
+          "description": "One caller-supplied Q&A pair accepted by the chat API.",
+          "properties": {
+            "answer": {
+              "default": "",
+              "maxLength": 2000,
+              "title": "Answer",
+              "type": "string"
+            },
+            "question": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "title": "ConversationTurn",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "User question model for /ask endpoint.\n\nAttributes:\n    query: Natural language query in English, Georgian, or Russian\n    user_id: Legacy non-authoritative correlation label; never identity\n    conversation_history: Optional list of previous Q&A pairs for context",
+      "properties": {
+        "conversation_history": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ConversationTurn"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Last 1-3 Q&A pairs: [{'question': '...', 'answer': '...'}]",
+          "title": "Conversation History"
+        },
+        "query": {
+          "description": "Natural language query",
+          "maxLength": 2000,
+          "title": "Query",
+          "type": "string"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legacy non-authoritative label; ignored for identity and authorization",
+          "title": "User Id"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "Question",
+      "type": "object"
+    }
+  }
+}
