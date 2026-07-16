@@ -23,8 +23,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
+from contracts.chat_gateway_v2 import ChatGatewayV2Response
 from models import (
     CHAT_GATEWAY_CONTRACT_VERSION,
+    CHAT_GATEWAY_V2_CONTRACT_VERSION,
+    SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS,
     APIErrorResponse,
     APIResponse,
     ConversationTurn,
@@ -34,29 +37,47 @@ from models import (
 # The committed artifact. Lives beside this module so both the exporter and the
 # drift test resolve it the same way.
 CONTRACT_ARTIFACT_PATH = Path(__file__).resolve().parent / "chat_gateway_v1.schema.json"
+V2_CONTRACT_ARTIFACT_PATH = (
+    Path(__file__).resolve().parent / "chat_gateway_v2.schema.json"
+)
 
 # The models that form the public wire contract, keyed by their contract role.
 # Order is stable so the generated document is byte-deterministic.
-_CONTRACT_MODELS = {
+_V1_CONTRACT_MODELS = {
     "Question": Question,               # request body
     "ConversationTurn": ConversationTurn,  # request sub-object
     "APIResponse": APIResponse,         # success response body
     "APIErrorResponse": APIErrorResponse,  # error envelope
 }
 
+_V2_CONTRACT_MODELS = {
+    "Question": Question,
+    "ConversationTurn": ConversationTurn,
+    "ChatGatewayV2Response": ChatGatewayV2Response,
+    "APIErrorResponse": APIErrorResponse,
+}
 
-def build_contract_document() -> Dict[str, Any]:
+def build_contract_document(
+    contract_version: str = CHAT_GATEWAY_CONTRACT_VERSION,
+) -> Dict[str, Any]:
     """Render the versioned contract document from the current Pydantic models.
 
     The returned dict is JSON-serializable and deterministic for a given set of
     models, so a byte-for-byte comparison against the committed artifact is a
     reliable drift signal.
     """
+    if contract_version not in SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS:
+        raise ValueError(f"Unsupported chat gateway contract: {contract_version}")
+    contract_models = (
+        _V2_CONTRACT_MODELS
+        if contract_version == CHAT_GATEWAY_V2_CONTRACT_VERSION
+        else _V1_CONTRACT_MODELS
+    )
     schemas = {
-        name: model.model_json_schema() for name, model in _CONTRACT_MODELS.items()
+        name: model.model_json_schema() for name, model in contract_models.items()
     }
     return {
-        "contract_version": CHAT_GATEWAY_CONTRACT_VERSION,
+        "contract_version": contract_version,
         "endpoint": "/ask",
         "description": (
             "Versioned request/response/error contract for the Enai chat gateway. "
@@ -67,12 +88,33 @@ def build_contract_document() -> Dict[str, Any]:
     }
 
 
-def serialize_contract_document(document: Dict[str, Any] | None = None) -> str:
+def serialize_contract_document(
+    document: Dict[str, Any] | None = None,
+    *,
+    contract_version: str = CHAT_GATEWAY_CONTRACT_VERSION,
+) -> str:
     """Serialize the contract document to canonical JSON (sorted keys, 2-space)."""
-    document = document if document is not None else build_contract_document()
+    document = (
+        document
+        if document is not None
+        else build_contract_document(contract_version=contract_version)
+    )
     return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
 
 
-def load_committed_contract() -> Dict[str, Any]:
+def contract_artifact_path(contract_version: str) -> Path:
+    """Return the committed artifact path for a supported contract version."""
+    if contract_version == CHAT_GATEWAY_CONTRACT_VERSION:
+        return CONTRACT_ARTIFACT_PATH
+    if contract_version == CHAT_GATEWAY_V2_CONTRACT_VERSION:
+        return V2_CONTRACT_ARTIFACT_PATH
+    raise ValueError(f"Unsupported chat gateway contract: {contract_version}")
+
+
+def load_committed_contract(
+    contract_version: str = CHAT_GATEWAY_CONTRACT_VERSION,
+) -> Dict[str, Any]:
     """Load the committed contract artifact from disk."""
-    return json.loads(CONTRACT_ARTIFACT_PATH.read_text(encoding="utf-8"))
+    return json.loads(
+        contract_artifact_path(contract_version).read_text(encoding="utf-8")
+    )

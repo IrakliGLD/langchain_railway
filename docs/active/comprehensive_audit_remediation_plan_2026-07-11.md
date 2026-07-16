@@ -7,6 +7,8 @@
 **Latest frontend complement (2026-07-14):** Independent frontend commit `a61de51` now derives a backend budget from the existing Edge exchange timeout, reserves a five-second Edge response margin, caps the transmitted budget at `115000` milliseconds, and sends `X-Enai-Request-Budget-Ms` on the existing signed backend request. No browser runtime, database schema, backend source, or cross-repository file dependency changed. Edge deployment and staging/production failure-injection evidence remain manual; per-call DB/provider cancellation and duplicate-execution/charge evidence still keep P5.1 open.
 **Latest P5.2 update (2026-07-14):** Backend commit `ba8dd11` routes fallback SQL, typed tools, vector operations, analyzer/pipeline enrichment, readiness, and schema reflection through one classified database gateway. Only transient SQLSTATE/infrastructure failures affect the breaker; syntax, schema, constraint, validation, and content errors do not. The gateway prevents connection acquisition while open and removes the vector path's duplicate string-matched breaker notification. No frontend or database migration is required.
 **Latest backend phase update (2026-07-15):** P4.A implementation is complete in backend commits `b69ea2b`, `9da08e7`, `c2d19a8`, `286ecba`, and `7bb8d02`; the behavior-changing gates intentionally remain at `shadow`, `warn`, or `off` until their production evidence gates pass. P5.4/P5.5 are complete in `2c9e12b`, the explicit OpenAI timeout slice of P5.1 is complete in `d9ec12b`, and the versioned P6.A chat-gateway schema source is complete in `55e61c9`. P7.A's local privacy/runtime/packaging package is committed in `4e7d0bb`, but the P7.A track remains partial because live database identity/credential revocation, PUBLIC/network grants, exact-image promotion, dependency scan, one-replica topology, rollback, privacy/vendor-retention evidence, and any future shared-state implementation are still open. P8.A's first behavior-neutral extraction is complete in `c8bd654`, and its pytest/coverage/assessment debt slice is complete in `245aa1b`; the P8.A track remains incremental because further god-module extractions, remaining high-risk coverage, the Stage 0.7 production-counter decision, LIGHT latency evidence, and two-stable-release flag cleanup remain open.
+**F0 deployment reconciliation (2026-07-16):** The operator confirmed a successful Railway production deployment of backend commit `4215050b7fceeeea539f0b9ff2addd088237e158` after the fixed-port/start-command/container/schema corrections in `87e35b3` through `4215050`. Deployment logs show gateway-only authentication, Uvicorn bound to `0.0.0.0:3000`, successful required-schema reflection, and a passing Railway `/readyz` healthcheck. The operator also confirmed the `enai_api_readonly` role creation/canary, read-only and forbidden-operation probes, production runtime-URL rotation, and successful readiness under that identity. This closes the deployed P0.10 healthcheck behavior and the live-runtime-identity portion of P7.2 only. PUBLIC/network-grant review, removal of any retained broad application credential, exact-artifact/SBOM evidence, rollback rehearsal, privacy/vendor-retention evidence, and control-plane autoscaling attestation remain open. Frontend/Supabase deployment evidence is unchanged unless separately recorded in its independent repository/runbooks.
+**F1 backend runtime hardening (2026-07-16):** This local batch removes the direct-startup `main.py` re-import, rejects `ENAI_HTTP_WORKERS`, `WEB_CONCURRENCY`, or `UVICORN_WORKERS` values other than one while runtime state is process-local, and bounds readiness reflection with a success TTL, outage retry interval, and lock-protected single-flight refresh. Readiness remains fail-closed for stale or incomplete schema state. Focused concurrency, stale-cache, startup, and configuration regressions pass. Deployment cadence, replica/autoscaling control-plane evidence, and exact production-query-cost evidence remain manual gates; this does not authorize more than one Railway replica.
 **Scope:** Backend at D:/Enaiapp/langchain_railway, frontend and Supabase assets at D:/export_enai, and their deployed integration
 **Purpose:** Resolve every verified finding from the comprehensive audit and follow-up review without using severity labels as a substitute for dependency-aware prioritization
 
@@ -356,7 +358,9 @@ Use separate, reviewable changes. Do not bundle all P0 items into one large chan
 - [x] Return non-200 when any required readiness dependency, including schema reflection, is unavailable.
 - [x] Distinguish optional/degraded components explicitly.
 - [x] Let fatal startup exceptions terminate with a nonzero exit code.
-- [ ] Verify deployed platform probe/restart behavior and readiness-query cost.
+- [x] Verify deployed platform startup and `/readyz` healthcheck behavior on the production Railway service.
+- [x] Bound readiness reflection cost with a success TTL, an outage retry interval, and single-flight refresh while preserving stale-schema fail-closed behavior.
+- [ ] Verify deployed readiness-query cadence/cost and control-plane probe behavior after the F1 backend batch is released.
 
 **Acceptance:**
 
@@ -1021,7 +1025,8 @@ P3 finding disposition:
 - [ ] Bind session token, conversation, history, and contract snapshot to subject/auth mode.
 - [ ] Serialize turns per session.
 - [ ] Prevent expired tokens from recreating empty sessions.
-- [ ] Add a startup/deployment assertion for unsupported multi-worker/replica configuration.
+- [x] Add a startup assertion rejecting unsupported configured HTTP worker counts while process-local state remains active.
+- [ ] Retain deployment/control-plane evidence that Railway runs exactly one replica with autoscaling disabled; source worker enforcement cannot prove replica topology.
 - [ ] Introduce a repository abstraction and external shared state before scaling.
 
 **Acceptance:**
@@ -1205,9 +1210,9 @@ P3 finding disposition:
 | Subtask | Status | Implemented/fixed | Still required |
 |---|---|---|---|
 | P7.1 logging and public telemetry | **Partial** | `4e7d0bb`: allow-listed public response metadata; protected/internal telemetry removed from caller-visible DTOs; private actor/session/IP values hashed; routine raw query/answer/SQL previews redacted; raw fixture capture default-off, sampled, opt-in, and limited to development/test. | Attest that token/cost/model/stage telemetry storage is access-controlled; define and approve vendor retention, access, export, deletion, and incident procedures; run deployed synthetic log-canary scans. |
-| P7.2 least-privilege database identity | **Partial** | `4e7d0bb`: exact relation inventory; dedicated read-only role script; no source-controlled password; staging/production runtime-role/read-only readiness check; protected identity metrics; rollback-safe allowed/denied probe script and runbook. | Create/canary the live role, run probes against staging/production, inventory and revoke/re-grant unnecessary `PUBLIC` privileges, restrict network access, rotate the runtime URL, and revoke the old broad credential after rollback. |
+| P7.2 least-privilege database identity | **Production runtime identity verified; external hardening open** | `4e7d0bb` supplies the role/probes; the operator confirmed the production `enai_api_readonly` canary, denial probes, runtime-URL rotation, and passing readiness on 2026-07-16. No staging database is available. | Inventory and safely revoke/re-grant unnecessary `PUBLIC` privileges, restrict network access, remove any retained broad application connection secret after rollback, and retain the production evidence. |
 | P7.3 packaging and deployment artifacts | **Local implementation complete; live evidence open** | `4e7d0bb`: strict `.dockerignore`; separate development dependencies; pinned Python image digest; non-root UID/GID; explicit runtime-only `COPY`; Docker selected as the Railway path; exact-SHA SBOM/audit/manifest/archive/checksum workflow. | Run the clean image build and dependency audit, inspect the image, promote the exact tested artifact, smoke it, and retain rollback evidence. |
-| P7.4 state and scaling | **Partial/deferred** | `c8bd654`: process-local sliding-window rate-limit state extracted behind `InMemoryRateLimitRepository`, with locking, bounded eviction, aggregate-only diagnostics, and an interface suitable for a later shared implementation. | Prove exactly one live worker/replica now. If scaling is approved, implement shared session, continuity, rate-limit, and idempotency repositories with TTL/failure policies and pass multi-process/failure tests. Multi-replica operation remains prohibited. |
+| P7.4 state and scaling | **Partial/deferred; one worker enforced in source** | `c8bd654`: process-local sliding-window rate-limit state is behind `InMemoryRateLimitRepository`. The F1 batch passes the app object directly to Uvicorn and rejects configured worker counts other than one. | Prove exactly one live Railway replica and disabled autoscaling in the control plane. If scaling is approved later, implement shared session, continuity, rate-limit, and idempotency repositories with TTL/failure policies and pass multi-process/failure tests. Multi-replica operation remains prohibited. |
 | P7.5 dependency/deployment assurance | **Partial** | `4e7d0bb`: exact-SHA evidence workflow, SBOM/audit inputs, immutable manifest/archive/checksums, non-root/excluded-artifact checks, rollback/smoke runbook; unavailable local scanning is explicitly `Unverified`. | Execute and review the workflow for staging/production; verify deployed RLS, edge hashes, secrets, grants, replica count, artifact identity, rollback commands, and named owners. |
 | P7 exit gate | **Open** | Local backend and frontend hardening packages exist independently. | Complete privacy inventory, least-privilege proof, clean promoted-artifact proof, deployment parity, topology, smoke, and rollback attestations. |
 
@@ -1244,10 +1249,11 @@ P3 finding disposition:
 **Effort/risk:** M plus ops / Medium–High
 
 - [x] Enumerate every relation/schema/function used by typed tools, fallback SQL, vector retrieval, reflection, and readiness.
-- [x] Create a dedicated runtime role script with only required usage/select grants; live role creation remains manual.
-- [x] Add fail-closed runtime identity/read-only readiness checks and denial probes for writes, DDL, role changes, and unrelated/auth/storage schema access; live execution remains manual.
+- [x] Create the dedicated runtime role with only required usage/select grants; production creation/canary was operator-confirmed on 2026-07-16.
+- [x] Run the fail-closed runtime identity/read-only checks and denial probes; production execution was operator-confirmed and staging is unavailable.
 - [ ] Revoke unnecessary PUBLIC grants and restrict network access.
-- [ ] Canary, rotate the production connection secret, verify deployed identity, then revoke the old broad credential.
+- [x] Canary the dedicated role, rotate the production runtime URL, and verify deployed identity/read-only behavior.
+- [ ] Remove any retained broad application connection secret after the rollback window; do not revoke Supabase-managed owner roles blindly.
 - [x] Add non-destructive least-privilege probes and their operator attestation procedure.
 
 **Backend implementation evidence (2026-07-15):** Commit `4e7d0bb` aligns `scripts/least_privilege_api_role.sql` with `config.STATIC_ALLOWED_TABLES`, creates no source-controlled password, enforces read-only/time/connection defaults, checks runtime identity in readiness and protected metrics, and adds rollback-safe allowed/denied probes. The manual sequence and blockers are in `p7a_backend_privacy_runtime_activation_runbook_2026-07-15.md`.
@@ -1295,7 +1301,7 @@ P3 finding disposition:
 - Fail-open/fail-closed behavior is documented and tested.
 - Scaling configuration cannot be enabled accidentally without the shared store.
 
-**Current backend state (2026-07-15):** Commit `c8bd654` hides process-local sliding-window state behind `InMemoryRateLimitRepository`, making a future shared implementation possible without moving authentication/key derivation. It does not implement multi-replica state and does not authorize scaling. Exactly one worker/replica remains a manual production topology gate.
+**Current backend state (updated 2026-07-16):** Commit `c8bd654` hides process-local sliding-window state behind `InMemoryRateLimitRepository`, making a future shared implementation possible without moving authentication/key derivation. The F1 runtime batch now rejects configured HTTP worker counts other than one, but it does not implement multi-replica state and does not authorize scaling. Exactly one Railway replica with autoscaling disabled remains a manual production topology gate.
 
 ### P7.5 — Complete dependency and deployment assurance
 

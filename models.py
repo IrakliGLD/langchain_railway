@@ -302,6 +302,10 @@ class QueryContext:
 # a caller may declare it via X-Enai-Contract-Version and the backend fails closed
 # on a mismatch. Bump only with a coordinated, documented contract change.
 CHAT_GATEWAY_CONTRACT_VERSION = "chat-gateway-v1"
+CHAT_GATEWAY_V2_CONTRACT_VERSION = "chat-gateway-v2"
+SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS = frozenset(
+    {CHAT_GATEWAY_CONTRACT_VERSION, CHAT_GATEWAY_V2_CONTRACT_VERSION}
+)
 
 
 class ConversationTurn(BaseModel):

@@ -3,6 +3,7 @@ Basic tests for main.py functionality.
 
 To run tests: pytest tests/
 """
+import ast
 import asyncio
 import hashlib
 import hmac
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -578,6 +580,44 @@ def test_ask_preserves_request_correlation_and_publishes_contract_version(monkey
     _clear_rate_limit_buckets()
 
 
+def test_ask_publishes_strict_additive_v2_without_changing_v1(monkeypatch):
+    _install_successful_ask_mocks(monkeypatch)
+    _clear_rate_limit_buckets()
+    request_id = "req-edge-v2-123"
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": request_id,
+            "X-Enai-Contract-Version": main_module.CHAT_GATEWAY_V2_CONTRACT_VERSION,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Enai-Contract-Version"] == "chat-gateway-v2"
+    payload = response.json()
+    assert set(payload) == {
+        "contract_version",
+        "answer",
+        "terminal_outcome",
+        "charts",
+        "provenance",
+        "trust",
+        "request_id",
+        "session",
+        "execution_time",
+    }
+    assert payload["contract_version"] == "chat-gateway-v2"
+    assert payload["request_id"] == request_id
+    assert payload["terminal_outcome"] == "data_answer"
+    assert payload["charts"] == []
+    assert "chart_metadata" not in payload
+    assert "service_tier" not in payload
+    _clear_rate_limit_buckets()
+
+
 def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatch):
     request_id = "req-p3-signed-context"
     issued_at = int(time.time())
@@ -1055,6 +1095,8 @@ def test_readyz_requires_database_and_every_required_relation(
 ):
     monkeypatch.setattr(main_module, "is_database_available", lambda: database_ready)
     monkeypatch.setattr(main_module, "SCHEMA_MAP", {"stale_view": {"stale_column"}})
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
 
     def refresh_schema_map():
         assert database_ready, "schema reflection must not run when connectivity already failed"
@@ -1083,7 +1125,12 @@ def test_readyz_rejects_a_required_relation_with_a_missing_column(monkeypatch):
     schema_map[table_name].pop()
     monkeypatch.setattr(main_module, "is_database_available", lambda: True)
     monkeypatch.setattr(main_module, "SCHEMA_MAP", schema_map)
-    monkeypatch.setattr(main_module, "refresh_schema_map", lambda: True)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", time.monotonic())
+
+    def unexpected_refresh():
+        raise AssertionError("a fresh schema snapshot must be reused")
+
+    monkeypatch.setattr(main_module, "refresh_schema_map", unexpected_refresh)
 
     response = TestClient(main_module.app).get("/readyz")
 
@@ -1119,6 +1166,9 @@ def test_readyz_refreshes_schema_for_recovery_and_runtime_drift(
 
     monkeypatch.setattr(main_module, "is_database_available", lambda: True)
 
+    monkeypatch.setattr(main_module, "_schema_map_cache_is_fresh", lambda: False)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
+
     def refresh_schema_map():
         main_module.SCHEMA_MAP = resolved_states.pop(0)
         return True
@@ -1132,6 +1182,88 @@ def test_readyz_refreshes_schema_for_recovery_and_runtime_drift(
     assert [response.json()["schema_ready"] for response in responses] == [
         status == 200 for status in expected_statuses
     ]
+
+
+def test_readyz_reuses_a_fresh_schema_snapshot_without_reflection(monkeypatch):
+    complete_schema = {
+        table_name: set(required_columns)
+        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+    }
+    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
+    monkeypatch.setattr(main_module, "SCHEMA_MAP", complete_schema)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", time.monotonic())
+
+    def unexpected_refresh():
+        raise AssertionError("a fresh schema snapshot must be reused")
+
+    monkeypatch.setattr(main_module, "refresh_schema_map", unexpected_refresh)
+    client = TestClient(main_module.app)
+
+    responses = [client.get("/readyz") for _ in range(2)]
+
+    assert [response.status_code for response in responses] == [200, 200]
+
+
+def test_readyz_fails_closed_when_stale_schema_refresh_fails(monkeypatch):
+    complete_schema = {
+        table_name: set(required_columns)
+        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
+    }
+    stale_at = time.monotonic() - main_module.SCHEMA_READINESS_CACHE_TTL_SECONDS - 1
+    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
+    monkeypatch.setattr(main_module, "SCHEMA_MAP", complete_schema)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", stale_at)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
+    monkeypatch.setattr(main_module, "refresh_schema_map", lambda: False)
+
+    response = TestClient(main_module.app).get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["schema_ready"] is False
+
+
+def test_schema_refresh_is_singleflight_across_concurrent_probes(monkeypatch):
+    refresh_calls = 0
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
+
+    def refresh_schema_map():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        time.sleep(0.02)
+        main_module._SCHEMA_MAP_REFRESHED_AT = time.monotonic()
+        return True
+
+    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: main_module._ensure_schema_map_current(), range(8)))
+
+    assert results == [True] * 8
+    assert refresh_calls == 1
+
+
+def test_failed_schema_refresh_is_throttled_across_concurrent_probes(monkeypatch):
+    refresh_calls = 0
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
+    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
+
+    def refresh_schema_map():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        time.sleep(0.02)
+        main_module._SCHEMA_MAP_REFRESH_FAILED_AT = time.monotonic()
+        return False
+
+    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: main_module._ensure_schema_map_current(), range(8)))
+
+    assert results == [False] * 8
+    assert refresh_calls == 1
+    assert main_module._ensure_schema_map_current() is False
+    assert refresh_calls == 1
 
 
 def test_schema_reflection_never_expands_the_sql_allowlist(monkeypatch):
@@ -1178,6 +1310,29 @@ def test_startup_failure_exits_nonzero():
 
     assert completed.returncode != 0
     assert "forced uvicorn startup failure" in completed.stderr
+
+
+def test_direct_startup_uses_the_app_object_and_one_worker():
+    source = Path(main_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    uvicorn_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "uvicorn"
+        and node.func.attr == "run"
+    ]
+
+    assert len(uvicorn_calls) == 1
+    assert isinstance(uvicorn_calls[0].args[0], ast.Name)
+    assert uvicorn_calls[0].args[0].id == "app"
+    workers_keyword = next(
+        keyword for keyword in uvicorn_calls[0].keywords if keyword.arg == "workers"
+    )
+    assert isinstance(workers_keyword.value, ast.Name)
+    assert workers_keyword.value.id == "HTTP_SERVER_WORKERS"
 
 
 class TestTypedToolRowContract:

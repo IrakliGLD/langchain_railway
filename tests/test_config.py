@@ -16,9 +16,13 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from config import (  # noqa: E402
     HTTP_SERVER_PORT,
+    HTTP_SERVER_WORKERS,
     MAX_REQUEST_BODY_BYTES,
+    SCHEMA_READINESS_CACHE_TTL_SECONDS,
+    SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
     STATIC_ALLOWED_TABLES,
     _read_bounded_int_env,
+    _read_single_worker_count,
     validate_runtime_settings,
 )
 
@@ -39,6 +43,23 @@ def test_request_body_limit_default_is_within_the_enforced_bounds():
 
 def test_http_server_port_defaults_to_fixed_railway_target():
     assert HTTP_SERVER_PORT == 3000
+
+
+def test_http_runtime_is_pinned_to_one_worker():
+    assert HTTP_SERVER_WORKERS == 1
+
+
+@pytest.mark.parametrize("raw_value", ["0", "2", "not-an-integer"])
+def test_http_runtime_rejects_unsupported_worker_settings(monkeypatch, raw_value):
+    monkeypatch.setenv("TEST_HTTP_WORKERS", raw_value)
+
+    with pytest.raises(RuntimeError, match="TEST_HTTP_WORKERS"):
+        _read_single_worker_count("TEST_HTTP_WORKERS")
+
+
+def test_schema_readiness_cache_ttl_is_bounded():
+    assert 5 <= SCHEMA_READINESS_CACHE_TTL_SECONDS <= 3600
+    assert 1 <= SCHEMA_READINESS_RETRY_INTERVAL_SECONDS <= 300
 
 
 def test_readonly_role_grants_match_whitelist():

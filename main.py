@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -90,10 +91,13 @@ from config import (
     GATEWAY_SHARED_SECRET,
     GEMINI_MODEL,
     HTTP_SERVER_PORT,
+    HTTP_SERVER_WORKERS,
     MAX_REQUEST_BODY_BYTES,
     MODEL_TYPE,
     NVIDIA_MODEL,
     OPENAI_MODEL,
+    SCHEMA_READINESS_CACHE_TTL_SECONDS,
+    SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
     SESSION_SIGNING_SECRET,
     STATIC_ALLOWED_TABLES,
     SUPABASE_JWT_SECRET,
@@ -107,6 +111,10 @@ from context import (
     DB_SCHEMA_DOC,
     DERIVED_LABELS,
     scrub_schema_mentions,
+)
+from contracts.chat_gateway_v2 import (
+    build_chat_gateway_v2_response,
+    serialize_chat_gateway_v2_response,
 )
 from core.db_gateway import database_connection
 from core.llm import (
@@ -129,10 +137,13 @@ from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_
 from guardrails.firewall import build_safe_refusal_message, inspect_query
 from models import (
     CHAT_GATEWAY_CONTRACT_VERSION,
+    CHAT_GATEWAY_V2_CONTRACT_VERSION,
+    SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS,
     APIErrorResponse,
     APIResponse,
     MetricsResponse,
     Question,
+    TerminalOutcome,
 )
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
@@ -257,23 +268,66 @@ _ = should_inject_balancing_pivot  # noqa: F811
 # Database Schema Reflection
 # -----------------------------
 SCHEMA_MAP: Dict[str, set] = {}
+_SCHEMA_MAP_REFRESHED_AT: Optional[float] = None
+_SCHEMA_MAP_REFRESH_FAILED_AT: Optional[float] = None
+_SCHEMA_REFRESH_LOCK = threading.Lock()
 REQUIRED_SCHEMA_COLUMNS = {
     table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
     for table_name in STATIC_ALLOWED_TABLES
 }
 
 
+def schema_readiness_gaps(schema_map: Dict[str, set]) -> Dict[str, List[str]]:
+    """Return allow-listed relations and required columns absent from reflection."""
+    gaps: Dict[str, List[str]] = {}
+    for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items():
+        actual_columns = set(schema_map.get(table_name) or set())
+        missing_columns = sorted(required_columns - actual_columns)
+        if missing_columns:
+            gaps[table_name] = missing_columns
+    return gaps
+
+
 def required_schema_is_ready(schema_map: Dict[str, set]) -> bool:
     """Return whether every allow-listed relation exposes its required columns."""
-    return all(
-        required_columns.issubset(set(schema_map.get(table_name) or set()))
-        for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items()
-    )
+    return not schema_readiness_gaps(schema_map)
+
+
+def _schema_map_cache_is_fresh(now_monotonic: Optional[float] = None) -> bool:
+    """Return whether the last successful reflection remains inside its TTL."""
+    if _SCHEMA_MAP_REFRESHED_AT is None:
+        return False
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    age_seconds = now - _SCHEMA_MAP_REFRESHED_AT
+    return 0 <= age_seconds <= SCHEMA_READINESS_CACHE_TTL_SECONDS
+
+
+def _schema_refresh_retry_is_due(now_monotonic: Optional[float] = None) -> bool:
+    """Return whether a failed reflection may be retried without probe thrashing."""
+    if _SCHEMA_MAP_REFRESH_FAILED_AT is None:
+        return True
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    age_seconds = now - _SCHEMA_MAP_REFRESH_FAILED_AT
+    return age_seconds < 0 or age_seconds >= SCHEMA_READINESS_RETRY_INTERVAL_SECONDS
+
+
+def _ensure_schema_map_current() -> bool:
+    """Refresh stale schema state once across concurrent readiness probes."""
+    if _schema_map_cache_is_fresh():
+        return True
+    if not _schema_refresh_retry_is_due():
+        return False
+    with _SCHEMA_REFRESH_LOCK:
+        if _schema_map_cache_is_fresh():
+            return True
+        if not _schema_refresh_retry_is_due():
+            return False
+        return refresh_schema_map()
 
 
 def refresh_schema_map() -> bool:
     """Best-effort schema reflection; never raises to caller."""
-    global SCHEMA_MAP
+    global SCHEMA_MAP, _SCHEMA_MAP_REFRESHED_AT, _SCHEMA_MAP_REFRESH_FAILED_AT
     try:
         with database_connection(ENGINE, operation="schema_reflection") as conn:
             result = conn.execute(
@@ -294,15 +348,26 @@ def refresh_schema_map() -> bool:
             schema_map.setdefault(str(view_name).lower(), set()).add(str(column_name).lower())
 
         SCHEMA_MAP = schema_map
+        _SCHEMA_MAP_REFRESHED_AT = time.monotonic()
+        _SCHEMA_MAP_REFRESH_FAILED_AT = None
         # Reflection describes availability; it must never expand the explicit
         # SQL security allow-list when an unrelated materialized view appears.
         # The allow-list is initialized from STATIC_ALLOWED_TABLES and is not
         # mutated during refresh, avoiding a transient empty set under
         # concurrent readiness probes.
         log.info("Schema reflection complete: %s views", len(SCHEMA_MAP))
+        gaps = schema_readiness_gaps(SCHEMA_MAP)
+        if gaps:
+            gap_summary = "; ".join(
+                f"{table_name}({','.join(columns)})"
+                for table_name, columns in sorted(gaps.items())
+            )
+            log.warning("Schema readiness missing required columns: %s", gap_summary)
         return True
     except Exception as exc:
-        SCHEMA_MAP = {}
+        # Retain the last known map for diagnostics, but leave its timestamp
+        # stale so readiness cannot pass from an outdated snapshot.
+        _SCHEMA_MAP_REFRESH_FAILED_AT = time.monotonic()
         log.warning("Schema reflection unavailable: %s", exc)
         return False
 
@@ -730,7 +795,12 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             response.headers["X-Request-ID"] = request_id
             response.headers["X-Trace-ID"] = span_id
             response.headers["X-Enai-Span-ID"] = span_id
-            response.headers["X-Enai-Contract-Version"] = CHAT_GATEWAY_CONTRACT_VERSION
+            declared_contract = request.headers.get("x-enai-contract-version")
+            response.headers["X-Enai-Contract-Version"] = (
+                declared_contract
+                if declared_contract in SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS
+                else CHAT_GATEWAY_CONTRACT_VERSION
+            )
             matched = request.scope.get("route") is not None
             level = logging.INFO if matched else logging.DEBUG
             log.log(
@@ -837,7 +907,7 @@ def healthz():
 def readyz():
     """Readiness probe: live DB connectivity plus current required schema."""
     db_ready = is_database_available()
-    schema_refreshed = refresh_schema_map() if db_ready else False
+    schema_refreshed = _ensure_schema_map_current() if db_ready else False
     schema_ready = bool(
         db_ready
         and schema_refreshed
@@ -1208,17 +1278,44 @@ def ask_post(
             response.headers["X-LLM-Estimated-Cost-USD"] = f"{float(request_llm_telemetry.get('estimated_cost_usd', 0.0)):.8f}"
         return request_llm_telemetry
 
+    def _v2_response(payload) -> JSONResponse:
+        result = JSONResponse(
+            content=serialize_chat_gateway_v2_response(payload)
+        )
+        for header_name, header_value in response.headers.items():
+            if header_name.lower().startswith("x-"):
+                result.headers[header_name] = header_value
+        return result
+
     if not _check_preauth_rate_limit(request):
         _finalize_request_telemetry()
         log_security_event("preauth_rate_limit_exceeded", request=request)
         raise AskAPIError(429, "RATE_LIMITED", "Rate limit exceeded", retryable=True)
+
+    selected_contract_version = (
+        x_enai_contract_version or CHAT_GATEWAY_CONTRACT_VERSION
+    )
+    if selected_contract_version not in SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS:
+        _finalize_request_telemetry()
+        log_security_event(
+            "unsupported_gateway_contract",
+            request=request,
+            provided_version=selected_contract_version,
+            supported_versions=sorted(SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS),
+        )
+        raise AskAPIError(
+            409,
+            "UNSUPPORTED_CONTRACT_VERSION",
+            "Unsupported chat gateway contract version",
+        )
+    request.state.chat_gateway_contract_version = selected_contract_version
 
     try:
         caller: CallerContext = authenticate_request(
             x_app_key=x_app_key,
             authorization=authorization,
             request_id=request_id,
-            contract_version=CHAT_GATEWAY_CONTRACT_VERSION,
+            contract_version=selected_contract_version,
             x_actor_id=x_enai_actor_id,
             x_actor_session_id=x_enai_session_id,
             x_actor_issued_at=x_enai_actor_issued_at,
@@ -1249,25 +1346,6 @@ def ask_post(
             getattr(request.state, "parent_span_id", ""),
         )
 
-    # Keep the declaration optional while the backend and edge deploy
-    # independently. Once a caller declares a version, fail closed before any
-    # model or database work if it is not supported.
-    if x_enai_contract_version is not None and not hmac.compare_digest(
-        x_enai_contract_version,
-        CHAT_GATEWAY_CONTRACT_VERSION,
-    ):
-        _finalize_request_telemetry()
-        log_security_event(
-            "unsupported_gateway_contract",
-            request=request,
-            provided_version=x_enai_contract_version,
-            supported_version=CHAT_GATEWAY_CONTRACT_VERSION,
-        )
-        raise AskAPIError(
-            409,
-            "UNSUPPORTED_CONTRACT_VERSION",
-            "Unsupported chat gateway contract version",
-        )
     try:
         request_deadline = build_request_deadline(
             x_enai_request_budget_ms,
@@ -1447,8 +1525,23 @@ def ask_post(
                     "risk_score": firewall_decision.risk_score,
                 },
             )
+            safe_answer = build_safe_refusal_message(firewall_decision)
+            if selected_contract_version == CHAT_GATEWAY_V2_CONTRACT_VERSION:
+                return _v2_response(
+                    build_chat_gateway_v2_response(
+                        None,
+                        answer=safe_answer,
+                        request_id=request_id,
+                        execution_time=exec_time,
+                        answer_provenance=build_answer_provenance(None),
+                        session_continuity_available=bool(
+                            reused_existing_session or bound_history
+                        ),
+                        terminal_outcome=TerminalOutcome.POLICY_BLOCKED,
+                    )
+                )
             return APIResponse(
-                answer=build_safe_refusal_message(firewall_decision),
+                answer=safe_answer,
                 charts=None,
                 chart_data=None,
                 chart_type=None,
@@ -1543,6 +1636,20 @@ def ask_post(
         )
 
         response.headers["X-Enai-Deadline-Remaining-Ms"] = str(request_deadline.remaining_ms())
+        if selected_contract_version == CHAT_GATEWAY_V2_CONTRACT_VERSION:
+            return _v2_response(
+                build_chat_gateway_v2_response(
+                    ctx,
+                    answer=ctx.summary,
+                    request_id=request_id,
+                    execution_time=exec_time,
+                    answer_provenance=build_answer_provenance(ctx),
+                    session_continuity_available=bool(
+                        reused_existing_session or bound_history
+                    ),
+                )
+            )
+
         return APIResponse(
             answer=ctx.summary,
             charts=(project_public_charts(getattr(ctx, "charts", None)) or None),
@@ -1569,7 +1676,15 @@ if __name__ == "__main__":
 
         # CRITICAL: host '0.0.0.0' is required for container accessibility
         log.info(f"🚀 Starting Uvicorn server on 0.0.0.0:{HTTP_SERVER_PORT}")
-        uvicorn.run("main:app", host="0.0.0.0", port=HTTP_SERVER_PORT, log_level="info")
+        # Pass the app object directly so executing main.py does not import and
+        # initialize the module a second time inside Uvicorn.
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=HTTP_SERVER_PORT,
+            workers=HTTP_SERVER_WORKERS,
+            log_level="info",
+        )
     except ImportError:
         log.error("Uvicorn is not installed. Please install it with 'pip install uvicorn'.")
         raise

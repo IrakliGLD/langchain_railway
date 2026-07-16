@@ -54,6 +54,23 @@ def _read_bounded_int_env(name: str, default: int, minimum: int, maximum: int) -
     return value
 
 
+def _read_single_worker_count(*names: str) -> int:
+    """Reject worker settings that would split process-local runtime state."""
+    for name in names:
+        raw_value = os.getenv(name)
+        if raw_value is None or not raw_value.strip():
+            continue
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} must be the integer 1") from exc
+        if value != 1:
+            raise RuntimeError(
+                f"{name} must be 1 while session, replay, and rate-limit state are process-local"
+            )
+    return 1
+
+
 # API Security
 # Prefer the new ENAI_* names; fall back to the earlier split-secret names during rollout.
 GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
@@ -65,6 +82,17 @@ ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().l
 # independent of Railway's injected dynamic PORT value so the process and
 # healthcheck target cannot silently diverge.
 HTTP_SERVER_PORT = _read_bounded_int_env("ENAI_HTTP_PORT", 3000, 1024, 65535)
+HTTP_SERVER_WORKERS = _read_single_worker_count(
+    "ENAI_HTTP_WORKERS",
+    "WEB_CONCURRENCY",
+    "UVICORN_WORKERS",
+)
+SCHEMA_READINESS_CACHE_TTL_SECONDS = _read_bounded_int_env(
+    "ENAI_SCHEMA_READINESS_CACHE_TTL_SECONDS", 60, 5, 3600
+)
+SCHEMA_READINESS_RETRY_INTERVAL_SECONDS = _read_bounded_int_env(
+    "ENAI_SCHEMA_READINESS_RETRY_INTERVAL_SECONDS", 10, 1, 300
+)
 # P7.A database identity gate. Staging/production must connect as the
 # dedicated read-only role; development/test can leave the value empty.
 DATABASE_RUNTIME_ROLE = os.getenv(
