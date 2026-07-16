@@ -1724,6 +1724,7 @@ def test_metrics_disabled_and_auth_behavior(monkeypatch):
     authorized = client.get("/metrics", headers={"X-App-Key": "test-evaluate-key"})
     assert authorized.status_code == 200
     assert authorized.json()["status"] == "healthy"
+    assert authorized.json()["resilience"]["db_work"]["control_capacity"] >= 1
 
 
 class TestTradeSharePivot:

@@ -112,7 +112,8 @@ def test_db_read_only_is_applied_before_statement_timeout(monkeypatch):
 
 def test_db_call_does_not_checkout_when_cleanup_budget_is_unavailable(monkeypatch):
     engine = _Engine()
-    monkeypatch.setattr(db_gateway, "db_circuit_breaker", _Breaker())
+    breaker = _Breaker()
+    monkeypatch.setattr(db_gateway, "db_circuit_breaker", breaker)
     monkeypatch.setattr(db_gateway, "REQUEST_CLEANUP_ALLOWANCE_MS", 3_000)
 
     with bind_request_execution_scope(deadline=_deadline(2_000), request_id="req-db-expired", actor_id="actor-db"):
@@ -121,6 +122,8 @@ def test_db_call_does_not_checkout_when_cleanup_budget_is_unavailable(monkeypatc
                 pass
 
     assert engine.connect_count == 0
+    assert breaker.successes == 0
+    assert breaker.failures == 0
 
 
 def test_provider_receives_bounded_timeout_and_duplicate_stage_is_blocked(monkeypatch):

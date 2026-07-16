@@ -215,8 +215,12 @@ def get_llm_breaker(provider: str) -> CircuitBreaker:
 
 
 def get_resilience_snapshot() -> Dict[str, object]:
+    # Import lazily to avoid a config/resilience/coordinator startup cycle.
+    from core.db_work_coordinator import db_work_coordinator
+
     return {
         "llm_breakers": {k: v.snapshot() for k, v in _llm_breakers.items()},
         "db_breaker": db_circuit_breaker.snapshot(),
+        "db_work": db_work_coordinator.snapshot(),
         "request_backpressure": request_backpressure_gate.snapshot(),
     }

@@ -234,6 +234,45 @@ REQUEST_CLEANUP_ALLOWANCE_MS = _read_bounded_int_env(
 DB_STATEMENT_TIMEOUT_MS = _read_bounded_int_env(
     "ENAI_DB_STATEMENT_TIMEOUT_MS", 30000, minimum=100, maximum=120000,
 )
+# F5/P5.3: the process coordinator stays below the physical SQLAlchemy pool
+# ceiling and retains a dedicated readiness/control lane under saturation.
+DB_POOL_SIZE = _read_bounded_int_env(
+    "ENAI_DB_POOL_SIZE", 3, minimum=1, maximum=20,
+)
+DB_MAX_OVERFLOW = _read_bounded_int_env(
+    "ENAI_DB_MAX_OVERFLOW", 2, minimum=0, maximum=20,
+)
+DB_POOL_CONNECTION_CEILING = DB_POOL_SIZE + DB_MAX_OVERFLOW
+if DB_POOL_CONNECTION_CEILING < 2:
+    raise RuntimeError(
+        "ENAI_DB_POOL_SIZE + ENAI_DB_MAX_OVERFLOW must leave at least "
+        "one application and one control connection"
+    )
+DB_MAX_CONCURRENCY = _read_bounded_int_env(
+    "ENAI_DB_MAX_CONCURRENCY", min(4, DB_POOL_CONNECTION_CEILING),
+    minimum=2,
+    maximum=DB_POOL_CONNECTION_CEILING,
+)
+DB_CONTROL_RESERVED_SLOTS = _read_bounded_int_env(
+    "ENAI_DB_CONTROL_RESERVED_SLOTS", 1, minimum=1, maximum=DB_MAX_CONCURRENCY - 1,
+)
+DB_APPLICATION_CONCURRENCY = DB_MAX_CONCURRENCY - DB_CONTROL_RESERVED_SLOTS
+DB_QUEUE_TIMEOUT_MS = _read_bounded_int_env(
+    "ENAI_DB_QUEUE_TIMEOUT_MS", 2000, minimum=0, maximum=10000,
+)
+DB_SECONDARY_WORKERS = _read_bounded_int_env(
+    "ENAI_DB_SECONDARY_WORKERS", min(2, DB_APPLICATION_CONCURRENCY),
+    minimum=1,
+    maximum=DB_APPLICATION_CONCURRENCY,
+)
+DB_SECONDARY_PENDING_LIMIT = _read_bounded_int_env(
+    "ENAI_DB_SECONDARY_PENDING_LIMIT", max(4, DB_SECONDARY_WORKERS * 2),
+    minimum=DB_SECONDARY_WORKERS,
+    maximum=64,
+)
+DB_SECONDARY_DRAIN_TIMEOUT_MS = _read_bounded_int_env(
+    "ENAI_DB_SECONDARY_DRAIN_TIMEOUT_MS", 250, minimum=0, maximum=2000,
+)
 DB_POOL_TIMEOUT_SECONDS = _read_bounded_int_env(
     "ENAI_DB_POOL_TIMEOUT_SECONDS", 2, minimum=1, maximum=10,
 )

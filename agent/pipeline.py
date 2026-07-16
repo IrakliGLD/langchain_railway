@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import copy_context
 from dataclasses import dataclass
@@ -54,6 +54,7 @@ from analysis.shares import compute_entity_price_contributions
 from analysis.system_quantities import normalize_tool_dataframe
 from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
+    DB_SECONDARY_DRAIN_TIMEOUT_MS,
     ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
     ENABLE_EVIDENCE_REANALYSIS,
@@ -80,6 +81,10 @@ from contracts.question_analysis import (
 )
 from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
 from core.db_gateway import database_connection
+from core.db_work_coordinator import (
+    DatabaseWorkCapacityExceeded,
+    db_work_coordinator,
+)
 from core.query_executor import ENGINE
 from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
@@ -92,6 +97,9 @@ from utils.query_validation import validate_tool_relevance
 from utils.request_deadline import (
     RequestDeadlineExceeded,
     bind_request_execution_scope,
+    bind_request_execution_scope_snapshot,
+    cap_request_deadline,
+    current_request_execution_scope,
 )
 from utils.residual_price import is_implied_ppa_cfd_price_query
 from utils.trace_logging import trace_detail
@@ -1677,6 +1685,12 @@ def _prefetched_result_executor(result):
     return _executor
 
 
+def _execute_secondary_call(executor, invocation, child_deadline):
+    """Run one secondary call with its parent identity and bounded deadline."""
+    with bind_request_execution_scope_snapshot(deadline=child_deadline):
+        return executor(invocation)
+
+
 def _run_secondary_evidence_loop(
     ctx: QueryContext,
     *,
@@ -1694,18 +1708,13 @@ def _run_secondary_evidence_loop(
     into ``ctx.df`` via ``merge_evidence_into_context``.
 
     When ``EVIDENCE_PARALLEL_SECONDARY`` is on and two or more steps
-    remain, the pure-I/O tool calls are prefetched concurrently on a
-    2-worker pool (sized to the core/db.py budget of 5 connections),
-    but every ctx mutation still happens serially in plan order: each
-    prefetched result is handed to ``_execute_evidence_step`` through
-    its ``executor=`` parameter. Evidence storage order, log order,
-    trace shapes, and metric counters are therefore identical to the
-    serial path. One semantic shift: the loop budget bounds *waiting*
-    rather than *starting* — a step still running at the deadline is
-    marked ``evidence_loop_budget_exceeded`` (serially it would block
-    the loop unboundedly and starve later steps instead); its DB work
-    remains bounded by the statement timeout.
-
+    remain, pure-I/O calls are prefetched through the process-wide bounded
+    DB-work coordinator. Every call inherits an actor/request-bound child
+    deadline, while ctx mutation remains serial and plan-ordered. Evidence
+    storage order, log order, trace shapes, and metric counters are therefore
+    unchanged. The loop budget bounds waiting; queued work is cancelled at
+    exit and PostgreSQL ``statement_timeout`` bounds running DB statements.
+    A non-cooperative overrun is explicitly surfaced in coordinator metrics.
     Phase F.5.1.a moved this body out of ``evidence_planner`` into
     pipeline.py to remove the circular-import workaround that previously
     forced a lazy ``from agent.pipeline import _execute_evidence_step``
@@ -1713,7 +1722,7 @@ def _run_secondary_evidence_loop(
     preserved as a thin delegate that calls this function and passes its
     local ``execute_tool`` binding, so tests that monkey-patch
     ``agent.evidence_planner.execute_tool`` continue to work — the
-    prefetch pool submits that same binding.
+    shared secondary executor submits that same binding.
     """
     remaining = [
         s for s in ctx.evidence_plan
@@ -1740,26 +1749,58 @@ def _run_secondary_evidence_loop(
         for step in steps
     ]
 
-    # Prefetch pass: start the pure-I/O tool calls concurrently. Results are
-    # applied strictly in plan order below, so parallelism never reorders ctx
-    # mutations.
-    pool = None
-    futures: list = [None] * len(steps)
-    if EVIDENCE_PARALLEL_SECONDARY and len(steps) >= 2:
-        pool = ThreadPoolExecutor(
-            max_workers=min(2, len(steps)),
-            thread_name_prefix="stage08-prefetch",
-        )
-        futures = [
-            pool.submit(copy_context().run, executor, inv)
-            for inv in invocations
-        ]
+    # Every secondary call receives a child deadline that cannot outlive the
+    # request. Parallel work uses the one process-wide bounded executor; ctx
+    # mutation still happens strictly in plan order below.
+    child_deadline = cap_request_deadline(
+        maximum_seconds=budget,
+        source="secondary_evidence",
+    )
+    request_scope = current_request_execution_scope()
+    request_key_seed = (
+        f"{request_scope.actor_binding}:{request_scope.request_id}"
+        if request_scope is not None and request_scope.request_id
+        else ctx.trace_id or f"local-{id(ctx)}-{time.monotonic_ns()}"
+    )
+    request_key = hash_private_identifier(
+        request_key_seed,
+        namespace="secondary-request",
+    )
+    parallel = EVIDENCE_PARALLEL_SECONDARY and len(steps) >= 2
+    futures: list[Future | None] = [None] * len(steps)
+    if parallel:
+        futures = []
+        for invocation in invocations:
+            captured_context = copy_context()
+
+            def _call(
+                captured_context=captured_context,
+                invocation=invocation,
+            ):
+                return captured_context.run(
+                    _execute_secondary_call,
+                    executor,
+                    invocation,
+                    child_deadline,
+                )
+
+            try:
+                future = db_work_coordinator.submit_secondary(
+                    request_key,
+                    _call,
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
+                )
+            except DatabaseWorkCapacityExceeded as exc:
+                future = Future()
+                future.set_exception(exc)
+            futures.append(future)
 
     try:
         for step, invocation, future in zip(steps, invocations, futures):
             step_executor = executor
             if future is None:
-                # Serial path: the budget gates starting a step.
+                # Serial path: the budget gates starting a step and the DB
+                # gateway enforces the same child deadline during execution.
                 if time.monotonic() > deadline:
                     step["error"] = f"evidence_loop_budget_exceeded_{budget}s"
                     log.warning(
@@ -1767,6 +1808,13 @@ def _run_secondary_evidence_loop(
                         budget, step["tool_name"], step.get("role"),
                     )
                     continue
+
+                def step_executor(inv):
+                    return _execute_secondary_call(
+                        executor,
+                        inv,
+                        child_deadline,
+                    )
             else:
                 # Prefetched path: the budget bounds waiting for the result.
                 try:
@@ -1821,8 +1869,16 @@ def _run_secondary_evidence_loop(
                     step["role"], step["tool_name"], exc,
                 )
     finally:
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        if parallel:
+            drain = db_work_coordinator.drain_secondary(
+                request_key,
+                timeout_seconds=DB_SECONDARY_DRAIN_TIMEOUT_MS / 1000.0,
+            )
+            if drain.remaining:
+                log.error(
+                    "Secondary evidence work exceeded its parent deadline: remaining=%d",
+                    drain.remaining,
+                )
 
     ctx = evidence_planner.merge_evidence_into_context(ctx)
     ctx.evidence_plan_complete = all(s.get("satisfied") for s in ctx.evidence_plan)

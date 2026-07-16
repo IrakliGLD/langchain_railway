@@ -2,6 +2,8 @@
 
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,11 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 
 from config import (  # noqa: E402
+    DB_APPLICATION_CONCURRENCY,
+    DB_CONTROL_RESERVED_SLOTS,
+    DB_MAX_CONCURRENCY,
+    DB_POOL_CONNECTION_CEILING,
+    DB_SECONDARY_WORKERS,
     HTTP_SERVER_PORT,
     HTTP_SERVER_WORKERS,
     MAX_REQUEST_BODY_BYTES,
@@ -48,6 +55,49 @@ def test_http_server_port_defaults_to_fixed_railway_target():
 def test_http_runtime_is_pinned_to_one_worker():
     assert HTTP_SERVER_WORKERS == 1
 
+
+def test_database_work_budget_reserves_control_capacity():
+    assert DB_MAX_CONCURRENCY <= DB_POOL_CONNECTION_CEILING
+    assert DB_CONTROL_RESERVED_SLOTS >= 1
+    assert DB_APPLICATION_CONCURRENCY >= 1
+    assert DB_APPLICATION_CONCURRENCY + DB_CONTROL_RESERVED_SLOTS == DB_MAX_CONCURRENCY
+    assert DB_SECONDARY_WORKERS <= DB_APPLICATION_CONCURRENCY
+
+
+def test_database_pool_rejects_capacity_without_application_and_control_slots():
+    env = os.environ.copy()
+    env.update({"ENAI_DB_POOL_SIZE": "1", "ENAI_DB_MAX_OVERFLOW": "0"})
+    env.pop("ENAI_DB_MAX_CONCURRENCY", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "one application and one control connection" in result.stderr
+
+
+def test_lower_pool_uses_a_safe_dynamic_concurrency_default():
+    env = os.environ.copy()
+    env.update({"ENAI_DB_POOL_SIZE": "2", "ENAI_DB_MAX_OVERFLOW": "0"})
+    env.pop("ENAI_DB_MAX_CONCURRENCY", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import config; print(config.DB_MAX_CONCURRENCY)",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "2"
 
 @pytest.mark.parametrize("raw_value", ["0", "2", "not-an-integer"])
 def test_http_runtime_rejects_unsupported_worker_settings(monkeypatch, raw_value):
