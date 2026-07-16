@@ -329,7 +329,11 @@ def refresh_schema_map() -> bool:
     """Best-effort schema reflection; never raises to caller."""
     global SCHEMA_MAP, _SCHEMA_MAP_REFRESHED_AT, _SCHEMA_MAP_REFRESH_FAILED_AT
     try:
-        with database_connection(ENGINE, operation="schema_reflection") as conn:
+        with database_connection(
+            ENGINE,
+            operation="schema_reflection",
+            priority="control",
+        ) as conn:
             result = conn.execute(
                 text(
                     """

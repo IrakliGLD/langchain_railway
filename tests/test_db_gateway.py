@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -14,8 +15,11 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from core import db_gateway
+from core.db_work_coordinator import DatabaseWorkCoordinator
+from utils.request_deadline import RequestDeadline, bind_request_execution_scope
 
 
 class _Breaker:
@@ -65,6 +69,22 @@ class _FailingEngine(_Engine):
     def connect(self):
         self.connect_calls += 1
         raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+
+class _PoolExhaustedEngine(_Engine):
+    def connect(self):
+        self.connect_calls += 1
+        raise SQLAlchemyTimeoutError("pool exhausted")
+
+
+def _test_coordinator() -> DatabaseWorkCoordinator:
+    return DatabaseWorkCoordinator(
+        application_capacity=1,
+        control_capacity=1,
+        queue_timeout_seconds=0.01,
+        secondary_workers=1,
+        secondary_pending_limit=1,
+    )
 
 
 def test_open_database_circuit_never_touches_engine(monkeypatch):
@@ -182,3 +202,119 @@ def test_sqlstate_classification(sqlstate, expected):
     error = ProgrammingError("statement", {}, original)
 
     assert db_gateway.is_transient_database_error(error) is expected
+
+
+def test_application_saturation_is_bounded_without_touching_pool(monkeypatch):
+    coordinator = _test_coordinator()
+    breaker = _Breaker()
+    engine = _Engine()
+    monkeypatch.setattr(db_gateway, "db_work_coordinator", coordinator)
+    monkeypatch.setattr(db_gateway, "db_circuit_breaker", breaker)
+    monkeypatch.setattr(db_gateway, "DB_QUEUE_TIMEOUT_MS", 10)
+    try:
+        with coordinator.admission(operation="holder", timeout_seconds=0):
+            with pytest.raises(HTTPException) as exc:
+                with db_gateway.database_connection(engine, operation="saturated"):
+                    pytest.fail("saturated work must not reach the pool")
+        assert exc.value.status_code == 503
+        assert exc.value.headers == {"Retry-After": "1"}
+        assert engine.connect_calls == 0
+        assert breaker.successes == 0
+        assert breaker.failures == 0
+        assert coordinator.snapshot()["active_application"] == 0
+    finally:
+        coordinator.shutdown_for_tests()
+
+
+def test_reserved_control_lane_reaches_readiness_while_application_is_saturated(monkeypatch):
+    coordinator = _test_coordinator()
+    breaker = _Breaker()
+    engine = _Engine()
+    monkeypatch.setattr(db_gateway, "db_work_coordinator", coordinator)
+    monkeypatch.setattr(db_gateway, "db_circuit_breaker", breaker)
+    try:
+        with coordinator.admission(operation="holder", timeout_seconds=0):
+            with db_gateway.database_connection(
+                engine,
+                operation="readiness",
+                priority="control",
+            ):
+                pass
+        assert engine.connect_calls == 1
+        assert breaker.successes == 1
+        snapshot = coordinator.snapshot()
+        assert snapshot["peak_application"] == 1
+        assert snapshot["peak_control"] == 1
+    finally:
+        coordinator.shutdown_for_tests()
+
+
+def test_pool_checkout_timeout_releases_capacity_and_opens_breaker_path(monkeypatch):
+    coordinator = _test_coordinator()
+    breaker = _Breaker()
+    engine = _PoolExhaustedEngine()
+    monkeypatch.setattr(db_gateway, "db_work_coordinator", coordinator)
+    monkeypatch.setattr(db_gateway, "db_circuit_breaker", breaker)
+    try:
+        with pytest.raises(SQLAlchemyTimeoutError):
+            with db_gateway.database_connection(engine, operation="pool_exhausted"):
+                pytest.fail("pool timeout must not yield")
+        assert breaker.failures == 1
+        assert breaker.successes == 0
+        assert coordinator.snapshot()["active_application"] == 0
+    finally:
+        coordinator.shutdown_for_tests()
+
+
+def test_open_breaker_rejects_before_global_admission(monkeypatch):
+    coordinator = _test_coordinator()
+    breaker = _Breaker(allowed=False, reason="open")
+    engine = _Engine()
+    monkeypatch.setattr(db_gateway, "db_work_coordinator", coordinator)
+    monkeypatch.setattr(db_gateway, "db_circuit_breaker", breaker)
+    try:
+        with pytest.raises(HTTPException):
+            with db_gateway.database_connection(engine, operation="open"):
+                pytest.fail("open breaker must not yield")
+        snapshot = coordinator.snapshot()
+        assert snapshot["accepted_application"] == 0
+        assert snapshot["rejected_application"] == 0
+        assert engine.connect_calls == 0
+    finally:
+        coordinator.shutdown_for_tests()
+
+
+def test_deadline_bounds_global_queue_wait(monkeypatch):
+    coordinator = _test_coordinator()
+    breaker = _Breaker()
+    engine = _Engine()
+    monkeypatch.setattr(db_gateway, "db_work_coordinator", coordinator)
+    monkeypatch.setattr(db_gateway, "db_circuit_breaker", breaker)
+    monkeypatch.setattr(db_gateway, "DB_QUEUE_TIMEOUT_MS", 5000)
+    monkeypatch.setattr(db_gateway, "REQUEST_CLEANUP_ALLOWANCE_MS", 10)
+    monkeypatch.setattr(db_gateway, "DB_POOL_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(db_gateway, "DB_CONNECT_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(db_gateway, "MINIMUM_START_BUDGET_MS", 1)
+    deadline = RequestDeadline.from_budget_ms(
+        budget_ms=50,
+        now_monotonic=time.monotonic(),
+        source="test",
+    )
+    try:
+        with coordinator.admission(operation="holder", timeout_seconds=0):
+            started = time.monotonic()
+            with bind_request_execution_scope(
+                deadline=deadline,
+                request_id="request-bounded-queue",
+                actor_id="actor-bounded-queue",
+            ):
+                with pytest.raises(HTTPException) as exc:
+                    with db_gateway.database_connection(engine, operation="bounded"):
+                        pytest.fail("expired queued work must not reach the pool")
+            elapsed = time.monotonic() - started
+        assert exc.value.status_code == 503
+        assert elapsed < 0.2
+        assert engine.connect_calls == 0
+        assert coordinator.snapshot()["active_application"] == 0
+    finally:
+        coordinator.shutdown_for_tests()

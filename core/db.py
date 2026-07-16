@@ -12,6 +12,8 @@ from sqlalchemy.pool import QueuePool
 
 from config import (
     DB_CONNECT_TIMEOUT_SECONDS,
+    DB_MAX_OVERFLOW,
+    DB_POOL_SIZE,
     DB_POOL_TIMEOUT_SECONDS,
     DB_STATEMENT_TIMEOUT_MS,
     SUPABASE_DB_URL,
@@ -54,8 +56,8 @@ DB_URL = coerce_to_psycopg_url(SUPABASE_DB_URL)
 ENGINE = create_engine(
     DB_URL,
     poolclass=QueuePool,
-    pool_size=3,           # Conservative: avoids PgBouncer saturation under concurrent load
-    max_overflow=2,        # Total max: 5 connections from this engine
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
     pool_timeout=DB_POOL_TIMEOUT_SECONDS,
     pool_pre_ping=True,
     pool_recycle=300,      # 5 min: recycle before PgBouncer kills idle connections

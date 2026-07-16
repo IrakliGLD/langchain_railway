@@ -141,6 +141,53 @@ def current_request_execution_scope() -> RequestExecutionScope | None:
     return _REQUEST_EXECUTION_SCOPE.get()
 
 
+def cap_request_deadline(
+    *,
+    maximum_seconds: float,
+    source: str,
+    now_monotonic: float | None = None,
+) -> RequestDeadline:
+    """Create a child deadline that can never outlive the current request."""
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    deadline_monotonic = now + max(0.0, float(maximum_seconds))
+    current = current_request_execution_scope()
+    retry_owner = "backend"
+    if current is not None and current.deadline is not None:
+        deadline_monotonic = min(
+            deadline_monotonic,
+            current.deadline.deadline_monotonic,
+        )
+        retry_owner = current.deadline.retry_owner
+    budget_ms = max(0, math.floor((deadline_monotonic - now) * 1000))
+    return RequestDeadline(
+        budget_ms=budget_ms,
+        started_monotonic=now,
+        deadline_monotonic=deadline_monotonic,
+        source=source,
+        retry_owner=retry_owner,
+    )
+
+
+@contextmanager
+def bind_request_execution_scope_snapshot(
+    *,
+    deadline: RequestDeadline | None,
+    scope: RequestExecutionScope | None = None,
+) -> Iterator[RequestExecutionScope]:
+    """Bind a copied request identity with a narrower deadline in a worker."""
+    parent = current_request_execution_scope() if scope is None else scope
+    child = RequestExecutionScope(
+        deadline=deadline,
+        request_id="" if parent is None else parent.request_id,
+        actor_binding="" if parent is None else parent.actor_binding,
+    )
+    token = _REQUEST_EXECUTION_SCOPE.set(child)
+    try:
+        yield child
+    finally:
+        _REQUEST_EXECUTION_SCOPE.reset(token)
+
+
 @contextmanager
 def bind_request_execution_scope(
     *,

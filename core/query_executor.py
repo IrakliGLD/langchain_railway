@@ -93,7 +93,13 @@ def get_database_runtime_identity() -> DatabaseRuntimeIdentity:
     """Probe connection identity without exposing it on public endpoints."""
 
     try:
-        with database_connection(ENGINE, operation="runtime_identity_probe", begin=True, read_only=True) as conn:
+        with database_connection(
+            ENGINE,
+            operation="runtime_identity_probe",
+            begin=True,
+            read_only=True,
+            priority="control",
+        ) as conn:
             row = conn.execute(
                 text(
                     "select current_user as current_user, "
