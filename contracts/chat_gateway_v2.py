@@ -103,19 +103,19 @@ class ChartMetadata(_StrictModel):
 
 
 class PeriodIdentity(_StrictModel):
-    grain: Optional[str] = None
-    start: Optional[str] = None
-    end: Optional[str] = None
+    grain: Optional[str]
+    start: Optional[str]
+    end: Optional[str]
 
 
 class EvidenceIdentity(_StrictModel):
-    source: Optional[str] = None
-    refs: List[str] = Field(default_factory=list)
+    source: Optional[str]
+    refs: List[str]
 
 
 class ChartIdentity(_StrictModel):
     filter_applied: bool
-    unit: Optional[str] = None
+    unit: Optional[str]
     period: PeriodIdentity
     evidence: EvidenceIdentity
 
@@ -165,7 +165,7 @@ class PublicSessionState(_StrictModel):
 
 
 class ChatGatewayV2Response(_StrictModel):
-    contract_version: Literal["chat-gateway-v2"] = CHAT_GATEWAY_V2_CONTRACT_VERSION
+    contract_version: Literal["chat-gateway-v2"]
     answer: str
     terminal_outcome: TerminalOutcome
     charts: List[ChartSpec]
@@ -174,6 +174,21 @@ class ChatGatewayV2Response(_StrictModel):
     request_id: str
     session: PublicSessionState
     execution_time: float = Field(ge=0.0)
+
+
+def serialize_chat_gateway_v2_response(
+    response: ChatGatewayV2Response,
+) -> Dict[str, Any]:
+    """Serialize v2 while retaining required nullable identity members."""
+
+    public = response.model_dump(mode="json", by_alias=True, exclude_none=True)
+    public_charts = public["charts"]
+    for index, chart in enumerate(response.charts):
+        public_charts[index]["identity"] = chart.identity.model_dump(
+            mode="json",
+            by_alias=True,
+        )
+    return public
 
 
 def _bounded_float(value: Any) -> float:
@@ -292,6 +307,7 @@ def build_chat_gateway_v2_response(
     grounding = normalized_provenance.get("grounding_gate", {})
     return ChatGatewayV2Response(
         answer=answer,
+        contract_version=CHAT_GATEWAY_V2_CONTRACT_VERSION,
         terminal_outcome=resolved_outcome,
         charts=charts,
         provenance=AnswerProvenance.model_validate(normalized_provenance),

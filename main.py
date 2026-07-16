@@ -112,7 +112,10 @@ from context import (
     DERIVED_LABELS,
     scrub_schema_mentions,
 )
-from contracts.chat_gateway_v2 import build_chat_gateway_v2_response
+from contracts.chat_gateway_v2 import (
+    build_chat_gateway_v2_response,
+    serialize_chat_gateway_v2_response,
+)
 from core.db_gateway import database_connection
 from core.llm import (
     classify_query_type,
@@ -1277,7 +1280,7 @@ def ask_post(
 
     def _v2_response(payload) -> JSONResponse:
         result = JSONResponse(
-            content=payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+            content=serialize_chat_gateway_v2_response(payload)
         )
         for header_name, header_value in response.headers.items():
             if header_name.lower().startswith("x-"):

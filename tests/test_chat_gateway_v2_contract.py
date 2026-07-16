@@ -22,7 +22,10 @@ from contracts.chat_gateway_contract import (
     load_committed_contract,
     serialize_contract_document,
 )
-from contracts.chat_gateway_v2 import build_chat_gateway_v2_response
+from contracts.chat_gateway_v2 import (
+    build_chat_gateway_v2_response,
+    serialize_chat_gateway_v2_response,
+)
 from models import CHAT_GATEWAY_V2_CONTRACT_VERSION, TerminalOutcome
 
 
@@ -127,6 +130,25 @@ def test_v2_response_schema_is_closed_and_explicit():
     assert definitions["ChartMetadata"]["additionalProperties"] is False
     assert definitions["ChartIdentity"]["additionalProperties"] is False
     assert error_definitions["APIErrorDetail"]["additionalProperties"] is False
+    assert {
+        "contract_version",
+        "answer",
+        "terminal_outcome",
+        "charts",
+        "provenance",
+        "trust",
+        "request_id",
+        "session",
+        "execution_time",
+    } == set(schema["required"])
+    assert set(definitions["ChartIdentity"]["required"]) == {
+        "filter_applied",
+        "unit",
+        "period",
+        "evidence",
+    }
+    assert set(definitions["PeriodIdentity"]["required"]) == {"grain", "start", "end"}
+    assert set(definitions["EvidenceIdentity"]["required"]) == {"source", "refs"}
 
 
 def test_v2_contract_excludes_private_and_browser_authority_fields():
@@ -149,14 +171,15 @@ def test_v2_contract_excludes_private_and_browser_authority_fields():
 
 
 def test_v2_projection_preserves_multiple_charts_and_public_identity():
-    payload = build_chat_gateway_v2_response(
+    response = build_chat_gateway_v2_response(
         _context(),
         answer="Grounded answer",
         request_id="req-v2-projection",
         execution_time=1.25,
         answer_provenance=_provenance(),
         session_continuity_available=True,
-    ).model_dump(mode="json", by_alias=True, exclude_none=True)
+    )
+    payload = serialize_chat_gateway_v2_response(response)
 
     assert payload["contract_version"] == CHAT_GATEWAY_V2_CONTRACT_VERSION
     assert payload["terminal_outcome"] == "data_answer"

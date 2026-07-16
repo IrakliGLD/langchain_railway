@@ -167,12 +167,12 @@
                   "type": "null"
                 }
               ],
-              "default": null,
               "title": "Unit"
             }
           },
           "required": [
             "filter_applied",
+            "unit",
             "period",
             "evidence"
           ],
@@ -720,10 +720,13 @@
                   "type": "null"
                 }
               ],
-              "default": null,
               "title": "Source"
             }
           },
+          "required": [
+            "source",
+            "refs"
+          ],
           "title": "EvidenceIdentity",
           "type": "object"
         },
@@ -765,7 +768,6 @@
                   "type": "null"
                 }
               ],
-              "default": null,
               "title": "End"
             },
             "grain": {
@@ -777,7 +779,6 @@
                   "type": "null"
                 }
               ],
-              "default": null,
               "title": "Grain"
             },
             "start": {
@@ -789,10 +790,14 @@
                   "type": "null"
                 }
               ],
-              "default": null,
               "title": "Start"
             }
           },
+          "required": [
+            "grain",
+            "start",
+            "end"
+          ],
           "title": "PeriodIdentity",
           "type": "object"
         },
@@ -961,7 +966,6 @@
         },
         "contract_version": {
           "const": "chat-gateway-v2",
-          "default": "chat-gateway-v2",
           "title": "Contract Version",
           "type": "string"
         },
@@ -988,6 +992,7 @@
         }
       },
       "required": [
+        "contract_version",
         "answer",
         "terminal_outcome",
         "charts",
