@@ -44,6 +44,3 @@ litellm==1.44.10
 
 # SQL parsing
 sqlglot==25.25.0
-
-# Testing
-pytest==8.0.0

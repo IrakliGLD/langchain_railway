@@ -183,6 +183,10 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
     assert "FROM python:3.11.15-slim-bookworm@sha256:" in dockerfile
     assert "COPY requirements.txt" in dockerfile
     assert "requirements-dev.txt" not in dockerfile
+    runtime_requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    development_requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    assert "pytest==8.0.0" not in runtime_requirements
+    assert "pytest==8.0.0" in development_requirements
     assert "USER enai" in dockerfile
     assert "EXPOSE 3000" in dockerfile
     assert "COPY . ." not in dockerfile
@@ -226,3 +230,28 @@ def test_runtime_role_verifier_rolls_back_unexpectedly_allowed_probes():
     assert 'conn.execute("begin")' in verifier
     assert "finally:" in verifier
     assert "conn.rollback()" in verifier
+
+def test_public_privilege_inventory_is_read_only_and_covers_managed_consumers():
+    inventory = (ROOT / "scripts" / "inventory_public_privileges.sql").read_text(
+        encoding="utf-8"
+    ).lower()
+
+    for required in [
+        "public",
+        "enai_api_readonly",
+        "anon",
+        "authenticated",
+        "service_role",
+        "supabase_auth_admin",
+        "supabase_storage_admin",
+        "pg_auth_members",
+        "information_schema.table_privileges",
+        "information_schema.routine_privileges",
+        "pg_default_acl",
+    ]:
+        assert required in inventory
+    executable_sql = "\n".join(
+        line for line in inventory.splitlines() if not line.lstrip().startswith("--")
+    )
+    for forbidden in ["revoke ", "grant ", "alter ", "drop ", "delete ", "update "]:
+        assert forbidden not in executable_sql
