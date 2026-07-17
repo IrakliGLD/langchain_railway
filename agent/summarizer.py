@@ -1790,10 +1790,12 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             confidence=float(envelope.confidence),
             summary_source="structured_conceptual_summary",
         )
-    except RuntimeError:
-        # Circuit breaker open — system-level issue, don't mask with fallback
-        raise
     except Exception as exc:
+        # Same repair as the structured data path (incident 2026-07-17): the
+        # former `except RuntimeError: raise` breaker sentinel also re-raised
+        # F8's ProviderExecutionError here, turning conceptual answers into
+        # 500s. All provider failures degrade to the legacy conceptual
+        # fallback; a true provider-tier outage re-raises from the call below.
         metrics.log_summary_schema_failure()
         log.warning(
             "Structured conceptual summarization failed (%s): %s",
@@ -2948,10 +2950,16 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 debug=True,
                 summary_envelope=envelope,
             )
-        except RuntimeError:
-            # Circuit breaker open — system-level issue, don't mask with fallback
-            raise
         except Exception as e:
+            # Incident 2026-07-17: this block previously kept an
+            # `except RuntimeError: raise` clause as the breaker-open sentinel.
+            # F8's ProviderExecutionError subclasses RuntimeError, so every
+            # provider failure (including ambiguous delivery) re-raised and
+            # turned /ask into a 500 instead of degrading. Breaker-open now
+            # surfaces as ProviderExecutionError(REJECTED) with its own
+            # core-level OpenAI fallback; if the provider tier is truly down,
+            # the legacy call below re-raises immediately from its own breaker
+            # check — so provider failures of every disposition degrade here.
             metrics.log_summary_schema_failure()
             log.warning(
                 "Structured summarization failed (%s): %s",
