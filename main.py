@@ -96,9 +96,12 @@ from config import (
     MODEL_TYPE,
     NVIDIA_MODEL,
     OPENAI_MODEL,
+    REQUEST_CLEANUP_ALLOWANCE_MS,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
+    SESSION_HISTORY_MAX_ITEM_CHARS,
     SESSION_SIGNING_SECRET,
+    SESSION_TURN_WAIT_TIMEOUT_MS,
     STATIC_ALLOWED_TABLES,
     SUPABASE_JWT_SECRET,
     TRUST_PROXY_CLIENT_IP,
@@ -165,10 +168,14 @@ from utils.request_deadline import (
 )
 from utils.resilience import get_resilience_snapshot, request_backpressure_gate
 from utils.session_memory import (
+    SessionCapacityExceededError,
+    SessionExpiredError,
+    SessionTurnBusyError,
     append_exchange,
     get_history,
     get_last_contract,
-    get_or_issue_session,
+    get_or_issue_session_turn,
+    get_session_memory_snapshot,
     resolve_session_token,
     seed_history,
     set_last_contract,
@@ -555,7 +562,7 @@ def filter_caller_history(
     raw_history: Optional[List[Any]],
     *,
     is_bearer: Optional[bool] = None,
-    max_item_chars: int = 2000,
+    max_item_chars: int = SESSION_HISTORY_MAX_ITEM_CHARS,
     max_items: int = 3,
 ) -> Tuple[List[Dict[str, str]], int]:
     """Normalize caller-provided conversation history into seedable turns.
@@ -608,7 +615,11 @@ def _rate_limit_key(
     if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
         session_token = (request.headers.get("x-session-token") or "").strip()
         if session_token:
-            session_id = resolve_session_token(session_token, SESSION_SIGNING_SECRET)
+            session_id = resolve_session_token(
+                session_token,
+                SESSION_SIGNING_SECRET,
+                auth_mode="gateway",
+            )
             if session_id:
                 session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
                 return f"gateway_session:{session_hash}"
@@ -964,6 +975,7 @@ def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
             "runtime_identity": runtime_identity.protected_metadata(),
         },
         "resilience": get_resilience_snapshot(),
+        "session_memory": get_session_memory_snapshot(),
     }
 
 
@@ -1444,23 +1456,99 @@ def ask_post(
             retryable=True,
         )
 
+    session_turn_lease = None
     try:
-        session_id, session_token, reused_existing_session = get_or_issue_session(
-            x_session_token,
-            SESSION_SIGNING_SECRET,
-            actor_id=caller.actor_id,
-            authoritative_session_id=(
-                caller.session_id if caller.actor_assertion_verified else None
-            ),
-        )
+        try:
+            request_deadline.ensure_remaining(
+                "session_turn_queue",
+                minimum_ms=REQUEST_CLEANUP_ALLOWANCE_MS + 1,
+            )
+            turn_wait_seconds = min(
+                SESSION_TURN_WAIT_TIMEOUT_MS / 1000.0,
+                max(
+                    0.0,
+                    (
+                        request_deadline.remaining_ms()
+                        - REQUEST_CLEANUP_ALLOWANCE_MS
+                    ) / 1000.0,
+                ),
+            )
+            (
+                session_id,
+                session_token,
+                reused_existing_session,
+                session_turn_lease,
+            ) = get_or_issue_session_turn(
+                x_session_token,
+                SESSION_SIGNING_SECRET,
+                actor_id=caller.actor_id,
+                authoritative_session_id=(
+                    caller.session_id if caller.actor_assertion_verified else None
+                ),
+                auth_mode=caller.auth_mode,
+                timeout_seconds=turn_wait_seconds,
+            )
+        except RequestDeadlineExceeded:
+            _finalize_request_telemetry()
+            log_security_event(
+                "request_deadline_exhausted",
+                request=request,
+                stage="session_turn_queue",
+            )
+            raise AskAPIError(
+                408,
+                "REQUEST_DEADLINE_EXCEEDED",
+                "Request deadline exceeded",
+                retryable=True,
+            )
+        except SessionTurnBusyError:
+            _finalize_request_telemetry()
+            log_security_event("session_turn_busy", request=request)
+            raise AskAPIError(
+                409,
+                "SESSION_BUSY",
+                "A prior conversation turn is still running",
+                retryable=True,
+            )
+        except SessionCapacityExceededError:
+            _finalize_request_telemetry()
+            log_security_event("session_capacity_exhausted", request=request)
+            raise AskAPIError(
+                503,
+                "SESSION_CAPACITY_EXHAUSTED",
+                "Conversation capacity temporarily unavailable",
+                retryable=True,
+            )
+        except SessionExpiredError:
+            _finalize_request_telemetry()
+            log_security_event("session_expired_during_acquire", request=request)
+            raise AskAPIError(
+                409,
+                "SESSION_EXPIRED",
+                "Conversation session expired",
+                retryable=True,
+            )
+        except ValueError:
+            _finalize_request_telemetry()
+            log_security_event("session_ownership_mismatch", request=request)
+            raise AskAPIError(
+                401,
+                "SESSION_OWNERSHIP_MISMATCH",
+                "Conversation session is not owned by this caller",
+            )
+
         response.headers["X-Session-Token"] = session_token
         if x_session_token and not reused_existing_session:
             log_security_event(
-                "invalid_session_token",
+                "invalid_or_expired_session_token",
                 request=request,
                 provided=True,
             )
-        stored_history = get_history(session_id, actor_id=caller.actor_id)
+        stored_history = get_history(
+            session_id,
+            actor_id=caller.actor_id,
+            auth_mode=caller.auth_mode,
+        )
 
         # All history sources are hostile prompt data, including server-loaded
         # database turns and this process's own cached copy. Inspect both the
@@ -1488,7 +1576,12 @@ def ask_post(
         if not bound_history and caller_history:
             bound_history = caller_history
             if bound_history:
-                seed_history(session_id, bound_history, actor_id=caller.actor_id)
+                seed_history(
+                    session_id,
+                    bound_history,
+                    actor_id=caller.actor_id,
+                    auth_mode=caller.auth_mode,
+                )
                 log.info(
                     "Seeded actor-bound session history. session_hash=%s turns=%d",
                     hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
@@ -1578,6 +1671,7 @@ def ask_post(
                 previous_contract_snapshot=get_last_contract(
                     session_id,
                     actor_id=caller.actor_id,
+                    auth_mode=caller.auth_mode,
                 ),
                 request_deadline=request_deadline,
                 actor_id=caller.actor_id,
@@ -1615,10 +1709,21 @@ def ask_post(
                 "Query processing failed",
             )
 
-        append_exchange(session_id, query_text, ctx.summary, actor_id=caller.actor_id)
+        append_exchange(
+            session_id,
+            query_text,
+            ctx.summary,
+            actor_id=caller.actor_id,
+            auth_mode=caller.auth_mode,
+        )
         _contract_snapshot = continuity_snapshot_json(ctx)
         if _contract_snapshot:
-            set_last_contract(session_id, _contract_snapshot, actor_id=caller.actor_id)
+            set_last_contract(
+                session_id,
+                _contract_snapshot,
+                actor_id=caller.actor_id,
+                auth_mode=caller.auth_mode,
+            )
         req_usage = _finalize_request_telemetry()
 
         exec_time = time.time() - t0
@@ -1665,6 +1770,8 @@ def ask_post(
             execution_time=exec_time,
         )
     finally:
+        if session_turn_lease is not None:
+            session_turn_lease.release()
         request_backpressure_gate.release()
 
 
