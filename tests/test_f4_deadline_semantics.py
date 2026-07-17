@@ -152,7 +152,9 @@ def test_lost_provider_response_is_ambiguous_and_never_falls_back(monkeypatch):
 
     class _Primary:
         def invoke(self, _messages, **_kwargs):
-            raise TimeoutError("response lost after send")
+            # A dropped connection mid-response: genuinely ambiguous delivery
+            # (not a locally-enforced timeout) must never retry anywhere.
+            raise ConnectionResetError("response lost after send")
 
     monkeypatch.setattr(llm_core, "get_llm_breaker", lambda _provider: _Breaker())
     monkeypatch.setattr(llm_core, "_should_fallback_to_openai", lambda: True)
@@ -170,6 +172,35 @@ def test_lost_provider_response_is_ambiguous_and_never_falls_back(monkeypatch):
 
     assert exc.value.disposition == ProviderDeliveryDisposition.AMBIGUOUS
     assert fallback_calls == []
+
+
+def test_local_timeout_falls_back_to_openai(monkeypatch):
+    """Incident 2026-07-17: a slow primary hitting OUR client timeout must fail
+    over to OpenAI (fresh attempt claim on a different provider) instead of
+    leaving the request unanswerable."""
+
+    class _Primary:
+        def invoke(self, _messages, **_kwargs):
+            raise TimeoutError("client timeout elapsed")
+
+    class _Fallback:
+        def invoke(self, _messages, **_kwargs):
+            return SimpleNamespace(content="fallback ok")
+
+    monkeypatch.setattr(llm_core, "get_llm_breaker", lambda _provider: _Breaker())
+    monkeypatch.setattr(llm_core, "_should_fallback_to_openai", lambda: True)
+    monkeypatch.setattr(llm_core, "make_openai", lambda: _Fallback())
+
+    with bind_request_execution_scope(deadline=_deadline(), request_id="req-timeout", actor_id="actor-3"):
+        result = llm_core._invoke_with_openai_fallback(
+            lambda: _Primary(),
+            "gemini-2.5-flash",
+            [("user", "not recorded")],
+            llm_start=time.time(),
+            label="question analyzer",
+        )
+
+    assert result.content == "fallback ok"
 
 
 @pytest.mark.parametrize("status_code", [400, 401, 403, 422])

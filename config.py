@@ -161,7 +161,17 @@ NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 # times out and falls back to OpenAI instead of holding the request for
 # minutes; max_retries drops to 1 because retrying a timeout on a slow model
 # only multiplies the wait (same rationale as the Gemini summarizer client).
-_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "90").strip()
+# Default 240s (operator decision 2026-07-17): minimax-m3 analyzer calls run
+# 65-90s+, and the previous 90s per-call cap cut them off *below* the request
+# budget's own per-call allowance (~110s of ASK_MAX_REQUEST_BUDGET_MS), so a
+# merely-slow-but-fine call failed as a timeout and the request 408'd. The
+# effective per-call timeout is ALWAYS clamped to the remaining request budget
+# by request_deadline.bounded_timeout_seconds, so 240 here means "use as much
+# of the request budget as this call needs" rather than a hard 240s wall — to
+# truly allow 240s end-to-end, raise ASK_MAX_REQUEST_BUDGET_MS and the edge/
+# frontend/platform HTTP timeouts together. Override via NVIDIA_TIMEOUT_SECONDS;
+# set 0 for intentionally unbounded.
+_raw_nvidia_timeout = os.getenv("NVIDIA_TIMEOUT_SECONDS", "240").strip()
 NVIDIA_TIMEOUT_SECONDS: float | None = float(_raw_nvidia_timeout) if _raw_nvidia_timeout and float(_raw_nvidia_timeout) > 0 else None
 
 _raw_gemini_timeout = os.getenv("GEMINI_TIMEOUT_SECONDS", "120").strip()

@@ -94,6 +94,53 @@ class TestStructuredDataPathDegrades:
             summarizer.summarize_data(_data_ctx())
 
 
+class TestTimeoutClassification:
+    """Incident follow-up: locally-enforced timeouts are TIMED_OUT (fallback-safe)."""
+
+    def test_stdlib_timeout_error_is_timed_out(self):
+        from utils.provider_attempts import classify_provider_failure
+
+        assert classify_provider_failure(TimeoutError("elapsed")) is (
+            ProviderDeliveryDisposition.TIMED_OUT
+        )
+
+    def test_sdk_timeout_type_name_is_timed_out(self):
+        from utils.provider_attempts import classify_provider_failure
+
+        APITimeoutError = type("APITimeoutError", (Exception,), {})
+        assert classify_provider_failure(APITimeoutError("request timed out")) is (
+            ProviderDeliveryDisposition.TIMED_OUT
+        )
+
+    def test_wrapped_timeout_cause_is_timed_out(self):
+        from utils.provider_attempts import classify_provider_failure
+
+        wrapper = RuntimeError("langchain wrapper")
+        wrapper.__cause__ = TimeoutError("inner timeout")
+        assert classify_provider_failure(wrapper) is ProviderDeliveryDisposition.TIMED_OUT
+
+    def test_connection_reset_stays_ambiguous(self):
+        from utils.provider_attempts import classify_provider_failure
+
+        assert classify_provider_failure(ConnectionResetError("reset")) is (
+            ProviderDeliveryDisposition.AMBIGUOUS
+        )
+
+    def test_fallback_safety_matrix(self):
+        def _err(disposition):
+            return ProviderExecutionError(
+                "x", provider="nvidia", stage="s", disposition=disposition,
+            )
+
+        assert _err(ProviderDeliveryDisposition.REJECTED).safe_to_fallback is True
+        assert _err(ProviderDeliveryDisposition.TIMED_OUT).safe_to_fallback is True
+        assert _err(ProviderDeliveryDisposition.AMBIGUOUS).safe_to_fallback is False
+        assert _err(ProviderDeliveryDisposition.PERMANENT_FAILURE).safe_to_fallback is False
+        # Same-provider replay stays REJECTED-only.
+        assert _err(ProviderDeliveryDisposition.TIMED_OUT).safe_to_retry is False
+        assert _err(ProviderDeliveryDisposition.REJECTED).safe_to_retry is True
+
+
 class TestConceptualPathDegrades:
     def test_ambiguous_provider_failure_uses_legacy_conceptual_fallback(self, monkeypatch):
         monkeypatch.setattr(

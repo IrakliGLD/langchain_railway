@@ -471,9 +471,18 @@ def _wait_before_safe_fallback(stage: str) -> None:
 
 
 def _fallback_to_openai(messages, primary_exc: Exception, *, llm_start: float, label: str):
-    """Use OpenAI only after a provider explicitly rejected work pre-delivery."""
+    """Use OpenAI after pre-send rejection OR a locally-enforced timeout.
+
+    Incident 2026-07-17: gating on ``safe_to_retry`` (REJECTED only) meant a
+    slow primary provider that hit OUR client timeout never failed over —
+    the 90s analyzer timeout consumed the request budget and every /ask died.
+    ``safe_to_fallback`` additionally admits TIMED_OUT: the fallback runs on a
+    different provider under a fresh attempt claim, so the same-attempt
+    no-replay policy is untouched. Genuinely ambiguous transport failures
+    still never retry anywhere.
+    """
     stage = _attempt_stage(label)
-    if not isinstance(primary_exc, ProviderExecutionError) or not primary_exc.safe_to_retry:
+    if not isinstance(primary_exc, ProviderExecutionError) or not primary_exc.safe_to_fallback:
         metrics.log_error()
         raise primary_exc
     if not _should_fallback_to_openai():
