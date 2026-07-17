@@ -623,16 +623,23 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     issued_at = int(time.time())
     captured = {}
 
-    def _capture_session(token, secret, **kwargs):
+    class _Lease:
+        released = False
+
+        def release(self):
+            self.released = True
+
+    def _capture_session_turn(token, secret, **kwargs):
         captured["session"] = (token, secret, kwargs)
-        return "opaque-session", "opaque-session.signed", False
+        captured["lease"] = _Lease()
+        return "opaque-session", "opaque-session.signed", False, captured["lease"]
 
     def _capture_pipeline(**kwargs):
         captured["pipeline"] = kwargs
         return _fake_query_context()
 
     monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
-    monkeypatch.setattr(main_module, "get_or_issue_session", _capture_session)
+    monkeypatch.setattr(main_module, "get_or_issue_session_turn", _capture_session_turn)
     monkeypatch.setattr(main_module, "get_history", lambda _session_id, **_kwargs: [])
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
     monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
@@ -657,15 +664,92 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     )
 
     assert response.status_code == 200, response.text
-    assert captured["session"][2] == {
-        "actor_id": TEST_GATEWAY_ACTOR,
-        "authoritative_session_id": TEST_GATEWAY_SESSION,
-    }
+    session_kwargs = captured["session"][2]
+    assert session_kwargs["actor_id"] == TEST_GATEWAY_ACTOR
+    assert session_kwargs["authoritative_session_id"] == TEST_GATEWAY_SESSION
+    assert session_kwargs["auth_mode"] == "gateway"
+    assert 0 <= session_kwargs["timeout_seconds"] <= (
+        main_module.SESSION_TURN_WAIT_TIMEOUT_MS / 1000.0
+    )
+    assert captured["lease"].released is True
     assert captured["pipeline"]["trace_id"].startswith("span-")
     assert captured["pipeline"]["trace_id"] != request_id
     assert response.json()["chart_metadata"]["request_id"] == request_id
     _clear_rate_limit_buckets()
 
+
+def test_ask_rejects_cross_actor_session_token_replay(monkeypatch):
+    other_actor = "02e52594-8748-4fd6-afb6-050f710d5788"
+    issued_at = int(time.time())
+    _, actor_one_token = issue_session_token(
+        "test-session-key",
+        actor_id=TEST_GATEWAY_ACTOR,
+        auth_mode="gateway",
+    )
+    monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for cross-actor replay"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-f6-cross-actor",
+            "X-Session-Token": actor_one_token,
+            "X-Enai-Contract-Version": main_module.CHAT_GATEWAY_CONTRACT_VERSION,
+            "X-Enai-Actor-Id": other_actor,
+            "X-Enai-Session-Id": TEST_GATEWAY_SESSION,
+            "X-Enai-Actor-Issued-At": str(issued_at),
+            "X-Enai-Actor-Signature": _gateway_actor_signature(
+                "req-f6-cross-actor",
+                actor_id=other_actor,
+                issued_at=issued_at,
+            ),
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "SESSION_OWNERSHIP_MISMATCH"
+    _clear_rate_limit_buckets()
+
+
+def test_ask_rejects_overlapping_session_turn_before_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "get_or_issue_session_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            main_module.SessionTurnBusyError("prior turn still running")
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for an overlapping turn"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-f6-overlap",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == {
+        "code": "SESSION_BUSY",
+        "message": "A prior conversation turn is still running",
+        "retryable": True,
+        "request_id": "req-f6-overlap",
+    }
+    _clear_rate_limit_buckets()
 
 def test_ask_accepts_gateway_budget_and_passes_deadline_to_pipeline(monkeypatch):
     request_id = "req-p5-deadline"
@@ -1553,7 +1637,7 @@ def test_gateway_rate_limit_key_ignores_forged_session_token(monkeypatch):
 def test_gateway_rate_limit_key_uses_verified_session_token(monkeypatch):
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
     monkeypatch.setattr(main_module, "SESSION_SIGNING_SECRET", "test-session-key")
-    _, session_token = issue_session_token("test-session-key")
+    _, session_token = issue_session_token("test-session-key", auth_mode="gateway")
     request = _make_request(
         {
             "X-App-Key": "test-gateway-key",
@@ -1590,8 +1674,8 @@ def test_gateway_rate_limit_is_per_verified_session(monkeypatch):
     monkeypatch.setattr(main_module, "ASK_RATE_LIMIT_GATEWAY_PER_MINUTE", 1)
     _clear_rate_limit_buckets()
 
-    _, session_token_one = issue_session_token("test-session-key")
-    _, session_token_two = issue_session_token("test-session-key")
+    _, session_token_one = issue_session_token("test-session-key", auth_mode="gateway")
+    _, session_token_two = issue_session_token("test-session-key", auth_mode="gateway")
     request_one = _make_request(
         {
             "X-App-Key": "test-gateway-key",
@@ -1725,6 +1809,7 @@ def test_metrics_disabled_and_auth_behavior(monkeypatch):
     assert authorized.status_code == 200
     assert authorized.json()["status"] == "healthy"
     assert authorized.json()["resilience"]["db_work"]["control_capacity"] >= 1
+    assert authorized.json()["session_memory"]["supported_replicas"] == 1
 
 
 class TestTradeSharePivot:

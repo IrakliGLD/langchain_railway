@@ -386,8 +386,21 @@ ROUTER_SEMANTIC_MIN_SCORE = min(
     1.0,
     max(0.1, float(os.getenv("ROUTER_SEMANTIC_MIN_SCORE", "0.55"))),
 )
-SESSION_HISTORY_MAX_TURNS = max(1, int(os.getenv("SESSION_HISTORY_MAX_TURNS", "3")))
-SESSION_IDLE_TTL_SECONDS = max(60, int(os.getenv("SESSION_IDLE_TTL_SECONDS", "3600")))
+SESSION_HISTORY_MAX_TURNS = _read_bounded_int_env(
+    "SESSION_HISTORY_MAX_TURNS", 3, minimum=1, maximum=20,
+)
+SESSION_HISTORY_MAX_ITEM_CHARS = _read_bounded_int_env(
+    "ENAI_SESSION_HISTORY_MAX_ITEM_CHARS", 2000, minimum=256, maximum=20000,
+)
+SESSION_IDLE_TTL_SECONDS = _read_bounded_int_env(
+    "SESSION_IDLE_TTL_SECONDS", 3600, minimum=60, maximum=86400,
+)
+SESSION_MAX_ENTRIES = _read_bounded_int_env(
+    "ENAI_SESSION_MAX_ENTRIES", 2048, minimum=1, maximum=100000,
+)
+SESSION_TURN_WAIT_TIMEOUT_MS = _read_bounded_int_env(
+    "ENAI_SESSION_TURN_WAIT_TIMEOUT_MS", 5000, minimum=0, maximum=30000,
+)
 ASK_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("ASK_MAX_CONCURRENT_REQUESTS", "8")))
 ASK_BACKPRESSURE_TIMEOUT_SECONDS = max(0.0, float(os.getenv("ASK_BACKPRESSURE_TIMEOUT_SECONDS", "0.0")))
 ASK_RATE_LIMIT_PUBLIC_PER_MINUTE = max(1, int(os.getenv("ASK_RATE_LIMIT_PUBLIC_PER_MINUTE", "10")))

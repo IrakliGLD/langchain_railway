@@ -100,8 +100,9 @@ def test_snapshot_dropped_when_over_cap(monkeypatch):
 # --- session storage -------------------------------------------------------
 
 def test_session_last_contract_round_trip():
-    session_memory.set_last_contract("s-cc-1", '{"a":1}')
-    assert session_memory.get_last_contract("s-cc-1") == '{"a":1}'
+    session_id, _ = session_memory.issue_session_token("test-session-key")
+    session_memory.set_last_contract(session_id, '{"a":1}')
+    assert session_memory.get_last_contract(session_id) == '{"a":1}'
     assert session_memory.get_last_contract("s-cc-absent") == ""
     session_memory.set_last_contract("s-cc-2", "x" * 5000)  # over cap → rejected
     assert session_memory.get_last_contract("s-cc-2") == ""

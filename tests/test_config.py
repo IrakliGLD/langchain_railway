@@ -27,6 +27,9 @@ from config import (  # noqa: E402
     MAX_REQUEST_BODY_BYTES,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
+    SESSION_HISTORY_MAX_ITEM_CHARS,
+    SESSION_MAX_ENTRIES,
+    SESSION_TURN_WAIT_TIMEOUT_MS,
     STATIC_ALLOWED_TABLES,
     _read_bounded_int_env,
     _read_single_worker_count,
@@ -105,6 +108,12 @@ def test_http_runtime_rejects_unsupported_worker_settings(monkeypatch, raw_value
 
     with pytest.raises(RuntimeError, match="TEST_HTTP_WORKERS"):
         _read_single_worker_count("TEST_HTTP_WORKERS")
+
+
+def test_session_capacity_and_turn_wait_are_bounded():
+    assert 256 <= SESSION_HISTORY_MAX_ITEM_CHARS <= 20000
+    assert 1 <= SESSION_MAX_ENTRIES <= 100000
+    assert 0 <= SESSION_TURN_WAIT_TIMEOUT_MS <= 30000
 
 
 def test_schema_readiness_cache_ttl_is_bounded():
