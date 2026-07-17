@@ -19,6 +19,7 @@ class ProviderDeliveryDisposition(str, Enum):
     COMPLETED = "completed"
     REJECTED = "rejected"
     AMBIGUOUS = "ambiguous"
+    TIMED_OUT = "timed_out"
     PERMANENT_FAILURE = "permanent_failure"
 
 
@@ -40,7 +41,24 @@ class ProviderExecutionError(RuntimeError):
 
     @property
     def safe_to_retry(self) -> bool:
+        """Same-provider replay is safe only when delivery was rejected pre-send."""
         return self.disposition == ProviderDeliveryDisposition.REJECTED
+
+    @property
+    def safe_to_fallback(self) -> bool:
+        """Cross-provider fallback safety (incident 2026-07-17).
+
+        A locally-enforced timeout means OUR client abandoned the call: the
+        original provider may still bill the attempt (operator cost), but a
+        fresh attempt on a DIFFERENT provider is a distinct ledger claim, so
+        the no-replay policy is preserved while the OpenAI safety net keeps
+        the request answerable when the primary provider is slow. Truly
+        ambiguous transport failures stay non-retryable.
+        """
+        return self.disposition in {
+            ProviderDeliveryDisposition.REJECTED,
+            ProviderDeliveryDisposition.TIMED_OUT,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,8 +154,36 @@ def finish_provider_attempt(
     )
 
 
+# Exception type names that identify a locally-enforced client timeout across
+# the SDKs in use (openai/httpx/google-genai/stdlib). Matched against the
+# error and its __cause__ chain because langchain wraps SDK errors.
+_TIMEOUT_ERROR_TYPE_NAMES = frozenset({
+    "apitimeouterror",       # openai.APITimeoutError
+    "timeoutexception",      # httpx.TimeoutException
+    "connecttimeout",        # httpx.ConnectTimeout
+    "readtimeout",           # httpx.ReadTimeout / requests.ReadTimeout
+    "writetimeout",          # httpx.WriteTimeout
+    "pooltimeout",           # httpx.PoolTimeout
+    "timeouterror",          # stdlib TimeoutError / asyncio.TimeoutError
+    "deadlineexceeded",      # google.api_core.exceptions.DeadlineExceeded
+})
+
+
+def _is_timeout_error(error: BaseException) -> bool:
+    seen = 0
+    current: BaseException | None = error
+    while current is not None and seen < 5:
+        if isinstance(current, TimeoutError):
+            return True
+        if type(current).__name__.lower() in _TIMEOUT_ERROR_TYPE_NAMES:
+            return True
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return False
+
+
 def classify_provider_failure(error: BaseException) -> ProviderDeliveryDisposition:
-    """Conservatively distinguish rejected, permanent, and ambiguous delivery."""
+    """Conservatively distinguish rejected, timed-out, permanent, and ambiguous delivery."""
     if isinstance(error, ProviderExecutionError):
         return error.disposition
     status = getattr(error, "status_code", None)
@@ -154,8 +200,13 @@ def classify_provider_failure(error: BaseException) -> ProviderDeliveryDispositi
         return ProviderDeliveryDisposition.REJECTED
     if status_code in {400, 401, 403, 404, 405, 422}:
         return ProviderDeliveryDisposition.PERMANENT_FAILURE
-    # Network errors, timeouts, and 5xx responses can arrive after the provider
-    # accepted work. Treat them as ambiguous and never blindly retry them.
+    # A locally-enforced timeout (incident 2026-07-17): our client gave up, so
+    # a cross-provider fallback is safe even though the original provider may
+    # still complete server-side. Distinct from generic ambiguity below.
+    if status_code is None and _is_timeout_error(error):
+        return ProviderDeliveryDisposition.TIMED_OUT
+    # Network errors and 5xx responses can arrive after the provider accepted
+    # work. Treat them as ambiguous and never blindly retry them.
     return ProviderDeliveryDisposition.AMBIGUOUS
 
 
