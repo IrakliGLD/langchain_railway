@@ -23,7 +23,7 @@ langchain-google-genai==0.0.11
 langchain-openai==0.1.1
 
 # Data validation and serialization
-# Note: pydantic must stay compatible with both langchain 0.1.20 and google-genai
+# Note: pydantic must stay compatible with both langchain-core 0.1.52 and google-genai
 pydantic==2.9.2
 
 # Data processing and analysis

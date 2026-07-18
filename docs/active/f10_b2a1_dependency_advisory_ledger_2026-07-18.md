@@ -73,7 +73,7 @@ artifact, not to this inventory.
 | statsmodels==0.14.1 | **none** | 0 | **remove (B2.A.2)** |
 | scipy==1.11.4 | `visualization/chart_builder.py:17` | 0 | keep |
 | PyJWT==2.9.0 | `utils/auth.py:12` | 13 | upgrade → 2.13.0 (B2.A.3) |
-| tenacity==8.2.3 | **none direct** (transitive: google-genai, langchain-core) | 0 | **drop direct pin (B2.A.2)**; stays transitively |
+| tenacity==8.2.3 | **none direct** (transitive: google-genai, langchain-core) | 0 | retained as explicit **transitive version hold** (B2.A.2 outcome: dropping the pin floats the closure to 8.5.0 under the old langchain-core — untested drift); re-evaluate at B2.A.5 |
 | python-dotenv==1.0.1 | `main.py:40`, `config.py:11` | 2 | upgrade → 1.2.2 (B2.A.3) |
 | google-generativeai==0.4.1 | guarded legacy fallback only (`knowledge/vector_embeddings.py:197`, inside try/except) | 0 (but pins protobuf<5 chain) | **remove (B2.A.5)** — held until then by `langchain-google-genai==0.0.11` (`requires google-generativeai>=0.4.1,<0.5`) |
 | google-genai==1.65.0 | `knowledge/vector_embeddings.py:193` (lazy) | 0 | keep (compatible with wrapper 4.2.7: `>=1.65.0,<3`) |
@@ -122,7 +122,7 @@ From [`dependency-graph-cp311.json`](../evidence/f10_b2/dependency-graph-cp311.j
 
 | Phase | Change | Records closed | Behavior risk |
 |---|---|---:|---|
-| B2.A.2 | Delete pins: `litellm`, `langchain`, `langchain-community`, `statsmodels`, `tenacity` (direct) — one commit per removal group | 42 | None (zero imports; resolver-verified) |
+| B2.A.2 | Delete pins: `litellm`, `langchain`, `langchain-community`, `statsmodels` — one commit per removal group; `tenacity` kept as a commented transitive version hold | 42 | None (zero imports; resolver-verified) |
 | B2.A.3 | `PyJWT==2.13.0`, `python-dotenv==1.2.2` + negative JWT tests | 15 | Low (auth policy tests added first) |
 | B2.A.4 | `fastapi==0.139.2` (+ resolved `starlette==1.3.1`) after HTTP characterization | 14 | Medium (middleware/exception/CORS/limits contracts) |
 | B2.A.5 | `langchain-openai==1.3.5`, `langchain-google-genai==4.2.7`, drop `google-generativeai` (+ transitive `langchain-core 1.4.9`, `langsmith 0.10.x`, protobuf chain exits) | 23 | Medium-high (provider runtime; adapt behind `ProviderInvocationRuntime`) |

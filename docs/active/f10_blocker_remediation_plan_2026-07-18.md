@@ -170,6 +170,8 @@ This phase is first because it is high impact, relatively low risk, and makes ev
 
 #### B2.A.2 — Remove unused direct dependencies
 
+**Repository implementation status (2026-07-18): complete in commits `1eefac2` (litellm), `6f50b3b` (langchain + langchain-community), `9b9017c` (statsmodels).** Each removal was verified by a clean cp311 dry-run re-resolution: the closure shrank 101 → 87 → 72 → 70 packages with zero additions and zero version movement, and the OSV record count fell 94 → 73 → 52. All 52 remaining records belong to the B2.A.3–B2.A.5 upgrade slices. Deviation: the `tenacity` direct pin was **retained as a commented transitive version hold** — dropping it floats the closure to 8.5.0 under the old langchain-core runtime, which would be untested drift; it is re-evaluated at B2.A.5. Verification on this workstation: targeted suite 1,661 passed, Ruff clean, no repo reference (code, tests, Dockerfile, CI) to any removed package. The container-faithful full pytest on Python 3.11 and the SBOM/pip-audit artifact remain CI/release-workflow evidence at the candidate SHA (`Manual verification pending`).
+
 Start with the lowest-risk changes. The audit found no production import of `litellm` and no direct use of several umbrella LangChain packages; verify again before editing.
 
 - Remove one unused direct package/group per commit.
