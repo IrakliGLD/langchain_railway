@@ -126,3 +126,20 @@ Copy this table for B1 and every later candidate. Never replace historical rows.
 | Backend CI green at the candidate SHA | **Required for each B1/B2 commit before promotion** |
 
 **Decision:** B0 is closed for repository development. Proceed with B1 implementation and commit its independent tracks. Do not begin B3 production promotion until owners, candidate deployment identities, rollback identities, green candidate CI, and the protected evidence archive are recorded.
+
+## 10. B1 append-only implementation candidates
+
+These rows record repository candidates only. Empty operational fields are deliberate blockers; they must not be inferred from local tests or public health.
+
+| Field | Backend B1.A | Frontend/Supabase B1.B |
+|---|---|---|
+| Application/repository | `IrakliGLD/langchain_railway` | `IrakliGLD/EnaiDashboard` |
+| Branch and full Git SHA | `refactor/review-phase-fixes`; `dc0620538b949ae6e2879b9b73d7956ddd04d5e2` | `main`; `55b15f342796df03dafe29ce77e6c19226cf9fa8` |
+| Candidate purpose | Immutable backend image/runtime/manifest identity | Immutable browser artifact and Edge source/version identity |
+| Local verification | `1,685` full tests; `173` focused; Ruff; workflow YAML | `464` frontend tests; ESLint; production audit 0; deterministic build; Deno format/lint/check; `21` Edge tests |
+| Generated identity | Runtime/image identity is the candidate SHA; v2 manifest emitted by protected workflow | Edge aggregate `973efd2764f9ab31d35789a7cc17edad9ac8dc5c5da9679344cda3fceb2fddcc`; browser aggregate is build-config dependent and emitted by the release workflow |
+| CI/release run | **PENDING** | **PENDING** |
+| Railway/Supabase deployment ID | **PENDING** | **PENDING** |
+| Operator/approver/evidence archive | **UNASSIGNED** | **UNASSIGNED** |
+| Rollback artifact/deployment | **PENDING** | **PENDING** |
+| Promotion decision | Blocked before B3 | Blocked before B3 |
