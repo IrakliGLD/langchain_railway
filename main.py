@@ -96,7 +96,6 @@ from config import (
     REQUEST_CLEANUP_ALLOWANCE_MS,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
-    SESSION_HISTORY_MAX_ITEM_CHARS,
     SESSION_SIGNING_SECRET,
     SESSION_TURN_WAIT_TIMEOUT_MS,
     STATIC_ALLOWED_TABLES,
@@ -134,6 +133,11 @@ from core.query_executor import (
     get_database_runtime_identity,
     is_database_available,
 )
+from core.session_runtime import (
+    SessionOwnershipError,
+    SessionRuntime,
+    filter_caller_history,
+)
 from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
 from guardrails.firewall import build_safe_refusal_message, inspect_query
 from models import (
@@ -146,6 +150,7 @@ from models import (
     Question,
     TerminalOutcome,
 )
+from utils import session_memory as session_memory_repository
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
 
@@ -169,14 +174,6 @@ from utils.session_memory import (
     SessionCapacityExceededError,
     SessionExpiredError,
     SessionTurnBusyError,
-    append_exchange,
-    get_history,
-    get_last_contract,
-    get_or_issue_session_turn,
-    get_session_memory_snapshot,
-    resolve_session_token,
-    seed_history,
-    set_last_contract,
 )
 from visualization.chart_builder import prepare_chart_data
 
@@ -233,6 +230,11 @@ application_runtime = ApplicationRuntime(
     lifespan_tasks=(_validate_skill_references, _warm_skill_reference_cache),
 )
 application_runtime.initialize_process()
+session_runtime = SessionRuntime(
+    repository=session_memory_repository,
+    signing_secret=SESSION_SIGNING_SECRET,
+    caller_history_max_item_chars=2000,
+)
 
 resolved_auth_mode = "gateway_and_bearer" if ENABLE_PUBLIC_BEARER_AUTH else "gateway_only"
 log.info("Auth mode enabled: %s", resolved_auth_mode)
@@ -461,40 +463,6 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
     security_log.warning(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
 
-def filter_caller_history(
-    raw_history: Optional[List[Any]],
-    *,
-    is_bearer: Optional[bool] = None,
-    max_item_chars: int = SESSION_HISTORY_MAX_ITEM_CHARS,
-    max_items: int = 3,
-) -> Tuple[List[Dict[str, str]], int]:
-    """Normalize caller-provided conversation history into seedable turns.
-
-    Returns (history_items, blocked_count).
-
-    Every transport is untrusted, including edge-loaded database history and
-    in-process session history. ``is_bearer`` remains as an ignored compatibility
-    argument for callers compiled against the P1 helper signature.
-    """
-    items: List[Dict[str, str]] = []
-    blocked = 0
-    for turn in (raw_history or [])[:max_items]:
-        if hasattr(turn, "model_dump"):
-            turn = turn.model_dump()
-        if not (isinstance(turn, dict) and turn.get("question")):
-            continue
-        question = str(turn.get("question", ""))[:max_item_chars]
-        answer = str(turn.get("answer", ""))[:max_item_chars]
-        q_decision = inspect_query(question)
-        a_decision = inspect_query(answer)
-        if q_decision.action == "block" or a_decision.action == "block":
-            blocked += 1
-            continue
-        question = q_decision.sanitized_query
-        answer = a_decision.sanitized_query
-        items.append({"question": question, "answer": answer})
-    return items, blocked
-
 # Caller-aware rate limiting: key by authenticated identity when available,
 # fall back to IP for unauthenticated/rejected traffic.
 def _rate_limit_key(
@@ -518,9 +486,8 @@ def _rate_limit_key(
     if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
         session_token = (request.headers.get("x-session-token") or "").strip()
         if session_token:
-            session_id = resolve_session_token(
+            session_id = session_runtime.resolve_token(
                 session_token,
-                SESSION_SIGNING_SECRET,
                 auth_mode="gateway",
             )
             if session_id:
@@ -867,7 +834,7 @@ def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
             "runtime_identity": runtime_identity.protected_metadata(),
         },
         "resilience": get_resilience_snapshot(),
-        "session_memory": get_session_memory_snapshot(),
+        "session_memory": session_runtime.memory_snapshot(),
     }
 
 
@@ -1348,7 +1315,7 @@ def ask_post(
             retryable=True,
         )
 
-    session_turn_lease = None
+    session_turn = None
     try:
         try:
             request_deadline.ensure_remaining(
@@ -1365,19 +1332,14 @@ def ask_post(
                     ) / 1000.0,
                 ),
             )
-            (
-                session_id,
-                session_token,
-                reused_existing_session,
-                session_turn_lease,
-            ) = get_or_issue_session_turn(
-                x_session_token,
-                SESSION_SIGNING_SECRET,
+            session_turn = session_runtime.begin_turn(
+                token=x_session_token,
                 actor_id=caller.actor_id,
                 authoritative_session_id=(
                     caller.session_id if caller.actor_assertion_verified else None
                 ),
                 auth_mode=caller.auth_mode,
+                caller_history=q.conversation_history,
                 timeout_seconds=turn_wait_seconds,
             )
         except RequestDeadlineExceeded:
@@ -1420,7 +1382,7 @@ def ask_post(
                 "Conversation session expired",
                 retryable=True,
             )
-        except ValueError:
+        except SessionOwnershipError:
             _finalize_request_telemetry()
             log_security_event("session_ownership_mismatch", request=request)
             raise AskAPIError(
@@ -1429,57 +1391,34 @@ def ask_post(
                 "Conversation session is not owned by this caller",
             )
 
-        response.headers["X-Session-Token"] = session_token
-        if x_session_token and not reused_existing_session:
+        response.headers["X-Session-Token"] = session_turn.session_token
+        if x_session_token and not session_turn.reused_existing_session:
             log_security_event(
                 "invalid_or_expired_session_token",
                 request=request,
                 provided=True,
             )
-        stored_history = get_history(
-            session_id,
-            actor_id=caller.actor_id,
-            auth_mode=caller.auth_mode,
+        session_id = session_turn.session_id
+        bound_history = session_turn.history
+        blocked_history_turns = (
+            session_turn.blocked_stored_turns + session_turn.blocked_caller_turns
         )
-
-        # All history sources are hostile prompt data, including server-loaded
-        # database turns and this process's own cached copy. Inspect both the
-        # persisted/session path and the current transport before choosing one.
-        bound_history, blocked_stored_turns = filter_caller_history(stored_history)
-        caller_history, blocked_caller_turns = filter_caller_history(
-            q.conversation_history,
-            max_item_chars=2000,
-        )
-        blocked_history_turns = blocked_stored_turns + blocked_caller_turns
         if blocked_history_turns:
             log_security_event(
                 "untrusted_history_turn_blocked",
                 request=request,
                 subject_id=caller.subject_id,
-                stored_turns=blocked_stored_turns,
-                caller_turns=blocked_caller_turns,
+                stored_turns=session_turn.blocked_stored_turns,
+                caller_turns=session_turn.blocked_caller_turns,
             )
 
-        # If the in-process session has no history yet (e.g. first request after
-        # deploy or session expiry) but the edge function provided server-loaded
-        # history from the chat_history table, use it as a seed.  This bridges
-        # the gap where the edge function cannot forward session tokens but *can*
-        # load persisted turns from the database on behalf of the authenticated user.
-        if not bound_history and caller_history:
-            bound_history = caller_history
-            if bound_history:
-                seed_history(
-                    session_id,
-                    bound_history,
-                    actor_id=caller.actor_id,
-                    auth_mode=caller.auth_mode,
-                )
-                log.info(
-                    "Seeded actor-bound session history. session_hash=%s turns=%d",
-                    hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
-                    len(bound_history),
-                )
-        elif caller_history and bound_history:
+        if session_turn.seeded_from_caller:
+            log.info(
+                "Seeded actor-bound session history. session_hash=%s turns=%d",
+                hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+                len(bound_history),
+            )
+        elif session_turn.ignored_caller_history:
             # Session already has history — ignore the client-provided duplicate
             log.debug(
                 "Ignoring duplicate caller history; session already has %d turns.",
@@ -1523,9 +1462,7 @@ def ask_post(
                         request_id=request_id,
                         execution_time=exec_time,
                         answer_provenance=build_answer_provenance(None),
-                        session_continuity_available=bool(
-                            reused_existing_session or bound_history
-                        ),
+                        session_continuity_available=session_turn.continuity_available,
                         terminal_outcome=TerminalOutcome.POLICY_BLOCKED,
                     )
                 )
@@ -1560,11 +1497,7 @@ def ask_post(
                 conversation_history=bound_history,
                 trace_id=trace_id,
                 session_id=session_id,
-                previous_contract_snapshot=get_last_contract(
-                    session_id,
-                    actor_id=caller.actor_id,
-                    auth_mode=caller.auth_mode,
-                ),
+                previous_contract_snapshot=session_turn.previous_contract(),
                 request_deadline=request_deadline,
                 actor_id=caller.actor_id,
                 request_id=request_id,
@@ -1601,21 +1534,11 @@ def ask_post(
                 "Query processing failed",
             )
 
-        append_exchange(
-            session_id,
+        session_turn.record_exchange(
             query_text,
             ctx.summary,
-            actor_id=caller.actor_id,
-            auth_mode=caller.auth_mode,
+            contract_snapshot_factory=lambda: continuity_snapshot_json(ctx),
         )
-        _contract_snapshot = continuity_snapshot_json(ctx)
-        if _contract_snapshot:
-            set_last_contract(
-                session_id,
-                _contract_snapshot,
-                actor_id=caller.actor_id,
-                auth_mode=caller.auth_mode,
-            )
         req_usage = _finalize_request_telemetry()
 
         exec_time = time.time() - t0
@@ -1647,9 +1570,7 @@ def ask_post(
                     request_id=request_id,
                     execution_time=exec_time,
                     answer_provenance=build_answer_provenance(ctx),
-                    session_continuity_available=bool(
-                        reused_existing_session or bound_history
-                    ),
+                    session_continuity_available=session_turn.continuity_available,
                 )
             )
 
@@ -1662,8 +1583,8 @@ def ask_post(
             execution_time=exec_time,
         )
     finally:
-        if session_turn_lease is not None:
-            session_turn_lease.release()
+        if session_turn is not None:
+            session_turn.release()
         request_backpressure_gate.release()
 
 

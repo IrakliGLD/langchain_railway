@@ -73,6 +73,7 @@ from agent.tools import common as tool_common
 from agent.tools import composition_tools
 from analysis.stats import quick_stats, rows_to_preview
 from core.application_runtime import ReadinessSnapshot
+from core.session_runtime import SessionTurn
 from core.sql_generator import sanitize_sql
 from main import (
     BALANCING_SEGMENT_NORMALIZER,
@@ -136,7 +137,7 @@ def _fake_query_context():
 
 def _install_successful_ask_mocks(monkeypatch):
     monkeypatch.setattr(main_module, "process_query", lambda **_kwargs: _fake_query_context())
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
 
 
 def _make_bearer_token(
@@ -629,20 +630,38 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
         def release(self):
             self.released = True
 
-    def _capture_session_turn(token, secret, **kwargs):
-        captured["session"] = (token, secret, kwargs)
+    class _Turn:
+        session_id = "opaque-session"
+        session_token = "opaque-session.signed"
+        reused_existing_session = False
+        history = []
+        blocked_stored_turns = 0
+        blocked_caller_turns = 0
+        seeded_from_caller = False
+        ignored_caller_history = False
+        continuity_available = False
+
+        def previous_contract(self):
+            return ""
+
+        def record_exchange(self, *_args, **_kwargs):
+            return None
+
+        def release(self):
+            captured["lease"].release()
+
+    def _capture_session_turn(**kwargs):
+        captured["session"] = kwargs
         captured["lease"] = _Lease()
-        return "opaque-session", "opaque-session.signed", False, captured["lease"]
+        return _Turn()
 
     def _capture_pipeline(**kwargs):
         captured["pipeline"] = kwargs
         return _fake_query_context()
 
     monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
-    monkeypatch.setattr(main_module, "get_or_issue_session_turn", _capture_session_turn)
-    monkeypatch.setattr(main_module, "get_history", lambda _session_id, **_kwargs: [])
+    monkeypatch.setattr(main_module.session_runtime, "begin_turn", _capture_session_turn)
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
     _clear_rate_limit_buckets()
 
     response = TestClient(main_module.app).post(
@@ -664,7 +683,7 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     )
 
     assert response.status_code == 200, response.text
-    session_kwargs = captured["session"][2]
+    session_kwargs = captured["session"]
     assert session_kwargs["actor_id"] == TEST_GATEWAY_ACTOR
     assert session_kwargs["authoritative_session_id"] == TEST_GATEWAY_SESSION
     assert session_kwargs["auth_mode"] == "gateway"
@@ -720,9 +739,9 @@ def test_ask_rejects_cross_actor_session_token_replay(monkeypatch):
 
 def test_ask_rejects_overlapping_session_turn_before_pipeline(monkeypatch):
     monkeypatch.setattr(
-        main_module,
-        "get_or_issue_session_turn",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        main_module.session_runtime,
+        "begin_turn",
+        lambda **_kwargs: (_ for _ in ()).throw(
             main_module.SessionTurnBusyError("prior turn still running")
         ),
     )
@@ -760,7 +779,7 @@ def test_ask_accepts_gateway_budget_and_passes_deadline_to_pipeline(monkeypatch)
         return _fake_query_context()
 
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
     _clear_rate_limit_buckets()
 
     response = TestClient(main_module.app).post(
@@ -821,7 +840,7 @@ def test_ask_caps_excessive_gateway_budget(monkeypatch):
         return _fake_query_context()
 
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
     _clear_rate_limit_buckets()
 
     response = TestClient(main_module.app).post(
@@ -1365,7 +1384,7 @@ def test_ask_response_includes_chart_collection(monkeypatch):
     ctx.chart_meta = ctx.charts[0]["metadata"]
 
     monkeypatch.setattr(main_module, "process_query", lambda **_kwargs: ctx)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
     monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
 
