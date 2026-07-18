@@ -29,10 +29,8 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -40,7 +38,7 @@ from urllib.parse import urlparse
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Header, HTTPException, Query, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,7 +46,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 # Phase 1D Security: Rate limiting
 from slowapi.util import get_remote_address
-from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -96,10 +93,10 @@ from config import (
     MODEL_TYPE,
     NVIDIA_MODEL,
     OPENAI_MODEL,
+    RELEASE_SHA,
     REQUEST_CLEANUP_ALLOWANCE_MS,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
-    SESSION_HISTORY_MAX_ITEM_CHARS,
     SESSION_SIGNING_SECRET,
     SESSION_TURN_WAIT_TIMEOUT_MS,
     STATIC_ALLOWED_TABLES,
@@ -119,6 +116,7 @@ from contracts.chat_gateway_v2 import (
     build_chat_gateway_v2_response,
     serialize_chat_gateway_v2_response,
 )
+from core.application_runtime import ApplicationRuntime
 from core.db_gateway import database_connection
 from core.llm import (
     classify_query_type,
@@ -136,6 +134,12 @@ from core.query_executor import (
     get_database_runtime_identity,
     is_database_available,
 )
+from core.release_identity import RELEASE_IDENTITY_SCHEMA_VERSION
+from core.session_runtime import (
+    SessionOwnershipError,
+    SessionRuntime,
+    filter_caller_history,
+)
 from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
 from guardrails.firewall import build_safe_refusal_message, inspect_query
 from models import (
@@ -148,6 +152,7 @@ from models import (
     Question,
     TerminalOutcome,
 )
+from utils import session_memory as session_memory_repository
 from utils.auth import CallerContext, authenticate_request
 from utils.language import detect_language, get_language_instruction
 
@@ -171,14 +176,6 @@ from utils.session_memory import (
     SessionCapacityExceededError,
     SessionExpiredError,
     SessionTurnBusyError,
-    append_exchange,
-    get_history,
-    get_last_contract,
-    get_or_issue_session_turn,
-    get_session_memory_snapshot,
-    resolve_session_token,
-    seed_history,
-    set_last_contract,
 )
 from visualization.chart_builder import prepare_chart_data
 
@@ -206,8 +203,40 @@ class _DropUvicornAccess404(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropUvicornAccess404())
 
-# Load knowledge files from knowledge/ directory at startup
-knowledge_module.load_knowledge()
+
+def _validate_skill_references() -> None:
+    from skills.loader import validate_skills
+
+    validate_skills()
+
+
+def _warm_skill_reference_cache() -> None:
+    from skills.loader import warmup_cache
+
+    warmup_cache()
+
+
+REQUIRED_SCHEMA_COLUMNS = {
+    table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
+    for table_name in STATIC_ALLOWED_TABLES
+}
+application_runtime = ApplicationRuntime(
+    engine=ENGINE,
+    database_connection=database_connection,
+    database_available=is_database_available,
+    required_schema_columns=REQUIRED_SCHEMA_COLUMNS,
+    cache_ttl_seconds=SCHEMA_READINESS_CACHE_TTL_SECONDS,
+    retry_interval_seconds=SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
+    logger=log,
+    process_initializers=(knowledge_module.load_knowledge,),
+    lifespan_tasks=(_validate_skill_references, _warm_skill_reference_cache),
+)
+application_runtime.initialize_process()
+session_runtime = SessionRuntime(
+    repository=session_memory_repository,
+    signing_secret=SESSION_SIGNING_SECRET,
+    caller_history_max_item_chars=2000,
+)
 
 resolved_auth_mode = "gateway_and_bearer" if ENABLE_PUBLIC_BEARER_AUTH else "gateway_only"
 log.info("Auth mode enabled: %s", resolved_auth_mode)
@@ -272,118 +301,6 @@ _ = should_inject_balancing_pivot  # noqa: F811
 # ---------------------------------------------------------------------------
 
 # -----------------------------
-# Database Schema Reflection
-# -----------------------------
-SCHEMA_MAP: Dict[str, set] = {}
-_SCHEMA_MAP_REFRESHED_AT: Optional[float] = None
-_SCHEMA_MAP_REFRESH_FAILED_AT: Optional[float] = None
-_SCHEMA_REFRESH_LOCK = threading.Lock()
-REQUIRED_SCHEMA_COLUMNS = {
-    table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
-    for table_name in STATIC_ALLOWED_TABLES
-}
-
-
-def schema_readiness_gaps(schema_map: Dict[str, set]) -> Dict[str, List[str]]:
-    """Return allow-listed relations and required columns absent from reflection."""
-    gaps: Dict[str, List[str]] = {}
-    for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items():
-        actual_columns = set(schema_map.get(table_name) or set())
-        missing_columns = sorted(required_columns - actual_columns)
-        if missing_columns:
-            gaps[table_name] = missing_columns
-    return gaps
-
-
-def required_schema_is_ready(schema_map: Dict[str, set]) -> bool:
-    """Return whether every allow-listed relation exposes its required columns."""
-    return not schema_readiness_gaps(schema_map)
-
-
-def _schema_map_cache_is_fresh(now_monotonic: Optional[float] = None) -> bool:
-    """Return whether the last successful reflection remains inside its TTL."""
-    if _SCHEMA_MAP_REFRESHED_AT is None:
-        return False
-    now = time.monotonic() if now_monotonic is None else now_monotonic
-    age_seconds = now - _SCHEMA_MAP_REFRESHED_AT
-    return 0 <= age_seconds <= SCHEMA_READINESS_CACHE_TTL_SECONDS
-
-
-def _schema_refresh_retry_is_due(now_monotonic: Optional[float] = None) -> bool:
-    """Return whether a failed reflection may be retried without probe thrashing."""
-    if _SCHEMA_MAP_REFRESH_FAILED_AT is None:
-        return True
-    now = time.monotonic() if now_monotonic is None else now_monotonic
-    age_seconds = now - _SCHEMA_MAP_REFRESH_FAILED_AT
-    return age_seconds < 0 or age_seconds >= SCHEMA_READINESS_RETRY_INTERVAL_SECONDS
-
-
-def _ensure_schema_map_current() -> bool:
-    """Refresh stale schema state once across concurrent readiness probes."""
-    if _schema_map_cache_is_fresh():
-        return True
-    if not _schema_refresh_retry_is_due():
-        return False
-    with _SCHEMA_REFRESH_LOCK:
-        if _schema_map_cache_is_fresh():
-            return True
-        if not _schema_refresh_retry_is_due():
-            return False
-        return refresh_schema_map()
-
-
-def refresh_schema_map() -> bool:
-    """Best-effort schema reflection; never raises to caller."""
-    global SCHEMA_MAP, _SCHEMA_MAP_REFRESHED_AT, _SCHEMA_MAP_REFRESH_FAILED_AT
-    try:
-        with database_connection(
-            ENGINE,
-            operation="schema_reflection",
-            priority="control",
-        ) as conn:
-            result = conn.execute(
-                text(
-                    """
-                    SELECT m.matviewname AS view_name, a.attname AS column_name
-                    FROM pg_matviews m
-                    JOIN pg_attribute a ON m.matviewname::regclass = a.attrelid
-                    WHERE a.attnum > 0 AND NOT a.attisdropped
-                    AND m.schemaname = 'public';
-                    """
-                )
-            )
-            rows = result.fetchall()
-
-        schema_map: Dict[str, set] = {}
-        for view_name, column_name in rows:
-            schema_map.setdefault(str(view_name).lower(), set()).add(str(column_name).lower())
-
-        SCHEMA_MAP = schema_map
-        _SCHEMA_MAP_REFRESHED_AT = time.monotonic()
-        _SCHEMA_MAP_REFRESH_FAILED_AT = None
-        # Reflection describes availability; it must never expand the explicit
-        # SQL security allow-list when an unrelated materialized view appears.
-        # The allow-list is initialized from STATIC_ALLOWED_TABLES and is not
-        # mutated during refresh, avoiding a transient empty set under
-        # concurrent readiness probes.
-        log.info("Schema reflection complete: %s views", len(SCHEMA_MAP))
-        gaps = schema_readiness_gaps(SCHEMA_MAP)
-        if gaps:
-            gap_summary = "; ".join(
-                f"{table_name}({','.join(columns)})"
-                for table_name, columns in sorted(gaps.items())
-            )
-            log.warning("Schema readiness missing required columns: %s", gap_summary)
-        return True
-    except Exception as exc:
-        # Retain the last known map for diagnostics, but leave its timestamp
-        # stale so readiness cannot pass from an outdated snapshot.
-        _SCHEMA_MAP_REFRESH_FAILED_AT = time.monotonic()
-        log.warning("Schema reflection unavailable: %s", exc)
-        return False
-
-
-# -----------------------------
 # Analysis Functions: Imported from analysis/* modules (lines 83-88)
 # -----------------------------
 # build_balancing_correlation_df, compute_weighted_balancing_price,
@@ -424,20 +341,10 @@ def resolve_parent_span_id(candidate: Optional[str]) -> str:
     return candidate if candidate and _SAFE_REQUEST_ID_RE.fullmatch(candidate) else ""
 
 
-@asynccontextmanager
-async def _lifespan(_app: FastAPI):
-    """Startup hook: prime schema cache and validate skills.
-
-    Replaces the deprecated ``@app.on_event("startup")`` (Q5, 2026-06-10).
-    """
-    refresh_schema_map()
-    from skills.loader import validate_skills, warmup_cache
-    validate_skills()
-    warmup_cache()
-    yield
-
-
-app = FastAPI(title="Enai Analyst (Gemini)", version=__version__, lifespan=_lifespan)
+app = application_runtime.create_application(
+    title="Enai Analyst (Gemini)",
+    version=__version__,
+)
 security_log = logging.getLogger("EnaiSecurity")
 
 
@@ -558,40 +465,6 @@ def log_security_event(event_type: str, request: Optional[Request] = None, **det
     security_log.warning(json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
 
-def filter_caller_history(
-    raw_history: Optional[List[Any]],
-    *,
-    is_bearer: Optional[bool] = None,
-    max_item_chars: int = SESSION_HISTORY_MAX_ITEM_CHARS,
-    max_items: int = 3,
-) -> Tuple[List[Dict[str, str]], int]:
-    """Normalize caller-provided conversation history into seedable turns.
-
-    Returns (history_items, blocked_count).
-
-    Every transport is untrusted, including edge-loaded database history and
-    in-process session history. ``is_bearer`` remains as an ignored compatibility
-    argument for callers compiled against the P1 helper signature.
-    """
-    items: List[Dict[str, str]] = []
-    blocked = 0
-    for turn in (raw_history or [])[:max_items]:
-        if hasattr(turn, "model_dump"):
-            turn = turn.model_dump()
-        if not (isinstance(turn, dict) and turn.get("question")):
-            continue
-        question = str(turn.get("question", ""))[:max_item_chars]
-        answer = str(turn.get("answer", ""))[:max_item_chars]
-        q_decision = inspect_query(question)
-        a_decision = inspect_query(answer)
-        if q_decision.action == "block" or a_decision.action == "block":
-            blocked += 1
-            continue
-        question = q_decision.sanitized_query
-        answer = a_decision.sanitized_query
-        items.append({"question": question, "answer": answer})
-    return items, blocked
-
 # Caller-aware rate limiting: key by authenticated identity when available,
 # fall back to IP for unauthenticated/rejected traffic.
 def _rate_limit_key(
@@ -615,9 +488,8 @@ def _rate_limit_key(
     if app_key and GATEWAY_SHARED_SECRET and hmac.compare_digest(app_key, GATEWAY_SHARED_SECRET):
         session_token = (request.headers.get("x-session-token") or "").strip()
         if session_token:
-            session_id = resolve_session_token(
+            session_id = session_runtime.resolve_token(
                 session_token,
-                SESSION_SIGNING_SECRET,
                 auth_mode="gateway",
             )
             if session_id:
@@ -921,22 +793,27 @@ def healthz():
 @app.get("/readyz")
 def readyz():
     """Readiness probe: live DB connectivity plus current required schema."""
-    db_ready = is_database_available()
-    schema_refreshed = _ensure_schema_map_current() if db_ready else False
-    schema_ready = bool(
-        db_ready
-        and schema_refreshed
-        and required_schema_is_ready(SCHEMA_MAP)
-    )
-    ready = db_ready and schema_ready
-    payload = {
-        "status": "ready" if ready else "degraded",
-        "database_ready": db_ready,
-        "schema_ready": schema_ready,
-    }
-    if ready:
+    snapshot = application_runtime.readiness()
+    payload = snapshot.public_payload()
+    if snapshot.ready:
         return payload
-    return JSONResponse(status_code=503, content=payload)
+    return JSONResponse(status_code=snapshot.status_code, content=payload)
+
+
+@app.get("/versionz")
+def versionz(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
+    """Return immutable artifact identity to authorized operators only."""
+    if (
+        not x_app_key
+        or not EVALUATE_ADMIN_SECRET
+        or not hmac.compare_digest(x_app_key, EVALUATE_ADMIN_SECRET)
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {
+        "application_version": __version__,
+        "git_sha": RELEASE_SHA,
+        "schema_version": RELEASE_IDENTITY_SCHEMA_VERSION,
+    }
 
 
 @app.get("/metrics")
@@ -975,7 +852,7 @@ def get_metrics(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
             "runtime_identity": runtime_identity.protected_metadata(),
         },
         "resilience": get_resilience_snapshot(),
-        "session_memory": get_session_memory_snapshot(),
+        "session_memory": session_runtime.memory_snapshot(),
     }
 
 
@@ -1456,7 +1333,7 @@ def ask_post(
             retryable=True,
         )
 
-    session_turn_lease = None
+    session_turn = None
     try:
         try:
             request_deadline.ensure_remaining(
@@ -1473,19 +1350,14 @@ def ask_post(
                     ) / 1000.0,
                 ),
             )
-            (
-                session_id,
-                session_token,
-                reused_existing_session,
-                session_turn_lease,
-            ) = get_or_issue_session_turn(
-                x_session_token,
-                SESSION_SIGNING_SECRET,
+            session_turn = session_runtime.begin_turn(
+                token=x_session_token,
                 actor_id=caller.actor_id,
                 authoritative_session_id=(
                     caller.session_id if caller.actor_assertion_verified else None
                 ),
                 auth_mode=caller.auth_mode,
+                caller_history=q.conversation_history,
                 timeout_seconds=turn_wait_seconds,
             )
         except RequestDeadlineExceeded:
@@ -1528,7 +1400,7 @@ def ask_post(
                 "Conversation session expired",
                 retryable=True,
             )
-        except ValueError:
+        except SessionOwnershipError:
             _finalize_request_telemetry()
             log_security_event("session_ownership_mismatch", request=request)
             raise AskAPIError(
@@ -1537,57 +1409,34 @@ def ask_post(
                 "Conversation session is not owned by this caller",
             )
 
-        response.headers["X-Session-Token"] = session_token
-        if x_session_token and not reused_existing_session:
+        response.headers["X-Session-Token"] = session_turn.session_token
+        if x_session_token and not session_turn.reused_existing_session:
             log_security_event(
                 "invalid_or_expired_session_token",
                 request=request,
                 provided=True,
             )
-        stored_history = get_history(
-            session_id,
-            actor_id=caller.actor_id,
-            auth_mode=caller.auth_mode,
+        session_id = session_turn.session_id
+        bound_history = session_turn.history
+        blocked_history_turns = (
+            session_turn.blocked_stored_turns + session_turn.blocked_caller_turns
         )
-
-        # All history sources are hostile prompt data, including server-loaded
-        # database turns and this process's own cached copy. Inspect both the
-        # persisted/session path and the current transport before choosing one.
-        bound_history, blocked_stored_turns = filter_caller_history(stored_history)
-        caller_history, blocked_caller_turns = filter_caller_history(
-            q.conversation_history,
-            max_item_chars=2000,
-        )
-        blocked_history_turns = blocked_stored_turns + blocked_caller_turns
         if blocked_history_turns:
             log_security_event(
                 "untrusted_history_turn_blocked",
                 request=request,
                 subject_id=caller.subject_id,
-                stored_turns=blocked_stored_turns,
-                caller_turns=blocked_caller_turns,
+                stored_turns=session_turn.blocked_stored_turns,
+                caller_turns=session_turn.blocked_caller_turns,
             )
 
-        # If the in-process session has no history yet (e.g. first request after
-        # deploy or session expiry) but the edge function provided server-loaded
-        # history from the chat_history table, use it as a seed.  This bridges
-        # the gap where the edge function cannot forward session tokens but *can*
-        # load persisted turns from the database on behalf of the authenticated user.
-        if not bound_history and caller_history:
-            bound_history = caller_history
-            if bound_history:
-                seed_history(
-                    session_id,
-                    bound_history,
-                    actor_id=caller.actor_id,
-                    auth_mode=caller.auth_mode,
-                )
-                log.info(
-                    "Seeded actor-bound session history. session_hash=%s turns=%d",
-                    hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
-                    len(bound_history),
-                )
-        elif caller_history and bound_history:
+        if session_turn.seeded_from_caller:
+            log.info(
+                "Seeded actor-bound session history. session_hash=%s turns=%d",
+                hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
+                len(bound_history),
+            )
+        elif session_turn.ignored_caller_history:
             # Session already has history — ignore the client-provided duplicate
             log.debug(
                 "Ignoring duplicate caller history; session already has %d turns.",
@@ -1631,9 +1480,7 @@ def ask_post(
                         request_id=request_id,
                         execution_time=exec_time,
                         answer_provenance=build_answer_provenance(None),
-                        session_continuity_available=bool(
-                            reused_existing_session or bound_history
-                        ),
+                        session_continuity_available=session_turn.continuity_available,
                         terminal_outcome=TerminalOutcome.POLICY_BLOCKED,
                     )
                 )
@@ -1668,11 +1515,7 @@ def ask_post(
                 conversation_history=bound_history,
                 trace_id=trace_id,
                 session_id=session_id,
-                previous_contract_snapshot=get_last_contract(
-                    session_id,
-                    actor_id=caller.actor_id,
-                    auth_mode=caller.auth_mode,
-                ),
+                previous_contract_snapshot=session_turn.previous_contract(),
                 request_deadline=request_deadline,
                 actor_id=caller.actor_id,
                 request_id=request_id,
@@ -1709,21 +1552,11 @@ def ask_post(
                 "Query processing failed",
             )
 
-        append_exchange(
-            session_id,
+        session_turn.record_exchange(
             query_text,
             ctx.summary,
-            actor_id=caller.actor_id,
-            auth_mode=caller.auth_mode,
+            contract_snapshot_factory=lambda: continuity_snapshot_json(ctx),
         )
-        _contract_snapshot = continuity_snapshot_json(ctx)
-        if _contract_snapshot:
-            set_last_contract(
-                session_id,
-                _contract_snapshot,
-                actor_id=caller.actor_id,
-                auth_mode=caller.auth_mode,
-            )
         req_usage = _finalize_request_telemetry()
 
         exec_time = time.time() - t0
@@ -1755,9 +1588,7 @@ def ask_post(
                     request_id=request_id,
                     execution_time=exec_time,
                     answer_provenance=build_answer_provenance(ctx),
-                    session_continuity_available=bool(
-                        reused_existing_session or bound_history
-                    ),
+                    session_continuity_available=session_turn.continuity_available,
                 )
             )
 
@@ -1770,8 +1601,8 @@ def ask_post(
             execution_time=exec_time,
         )
     finally:
-        if session_turn_lease is not None:
-            session_turn_lease.release()
+        if session_turn is not None:
+            session_turn.release()
         request_backpressure_gate.release()
 
 

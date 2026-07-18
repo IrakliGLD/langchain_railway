@@ -19,20 +19,23 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import inspect
+import logging
 
 import pytest
 
 from agent import pipeline
-from agent.evidence_planner import (
+from agent.evidence_planner import build_evidence_plan
+from agent.plan_validation import (
     SEVERITY_REJECT,
     SEVERITY_WARN,
     PlanValidationResult,
-    _validate_plan_against_answer_kind,
-    build_evidence_plan,
+    validate_plan_against_answer_kind,
 )
 from contracts.question_analysis import AnswerKind, QuestionAnalysis, RenderStyle
 from models import QueryContext, ResolutionPolicy
 from utils.metrics import metrics
+
+_validate_plan_against_answer_kind = validate_plan_against_answer_kind
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,6 +109,20 @@ def _primary_step(tool_name: str = "get_prices", params: dict | None = None) -> 
 
 
 class TestValidatorTypedResult:
+    def test_typed_result_serializes_without_losing_issue_fields(self):
+        result = PlanValidationResult()
+        result.add("rule_x", SEVERITY_WARN, "safe message")
+
+        assert result.as_event() == {
+            "issues": [
+                {
+                    "rule": "rule_x",
+                    "severity": SEVERITY_WARN,
+                    "message": "safe message",
+                }
+            ]
+        }
+
     def test_comparison_single_source_without_range_warns(self):
         # No explicit range: the tool's default recent-history window can
         # still produce multi-period rows, so this must NOT reject.
@@ -249,6 +266,72 @@ class TestValidatorTypedResult:
         result = _validate_plan_against_answer_kind(steps, qa, "current price")
         assert "deterministic_with_narrative_steps" in [i.rule for i in result.warnings]
         assert result.rejects == []
+
+    def test_narrative_answer_with_only_primary_evidence_warns(self):
+        qa = _qa(answer_kind="forecast")
+        qa.render_style = RenderStyle.NARRATIVE
+        steps = [
+            _primary_step(
+                params={
+                    "start_date": "2020-01-01",
+                    "end_date": "2024-12-31",
+                }
+            )
+        ]
+
+        result = validate_plan_against_answer_kind(steps, qa, "forecast prices")
+
+        assert "narrative_single_step" in [issue.rule for issue in result.warnings]
+
+    def test_visualization_cross_check_warns_for_chart_without_time_axis(self, caplog):
+        payload = _make_qa_payload(answer_kind="scalar")
+        payload["visualization"].update(
+            {
+                "chart_recommended": True,
+                "primary_presentation": "chart",
+                "visual_goal": "trend",
+            }
+        )
+        qa = QuestionAnalysis(**payload)
+
+        with caplog.at_level(logging.WARNING, logger="Enai"):
+            validate_plan_against_answer_kind(
+                [_primary_step(params={"metric": "balancing"})],
+                qa,
+                "show a chart",
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("no evidence step has date params" in message for message in messages)
+        assert any("requires a time axis" in message for message in messages)
+
+    def test_visualization_cross_check_warns_for_short_seasonal_span(self, caplog):
+        payload = _make_qa_payload(answer_kind="timeseries")
+        payload["visualization"].update(
+            {
+                "chart_recommended": True,
+                "primary_presentation": "chart",
+                "visual_goal": "trend",
+                "time_grain": "season",
+            }
+        )
+        qa = QuestionAnalysis(**payload)
+        steps = [
+            _primary_step(
+                params={
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-12-31",
+                }
+            )
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="Enai"):
+            validate_plan_against_answer_kind(steps, qa, "seasonal chart")
+
+        assert any(
+            "evidence span is" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------

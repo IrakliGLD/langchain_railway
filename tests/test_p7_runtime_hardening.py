@@ -191,6 +191,11 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
     assert "EXPOSE 3000" in dockerfile
     assert "COPY . ." not in dockerfile
     assert "prompts ./prompts" not in dockerfile
+    assert "ARG RAILWAY_GIT_COMMIT_SHA" in dockerfile
+    assert "ARG ENAI_RELEASE_SHA" in dockerfile
+    assert 'org.opencontainers.image.revision="${ENAI_RELEASE_SHA}"' in dockerfile
+    assert 'Path("/app/release-identity.json")' in dockerfile
+    assert "write_release_identity" in dockerfile
 
 
 def test_docker_context_and_railway_config_are_fail_closed():
@@ -212,6 +217,7 @@ def test_release_evidence_workflow_builds_exact_sha_and_emits_scan_artifacts():
     workflow = (ROOT / ".github" / "workflows" / "backend-release-evidence.yml").read_text(encoding="utf-8")
 
     assert "git_ref" in workflow
+    assert "^[0-9a-f]{40}$" in workflow
     assert "docker build" in workflow
     assert "pip-audit" in workflow
     assert "cyclonedx-py" in workflow
@@ -220,6 +226,10 @@ def test_release_evidence_workflow_builds_exact_sha_and_emits_scan_artifacts():
     assert "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5" in workflow
     assert workflow.index("mkdir -p artifacts") < workflow.index("cyclonedx-py")
     assert "if docker image inspect" in workflow
+    assert '--build-arg ENAI_RELEASE_SHA="${{ inputs.git_ref }}"' in workflow
+    assert "org.opencontainers.image.revision" in workflow
+    assert "load_release_sha" in workflow
+    assert '--image-revision "$image_revision"' in workflow
 
 
 def test_runtime_role_verifier_rolls_back_unexpectedly_allowed_probes():

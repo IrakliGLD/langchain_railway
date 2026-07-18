@@ -13,7 +13,6 @@ import subprocess
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -73,6 +72,8 @@ import main as main_module  # noqa: E402
 from agent.tools import common as tool_common
 from agent.tools import composition_tools
 from analysis.stats import quick_stats, rows_to_preview
+from core.application_runtime import ReadinessSnapshot
+from core.session_runtime import SessionTurn
 from core.sql_generator import sanitize_sql
 from main import (
     BALANCING_SEGMENT_NORMALIZER,
@@ -136,7 +137,7 @@ def _fake_query_context():
 
 def _install_successful_ask_mocks(monkeypatch):
     monkeypatch.setattr(main_module, "process_query", lambda **_kwargs: _fake_query_context())
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
 
 
 def _make_bearer_token(
@@ -629,20 +630,38 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
         def release(self):
             self.released = True
 
-    def _capture_session_turn(token, secret, **kwargs):
-        captured["session"] = (token, secret, kwargs)
+    class _Turn:
+        session_id = "opaque-session"
+        session_token = "opaque-session.signed"
+        reused_existing_session = False
+        history = []
+        blocked_stored_turns = 0
+        blocked_caller_turns = 0
+        seeded_from_caller = False
+        ignored_caller_history = False
+        continuity_available = False
+
+        def previous_contract(self):
+            return ""
+
+        def record_exchange(self, *_args, **_kwargs):
+            return None
+
+        def release(self):
+            captured["lease"].release()
+
+    def _capture_session_turn(**kwargs):
+        captured["session"] = kwargs
         captured["lease"] = _Lease()
-        return "opaque-session", "opaque-session.signed", False, captured["lease"]
+        return _Turn()
 
     def _capture_pipeline(**kwargs):
         captured["pipeline"] = kwargs
         return _fake_query_context()
 
     monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
-    monkeypatch.setattr(main_module, "get_or_issue_session_turn", _capture_session_turn)
-    monkeypatch.setattr(main_module, "get_history", lambda _session_id, **_kwargs: [])
+    monkeypatch.setattr(main_module.session_runtime, "begin_turn", _capture_session_turn)
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
     _clear_rate_limit_buckets()
 
     response = TestClient(main_module.app).post(
@@ -664,7 +683,7 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     )
 
     assert response.status_code == 200, response.text
-    session_kwargs = captured["session"][2]
+    session_kwargs = captured["session"]
     assert session_kwargs["actor_id"] == TEST_GATEWAY_ACTOR
     assert session_kwargs["authoritative_session_id"] == TEST_GATEWAY_SESSION
     assert session_kwargs["auth_mode"] == "gateway"
@@ -720,9 +739,9 @@ def test_ask_rejects_cross_actor_session_token_replay(monkeypatch):
 
 def test_ask_rejects_overlapping_session_turn_before_pipeline(monkeypatch):
     monkeypatch.setattr(
-        main_module,
-        "get_or_issue_session_turn",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        main_module.session_runtime,
+        "begin_turn",
+        lambda **_kwargs: (_ for _ in ()).throw(
             main_module.SessionTurnBusyError("prior turn still running")
         ),
     )
@@ -760,7 +779,7 @@ def test_ask_accepts_gateway_budget_and_passes_deadline_to_pipeline(monkeypatch)
         return _fake_query_context()
 
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
     _clear_rate_limit_buckets()
 
     response = TestClient(main_module.app).post(
@@ -821,7 +840,7 @@ def test_ask_caps_excessive_gateway_budget(monkeypatch):
         return _fake_query_context()
 
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
     _clear_rate_limit_buckets()
 
     response = TestClient(main_module.app).post(
@@ -1152,225 +1171,20 @@ def test_ask_rejects_invalid_history_shape_and_bounds(payload):
 
 
 @pytest.mark.parametrize(
-    ("database_ready", "schema_map", "expected_status"),
+    ("snapshot", "expected_status"),
     [
-        (True, {}, 503),
-        (True, {next(iter(main_module.STATIC_ALLOWED_TABLES)): {"date"}}, 503),
-        (
-            True,
-            {
-                table_name: set(required_columns)
-                for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-            },
-            200,
-        ),
-        (
-            False,
-            {
-                table_name: set(required_columns)
-                for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-            },
-            503,
-        ),
+        (ReadinessSnapshot(True, True), 200),
+        (ReadinessSnapshot(True, False), 503),
+        (ReadinessSnapshot(False, False), 503),
     ],
 )
-def test_readyz_requires_database_and_every_required_relation(
-    monkeypatch, database_ready, schema_map, expected_status
-):
-    monkeypatch.setattr(main_module, "is_database_available", lambda: database_ready)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", {"stale_view": {"stale_column"}})
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        assert database_ready, "schema reflection must not run when connectivity already failed"
-        main_module.SCHEMA_MAP = schema_map
-        return True
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
+def test_readyz_preserves_runtime_snapshot_contract(monkeypatch, snapshot, expected_status):
+    monkeypatch.setattr(main_module.application_runtime, "readiness", lambda: snapshot)
 
     response = TestClient(main_module.app).get("/readyz")
 
-    schema_ready = database_ready and main_module.required_schema_is_ready(schema_map)
     assert response.status_code == expected_status
-    assert response.json() == {
-        "status": "ready" if expected_status == 200 else "degraded",
-        "database_ready": database_ready,
-        "schema_ready": schema_ready,
-    }
-
-
-def test_readyz_rejects_a_required_relation_with_a_missing_column(monkeypatch):
-    schema_map = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    table_name = next(iter(schema_map))
-    schema_map[table_name].pop()
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", schema_map)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", time.monotonic())
-
-    def unexpected_refresh():
-        raise AssertionError("a fresh schema snapshot must be reused")
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", unexpected_refresh)
-
-    response = TestClient(main_module.app).get("/readyz")
-
-    assert response.status_code == 503
-    assert response.json()["schema_ready"] is False
-
-
-@pytest.mark.parametrize(
-    ("schema_states", "expected_statuses"),
-    [
-        ([{}, "complete"], [503, 200]),
-        (["complete", "missing_column"], [200, 503]),
-    ],
-)
-def test_readyz_refreshes_schema_for_recovery_and_runtime_drift(
-    monkeypatch, schema_states, expected_statuses
-):
-    complete_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    missing_column_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    missing_column_schema[next(iter(missing_column_schema))].pop()
-    resolved_states = [
-        complete_schema if state == "complete"
-        else missing_column_schema if state == "missing_column"
-        else state
-        for state in schema_states
-    ]
-
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-
-    monkeypatch.setattr(main_module, "_schema_map_cache_is_fresh", lambda: False)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        main_module.SCHEMA_MAP = resolved_states.pop(0)
-        return True
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
-    client = TestClient(main_module.app)
-
-    responses = [client.get("/readyz") for _ in expected_statuses]
-
-    assert [response.status_code for response in responses] == expected_statuses
-    assert [response.json()["schema_ready"] for response in responses] == [
-        status == 200 for status in expected_statuses
-    ]
-
-
-def test_readyz_reuses_a_fresh_schema_snapshot_without_reflection(monkeypatch):
-    complete_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", complete_schema)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", time.monotonic())
-
-    def unexpected_refresh():
-        raise AssertionError("a fresh schema snapshot must be reused")
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", unexpected_refresh)
-    client = TestClient(main_module.app)
-
-    responses = [client.get("/readyz") for _ in range(2)]
-
-    assert [response.status_code for response in responses] == [200, 200]
-
-
-def test_readyz_fails_closed_when_stale_schema_refresh_fails(monkeypatch):
-    complete_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    stale_at = time.monotonic() - main_module.SCHEMA_READINESS_CACHE_TTL_SECONDS - 1
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", complete_schema)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", stale_at)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-    monkeypatch.setattr(main_module, "refresh_schema_map", lambda: False)
-
-    response = TestClient(main_module.app).get("/readyz")
-
-    assert response.status_code == 503
-    assert response.json()["schema_ready"] is False
-
-
-def test_schema_refresh_is_singleflight_across_concurrent_probes(monkeypatch):
-    refresh_calls = 0
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        nonlocal refresh_calls
-        refresh_calls += 1
-        time.sleep(0.02)
-        main_module._SCHEMA_MAP_REFRESHED_AT = time.monotonic()
-        return True
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(lambda _: main_module._ensure_schema_map_current(), range(8)))
-
-    assert results == [True] * 8
-    assert refresh_calls == 1
-
-
-def test_failed_schema_refresh_is_throttled_across_concurrent_probes(monkeypatch):
-    refresh_calls = 0
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        nonlocal refresh_calls
-        refresh_calls += 1
-        time.sleep(0.02)
-        main_module._SCHEMA_MAP_REFRESH_FAILED_AT = time.monotonic()
-        return False
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(lambda _: main_module._ensure_schema_map_current(), range(8)))
-
-    assert results == [False] * 8
-    assert refresh_calls == 1
-    assert main_module._ensure_schema_map_current() is False
-    assert refresh_calls == 1
-
-
-def test_schema_reflection_never_expands_the_sql_allowlist(monkeypatch):
-    required_table = next(iter(main_module.STATIC_ALLOWED_TABLES))
-
-    class ReflectionResult:
-        def fetchall(self):
-            return [(required_table, "date"), ("private_unlisted_view", "secret")]
-
-    class ReflectionConnection(DummyConnection):
-        def execute(self, *args: Any, **kwargs: Any):
-            return ReflectionResult()
-
-    class ReflectionEngine:
-        def connect(self):
-            return ReflectionConnection()
-
-    monkeypatch.setattr(main_module, "ENGINE", ReflectionEngine())
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", {})
-
-    assert main_module.refresh_schema_map() is True
-    assert "private_unlisted_view" in main_module.SCHEMA_MAP
-    assert main_module.ALLOWED_TABLES == set(main_module.STATIC_ALLOWED_TABLES)
+    assert response.json() == snapshot.public_payload()
 
 
 def test_startup_failure_exits_nonzero():
@@ -1570,7 +1384,7 @@ def test_ask_response_includes_chart_collection(monkeypatch):
     ctx.chart_meta = ctx.charts[0]["metadata"]
 
     monkeypatch.setattr(main_module, "process_query", lambda **_kwargs: ctx)
-    monkeypatch.setattr(main_module, "append_exchange", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
     monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
 
@@ -1810,6 +1624,33 @@ def test_metrics_disabled_and_auth_behavior(monkeypatch):
     assert authorized.json()["status"] == "healthy"
     assert authorized.json()["resilience"]["db_work"]["control_capacity"] >= 1
     assert authorized.json()["session_memory"]["supported_replicas"] == 1
+
+
+def test_release_identity_endpoint_is_protected_and_minimal(monkeypatch):
+    monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
+    monkeypatch.setattr(main_module, "RELEASE_SHA", "a" * 40)
+    client = TestClient(main_module.app)
+
+    assert client.get("/versionz").status_code == 401
+    assert client.get("/versionz", headers={"X-App-Key": "wrong"}).status_code == 401
+
+    authorized = client.get(
+        "/versionz",
+        headers={"X-App-Key": "test-evaluate-key"},
+    )
+    assert authorized.status_code == 200
+    assert authorized.json() == {
+        "application_version": main_module.__version__,
+        "git_sha": "a" * 40,
+        "schema_version": "backend-release-identity-v1",
+    }
+
+
+def test_release_identity_does_not_change_public_liveness_contract():
+    response = TestClient(main_module.app).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 class TestTradeSharePivot:

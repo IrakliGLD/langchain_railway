@@ -30,6 +30,15 @@ import pandas as pd
 from sqlalchemy import text
 
 from agent import analyzer, chart_pipeline, evidence_finalizer, evidence_planner, planner, sql_executor, summarizer
+from agent.evidence_derivation import (
+    derive_evidence,
+)
+from agent.evidence_derivation import (
+    missing_requested_evidence as _missing_requested_evidence,
+)
+from agent.evidence_derivation import (
+    requested_derived_metric_names as _requested_derived_metric_names,
+)
 from agent.fixture_candidates import log_fixture_candidate
 from agent.p4_rollout import (
     GATE_EVIDENCE_FINALIZATION,
@@ -48,6 +57,7 @@ from agent.provenance import (
 )
 from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
+from agent.stage_orchestrator import PipelineStageOrchestrator
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
 from analysis.shares import compute_entity_price_contributions
@@ -760,38 +770,6 @@ def _rewrite_query_for_clarify_selection(selected: str, conversation_history) ->
     if not original_question:
         return selected
     return f"{original_question}\nSelected interpretation: {selected}"
-
-
-def _requested_derived_metric_names(ctx: QueryContext) -> list[str]:
-    """Return active analyzer requested derived metrics in stable order."""
-
-    if not ctx.has_authoritative_question_analysis:
-        return []
-
-    names: list[str] = []
-    seen: set[str] = set()
-    for metric in ctx.question_analysis.analysis_requirements.derived_metrics or []:
-        name = getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
-        if not name or name in seen:
-            continue
-        names.append(name)
-        seen.add(name)
-    return names
-
-
-def _missing_requested_evidence(ctx: QueryContext) -> list[str]:
-    """Return requested derived metrics that Stage 3 did not materialize."""
-
-    requested = list(ctx.requested_derived_metrics or [])
-    if not requested:
-        return []
-
-    evidence_names = {
-        str(record.get("derived_metric_name") or "").strip()
-        for record in (ctx.analysis_evidence or [])
-        if str(record.get("derived_metric_name") or "").strip()
-    }
-    return [name for name in requested if name not in evidence_names]
 
 
 def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
@@ -2904,21 +2882,26 @@ def _process_query_impl(
     def _trace_stage(stage_name: str, started_at: float, **extra):
         _emit_trace_stage(ctx, stage_name, started_at, **extra)
 
+    stages = PipelineStageOrchestrator(
+        ctx,
+        require_budget=_require_request_budget,
+    )
+
     # Stage 0: cheap preparation
-    _require_request_budget(ctx, "stage_0_prepare_context")
     t_stage = time.time()
-    ctx = planner.prepare_context(ctx)
+    ctx = stages.run("stage_0_prepare_context", planner.prepare_context)
     _trace_stage("stage_0_prepare_context", t_stage, conceptual=ctx.is_conceptual, lang=ctx.lang_code)
 
     # Stage 0.2: structured question analysis
     if ENABLE_QUESTION_ANALYZER_SHADOW or ENABLE_QUESTION_ANALYZER_HINTS:
-        _require_request_budget(ctx, "stage_0_2_question_analyzer")
         t_stage = time.time()
         analyzer_mode = "active" if ENABLE_QUESTION_ANALYZER_HINTS else "shadow"
-        if ENABLE_QUESTION_ANALYZER_HINTS:
-            ctx = planner.analyze_question_active(ctx)
-        else:
-            ctx = planner.analyze_question_shadow(ctx)
+        analyzer_stage = (
+            planner.analyze_question_active
+            if ENABLE_QUESTION_ANALYZER_HINTS
+            else planner.analyze_question_shadow
+        )
+        ctx = stages.run("stage_0_2_question_analyzer", analyzer_stage)
         qa_type = ""
         qa_path = ""
         qa_conf = 0.0
@@ -2968,29 +2951,36 @@ def _process_query_impl(
     _retrieval_tier = _resolve_vector_tier(ctx)
     ctx.vector_retrieval_tier = _retrieval_tier.value
 
-    _require_request_budget(ctx, "stage_0_3_vector_knowledge")
-    _run_vector_knowledge_stage(ctx, _retrieval_tier, routing_query)
+    stages.run_effect(
+        "stage_0_3_vector_knowledge",
+        lambda stage_ctx: _run_vector_knowledge_stage(
+            stage_ctx,
+            _retrieval_tier,
+            routing_query,
+        ),
+    )
 
     _apply_response_mode(ctx)
 
-    _require_request_budget(ctx, "stage_4_early_answer")
-    _res = _early_answer_clarify(ctx)
-    ctx = _res.ctx
-    if _res.terminal:
-        return ctx
+    if stages.run_terminal("stage_4_early_answer", _early_answer_clarify):
+        return stages.context
+    ctx = stages.context
 
     # Conceptual short-circuit
-    _require_request_budget(ctx, "stage_4_early_conceptual_answer")
-    _res = _early_answer_conceptual(ctx)
-    ctx = _res.ctx
-    if _res.terminal:
-        return ctx
+    if stages.run_terminal(
+        "stage_4_early_conceptual_answer",
+        _early_answer_conceptual,
+    ):
+        return stages.context
+    ctx = stages.context
 
     # Stage 0.4: expand the authoritative analyzer output into the exact datasets we still need.
     if ENABLE_EVIDENCE_PLANNER:
-        _require_request_budget(ctx, "stage_0_4_evidence_plan")
         t_stage = time.time()
-        ctx = evidence_planner.build_evidence_plan(ctx)
+        ctx = stages.run(
+            "stage_0_4_evidence_plan",
+            evidence_planner.build_evidence_plan,
+        )
         _trace_stage(
             "stage_0_4_evidence_plan", t_stage,
             steps=len(ctx.evidence_plan),
@@ -3002,7 +2992,7 @@ def _process_query_impl(
         # tool/DB call when ENAI_PLAN_VALIDATION_MODE=enforce; pass-through
         # (typed result + counters only) in the default warn mode.
         _res = _enforce_plan_validation_stage(ctx)
-        ctx = _res.ctx
+        ctx = stages.adopt(_res.ctx)
         if _res.terminal:
             return ctx
 
@@ -3011,7 +3001,7 @@ def _process_query_impl(
     # consolidated function. See _execute_evidence_plan above for the
     # full body — every trace shape, metric counter, and recovery path
     # is identical to the pre-§5.1.b form.
-    ctx = _execute_evidence_plan(ctx)
+    ctx = stages.adopt(_execute_evidence_plan(ctx))
 
     # Stage 0.9: surprising-evidence detection (always) + flag-gated single
     # re-analysis (§3.6, design item 1).
@@ -3024,23 +3014,23 @@ def _process_query_impl(
             and gate_is_active(ctx, GATE_EVIDENCE_REANALYSIS, default=True)
             and not ctx.reanalysis_attempted
         ):
-            _require_request_budget(ctx, "stage_0_9_evidence_reanalysis")
-            _res = _attempt_evidence_reanalysis(ctx, _anomaly)
-            ctx = _res.ctx
+            should_stop = stages.run_terminal(
+                "stage_0_9_evidence_reanalysis",
+                lambda stage_ctx: _attempt_evidence_reanalysis(stage_ctx, _anomaly),
+            )
+            ctx = stages.context
             # A reclassification to knowledge/clarify (or a plan-validation
             # reject) during re-analysis is terminal — the fresh mode owns the
             # answer instead of the pipeline continuing in stale data mode (M4).
-            if _res.terminal:
+            if should_stop:
                 return ctx
 
     # Legacy agent loop removed (audit): with Stage 0.2 authoritative it never ran,
     # and analyzer-failure / no-tool cases fall through to the generate-plan/SQL
     # fallback below (a more capable path than the retired keyword-driven loop).
-    _require_request_budget(ctx, "stage_1_generate_sql")
-    _res = _run_generate_sql_stage(ctx)
-    ctx = _res.ctx
-    if _res.terminal:
-        return ctx
+    if stages.run_terminal("stage_1_generate_sql", _run_generate_sql_stage):
+        return stages.context
+    ctx = stages.context
 
     # Snapshot the source tabular output before analyzer mutates or augments the evidence.
     if ctx.rows and ctx.cols and not ctx.provenance_rows:
@@ -3062,24 +3052,8 @@ def _process_query_impl(
         )
 
     # Stage 3: enrich
-    _require_request_budget(ctx, "stage_3_analyzer_enrich")
     t_stage = time.time()
-    ctx = analyzer.enrich(ctx)
-    if ctx.rows and ctx.cols and set(ctx.cols) - set(ctx.provenance_cols or []):
-        inferred_source = str(ctx.provenance_source or ("tool" if ctx.used_tool else "sql"))
-        inferred_hash = str(ctx.provenance_query_hash or "")
-        if not inferred_hash:
-            if ctx.used_tool and ctx.tool_name:
-                inferred_hash = tool_invocation_hash(ctx.tool_name, ctx.tool_params)
-            elif ctx.safe_sql:
-                inferred_hash = sql_query_hash(ctx.safe_sql)
-        stamp_provenance(
-            ctx,
-            ctx.cols,
-            ctx.rows,
-            source=inferred_source or "tool",
-            query_hash=inferred_hash or sql_query_hash(f"{ctx.query}|stage3_enriched"),
-        )
+    ctx = stages.run("stage_3_analyzer_enrich", derive_evidence)
     _trace_stage(
         "stage_3_analyzer_enrich",
         t_stage,
@@ -3103,11 +3077,12 @@ def _process_query_impl(
         missing_evidence_for_metrics=list(ctx.missing_evidence_for_metrics or []),
     )
 
-    _require_request_budget(ctx, "stage_4_missing_evidence_answer")
-    _res = _check_missing_evidence_stage(ctx)
-    ctx = _res.ctx
-    if _res.terminal:
-        return ctx
+    if stages.run_terminal(
+        "stage_4_missing_evidence_answer",
+        _check_missing_evidence_stage,
+    ):
+        return stages.context
+    ctx = stages.context
 
     # Append structured evidence summary when evidence planner contributed data
     if ENABLE_EVIDENCE_PLANNER and ctx.evidence_collected:
@@ -3127,9 +3102,8 @@ def _process_query_impl(
             )
 
     # Stage 4: summarize
-    _require_request_budget(ctx, "stage_4_summarize_data")
     t_stage = time.time()
-    ctx = summarizer.summarize_data(ctx)
+    ctx = stages.run("stage_4_summarize_data", summarizer.summarize_data)
     _trace_stage(
         "stage_4_summarize_data",
         t_stage,
@@ -3141,9 +3115,8 @@ def _process_query_impl(
     log.info("Stage 4 complete | summary generated")
 
     # Stage 5: chart
-    _require_request_budget(ctx, "stage_5_chart_build")
     t_stage = time.time()
-    ctx = chart_pipeline.build_chart(ctx)
+    ctx = stages.run("stage_5_chart_build", chart_pipeline.build_chart)
     _trace_stage("stage_5_chart_build", t_stage, chart_type=ctx.chart_type or "")
     log.info("Stage 5 complete | chart_type=%s", ctx.chart_type)
 

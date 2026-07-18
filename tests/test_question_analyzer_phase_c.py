@@ -42,6 +42,7 @@ class _DummyEngine:
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
 from agent import analyzer, planner, summarizer  # noqa: E402
+from agent.question_interpretation import finalize_question_contract  # noqa: E402
 from contracts.question_analysis import AnswerKind, QuestionAnalysis, RenderStyle  # noqa: E402
 from core import llm as llm_core  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
@@ -65,6 +66,25 @@ class _DummyMessage:
         self.content = content
         self.usage_metadata = {}
         self.response_metadata = {}
+
+
+def test_question_contract_finalizer_is_noop_for_already_valid_simple_lookup():
+    analysis = _analytical_payload().model_copy(
+        update={
+            "raw_query": "Show balancing prices",
+            "canonical_query_en": "Show balancing prices",
+        }
+    )
+
+    finalized = finalize_question_contract(
+        analysis,
+        raw_query=analysis.raw_query,
+        conversation_history=[],
+    )
+
+    assert finalized.contract is analysis
+    assert finalized.applied_guardrails == ()
+    assert finalized.clarify_reason_update is None
 
 
 def _analytical_payload() -> QuestionAnalysis:

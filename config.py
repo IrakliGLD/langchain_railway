@@ -10,6 +10,8 @@ from textwrap import dedent
 
 from dotenv import load_dotenv
 
+from core.release_identity import load_release_sha, normalize_release_sha
+
 # Load environment variables
 load_dotenv()
 
@@ -78,6 +80,7 @@ SESSION_SIGNING_SECRET = _read_secret_env("ENAI_SESSION_SIGNING_SECRET", "SESSIO
 EVALUATE_ADMIN_SECRET = _read_secret_env("ENAI_EVALUATE_SECRET", "EVALUATE_ADMIN_SECRET")
 ENAI_AUTH_MODE = (os.getenv("ENAI_AUTH_MODE", "gateway_only").strip().lower() or "gateway_only")
 ENAI_DEPLOYMENT_ENV = (os.getenv("ENAI_DEPLOYMENT_ENV", "development").strip().lower() or "development")
+RELEASE_SHA = load_release_sha(environment_value=os.getenv("ENAI_RELEASE_SHA"))
 # The Railway service uses a fixed target port.  Keep the application bind
 # independent of Railway's injected dynamic PORT value so the process and
 # healthcheck target cannot silently diverge.
@@ -469,6 +472,7 @@ def validate_runtime_settings(
     evaluate_admin_secret: str | None,
     auth_mode: str,
     deployment_env: str,
+    release_sha: str | None = None,
     supabase_jwt_secret: str | None,
     enable_evaluate_endpoint: bool,
     allow_evaluate_endpoint: bool,
@@ -541,6 +545,9 @@ def validate_runtime_settings(
     # credential at startup like the other two.
     if model_type == "openai" and not openai_api_key:
         raise RuntimeError("MODEL_TYPE=openai but OPENAI_API_KEY is missing")
+    normalized_release_sha = normalize_release_sha(release_sha)
+    if deployment_env in {"staging", "production"} and not normalized_release_sha:
+        raise RuntimeError("ENAI_RELEASE_SHA is required in staging and production")
 
 
 validate_runtime_settings(
@@ -550,6 +557,7 @@ validate_runtime_settings(
     evaluate_admin_secret=EVALUATE_ADMIN_SECRET,
     auth_mode=ENAI_AUTH_MODE,
     deployment_env=ENAI_DEPLOYMENT_ENV,
+    release_sha=RELEASE_SHA,
     supabase_jwt_secret=SUPABASE_JWT_SECRET,
     enable_evaluate_endpoint=ENABLE_EVALUATE_ENDPOINT,
     allow_evaluate_endpoint=ALLOW_EVALUATE_ENDPOINT,
@@ -653,5 +661,4 @@ BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"
 
 # Balancing share pivot SQL — canonical definition lives in agent/sql_executor.py.
 # Do not define a separate copy here to avoid drift.
-
 

@@ -30,6 +30,7 @@ _VALIDATE_BASE = dict(
     evaluate_admin_secret="evaluate",
     auth_mode="gateway_only",
     deployment_env="production",
+    release_sha="a" * 40,
     supabase_jwt_secret=None,
     enable_evaluate_endpoint=False,
     allow_evaluate_endpoint=False,
