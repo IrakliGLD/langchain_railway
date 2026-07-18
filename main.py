@@ -93,6 +93,7 @@ from config import (
     MODEL_TYPE,
     NVIDIA_MODEL,
     OPENAI_MODEL,
+    RELEASE_SHA,
     REQUEST_CLEANUP_ALLOWANCE_MS,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
@@ -133,6 +134,7 @@ from core.query_executor import (
     get_database_runtime_identity,
     is_database_available,
 )
+from core.release_identity import RELEASE_IDENTITY_SCHEMA_VERSION
 from core.session_runtime import (
     SessionOwnershipError,
     SessionRuntime,
@@ -796,6 +798,22 @@ def readyz():
     if snapshot.ready:
         return payload
     return JSONResponse(status_code=snapshot.status_code, content=payload)
+
+
+@app.get("/versionz")
+def versionz(x_app_key: Optional[str] = Header(None, alias="X-App-Key")):
+    """Return immutable artifact identity to authorized operators only."""
+    if (
+        not x_app_key
+        or not EVALUATE_ADMIN_SECRET
+        or not hmac.compare_digest(x_app_key, EVALUATE_ADMIN_SECRET)
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {
+        "application_version": __version__,
+        "git_sha": RELEASE_SHA,
+        "schema_version": RELEASE_IDENTITY_SCHEMA_VERSION,
+    }
 
 
 @app.get("/metrics")

@@ -1626,6 +1626,33 @@ def test_metrics_disabled_and_auth_behavior(monkeypatch):
     assert authorized.json()["session_memory"]["supported_replicas"] == 1
 
 
+def test_release_identity_endpoint_is_protected_and_minimal(monkeypatch):
+    monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
+    monkeypatch.setattr(main_module, "RELEASE_SHA", "a" * 40)
+    client = TestClient(main_module.app)
+
+    assert client.get("/versionz").status_code == 401
+    assert client.get("/versionz", headers={"X-App-Key": "wrong"}).status_code == 401
+
+    authorized = client.get(
+        "/versionz",
+        headers={"X-App-Key": "test-evaluate-key"},
+    )
+    assert authorized.status_code == 200
+    assert authorized.json() == {
+        "application_version": main_module.__version__,
+        "git_sha": "a" * 40,
+        "schema_version": "backend-release-identity-v1",
+    }
+
+
+def test_release_identity_does_not_change_public_liveness_contract():
+    response = TestClient(main_module.app).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 class TestTradeSharePivot:
     """Tests for the auto-pivot SQL helper used when share columns are hallucinated."""
 

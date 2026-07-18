@@ -84,6 +84,8 @@ This phase is first because it is high impact, relatively low risk, and makes ev
 
 ### B1.A — Backend identity
 
+**Repository implementation status (2026-07-18): complete; deployment evidence pending.** The Docker build now requires a full source SHA, embeds it in `/app/release-identity.json`, and labels the image with `org.opencontainers.image.revision`. Runtime startup accepts the embedded identity as authoritative, rejects a conflicting `ENAI_RELEASE_SHA`, and requires a resolved identity in staging/production. The protected `GET /versionz` endpoint exposes only schema version, application version, and full Git SHA through the existing `ENAI_EVALUATE_SECRET` boundary. The release-evidence workflow verifies the embedded identity and OCI label before emitting the v2 manifest, which records both the source SHA and image revision. Focused verification passed `173` tests and the full suite passed `1,685` tests; Ruff is green. Docker execution is unverified on this workstation because Docker is not installed and must be exercised by the protected workflow. B1.A is ready to commit independently, but its production exit gate remains open until the workflow artifact, Railway deployment/image identity, protected `/versionz` result, and rollback identity are recorded.
+
 **Implementation:**
 
 1. Define one canonical 40-character release identity, for example `ENAI_RELEASE_SHA`, supplied by the build/promotion system—not manually edited source code.
@@ -105,6 +107,15 @@ This phase is first because it is high impact, relatively low risk, and makes ev
 - Docker non-root/excluded-file checks remain green.
 
 **Exit gate:** the exact backend SHA and image digest can be mechanically compared before and after deployment.
+
+#### B1.A activation and evidence steps
+
+1. Push the B1.A commit, then run **Backend release evidence** with its full 40-character SHA. The workflow supplies that SHA explicitly as the image build argument.
+2. For a normal Railway Git-triggered Docker build, do not manually invent `ENAI_RELEASE_SHA`: Railway supplies `RAILWAY_GIT_COMMIT_SHA`, and the Dockerfile consumes it. If Railway is configured to omit Git metadata or a non-Git builder is used, supply the exact candidate SHA as the Docker build argument `ENAI_RELEASE_SHA`.
+3. A runtime `ENAI_RELEASE_SHA` variable is optional for the Docker image. If defined, it must equal the embedded SHA exactly or startup fails. Non-Docker staging/production execution must set it because no embedded identity file exists.
+4. After deployment, call `GET /versionz` with `X-App-Key` set to the existing `ENAI_EVALUATE_SECRET`. Compare its `git_sha` byte-for-byte with the candidate SHA. Do not expose this secret or response through a public health monitor.
+5. Confirm `/healthz` and `/readyz` remain green, then record the Railway deployment ID, source SHA, runtime image digest, release-workflow run/artifact, manifest image ID/revision, one-replica setting, previous rollback deployment/digest, operator, approver, and timestamps in the B0 ledger.
+6. If Railway rebuilt from Git rather than promoting the workflow image, the SHA comparison proves source identity but the separately built image digest will differ. Record both digests explicitly; do not claim byte-identical promotion. Build-once/promote-by-digest remains the preferred later control when the platform workflow supports it.
 
 ### B1.B — Frontend and Edge identity
 

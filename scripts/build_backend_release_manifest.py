@@ -5,10 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = ("Dockerfile", "requirements.txt", "railway.json")
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.release_identity import normalize_release_sha  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -23,16 +28,26 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--git-sha", required=True)
     parser.add_argument("--image-id", required=True)
+    parser.add_argument("--image-revision", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    if len(args.git_sha) != 40 or any(c not in "0123456789abcdef" for c in args.git_sha.lower()):
-        parser.error("--git-sha must be a full 40-character commit SHA")
+    try:
+        git_sha = normalize_release_sha(args.git_sha, field_name="--git-sha")
+        image_revision = normalize_release_sha(
+            args.image_revision,
+            field_name="--image-revision",
+        )
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    if git_sha != image_revision:
+        parser.error("--image-revision must match --git-sha")
 
     payload = {
-        "schema_version": "backend-release-manifest-v1",
-        "git_sha": args.git_sha.lower(),
+        "schema_version": "backend-release-manifest-v2",
+        "git_sha": git_sha,
         "image_id": args.image_id,
+        "image_revision": image_revision,
         "inputs": {name: _sha256(ROOT / name) for name in INPUTS},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
