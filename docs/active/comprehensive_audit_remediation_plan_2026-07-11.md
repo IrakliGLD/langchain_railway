@@ -1433,6 +1433,22 @@ These checks close only the completed slice; every future extraction must indepe
 
 **Remaining P8.A blockers (2026-07-18):** Stage 0.7 representative production counter deltas/traces and owner approval are unavailable; LIGHT-tier production cost, latency, relevance, grounding, provenance, and answer-quality evidence is unavailable; and two stable production releases with rollback evidence have not been attested for temporary flags. No strategy, retrieval behavior, or rollout flag was removed. These are production-evidence/owner-decision blockers, not missing F9 structural implementation. Further extraction remains incremental and must be justified by measured risk rather than pursued as a rewrite.
 
+## 15.1 F10 — Final independent audit and closure
+
+**Status (2026-07-18): Not closed; three High release blockers have no named, time-bound waiver.** The complete evidence ledger, findings, manual closure steps, and live-evidence A–F reassessment are in [`f10_final_independent_audit_2026-07-18.md`](./f10_final_independent_audit_2026-07-18.md).
+
+- [x] Push the audited backend branch and confirm frontend `main` is synchronized independently.
+- [x] Run the available full backend, frontend, Edge, static database, security, contract, build, bounded readiness-load, and public accessibility suites.
+- [x] Smoke public production health, auth rejection, CORS, frontend routes, Edge health, and all function source digests.
+- [x] Compare implementation ownership/defaults with `query_pipeline_architecture.md` and correct the stale F9 module map.
+- [x] Re-run the A–F assessment using current local and public-production evidence.
+- [ ] Resolve or formally waive the backend dependency advisories (`F10-SEC-01`).
+- [ ] Prove exact backend/frontend/Edge deployed artifact identities (`F10-REL-02`).
+- [ ] Run credentialed authenticated/browser/admin/accessibility and live-database closure evidence (`F10-E2E-03`).
+- [ ] Remove compatibility paths and expired flags only after the documented two-release, telemetry, consumer, and rollback prerequisites (`F10-ARCH-04`).
+
+The public services are healthy and the available source suites are green; neither fact substitutes for the missing release evidence. F10 must remain open until every unchecked item above is closed or a named owner approves a waiver with an expiry date.
+
 ## 16. Finding coverage matrix
 
 ### High findings
