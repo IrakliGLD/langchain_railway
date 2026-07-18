@@ -189,6 +189,8 @@ Start with the lowest-risk changes. The audit found no production import of `lit
 
 #### B2.A.4 — Upgrade FastAPI/Starlette
 
+**Repository implementation status (2026-07-18): complete.** `fastapi==0.139.2` with an explicit `starlette==1.3.1` pin (FastAPI 0.139 no longer caps starlette, so the exact advisory-fixed version is pinned for determinism) closes all 14 Starlette records (37 → 23). Characterization before upgrade: custom middlewares are version-robust (`RequestBodyLimitMiddleware` is pure ASGI; `RequestIDMiddleware` uses the stable `BaseHTTPMiddleware` API), exception handlers delegate to the FastAPI defaults, rate limiting is application-owned (slowapi supplies only `get_remote_address`), and lifespan uses the modern context-manager API. Verification: full suite 1,706 green including `tests/security` (HTTP contract, exception envelopes, CORS, request-size, rate-limit, readiness) with the target pair installed locally; `pip check` clean; cp311 closure movement limited to the two intended upgrades plus fastapi's two new metadata helpers (`annotated-doc`, `typing-inspection`). Readiness-under-saturation and container smoke on the exact artifact remain B4.A/CI evidence (`Manual verification pending`).
+
 - Choose a supported compatible FastAPI/Starlette pair that closes the reported Starlette advisories.
 - Characterize middleware order, request path handling, exception envelopes, CORS, request-size limits, rate limiting, lifespan/startup, `/healthz`, and `/readyz` before upgrading.
 - Run HTTP contract, security adversarial, red-team, readiness saturation, and container smoke after the upgrade.
