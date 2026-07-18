@@ -181,6 +181,8 @@ Start with the lowest-risk changes. The audit found no production import of `lit
 
 #### B2.A.3 — Upgrade auth and utility dependencies
 
+**Repository implementation status (2026-07-18): complete (PyJWT + python-dotenv).** `PyJWT==2.13.0` and `python-dotenv==1.2.2` close all 15 remaining auth/utility records (52 → 37); the disputed no-fix record `PYSEC-2025-183` ends at 2.10.1 and does not flag 2.13.0. `tests/test_auth_negative.py` pins the PyJWT 2.13 rejection matrix — alg=none, HS512-with-correct-secret, wrong secret, malformed/segment-count/garbage tokens, unknown and malformed `crit` headers, expiry, missing `sub`/`exp`/`aud`, wrong audience — and documents the current policy that audience is enforced while issuer is not, plus gateway-only behavior (valid bearer rejected while `ENABLE_PUBLIC_BEARER_AUTH` is off, gateway secret unaffected). Full suite 1,706 green including `tests/security`, Ruff clean, cp311 closure identical except the two intended version movements. **Protobuf is deliberately not upgraded here:** it is held at 4.25.9 by the legacy `google-generativeai` chain, which `langchain-google-genai==0.0.11` requires; it is remediated structurally in B2.A.5 where the entire chain leaves the closure.
+
 - Upgrade PyJWT to an advisory-fixed version compatible with the explicit algorithm/claim policy.
 - Upgrade `python-dotenv` and `protobuf` through separately reviewable changes where they remain installed.
 - Add negative JWT tests for unsupported algorithms, malformed headers, critical headers, expiry, audience/issuer policy, and gateway-only behavior even though public bearer auth remains disabled.

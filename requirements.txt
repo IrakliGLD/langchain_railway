@@ -33,14 +33,17 @@ numpy==1.26.4
 scipy==1.11.4  # For trendline calculations (linear regression)
 
 # Authentication
-PyJWT==2.9.0
+# 2.13.0 closes the 2026 header/algorithm-hardening advisory set
+# (F10-SEC-01 B2.A.3); the rejection policy is pinned by
+# tests/test_auth_negative.py.
+PyJWT==2.13.0
 
 # Utilities
 # tenacity has no direct importer (F10-SEC-01 B2.A.2); the exact pin is a
 # transitive version hold for google-genai and langchain-core — without it
 # the closure floats to 8.5.0. Re-evaluate at the B2.A.5 wrapper upgrade.
 tenacity==8.2.3
-python-dotenv==1.0.1
+python-dotenv==1.2.2  # 1.2.2 closes CVE-2026-28684 (F10-SEC-01 B2.A.3)
 
 # AI/ML services
 # (litellm removed 2026-07-18 — zero importers, F10-SEC-01 B2.A.2;
