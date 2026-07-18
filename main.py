@@ -29,10 +29,8 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -40,7 +38,7 @@ from urllib.parse import urlparse
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Header, HTTPException, Query, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,7 +46,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 # Phase 1D Security: Rate limiting
 from slowapi.util import get_remote_address
-from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -119,6 +116,7 @@ from contracts.chat_gateway_v2 import (
     build_chat_gateway_v2_response,
     serialize_chat_gateway_v2_response,
 )
+from core.application_runtime import ApplicationRuntime
 from core.db_gateway import database_connection
 from core.llm import (
     classify_query_type,
@@ -206,8 +204,35 @@ class _DropUvicornAccess404(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropUvicornAccess404())
 
-# Load knowledge files from knowledge/ directory at startup
-knowledge_module.load_knowledge()
+
+def _validate_skill_references() -> None:
+    from skills.loader import validate_skills
+
+    validate_skills()
+
+
+def _warm_skill_reference_cache() -> None:
+    from skills.loader import warmup_cache
+
+    warmup_cache()
+
+
+REQUIRED_SCHEMA_COLUMNS = {
+    table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
+    for table_name in STATIC_ALLOWED_TABLES
+}
+application_runtime = ApplicationRuntime(
+    engine=ENGINE,
+    database_connection=database_connection,
+    database_available=is_database_available,
+    required_schema_columns=REQUIRED_SCHEMA_COLUMNS,
+    cache_ttl_seconds=SCHEMA_READINESS_CACHE_TTL_SECONDS,
+    retry_interval_seconds=SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
+    logger=log,
+    process_initializers=(knowledge_module.load_knowledge,),
+    lifespan_tasks=(_validate_skill_references, _warm_skill_reference_cache),
+)
+application_runtime.initialize_process()
 
 resolved_auth_mode = "gateway_and_bearer" if ENABLE_PUBLIC_BEARER_AUTH else "gateway_only"
 log.info("Auth mode enabled: %s", resolved_auth_mode)
@@ -272,118 +297,6 @@ _ = should_inject_balancing_pivot  # noqa: F811
 # ---------------------------------------------------------------------------
 
 # -----------------------------
-# Database Schema Reflection
-# -----------------------------
-SCHEMA_MAP: Dict[str, set] = {}
-_SCHEMA_MAP_REFRESHED_AT: Optional[float] = None
-_SCHEMA_MAP_REFRESH_FAILED_AT: Optional[float] = None
-_SCHEMA_REFRESH_LOCK = threading.Lock()
-REQUIRED_SCHEMA_COLUMNS = {
-    table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
-    for table_name in STATIC_ALLOWED_TABLES
-}
-
-
-def schema_readiness_gaps(schema_map: Dict[str, set]) -> Dict[str, List[str]]:
-    """Return allow-listed relations and required columns absent from reflection."""
-    gaps: Dict[str, List[str]] = {}
-    for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items():
-        actual_columns = set(schema_map.get(table_name) or set())
-        missing_columns = sorted(required_columns - actual_columns)
-        if missing_columns:
-            gaps[table_name] = missing_columns
-    return gaps
-
-
-def required_schema_is_ready(schema_map: Dict[str, set]) -> bool:
-    """Return whether every allow-listed relation exposes its required columns."""
-    return not schema_readiness_gaps(schema_map)
-
-
-def _schema_map_cache_is_fresh(now_monotonic: Optional[float] = None) -> bool:
-    """Return whether the last successful reflection remains inside its TTL."""
-    if _SCHEMA_MAP_REFRESHED_AT is None:
-        return False
-    now = time.monotonic() if now_monotonic is None else now_monotonic
-    age_seconds = now - _SCHEMA_MAP_REFRESHED_AT
-    return 0 <= age_seconds <= SCHEMA_READINESS_CACHE_TTL_SECONDS
-
-
-def _schema_refresh_retry_is_due(now_monotonic: Optional[float] = None) -> bool:
-    """Return whether a failed reflection may be retried without probe thrashing."""
-    if _SCHEMA_MAP_REFRESH_FAILED_AT is None:
-        return True
-    now = time.monotonic() if now_monotonic is None else now_monotonic
-    age_seconds = now - _SCHEMA_MAP_REFRESH_FAILED_AT
-    return age_seconds < 0 or age_seconds >= SCHEMA_READINESS_RETRY_INTERVAL_SECONDS
-
-
-def _ensure_schema_map_current() -> bool:
-    """Refresh stale schema state once across concurrent readiness probes."""
-    if _schema_map_cache_is_fresh():
-        return True
-    if not _schema_refresh_retry_is_due():
-        return False
-    with _SCHEMA_REFRESH_LOCK:
-        if _schema_map_cache_is_fresh():
-            return True
-        if not _schema_refresh_retry_is_due():
-            return False
-        return refresh_schema_map()
-
-
-def refresh_schema_map() -> bool:
-    """Best-effort schema reflection; never raises to caller."""
-    global SCHEMA_MAP, _SCHEMA_MAP_REFRESHED_AT, _SCHEMA_MAP_REFRESH_FAILED_AT
-    try:
-        with database_connection(
-            ENGINE,
-            operation="schema_reflection",
-            priority="control",
-        ) as conn:
-            result = conn.execute(
-                text(
-                    """
-                    SELECT m.matviewname AS view_name, a.attname AS column_name
-                    FROM pg_matviews m
-                    JOIN pg_attribute a ON m.matviewname::regclass = a.attrelid
-                    WHERE a.attnum > 0 AND NOT a.attisdropped
-                    AND m.schemaname = 'public';
-                    """
-                )
-            )
-            rows = result.fetchall()
-
-        schema_map: Dict[str, set] = {}
-        for view_name, column_name in rows:
-            schema_map.setdefault(str(view_name).lower(), set()).add(str(column_name).lower())
-
-        SCHEMA_MAP = schema_map
-        _SCHEMA_MAP_REFRESHED_AT = time.monotonic()
-        _SCHEMA_MAP_REFRESH_FAILED_AT = None
-        # Reflection describes availability; it must never expand the explicit
-        # SQL security allow-list when an unrelated materialized view appears.
-        # The allow-list is initialized from STATIC_ALLOWED_TABLES and is not
-        # mutated during refresh, avoiding a transient empty set under
-        # concurrent readiness probes.
-        log.info("Schema reflection complete: %s views", len(SCHEMA_MAP))
-        gaps = schema_readiness_gaps(SCHEMA_MAP)
-        if gaps:
-            gap_summary = "; ".join(
-                f"{table_name}({','.join(columns)})"
-                for table_name, columns in sorted(gaps.items())
-            )
-            log.warning("Schema readiness missing required columns: %s", gap_summary)
-        return True
-    except Exception as exc:
-        # Retain the last known map for diagnostics, but leave its timestamp
-        # stale so readiness cannot pass from an outdated snapshot.
-        _SCHEMA_MAP_REFRESH_FAILED_AT = time.monotonic()
-        log.warning("Schema reflection unavailable: %s", exc)
-        return False
-
-
-# -----------------------------
 # Analysis Functions: Imported from analysis/* modules (lines 83-88)
 # -----------------------------
 # build_balancing_correlation_df, compute_weighted_balancing_price,
@@ -424,20 +337,10 @@ def resolve_parent_span_id(candidate: Optional[str]) -> str:
     return candidate if candidate and _SAFE_REQUEST_ID_RE.fullmatch(candidate) else ""
 
 
-@asynccontextmanager
-async def _lifespan(_app: FastAPI):
-    """Startup hook: prime schema cache and validate skills.
-
-    Replaces the deprecated ``@app.on_event("startup")`` (Q5, 2026-06-10).
-    """
-    refresh_schema_map()
-    from skills.loader import validate_skills, warmup_cache
-    validate_skills()
-    warmup_cache()
-    yield
-
-
-app = FastAPI(title="Enai Analyst (Gemini)", version=__version__, lifespan=_lifespan)
+app = application_runtime.create_application(
+    title="Enai Analyst (Gemini)",
+    version=__version__,
+)
 security_log = logging.getLogger("EnaiSecurity")
 
 
@@ -921,22 +824,11 @@ def healthz():
 @app.get("/readyz")
 def readyz():
     """Readiness probe: live DB connectivity plus current required schema."""
-    db_ready = is_database_available()
-    schema_refreshed = _ensure_schema_map_current() if db_ready else False
-    schema_ready = bool(
-        db_ready
-        and schema_refreshed
-        and required_schema_is_ready(SCHEMA_MAP)
-    )
-    ready = db_ready and schema_ready
-    payload = {
-        "status": "ready" if ready else "degraded",
-        "database_ready": db_ready,
-        "schema_ready": schema_ready,
-    }
-    if ready:
+    snapshot = application_runtime.readiness()
+    payload = snapshot.public_payload()
+    if snapshot.ready:
         return payload
-    return JSONResponse(status_code=503, content=payload)
+    return JSONResponse(status_code=snapshot.status_code, content=payload)
 
 
 @app.get("/metrics")

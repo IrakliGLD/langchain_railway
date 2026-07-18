@@ -13,7 +13,6 @@ import subprocess
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -73,6 +72,7 @@ import main as main_module  # noqa: E402
 from agent.tools import common as tool_common
 from agent.tools import composition_tools
 from analysis.stats import quick_stats, rows_to_preview
+from core.application_runtime import ReadinessSnapshot
 from core.sql_generator import sanitize_sql
 from main import (
     BALANCING_SEGMENT_NORMALIZER,
@@ -1152,225 +1152,20 @@ def test_ask_rejects_invalid_history_shape_and_bounds(payload):
 
 
 @pytest.mark.parametrize(
-    ("database_ready", "schema_map", "expected_status"),
+    ("snapshot", "expected_status"),
     [
-        (True, {}, 503),
-        (True, {next(iter(main_module.STATIC_ALLOWED_TABLES)): {"date"}}, 503),
-        (
-            True,
-            {
-                table_name: set(required_columns)
-                for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-            },
-            200,
-        ),
-        (
-            False,
-            {
-                table_name: set(required_columns)
-                for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-            },
-            503,
-        ),
+        (ReadinessSnapshot(True, True), 200),
+        (ReadinessSnapshot(True, False), 503),
+        (ReadinessSnapshot(False, False), 503),
     ],
 )
-def test_readyz_requires_database_and_every_required_relation(
-    monkeypatch, database_ready, schema_map, expected_status
-):
-    monkeypatch.setattr(main_module, "is_database_available", lambda: database_ready)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", {"stale_view": {"stale_column"}})
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        assert database_ready, "schema reflection must not run when connectivity already failed"
-        main_module.SCHEMA_MAP = schema_map
-        return True
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
+def test_readyz_preserves_runtime_snapshot_contract(monkeypatch, snapshot, expected_status):
+    monkeypatch.setattr(main_module.application_runtime, "readiness", lambda: snapshot)
 
     response = TestClient(main_module.app).get("/readyz")
 
-    schema_ready = database_ready and main_module.required_schema_is_ready(schema_map)
     assert response.status_code == expected_status
-    assert response.json() == {
-        "status": "ready" if expected_status == 200 else "degraded",
-        "database_ready": database_ready,
-        "schema_ready": schema_ready,
-    }
-
-
-def test_readyz_rejects_a_required_relation_with_a_missing_column(monkeypatch):
-    schema_map = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    table_name = next(iter(schema_map))
-    schema_map[table_name].pop()
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", schema_map)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", time.monotonic())
-
-    def unexpected_refresh():
-        raise AssertionError("a fresh schema snapshot must be reused")
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", unexpected_refresh)
-
-    response = TestClient(main_module.app).get("/readyz")
-
-    assert response.status_code == 503
-    assert response.json()["schema_ready"] is False
-
-
-@pytest.mark.parametrize(
-    ("schema_states", "expected_statuses"),
-    [
-        ([{}, "complete"], [503, 200]),
-        (["complete", "missing_column"], [200, 503]),
-    ],
-)
-def test_readyz_refreshes_schema_for_recovery_and_runtime_drift(
-    monkeypatch, schema_states, expected_statuses
-):
-    complete_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    missing_column_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    missing_column_schema[next(iter(missing_column_schema))].pop()
-    resolved_states = [
-        complete_schema if state == "complete"
-        else missing_column_schema if state == "missing_column"
-        else state
-        for state in schema_states
-    ]
-
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-
-    monkeypatch.setattr(main_module, "_schema_map_cache_is_fresh", lambda: False)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        main_module.SCHEMA_MAP = resolved_states.pop(0)
-        return True
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
-    client = TestClient(main_module.app)
-
-    responses = [client.get("/readyz") for _ in expected_statuses]
-
-    assert [response.status_code for response in responses] == expected_statuses
-    assert [response.json()["schema_ready"] for response in responses] == [
-        status == 200 for status in expected_statuses
-    ]
-
-
-def test_readyz_reuses_a_fresh_schema_snapshot_without_reflection(monkeypatch):
-    complete_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", complete_schema)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", time.monotonic())
-
-    def unexpected_refresh():
-        raise AssertionError("a fresh schema snapshot must be reused")
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", unexpected_refresh)
-    client = TestClient(main_module.app)
-
-    responses = [client.get("/readyz") for _ in range(2)]
-
-    assert [response.status_code for response in responses] == [200, 200]
-
-
-def test_readyz_fails_closed_when_stale_schema_refresh_fails(monkeypatch):
-    complete_schema = {
-        table_name: set(required_columns)
-        for table_name, required_columns in main_module.REQUIRED_SCHEMA_COLUMNS.items()
-    }
-    stale_at = time.monotonic() - main_module.SCHEMA_READINESS_CACHE_TTL_SECONDS - 1
-    monkeypatch.setattr(main_module, "is_database_available", lambda: True)
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", complete_schema)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", stale_at)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-    monkeypatch.setattr(main_module, "refresh_schema_map", lambda: False)
-
-    response = TestClient(main_module.app).get("/readyz")
-
-    assert response.status_code == 503
-    assert response.json()["schema_ready"] is False
-
-
-def test_schema_refresh_is_singleflight_across_concurrent_probes(monkeypatch):
-    refresh_calls = 0
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        nonlocal refresh_calls
-        refresh_calls += 1
-        time.sleep(0.02)
-        main_module._SCHEMA_MAP_REFRESHED_AT = time.monotonic()
-        return True
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(lambda _: main_module._ensure_schema_map_current(), range(8)))
-
-    assert results == [True] * 8
-    assert refresh_calls == 1
-
-
-def test_failed_schema_refresh_is_throttled_across_concurrent_probes(monkeypatch):
-    refresh_calls = 0
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESHED_AT", None)
-    monkeypatch.setattr(main_module, "_SCHEMA_MAP_REFRESH_FAILED_AT", None)
-
-    def refresh_schema_map():
-        nonlocal refresh_calls
-        refresh_calls += 1
-        time.sleep(0.02)
-        main_module._SCHEMA_MAP_REFRESH_FAILED_AT = time.monotonic()
-        return False
-
-    monkeypatch.setattr(main_module, "refresh_schema_map", refresh_schema_map)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(lambda _: main_module._ensure_schema_map_current(), range(8)))
-
-    assert results == [False] * 8
-    assert refresh_calls == 1
-    assert main_module._ensure_schema_map_current() is False
-    assert refresh_calls == 1
-
-
-def test_schema_reflection_never_expands_the_sql_allowlist(monkeypatch):
-    required_table = next(iter(main_module.STATIC_ALLOWED_TABLES))
-
-    class ReflectionResult:
-        def fetchall(self):
-            return [(required_table, "date"), ("private_unlisted_view", "secret")]
-
-    class ReflectionConnection(DummyConnection):
-        def execute(self, *args: Any, **kwargs: Any):
-            return ReflectionResult()
-
-    class ReflectionEngine:
-        def connect(self):
-            return ReflectionConnection()
-
-    monkeypatch.setattr(main_module, "ENGINE", ReflectionEngine())
-    monkeypatch.setattr(main_module, "SCHEMA_MAP", {})
-
-    assert main_module.refresh_schema_map() is True
-    assert "private_unlisted_view" in main_module.SCHEMA_MAP
-    assert main_module.ALLOWED_TABLES == set(main_module.STATIC_ALLOWED_TABLES)
+    assert response.json() == snapshot.public_payload()
 
 
 def test_startup_failure_exits_nonzero():
