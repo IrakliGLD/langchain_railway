@@ -21,6 +21,7 @@ from agent.plan_validation import (
     SEVERITY_WARN,
     PlanValidationIssue,
     PlanValidationResult,
+    _cross_check_visualization,
     validate_plan_against_answer_kind,
 )
 from agent.planner import resolve_tool_params
