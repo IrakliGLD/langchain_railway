@@ -12,6 +12,7 @@ grounding-token change. They assert that:
 
 Nothing here touches the live gate — `_is_summary_grounded` is unchanged.
 """
+
 import os
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -24,6 +25,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import logging  # noqa: E402
 
 from agent import summarizer  # noqa: E402
+from agent.summary_grounding import build_grounding_tokens  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 from models import GroundingPolicy, QueryContext  # noqa: E402
 
@@ -33,6 +35,12 @@ def test_tokenize_seam_is_opt_in():
     assert "85" in summarizer._tokenize_cell_value(0.85)
     # ...and the harness flag suppresses only the percent expansion.
     assert "85" not in summarizer._tokenize_cell_value(0.85, emit_ratio_percent=False)
+
+
+def test_public_grounding_boundary_matches_summarizer_compatibility_export():
+    ctx = QueryContext(query="price", cols=["value"], rows=[(12.5,)])
+
+    assert build_grounding_tokens(ctx) == summarizer._build_grounding_tokens(ctx)
 
 
 def test_is_ratio_column_recognises_share_and_ratio_names():
@@ -60,10 +68,10 @@ def test_shadow_flags_false_pass_on_non_ratio_cell():
         confidence=0.9,
     )
     cmp = summarizer.compare_grounding_policies(envelope, ctx)
-    assert cmp.current_passed is True       # x100 everywhere -> "85" matches
-    assert cmp.candidate_passed is False    # corr_coef not a ratio col -> no "85"
+    assert cmp.current_passed is True  # x100 everywhere -> "85" matches
+    assert cmp.candidate_passed is False  # corr_coef not a ratio col -> no "85"
     assert cmp.disagree is True
-    assert cmp.divergent_tokens             # the removed percent token(s)
+    assert cmp.divergent_tokens  # the removed percent token(s)
 
 
 def test_shadow_preserves_legitimate_share_percentage():
