@@ -12,11 +12,13 @@ uvicorn==0.27.1
 slowapi==0.1.9  # Rate limiting
 
 # LangChain ecosystem - compatible versions
-# Note: langchain 0.1.20 requires langchain-core>=0.1.52,<0.2.0
-# langchain-openai 0.1.1 is compatible with langchain-core<0.2.0
-langchain==0.1.20
+# Only the two provider wrappers are imported (core/llm.py,
+# core/llm_runtime.py, knowledge/vector_embeddings.py); langchain-core is
+# their shared transitive runtime, pinned explicitly to keep resolution
+# deterministic until the B2.A.5 wrapper upgrade. (langchain and
+# langchain-community removed 2026-07-18 — zero importers, F10-SEC-01
+# B2.A.2.)
 langchain-core==0.1.52
-langchain-community==0.0.38
 langchain-google-genai==0.0.11
 langchain-openai==0.1.1
 
