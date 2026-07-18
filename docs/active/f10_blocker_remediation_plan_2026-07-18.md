@@ -51,7 +51,7 @@ Do not begin B3 promotion until B1 and B2 are green. B4 tests the promoted B3 ar
 
 **Goal:** eliminate moving-target ambiguity before code changes.
 
-**Implementation status (2026-07-18):** repository-side B0 ledger implemented in [`f10_b0_release_evidence_ledger_2026-07-18.md`](./f10_b0_release_evidence_ledger_2026-07-18.md). Operational exit remains blocked by unassigned named owners, private frontend/Railway run and deployment IDs, rollback identities, and a failed backend focused-coverage CI job. B1 promotion must not begin until those fields are completed.
+**Implementation status (2026-07-18):** repository-side B0 ledger implemented in [`f10_b0_release_evidence_ledger_2026-07-18.md`](./f10_b0_release_evidence_ledger_2026-07-18.md). Audit correction: B1 development may proceed because new workflow/deployment/rollback IDs cannot exist until B1/B2 create candidates and B3 promotes them. Unassigned owners, protected evidence storage, candidate IDs, and green candidate CI remain mandatory B3 preflight gates; no High waiver is permitted while waiver authority is unassigned.
 
 ### Actions
 

@@ -2,9 +2,9 @@
 
 ## Status
 
-**B0 repository implementation is complete; B0 operational exit is blocked.** Repository identities, public deployment evidence, evidence locations, and the required ownership schema are recorded. Named human owners, private frontend workflow IDs, Railway deployment/image IDs, and rollback deployment IDs are unavailable and must not be guessed.
+**B0 repository implementation is complete and B1 development may proceed.** Repository identities, public deployment evidence, evidence locations, and the required ownership schema are recorded. Named human owners, private frontend workflow IDs, Railway deployment/image IDs, and rollback deployment IDs are unavailable and must not be guessed; they are promotion evidence that must be completed before B3, not information that can exist before B1 creates new candidates.
 
-Do not treat this document as approval to promote B1 artifacts. The unchecked manual fields in §7 must be completed first.
+Do not treat this document as approval to promote B1 artifacts. B1 implementation, local verification, audit, commit, and push are allowed; B3 production promotion remains blocked until the applicable manual fields in §7 are completed.
 
 ## 1. Scope and independence
 
@@ -69,24 +69,24 @@ The following assignments require explicit human names or accountable organizati
 
 | Responsibility | Named owner | Approver | Status |
 |---|---|---|---|
-| Backend dependency/security remediation | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Backend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Frontend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Supabase Edge/database operations | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Credentialed production smoke accounts | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Accessibility evidence | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Critical/High waiver authority | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
-| Final F10 release decision | **UNASSIGNED** | **UNASSIGNED** | Manual blocker |
+| Backend dependency/security remediation | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
+| Backend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
+| Frontend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
+| Supabase Edge/database operations | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
+| Credentialed production smoke accounts | **UNASSIGNED** | **UNASSIGNED** | Required before B4 production evidence |
+| Accessibility evidence | **UNASSIGNED** | **UNASSIGNED** | Required before B4 production evidence |
+| Critical/High waiver authority | **UNASSIGNED** | **UNASSIGNED** | Default is no waivers until assigned |
+| Final F10 release decision | **UNASSIGNED** | **UNASSIGNED** | Required before B6 closure |
 
 One person may hold several roles if explicitly recorded, but the waiver approver should not approve their own unresolved security exception where an independent reviewer is available.
 
 ## 7. Manual completion checklist
 
 - [ ] Replace every `UNASSIGNED` ownership field with a named accountable owner/approver.
-- [ ] Record the current backend Railway service, environment, deployment ID, source SHA, image digest, replica/autoscaling setting, and rollback deployment ID.
-- [ ] Record the current frontend Railway service, environment, deployment ID, source SHA/artifact manifest, and rollback deployment ID.
-- [ ] Record frontend private GitHub CI and release-evidence run IDs for the current or superseding candidate.
-- [ ] Record the current Supabase Edge deployment workflow run, deployment timestamp, project ref, source digest, full version, and rollback SHA.
+- [ ] Before B3, record the candidate backend Railway service, environment, deployment ID, source SHA, image digest, replica/autoscaling setting, and rollback deployment ID.
+- [ ] Before B3, record the candidate frontend Railway service, environment, deployment ID, source SHA/artifact manifest, and rollback deployment ID.
+- [ ] Before B3, record frontend private GitHub CI and release-evidence run IDs for the superseding candidate.
+- [ ] Before B3, record the candidate Supabase Edge deployment workflow run, deployment timestamp, project ref, source digest, full version, and rollback SHA.
 - [ ] Choose the protected evidence archive and confirm retention/access policy.
 - [ ] Download the authorized backend failed-job log, reproduce with Python 3.11 plus `requirements.txt`/`requirements-dev.txt`, and close the focused-coverage CI failure at the next candidate SHA. The Python 3.14 local pass is diagnostic evidence, not a substitute.
 
@@ -120,8 +120,9 @@ Copy this table for B1 and every later candidate. Never replace historical rows.
 | Exact baseline repository SHAs recorded | Pass |
 | Public deployment/source evidence recorded without inferring exact deployment SHAs | Pass |
 | Evidence schema and append-only candidate template defined | Pass |
-| Named human owners/approvers assigned | **Blocked** |
-| Private workflow, Railway, artifact, and rollback identities recorded | **Blocked** |
-| Backend CI green at the candidate SHA | **Blocked** |
+| Named roles and no-waiver default defined for development | Pass |
+| Named human owners/approvers assigned for promotion | **Deferred to B3 preflight** |
+| Candidate workflow, Railway, artifact, and rollback identities recorded | **Deferred until B1/B2 candidates exist and B3 runs** |
+| Backend CI green at the candidate SHA | **Required for each B1/B2 commit before promotion** |
 
-**Decision:** commit the B0 ledger so the missing operational evidence is explicit and reviewable. Do not mark B0 fully closed or start B1 promotion until the blocked rows are completed. B1 code design may be inspected, but implementation must not be represented as an approved release candidate while B0 remains operationally blocked.
+**Decision:** B0 is closed for repository development. Proceed with B1 implementation and commit its independent tracks. Do not begin B3 production promotion until owners, candidate deployment identities, rollback identities, green candidate CI, and the protected evidence archive are recorded.
