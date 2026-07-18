@@ -30,6 +30,15 @@ import pandas as pd
 from sqlalchemy import text
 
 from agent import analyzer, chart_pipeline, evidence_finalizer, evidence_planner, planner, sql_executor, summarizer
+from agent.evidence_derivation import (
+    derive_evidence,
+)
+from agent.evidence_derivation import (
+    missing_requested_evidence as _missing_requested_evidence,
+)
+from agent.evidence_derivation import (
+    requested_derived_metric_names as _requested_derived_metric_names,
+)
 from agent.fixture_candidates import log_fixture_candidate
 from agent.p4_rollout import (
     GATE_EVIDENCE_FINALIZATION,
@@ -761,38 +770,6 @@ def _rewrite_query_for_clarify_selection(selected: str, conversation_history) ->
     if not original_question:
         return selected
     return f"{original_question}\nSelected interpretation: {selected}"
-
-
-def _requested_derived_metric_names(ctx: QueryContext) -> list[str]:
-    """Return active analyzer requested derived metrics in stable order."""
-
-    if not ctx.has_authoritative_question_analysis:
-        return []
-
-    names: list[str] = []
-    seen: set[str] = set()
-    for metric in ctx.question_analysis.analysis_requirements.derived_metrics or []:
-        name = getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
-        if not name or name in seen:
-            continue
-        names.append(name)
-        seen.add(name)
-    return names
-
-
-def _missing_requested_evidence(ctx: QueryContext) -> list[str]:
-    """Return requested derived metrics that Stage 3 did not materialize."""
-
-    requested = list(ctx.requested_derived_metrics or [])
-    if not requested:
-        return []
-
-    evidence_names = {
-        str(record.get("derived_metric_name") or "").strip()
-        for record in (ctx.analysis_evidence or [])
-        if str(record.get("derived_metric_name") or "").strip()
-    }
-    return [name for name in requested if name not in evidence_names]
 
 
 def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
@@ -3076,22 +3053,7 @@ def _process_query_impl(
 
     # Stage 3: enrich
     t_stage = time.time()
-    ctx = stages.run("stage_3_analyzer_enrich", analyzer.enrich)
-    if ctx.rows and ctx.cols and set(ctx.cols) - set(ctx.provenance_cols or []):
-        inferred_source = str(ctx.provenance_source or ("tool" if ctx.used_tool else "sql"))
-        inferred_hash = str(ctx.provenance_query_hash or "")
-        if not inferred_hash:
-            if ctx.used_tool and ctx.tool_name:
-                inferred_hash = tool_invocation_hash(ctx.tool_name, ctx.tool_params)
-            elif ctx.safe_sql:
-                inferred_hash = sql_query_hash(ctx.safe_sql)
-        stamp_provenance(
-            ctx,
-            ctx.cols,
-            ctx.rows,
-            source=inferred_source or "tool",
-            query_hash=inferred_hash or sql_query_hash(f"{ctx.query}|stage3_enriched"),
-        )
+    ctx = stages.run("stage_3_analyzer_enrich", derive_evidence)
     _trace_stage(
         "stage_3_analyzer_enrich",
         t_stage,
