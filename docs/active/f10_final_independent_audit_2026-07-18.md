@@ -2,6 +2,8 @@
 
 ## Decision
 
+The ordered remediation sequence for the blockers below is documented in [`f10_blocker_remediation_plan_2026-07-18.md`](./f10_blocker_remediation_plan_2026-07-18.md).
+
 **F10 is not closed.** The source revisions pass the available local quality gates and the public production surfaces are healthy, but the final release gate cannot be signed because:
 
 1. the backend dependency audit reports unresolved known vulnerabilities and no named, time-bound security waiver exists;

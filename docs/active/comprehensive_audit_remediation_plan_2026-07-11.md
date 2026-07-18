@@ -1435,7 +1435,9 @@ These checks close only the completed slice; every future extraction must indepe
 
 ## 15.1 F10 — Final independent audit and closure
 
-**Status (2026-07-18): Not closed; three High release blockers have no named, time-bound waiver.** The complete evidence ledger, findings, manual closure steps, and live-evidence A–F reassessment are in [`f10_final_independent_audit_2026-07-18.md`](./f10_final_independent_audit_2026-07-18.md).
+**Status (2026-07-18): Not closed; three High release blockers have no named, time-bound waiver.** The complete evidence ledger, findings, manual closure steps, and live-evidence A–F reassessment are in [`f10_final_independent_audit_2026-07-18.md`](./f10_final_independent_audit_2026-07-18.md). The ordered implementation, deployment, rollback, and evidence sequence is in [`f10_blocker_remediation_plan_2026-07-18.md`](./f10_blocker_remediation_plan_2026-07-18.md).
+
+**B0 implementation update (2026-07-18):** The append-only release/evidence schema and verified baseline identities are recorded in [`f10_b0_release_evidence_ledger_2026-07-18.md`](./f10_b0_release_evidence_ledger_2026-07-18.md). B0 remains operationally blocked: named owners/approvers, private frontend and Railway deployment/run IDs, rollback identities, and a green backend focused-coverage CI run are not yet recorded.
 
 - [x] Push the audited backend branch and confirm frontend `main` is synchronized independently.
 - [x] Run the available full backend, frontend, Edge, static database, security, contract, build, bounded readiness-load, and public accessibility suites.
