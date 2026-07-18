@@ -156,6 +156,8 @@ This phase is first because it is high impact, relatively low risk, and makes ev
 
 #### B2.A.1 — Produce an advisory/reachability ledger
 
+**Repository implementation status (2026-07-18): complete.** See [`f10_b2a1_dependency_advisory_ledger_2026-07-18.md`](./f10_b2a1_dependency_advisory_ledger_2026-07-18.md) and `docs/evidence/f10_b2/`. The pinned cp311 closure (101 packages) carries 94 OSV records (~34 CVEs) in 11 packages; 42 records belong to pins with zero production imports, every record has a reachable fix or exits the closure, and no waiver is required. Documented deviation: this workstation's Python 3.14 cannot execute `pip-audit -r` against cp311-only pins, so the identical OSV database was queried directly against the exact resolved closure; the authoritative `pip-audit` JSON remains the protected release-evidence workflow artifact at the B2 candidate SHA. The ledger also records that the local test environment diverges from the production pin set on 76 of 101 packages, so local green suites are diagnostic evidence only.
+
 1. Run `pip-audit -r requirements.txt --format json` and preserve the JSON.
 2. Produce a forward and reverse dependency graph in a disposable Python 3.11 environment.
 3. For every advisory record:
