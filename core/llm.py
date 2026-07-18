@@ -11,7 +11,6 @@ Handles:
 """
 
 import hashlib
-import inspect
 import json
 import logging
 import random
@@ -92,6 +91,7 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
+from core.provider_invocation import ProviderInvocationRuntime
 from knowledge.sql_example_selector import get_relevant_examples
 from skills.loader import (
     _extract_section,
@@ -117,6 +117,13 @@ from utils.request_deadline import current_request_execution_scope
 from utils.resilience import get_llm_breaker
 
 log = logging.getLogger("Enai")
+_provider_invocation_runtime = ProviderInvocationRuntime(
+    claim_attempt=claim_provider_attempt,
+    finish_attempt=finish_provider_attempt,
+    classify_failure=classify_provider_failure,
+    wrap_failure=wrap_provider_failure,
+    log_circuit_open=metrics.log_circuit_open,
+)
 
 
 def _is_fast_pipeline_mode() -> bool:
@@ -237,55 +244,14 @@ def _invoke_with_resilience(llm, messages, model_name: str, *, attempt_stage: st
     provider = _provider_from_model_name(model_name)
     timeout_seconds = _effective_provider_timeout_seconds(provider, attempt_stage)
     breaker = get_llm_breaker(provider)
-    allowed, reason = breaker.allow_request()
-    if not allowed:
-        metrics.log_circuit_open(f"llm_{provider}")
-        raise ProviderExecutionError(
-            f"LLM circuit breaker open for provider={provider} reason={reason}",
-            provider=provider,
-            stage=attempt_stage,
-            disposition=ProviderDeliveryDisposition.REJECTED,
-        )
-
-    token = claim_provider_attempt(provider, attempt_stage)
-    try:
-        invoke_kwargs = {"timeout": timeout_seconds}
-        if provider == "gemini":
-            # google-genai HttpOptions uses milliseconds and attempts includes
-            # the first call, so 1 disables SDK-owned retries.
-            invoke_kwargs = {
-                "timeout": max(1, int(timeout_seconds * 1000)),
-                "max_retries": 1,
-            }
-        try:
-            invoke_signature = inspect.signature(llm.invoke)
-            accepts_kwargs = (
-                any(
-                    parameter.kind == inspect.Parameter.VAR_KEYWORD
-                    for parameter in invoke_signature.parameters.values()
-                )
-                or "timeout" in invoke_signature.parameters
-            )
-        except (TypeError, ValueError):
-            accepts_kwargs = True
-        message = llm.invoke(messages, **invoke_kwargs) if accepts_kwargs else llm.invoke(messages)
-    except Exception as error:
-        disposition = classify_provider_failure(error)
-        finish_provider_attempt(token, disposition)
-        if disposition != ProviderDeliveryDisposition.PERMANENT_FAILURE:
-            breaker.record_failure()
-        else:
-            breaker.record_success()
-        raise wrap_provider_failure(
-            error,
-            provider=provider,
-            stage=attempt_stage,
-            disposition=disposition,
-        ) from error
-
-    finish_provider_attempt(token, ProviderDeliveryDisposition.COMPLETED)
-    breaker.record_success()
-    return message
+    return _provider_invocation_runtime.invoke(
+        llm,
+        messages,
+        provider=provider,
+        stage=attempt_stage,
+        timeout_seconds=timeout_seconds,
+        breaker=breaker,
+    )
 
 
 def _invoke_at_stage(llm, messages, model_name: str, stage: str):
