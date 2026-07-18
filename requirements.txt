@@ -38,9 +38,10 @@ tenacity==8.2.3
 python-dotenv==1.0.1
 
 # AI/ML services
+# (litellm removed 2026-07-18 — zero importers, F10-SEC-01 B2.A.2;
+# provider access goes through langchain-openai/langchain-google-genai.)
 google-generativeai==0.4.1
 google-genai==1.65.0
-litellm==1.44.10
 
 # SQL parsing
 sqlglot==25.25.0
