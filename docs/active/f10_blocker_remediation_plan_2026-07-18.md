@@ -275,6 +275,8 @@ Where the contract is unchanged, backend and frontend remain independently deplo
 
 ### B4.A — Backend evidence
 
+**Repository-side implementation status (2026-07-19): complete — see [`f10_b4a_backend_evidence_2026-07-19.md`](./f10_b4a_backend_evidence_2026-07-19.md).** Every automatable B4.A requirement is mapped to green, cited evidence at candidate `b628f7881175fc12e47da0f87570411d65c0e789`: clean-environment pytest/Ruff/security/red-team/audit via the fully green CI run `29678536060`; a fresh dedicated 428-test evidence run covering the complete failure matrix (pool exhaustion, breaker-open, readiness-under-saturation, cancellation/no-orphan-work, simultaneous primary/secondary load, statement timeout, and the F4 deterministic-fake injection rows); replay/request-size/typed-error contract citations; and idempotency proofs (finalize-once provider attempts, 409 assertion replay, durable Edge ledger authority). A local red-team gate run scored 1.0 with zero hard failures. The deployed-artifact rows — release-evidence SBOM review, Railway deployment/rollback/one-replica attestation, the §6 safe production smoke, and the §8 chat-load window (parameters proposed, awaiting explicit approval) — are `Manual verification pending` behind B3 promotion.
+
 Run against the exact B3 backend artifact:
 
 - complete pytest and Ruff gates from a clean checkout/container;
