@@ -294,6 +294,8 @@ Before any production chat load, approve a maximum concurrency, request count, p
 
 ### B4.B — Frontend, Edge, database, and accessibility evidence
 
+**Repository-side implementation status (2026-07-19): complete — see the independent frontend repository's `docs/active/f10_b4b_frontend_edge_db_evidence_2026-07-19.md` (frontend commits `22c3f65`/`75e22b0`, documentation-only; the frontend candidate remains `ae9b68f9779a4a2c22a0b0c14307f0eb837ae231`).** All five required workflows and the full `SMOKE_*` secret contract (including `SMOKE_REQUIRE_AUTH` and artifact-SHA/version binding) already exist — no parallel runner and no workflow changes were needed. Every required browser/Edge state maps to green evidence: mock-provable states (malformed payload, timeout/abort, quota/paused denial, degradation/critical messaging, admin flows) in the 465-test component suite per the plan's isolated-mock guidance; live states in the Playwright login-proof spec and the three-scan credentialed axe matrix. The disposable database pack is `npm run test:db` → 11 SQL regressions covering the F10-E2E-03 surface. Two operator prerequisites gate live execution: `TEST_DATABASE_URL` must reach a disposable database (the runner fails hard without it, so frontend CI cannot be green until then — provision the temporary Supabase project first), and the four synthetic accounts (active/paused/quota-exhausted/admin) must be created and stored in the protected environments. Live runs, DB attestations, and the manual keyboard/SR/zoom checklist are `Manual verification pending` behind B3.
+
 #### GitHub environment/secrets
 
 Configure the existing workflows rather than inventing a parallel runner:
