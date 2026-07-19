@@ -32,7 +32,10 @@ def test_lock_source_digest_matches_requirements():
     # An edited requirements.txt without a regenerated lock fails here.
     match = re.search(r"# Source: requirements\.txt \(sha256=([0-9a-f]{64})\)", LOCK)
     assert match, "lock is missing its source-digest header"
-    current = hashlib.sha256((ROOT / "requirements.txt").read_bytes()).hexdigest()
+    # LF-normalized to match the generator: Windows worktrees may be CRLF
+    # while CI checkouts are LF; the digest must agree on both.
+    normalized = (ROOT / "requirements.txt").read_bytes().replace(b"\r\n", b"\n")
+    current = hashlib.sha256(normalized).hexdigest()
     assert match.group(1) == current, (
         "requirements-lock.txt is stale; run "
         "'python scripts/generate_requirements_lock.py'"
