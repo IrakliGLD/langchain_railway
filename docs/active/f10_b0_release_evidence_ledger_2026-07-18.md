@@ -88,7 +88,7 @@ One person may hold several roles if explicitly recorded, but the waiver approve
 - [ ] Before B3, record frontend private GitHub CI and release-evidence run IDs for the superseding candidate.
 - [ ] Before B3, record the candidate Supabase Edge deployment workflow run, deployment timestamp, project ref, source digest, full version, and rollback SHA.
 - [ ] Choose the protected evidence archive and confirm retention/access policy.
-- [ ] Download the authorized backend failed-job log, reproduce with Python 3.11 plus `requirements.txt`/`requirements-dev.txt`, and close the focused-coverage CI failure at the next candidate SHA. The Python 3.14 local pass is diagnostic evidence, not a substitute.
+- [x] Download the authorized backend failed-job log, reproduce with Python 3.11 plus `requirements.txt`/`requirements-dev.txt`, and close the focused-coverage CI failure at the next candidate SHA. The Python 3.14 local pass is diagnostic evidence, not a substitute. *(Closed 2026-07-19 at `b628f788…`, CI run `29678536060` fully green. Root causes, fixed in order: a finite fake clock patched onto the shared `time` module collided with Python 3.11's logging timestamps (`14c8a42`); the workflow env diverged from the canonical test literals, 401ing the /ask contract tests (`948cddf`); and pydantic 2.9.2 rendered JSON schemas differently from the 2.12.4 that generated the committed contract artifacts (`b628f78`).)*
 
 ## 8. Append-only candidate template
 
@@ -143,3 +143,19 @@ These rows record repository candidates only. Empty operational fields are delib
 | Operator/approver/evidence archive | Irakli / Irakli; protected archive selection pending | Irakli / Irakli; protected archive selection pending |
 | Rollback artifact/deployment | **PENDING** | **PENDING** |
 | Promotion decision | Blocked before B3 | Blocked before B3 |
+
+## 11. B2 append-only implementation candidates (supersede §10 for promotion)
+
+| Field | Backend B2 | Frontend/Supabase B2.B |
+|---|---|---|
+| Application/repository | `IrakliGLD/langchain_railway` | `IrakliGLD/EnaiDashboard` |
+| Branch and full Git SHA | `refactor/review-phase-fixes`; `b628f7881175fc12e47da0f87570411d65c0e789` | `main`; `ae9b68f9779a4a2c22a0b0c14307f0eb837ae231` (unchanged by B2 — no frontend code change was required) |
+| Candidate purpose | F10-SEC-01 closure: dependency closure audits **zero advisories, zero waivers** (94 → 0); hashed 68-pin lock installed with `--require-hashes`; CI advisory + lock-freshness gates | B2.B integration attestation of the unchanged frontend against the remediated backend |
+| Local verification | Full suite 1,710 green incl. `tests/security`; Ruff; exact CI coverage commands green | 465/0 tests; ESLint; contract verify (no schema change); edge manifest `973efd27…`; identity-bearing build + artifact verify; prod npm audit 0 |
+| CI run/conclusion | [`29678536060`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29678536060) **success — every step green, including the first-ever pass of the full-test/coverage-floor step** | Owner attestation pending (repository CI is private; pinned Deno v2.1.4 `edge:verify` runs on every push) |
+| Release-evidence run | **PENDING** — operator runs `Backend release evidence` with this exact SHA | **PENDING** — `Frontend release evidence` at this exact SHA |
+| Railway/Supabase deployment ID | **PENDING** (B3) | **PENDING** (B3) |
+| Rollback artifact/deployment | **PENDING** (record previous deployment before promoting) | **PENDING** |
+| Promotion decision | Ready for B3 preflight once release-evidence artifacts are recorded | Ready for B3 preflight |
+
+Ledger commits after `b628f7881175fc12e47da0f87570411d65c0e789` are documentation-only and are explicitly recorded as such per §B0-4; they do not create a new candidate.
