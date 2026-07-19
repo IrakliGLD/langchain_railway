@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -139,10 +141,15 @@ def test_query_executor_fetches_in_batches_and_caps_rows(monkeypatch):
         connection.execute("SET TRANSACTION READ ONLY")
         yield connection
 
-    clock = iter([10.0, 10.25])
+    # Patch the module's `time` NAME, not the shared time module: mutating
+    # time.time leaks into stdlib logging (which timestamps via time.time()
+    # on Python <= 3.12, exhausting a finite clock — the 3.11 CI failure).
+    # The chain keeps every call after the first at 10.25 so the measured
+    # window stays 0.25s no matter how many reads happen.
+    clock = itertools.chain([10.0], itertools.repeat(10.25))
     monkeypatch.setattr(query_executor, "database_connection", _connection)
     monkeypatch.setattr(query_executor, "MAX_ROWS", 3)
-    monkeypatch.setattr(query_executor.time, "time", lambda: next(clock))
+    monkeypatch.setattr(query_executor, "time", SimpleNamespace(time=lambda: next(clock)))
 
     frame, columns, rows, elapsed = query_executor.execute_sql_safely("select value")
 
