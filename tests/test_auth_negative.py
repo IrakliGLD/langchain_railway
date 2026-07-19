@@ -160,6 +160,9 @@ class TestGatewayOnlyBehavior:
     def test_gateway_secret_still_authenticates_when_bearer_disabled(self, monkeypatch):
         monkeypatch.setattr(auth_module, "ENABLE_PUBLIC_BEARER_AUTH", False)
         monkeypatch.setattr(auth_module, "GATEWAY_ACTOR_ASSERTION_MODE", "optional")
+        # CI presets ENAI_GATEWAY_SECRET before this module's setdefault runs,
+        # so never assume the env value — pin the module attribute instead.
+        monkeypatch.setattr(auth_module, "GATEWAY_SHARED_SECRET", "test-gateway-key")
         ctx = authenticate_request(x_app_key="test-gateway-key", request_id="req-1")
         assert ctx.auth_mode == "gateway"
         assert ctx.subject_id == "gateway:internal"
