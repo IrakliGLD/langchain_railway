@@ -74,11 +74,16 @@ jobs:
       - name: Prepare evidence directory
         run: mkdir -p artifacts
 
+      - name: Verify requirements lock is current
+        run: python scripts/generate_requirements_lock.py --check
+
+      # B2.A.6: SBOM and audit cover the complete hashed closure the image
+      # actually installs, not only the top-level requirements.
       - name: Create SBOM
-        run: cyclonedx-py requirements requirements.txt --output-format JSON --output-file artifacts/backend-sbom.cdx.json
+        run: cyclonedx-py requirements requirements-lock.txt --output-format JSON --output-file artifacts/backend-sbom.cdx.json
 
       - name: Audit production dependencies
-        run: pip-audit --requirement requirements.txt --format json --output artifacts/backend-pip-audit.json
+        run: pip-audit --requirement requirements-lock.txt --no-deps --format json --output artifacts/backend-pip-audit.json
 
       - name: Create release manifest and image archive
         if: always()

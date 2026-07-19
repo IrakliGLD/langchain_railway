@@ -8,12 +8,18 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     env:
+      # These MUST equal the os.environ.setdefault defaults used across
+      # tests/ — the suite treats them as the canonical test environment
+      # (tests mint gateway keys and session tokens with these literals,
+      # and config/auth modules capture them at import). Divergent values
+      # here 401 every /ask contract test; see the 2026-07-19 full-test
+      # gate failure at 79c20da.
       SUPABASE_DB_URL: postgresql://user:pass@localhost/db
-      ENAI_GATEWAY_SECRET: ci-gateway-key
-      ENAI_SESSION_SIGNING_SECRET: ci-session-key
-      ENAI_EVALUATE_SECRET: ci-evaluate-key
+      ENAI_GATEWAY_SECRET: test-gateway-key
+      ENAI_SESSION_SIGNING_SECRET: test-session-key
+      ENAI_EVALUATE_SECRET: test-evaluate-key
       MODEL_TYPE: openai
-      OPENAI_API_KEY: ci-openai-key
+      OPENAI_API_KEY: test-openai-key
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,8 +33,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --require-hashes --only-binary :all: -r requirements-lock.txt
           pip install -r requirements-dev.txt
+
+      - name: Verify requirements lock is current
+        run: python scripts/generate_requirements_lock.py --check
+
+      # F10-SEC-01 B2.A.6: required advisory gate over the exact production
+      # closure. Fails on ANY advisory (stricter than the Critical/High
+      # minimum). A waiver is expressed as a narrowly scoped, documented
+      # --ignore-vuln <ID> flag whose ID matches the waiver ledger — never by
+      # removing this step.
+      - name: Audit production dependency closure
+        run: pip-audit --requirement requirements-lock.txt --no-deps
 
       - name: Lint (ruff)
         run: ruff check .

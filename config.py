@@ -365,7 +365,6 @@ HONEST_TERMINAL_OUTCOMES_PERCENT = _read_bounded_int_env(
 # Railway edge, where the socket peer is the proxy and would collapse every
 # caller into one shared bucket. Set to false for direct-exposure deployments.
 TRUST_PROXY_CLIENT_IP = os.getenv("TRUST_PROXY_CLIENT_IP", "true").lower() in ("1", "true", "yes", "on")
-ENABLE_AGENT_LOOP = os.getenv("ENABLE_AGENT_LOOP", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_SHADOW = os.getenv("ENABLE_QUESTION_ANALYZER_SHADOW", "false").lower() in ("1", "true", "yes", "on")
 ENABLE_QUESTION_ANALYZER_HINTS = os.getenv("ENABLE_QUESTION_ANALYZER_HINTS", "true").lower() in ("1", "true", "yes", "on")
 ENABLE_TRACE_DEBUG_ARTIFACTS = os.getenv("ENABLE_TRACE_DEBUG_ARTIFACTS", "false").lower() in ("1", "true", "yes", "on")

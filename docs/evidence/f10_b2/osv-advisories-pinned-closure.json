@@ -1,0 +1,1184 @@
+{
+ "source": "https://api.osv.dev (querybatch + per-vuln details)",
+ "queried": "2026-07-18",
+ "closure": "resolved-cp311-freeze.txt",
+ "packages": {
+  "langchain-community==0.0.38": [
+   {
+    "id": "GHSA-3hjh-jh2h-vrg6",
+    "aliases": [
+     "CVE-2024-2965",
+     "PYSEC-2024-118",
+     "PYSEC-2026-2561"
+    ],
+    "severity": "MODERATE",
+    "summary": "Denial of service in langchain-community",
+    "fixed_in": [
+     "0.2.5"
+    ]
+   },
+   {
+    "id": "GHSA-f2jm-rw3h-6phg",
+    "aliases": [
+     "CVE-2024-5998",
+     "PYSEC-2024-323",
+     "PYSEC-2026-1514"
+    ],
+    "severity": "HIGH",
+    "summary": "LangChain pickle deserialization of untrusted data",
+    "fixed_in": [
+     "0.2.4"
+    ]
+   },
+   {
+    "id": "GHSA-pc6w-59fv-rh23",
+    "aliases": [
+     "CVE-2025-6984",
+     "PYSEC-2026-1515"
+    ],
+    "severity": "HIGH",
+    "summary": "Langchain Community Vulnerable to XML External Entity (XXE) Attacks",
+    "fixed_in": [
+     "0.3.27"
+    ]
+   },
+   {
+    "id": "GHSA-q25c-c977-4cmh",
+    "aliases": [
+     "CVE-2024-3095",
+     "PYSEC-2026-1516"
+    ],
+    "severity": "MODERATE",
+    "summary": "Server-Side Request Forgery in langchain-community.retrievers.web_research.WebResearchRetriever",
+    "fixed_in": [
+     "0.2.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1514",
+    "aliases": [
+     "CVE-2024-5998",
+     "GHSA-f2jm-rw3h-6phg",
+     "PYSEC-2024-323"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain pickle deserialization of untrusted data",
+    "fixed_in": [
+     "0.2.4"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1515",
+    "aliases": [
+     "CVE-2025-6984",
+     "GHSA-pc6w-59fv-rh23"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Langchain Community Vulnerable to XML External Entity (XXE) Attacks",
+    "fixed_in": [
+     "0.3.27"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1516",
+    "aliases": [
+     "CVE-2024-3095",
+     "GHSA-q25c-c977-4cmh"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Server-Side Request Forgery in langchain-community.retrievers.web_research.WebResearchRetriever",
+    "fixed_in": [
+     "0.2.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2561",
+    "aliases": [
+     "CVE-2024-2965",
+     "GHSA-3hjh-jh2h-vrg6",
+     "PYSEC-2024-118"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Denial of service in langchain-community",
+    "fixed_in": [
+     "0.2.5"
+    ]
+   }
+  ],
+  "langchain-core==0.1.52": [
+   {
+    "id": "GHSA-2g6r-c272-w58r",
+    "aliases": [
+     "CVE-2026-26013",
+     "PYSEC-2026-2562"
+    ],
+    "severity": "LOW",
+    "summary": "LangChain affected by SSRF via image_url token counting in ChatOpenAI.get_num_tokens_from_messages",
+    "fixed_in": [
+     "1.2.11"
+    ]
+   },
+   {
+    "id": "GHSA-5chr-fjjv-38qv",
+    "aliases": [
+     "CVE-2024-10940",
+     "PYSEC-2026-1517"
+    ],
+    "severity": "MODERATE",
+    "summary": "langchain-core allows unauthorized users to read arbitrary files from the host file system",
+    "fixed_in": [
+     "0.1.53",
+     "0.2.43",
+     "0.3.15"
+    ]
+   },
+   {
+    "id": "GHSA-6qv9-48xg-fc7f",
+    "aliases": [
+     "CVE-2025-65106",
+     "PYSEC-2026-1518"
+    ],
+    "severity": "HIGH",
+    "summary": "LangChain Vulnerable to Template Injection via Attribute Access in Prompt Templates",
+    "fixed_in": [
+     "0.3.80",
+     "1.0.7"
+    ]
+   },
+   {
+    "id": "GHSA-926x-3r5x-gfhw",
+    "aliases": [
+     "CVE-2026-40087",
+     "PYSEC-2026-2563"
+    ],
+    "severity": "MODERATE",
+    "summary": "LangChain has incomplete f-string validation in prompt templates",
+    "fixed_in": [
+     "0.3.84",
+     "1.2.28"
+    ]
+   },
+   {
+    "id": "GHSA-c67j-w6g6-q2cm",
+    "aliases": [
+     "CVE-2025-68664",
+     "PYSEC-2026-373"
+    ],
+    "severity": "CRITICAL",
+    "summary": "LangChain serialization injection vulnerability enables secret extraction in dumps/loads APIs",
+    "fixed_in": [
+     "0.3.81",
+     "1.2.5"
+    ]
+   },
+   {
+    "id": "GHSA-pjwx-r37v-7724",
+    "aliases": [
+     "CVE-2026-44843",
+     "PYSEC-2026-2564"
+    ],
+    "severity": "HIGH",
+    "summary": "LangChain vulnerable to unsafe deserialization of attacker-controlled objects through overly broad `load()` allowlists",
+    "fixed_in": [
+     "0.3.85",
+     "1.3.3"
+    ]
+   },
+   {
+    "id": "GHSA-qh6h-p6c9-ff54",
+    "aliases": [
+     "CVE-2026-34070",
+     "PYSEC-2026-2193"
+    ],
+    "severity": "HIGH",
+    "summary": "LangChain Core has Path Traversal vulnerabilites in legacy `load_prompt` functions",
+    "fixed_in": [
+     "1.2.22"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1517",
+    "aliases": [
+     "CVE-2024-10940",
+     "GHSA-5chr-fjjv-38qv"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "langchain-core allows unauthorized users to read arbitrary files from the host file system",
+    "fixed_in": [
+     "0.1.53",
+     "0.2.43",
+     "0.3.15"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1518",
+    "aliases": [
+     "CVE-2025-65106",
+     "GHSA-6qv9-48xg-fc7f"
+    ],
+    "severity": "CVSS_V4",
+    "summary": "LangChain Vulnerable to Template Injection via Attribute Access in Prompt Templates",
+    "fixed_in": [
+     "0.3.80",
+     "1.0.7"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2193",
+    "aliases": [
+     "CVE-2026-34070",
+     "GHSA-qh6h-p6c9-ff54"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain is a framework for building agents and LLM-powered applications. Prior to version 1.2.22, multiple functions in langchain_core.prompts.loading read files from paths embedded in deserialized ",
+    "fixed_in": [
+     "1.2.22"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2562",
+    "aliases": [
+     "CVE-2026-26013",
+     "GHSA-2g6r-c272-w58r"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain affected by SSRF via image_url token counting in ChatOpenAI.get_num_tokens_from_messages",
+    "fixed_in": [
+     "1.2.11"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2563",
+    "aliases": [
+     "CVE-2026-40087",
+     "GHSA-926x-3r5x-gfhw"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain has incomplete f-string validation in prompt templates",
+    "fixed_in": [
+     "0.3.84",
+     "1.2.28"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2564",
+    "aliases": [
+     "CVE-2026-44843",
+     "GHSA-pjwx-r37v-7724"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain vulnerable to unsafe deserialization of attacker-controlled objects through overly broad `load()` allowlists",
+    "fixed_in": [
+     "0.3.85",
+     "1.3.3"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-373",
+    "aliases": [
+     "CVE-2025-68664",
+     "GHSA-c67j-w6g6-q2cm"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain serialization injection vulnerability enables secret extraction in dumps/loads APIs",
+    "fixed_in": [
+     "0.3.81",
+     "1.2.5"
+    ]
+   }
+  ],
+  "langchain-openai==0.1.1": [
+   {
+    "id": "GHSA-r7w7-9xr2-qq2r",
+    "aliases": [
+     "CVE-2026-41488",
+     "PYSEC-2026-76"
+    ],
+    "severity": "LOW",
+    "summary": "langchain-openai: Image token counting SSRF protection can be bypassed via DNS rebinding",
+    "fixed_in": [
+     "1.1.14"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-76",
+    "aliases": [
+     "CVE-2026-41488",
+     "GHSA-r7w7-9xr2-qq2r"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain is a framework for building agents and LLM-powered applications. Prior to 1.1.14, langchain-openai's _url_to_size() helper (used by get_num_tokens_from_messages for image token counting) val",
+    "fixed_in": [
+     "1.1.14"
+    ]
+   }
+  ],
+  "langchain-text-splitters==0.0.2": [
+   {
+    "id": "GHSA-fv5p-p927-qmxr",
+    "aliases": [
+     "CVE-2026-41481",
+     "PYSEC-2026-77"
+    ],
+    "severity": "MODERATE",
+    "summary": "LangChain Text Splitters: HTMLHeaderTextSplitter.split_text_from_url SSRF Redirect Bypass",
+    "fixed_in": [
+     "1.1.2"
+    ]
+   },
+   {
+    "id": "GHSA-m42m-m8cr-8m58",
+    "aliases": [
+     "CVE-2025-6985",
+     "PYSEC-2026-1520"
+    ],
+    "severity": "HIGH",
+    "summary": "LangChain Text Splitters is vulnerable to XML External Entity (XXE) attacks due to unsafe XSLT parsing",
+    "fixed_in": [
+     "0.3.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1520",
+    "aliases": [
+     "CVE-2025-6985",
+     "GHSA-m42m-m8cr-8m58"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain Text Splitters is vulnerable to XML External Entity (XXE) attacks due to unsafe XSLT parsing",
+    "fixed_in": [
+     "0.3.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-77",
+    "aliases": [
+     "CVE-2026-41481",
+     "GHSA-fv5p-p927-qmxr"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain is a framework for building agents and LLM-powered applications. Prior to langchain-text-splitters\n 1.1.2, HTMLHeaderTextSplitter.split_text_from_url() validated the initial URL using valida",
+    "fixed_in": [
+     "1.1.2"
+    ]
+   }
+  ],
+  "langchain==0.1.20": [
+   {
+    "id": "GHSA-3644-q5cj-c5c7",
+    "aliases": [
+     "CVE-2026-45134",
+     "PYSEC-2026-2555",
+     "PYSEC-2026-2560",
+     "PYSEC-2026-2582"
+    ],
+    "severity": "HIGH",
+    "summary": "LangSmith SDK: Public prompt pull deserializes untrusted manifests without trust boundary warning",
+    "fixed_in": [
+     "0.3.30"
+    ]
+   },
+   {
+    "id": "GHSA-3hjh-jh2h-vrg6",
+    "aliases": [
+     "CVE-2024-2965",
+     "PYSEC-2024-118",
+     "PYSEC-2026-2561"
+    ],
+    "severity": "MODERATE",
+    "summary": "Denial of service in langchain-community",
+    "fixed_in": [
+     "0.2.5"
+    ]
+   },
+   {
+    "id": "GHSA-45pg-36p6-83v9",
+    "aliases": [
+     "CVE-2024-8309",
+     "PYSEC-2024-115",
+     "PYSEC-2026-1507"
+    ],
+    "severity": "LOW",
+    "summary": "Langchain SQL Injection vulnerability",
+    "fixed_in": [
+     "0.2.0"
+    ]
+   },
+   {
+    "id": "GHSA-gr75-jv2w-4656",
+    "aliases": [
+     "CVE-2026-55443",
+     "PYSEC-2026-2192",
+     "PYSEC-2026-2556"
+    ],
+    "severity": "MODERATE",
+    "summary": "LangChain: Path traversal and sandbox escape in LangChain file-search middleware and loaders",
+    "fixed_in": [
+     "1.3.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2024-118",
+    "aliases": [
+     "CVE-2024-2965",
+     "GHSA-3hjh-jh2h-vrg6",
+     "PYSEC-2026-2561"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "A Denial-of-Service (DoS) vulnerability exists in the `SitemapLoader` class of the `langchain-ai/langchain` repository, affecting all versions. The `parse_sitemap` method, responsible for parsing site",
+    "fixed_in": [
+     "0.2.5",
+     "73c42306745b0831aa6fe7fe4eeb70d2c2d87a82"
+    ]
+   },
+   {
+    "id": "PYSEC-2024-323",
+    "aliases": [
+     "CVE-2024-5998",
+     "GHSA-f2jm-rw3h-6phg",
+     "PYSEC-2026-1514"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "A vulnerability in the FAISS.deserialize_from_bytes function of langchain-ai/langchain allows for pickle deserialization of untrusted data. This can lead to the execution of arbitrary commands via the",
+    "fixed_in": [
+     "0.2.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1507",
+    "aliases": [
+     "CVE-2024-8309",
+     "GHSA-45pg-36p6-83v9",
+     "PYSEC-2024-115"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Langchain SQL Injection vulnerability",
+    "fixed_in": [
+     "0.2.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2192",
+    "aliases": [
+     "CVE-2026-55443",
+     "GHSA-gr75-jv2w-4656",
+     "PYSEC-2026-2556"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangChain is a framework for building agents and LLM-powered applications. Prior to 1.3.9, several LangChain components that resolve filesystem paths or expand search patterns do not consistently conf",
+    "fixed_in": [
+     "1.3.9"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2555",
+    "aliases": [
+     "CVE-2026-45134",
+     "GHSA-3644-q5cj-c5c7",
+     "PYSEC-2026-2560",
+     "PYSEC-2026-2582"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangSmith SDK: Public prompt pull deserializes untrusted manifests without trust boundary warning",
+    "fixed_in": [
+     "0.3.30"
+    ]
+   }
+  ],
+  "langsmith==0.1.147": [
+   {
+    "id": "GHSA-3644-q5cj-c5c7",
+    "aliases": [
+     "CVE-2026-45134",
+     "PYSEC-2026-2555",
+     "PYSEC-2026-2560",
+     "PYSEC-2026-2582"
+    ],
+    "severity": "HIGH",
+    "summary": "LangSmith SDK: Public prompt pull deserializes untrusted manifests without trust boundary warning",
+    "fixed_in": [
+     "0.6.0",
+     "0.8.0"
+    ]
+   },
+   {
+    "id": "GHSA-f4xh-w4cj-qxq8",
+    "aliases": [
+     "CVE-2026-59152"
+    ],
+    "severity": "HIGH",
+    "summary": "LangSmith SDK TracingMiddleware: Arbitrary server-side file read",
+    "fixed_in": [
+     "0.8.18"
+    ]
+   },
+   {
+    "id": "GHSA-rr7j-v2q5-chgv",
+    "aliases": [
+     "CVE-2026-41182",
+     "PYSEC-2026-2583"
+    ],
+    "severity": "MODERATE",
+    "summary": "LangSmith SDK: Streaming token events bypass output redaction",
+    "fixed_in": [
+     "0.5.19",
+     "0.7.31"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2582",
+    "aliases": [
+     "CVE-2026-45134",
+     "GHSA-3644-q5cj-c5c7",
+     "PYSEC-2026-2555",
+     "PYSEC-2026-2560"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangSmith SDK: Public prompt pull deserializes untrusted manifests without trust boundary warning",
+    "fixed_in": [
+     "0.8.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2583",
+    "aliases": [
+     "CVE-2026-41182",
+     "GHSA-rr7j-v2q5-chgv"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LangSmith SDK: Streaming token events bypass output redaction",
+    "fixed_in": [
+     "0.7.31"
+    ]
+   }
+  ],
+  "litellm==1.44.10": [
+   {
+    "id": "GHSA-4xpc-pv4p-pm3w",
+    "aliases": [
+     "CVE-2026-49468",
+     "PYSEC-2026-388"
+    ],
+    "severity": "CRITICAL",
+    "summary": "LiteLLM: Authentication Bypass via Host Header Injection",
+    "fixed_in": [
+     "1.84.0"
+    ]
+   },
+   {
+    "id": "GHSA-53mr-6c8q-9789",
+    "aliases": [
+     "CVE-2026-35029",
+     "PYSEC-2026-2597"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM: Privilege escalation via unrestricted proxy configuration endpoint",
+    "fixed_in": [
+     "1.83.0"
+    ]
+   },
+   {
+    "id": "GHSA-69x8-hrgq-fjj8",
+    "aliases": [],
+    "severity": "HIGH",
+    "summary": "LiteLLM: Password hash exposure and pass-the-hash authentication bypass",
+    "fixed_in": [
+     "1.83.0"
+    ]
+   },
+   {
+    "id": "GHSA-879v-fggm-vxw2",
+    "aliases": [
+     "CVE-2025-0330",
+     "PYSEC-2026-1543"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM Has a Leakage of Langfuse API Keys",
+    "fixed_in": []
+   },
+   {
+    "id": "GHSA-fh2c-86xm-pm2x",
+    "aliases": [
+     "CVE-2024-8984",
+     "PYSEC-2026-1545"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM Vulnerable to Denial of Service (DoS) via Crafted HTTP Request",
+    "fixed_in": [
+     "1.56.2"
+    ]
+   },
+   {
+    "id": "GHSA-fjcf-3j3r-78rp",
+    "aliases": [
+     "CVE-2025-0628",
+     "PYSEC-2026-1546"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM Has an Improper Authorization Vulnerability",
+    "fixed_in": [
+     "1.61.15"
+    ]
+   },
+   {
+    "id": "GHSA-g5pg-73fc-hjwq",
+    "aliases": [
+     "CVE-2024-9606",
+     "PYSEC-2026-1548"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM Reveals Portion of API Key via a Logging File",
+    "fixed_in": [
+     "1.44.12"
+    ]
+   },
+   {
+    "id": "GHSA-gw2q-qw9j-rgv7",
+    "aliases": [
+     "CVE-2024-10188",
+     "PYSEC-2026-1549"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM Vulnerable to Denial of Service (DoS)",
+    "fixed_in": [
+     "1.53.1.dev1"
+    ]
+   },
+   {
+    "id": "GHSA-jjhc-v7c2-5hh6",
+    "aliases": [
+     "CVE-2026-35030",
+     "PYSEC-2026-390"
+    ],
+    "severity": "CRITICAL",
+    "summary": "LiteLLM: Authentication bypass via OIDC userinfo cache key collision",
+    "fixed_in": [
+     "1.83.0"
+    ]
+   },
+   {
+    "id": "GHSA-qrc4-49gv-mv9m",
+    "aliases": [
+     "CVE-2026-47101",
+     "PYSEC-2026-2598"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM allows an authenticated internal_user to create API keys with access to routes that their role does not permit",
+    "fixed_in": [
+     "1.83.14"
+    ]
+   },
+   {
+    "id": "GHSA-wpfp-gwwc-vwq6",
+    "aliases": [
+     "CVE-2026-47102",
+     "PYSEC-2026-2600"
+    ],
+    "severity": "HIGH",
+    "summary": "LiteLLM allows a user to modify their own user_role via the /user/update endpoint",
+    "fixed_in": [
+     "1.83.10"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1543",
+    "aliases": [
+     "CVE-2025-0330",
+     "GHSA-879v-fggm-vxw2"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM Has a Leakage of Langfuse API Keys",
+    "fixed_in": []
+   },
+   {
+    "id": "PYSEC-2026-1545",
+    "aliases": [
+     "CVE-2024-8984",
+     "GHSA-fh2c-86xm-pm2x"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM Vulnerable to Denial of Service (DoS) via Crafted HTTP Request",
+    "fixed_in": [
+     "1.56.2"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1546",
+    "aliases": [
+     "CVE-2025-0628",
+     "GHSA-fjcf-3j3r-78rp"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM Has an Improper Authorization Vulnerability",
+    "fixed_in": [
+     "1.61.15"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1548",
+    "aliases": [
+     "CVE-2024-9606",
+     "GHSA-g5pg-73fc-hjwq"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM Reveals Portion of API Key via a Logging File",
+    "fixed_in": [
+     "1.44.12"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1549",
+    "aliases": [
+     "CVE-2024-10188",
+     "GHSA-gw2q-qw9j-rgv7"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM Vulnerable to Denial of Service (DoS)",
+    "fixed_in": [
+     "1.53.1.dev1"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2597",
+    "aliases": [
+     "CVE-2026-35029",
+     "GHSA-53mr-6c8q-9789"
+    ],
+    "severity": "CVSS_V4",
+    "summary": "LiteLLM: Privilege escalation via unrestricted proxy configuration endpoint",
+    "fixed_in": [
+     "1.83.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2598",
+    "aliases": [
+     "CVE-2026-47101",
+     "GHSA-qrc4-49gv-mv9m"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM allows an authenticated internal_user to create API keys with access to routes that their role does not permit",
+    "fixed_in": [
+     "1.83.14"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2600",
+    "aliases": [
+     "CVE-2026-47102",
+     "GHSA-wpfp-gwwc-vwq6"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "LiteLLM allows a user to modify their own user_role via the /user/update endpoint",
+    "fixed_in": [
+     "1.83.10"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-388",
+    "aliases": [
+     "CVE-2026-49468",
+     "GHSA-4xpc-pv4p-pm3w"
+    ],
+    "severity": "CVSS_V4",
+    "summary": "LiteLLM: Authentication Bypass via Host Header Injection",
+    "fixed_in": [
+     "1.84.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-390",
+    "aliases": [
+     "CVE-2026-35030",
+     "GHSA-jjhc-v7c2-5hh6"
+    ],
+    "severity": "CVSS_V4",
+    "summary": "LiteLLM: Authentication bypass via OIDC userinfo cache key collision",
+    "fixed_in": [
+     "1.83.0"
+    ]
+   }
+  ],
+  "protobuf==4.25.9": [
+   {
+    "id": "GHSA-7gcm-g887-7qv7",
+    "aliases": [
+     "CVE-2026-0994",
+     "PYSEC-2026-1805"
+    ],
+    "severity": "HIGH",
+    "summary": "protobuf affected by a JSON recursion depth bypass",
+    "fixed_in": [
+     "5.29.6",
+     "6.33.5"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1805",
+    "aliases": [
+     "CVE-2026-0994",
+     "GHSA-7gcm-g887-7qv7"
+    ],
+    "severity": "CVSS_V4",
+    "summary": "protobuf affected by a JSON recursion depth bypass",
+    "fixed_in": [
+     "5.29.6",
+     "6.33.5"
+    ]
+   }
+  ],
+  "pyjwt==2.9.0": [
+   {
+    "id": "GHSA-752w-5fwx-jx9f",
+    "aliases": [
+     "CVE-2026-32597",
+     "PYSEC-2026-120"
+    ],
+    "severity": "HIGH",
+    "summary": "PyJWT accepts unknown `crit` header extensions",
+    "fixed_in": [
+     "2.12.0"
+    ]
+   },
+   {
+    "id": "GHSA-993g-76c3-p5m4",
+    "aliases": [
+     "CVE-2026-48522",
+     "PYSEC-2026-175"
+    ],
+    "severity": "MODERATE",
+    "summary": "PyJWKClient: missing scheme allowlist enables CVE-2024-21643-class SSRF + token forgery via file://, ftp://, data: schemes",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "GHSA-fhv5-28vv-h8m8",
+    "aliases": [
+     "CVE-2026-48524",
+     "PYSEC-2026-177"
+    ],
+    "severity": "LOW",
+    "summary": "PyJWKClient unbounded JWKS endpoint requests via attacker-controlled kid values (DoS)",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "GHSA-jq35-7prp-9v3f",
+    "aliases": [
+     "CVE-2026-48523",
+     "PYSEC-2026-176"
+    ],
+    "severity": "MODERATE",
+    "summary": "PyJWT: Algorithm allow-list bypass when decoding with `PyJWK` / `PyJWKClient` keys",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "GHSA-w7vc-732c-9m39",
+    "aliases": [
+     "CVE-2026-48525",
+     "PYSEC-2026-178"
+    ],
+    "severity": "MODERATE",
+    "summary": "PyJWT: Unauthenticated DoS via unbounded Base64URL decoding of unused payload segment in b64=false detached JWS",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "GHSA-xgmm-8j9v-c9wx",
+    "aliases": [
+     "CVE-2026-48526",
+     "PYSEC-2026-179"
+    ],
+    "severity": "HIGH",
+    "summary": "PyJWT: Public-key JWK accepted as HMAC secret enables forged HS256 tokens when mixed families are allowed",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2025-183",
+    "aliases": [
+     "CVE-2025-45768"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "pyjwt v2.10.1 was discovered to contain weak encryption. NOTE: this is disputed by the Supplier because the key length is chosen by the application that uses the library (admittedly, library users may",
+    "fixed_in": []
+   },
+   {
+    "id": "PYSEC-2026-120",
+    "aliases": [
+     "CVE-2026-32597",
+     "GHSA-752w-5fwx-jx9f"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "PyJWT is a JSON Web Token implementation in Python. Prior to 2.12.0, PyJWT does not validate the crit (Critical) Header Parameter defined in RFC 7515 \u00a74.1.11. When a JWS token contains a crit array li",
+    "fixed_in": [
+     "2.12.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-175",
+    "aliases": [
+     "CVE-2026-48522",
+     "GHSA-993g-76c3-p5m4"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "PyJWT is a JSON Web Token implementation in Python. Prior to 2.13.0, PyJWKClient passes its uri argument directly to urllib.request.urlopen() which uses Python stdlib's default OpenerDirector register",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-176",
+    "aliases": [
+     "CVE-2026-48523",
+     "GHSA-jq35-7prp-9v3f"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "PyJWT is a JSON Web Token implementation in Python. From 2.9.0 to 2.12.1, there is a verifier-side algorithm allow-list bypass when jwt.decode() or jwt.decode_complete() are called with a PyJWK key. T",
+    "fixed_in": [
+     "2.12.1"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-177",
+    "aliases": [
+     "CVE-2026-48524",
+     "GHSA-fhv5-28vv-h8m8"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "PyJWT is a JSON Web Token implementation in Python. Prior to 2.13.0, PyJWKClient.get_signing_key() forces a fresh HTTP request to the JWKS endpoint for every JWT with an unknown kid value, with no rat",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-178",
+    "aliases": [
+     "CVE-2026-48525",
+     "GHSA-w7vc-732c-9m39"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "PyJWT is a JSON Web Token implementation in Python. From 2.8.0 to 2.12.1, when verifying detached JWS tokens using the unencoded-payload option (\"b64\": false, RFC 7797), PyJWT performs Base64URL decod",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-179",
+    "aliases": [
+     "CVE-2026-48526",
+     "GHSA-xgmm-8j9v-c9wx"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "PyJWT is a JSON Web Token implementation in Python. Prior to 2.13.0, when the verifier is decoding JSON Web Tokens, while supporting both asymmetric and HMAC algorithms, the library does not validate ",
+    "fixed_in": [
+     "2.13.0"
+    ]
+   }
+  ],
+  "python-dotenv==1.0.1": [
+   {
+    "id": "GHSA-mf9w-mj56-hr94",
+    "aliases": [
+     "CVE-2026-28684",
+     "PYSEC-2026-2270"
+    ],
+    "severity": "MODERATE",
+    "summary": "python-dotenv: Symlink following in set_key allows arbitrary file overwrite via cross-device rename fallback",
+    "fixed_in": [
+     "1.2.2"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2270",
+    "aliases": [
+     "CVE-2026-28684",
+     "GHSA-mf9w-mj56-hr94"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "python-dotenv reads key-value pairs from a .env file and can set them as environment variables. Prior to version 1.2.2, `set_key()` and `unset_key()` in python-dotenv follow symbolic links when rewrit",
+    "fixed_in": [
+     "1.2.2"
+    ]
+   }
+  ],
+  "starlette==0.36.3": [
+   {
+    "id": "GHSA-2c2j-9gv5-cj73",
+    "aliases": [
+     "CVE-2025-54121",
+     "PYSEC-2026-1941"
+    ],
+    "severity": "MODERATE",
+    "summary": "Starlette has possible denial-of-service vector when parsing large files in multipart forms",
+    "fixed_in": [
+     "0.47.2"
+    ]
+   },
+   {
+    "id": "GHSA-82w8-qh3p-5jfq",
+    "aliases": [
+     "CVE-2026-54283",
+     "PYSEC-2026-249"
+    ],
+    "severity": "HIGH",
+    "summary": "Starlette: request.form() limits silently ignored for application/x-www-form-urlencoded enable DoS",
+    "fixed_in": [
+     "1.3.1"
+    ]
+   },
+   {
+    "id": "GHSA-86qp-5c8j-p5mr",
+    "aliases": [
+     "CVE-2026-48710",
+     "PYSEC-2026-161",
+     "X41-2026-002"
+    ],
+    "severity": "MODERATE",
+    "summary": "Starlette has missing Host header validation that poisons request.url.path, bypassing path-based security checks",
+    "fixed_in": [
+     "1.0.1"
+    ]
+   },
+   {
+    "id": "GHSA-f96h-pmfr-66vw",
+    "aliases": [
+     "CVE-2024-47874",
+     "PYSEC-2026-1943"
+    ],
+    "severity": "HIGH",
+    "summary": "Starlette Denial of service (DoS) via multipart/form-data",
+    "fixed_in": [
+     "0.40.0"
+    ]
+   },
+   {
+    "id": "GHSA-jp82-jpqv-5vv3",
+    "aliases": [
+     "CVE-2026-54282",
+     "PYSEC-2026-248"
+    ],
+    "severity": "LOW",
+    "summary": "Starlette: Unvalidated request path concatenated into authority poisons request.url.hostname",
+    "fixed_in": [
+     "1.3.0"
+    ]
+   },
+   {
+    "id": "GHSA-wqp7-x3pw-xc5r",
+    "aliases": [
+     "CVE-2026-48818",
+     "PYSEC-2026-2281"
+    ],
+    "severity": "HIGH",
+    "summary": "Starlette: SSRF and NTLM credential theft via UNC paths in StaticFiles on Windows",
+    "fixed_in": [
+     "1.1.0"
+    ]
+   },
+   {
+    "id": "GHSA-x746-7m8f-x49c",
+    "aliases": [
+     "CVE-2026-48817",
+     "PYSEC-2026-2280"
+    ],
+    "severity": "MODERATE",
+    "summary": "Starlette: Arbitrary HTTP method dispatched to `HTTPEndpoint` attributes via `getattr`",
+    "fixed_in": [
+     "1.1.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-161",
+    "aliases": [
+     "CVE-2026-48710",
+     "GHSA-86qp-5c8j-p5mr",
+     "X41-2026-002"
+    ],
+    "severity": null,
+    "summary": "BadHost: Missing Host header validation poisons request.url.path, bypassing path-based security checks",
+    "fixed_in": [
+     "1.0.1"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1941",
+    "aliases": [
+     "CVE-2025-54121",
+     "GHSA-2c2j-9gv5-cj73"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Starlette has possible denial-of-service vector when parsing large files in multipart forms",
+    "fixed_in": [
+     "0.47.2"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-1943",
+    "aliases": [
+     "CVE-2024-47874",
+     "GHSA-f96h-pmfr-66vw"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Starlette Denial of service (DoS) via multipart/form-data",
+    "fixed_in": [
+     "0.40.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2280",
+    "aliases": [
+     "CVE-2026-48817",
+     "GHSA-x746-7m8f-x49c"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Starlette is a lightweight ASGI framework/toolkit. In versions 1.0.1 and below, when dispatching a request, HTTPEndpoint selects the handler by lowercasing the HTTP method and looking it up as an attr",
+    "fixed_in": [
+     "1.1.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-2281",
+    "aliases": [
+     "CVE-2026-48818",
+     "GHSA-wqp7-x3pw-xc5r"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Starlette is a lightweight ASGI framework/toolkit. In versions 1.0.1 and earlier, StaticFiles on Windows is vulnerable to SSRF. An UNC path such as \\\\attacker.com\\share can cause os.path.realpath to i",
+    "fixed_in": [
+     "1.1.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-248",
+    "aliases": [
+     "CVE-2026-54282",
+     "GHSA-jp82-jpqv-5vv3"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Starlette is a lightweight ASGI framework/toolkit. Prior to 1.3.0, the HTTP request path is not validated before being used to reconstruct request.url. Because request.url is rebuilt by concatenating ",
+    "fixed_in": [
+     "1.3.0"
+    ]
+   },
+   {
+    "id": "PYSEC-2026-249",
+    "aliases": [
+     "CVE-2026-54283",
+     "GHSA-82w8-qh3p-5jfq"
+    ],
+    "severity": "CVSS_V3",
+    "summary": "Starlette is a lightweight ASGI framework/toolkit. From 0.4.1 until 1.3.1, request.form() accepts max_fields and max_part_size to bound resource consumption while parsing form data. These limits are e",
+    "fixed_in": [
+     "1.3.1"
+    ]
+   }
+  ]
+ }
+}

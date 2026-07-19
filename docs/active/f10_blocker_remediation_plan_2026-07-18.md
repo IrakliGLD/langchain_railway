@@ -156,6 +156,8 @@ This phase is first because it is high impact, relatively low risk, and makes ev
 
 #### B2.A.1 — Produce an advisory/reachability ledger
 
+**Repository implementation status (2026-07-18): complete.** See [`f10_b2a1_dependency_advisory_ledger_2026-07-18.md`](./f10_b2a1_dependency_advisory_ledger_2026-07-18.md) and `docs/evidence/f10_b2/`. The pinned cp311 closure (101 packages) carries 94 OSV records (~34 CVEs) in 11 packages; 42 records belong to pins with zero production imports, every record has a reachable fix or exits the closure, and no waiver is required. Documented deviation: this workstation's Python 3.14 cannot execute `pip-audit -r` against cp311-only pins, so the identical OSV database was queried directly against the exact resolved closure; the authoritative `pip-audit` JSON remains the protected release-evidence workflow artifact at the B2 candidate SHA. The ledger also records that the local test environment diverges from the production pin set on 76 of 101 packages, so local green suites are diagnostic evidence only.
+
 1. Run `pip-audit -r requirements.txt --format json` and preserve the JSON.
 2. Produce a forward and reverse dependency graph in a disposable Python 3.11 environment.
 3. For every advisory record:
@@ -168,6 +170,8 @@ This phase is first because it is high impact, relatively low risk, and makes ev
 
 #### B2.A.2 — Remove unused direct dependencies
 
+**Repository implementation status (2026-07-18): complete in commits `1eefac2` (litellm), `6f50b3b` (langchain + langchain-community), `9b9017c` (statsmodels).** Each removal was verified by a clean cp311 dry-run re-resolution: the closure shrank 101 → 87 → 72 → 70 packages with zero additions and zero version movement, and the OSV record count fell 94 → 73 → 52. All 52 remaining records belong to the B2.A.3–B2.A.5 upgrade slices. Deviation: the `tenacity` direct pin was **retained as a commented transitive version hold** — dropping it floats the closure to 8.5.0 under the old langchain-core runtime, which would be untested drift; it is re-evaluated at B2.A.5. Verification on this workstation: targeted suite 1,661 passed, Ruff clean, no repo reference (code, tests, Dockerfile, CI) to any removed package. The container-faithful full pytest on Python 3.11 and the SBOM/pip-audit artifact remain CI/release-workflow evidence at the candidate SHA (`Manual verification pending`).
+
 Start with the lowest-risk changes. The audit found no production import of `litellm` and no direct use of several umbrella LangChain packages; verify again before editing.
 
 - Remove one unused direct package/group per commit.
@@ -177,17 +181,23 @@ Start with the lowest-risk changes. The audit found no production import of `lit
 
 #### B2.A.3 — Upgrade auth and utility dependencies
 
+**Repository implementation status (2026-07-18): complete (PyJWT + python-dotenv).** `PyJWT==2.13.0` and `python-dotenv==1.2.2` close all 15 remaining auth/utility records (52 → 37); the disputed no-fix record `PYSEC-2025-183` ends at 2.10.1 and does not flag 2.13.0. `tests/test_auth_negative.py` pins the PyJWT 2.13 rejection matrix — alg=none, HS512-with-correct-secret, wrong secret, malformed/segment-count/garbage tokens, unknown and malformed `crit` headers, expiry, missing `sub`/`exp`/`aud`, wrong audience — and documents the current policy that audience is enforced while issuer is not, plus gateway-only behavior (valid bearer rejected while `ENABLE_PUBLIC_BEARER_AUTH` is off, gateway secret unaffected). Full suite 1,706 green including `tests/security`, Ruff clean, cp311 closure identical except the two intended version movements. **Protobuf is deliberately not upgraded here:** it is held at 4.25.9 by the legacy `google-generativeai` chain, which `langchain-google-genai==0.0.11` requires; it is remediated structurally in B2.A.5 where the entire chain leaves the closure.
+
 - Upgrade PyJWT to an advisory-fixed version compatible with the explicit algorithm/claim policy.
 - Upgrade `python-dotenv` and `protobuf` through separately reviewable changes where they remain installed.
 - Add negative JWT tests for unsupported algorithms, malformed headers, critical headers, expiry, audience/issuer policy, and gateway-only behavior even though public bearer auth remains disabled.
 
 #### B2.A.4 — Upgrade FastAPI/Starlette
 
+**Repository implementation status (2026-07-18): complete.** `fastapi==0.139.2` with an explicit `starlette==1.3.1` pin (FastAPI 0.139 no longer caps starlette, so the exact advisory-fixed version is pinned for determinism) closes all 14 Starlette records (37 → 23). Characterization before upgrade: custom middlewares are version-robust (`RequestBodyLimitMiddleware` is pure ASGI; `RequestIDMiddleware` uses the stable `BaseHTTPMiddleware` API), exception handlers delegate to the FastAPI defaults, rate limiting is application-owned (slowapi supplies only `get_remote_address`), and lifespan uses the modern context-manager API. Verification: full suite 1,706 green including `tests/security` (HTTP contract, exception envelopes, CORS, request-size, rate-limit, readiness) with the target pair installed locally; `pip check` clean; cp311 closure movement limited to the two intended upgrades plus fastapi's two new metadata helpers (`annotated-doc`, `typing-inspection`). Readiness-under-saturation and container smoke on the exact artifact remain B4.A/CI evidence (`Manual verification pending`).
+
 - Choose a supported compatible FastAPI/Starlette pair that closes the reported Starlette advisories.
 - Characterize middleware order, request path handling, exception envelopes, CORS, request-size limits, rate limiting, lifespan/startup, `/healthz`, and `/readyz` before upgrading.
 - Run HTTP contract, security adversarial, red-team, readiness saturation, and container smoke after the upgrade.
 
 #### B2.A.5 — Modernize the LangChain/provider group
+
+**Repository implementation status (2026-07-18): complete — the pinned closure now has zero OSV advisory records.** `langchain-openai==1.3.5`, `langchain-google-genai==4.2.7`, explicit `langchain-core==1.4.9`, and removal of the legacy `google-generativeai` pin close the final 23 records (langchain-core 14, langsmith 5, langchain-openai 2, protobuf 2). The entire legacy gRPC chain — `google-generativeai`, `google-ai-generativelanguage`, `google-api-core`, `googleapis-common-protos`, `grpcio`, `grpcio-status`, `proto-plus`, `protobuf` — left the 69-package closure because the modern `google-genai` SDK is REST-only. Characterization: every constructor kwarg the code passes (`request_timeout`, `max_tokens`, `base_url`, `convert_system_message_to_human`, `thinking_budget`, `max_retries`, `dimensions`, `embed_documents(timeout=...)`) was probe-verified against the exact target versions before and after upgrade; no adapter code was needed, so `ProviderInvocationRuntime` and all pipeline code are untouched. Full suite 1,706 green (provider selection, independent breakers, single bounded attempt, budget propagation, ambiguous-delivery classification, golden answers, provenance) on the exact target stack installed locally; `pip check` clean. The `tenacity` hold moved 8.2.3 → 9.1.4 (the characterized version; google-genai caps <9.2.0). The guarded `google.generativeai` fallback branch in `knowledge/vector_embeddings.py` remains as inert resilience code; its deletion is a B5 compatibility-registry item, not a B2 change.
 
 Treat `langchain-core`, `langchain-openai`, `langchain-google-genai`, `langsmith`, and their transitive packages as one constrained compatibility problem but commit adaptations in reviewable slices.
 
@@ -204,6 +214,8 @@ Treat `langchain-core`, `langchain-openai`, `langchain-google-genai`, `langsmith
 
 #### B2.A.6 — Make the fix durable
 
+**Repository implementation status (2026-07-18): complete.** `requirements-lock.txt` records the complete 69-package production closure with the sha256 of **every** PyPI artifact per pin (1,645 hashes), generated deterministically by `scripts/generate_requirements_lock.py` (fixed cp311/manylinux wheels-only resolution regardless of host; `--check` mode byte-compares for CI). The Dockerfile installs with `--require-hashes --only-binary :all:` from the lock, so artifact substitution or resolver drift fails the build; a hash-checked wheels-only dry-run install for the exact container target passed on this workstation. CI now installs from the hashed lock and gains two required steps: lock-freshness (`--check`) and `pip-audit --requirement requirements-lock.txt --no-deps`, which fails on **any** advisory — waivers are expressed only as documented per-ID `--ignore-vuln` flags. The release-evidence workflow verifies lock freshness and now generates the SBOM and audit JSON from the full closure instead of top-level requirements; the release manifest hashes the lock as a fourth input. `.github/dependabot.yml` adds weekly grouped renovation (provider-framework, web-stack, github-actions); Dependabot edits `requirements.txt` only and the lock-check gate forces regeneration. Offline staleness is additionally caught in the suite by `tests/test_requirements_lock.py` (source-digest, pin-parity, hash-presence checks). Verification: Ruff clean, full suite 1,710 green. The first green run of CI and `Backend release evidence` at the B2 candidate SHA remains the authoritative 3.11 attestation (`Manual verification pending`).
+
 - Separate top-level requirements from a reproducible compiled lock with hashes, or adopt an equivalent reproducible Python locking mechanism.
 - Add a required CI Critical/High `pip-audit` gate and retain the release-workflow SBOM/audit artifacts.
 - Add dependency review/renovation automation with grouped provider-framework updates.
@@ -216,6 +228,8 @@ Treat `langchain-core`, `langchain-openai`, `langchain-google-genai`, `langsmith
 - query-pipeline schemas, golden outputs, provenance, provider-attempt counts, deadlines, and public API remain unchanged.
 
 ### B2.B — Frontend/Edge integration complement
+
+**Implementation status (2026-07-19): complete with no frontend change required.** All gates ran from the independent frontend repository at its unchanged HEAD `ae9b68f9779a4a2c22a0b0c14307f0eb837ae231`, each with its true exit code captured: `npm ci` clean; `contract:chat-gateway` verified the generated v2 consumers byte-current (the backend dependency work changed no public schema); tests **465 passed / 0 failed**; ESLint clean; `edge:manifest` verified source aggregate `973efd2764f9ab31d35789a7cc17edad9ac8dc5c5da9679344cda3fceb2fddcc`; production build succeeded with the CI-equivalent placeholder environment and the full HEAD SHA as release identity (B1.B correctly fails the build without one), and `artifact:verify` passed against that fresh manifest (`095811bd…`, verification-only — promotion artifacts come from the release workflow); production `npm audit` reported zero vulnerabilities. The four Deno gates (`edge:format`/`edge:lint`/`edge:check`/`edge:test`) cannot run on this workstation (no Deno runtime; the repo tooling requires the pinned one) — they are executed by frontend CI, which pins Deno v2.1.4 and runs `edge:verify` on every push; confirming the green CI run at `ae9b68f` is an owner attestation because the repository is not publicly readable (`Manual verification pending`). Evidence-quality note: an initial pass piped gate output through `tail`, which masked exit codes; every gate was re-run with direct exit-code capture before being recorded here.
 
 Backend library upgrades should not require frontend behavior changes if the HTTP contract remains stable.
 
@@ -261,6 +275,8 @@ Where the contract is unchanged, backend and frontend remain independently deplo
 
 ### B4.A — Backend evidence
 
+**Repository-side implementation status (2026-07-19): complete — see [`f10_b4a_backend_evidence_2026-07-19.md`](./f10_b4a_backend_evidence_2026-07-19.md).** Every automatable B4.A requirement is mapped to green, cited evidence at candidate `b628f7881175fc12e47da0f87570411d65c0e789`: clean-environment pytest/Ruff/security/red-team/audit via the fully green CI run `29678536060`; a fresh dedicated 428-test evidence run covering the complete failure matrix (pool exhaustion, breaker-open, readiness-under-saturation, cancellation/no-orphan-work, simultaneous primary/secondary load, statement timeout, and the F4 deterministic-fake injection rows); replay/request-size/typed-error contract citations; and idempotency proofs (finalize-once provider attempts, 409 assertion replay, durable Edge ledger authority). A local red-team gate run scored 1.0 with zero hard failures. The deployed-artifact rows — release-evidence SBOM review, Railway deployment/rollback/one-replica attestation, the §6 safe production smoke, and the §8 chat-load window (parameters proposed, awaiting explicit approval) — are `Manual verification pending` behind B3 promotion.
+
 Run against the exact B3 backend artifact:
 
 - complete pytest and Ruff gates from a clean checkout/container;
@@ -277,6 +293,8 @@ Production failure smoke should remain safe: real signed happy path, invalid sig
 Before any production chat load, approve a maximum concurrency, request count, provider-spend ceiling, test window, abort thresholds, and rollback owner. Stop immediately on duplicate operation/provider attempts, elevated production error rate, readiness degradation, database saturation, or spend above the ceiling.
 
 ### B4.B — Frontend, Edge, database, and accessibility evidence
+
+**Repository-side implementation status (2026-07-19): complete — see the independent frontend repository's `docs/active/f10_b4b_frontend_edge_db_evidence_2026-07-19.md` (frontend commits `22c3f65`/`75e22b0`, documentation-only; the frontend candidate remains `ae9b68f9779a4a2c22a0b0c14307f0eb837ae231`).** All five required workflows and the full `SMOKE_*` secret contract (including `SMOKE_REQUIRE_AUTH` and artifact-SHA/version binding) already exist — no parallel runner and no workflow changes were needed. Every required browser/Edge state maps to green evidence: mock-provable states (malformed payload, timeout/abort, quota/paused denial, degradation/critical messaging, admin flows) in the 465-test component suite per the plan's isolated-mock guidance; live states in the Playwright login-proof spec and the three-scan credentialed axe matrix. The disposable database pack is `npm run test:db` → 11 SQL regressions covering the F10-E2E-03 surface. Two operator prerequisites gate live execution: `TEST_DATABASE_URL` must reach a disposable database (the runner fails hard without it, so frontend CI cannot be green until then — provision the temporary Supabase project first), and the four synthetic accounts (active/paused/quota-exhausted/admin) must be created and stored in the protected environments. Live runs, DB attestations, and the manual keyboard/SR/zoom checklist are `Manual verification pending` behind B3.
 
 #### GitHub environment/secrets
 
@@ -350,6 +368,8 @@ First create a compatibility registry classifying every candidate as:
 
 ### B5.A — Backend
 
+**Implementation status (2026-07-19): registry complete; the one immediately-executable item is done.** The required compatibility registry is [`f10_b5_compatibility_registry_2026-07-19.md`](./f10_b5_compatibility_registry_2026-07-19.md): one expired path removed now (item 1 below, commit `a99e51c` — flag, branches, trace field, 23 test monkeypatches, two trace-shape assertions; no public schema change, full suite 1,710 green), one expired-candidate deferred with criterion (inert `google.generativeai` fallback branch), the B5.A.4 quartet and six completed default-on switches classified as rollout with owners/criteria/deadlines, the legacy SQL and summary fallbacks classified as retained resilience per item 5, and the protocol items (assertion-mode `optional`, legacy secret names, legacy prompt-budget knob, dormant bearer surface, `Question.user_id`) each given an inventory-based removal criterion. Items 2–4 remain time/evidence-gated exactly as written below — none may be forced into the first release.
+
 1. Remove `ENABLE_AGENT_LOOP`, its pipeline imports/branches, `agent_loop_blocked_by_policy`, and tests that exist only to preserve the deleted loop's trace shape. Confirm no public response schema changes.
 2. After all deployed Edge traffic is proven signed, remove the `optional` value and then retire `ENAI_GATEWAY_ACTOR_ASSERTION_MODE` rather than only changing its default. Actor assertion becomes unconditionally required for gateway requests; retain signature freshness/replay tests.
 3. Remove legacy secret-name fallbacks only after Railway environment inventory confirms canonical `ENAI_*` names are present and one rollback deployment has been rehearsed.
@@ -360,6 +380,8 @@ First create a compatibility registry classifying every candidate as:
 5. Do not remove the legacy SQL or safe summary fallback solely because it is called legacy. Remove only when production counters, correctness evaluation, and a safer terminal behavior prove it unnecessary.
 
 ### B5.B — Frontend/Edge/database
+
+**Implementation status (2026-07-19): registry complete — see the independent frontend repository's `docs/active/f10_b5b_compatibility_registry_2026-07-19.md` (frontend commit `ac87530`, documentation-only; frontend candidate unchanged at `ae9b68f9…`).** Source inventory found **no expired frontend/Edge compatibility implementation to delete**: the browser and Edge are v2/v3-only with strict envelope validation (no v1 reader exists in the frontend — the remaining v1 surface is the backend's dual publication, tracked cross-repo), and Edge functions read only canonical environment names with zero deprecated-name fallback chains, so item 3 reduces to a Supabase secret-inventory attestation satisfied alongside B3. Remaining classified candidates, each with owner/criterion/deadline: the instrumented `admin-get-users` legacy response shape (log-gated), chat-gateway v1 retirement (item 1, cross-repo, log+rollback-inventory gated), and the P6.B JSON/text database compatibility set — `migrate_chat_history_jsonb_v1`, the `chat_history_jsonb_quarantine` table, and the tolerant-reader patch — gated on the production zero-quarantine read-only query (item 2). The P3.B reconciliation protocol is recorded as designed resilience, not compatibility. Item 4's regenerate-and-regate rule applies to any future cleanup change.
 
 1. Remove chat-gateway v1 compatibility only after access logs and release inventory show every supported backend/Edge/browser combination uses v2 and rollback no longer depends on v1.
 2. Remove JSON/text compatibility readers only after a production read-only query proves all relevant rows satisfy the JSONB constraints and quarantine/reconciliation counts are zero.

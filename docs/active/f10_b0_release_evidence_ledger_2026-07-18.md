@@ -69,26 +69,26 @@ The following assignments require explicit human names or accountable organizati
 
 | Responsibility | Named owner | Approver | Status |
 |---|---|---|---|
-| Backend dependency/security remediation | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Backend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Frontend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Supabase Edge/database operations | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Credentialed production smoke accounts | **UNASSIGNED** | **UNASSIGNED** | Required before B4 production evidence |
-| Accessibility evidence | **UNASSIGNED** | **UNASSIGNED** | Required before B4 production evidence |
-| Critical/High waiver authority | **UNASSIGNED** | **UNASSIGNED** | Default is no waivers until assigned |
-| Final F10 release decision | **UNASSIGNED** | **UNASSIGNED** | Required before B6 closure |
+| Backend dependency/security remediation | Irakli | Irakli | Assigned 2026-07-19 |
+| Backend Railway build/deploy/rollback | Irakli | Irakli | Assigned 2026-07-19 |
+| Frontend Railway build/deploy/rollback | Irakli | Irakli | Assigned 2026-07-19 |
+| Supabase Edge/database operations | Irakli | Irakli | Assigned 2026-07-19 |
+| Credentialed production smoke accounts | Irakli | Irakli | Assigned 2026-07-19 |
+| Accessibility evidence | Irakli | Irakli | Assigned 2026-07-19 |
+| Critical/High waiver authority | Irakli | Irakli | Assigned 2026-07-19 |
+| Final F10 release decision | Irakli | Irakli | Assigned 2026-07-19 |
 
-One person may hold several roles if explicitly recorded, but the waiver approver should not approve their own unresolved security exception where an independent reviewer is available.
+One person may hold several roles if explicitly recorded, but the waiver approver should not approve their own unresolved security exception where an independent reviewer is available. **Recorded 2026-07-19: Irakli holds every role as sole operator of both repositories.** No waiver currently exists or is requested — the B2 dependency closure audits clean — so the self-approval constraint on waivers is presently moot; if a future Critical/High waiver is ever needed, seek an independent reviewer before self-approval.
 
 ## 7. Manual completion checklist
 
-- [ ] Replace every `UNASSIGNED` ownership field with a named accountable owner/approver.
+- [x] Replace every `UNASSIGNED` ownership field with a named accountable owner/approver. *(2026-07-19: all roles assigned to Irakli, §6.)*
 - [ ] Before B3, record the candidate backend Railway service, environment, deployment ID, source SHA, image digest, replica/autoscaling setting, and rollback deployment ID.
 - [ ] Before B3, record the candidate frontend Railway service, environment, deployment ID, source SHA/artifact manifest, and rollback deployment ID.
 - [ ] Before B3, record frontend private GitHub CI and release-evidence run IDs for the superseding candidate.
 - [ ] Before B3, record the candidate Supabase Edge deployment workflow run, deployment timestamp, project ref, source digest, full version, and rollback SHA.
 - [ ] Choose the protected evidence archive and confirm retention/access policy.
-- [ ] Download the authorized backend failed-job log, reproduce with Python 3.11 plus `requirements.txt`/`requirements-dev.txt`, and close the focused-coverage CI failure at the next candidate SHA. The Python 3.14 local pass is diagnostic evidence, not a substitute.
+- [x] Download the authorized backend failed-job log, reproduce with Python 3.11 plus `requirements.txt`/`requirements-dev.txt`, and close the focused-coverage CI failure at the next candidate SHA. The Python 3.14 local pass is diagnostic evidence, not a substitute. *(Closed 2026-07-19 at `b628f788…`, CI run `29678536060` fully green. Root causes, fixed in order: a finite fake clock patched onto the shared `time` module collided with Python 3.11's logging timestamps (`14c8a42`); the workflow env diverged from the canonical test literals, 401ing the /ask contract tests (`948cddf`); and pydantic 2.9.2 rendered JSON schemas differently from the 2.12.4 that generated the committed contract artifacts (`b628f78`).)*
 
 ## 8. Append-only candidate template
 
@@ -121,7 +121,7 @@ Copy this table for B1 and every later candidate. Never replace historical rows.
 | Public deployment/source evidence recorded without inferring exact deployment SHAs | Pass |
 | Evidence schema and append-only candidate template defined | Pass |
 | Named roles and no-waiver default defined for development | Pass |
-| Named human owners/approvers assigned for promotion | **Deferred to B3 preflight** |
+| Named human owners/approvers assigned for promotion | **Assigned 2026-07-19 (Irakli, all roles — §6)** |
 | Candidate workflow, Railway, artifact, and rollback identities recorded | **Deferred until B1/B2 candidates exist and B3 runs** |
 | Backend CI green at the candidate SHA | **Required for each B1/B2 commit before promotion** |
 
@@ -140,6 +140,24 @@ These rows record repository candidates only. Empty operational fields are delib
 | Generated identity | Runtime/image identity is the candidate SHA; v2 manifest emitted by protected workflow | Edge aggregate `973efd2764f9ab31d35789a7cc17edad9ac8dc5c5da9679344cda3fceb2fddcc`; browser aggregate is build-config dependent and emitted by the release workflow |
 | CI/release run | **PENDING** | **PENDING** |
 | Railway/Supabase deployment ID | **PENDING** | **PENDING** |
-| Operator/approver/evidence archive | **UNASSIGNED** | **UNASSIGNED** |
+| Operator/approver/evidence archive | Irakli / Irakli; protected archive selection pending | Irakli / Irakli; protected archive selection pending |
 | Rollback artifact/deployment | **PENDING** | **PENDING** |
 | Promotion decision | Blocked before B3 | Blocked before B3 |
+
+## 11. B2 append-only implementation candidates (supersede §10 for promotion)
+
+| Field | Backend B2 | Frontend/Supabase B2.B |
+|---|---|---|
+| Application/repository | `IrakliGLD/langchain_railway` | `IrakliGLD/EnaiDashboard` |
+| Branch and full Git SHA | `refactor/review-phase-fixes`; `b628f7881175fc12e47da0f87570411d65c0e789` | `main`; `ae9b68f9779a4a2c22a0b0c14307f0eb837ae231` (unchanged by B2 — no frontend code change was required) |
+| Candidate purpose | F10-SEC-01 closure: dependency closure audits **zero advisories, zero waivers** (94 → 0); hashed 68-pin lock installed with `--require-hashes`; CI advisory + lock-freshness gates | B2.B integration attestation of the unchanged frontend against the remediated backend |
+| Local verification | Full suite 1,710 green incl. `tests/security`; Ruff; exact CI coverage commands green | 465/0 tests; ESLint; contract verify (no schema change); edge manifest `973efd27…`; identity-bearing build + artifact verify; prod npm audit 0 |
+| CI run/conclusion | [`29678536060`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29678536060) **success — every step green, including the first-ever pass of the full-test/coverage-floor step** | Owner attestation pending (repository CI is private; pinned Deno v2.1.4 `edge:verify` runs on every push) |
+| Release-evidence run | **PENDING** — operator runs `Backend release evidence` with this exact SHA | **PENDING** — `Frontend release evidence` at this exact SHA |
+| Railway/Supabase deployment ID | **PENDING** (B3) | **PENDING** (B3) |
+| Rollback artifact/deployment | **PENDING** (record previous deployment before promoting) | **PENDING** |
+| Promotion decision | Ready for B3 preflight once release-evidence artifacts are recorded | Ready for B3 preflight |
+
+Ledger commits after `b628f7881175fc12e47da0f87570411d65c0e789` are documentation-only and are explicitly recorded as such per §B0-4; they do not create a new candidate.
+
+**Superseding backend candidate (2026-07-19):** the B5.A expired-flag removal (`a99e51cc9c7ff7824879dab3edf9affeffd6b4f0`, code) and compatibility registry advance the candidate to `refactor/review-phase-fixes` @ **`2ce375d29b060d512bfa746035ec38db508f3d8e`** — CI run [`29679422065`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29679422065) **success, all gates green**. No promotion evidence existed for the prior candidate, so nothing is invalidated; all B2/B4.A repository evidence carries forward (dependency closure unchanged — the removal touched no pins; zero advisories; no public schema change, contract drift gates green). B3 promotion should use this SHA. Ledger commits after it are again documentation-only unless stated otherwise.

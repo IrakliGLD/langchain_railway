@@ -1,0 +1,31 @@
+# F10-SEC-01 B2.A.6: grouped dependency renovation. Dependabot edits
+# requirements.txt (and workflow pins) only; the CI "Verify requirements lock
+# is current" step fails until scripts/generate_requirements_lock.py is rerun,
+# so the hashed lock can never silently drift from a renovation PR.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      provider-framework:
+        patterns:
+          - "langchain*"
+          - "langsmith"
+          - "openai"
+          - "google-genai"
+          - "tiktoken"
+          - "tenacity"
+      web-stack:
+        patterns:
+          - "fastapi"
+          - "starlette"
+          - "uvicorn"
+          - "slowapi"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

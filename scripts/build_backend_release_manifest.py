@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-INPUTS = ("Dockerfile", "requirements.txt", "railway.json")
+INPUTS = ("Dockerfile", "requirements.txt", "requirements-lock.txt", "railway.json")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

@@ -1,0 +1,816 @@
+{
+ "forward": {
+  "aiohappyeyeballs": [],
+  "aiohttp": [
+   "aiohappyeyeballs",
+   "aiosignal",
+   "attrs",
+   "frozenlist",
+   "multidict",
+   "propcache",
+   "typing-extensions",
+   "yarl"
+  ],
+  "aiosignal": [
+   "frozenlist",
+   "typing-extensions"
+  ],
+  "annotated-types": [
+   "typing-extensions"
+  ],
+  "anyio": [
+   "idna",
+   "typing-extensions"
+  ],
+  "attrs": [],
+  "certifi": [],
+  "cffi": [
+   "pycparser"
+  ],
+  "charset-normalizer": [],
+  "click": [
+   "colorama"
+  ],
+  "colorama": [],
+  "cryptography": [
+   "cffi",
+   "typing-extensions"
+  ],
+  "dataclasses-json": [
+   "marshmallow",
+   "typing-inspect"
+  ],
+  "deprecated": [
+   "wrapt"
+  ],
+  "distro": [],
+  "fastapi": [
+   "pydantic",
+   "starlette",
+   "typing-extensions"
+  ],
+  "filelock": [],
+  "frozenlist": [],
+  "fsspec": [],
+  "google-ai-generativelanguage": [
+   "google-api-core",
+   "proto-plus",
+   "protobuf"
+  ],
+  "google-api-core": [
+   "google-auth",
+   "googleapis-common-protos",
+   "proto-plus",
+   "protobuf",
+   "requests"
+  ],
+  "google-auth": [
+   "cryptography",
+   "pyasn1-modules"
+  ],
+  "google-genai": [
+   "anyio",
+   "distro",
+   "google-auth",
+   "httpx",
+   "pydantic",
+   "requests",
+   "sniffio",
+   "tenacity",
+   "typing-extensions",
+   "websockets"
+  ],
+  "google-generativeai": [
+   "google-ai-generativelanguage",
+   "google-api-core",
+   "google-auth",
+   "protobuf",
+   "pydantic",
+   "tqdm",
+   "typing-extensions"
+  ],
+  "googleapis-common-protos": [
+   "protobuf"
+  ],
+  "greenlet": [],
+  "grpcio": [
+   "typing-extensions"
+  ],
+  "grpcio-status": [
+   "googleapis-common-protos",
+   "grpcio",
+   "protobuf"
+  ],
+  "h11": [],
+  "hf-xet": [],
+  "httpcore": [
+   "certifi",
+   "h11"
+  ],
+  "httpx": [
+   "anyio",
+   "certifi",
+   "httpcore",
+   "idna"
+  ],
+  "huggingface-hub": [
+   "click",
+   "filelock",
+   "fsspec",
+   "hf-xet",
+   "httpx",
+   "packaging",
+   "pyyaml",
+   "tqdm",
+   "typing-extensions"
+  ],
+  "idna": [],
+  "importlib-metadata": [
+   "zipp"
+  ],
+  "jinja2": [
+   "markupsafe"
+  ],
+  "jiter": [],
+  "jsonpatch": [
+   "jsonpointer"
+  ],
+  "jsonpointer": [],
+  "jsonschema": [
+   "attrs",
+   "jsonschema-specifications",
+   "referencing",
+   "rpds-py"
+  ],
+  "jsonschema-specifications": [
+   "referencing"
+  ],
+  "langchain": [
+   "aiohttp",
+   "dataclasses-json",
+   "langchain-community",
+   "langchain-core",
+   "langchain-text-splitters",
+   "langsmith",
+   "numpy",
+   "pydantic",
+   "pyyaml",
+   "requests",
+   "sqlalchemy",
+   "tenacity"
+  ],
+  "langchain-community": [
+   "aiohttp",
+   "dataclasses-json",
+   "langchain-core",
+   "langsmith",
+   "numpy",
+   "pyyaml",
+   "requests",
+   "sqlalchemy",
+   "tenacity"
+  ],
+  "langchain-core": [
+   "jsonpatch",
+   "langsmith",
+   "packaging",
+   "pydantic",
+   "pyyaml",
+   "tenacity"
+  ],
+  "langchain-google-genai": [
+   "google-generativeai",
+   "langchain-core"
+  ],
+  "langchain-openai": [
+   "langchain-core",
+   "openai",
+   "tiktoken"
+  ],
+  "langchain-text-splitters": [
+   "langchain-core"
+  ],
+  "langsmith": [
+   "httpx",
+   "orjson",
+   "pydantic",
+   "requests",
+   "requests-toolbelt"
+  ],
+  "limits": [
+   "deprecated",
+   "packaging",
+   "typing-extensions"
+  ],
+  "litellm": [
+   "aiohttp",
+   "click",
+   "importlib-metadata",
+   "jinja2",
+   "jsonschema",
+   "openai",
+   "pydantic",
+   "python-dotenv",
+   "requests",
+   "tiktoken",
+   "tokenizers"
+  ],
+  "markupsafe": [],
+  "marshmallow": [
+   "packaging"
+  ],
+  "multidict": [
+   "typing-extensions"
+  ],
+  "mypy-extensions": [],
+  "numpy": [],
+  "openai": [
+   "anyio",
+   "distro",
+   "httpx",
+   "jiter",
+   "pydantic",
+   "sniffio",
+   "tqdm",
+   "typing-extensions"
+  ],
+  "orjson": [],
+  "packaging": [],
+  "pandas": [
+   "numpy",
+   "python-dateutil",
+   "pytz",
+   "tzdata"
+  ],
+  "patsy": [
+   "numpy"
+  ],
+  "propcache": [],
+  "proto-plus": [
+   "protobuf"
+  ],
+  "protobuf": [],
+  "psycopg": [
+   "typing-extensions",
+   "tzdata"
+  ],
+  "psycopg-binary": [],
+  "pyasn1": [],
+  "pyasn1-modules": [
+   "pyasn1"
+  ],
+  "pycparser": [],
+  "pydantic": [
+   "annotated-types",
+   "pydantic-core",
+   "typing-extensions"
+  ],
+  "pydantic-core": [
+   "typing-extensions"
+  ],
+  "pyjwt": [],
+  "python-dateutil": [
+   "six"
+  ],
+  "python-dotenv": [],
+  "pytz": [],
+  "pyyaml": [],
+  "referencing": [
+   "attrs",
+   "rpds-py",
+   "typing-extensions"
+  ],
+  "regex": [],
+  "requests": [
+   "certifi",
+   "charset-normalizer",
+   "idna",
+   "urllib3"
+  ],
+  "requests-toolbelt": [
+   "requests"
+  ],
+  "rpds-py": [],
+  "scipy": [
+   "numpy"
+  ],
+  "six": [],
+  "slowapi": [
+   "limits"
+  ],
+  "sniffio": [],
+  "sqlalchemy": [
+   "greenlet",
+   "importlib-metadata",
+   "typing-extensions"
+  ],
+  "sqlglot": [],
+  "starlette": [
+   "anyio",
+   "typing-extensions"
+  ],
+  "statsmodels": [
+   "numpy",
+   "packaging",
+   "pandas",
+   "patsy",
+   "scipy"
+  ],
+  "tenacity": [],
+  "tiktoken": [
+   "regex",
+   "requests"
+  ],
+  "tokenizers": [
+   "huggingface-hub"
+  ],
+  "tqdm": [
+   "colorama"
+  ],
+  "typing-extensions": [],
+  "typing-inspect": [
+   "mypy-extensions",
+   "typing-extensions"
+  ],
+  "tzdata": [],
+  "urllib3": [],
+  "uvicorn": [
+   "click",
+   "h11",
+   "typing-extensions"
+  ],
+  "websockets": [],
+  "wrapt": [],
+  "yarl": [
+   "idna",
+   "multidict",
+   "propcache"
+  ],
+  "zipp": []
+ },
+ "reverse": {
+  "aiohappyeyeballs": [
+   "aiohttp"
+  ],
+  "aiohttp": [
+   "langchain",
+   "langchain-community",
+   "litellm"
+  ],
+  "aiosignal": [
+   "aiohttp"
+  ],
+  "annotated-types": [
+   "pydantic"
+  ],
+  "anyio": [
+   "google-genai",
+   "httpx",
+   "openai",
+   "starlette"
+  ],
+  "attrs": [
+   "aiohttp",
+   "jsonschema",
+   "referencing"
+  ],
+  "certifi": [
+   "httpcore",
+   "httpx",
+   "requests"
+  ],
+  "cffi": [
+   "cryptography"
+  ],
+  "charset-normalizer": [
+   "requests"
+  ],
+  "click": [
+   "huggingface-hub",
+   "litellm",
+   "uvicorn"
+  ],
+  "colorama": [
+   "click",
+   "tqdm"
+  ],
+  "cryptography": [
+   "google-auth"
+  ],
+  "dataclasses-json": [
+   "langchain",
+   "langchain-community"
+  ],
+  "deprecated": [
+   "limits"
+  ],
+  "distro": [
+   "google-genai",
+   "openai"
+  ],
+  "filelock": [
+   "huggingface-hub"
+  ],
+  "frozenlist": [
+   "aiohttp",
+   "aiosignal"
+  ],
+  "fsspec": [
+   "huggingface-hub"
+  ],
+  "google-ai-generativelanguage": [
+   "google-generativeai"
+  ],
+  "google-api-core": [
+   "google-ai-generativelanguage",
+   "google-generativeai"
+  ],
+  "google-auth": [
+   "google-api-core",
+   "google-genai",
+   "google-generativeai"
+  ],
+  "google-generativeai": [
+   "langchain-google-genai"
+  ],
+  "googleapis-common-protos": [
+   "google-api-core",
+   "grpcio-status"
+  ],
+  "greenlet": [
+   "sqlalchemy"
+  ],
+  "grpcio": [
+   "grpcio-status"
+  ],
+  "h11": [
+   "httpcore",
+   "uvicorn"
+  ],
+  "hf-xet": [
+   "huggingface-hub"
+  ],
+  "httpcore": [
+   "httpx"
+  ],
+  "httpx": [
+   "google-genai",
+   "huggingface-hub",
+   "langsmith",
+   "openai"
+  ],
+  "huggingface-hub": [
+   "tokenizers"
+  ],
+  "idna": [
+   "anyio",
+   "httpx",
+   "requests",
+   "yarl"
+  ],
+  "importlib-metadata": [
+   "litellm",
+   "sqlalchemy"
+  ],
+  "jinja2": [
+   "litellm"
+  ],
+  "jiter": [
+   "openai"
+  ],
+  "jsonpatch": [
+   "langchain-core"
+  ],
+  "jsonpointer": [
+   "jsonpatch"
+  ],
+  "jsonschema": [
+   "litellm"
+  ],
+  "jsonschema-specifications": [
+   "jsonschema"
+  ],
+  "langchain-community": [
+   "langchain"
+  ],
+  "langchain-core": [
+   "langchain",
+   "langchain-community",
+   "langchain-google-genai",
+   "langchain-openai",
+   "langchain-text-splitters"
+  ],
+  "langchain-text-splitters": [
+   "langchain"
+  ],
+  "langsmith": [
+   "langchain",
+   "langchain-community",
+   "langchain-core"
+  ],
+  "limits": [
+   "slowapi"
+  ],
+  "markupsafe": [
+   "jinja2"
+  ],
+  "marshmallow": [
+   "dataclasses-json"
+  ],
+  "multidict": [
+   "aiohttp",
+   "yarl"
+  ],
+  "mypy-extensions": [
+   "typing-inspect"
+  ],
+  "numpy": [
+   "langchain",
+   "langchain-community",
+   "pandas",
+   "patsy",
+   "scipy",
+   "statsmodels"
+  ],
+  "openai": [
+   "langchain-openai",
+   "litellm"
+  ],
+  "orjson": [
+   "langsmith"
+  ],
+  "packaging": [
+   "huggingface-hub",
+   "langchain-core",
+   "limits",
+   "marshmallow",
+   "statsmodels"
+  ],
+  "pandas": [
+   "statsmodels"
+  ],
+  "patsy": [
+   "statsmodels"
+  ],
+  "propcache": [
+   "aiohttp",
+   "yarl"
+  ],
+  "proto-plus": [
+   "google-ai-generativelanguage",
+   "google-api-core"
+  ],
+  "protobuf": [
+   "google-ai-generativelanguage",
+   "google-api-core",
+   "google-generativeai",
+   "googleapis-common-protos",
+   "grpcio-status",
+   "proto-plus"
+  ],
+  "pyasn1": [
+   "pyasn1-modules"
+  ],
+  "pyasn1-modules": [
+   "google-auth"
+  ],
+  "pycparser": [
+   "cffi"
+  ],
+  "pydantic": [
+   "fastapi",
+   "google-genai",
+   "google-generativeai",
+   "langchain",
+   "langchain-core",
+   "langsmith",
+   "litellm",
+   "openai"
+  ],
+  "pydantic-core": [
+   "pydantic"
+  ],
+  "python-dateutil": [
+   "pandas"
+  ],
+  "python-dotenv": [
+   "litellm"
+  ],
+  "pytz": [
+   "pandas"
+  ],
+  "pyyaml": [
+   "huggingface-hub",
+   "langchain",
+   "langchain-community",
+   "langchain-core"
+  ],
+  "referencing": [
+   "jsonschema",
+   "jsonschema-specifications"
+  ],
+  "regex": [
+   "tiktoken"
+  ],
+  "requests": [
+   "google-api-core",
+   "google-genai",
+   "langchain",
+   "langchain-community",
+   "langsmith",
+   "litellm",
+   "requests-toolbelt",
+   "tiktoken"
+  ],
+  "requests-toolbelt": [
+   "langsmith"
+  ],
+  "rpds-py": [
+   "jsonschema",
+   "referencing"
+  ],
+  "scipy": [
+   "statsmodels"
+  ],
+  "six": [
+   "python-dateutil"
+  ],
+  "sniffio": [
+   "google-genai",
+   "openai"
+  ],
+  "sqlalchemy": [
+   "langchain",
+   "langchain-community"
+  ],
+  "starlette": [
+   "fastapi"
+  ],
+  "tenacity": [
+   "google-genai",
+   "langchain",
+   "langchain-community",
+   "langchain-core"
+  ],
+  "tiktoken": [
+   "langchain-openai",
+   "litellm"
+  ],
+  "tokenizers": [
+   "litellm"
+  ],
+  "tqdm": [
+   "google-generativeai",
+   "huggingface-hub",
+   "openai"
+  ],
+  "typing-extensions": [
+   "aiohttp",
+   "aiosignal",
+   "annotated-types",
+   "anyio",
+   "cryptography",
+   "fastapi",
+   "google-genai",
+   "google-generativeai",
+   "grpcio",
+   "huggingface-hub",
+   "limits",
+   "multidict",
+   "openai",
+   "psycopg",
+   "pydantic",
+   "pydantic-core",
+   "referencing",
+   "sqlalchemy",
+   "starlette",
+   "typing-inspect",
+   "uvicorn"
+  ],
+  "typing-inspect": [
+   "dataclasses-json"
+  ],
+  "tzdata": [
+   "pandas",
+   "psycopg"
+  ],
+  "urllib3": [
+   "requests"
+  ],
+  "websockets": [
+   "google-genai"
+  ],
+  "wrapt": [
+   "deprecated"
+  ],
+  "yarl": [
+   "aiohttp"
+  ],
+  "zipp": [
+   "importlib-metadata"
+  ]
+ },
+ "versions": {
+  "aiohappyeyeballs": "2.7.1",
+  "aiohttp": "3.14.1",
+  "aiosignal": "1.4.0",
+  "annotated-types": "0.7.0",
+  "anyio": "4.14.2",
+  "attrs": "26.1.0",
+  "certifi": "2026.6.17",
+  "cffi": "2.1.0",
+  "charset-normalizer": "3.4.9",
+  "click": "8.4.2",
+  "colorama": "0.4.6",
+  "cryptography": "49.0.0",
+  "dataclasses-json": "0.6.7",
+  "deprecated": "1.3.1",
+  "distro": "1.9.0",
+  "fastapi": "0.109.2",
+  "filelock": "3.31.0",
+  "frozenlist": "1.8.0",
+  "fsspec": "2026.6.0",
+  "google-ai-generativelanguage": "0.4.0",
+  "google-api-core": "2.25.2",
+  "google-auth": "2.56.0",
+  "google-genai": "1.65.0",
+  "google-generativeai": "0.4.1",
+  "googleapis-common-protos": "1.75.0",
+  "greenlet": "3.2.5",
+  "grpcio": "1.82.1",
+  "grpcio-status": "1.62.3",
+  "h11": "0.16.0",
+  "hf-xet": "1.5.2",
+  "httpcore": "1.0.9",
+  "httpx": "0.28.1",
+  "huggingface-hub": "1.24.0",
+  "idna": "3.18",
+  "importlib-metadata": "9.0.0",
+  "jinja2": "3.1.6",
+  "jiter": "0.16.0",
+  "jsonpatch": "1.33",
+  "jsonpointer": "3.1.1",
+  "jsonschema": "4.26.0",
+  "jsonschema-specifications": "2025.9.1",
+  "langchain": "0.1.20",
+  "langchain-community": "0.0.38",
+  "langchain-core": "0.1.52",
+  "langchain-google-genai": "0.0.11",
+  "langchain-openai": "0.1.1",
+  "langchain-text-splitters": "0.0.2",
+  "langsmith": "0.1.147",
+  "limits": "5.8.0",
+  "litellm": "1.44.10",
+  "markupsafe": "3.0.3",
+  "marshmallow": "3.26.2",
+  "multidict": "6.7.1",
+  "mypy-extensions": "1.1.0",
+  "numpy": "1.26.4",
+  "openai": "1.109.1",
+  "orjson": "3.11.9",
+  "packaging": "23.2",
+  "pandas": "2.1.4",
+  "patsy": "1.0.2",
+  "propcache": "0.5.2",
+  "proto-plus": "1.28.1",
+  "protobuf": "4.25.9",
+  "psycopg": "3.2.1",
+  "psycopg-binary": "3.2.1",
+  "pyasn1": "0.6.4",
+  "pyasn1-modules": "0.4.2",
+  "pycparser": "3.0",
+  "pydantic": "2.9.2",
+  "pydantic-core": "2.23.4",
+  "pyjwt": "2.9.0",
+  "python-dateutil": "2.9.0.post0",
+  "python-dotenv": "1.0.1",
+  "pytz": "2026.2",
+  "pyyaml": "6.0.3",
+  "referencing": "0.37.0",
+  "regex": "2026.7.10",
+  "requests": "2.34.2",
+  "requests-toolbelt": "1.0.0",
+  "rpds-py": "2026.6.3",
+  "scipy": "1.11.4",
+  "six": "1.17.0",
+  "slowapi": "0.1.9",
+  "sniffio": "1.3.1",
+  "sqlalchemy": "2.0.44",
+  "sqlglot": "25.25.0",
+  "starlette": "0.36.3",
+  "statsmodels": "0.14.1",
+  "tenacity": "8.2.3",
+  "tiktoken": "0.11.0",
+  "tokenizers": "0.23.1",
+  "tqdm": "4.69.0",
+  "typing-extensions": "4.16.0",
+  "typing-inspect": "0.9.0",
+  "tzdata": "2026.3",
+  "urllib3": "2.7.0",
+  "uvicorn": "0.27.1",
+  "websockets": "16.1.1",
+  "wrapt": "2.2.2",
+  "yarl": "1.24.2",
+  "zipp": "4.1.0"
+ }
+}

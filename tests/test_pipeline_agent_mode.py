@@ -55,7 +55,6 @@ def _minimal_df():
 
 def test_pipeline_records_stage_timings(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: ctx)
 
     def _planner(ctx):

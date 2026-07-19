@@ -65,7 +65,6 @@ from analysis.system_quantities import normalize_tool_dataframe
 from config import (
     ANALYZER_CONFIDENCE_OVERRIDE_THRESHOLD,
     DB_SECONDARY_DRAIN_TIMEOUT_MS,
-    ENABLE_AGENT_LOOP,
     ENABLE_EVIDENCE_PLANNER,
     ENABLE_EVIDENCE_REANALYSIS,
     ENABLE_HONEST_TERMINAL_OUTCOMES,
@@ -2442,12 +2441,10 @@ def _apply_response_mode(ctx: QueryContext) -> None:
         ctx.resolution_policy,
     )
 
-    # Set policy-blocked flags for observability before the short-circuit return.
+    # Set the policy-blocked flag for observability before the short-circuit return.
     if ctx.response_mode == ResponseMode.KNOWLEDGE_PRIMARY or ctx.resolution_policy == ResolutionPolicy.CLARIFY:
         if ENABLE_TYPED_TOOLS:
             ctx.tool_blocked_by_policy = True
-        if ENABLE_AGENT_LOOP:
-            ctx.agent_loop_blocked_by_policy = True
 
     trace_detail(
         log, ctx, "response_mode_derivation", "result",
@@ -2455,7 +2452,6 @@ def _apply_response_mode(ctx: QueryContext) -> None:
         resolution_policy=ctx.resolution_policy,
         is_conceptual=ctx.is_conceptual,
         tool_blocked_by_policy=ctx.tool_blocked_by_policy,
-        agent_loop_blocked_by_policy=ctx.agent_loop_blocked_by_policy,
         clarify_reason=ctx.clarify_reason,
         requested_derived_metrics=list(ctx.requested_derived_metrics or []),
         analyzer_available=ctx.question_analysis is not None,
@@ -2801,7 +2797,6 @@ def _check_missing_evidence_stage(ctx: QueryContext) -> StageResult:
                 "missing_derived_evidence:" + ",".join(ctx.missing_evidence_for_metrics)
             )
             ctx.tool_blocked_by_policy = ctx.tool_blocked_by_policy or ENABLE_TYPED_TOOLS
-            ctx.agent_loop_blocked_by_policy = ctx.agent_loop_blocked_by_policy or ENABLE_AGENT_LOOP
             log.info(
                 "Blocking data summarization due to missing derived evidence: %s",
                 ctx.missing_evidence_for_metrics,
