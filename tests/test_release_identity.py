@@ -151,7 +151,7 @@ def test_release_manifest_records_and_verifies_image_revision(tmp_path: Path):
         "image_revision": NORMALIZED_SHA,
         "inputs": {
             name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-            for name in ("Dockerfile", "requirements.txt", "railway.json")
+            for name in ("Dockerfile", "requirements.txt", "requirements-lock.txt", "railway.json")
         },
         "schema_version": "backend-release-manifest-v2",
     }

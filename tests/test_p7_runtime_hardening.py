@@ -182,6 +182,10 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
 
     assert "FROM python:3.11.15-slim-bookworm@sha256:" in dockerfile
     assert "COPY requirements.txt" in dockerfile
+    # B2.A.6: the runtime environment installs from the hashed lock only.
+    assert "COPY requirements-lock.txt" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "--requirement requirements-lock.txt" in dockerfile
     assert "requirements-dev.txt" not in dockerfile
     runtime_requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     development_requirements = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")

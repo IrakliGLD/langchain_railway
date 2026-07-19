@@ -22,7 +22,11 @@ WORKDIR /app
 # Runtime dependencies only.  Development/test/scanning tools never enter the
 # production image.
 COPY requirements.txt ./requirements.txt
-RUN python -m pip install --no-cache-dir --requirement requirements.txt
+# B2.A.6: install the exact hashed closure — any artifact substitution or
+# resolver drift fails the build instead of silently changing the runtime.
+COPY requirements-lock.txt ./requirements-lock.txt
+RUN python -m pip install --no-cache-dir --require-hashes --only-binary :all: \
+    --requirement requirements-lock.txt
 
 # Explicit runtime allow-list: no repository-wide COPY and no tests, reports,
 # exports, VCS data, operator scripts, or local environment files.
