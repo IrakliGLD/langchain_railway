@@ -177,7 +177,7 @@ Ledger commits after `b628f7881175fc12e47da0f87570411d65c0e789` are documentatio
 | Rollback target | Previous deployment = **Merge pull request #125** (= `bd0a91f897…`), now `REMOVED` in history; redeploy it to roll back. |
 | Startup evidence | Deploy logs: "Application startup complete", "Uvicorn running on 0.0.0.0:3000", "Schema reflection complete: 14 views", `/healthz` + `/readyz` 200. |
 
-Remaining for B3.A closure: the protected `GET /versionz` byte-for-byte `git_sha` check (requires `ENAI_EVALUATE_SECRET`; operator-run).
+**B3.A identity verification — PASSED (2026-07-19).** Protected `GET /versionz` (auth via `ENAI_EVALUATE_SECRET`/`X-App-Key`) returned `git_sha = 2f2a31053dfa391fbb0958ae858141c6f3e26ff9`, `application_version 20.0`, `schema_version backend-release-identity-v1`. That SHA is the **current `main` head** (merge #135), which auto-deployed after #126; it is `699b703…` **+ one documentation-only ledger commit** (`git diff 699b703..2f2a3105` = 30 lines in this ledger file, zero code). Backend CI green at `2f2a3105` (run [`29689035560`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29689035560)). The returned SHA equals the deployed `main` head and is content-identical to the tested candidate → F10-REL-02 identity requirement satisfied for the backend. **Deployed backend identity of record: `2f2a31053dfa391fbb0958ae858141c6f3e26ff9`.** (A 404 would have meant the endpoint was absent; the earlier 401 confirmed the endpoint exists and simply rejected a wrong key.)
 
 **B3.B frontend/Edge live state (2026-07-19, curl-verified against production):**
 
