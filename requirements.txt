@@ -64,7 +64,7 @@ python-dotenv==1.2.2  # 1.2.2 closes CVE-2026-28684 (F10-SEC-01 B2.A.3)
 # SDK was only required by langchain-google-genai 0.0.x; its removal drops
 # the entire protobuf/gRPC chain from the closure. The guarded legacy
 # fallback in knowledge/vector_embeddings.py remains inert resilience code.)
-google-genai==1.65.0
+google-genai==2.12.1
 
 # SQL parsing
 sqlglot==25.25.0
