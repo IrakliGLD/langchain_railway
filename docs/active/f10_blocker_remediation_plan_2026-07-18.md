@@ -231,6 +231,8 @@ Treat `langchain-core`, `langchain-openai`, `langchain-google-genai`, `langsmith
 
 **Implementation status (2026-07-19): complete with no frontend change required.** All gates ran from the independent frontend repository at its unchanged HEAD `ae9b68f9779a4a2c22a0b0c14307f0eb837ae231`, each with its true exit code captured: `npm ci` clean; `contract:chat-gateway` verified the generated v2 consumers byte-current (the backend dependency work changed no public schema); tests **465 passed / 0 failed**; ESLint clean; `edge:manifest` verified source aggregate `973efd2764f9ab31d35789a7cc17edad9ac8dc5c5da9679344cda3fceb2fddcc`; production build succeeded with the CI-equivalent placeholder environment and the full HEAD SHA as release identity (B1.B correctly fails the build without one), and `artifact:verify` passed against that fresh manifest (`095811bd…`, verification-only — promotion artifacts come from the release workflow); production `npm audit` reported zero vulnerabilities. The four Deno gates (`edge:format`/`edge:lint`/`edge:check`/`edge:test`) cannot run on this workstation (no Deno runtime; the repo tooling requires the pinned one) — they are executed by frontend CI, which pins Deno v2.1.4 and runs `edge:verify` on every push; confirming the green CI run at `ae9b68f` is an owner attestation because the repository is not publicly readable (`Manual verification pending`). Evidence-quality note: an initial pass piped gate output through `tail`, which masked exit codes; every gate was re-run with direct exit-code capture before being recorded here.
 
+Backend library upgrades should not require frontend behavior changes if the HTTP contract remains stable.
+
 Run from the independent frontend repository:
 
 ```text
