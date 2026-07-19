@@ -2248,7 +2248,6 @@ def test_analyzer_overrides_heuristic_conceptual_for_data_query(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
@@ -2350,7 +2349,6 @@ def test_data_explanation_with_knowledge_path_not_conceptual(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
@@ -2384,7 +2382,6 @@ def test_conceptual_definition_with_knowledge_path_stays_conceptual(monkeypatch)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2417,7 +2414,6 @@ def test_technical_conceptual_definition_can_use_data_primary_path(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
@@ -2454,7 +2450,6 @@ def test_technical_conceptual_definition_can_fallback_to_router_tool_after_autho
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_EVIDENCE_PLANNER", True)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
@@ -2509,7 +2504,6 @@ def test_ambiguous_with_knowledge_path_stays_conceptual(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2541,7 +2535,6 @@ def test_comparison_with_knowledge_path_is_knowledge_primary(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2581,7 +2574,6 @@ def test_response_mode_regulatory_procedure_knowledge_primary(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2612,7 +2604,6 @@ def test_response_mode_data_retrieval_data_primary(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2644,7 +2635,6 @@ def test_response_mode_comparison_with_tool_path_data_primary(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2676,7 +2666,6 @@ def test_tool_routing_skipped_for_knowledge_primary(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2695,9 +2684,6 @@ def test_tool_routing_skipped_for_knowledge_primary(monkeypatch):
     assert out.response_mode == "knowledge_primary"
     assert out.tool_blocked_by_policy is True, (
         "tool_blocked_by_policy must be set before conceptual short-circuit"
-    )
-    assert out.agent_loop_blocked_by_policy is True, (
-        "agent_loop_blocked_by_policy must be set before conceptual short-circuit"
     )
     assert out.used_tool is False
 
@@ -2723,7 +2709,6 @@ def test_response_mode_fallback_heuristic_conceptual(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
@@ -2845,7 +2830,6 @@ def test_response_mode_fallback_heuristic_data(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2892,7 +2876,6 @@ def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", True)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2919,7 +2902,7 @@ def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
     assert out.resolved_query_source == "raw_query"
 
 
-def test_unresolved_analyzer_entities_skip_agent_loop_and_use_planner_path(monkeypatch):
+def test_unresolved_analyzer_entities_use_planner_path(monkeypatch):
     """Unresolved analyzer entities must fail closed and fall through to planner/SQL, not agent loop."""
     from agent import pipeline
     from contracts.question_analysis import QuestionAnalysis
@@ -2936,7 +2919,6 @@ def test_unresolved_analyzer_entities_skip_agent_loop_and_use_planner_path(monke
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -2989,7 +2971,6 @@ def test_analyzer_build_failure_can_recover_via_resolved_query_match(monkeypatch
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -3060,7 +3041,6 @@ def test_authoritative_question_analysis_skips_raw_router_match(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_EVIDENCE_PLANNER", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -3113,7 +3093,7 @@ def test_authoritative_question_analysis_skips_raw_router_match(monkeypatch):
     assert out.summary == "data answer via analyzer route"
 
 
-def test_authoritative_question_analysis_skips_agent_loop_and_uses_planner_sql(monkeypatch):
+def test_authoritative_question_analysis_uses_planner_sql(monkeypatch):
     """SQL-shaped authoritative Stage 0.2 requests must not detour into the agent loop."""
     from agent import pipeline
     from contracts.question_analysis import QuestionAnalysis
@@ -3125,7 +3105,6 @@ def test_authoritative_question_analysis_skips_agent_loop_and_uses_planner_sql(m
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -3179,7 +3158,6 @@ def test_resolved_query_recovery_validates_relevance_against_canonical_query(mon
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -3243,7 +3221,6 @@ def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypa
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", True)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", True)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
@@ -3267,7 +3244,6 @@ def test_resolution_policy_clarify_skips_tool_and_returns_clarification(monkeypa
     assert out.summary == "clarify answer"
     assert out.summary_source == "clarification_request"
     assert out.tool_blocked_by_policy is True
-    assert out.agent_loop_blocked_by_policy is True
     assert out.used_tool is False
 
 
@@ -3479,7 +3455,6 @@ def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", True)
     monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
     monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
-    monkeypatch.setattr(pipeline, "ENABLE_AGENT_LOOP", False)
     monkeypatch.setattr(
         pipeline.planner, "prepare_context",
         lambda ctx: setattr(ctx, "is_conceptual", False) or ctx,
