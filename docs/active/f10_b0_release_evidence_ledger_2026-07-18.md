@@ -159,3 +159,5 @@ These rows record repository candidates only. Empty operational fields are delib
 | Promotion decision | Ready for B3 preflight once release-evidence artifacts are recorded | Ready for B3 preflight |
 
 Ledger commits after `b628f7881175fc12e47da0f87570411d65c0e789` are documentation-only and are explicitly recorded as such per §B0-4; they do not create a new candidate.
+
+**Superseding backend candidate (2026-07-19):** the B5.A expired-flag removal (`a99e51cc9c7ff7824879dab3edf9affeffd6b4f0`, code) and compatibility registry advance the candidate to `refactor/review-phase-fixes` @ **`2ce375d29b060d512bfa746035ec38db508f3d8e`** — CI run [`29679422065`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29679422065) **success, all gates green**. No promotion evidence existed for the prior candidate, so nothing is invalidated; all B2/B4.A repository evidence carries forward (dependency closure unchanged — the removal touched no pins; zero advisories; no public schema change, contract drift gates green). B3 promotion should use this SHA. Ledger commits after it are again documentation-only unless stated otherwise.
