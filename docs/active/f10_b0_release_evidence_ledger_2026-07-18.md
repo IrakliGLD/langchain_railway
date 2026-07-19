@@ -160,6 +160,23 @@ These rows record repository candidates only. Empty operational fields are delib
 
 Ledger commits after `b628f7881175fc12e47da0f87570411d65c0e789` are documentation-only and are explicitly recorded as such per §B0-4; they do not create a new candidate.
 
-**B3.A promotion progress (2026-07-19):** PR #126 merged the candidate into `main`; the promotion identity is the merge commit **`699b703eca38e2b9fb34d65a2db622499a8f1b0b`** (content-identical to `2ce375d2…`). CI on `main` at that SHA: run [`29686008664`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29686008664) **success** — the first green `main` CI in this repository. `Backend release evidence` dispatched by Irakli against the protected `production` environment at that exact SHA: run [`29686830193`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29686830193) **success**, immutable artifact `backend-production-699b703eca38e2b9fb34d65a2db622499a8f1b0b` (178,563,880 bytes: image archive, SBOM, pip-audit JSON, release manifest, checksums) — retain beyond the 30-day artifact window per §5. Still pending for B3.A closure: Railway deployment ID at this SHA, previous-deployment rollback ID, one-replica/autoscaling attestation, and the protected `/versionz` byte-for-byte identity check. Public `/healthz` and `/readyz` returned 200 at recording time.
+**B3.A promotion progress (2026-07-19):** PR #126 merged the candidate into `main`; the promotion identity is the merge commit **`699b703eca38e2b9fb34d65a2db622499a8f1b0b`** (content-identical to `2ce375d2…`). CI on `main` at that SHA: run [`29686008664`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29686008664) **success** — the first green `main` CI in this repository. `Backend release evidence` dispatched by Irakli against the protected `production` environment at that exact SHA: run [`29686830193`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29686830193) **success**, immutable artifact `backend-production-699b703eca38e2b9fb34d65a2db622499a8f1b0b` (178,563,880 bytes: image archive, SBOM, pip-audit JSON, release manifest, checksums) — retain beyond the 30-day artifact window per §5. Public `/healthz` and `/readyz` returned 200 at recording time.
+
+**Railway deployment attestation (2026-07-19, read from the Railway dashboard):**
+
+| Field | Value |
+|---|---|
+| Project | `Enai` — `b15aea53-f966-462b-8de3-9d3f744c432d` |
+| Service | `enerbot` — `c274d6d3-88af-494f-b38d-2c286409ac0e` |
+| Environment | `production` — `475e29b6-2565-4bde-9ca4-b8144ca643ed` |
+| Active deployment | `79b9fb13` (short) — status **ACTIVE, Deployment successful**, started 2026-07-19 15:54 GMT+4 |
+| Deployed source | **Merge pull request #126** (= merge commit `699b703eca38e2b9fb34d65a2db622499a8f1b0b`), repo `IrakliGLD/langchain_railway`, branch `main` |
+| Build model | Railway Git-triggered Docker build (auto-deploy on push to `main` enabled). Source SHA identity is proven; the Railway image digest is separately built and therefore differs from the attested release-evidence image — not a byte-identical promotion, per plan §B1.A-6/-18. |
+| Replicas / region | **1 Replica**, EU West (Amsterdam). Multi-region/horizontal scaling is plan-gated (Pro-only) and not enabled → one-replica constraint satisfied. |
+| Port | 3000 (matches Dockerfile `EXPOSE 3000`) |
+| Rollback target | Previous deployment = **Merge pull request #125** (= `bd0a91f897…`), now `REMOVED` in history; redeploy it to roll back. |
+| Startup evidence | Deploy logs: "Application startup complete", "Uvicorn running on 0.0.0.0:3000", "Schema reflection complete: 14 views", `/healthz` + `/readyz` 200. |
+
+Remaining for B3.A closure: the protected `GET /versionz` byte-for-byte `git_sha` check (requires `ENAI_EVALUATE_SECRET`; operator-run).
 
 **Superseding backend candidate (2026-07-19):** the B5.A expired-flag removal (`a99e51cc9c7ff7824879dab3edf9affeffd6b4f0`, code) and compatibility registry advance the candidate to `refactor/review-phase-fixes` @ **`2ce375d29b060d512bfa746035ec38db508f3d8e`** — CI run [`29679422065`](https://github.com/IrakliGLD/langchain_railway/actions/runs/29679422065) **success, all gates green**. No promotion evidence existed for the prior candidate, so nothing is invalidated; all B2/B4.A repository evidence carries forward (dependency closure unchanged — the removal touched no pins; zero advisories; no public schema change, contract drift gates green). B3 promotion should use this SHA. Ledger commits after it are again documentation-only unless stated otherwise.
