@@ -30,8 +30,13 @@ langchain-google-genai==4.2.7
 langchain-openai==1.3.5
 
 # Data validation and serialization
-# Note: pydantic must stay compatible with both langchain-core 0.1.52 and google-genai
-pydantic==2.9.2
+# 2.12.4 is the version the full local suite characterizes AND the version
+# that generated the committed contracts/chat_gateway_v1.schema.json —
+# pydantic 2.9.x emits a different JSON schema, which failed the CI contract
+# drift gate the first time the full-test step executed (B2 follow-up,
+# 2026-07-19). Compatible: fastapi 0.139.2 (>=2.9), langchain-core 1.4.9,
+# google-genai (<3).
+pydantic==2.12.4
 
 # Data processing and analysis
 # (statsmodels removed 2026-07-18 — zero importers, F10-SEC-01 B2.A.2.)
