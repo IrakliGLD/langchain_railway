@@ -43,6 +43,79 @@ RESOLUTION_FLAGS = [
 ]
 
 
+# Marker environment of the production container. pip evaluates dependency
+# markers against the GENERATING host (there is no override flag), so a
+# Windows host resolves host-only packages such as colorama (a
+# platform_system=="Windows" dependency of click) that a Linux host never
+# sees. The reachability walk below re-evaluates every dependency edge
+# against this fixed environment, making the lock byte-identical no matter
+# where it is generated.
+TARGET_MARKER_ENV = {
+    "python_version": "3.11",
+    "python_full_version": "3.11.15",
+    "implementation_name": "cpython",
+    "platform_python_implementation": "CPython",
+    "sys_platform": "linux",
+    "platform_system": "Linux",
+    "os_name": "posix",
+    "platform_machine": "x86_64",
+}
+
+
+def _normalize_name(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def _top_level_requirements() -> list:
+    from packaging.requirements import Requirement
+
+    requirements = []
+    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if stripped:
+            requirements.append(Requirement(stripped))
+    return requirements
+
+
+def _reachable_for_target(report: dict) -> set[str]:
+    """Walk requires_dist edges with markers evaluated for the container."""
+    from packaging.requirements import Requirement
+
+    metadata = {}
+    for item in report["install"]:
+        meta = item["metadata"]
+        metadata[_normalize_name(meta["name"])] = meta.get("requires_dist") or []
+
+    def _edge_applies(requirement: Requirement, active_extras: frozenset[str]) -> bool:
+        if requirement.marker is None:
+            return True
+        for extra in active_extras or {""}:
+            if requirement.marker.evaluate({**TARGET_MARKER_ENV, "extra": extra}):
+                return True
+        return False
+
+    visited: set[tuple[str, frozenset[str]]] = set()
+    queue: list[tuple[str, frozenset[str]]] = []
+    for requirement in _top_level_requirements():
+        queue.append((_normalize_name(requirement.name), frozenset(requirement.extras)))
+    while queue:
+        name, extras = queue.pop()
+        if (name, extras) in visited:
+            continue
+        visited.add((name, extras))
+        for raw in metadata.get(name, []):
+            try:
+                dep = Requirement(raw)
+            except Exception:
+                continue
+            if not _edge_applies(dep, extras):
+                continue
+            dep_name = _normalize_name(dep.name)
+            if dep_name in metadata:
+                queue.append((dep_name, frozenset(dep.extras)))
+    return {name for name, _extras in visited}
+
+
 def resolve_closure() -> dict[str, str]:
     """Resolve requirements.txt for the container target without installing."""
     with tempfile.TemporaryDirectory() as td:
@@ -61,10 +134,13 @@ def resolve_closure() -> dict[str, str]:
                 "dependency resolution failed:\n" + completed.stderr[-4000:]
             )
         report = json.loads(report_path.read_text(encoding="utf-8"))
+    reachable = _reachable_for_target(report)
     closure: dict[str, str] = {}
     for item in report["install"]:
         meta = item["metadata"]
-        closure[meta["name"].lower().replace("_", "-")] = meta["version"]
+        name = _normalize_name(meta["name"])
+        if name in reachable:
+            closure[name] = meta["version"]
     return closure
 
 
