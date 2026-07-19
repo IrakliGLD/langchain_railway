@@ -69,20 +69,20 @@ The following assignments require explicit human names or accountable organizati
 
 | Responsibility | Named owner | Approver | Status |
 |---|---|---|---|
-| Backend dependency/security remediation | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Backend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Frontend Railway build/deploy/rollback | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Supabase Edge/database operations | **UNASSIGNED** | **UNASSIGNED** | Required before B3 promotion |
-| Credentialed production smoke accounts | **UNASSIGNED** | **UNASSIGNED** | Required before B4 production evidence |
-| Accessibility evidence | **UNASSIGNED** | **UNASSIGNED** | Required before B4 production evidence |
-| Critical/High waiver authority | **UNASSIGNED** | **UNASSIGNED** | Default is no waivers until assigned |
-| Final F10 release decision | **UNASSIGNED** | **UNASSIGNED** | Required before B6 closure |
+| Backend dependency/security remediation | Irakli | Irakli | Assigned 2026-07-19 |
+| Backend Railway build/deploy/rollback | Irakli | Irakli | Assigned 2026-07-19 |
+| Frontend Railway build/deploy/rollback | Irakli | Irakli | Assigned 2026-07-19 |
+| Supabase Edge/database operations | Irakli | Irakli | Assigned 2026-07-19 |
+| Credentialed production smoke accounts | Irakli | Irakli | Assigned 2026-07-19 |
+| Accessibility evidence | Irakli | Irakli | Assigned 2026-07-19 |
+| Critical/High waiver authority | Irakli | Irakli | Assigned 2026-07-19 |
+| Final F10 release decision | Irakli | Irakli | Assigned 2026-07-19 |
 
-One person may hold several roles if explicitly recorded, but the waiver approver should not approve their own unresolved security exception where an independent reviewer is available.
+One person may hold several roles if explicitly recorded, but the waiver approver should not approve their own unresolved security exception where an independent reviewer is available. **Recorded 2026-07-19: Irakli holds every role as sole operator of both repositories.** No waiver currently exists or is requested — the B2 dependency closure audits clean — so the self-approval constraint on waivers is presently moot; if a future Critical/High waiver is ever needed, seek an independent reviewer before self-approval.
 
 ## 7. Manual completion checklist
 
-- [ ] Replace every `UNASSIGNED` ownership field with a named accountable owner/approver.
+- [x] Replace every `UNASSIGNED` ownership field with a named accountable owner/approver. *(2026-07-19: all roles assigned to Irakli, §6.)*
 - [ ] Before B3, record the candidate backend Railway service, environment, deployment ID, source SHA, image digest, replica/autoscaling setting, and rollback deployment ID.
 - [ ] Before B3, record the candidate frontend Railway service, environment, deployment ID, source SHA/artifact manifest, and rollback deployment ID.
 - [ ] Before B3, record frontend private GitHub CI and release-evidence run IDs for the superseding candidate.
@@ -121,7 +121,7 @@ Copy this table for B1 and every later candidate. Never replace historical rows.
 | Public deployment/source evidence recorded without inferring exact deployment SHAs | Pass |
 | Evidence schema and append-only candidate template defined | Pass |
 | Named roles and no-waiver default defined for development | Pass |
-| Named human owners/approvers assigned for promotion | **Deferred to B3 preflight** |
+| Named human owners/approvers assigned for promotion | **Assigned 2026-07-19 (Irakli, all roles — §6)** |
 | Candidate workflow, Railway, artifact, and rollback identities recorded | **Deferred until B1/B2 candidates exist and B3 runs** |
 | Backend CI green at the candidate SHA | **Required for each B1/B2 commit before promotion** |
 
@@ -140,6 +140,6 @@ These rows record repository candidates only. Empty operational fields are delib
 | Generated identity | Runtime/image identity is the candidate SHA; v2 manifest emitted by protected workflow | Edge aggregate `973efd2764f9ab31d35789a7cc17edad9ac8dc5c5da9679344cda3fceb2fddcc`; browser aggregate is build-config dependent and emitted by the release workflow |
 | CI/release run | **PENDING** | **PENDING** |
 | Railway/Supabase deployment ID | **PENDING** | **PENDING** |
-| Operator/approver/evidence archive | **UNASSIGNED** | **UNASSIGNED** |
+| Operator/approver/evidence archive | Irakli / Irakli; protected archive selection pending | Irakli / Irakli; protected archive selection pending |
 | Rollback artifact/deployment | **PENDING** | **PENDING** |
 | Promotion decision | Blocked before B3 | Blocked before B3 |
