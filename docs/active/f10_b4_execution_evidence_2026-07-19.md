@@ -73,22 +73,33 @@ Archive the output. The dedicated runtime-role allowed/denied SELECT probes
 are exercised by `scripts/verify_runtime_database_role.py` against the runtime
 connection.
 
-## 6. B4.B — manual accessibility checklist — OPERATOR
+## 6. B4.B — accessibility checklist — programmatic pass + operator confirmations
 
-At `https://dashboard.galdava.com`, signed in, record pass/fail + notes:
+Automated credentialed axe (WCAG 2a/2aa/21aa/22aa) is green on login/public,
+authenticated dashboard/chat, and admin (all three scans, after the toast-close
+fix `04dd014`). A programmatic pass of the **public** surfaces was run through
+the in-app browser (DOM/accessibility-tree inspection):
 
-- [ ] **Keyboard order**: Tab through login → dashboard → a chart tab → chat;
-      focus order is logical, nothing is unreachable.
-- [ ] **Visible focus**: every interactive control shows a visible focus ring.
-- [ ] **Screen reader**: with NVDA/VoiceOver, tab controls, the chart region,
-      the chat input, and the toast close button all announce a name+role
-      (toast close now announces "Close").
-- [ ] **Live regions**: chat responses / toasts are announced.
-- [ ] **Touch targets**: interactive targets ≥ 24×24 CSS px on mobile viewport.
-- [ ] **Responsive**: 375-px and 768-px viewports have no clipped/overlapping
-      controls.
-- [ ] **200 % zoom**: at browser 200 % zoom, no horizontal scroll trap; content
-      reflows and remains operable.
+| Check | Login | Public dashboard | Method |
+|---|---|---|---|
+| Keyboard order logical (focusable in DOM order) | ✅ theme→tabs→email→password→forgot→Sign In→public | ✅ | focusable-element DOM order |
+| Every interactive control has an accessible name | ✅ 10/10 | ✅ 35/35 (gated tabs announce "You need to register to access") | aria-label/label/text |
+| Touch targets ≥ 24×24 px | ✅ none smaller | ✅ none smaller | getBoundingClientRect |
+| No horizontal overflow (responsive) | ✅ 730 + 375 px | ✅ 375 px, chart renders | scrollWidth ≤ innerWidth |
+| **200 % zoom** reflows without scroll trap | ✅ operator-confirmed | — | manual |
+
+Remaining **operator confirmations** (need a real screen reader and/or an
+authenticated session, which the programmatic pass can't fully substitute):
+
+- [ ] **Visible focus ring**: eyeball that each focused control shows a ring
+      (the CSS uses `focus:ring-*`; confirm it renders on your browser/theme).
+- [ ] **Screen reader (NVDA)**: on the authenticated dashboard + chat, confirm
+      tabs, the chart region, the chat input, and a toast all announce
+      name+role (the toast close now announces "Close").
+- [ ] **Live regions**: with NVDA on, confirm a chat response / toast is
+      announced automatically (none present on the static public/login pages).
+- [ ] **Authenticated dashboard/chat/admin** touch/overflow at 375 & 768 px —
+      spot-check while signed in (axe already found no serious/critical issues).
 
 ## 7. Exit status
 
