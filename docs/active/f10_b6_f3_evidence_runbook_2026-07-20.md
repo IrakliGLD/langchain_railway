@@ -64,7 +64,7 @@ run is itself proof the artifact was built at the exact frozen SHA.
 | 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
 | 6 | Disposable-DB regression | _pending_ | — | ⏳ operator (throwaway DB, never prod `qvmqmmcglqmhachqaezt`) |
 | 7 | `/versionz` | `dashboard.galdava.com/versionz` (`X-App-Key`) | `65cf93b` | ✅ `git_sha == 65cf93b697…` |
-| 8 | Manual a11y checklist | _pending_ | `fc44fd4` | ⏳ operator (real screen reader) or programmatic pass via logged-in browser pane |
+| 8 | Manual a11y checklist | programmatic authenticated pass (2026-07-21, browser pane) — see §6 | `fc44fd4` | ✅ structural pass green; only the SR-listen attestation is operator-residual |
 
 ## 4. Exit
 
@@ -103,6 +103,44 @@ restored the exact current variable snapshot. Health was continuous throughout
 identity is restored and healthy.** Rollback target of record: `2f2a310` (#135,
 deployment `4a7bdbc7`).
 
-**Phase F4 COMPLETE.** Remaining to close F10: F3 items 6 (disposable-DB — SQL
-byte-unchanged since the last green run #271, carries forward; optional fresh
-`test:db`) and 8 (manual a11y), then Phase F5 (B6 re-audit).
+**Phase F4 COMPLETE.**
+
+## 6. Item 8 — programmatic authenticated a11y pass (2026-07-21)
+
+Run through the in-app browser on an authenticated **admin** session at
+`dashboard.galdava.com` (frozen `fc44fd4`), inspecting accessibility *structure*
+only (no personal/admin data captured). Complements the already-green automated
+axe scans (Live Browser Proof #8: login/public + dashboard/chat + admin, WCAG
+2a/2aa/21aa/22aa) with the manual-checklist items axe can't cover.
+
+| Surface | Widths | Horiz. overflow | Unnamed controls | Targets < 24px | Structure notes |
+|---|---|---|---|---|---|
+| Dashboard home | 375, 730 | none | **0 / 34** | **0** | 12 role=tab; no h1–h3 (minor) |
+| Chat | 730 | none | **0 / 12** | **0** | input named "Ask ENAI Analyst"; **`role="log" aria-live="polite"`** message region (responses are announced) |
+| Admin | 730, 768 | none | **0 / 39** | **0** | table has **7 `th` + `caption`**; at 768 the wide table scrolls in its own `overflow-x` container (page never overflows) |
+
+- **Accessible names:** 0 unnamed interactive controls on any surface.
+- **Touch targets:** 0 controls under 24×24 px on any surface/width.
+- **Responsive:** no horizontal page overflow at 375 / 730 / 768; wide admin
+  table uses an internal scroll container.
+- **Live regions:** chat message container is `role="log"`/`aria-live="polite"`
+  → chat responses announce to screen readers.
+- **Visible focus:** styled controls use `focus-visible:ring-2 ring-offset-2`
+  (buttons) / `focus-visible:border-primary` (chat input); keyboard `Tab`
+  produced a visible orange focus indicator (screenshot evidence). A few icon
+  buttons (sidebar/account/theme) carry no custom focus class and fall back to
+  the browser-default outline — still visible.
+
+**Minor, non-blocking observations (not WCAG violations; axe passed):** dashboard
+home has no `h1–h3` heading elements (limits SR heading navigation); admin
+mutations have no `aria-live` status region.
+
+**Operator-residual (the only part not programmatically verifiable):** an actual
+screen-reader *listening* pass (NVDA/VoiceOver) to confirm the announcements are
+spoken correctly. The underlying structure (names, roles, `aria-live`) is
+correct, so this is a confirmation formality.
+
+Remaining to close F10: F3 item 6 (disposable-DB — SQL byte-unchanged since the
+last green #271, carries forward; auto-stamps on the next frontend CI now that
+`TEST_DATABASE_URL` is set) and the SR-listen residual above, then Phase F5 (B6
+re-audit).
