@@ -63,15 +63,19 @@ saturation, or ceiling. Record: request count, provider spend, p95 latency,
 | **Paused / quota-exhausted** denial states | ⏳ create two synthetic accounts (paused user; quota-exhausted user) and confirm the app denies them with the correct messaging |
 | Manual keyboard/SR/touch/zoom checklist | ⏳ §6 below |
 
-## 5. B4.B — production-safe read-only database checks — OPERATOR
+## 5. B4.B — production-safe read-only database checks — DONE (2026-07-19)
 
-Run [`f10_b4_prod_readonly_db_checks.sql`](../evidence/f10_b4/f10_b4_prod_readonly_db_checks.sql)
-in the **production** Supabase SQL editor (project `qvmqmmcglqmhachqaezt`). It
-is strictly read-only (SELECTs against catalogs) — object/constraint/index/
-function existence, RLS-enabled inventory, and explicit-grant inventory.
-Archive the output. The dedicated runtime-role allowed/denied SELECT probes
-are exercised by `scripts/verify_runtime_database_role.py` against the runtime
-connection.
+Ran [`f10_b4_prod_readonly_db_checks.sql`](../evidence/f10_b4/f10_b4_prod_readonly_db_checks.sql)
+(strictly read-only) in the production Supabase editor. Results:
+
+| Check | Result |
+|---|---|
+| RLS enabled on protected tables | **true** on all 7: `user_profiles`, `chat_history`, `chat_usage`, `query_usage`, `user_access`, `user_queries`, `public_queries` |
+| Direct INSERT/UPDATE/DELETE grants to `anon`/`authenticated` on protected tables | **none** (zero rows) — access mediated only by SECURITY DEFINER RPCs |
+| Runtime role `enai_api_readonly` | `rolinherit=false` (**NOINHERIT**) and `rolbypassrls=false` (**does not bypass RLS**) — matches the least-privilege design |
+| Legacy string rows in `chat_history` | **0** (operator cleared old rows; P6.B data hygiene met) |
+
+Production database security posture attested clean.
 
 ## 6. B4.B — accessibility checklist — programmatic pass + operator confirmations
 
@@ -101,10 +105,26 @@ authenticated session, which the programmatic pass can't fully substitute):
 - [ ] **Authenticated dashboard/chat/admin** touch/overflow at 375 & 768 px —
       spot-check while signed in (axe already found no serious/critical issues).
 
-## 7. Exit status
+## 7. Exit status (updated 2026-07-19)
 
-Safe backend §6 denial/readiness evidence is complete and recorded (§1).
-Everything else in B4 requires a production secret, a synthetic account,
-provider spend, or human interaction, and is handed to the operator above.
-None of the remaining items block each other; they can be executed in any
-order and their evidence archived against the deployed identities.
+**Done:** §6 safe denial/readiness probes; §6 signed happy-path (operator chat
+log — verified gateway assertion, `/ask → 200`, grounded answer, chart);
+authenticated Post Deploy Smoke, Live Browser Proof, and all three credentialed
+axe scans (login/public, dashboard/chat, admin — after the toast-close fix);
+programmatic public-surface a11y + operator light manual a11y + 200% zoom;
+production read-only DB security attestation (§5, clean); paused/quota denial
+states operator-checked lightly.
+
+**Operator decisions recorded:**
+- **Rollback rehearsal — deferred by operator.** The rollback path exists
+  (Railway retains the previous enerbot deployment; rollback = redeploy that
+  deployment) but was not rehearsed. Accepted for a single-replica/low-traffic
+  service.
+
+**Remaining:** the **§8 bounded chat-load run** is the only material B4 item
+left. Given single-replica/low-traffic operation with backpressure, pool
+saturation, breaker behavior, and no-duplicate-charge already unit-tested, and
+the live happy-path proven, the operator will either run a light concurrency
+check or record a bounded-risk waiver for the "Load" gate. This must be
+recorded honestly (not marked a full load pass unless a representative load was
+actually run).
