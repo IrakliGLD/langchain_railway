@@ -26,7 +26,7 @@ holdback code.
 | Switch (default) | Removal criterion | Deadline |
 |---|---|---|
 | `EVIDENCE_FINALIZATION_MODE` (`shadow`) | Two stable releases at `enforce`; finalization counters clean | 2026-08-31 |
-| `PLAN_VALIDATION_MODE` (`shadow`) | Two stable releases at `enforce`; no false-reject incidents | 2026-08-31 |
+| `PLAN_VALIDATION_MODE` (`warn`) | Two stable releases at `enforce`; no false-reject incidents | 2026-08-31 |
 | `ENABLE_HONEST_TERMINAL_OUTCOMES` (`false`) + its `p4_rollout` holdback | Two stable releases on; terminal-outcome mix reviewed | 2026-08-31 |
 | `ENABLE_EVIDENCE_REANALYSIS` (`false`) | Two stable releases on; reanalysis quality/deadline metrics reviewed | 2026-08-31 |
 

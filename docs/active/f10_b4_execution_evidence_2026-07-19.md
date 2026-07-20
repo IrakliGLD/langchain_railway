@@ -59,7 +59,7 @@ saturation, or ceiling. Record: request count, provider spend, p95 latency,
 | Authenticated Post Deploy Smoke (browser→Edge→backend) | ✅ green (#240) |
 | Live Browser Proof (authenticated dashboard, protected RPC pipeline, no runtime errors) | ✅ green (#6) |
 | Credentialed axe — login/public + authenticated dashboard/chat | ✅ green (#6) — **found & fixed a real critical WCAG 4.1.2 toast-close-button violation** (`04dd014`) |
-| Credentialed axe — **admin** | ⏳ **skipped**: set `SMOKE_ADMIN_EMAIL`/`SMOKE_ADMIN_PASSWORD` repo secrets, then re-run Live Browser Proof |
+| Credentialed axe — **admin** | ✅ green (2026-07-20): operator set `SMOKE_ADMIN_EMAIL`/`SMOKE_ADMIN_PASSWORD` and re-ran Live Browser Proof; all three axe scans (login/public, dashboard/chat, admin) pass with no serious/critical violation. Must be re-confirmed at the frozen F2/F3 SHA. |
 | **Paused / quota-exhausted** denial states | ⏳ create two synthetic accounts (paused user; quota-exhausted user) and confirm the app denies them with the correct messaging |
 | Manual keyboard/SR/touch/zoom checklist | ⏳ §6 below |
 
@@ -105,26 +105,34 @@ authenticated session, which the programmatic pass can't fully substitute):
 - [ ] **Authenticated dashboard/chat/admin** touch/overflow at 375 & 768 px —
       spot-check while signed in (axe already found no serious/critical issues).
 
-## 7. Exit status (updated 2026-07-19)
+## 7. Exit status (updated 2026-07-20 for the B6 remediation)
 
-**Done:** §6 safe denial/readiness probes; §6 signed happy-path (operator chat
-log — verified gateway assertion, `/ask → 200`, grounded answer, chart);
-authenticated Post Deploy Smoke, Live Browser Proof, and all three credentialed
-axe scans (login/public, dashboard/chat, admin — after the toast-close fix);
-programmatic public-surface a11y + operator light manual a11y + 200% zoom;
-production read-only DB security attestation (§5, clean); paused/quota denial
-states operator-checked lightly.
+**Done (but see the SHA-realignment caveat):** §6 safe denial/readiness probes;
+§6 signed happy-path (operator chat log — verified gateway assertion,
+`/ask → 200`, grounded answer, chart); authenticated Post Deploy Smoke, Live
+Browser Proof, and all three credentialed axe scans (login/public,
+dashboard/chat, admin — after the toast-close fix); programmatic public-surface
+a11y (§6, recorded) and 200% zoom (operator-confirmed); production read-only DB
+security attestation (§5, clean); paused/quota denial states operator-checked
+lightly.
 
-**Operator decisions recorded:**
-- **Rollback rehearsal — deferred by operator.** The rollback path exists
-  (Railway retains the previous enerbot deployment; rollback = redeploy that
-  deployment) but was not rehearsed. Accepted for a single-replica/low-traffic
-  service.
+**Honestly still pending (not done — do not mark complete by prose):**
+- **Authenticated manual accessibility** — the visible-focus, NVDA/name-role,
+  live-region, and authenticated responsive/touch checks are **not** performed;
+  only the *public* surfaces were audited programmatically. To be completed at
+  the frozen F2/F3 SHA with recorded browser/AT versions, pages, viewport/zoom,
+  and evidence location (F10 B6 F1.5). The earlier "light manual" phrasing
+  overstated this and is corrected here.
+- **§8 bounded chat load** — **not run.** B6 decision (2026-07-20): satisfy the
+  Load gate with a **formal F10-template waiver** (drafted in the B6 plan Phase
+  F4), not an informal acceptance.
+- **Rollback** — B6 decision (2026-07-20): **rehearse once** (Phase F4;
+  redeploy previous, verify health, roll forward; record IDs). The earlier
+  "deferred" note is superseded.
 
-**Remaining:** the **§8 bounded chat-load run** is the only material B4 item
-left. Given single-replica/low-traffic operation with backpressure, pool
-saturation, breaker behavior, and no-duplicate-charge already unit-tested, and
-the live happy-path proven, the operator will either run a light concurrency
-check or record a bounded-risk waiver for the "Load" gate. This must be
-recorded honestly (not marked a full load pass unless a representative load was
-actually run).
+**SHA-realignment caveat (F10-REL-02/E2E-03):** the integrated evidence above
+was gathered across drifting frontend SHAs (`1938967` smoke/Edge vs `04dd014`
+browser). Per the B6 plan, browser + Edge are re-frozen at one SHA (Phase F2)
+and the authenticated Post Deploy Smoke, Live Browser Proof, axe (all three),
+and the full disposable DB regression are **re-run at that single identity**
+(Phase F3). Only that re-run evidence counts toward closure.
