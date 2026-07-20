@@ -1,11 +1,10 @@
-# F10 B6 — Representative Chat-Load Gate Waiver — 2026-07-20 (awaiting approval)
+# F10 B6 — Representative Chat-Load Gate Waiver — APPROVED 2026-07-21
 
 Per the F10 waiver template (remediation plan §11), satisfies the B6 **Load**
 gate (finding F10-E2E-03) with a complete, named, expiring waiver rather than an
-informal acceptance. The frozen artifact SHAs are now filled (F2 verified live).
-**Only the operator's risk sign-off + approval date remain** — everything else
-is complete. The assistant cannot self-approve this; approval is Irakli's named
-acceptance of the deferred-load risk.
+informal acceptance. Frozen artifact SHAs filled (F2 verified live). **Approved
+by Irakli 2026-07-21** (operator risk sign-off), expiring 2026-08-20 — the
+deferred load envelope must be run or the waiver renewed before then.
 
 ```text
 Waiver ID:            F10-B6-LOAD-01
@@ -50,11 +49,10 @@ and target release:   Run the approved envelope (concurrency 2, ≤20 requests,
                       saturation, or ceiling) within the waiver window and attach
                       request count, spend, p95, /readyz-under-load, and
                       zero-duplicate-charge evidence to the release record.
-Approved at:          AWAITING Irakli's approval — the SHAs, controls, owner and
-                      ticket are complete; only the operator's risk sign-off +
-                      date remain. On approval, record the date here.
-Expires at:           approval date + 30 days (e.g. 2026-08-20 if approved
-                      2026-07-21).
+Approved at:          2026-07-21 — Irakli (operator risk sign-off; approved in
+                      session on the confirmation "waiver approved").
+Expires at:           2026-08-20 (Approved at + 30 days). Run the envelope or
+                      renew before this date.
 Rollback/disable
 action:               None — this waiver enables no code path; it defers an
                       evidence-gathering load run. If the deferred load run later
