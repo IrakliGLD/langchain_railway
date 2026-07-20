@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 import threading
 from typing import Any, Callable, List, Literal, Protocol
@@ -186,89 +185,33 @@ class GeminiEmbeddingProvider:
         self._model = resolved_model
         self._normalization_version = os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1"
         self._corpus_version = os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1"
-        self._legacy_model = resolved_model if resolved_model.startswith("models/") else f"models/{resolved_model}"
-        self._backend: Literal["google_genai", "google_generativeai"]
-
+        # google-genai is a hard production dependency (the legacy
+        # google-generativeai SDK was removed in F10 B2.A.5); there is no
+        # fallback backend.
         try:
             from google import genai
             from google.genai import types
-        except ImportError:
-            try:
-                import google.generativeai as legacy_genai
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Gemini vector embeddings require either google-genai or google-generativeai"
-                ) from exc
-            configure = getattr(legacy_genai, "configure", None)
-            if callable(configure):
-                configure(api_key=api_key)
-            self._backend = "google_generativeai"
-            self._client = legacy_genai
-            self._config = None
-        else:
-            self._backend = "google_genai"
-            self._types = types
-            if hasattr(types, "HttpOptions") and hasattr(types, "HttpRetryOptions"):
-                self._client = genai.Client(
-                    api_key=api_key,
-                    http_options=types.HttpOptions(
-                        timeout=max(
-                            1,
-                            int(_positive_float_env("GEMINI_TIMEOUT_SECONDS", 120.0) * 1000),
-                        ),
-                        retry_options=types.HttpRetryOptions(attempts=1),
+        except ImportError as exc:
+            raise RuntimeError(
+                "Gemini vector embeddings require google-genai"
+            ) from exc
+        self._types = types
+        if hasattr(types, "HttpOptions") and hasattr(types, "HttpRetryOptions"):
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=max(
+                        1,
+                        int(_positive_float_env("GEMINI_TIMEOUT_SECONDS", 120.0) * 1000),
                     ),
-                )
-            else:
-                self._client = genai.Client(api_key=api_key)
-            self._config = types.EmbedContentConfig(
-                output_dimensionality=self._expected_dimension,
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
             )
-
-    @staticmethod
-    def _vector_from_legacy_embedding(value: Any) -> List[float]:
-        if hasattr(value, "values"):
-            value = value.values
-        if isinstance(value, dict):
-            if "embedding" in value:
-                return GeminiEmbeddingProvider._vector_from_legacy_embedding(value["embedding"])
-            if "values" in value:
-                return GeminiEmbeddingProvider._vector_from_legacy_embedding(value["values"])
-        if isinstance(value, (list, tuple)):
-            return [float(item) for item in value]
-        raise RuntimeError("Legacy Gemini embedding response had an unsupported shape")
-
-    def _embed_legacy_single(self, text: str, *, task_type: str, timeout_seconds: float) -> List[float]:
-        kwargs = {
-            "model": self._legacy_model,
-            "content": text,
-            "task_type": task_type,
-            "output_dimensionality": self._expected_dimension,
-        }
-        try:
-            signature = inspect.signature(self._client.embed_content)
-            accepts_request_options = "request_options" in signature.parameters or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
-            )
-        except (TypeError, ValueError):
-            accepts_request_options = True
-        if accepts_request_options:
-            kwargs["request_options"] = {"timeout": timeout_seconds}
-        result = self._client.embed_content(**kwargs)
-        if isinstance(result, dict):
-            if "embedding" in result:
-                return self._vector_from_legacy_embedding(result["embedding"])
-            if "embeddings" in result and result["embeddings"]:
-                return self._vector_from_legacy_embedding(result["embeddings"][0])
-        if isinstance(result, list) and result:
-            return self._vector_from_legacy_embedding(result[0])
-        if hasattr(result, "embedding"):
-            return self._vector_from_legacy_embedding(result.embedding)
-        if hasattr(result, "embeddings"):
-            embeddings = getattr(result, "embeddings")
-            if embeddings:
-                return self._vector_from_legacy_embedding(embeddings[0])
-        raise RuntimeError("Gemini embedding response did not contain any embeddings")
+        else:
+            self._client = genai.Client(api_key=api_key)
+        self._config = types.EmbedContentConfig(
+            output_dimensionality=self._expected_dimension,
+        )
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
@@ -278,34 +221,24 @@ class GeminiEmbeddingProvider:
         def _call() -> List[List[float]]:
             embeddings: List[List[float]] = []
             items = list(texts)
-            if self._backend == "google_generativeai":
-                for item in items:
-                    embeddings.append(
-                        self._embed_legacy_single(
-                            item,
-                            task_type="retrieval_document",
-                            timeout_seconds=timeout,
+            config = self._config
+            if hasattr(self._types, "HttpOptions") and hasattr(self._types, "HttpRetryOptions"):
+                config = self._config.model_copy(
+                    update={
+                        "http_options": self._types.HttpOptions(
+                            timeout=max(1, int(timeout * 1000)),
+                            retry_options=self._types.HttpRetryOptions(attempts=1),
                         )
-                    )
-            else:
-                config = self._config
-                if hasattr(self._types, "HttpOptions") and hasattr(self._types, "HttpRetryOptions"):
-                    config = self._config.model_copy(
-                        update={
-                            "http_options": self._types.HttpOptions(
-                                timeout=max(1, int(timeout * 1000)),
-                                retry_options=self._types.HttpRetryOptions(attempts=1),
-                            )
-                        }
-                    )
-                for start in range(0, len(items), self._batch_size):
-                    batch = items[start : start + self._batch_size]
-                    result = self._client.models.embed_content(
-                        model=self._model,
-                        contents=batch,
-                        config=config,
-                    )
-                    embeddings.extend(list(item.values) for item in (result.embeddings or []))
+                    }
+                )
+            for start in range(0, len(items), self._batch_size):
+                batch = items[start : start + self._batch_size]
+                result = self._client.models.embed_content(
+                    model=self._model,
+                    contents=batch,
+                    config=config,
+                )
+                embeddings.extend(list(item.values) for item in (result.embeddings or []))
             return embeddings
 
         embeddings = _execute_embedding_call("gemini", "document_embedding", _call)
@@ -319,12 +252,6 @@ class GeminiEmbeddingProvider:
         timeout = _embedding_timeout_seconds("gemini", "query_embedding")
 
         def _call() -> List[float]:
-            if self._backend == "google_generativeai":
-                return self._embed_legacy_single(
-                    text,
-                    task_type="retrieval_query",
-                    timeout_seconds=timeout,
-                )
             config = self._config
             if hasattr(self._types, "HttpOptions") and hasattr(self._types, "HttpRetryOptions"):
                 config = self._config.model_copy(

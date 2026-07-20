@@ -270,7 +270,7 @@ After `_execute_evidence_plan` returns, `_detect_evidence_anomaly` checks data-s
 
 ### 3.7 Stages 1/2 — Legacy SQL Fallback
 
-The legacy agent loop (`orchestrator.run_agent_loop`) was **deleted** in the architecture-audit P2 cleanup (2026-07). With Stage 0.2 authoritative it never fired in production, and analyzer-failure / no-tool cases fall through to the generate-plan/SQL fallback below — a more capable path than the retired keyword-driven loop. `agent/orchestrator.py` no longer exists. `ENABLE_AGENT_LOOP` survives as an inert config flag: it only feeds the `agent_loop_blocked_by_policy` observability fields so trace shapes stay stable; no loop code remains behind it.
+The legacy agent loop (`orchestrator.run_agent_loop`) was **deleted** in the architecture-audit P2 cleanup (2026-07). With Stage 0.2 authoritative it never fired in production, and analyzer-failure / no-tool cases fall through to the generate-plan/SQL fallback below — a more capable path than the retired keyword-driven loop. `agent/orchestrator.py` no longer exists. The `ENABLE_AGENT_LOOP` config flag and its `agent_loop_blocked_by_policy` trace field were **removed entirely** in F10 B5.A (2026-07-19) — they were inert residue after the loop deletion; no flag, branch, or trace field remains.
 
 Stages 1/2 (`planner.generate_plan` + `sql_executor.validate_and_execute`) fire when `not ctx.used_tool` after evidence-plan execution. The condition is the §2.3 ideal's "SQL escape hatch when no typed tool produced primary data". Conceptual or `skip_sql` paths route to `summarizer.answer_conceptual` and return (terminal). The stage body lives in `_run_generate_sql_stage`, one of the `StageResult` stage functions extracted from `process_query` (audit P0-4d).
 

@@ -108,13 +108,16 @@ harness — never in production (plan §2.6).
 | `Backend release evidence` run at the candidate SHA (SBOM + audit JSON + image digest + Docker smoke) | Irakli | Operator workflow dispatch |
 | Railway deployment/rollback IDs, one-replica/autoscaling attestation | Irakli | B3 deploy |
 | Production smoke §6 results | Irakli | B3 deploy |
-| Production chat load within §8 parameters | Irakli | §8 approval |
+| Production chat load within §8 parameters | Irakli | §8 approved 2026-07-19 → operator run only |
 
-## 8. Production chat-load parameters (proposed — require explicit approval)
+## 8. Production chat-load parameters — APPROVED 2026-07-19 by Irakli
 
-Per the plan, no production load runs before these are approved. Proposal:
+Approver: **Irakli** (B0 §6 waiver/approval authority and rollback owner).
+Approved 2026-07-19. The load run itself remains an operator action executed
+under this envelope; it must be aborted immediately if any threshold below is
+hit.
 
-| Parameter | Proposed value |
+| Parameter | Approved value |
 |---|---|
 | Maximum concurrency | 2 |
 | Total request count | ≤ 20 |
@@ -122,6 +125,13 @@ Per the plan, no production load runs before these are approved. Proposal:
 | Test window | 15 minutes, low-traffic hour |
 | Abort thresholds | Any duplicate provider attempt/charge; error rate > 10%; `/readyz` degradation; DB saturation; ceiling reached |
 | Rollback owner | Irakli (previous Railway deployment ID recorded in B0 §11 before the window) |
+
+The backend production-evidence **governance** is now unblocked: with these
+parameters approved and `/versionz` identity verified (B0 ledger), the
+remaining §7 rows are pure operator execution (release-evidence artifact
+review, Railway ID capture, §6 safe smoke probes, and the bounded load run
+within this envelope). No provider spend or production load occurs until the
+operator runs it.
 
 ## 9. Exit status
 
