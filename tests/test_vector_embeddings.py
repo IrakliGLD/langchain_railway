@@ -184,46 +184,20 @@ def test_gemini_provider_batches_document_embeddings(monkeypatch):
     assert captured_batches == [100, 100, 5]
 
 
-def test_gemini_provider_falls_back_to_google_generativeai(monkeypatch):
-    captured = {"configured": None, "calls": []}
-
-    class FakeLegacyGenAI:
-        @staticmethod
-        def configure(*, api_key):
-            captured["configured"] = api_key
-
-        @staticmethod
-        def embed_content(*, model, content, task_type, output_dimensionality):
-            captured["calls"].append(
-                {
-                    "model": model,
-                    "content": content,
-                    "task_type": task_type,
-                    "output_dimensionality": output_dimensionality,
-                }
-            )
-            return {"embedding": [0.3] * output_dimensionality}
-
-    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
-    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
-    monkeypatch.setenv("GOOGLE_API_KEY", "legacy-google-key")
+def test_gemini_provider_requires_google_genai(monkeypatch):
+    # The legacy google-generativeai fallback was removed (F10 B6 F1.1);
+    # google-genai is a hard production dependency and its absence must fail
+    # loudly rather than silently degrade to a legacy backend.
+    monkeypatch.setenv("GOOGLE_API_KEY", "some-google-key")
 
     google_module = types.ModuleType("google")
-    google_module.__path__ = []  # mark as package
+    google_module.__path__ = []  # package marker, but without a genai submodule
     monkeypatch.setitem(sys.modules, "google", google_module)
     monkeypatch.delitem(sys.modules, "google.genai", raising=False)
-    monkeypatch.setitem(sys.modules, "google.generativeai", FakeLegacyGenAI)
+    monkeypatch.delitem(sys.modules, "google.generativeai", raising=False)
 
-    provider = vector_embeddings.GeminiEmbeddingProvider()
-    query_embedding = provider.embed_query("hello")
-    doc_embeddings = provider.embed_documents(["doc 1", "doc 2"])
-
-    assert captured["configured"] == "legacy-google-key"
-    assert captured["calls"][0]["model"] == "models/gemini-embedding-001"
-    assert captured["calls"][0]["task_type"] == "retrieval_query"
-    assert captured["calls"][1]["task_type"] == "retrieval_document"
-    assert len(query_embedding) == 768
-    assert len(doc_embeddings) == 2
+    with pytest.raises(RuntimeError, match="google-genai"):
+        vector_embeddings.GeminiEmbeddingProvider()
 
 
 def test_get_embedding_provider_caches_instance_per_config(monkeypatch):
