@@ -462,9 +462,9 @@ langchain-openai==1.3.5 \
 langchain-protocol==0.0.18 \
     --hash=sha256:70b53a86fbf9cedc863555effe44da192ab02d556ddbf2cf95b8873adcf41b5a \
     --hash=sha256:ec3e11782f1ed0c9db38e5a9ed01b0e7a0d3fba406faa8aef6594b73c56a63e6
-langsmith==0.10.6 \
-    --hash=sha256:094285b755224f49fd396c3672b0f747294c7b8d9e8278a81d76b487b5cfdb56 \
-    --hash=sha256:6ec5b26bb57ee41363c07eb2884f24d69910b8d6bc26cae1f9e367af15259f1b
+langsmith==0.10.7 \
+    --hash=sha256:0438247231481f16d0b44e9b70dc918f2afa1aecc93f2e497a56160806dd4138 \
+    --hash=sha256:a0e34748acfd942a35d63e0da416a7fed4de9ceb32acd855c1369e8744508b38
 limits==5.8.0 \
     --hash=sha256:ae1b008a43eb43073c3c579398bd4eb4c795de60952532dc24720ab45e1ac6b8 \
     --hash=sha256:c9e0d74aed837e8f6f50d1fcebcf5fd8130957287206bc3799adaee5092655da
