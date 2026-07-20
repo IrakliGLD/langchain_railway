@@ -44,20 +44,27 @@ backend `origin/main` `2f2a310` (F1 not merged). Do not start F3 until F2.a
 
 ## 3. Assistant verification role (after each run)
 
-Re-read the live identities, confirm the run/artifact targeted `d52a97e` (or the
-merge SHA), and record run IDs + artifact names into the F3 evidence table
-below. **Any surface reporting a non-frozen SHA halts F3** and re-opens F2.
+Re-read the live identities, confirm the run/artifact targeted `fc44fd4`
+(frontend) or `65cf93b` (backend), and record run IDs + artifact names into the
+F3 evidence table below. **Any surface reporting a non-frozen SHA halts F3** and
+re-opens F2. The **frozen identities are backend `65cf93b` / frontend `fc44fd4`**
+(the pre-freeze `d52a97e` was superseded by the F1.4-follow-on edge-manifest fix;
+see [`f10_b6_f2_freeze_evidence`](./f10_b6_f2_freeze_evidence_2026-07-20.md)).
 
-| # | Item | Run / artifact ID | Target SHA observed | Status |
+Results (2026-07-20). The two release-evidence workflows and the edge deploy
+each **reject mutable refs and assert `checkout HEAD == git_ref`**, so a green
+run is itself proof the artifact was built at the exact frozen SHA.
+
+| # | Item | Run / artifact ID | Target SHA | Status |
 |---|---|---|---|---|
-| 1 | Frontend release evidence | _fill_ | _fill_ | ⏳ |
-| 2 | Backend release evidence | _fill_ | _fill_ | ⏳ |
-| 3 | Railway image digest | _fill_ | _fill_ | ⏳ |
-| 4 | Post Deploy Smoke | _fill_ | _fill_ | ⏳ |
-| 5 | Live Browser Proof + axe | _fill_ | _fill_ | ⏳ |
-| 6 | Disposable-DB regression | _fill_ | _fill_ | ⏳ |
-| 7 | `/versionz` | _fill_ | _fill_ | ⏳ |
-| 8 | Manual a11y checklist | _fill_ | _fill_ | ⏳ |
+| 1 | Frontend release evidence | `frontend-release-evidence` run **#2** (artifact `frontend-release-production-<fc44fd4>`) | `fc44fd4` | ✅ green (44s) |
+| 2 | Backend release evidence | run **`29761159168`** (artifact `backend-production-<65cf93b>`) | `65cf93b` | ✅ green — embedded **and** OCI-labeled revision == SHA, non-root, SBOM, pip-audit |
+| 3 | Railway image binding | deployment **`ffc9ec32`** (project `b15aea53` / service `c274d6d3` / env `475e29b6`) | `65cf93b` | ✅ ACTIVE + healthy; Railway source-build ⇒ SHA-bound (no separate Docker digest), per plan |
+| 4 | Post Deploy Smoke | run **#246** | `fc44fd4` | ✅ green (47s) |
+| 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
+| 6 | Disposable-DB regression | _pending_ | — | ⏳ operator (throwaway DB, never prod `qvmqmmcglqmhachqaezt`) |
+| 7 | `/versionz` | `dashboard.galdava.com/versionz` (`X-App-Key`) | `65cf93b` | ✅ `git_sha == 65cf93b697…` |
+| 8 | Manual a11y checklist | _pending_ | `fc44fd4` | ⏳ operator (real screen reader) or programmatic pass via logged-in browser pane |
 
 ## 4. Exit
 
