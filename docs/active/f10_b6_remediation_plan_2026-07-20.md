@@ -63,31 +63,45 @@ waiver — an informal acceptance does not satisfy the gate.
 
 Each sub-phase: implement → targeted suite green → adversarial audit → commit.
 
-- **F1.1 (backend code, ARCH-04a):** delete the inert `google.generativeai`
-  fallback branch in `knowledge/vector_embeddings.py` (backend collapses to the
-  single `google_genai` path); update `tests/test_vector_embeddings.py` to drop
-  the legacy-backend cases. *(Does not touch the working embedding path or the
-  API-key issue, which is operator-owned.)*
+- **F1.1 (backend code, ARCH-04a — DONE `6769a08`):** deleted the inert
+  `google.generativeai` fallback branch in `knowledge/vector_embeddings.py`
+  (backend now collapses to the single `google_genai` path; a missing
+  `google.genai` raises `RuntimeError`); updated
+  `tests/test_vector_embeddings.py` to assert the requirement instead of the
+  legacy fallback. Full backend suite 1,710 green. *(Did not touch the working
+  embedding path or the API-key issue, which is operator-owned.)*
 - **F1.2 (ARCH-04b, docs-only — DONE):** recorded the KEEP decision for the
   `gateway_and_bearer` surface in the B5 registry (protocol-compatibility
   classification, owner Irakli, removal criterion, 2026-09-30 review). No auth
   code changed; the production auth path is untouched during certification.
-- **F1.3 (docs, DOC-06):** reconcile `query_pipeline_architecture.md`
-  (`ENABLE_AGENT_LOOP`/`agent_loop_blocked_by_policy` are **removed**, not
-  inert); fix the B5 registry `PLAN_VALIDATION_MODE` default (`shadow`→`warn`);
-  reconcile the B4 a11y §4 table with the §7 summary (admin axe **green** after
-  `SMOKE_ADMIN_*` was set; state precisely which manual items are done vs
-  operator-pending).
-- **F1.4 (frontend, QA-08):** add `.gitattributes` forcing LF on the generated
-  contract/SQL sources and/or LF-normalize before hashing in the F2/vendored
-  verifiers; add a Windows-portable test so a clean `autocrlf=true` checkout is
-  465/465 and `db:f2:verify` passes.
-- **F1.5 (a11y evidence, A11Y-07):** run the programmatic authenticated a11y
-  pass (operator logs the browser pane in) or, failing AT access, record the
-  manual checklist honestly with browser/AT versions, pages, viewport/zoom, and
-  the exact SHA — no prose "done" without observations.
+- **F1.3 (docs, DOC-06 — DONE `3aa6568`):** reconciled
+  `query_pipeline_architecture.md` (`ENABLE_AGENT_LOOP`/
+  `agent_loop_blocked_by_policy` are **removed entirely** in B5.A, not inert);
+  fixed the B5 registry `PLAN_VALIDATION_MODE` default (`shadow`→`warn`);
+  reconciled the B4 a11y §4 table with the §7 summary (admin axe **green** after
+  `SMOKE_ADMIN_*` was set) and rewrote §7 to mark authenticated manual a11y
+  **PENDING** at the frozen SHA, §8 load a **FORMAL WAIVER**, and rollback a
+  **REHEARSE**, with the SHA-realignment caveat.
+- **F1.4 (frontend, QA-08 — DONE `d52a97e`):** extended `.gitattributes` to
+  force LF on `src/contracts/**` and `database/baseline/**` (the raw-byte-hashed
+  contract/SQL sources); LF-normalized both the source read and the verify
+  comparison in `tools/build-f2-chat-gateway-patch.js` (matching p3b/p6b/fb5);
+  added `tools/line-ending-policy.test.js` pinning the required LF globs so the
+  policy can't silently regress. All db verifiers green, `db:f2:verify` passes,
+  lint exit 0, frontend suite 466 green.
+- **F1.5 (a11y evidence, A11Y-07 — doc-honesty DONE in F1.3; evidence → F3):**
+  the B4 evidence doc now honestly records authenticated manual a11y as pending
+  (no prose "done" without observations). The actual authenticated pass
+  (visible-focus / NVDA name-role / live-region / responsive-touch) is gathered
+  **at the frozen SHA in Phase F3** — running it now, before F2 deploys the
+  frozen identity, would only be superseded. No pre-freeze code/doc work remains.
 
-**Exit:** both repos CI-green; a single **final candidate SHA** per repo.
+**Exit — REACHED (2026-07-20):** both repos CI-green (backend 1,710 / frontend
+466); final candidate SHAs — backend `3aa6568` (branch
+`refactor/review-phase-fixes`, awaiting the F2 merge to `main`), frontend
+`d52a97e` (already on `main`). The F4 §8 load waiver is pre-drafted:
+[`f10_b6_load_waiver_2026-07-20.md`](./f10_b6_load_waiver_2026-07-20.md)
+(SHA fields fill at F2 freeze).
 
 ### Phase F2 — Freeze & aligned deployment (operator; assistant drives/verifies)
 
@@ -111,10 +125,11 @@ A11Y-07).
 
 ### Phase F4 — Load & reliability closure (operator; assistant drafts waivers)
 
-- **§8 load** — run the approved envelope and record request count, spend, p95,
-  `/readyz` under load, zero duplicate attempts; **or** attach a complete
-  F10-template waiver (owner, approver, compensating controls, expiry ≤30 days,
-  remediation ticket).
+- **§8 load** — decision: **formal waiver** (not a run). Draft is complete:
+  [`f10_b6_load_waiver_2026-07-20.md`](./f10_b6_load_waiver_2026-07-20.md)
+  (owner/approver Irakli, five compensating controls, 30-day expiry, remediation
+  ticket). Finalize at F3 by filling the frozen backend+frontend SHAs and the
+  approval timestamp — a waiver cannot cover an unknown deployed SHA.
 - **Rollback** — rehearse (redeploy previous, verify health, roll forward) and
   record IDs; **or** a complete waiver.
 
