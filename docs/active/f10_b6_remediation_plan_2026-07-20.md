@@ -96,12 +96,25 @@ Each sub-phase: implement → targeted suite green → adversarial audit → com
   **at the frozen SHA in Phase F3** — running it now, before F2 deploys the
   frozen identity, would only be superseded. No pre-freeze code/doc work remains.
 
-**Exit — REACHED (2026-07-20):** both repos CI-green (backend 1,710 / frontend
-466); final candidate SHAs — backend `3aa6568` (branch
+**Exit — REACHED (2026-07-20):** both repos CI-green (backend targeted 1,686 /
+full 1,710; frontend 466); final candidate SHAs — backend `e42833b` (branch
 `refactor/review-phase-fixes`, awaiting the F2 merge to `main`), frontend
 `d52a97e` (already on `main`). The F4 §8 load waiver is pre-drafted:
 [`f10_b6_load_waiver_2026-07-20.md`](./f10_b6_load_waiver_2026-07-20.md)
 (SHA fields fill at F2 freeze).
+
+**Independent phased-audit of committed F1 (2026-07-20):** ran the
+`developer-phased-audit` audit pass over `6769a08`/`1569242`/`3aa6568`/`d52a97e`.
+One material finding — F1.1's deletion of `_embed_legacy_single` orphaned
+`import inspect` in `knowledge/vector_embeddings.py`, masked because `F401` is
+globally ignored in `pyproject.toml`. Fixed in `e42833b`. Everything else clean:
+the google-genai happy path survived intact, the negative test correctly asserts
+`RuntimeError`, F1.4's `.gitattributes` LF policy is a true root-cause fix
+(`git check-attr` confirms every raw-hashed source resolves to `eol=lf`, not just
+build-f2), and the F1.2/F1.3 doc claims verify against source
+(`ENABLE_AGENT_LOOP`/`agent_loop_blocked_by_policy` absent from code;
+`PLAN_VALIDATION_MODE` default `warn`; `gateway_and_bearer` retained and, per
+`config.py:519-521`, actively blocked outside the test env).
 
 ### Phase F2 — Freeze & aligned deployment (operator; assistant drives/verifies)
 
