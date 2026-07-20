@@ -73,3 +73,36 @@ non-frozen SHA, and the table filled with run IDs + the Railway image digest.
 Then Phase F4 (finalize the §8 load waiver with the now-known SHAs; rehearse
 rollback) and Phase F5 (re-run the B6 closure matrix against the frozen
 immutable identities).
+
+## 5. Phase F4 — Load waiver + rollback rehearsal
+
+### 5.1 §8 load waiver — APPROVED
+
+[`f10_b6_load_waiver_2026-07-20.md`](./f10_b6_load_waiver_2026-07-20.md),
+waiver `F10-B6-LOAD-01`, **approved by Irakli 2026-07-21**, expiring 2026-08-20.
+Frozen SHAs filled (backend `65cf93b` + Railway deployment `ffc9ec32`, frontend
+`fc44fd4`); five compensating controls; remediation ticket to run the envelope
+before expiry.
+
+### 5.2 Rollback rehearsal — PASS (2026-07-21)
+
+Rehearsed live on the production backend (single replica, EU West) via Railway's
+**Rollback** action:
+
+| Step | Deployment | Result |
+|---|---|---|
+| Baseline | `65cf93b` (deployment `ffc9ec32`) | `healthz: ok`, `readyz: ready`+schema |
+| Roll **back** to #135 | `2f2a310` (deployment `4a7bdbc7`) | ACTIVE in ~49s; `healthz: ok`, `readyz: ready`+schema (confirmed twice) |
+| Roll **forward** to #136 | `65cf93b` (redeploy) | ACTIVE; `healthz: ok`, `readyz: ready`+schema |
+
+Rollback restores build **and** variables; net-neutral here because `#136` was
+the active deployment (no newer var-change deploy existed), so the roll-forward
+restored the exact current variable snapshot. Health was continuous throughout
+(the previous deployment serves until the replacement passes health checks).
+**Rollback path validated end-to-end in both directions; the frozen `65cf93b`
+identity is restored and healthy.** Rollback target of record: `2f2a310` (#135,
+deployment `4a7bdbc7`).
+
+**Phase F4 COMPLETE.** Remaining to close F10: F3 items 6 (disposable-DB — SQL
+byte-unchanged since the last green run #271, carries forward; optional fresh
+`test:db`) and 8 (manual a11y), then Phase F5 (B6 re-audit).
