@@ -45,6 +45,18 @@ frozen **once** (Phase F2) and never re-invalidated before the evidence pass
 (2) and (3) each need either execution evidence or a complete F10-template
 waiver — an informal acceptance does not satisfy the gate.
 
+**Decisions recorded (2026-07-20, Irakli):**
+1. Bearer surface → **KEEP + DOCUMENT** (no code change). Removing it is an
+   auth-core + rate-limit refactor (config, `utils/auth.py`, `main.py`
+   rate-limiting, the B2.A.3 negative-JWT suite, and the now-unused PyJWT), and
+   refactoring the production auth path during certification adds more risk than
+   the dormant surface itself. Recorded in the B5 registry with a concrete
+   protocol-compatibility classification, owner (Irakli), removal criterion, and
+   2026-09-30 review date. F10-ARCH-04's governance gate is satisfied by the
+   recorded decision.
+2. §8 load → **FORMAL WAIVER** (assistant drafts the F10-template waiver).
+3. Rollback → **REHEARSE ONCE** (operator, in Railway; assistant records IDs).
+
 ## 4. Phased plan
 
 ### Phase F1 — Repo-side code & doc remediation (assistant-led, per-phase gated)
@@ -56,10 +68,10 @@ Each sub-phase: implement → targeted suite green → adversarial audit → com
   single `google_genai` path); update `tests/test_vector_embeddings.py` to drop
   the legacy-backend cases. *(Does not touch the working embedding path or the
   API-key issue, which is operator-owned.)*
-- **F1.2 (backend code/decision, ARCH-04b):** per decision (3.1) — either
-  remove the `gateway_and_bearer` surface (config + `utils/auth.py` bearer path
-  + `tests/test_auth_negative.py`/`test_main.py` bearer cases) or record the
-  registry keep-classification.
+- **F1.2 (ARCH-04b, docs-only — DONE):** recorded the KEEP decision for the
+  `gateway_and_bearer` surface in the B5 registry (protocol-compatibility
+  classification, owner Irakli, removal criterion, 2026-09-30 review). No auth
+  code changed; the production auth path is untouched during certification.
 - **F1.3 (docs, DOC-06):** reconcile `query_pipeline_architecture.md`
   (`ENABLE_AGENT_LOOP`/`agent_loop_blocked_by_policy` are **removed**, not
   inert); fix the B5 registry `PLAN_VALIDATION_MODE` default (`shadow`→`warn`);
