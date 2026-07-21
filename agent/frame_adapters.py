@@ -77,7 +77,7 @@ _TARIFF_ENTITY_LABELS = {
 
 _COMPOSITION_ENTITY_LABELS = {
     "share_import": "Import",
-    "share_deregulated_hydro": "Deregulated Hydro",
+    "share_deregulated_ren": "Deregulated Renewable",
     "share_regulated_hpp": "Regulated HPP",
     "share_regulated_new_tpp": "Regulated New TPP",
     "share_regulated_old_tpp": "Regulated Old TPP",

@@ -3,7 +3,7 @@
 ## Disclosable Information
 
 - Regulated HPP tariffs (~30-40 GEL/MWh)
-- Deregulated hydro prices (~40-50 GEL/MWh)
+- Deregulated renewable prices (~40-50 GEL/MWh)
 - Correlation coefficients from statistical analysis
 - Entity share percentages from data
 - Exchange rate values

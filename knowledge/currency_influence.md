@@ -44,23 +44,23 @@ Not all tariffs react to exchange rate in the same way.
 - However, FX impact is not reflected immediately
 - Exchange-rate effect is reflected only in the next regulatory period
 
-#### Deregulated Hydro Prices
-- Deregulated hydro is GEL-priced in observed market outcomes
+#### Deregulated Renewable Prices
+- Deregulated renewable is GEL-priced in observed market outcomes
 - Its price is not directly contract-indexed to USD
 - FX effect is indirect, through system composition and competition with USD-linked sources
 
 **Balancing Market Reference Mechanism:**
-- When electricity from deregulated hydro is sold on the balancing market, its remuneration is linked to reference generation sources:
+- When electricity from deregulated renewable is sold on the balancing market, its remuneration is linked to reference generation sources:
   - **Summer (April–July, the canonical SUMMER_MONTHS in code):**
     - price is referenced to the cheapest hydro generation
     - weaker direct link to USD
   - **Winter (August–March, the canonical WINTER_MONTHS in code):**
     - price is referenced to thermal generation
     - thermal generation is gas-based and USD-linked
-    - therefore, deregulated hydro becomes **effectively USD-indexed in winter**
+    - therefore, deregulated renewable becomes **effectively USD-indexed in winter**
 
 **Implication:**
-- Deregulated hydro has **seasonally changing FX exposure**:
+- Deregulated renewable has **seasonally changing FX exposure**:
   - lower FX sensitivity in summer
   - higher FX sensitivity in winter due to linkage with thermal generation
 
@@ -94,7 +94,7 @@ These tariffs are fixed during the regulatory period and do not immediately refl
 ---
 
 ### 3.4 GEL Market-Based Category
-- `deregulated_hydro`
+- `deregulated_ren`
 
 effect of xrate rapends if it is summer or winter period.
 
@@ -116,7 +116,7 @@ USD-denominated electricity prices usually change much less.
 
 They may still move because:
 - the generation composition changes
-- GEL-priced components such as regulated hydro or deregulated hydro change their relative contribution
+- GEL-priced components such as regulated hydro or deregulated renewable change their relative contribution
 
 So, in USD terms, composition is usually the main driver, while pure exchange-rate noise is lower.
 

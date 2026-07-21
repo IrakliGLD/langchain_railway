@@ -343,7 +343,7 @@
       "quality_criteria": {
         "must_include": [
           "primary drivers",
-          "composition (import, deregulated_hydro)",
+          "composition (import, deregulated_ren)",
           "exchange rate",
           "seasonal patterns (Summer vs Winter)",
           "correlation coefficients or percentages",
@@ -393,7 +393,7 @@
       "expected_sql_patterns": [
         "trade_derived_entities",
         "balancing_price",
-        "share_import OR share_deregulated_hydro",
+        "share_import OR share_deregulated_ren",
         "JOIN ON date",
         "correlation OR comparison"
       ],
@@ -402,7 +402,7 @@
         "must_include": [
           "entity composition",
           "import share",
-          "deregulated hydro share",
+          "deregulated renewable share",
           "impact on price",
           "numeric evidence"
         ],

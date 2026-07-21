@@ -159,7 +159,7 @@ For `trade_derived_entities WHERE segment='balancing'`:
 | `regulated_hpp` (most fixed-tariff regulated HPPs, e.g. Enguri, Khrami, Vardnili) | §1.ა | GEL (per Commission tariff) |
 | `regulated_new_tpp` (Gardabani — designated guaranteed-capacity source) | §1.დ | GEL (per upper-cap tariff, gas-cost linked) |
 | `regulated_old_tpp` (older thermal, not guaranteed-capacity) | §1.გ or §1.ბ | GEL (per upper-cap tariff, gas-cost linked) |
-| `deregulated_hydro` (mid-large deregulated plants) | §1.კ.ა (winter) / §1.კ.ბ (summer) | GEL (winter: indirect USD link via post-2010 GC source; summer: cheapest fixed-HPP tariff) |
+| `deregulated_ren` (mid-large deregulated plants) | §1.კ.ა (winter) / §1.კ.ბ (summer) | GEL (winter: indirect USD link via post-2010 GC source; summer: cheapest fixed-HPP tariff) |
 | Deregulated **small-capacity** plants | §1.ვ → **Art 36(1) §2** | GEL (same winter/summer pattern as §1.კ) |
 | Newly built plants | §1.თ → **Art 36(2)** | GEL or contract (winter post-2010 GC tariff capped by GEP contract; see section D) |
 | `renewable_ppa`, `thermal_ppa`, `CfD_scheme` | **§1(1)** via Art 13 §5 mandatory direct contracts | USD (contract, confidential, ~55–57 USD/MWh inferred benchmark) |
@@ -404,7 +404,7 @@ Coverage: January 2015–present, monthly granularity.
 ## Weighting Entities
 The following entities participate in the balancing price calculation:
 
-- `deregulated_hydro` — Deregulated hydropower plants, one of the cheapest sources of balancing electricity  
+- `deregulated_ren` — Deregulated renewable plants, one of the cheapest sources of balancing electricity
 - `import` — Direct electricity imports, USD-priced  
 - `regulated_hpp` — Regulated hydro power plants, GEL tariffs, mostly the cheapest source  
 - `regulated_new_tpp` — Regulated new thermal power plant (Gardabani), GEL tariff reflecting current xrate  
@@ -440,7 +440,7 @@ Price changes are driven by deviations from this baseline:
 - Adding cheaper sources → lowers average price  
 - Adding more expensive sources → increases average price  
 
-- Higher share of cheap sources (`regulated_hpp`, `deregulated_hydro`) → lower price  
+- Higher share of cheap sources (`regulated_hpp`, `deregulated_ren`) → lower price
 - Higher share of always-expensive sources (`import`, `regulated_old_tpp`, `thermal_ppa`) → higher price  
 - **`renewable_ppa` and `CfD_scheme` — SEASON-DEPENDENT direction (CRITICAL):**
   - Their price is approximately 55–57 USD/MWh (fixed, USD-indexed contract)
@@ -449,7 +449,7 @@ Price changes are driven by deviations from this baseline:
   - **RULE:** Never state a general directional claim for renewable PPA/CfD without specifying the season. A general "impact on prices" question MUST be answered separately for summer and winter.
 
 **Seasonal Effect:**
-- Summer → free hydro (`regulated_hpp`, `deregulated_hydro`) abundant → lower price; BUT `renewable_ppa`/`CfD_scheme` push price UP relative to free-hydro baseline
+- Summer → low-cost renewable supply (`regulated_hpp`, `deregulated_ren`) abundant → lower price; BUT `renewable_ppa`/`CfD_scheme` push price UP relative to that baseline
 - Winter → balancing mix dominated by PPA/CfD (baseline), regulated thermal, and imports → higher price; `renewable_ppa`/`CfD_scheme` are relatively cheaper than import/old thermals → they moderate (lower) winter price
   - Higher-cost sources have limited ability to displace this mix because buyers prefer the cheapest available balancing supply
 
@@ -464,17 +464,17 @@ Price changes are driven by deviations from this baseline:
   - share of cheap hydro in balancing declines  
   - balancing price does not decrease as strongly as in the past, even in high-hydro periods  
 
-**Deregulated Hydro Pricing (CRITICAL):**
+**Deregulated Renewable Pricing (CRITICAL):**
 - Summer (Apr–Jul): price is low (~<50 GEL/MWh), referenced to cheapest regulated HPP
 - Winter (Aug–Mar): price increases (>100 GEL/MWh), referenced to thermal tariffs
-→ In winter months, deregulated hydro becomes **indirectly USD-linked**
+→ In winter months, deregulated renewable becomes **indirectly USD-linked**
 
-**Note on month boundaries:** the canonical summer/winter split used in code (`config.SUMMER_MONTHS` = months 4–7; `config.WINTER_MONTHS` = months 1–3 and 8–12) is the source of truth for all seasonal calculations and forecasts. The Aug–Mar deregulated-hydro reference window aligns with this split.
+**Note on month boundaries:** the canonical summer/winter split used in code (`config.SUMMER_MONTHS` = months 4–7; `config.WINTER_MONTHS` = months 1–3 and 8–12) is the source of truth for all seasonal calculations and forecasts. The Aug–Mar deregulated-renewable reference window aligns with this split.
 
 ---
 
 **Structural Trends:**
-- Declining share of `regulated_hpp` and `deregulated_hydro`
+- Declining share of `regulated_hpp` and `deregulated_ren`
 - Increasing role of:
   - `renewable_ppa`
   - `import`
@@ -536,7 +536,7 @@ Export acts as competing sink for cheap generation
   - `regulated_new_tpp`
 
 - **Partially USD-linked:**
-  - `deregulated_hydro` (winter months)
+  - `deregulated_ren` (winter months)
 
 - **GEL-priced:**
   - `regulated_hpp`
@@ -546,7 +546,7 @@ Export acts as competing sink for cheap generation
 **Mechanism:**
 - GEL depreciation → strong increase in GEL balancing price
 - Majority of balancing electricity is **directly or indirectly USD-linked**
-- See `currency_influence.md` for the full FX transmission logic and the detailed treatment of seasonally USD-linked deregulated hydro
+- See `currency_influence.md` for the full FX transmission logic and the detailed treatment of seasonally USD-linked deregulated renewable
 
 ---
 
@@ -561,7 +561,7 @@ Export acts as competing sink for cheap generation
 From cheapest to most expensive (approximate):
 
 1. Regulated HPP — ~below 50 GEL/MWh  
-2. Deregulated Hydro — seasonal (low in summer, high in winter)  
+2. Deregulated Renewable — seasonal (low in summer, high in winter)
 3. Regulated Thermal (old/new TPP) — gas + xrate driven  
 4. Renewable PPA — USD-priced (CONFIDENTIAL)  
 5. CfD_scheme — USD-priced (CONFIDENTIAL)  
@@ -592,7 +592,7 @@ This is the canonical timeline of policy decisions that have shifted balancing-p
 ### Composition-affecting policy events
 
 - **Jan 2024:** Gas price increase for regulated thermals → thermal tariffs increased → higher balancing price when regulated thermals are sold as balancing electricity.
-- **Jan–Mar 2024 (temporary rule):** the Electricity (Capacity) Market Rules were temporarily changed for three months. During Jan–Mar 2024, the reference price for deregulated hydropower plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated hydropower plants.
+- **Jan–Mar 2024 (temporary rule):** the Electricity (Capacity) Market Rules were temporarily changed for three months. During Jan–Mar 2024, the reference price for deregulated renewable plants was linked to the more expensive **regulated old thermal power plant** benchmark, increasing the procurement price of balancing electricity from deregulated renewable plants.
 - **Jul 2024:** Exchange launched (GENEX) — added a new trading segment alongside balancing.
 - **Jul 2024-Jul 2027 transition:** Exchange trading is voluntary and limited to buyers/sellers eligible under Article 17^4 of the Electricity Market Model Concept; monthly balancing price and quantity still apply. See `exchange_transition.md`.
 - **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. This is one instance of a broader state-owned plant allocation pattern — see the *"State-owned plant allocation as a balancing-price-reduction lever"* subsection below for the full case list and detection methodology.
@@ -638,7 +638,7 @@ A single occurrence of either signal is weak evidence; a cluster of them concent
 
 ### Why this matters for forecasting
 
-Balancing-price forecasts that ignore the policy lever set above will systematically miss inflection points. The dominant levers are: (1) gas-price decisions, (2) deregulated-hydro reference rules, (3) state-owned-hydro allocation choices, (4) CfD/PPA capacity additions (see `cfd_ppa.md` §6), (5) the 2027 regime break. Any 3+ year forecast narrative MUST mention which of these are assumed unchanged.
+Balancing-price forecasts that ignore the policy lever set above will systematically miss inflection points. The dominant levers are: (1) gas-price decisions, (2) deregulated-renewable reference rules, (3) state-owned-hydro allocation choices, (4) CfD/PPA capacity additions (see `cfd_ppa.md` §6), (5) the 2027 regime break. Any 3+ year forecast narrative MUST mention which of these are assumed unchanged.
 
 ---
 
@@ -661,7 +661,7 @@ Balancing-price forecasts that ignore the policy lever set above will systematic
 ---
 
 ### For Seasonal Analysis
-- Summer → free hydro (`regulated_hpp`, `deregulated_hydro`) → lower price  
+- Summer → low-cost renewable supply (`regulated_hpp`, `deregulated_ren`) → lower price
 - Summer → `renewable_ppa` / `CfD_scheme` → HIGHER price (fixed ~55–57 USD/MWh exceeds cheap summer hydro levels)
 - Winter → thermal/import → higher price  
 - Winter → `renewable_ppa` / `CfD_scheme` → LOWER price when displacing import; ambiguous when displacing regulated thermal (depends on gas prices)
@@ -720,7 +720,7 @@ Calculates monthly entity contributions.
 ---
 
 **Available prices:**
-- `deregulated_hydro` → `p_dereg_gel`  
+- `deregulated_ren` → `p_dereg_gel`
 - `regulated_hpp` → quantity-weighted tariff from `mv_balancing_trade_with_tariff`  
 - `regulated_new_tpp` → Gardabani tariff from `mv_balancing_trade_with_tariff`  
 - `regulated_old_tpp` → quantity-weighted tariff from `mv_balancing_trade_with_tariff` (all non-Gardabani TPPs with regulated tariffs)

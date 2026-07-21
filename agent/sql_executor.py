@@ -109,7 +109,7 @@ def apply_type_tech_side_filter(df: pd.DataFrame, query: str) -> Tuple[pd.DataFr
 
 _SHARE_ENTITY_COLUMNS = [
     ("import", "share_import"),
-    ("deregulated_hydro", "share_deregulated_hydro"),
+    ("deregulated_ren", "share_deregulated_ren"),
     ("regulated_hpp", "share_regulated_hpp"),
     ("regulated_new_tpp", "share_regulated_new_tpp"),
     ("regulated_old_tpp", "share_regulated_old_tpp"),
@@ -121,8 +121,8 @@ _SHARE_ENTITY_COLUMNS = [
 # (column_alias, component_entities, scope) — scope ∈ {"both", "pivot"}
 _SHARE_COMPOSITE_COLUMNS = [
     ("share_all_ppa", ["renewable_ppa", "thermal_ppa"], "both"),
-    ("share_all_renewables", ["regulated_hpp", "deregulated_hydro", "renewable_ppa", "CfD_scheme"], "both"),
-    ("share_total_hpp", ["regulated_hpp", "deregulated_hydro"], "pivot"),
+    ("share_all_renewables", ["regulated_hpp", "deregulated_ren", "renewable_ppa", "CfD_scheme"], "both"),
+    ("share_total_hpp", ["regulated_hpp", "deregulated_ren"], "pivot"),
 ]
 
 _SHARE_RATIO_EXPR = "ROUND(SUM(quantity) / NULLIF(SUM(SUM(quantity)) OVER (PARTITION BY date), 0), 4)"

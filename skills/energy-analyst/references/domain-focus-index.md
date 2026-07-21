@@ -8,7 +8,7 @@ Maps query focus areas to the analytical rules, knowledge topics, and entity cat
 **Knowledge topics**: balancing_price, market_structure
 **Applicable rules**: entity-taxonomy (all 8 entities), driver-framework (full hierarchy), seasonal-rules (mandatory separation for >6 months)
 **Key analysis**: composition shares + exchange rate + seasonal decomposition
-**Entity pricing groups**: USD-priced (renewable_ppa, thermal_ppa, CfD_scheme, import) vs GEL-priced (deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp)
+**Entity pricing groups**: USD-priced (renewable_ppa, thermal_ppa, CfD_scheme, import) vs GEL-priced (deregulated_ren, regulated_hpp, regulated_old_tpp, regulated_new_tpp)
 
 ## Focus: Tariff
 

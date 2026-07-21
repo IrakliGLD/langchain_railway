@@ -62,7 +62,7 @@ def test_balancing_driver_enrichment_adds_source_price_columns(monkeypatch):
         lambda *_args, **_kwargs: pd.DataFrame(
             {
                 "date": ["2024-01-01", "2024-02-01"],
-                "price_deregulated_hydro_gel": [45.0, 48.0],
+                "price_deregulated_ren_gel": [45.0, 48.0],
                 "price_regulated_hpp_gel": [32.0, 33.0],
                 "contribution_regulated_hpp_gel": [6.4, 5.9],
                 "residual_contribution_ppa_import_gel": [101.0, 126.0],
@@ -87,7 +87,7 @@ def test_balancing_driver_enrichment_adds_source_price_columns(monkeypatch):
         is_explanation=False,
     )
 
-    assert "price_deregulated_hydro_gel" in out.cols
+    assert "price_deregulated_ren_gel" in out.cols
     assert "price_regulated_hpp_gel" in out.cols
     assert "contribution_regulated_hpp_gel" in out.cols
     assert "residual_contribution_ppa_import_gel" in out.cols
@@ -96,7 +96,7 @@ def test_balancing_driver_enrichment_adds_source_price_columns(monkeypatch):
     assert len(out.join_provenance) == 1
     assert out.join_provenance[0]["secondary_tool"] == "compute_entity_price_contributions"
     assert out.join_provenance[0]["role"] == "balancing_driver_context"
-    assert "price_deregulated_hydro_gel" in out.join_provenance[0]["columns_added"]
+    assert "price_deregulated_ren_gel" in out.join_provenance[0]["columns_added"]
 
 
 def test_balancing_driver_enrichment_falls_back_to_composition_for_comparison_queries(monkeypatch):

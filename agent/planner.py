@@ -187,8 +187,8 @@ def _expand_forecast_history_window(
 # ---------------------------------------------------------------------------
 
 # Build inverted indexes from BALANCING_SHARE_METADATA (e.g. analyzer.py:37-47).
-# _COST_TO_ENTITIES: {"cheap": ["regulated_hpp", "deregulated_hydro"], ...}
-# _LABEL_TO_ENTITY: {"regulated hpp": "regulated_hpp", "deregulated hydro": "deregulated_hydro", ...}
+# _COST_TO_ENTITIES: {"cheap": ["regulated_hpp", "deregulated_ren"], ...}
+# _LABEL_TO_ENTITY: {"regulated hpp": "regulated_hpp", "deregulated renewable": "deregulated_ren", ...}
 _ALLOWED_LOWER = {e.lower() for e in ALLOWED_BALANCING_ENTITIES}
 
 _COST_TO_ENTITIES: dict[str, list[str]] = {}
@@ -228,10 +228,10 @@ _ENTITY_ALIAS_TO_ENTITIES: dict[str, list[str]] = {
     "all regulated thermals": ["regulated_old_tpp", "regulated_new_tpp"],
     "regulated tpp": ["regulated_old_tpp", "regulated_new_tpp"],
     "regulated tpps": ["regulated_old_tpp", "regulated_new_tpp"],
-    "deregulated plants": ["deregulated_hydro"],
-    "deregulated plant": ["deregulated_hydro"],
-    "deregulated power plants": ["deregulated_hydro"],
-    "deregulated power plant": ["deregulated_hydro"],
+    "deregulated plants": ["deregulated_ren"],
+    "deregulated plant": ["deregulated_ren"],
+    "deregulated power plants": ["deregulated_ren"],
+    "deregulated power plant": ["deregulated_ren"],
     "residual ppa/cfd/import": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
     "ppa cfd import residual": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
     "ppa_cfd_import_residual": ["renewable_ppa", "thermal_ppa", "CfD_scheme", "import"],
@@ -287,7 +287,7 @@ def normalize_balancing_entities(raw_entities: list[str]) -> list[str] | None:
                 break
         if matched_cost:
             continue
-        # 4. Label substring match ("hydro" -> deregulated_hydro, etc.)
+        # 4. Label substring match ("renewable" -> deregulated_ren, etc.)
         matched_label = False
         for label, entity in _LABEL_TO_ENTITY.items():
             if val in label or label in val:

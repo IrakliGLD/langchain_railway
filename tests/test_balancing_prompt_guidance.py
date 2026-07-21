@@ -41,13 +41,13 @@ def test_balancing_focus_loads_full_balancing_template(monkeypatch):
 
     llm_core.llm_summarize_structured(
         user_query="Why did balancing electricity price change in February 2022?",
-        data_preview="date,p_bal_gel,price_deregulated_hydro_gel\n2022-01-01,183.8,45.0",
+        data_preview="date,p_bal_gel,price_deregulated_ren_gel\n2022-01-01,183.8,45.0",
         stats_hint="Month-over-month change available.",
     )
 
     prompt = captured["prompt"]
     assert "Source Price / Tariff Layer" in prompt
-    assert "price_deregulated_hydro_gel" in prompt
+    assert "price_deregulated_ren_gel" in prompt
     assert "residual_contribution_ppa_import_*" in prompt
     assert "below balancing price" in prompt
     assert "share change and the component price change" in prompt

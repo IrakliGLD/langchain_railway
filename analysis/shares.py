@@ -25,7 +25,7 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
 
     Variables included:
     - Targets: p_bal_gel, p_bal_usd
-    - Drivers: xrate, entity shares (import, deregulated_hydro, regulated_hpp,
+    - Drivers: xrate, entity shares (import, deregulated_ren, regulated_hpp,
                renewable_ppa, thermal_ppa), tariffs from mv_balancing_trade_with_tariff
                (Enguri, Gardabani, old TPPs weighted by balancing quantity)
 
@@ -53,7 +53,7 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
         t.date,
         SUM(t.quantity) AS total_qty,
         SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
-        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+        SUM(CASE WHEN t.entity = 'deregulated_ren' THEN t.quantity ELSE 0 END) AS qty_dereg_ren,
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
         SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
         SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
@@ -94,7 +94,7 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
       p.p_bal_usd,
       p.xrate,
       (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
-      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+      (s.qty_dereg_ren / NULLIF(s.total_qty,0)) AS share_deregulated_ren,
       (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp,
       (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) AS share_regulated_new_tpp,
       (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
@@ -102,8 +102,8 @@ def build_balancing_correlation_df(conn: Any) -> pd.DataFrame:
       (s.qty_thermal_ppa / NULLIF(s.total_qty,0)) AS share_thermal_ppa,
       (s.qty_cfd_scheme / NULLIF(s.total_qty,0)) AS share_cfd_scheme,
       ((s.qty_ren_ppa + s.qty_thermal_ppa) / NULLIF(s.total_qty,0)) AS share_all_ppa,
-      ((s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme) / NULLIF(s.total_qty,0)) AS share_all_renewables,
-      ((s.qty_dereg_hydro + s.qty_reg_hpp) / NULLIF(s.total_qty,0)) AS share_all_hydro,
+      ((s.qty_dereg_ren + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme) / NULLIF(s.total_qty,0)) AS share_all_renewables,
+      ((s.qty_dereg_ren + s.qty_reg_hpp) / NULLIF(s.total_qty,0)) AS share_all_hydro,
       tr.enguri_tariff_gel,
       tr.gardabani_tpp_tariff_gel,
       tr.grouped_old_tpp_tariff_gel
@@ -247,7 +247,7 @@ def compute_weighted_balancing_price(conn: Any) -> pd.DataFrame:
       SELECT date, entity, SUM(quantity) AS qty
       FROM trade_derived_entities
       WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
-        AND entity IN ('deregulated_hydro','import','regulated_hpp',
+        AND entity IN ('deregulated_ren','import','regulated_hpp',
                        'regulated_new_tpp','regulated_old_tpp',
                        'renewable_ppa','thermal_ppa')
       GROUP BY date, entity
@@ -288,7 +288,7 @@ def compute_entity_price_contributions(
       tariff_gel from mv_balancing_trade_with_tariff (weighted by balancing_quantity).
       Tariffs reflect only months when the entity actually sold on balancing.
       NULL when a regulated group had no balancing sales in a month.
-    - Deregulated hydro: use p_dereg_gel from price_with_usd
+    - Deregulated renewable: use p_dereg_gel from price_with_usd
     - PPAs and imports: reference prices NOT available in database (confidential), but reference number are provided in domain_knowldege.py
     - Actual balancing transaction prices differ from reference prices
     - This provides directional insight, not exact decomposition
@@ -308,7 +308,7 @@ def compute_entity_price_contributions(
         >>> with engine.connect() as conn:
         ...     df = compute_entity_price_contributions(conn)
         ...     print(df[['date', 'balancing_price_gel', 'share_import',
-        ...              'contribution_deregulated_hydro_gel']].head())
+        ...              'contribution_deregulated_ren_gel']].head())
     """
     share_filters = []
     price_filters = []
@@ -340,7 +340,7 @@ def compute_entity_price_contributions(
         t.date,
         SUM(t.quantity) AS total_qty,
         SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
-        SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+        SUM(CASE WHEN t.entity = 'deregulated_ren' THEN t.quantity ELSE 0 END) AS qty_dereg_ren,
         SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp,
         SUM(CASE WHEN t.entity = 'regulated_new_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_new_tpp,
         SUM(CASE WHEN t.entity = 'regulated_old_tpp' THEN t.quantity ELSE 0 END) AS qty_reg_old_tpp,
@@ -381,8 +381,8 @@ def compute_entity_price_contributions(
     entity_prices AS (
       SELECT
         p.date,
-        p.p_dereg_gel AS price_deregulated_hydro_gel,
-        p.p_dereg_usd AS price_deregulated_hydro_usd,
+        p.p_dereg_gel AS price_deregulated_ren_gel,
+        p.p_dereg_usd AS price_deregulated_ren_usd,
         wt.wtariff_hpp_gel AS price_regulated_hpp_gel,
         wt.wtariff_hpp_gel / NULLIF(p.xrate, 0) AS price_regulated_hpp_usd,
         wt.wtariff_new_tpp_gel AS price_regulated_new_tpp_gel,
@@ -402,7 +402,7 @@ def compute_entity_price_contributions(
 
       -- Shares
       (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
-      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+      (s.qty_dereg_ren / NULLIF(s.total_qty,0)) AS share_deregulated_ren,
       (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp,
       (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) AS share_regulated_new_tpp,
       (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) AS share_regulated_old_tpp,
@@ -411,8 +411,8 @@ def compute_entity_price_contributions(
       (s.qty_cfd_scheme / NULLIF(s.total_qty,0)) AS share_cfd_scheme,
 
       -- Reference prices (where available)
-      ep.price_deregulated_hydro_gel,
-      ep.price_deregulated_hydro_usd,
+      ep.price_deregulated_ren_gel,
+      ep.price_deregulated_ren_usd,
       ep.price_regulated_hpp_gel,
       ep.price_regulated_hpp_usd,
       ep.price_regulated_new_tpp_gel,
@@ -422,16 +422,16 @@ def compute_entity_price_contributions(
 
       -- Estimated contributions to balancing price
       -- (share × reference_price) = estimated contribution in GEL/MWh or USD/MWh
-      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_hydro_gel, 0)
-        AS contribution_deregulated_hydro_gel,
+      (s.qty_dereg_ren / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_ren_gel, 0)
+        AS contribution_deregulated_ren_gel,
       (s.qty_reg_hpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_hpp_gel, 0)
         AS contribution_regulated_hpp_gel,
       (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_new_tpp_gel, 0)
         AS contribution_regulated_new_tpp_gel,
       (s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_old_tpp_gel, 0)
         AS contribution_regulated_old_tpp_gel,
-      (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_hydro_usd, 0)
-        AS contribution_deregulated_hydro_usd,
+      (s.qty_dereg_ren / NULLIF(s.total_qty,0)) * COALESCE(ep.price_deregulated_ren_usd, 0)
+        AS contribution_deregulated_ren_usd,
       (s.qty_reg_hpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_hpp_usd, 0)
         AS contribution_regulated_hpp_usd,
       (s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * COALESCE(ep.price_regulated_new_tpp_usd, 0)
@@ -440,12 +440,12 @@ def compute_entity_price_contributions(
         AS contribution_regulated_old_tpp_usd,
 
       -- Sum of known contributions
-      COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_gel, 0) +
+      COALESCE((s.qty_dereg_ren / NULLIF(s.total_qty,0)) * ep.price_deregulated_ren_gel, 0) +
       COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_gel, 0) +
       COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_gel, 0) +
       COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_gel, 0)
         AS total_known_contributions_gel,
-      COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_usd, 0) +
+      COALESCE((s.qty_dereg_ren / NULLIF(s.total_qty,0)) * ep.price_deregulated_ren_usd, 0) +
       COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_usd, 0) +
       COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_usd, 0) +
       COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_usd, 0)
@@ -453,7 +453,7 @@ def compute_entity_price_contributions(
 
       -- Residual calculations are valid only when every positive-share known bucket has a price.
       CASE WHEN
-        (s.qty_dereg_hydro = 0 OR ep.price_deregulated_hydro_gel IS NOT NULL) AND
+        (s.qty_dereg_ren = 0 OR ep.price_deregulated_ren_gel IS NOT NULL) AND
         (s.qty_reg_hpp = 0 OR ep.price_regulated_hpp_gel IS NOT NULL) AND
         (s.qty_reg_new_tpp = 0 OR ep.price_regulated_new_tpp_gel IS NOT NULL) AND
         (s.qty_reg_old_tpp = 0 OR ep.price_regulated_old_tpp_gel IS NOT NULL)
@@ -461,13 +461,13 @@ def compute_entity_price_contributions(
 
       -- Residual (PPA + import contribution, not directly observable)
       p.p_bal_gel - (
-        COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_gel, 0) +
+        COALESCE((s.qty_dereg_ren / NULLIF(s.total_qty,0)) * ep.price_deregulated_ren_gel, 0) +
         COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_gel, 0) +
         COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_gel, 0) +
         COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_gel, 0)
       ) AS residual_contribution_ppa_import_gel,
       p.p_bal_usd - (
-        COALESCE((s.qty_dereg_hydro / NULLIF(s.total_qty,0)) * ep.price_deregulated_hydro_usd, 0) +
+        COALESCE((s.qty_dereg_ren / NULLIF(s.total_qty,0)) * ep.price_deregulated_ren_usd, 0) +
         COALESCE((s.qty_reg_hpp / NULLIF(s.total_qty,0)) * ep.price_regulated_hpp_usd, 0) +
         COALESCE((s.qty_reg_new_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_new_tpp_usd, 0) +
         COALESCE((s.qty_reg_old_tpp / NULLIF(s.total_qty,0)) * ep.price_regulated_old_tpp_usd, 0)

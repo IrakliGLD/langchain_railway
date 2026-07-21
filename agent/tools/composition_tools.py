@@ -11,7 +11,7 @@ from .types import ToolResult
 # Canonical balancing buckets accepted by the composition tool.
 ALLOWED_BALANCING_ENTITIES = (
     "import",
-    "deregulated_hydro",
+    "deregulated_ren",
     "regulated_hpp",
     "regulated_new_tpp",
     "regulated_old_tpp",

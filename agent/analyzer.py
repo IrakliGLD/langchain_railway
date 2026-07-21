@@ -162,16 +162,16 @@ def build_share_shift_notes(
 
 _COMPONENT_PRESSURE_SPECS = (
     {
-        "component": "deregulated_hydro",
-        "share_col": "share_deregulated_hydro",
-        "label": "deregulated hydro",
+        "component": "deregulated_ren",
+        "share_col": "share_deregulated_ren",
+        "label": "deregulated renewable",
         "price_cols": {
-            "gel": "price_deregulated_hydro_gel",
-            "usd": "price_deregulated_hydro_usd",
+            "gel": "price_deregulated_ren_gel",
+            "usd": "price_deregulated_ren_usd",
         },
         "contribution_cols": {
-            "gel": "contribution_deregulated_hydro_gel",
-            "usd": "contribution_deregulated_hydro_usd",
+            "gel": "contribution_deregulated_ren_gel",
+            "usd": "contribution_deregulated_ren_usd",
         },
         "mechanism_note": "seasonal hydro layer; summer is often below balancing price, winter must use observed price.",
     },
@@ -1331,7 +1331,7 @@ def _select_share_column(share_cols: list[str], target_text: str) -> Optional[st
         "import": "share_import",
         "renewable_ppa": "share_renewable_ppa",
         "thermal_ppa": "share_thermal_ppa",
-        "deregulated_hydro": "share_deregulated_hydro",
+        "deregulated_ren": "share_deregulated_ren",
         "regulated_hpp": "share_regulated_hpp",
         "all_ppa": "share_all_ppa",
         "ppa": "share_all_ppa",
@@ -2638,7 +2638,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
                 allowed_targets = ["p_bal_gel", "p_bal_usd"]
                 allowed_drivers = [
-                    "xrate", "share_import", "share_deregulated_hydro",
+                    "xrate", "share_import", "share_deregulated_ren",
                     "share_regulated_hpp", "share_renewable_ppa",
                     "share_all_ppa", "share_all_renewables", "share_all_hydro",
                     "enguri_tariff_gel", "gardabani_tpp_tariff_gel",
@@ -3347,7 +3347,7 @@ def _build_why_context(ctx: QueryContext) -> None:
             )
 
     why_ctx["notes"].append("Balancing price is a weighted average of electricity sold as balancing energy.")
-    why_ctx["notes"].append("Regulated and deregulated hydro depend weakly on xrate; thermal PPAs and imports depend strongly on xrate.")
+    why_ctx["notes"].append("Regulated HPP and deregulated renewable prices depend weakly on xrate; thermal PPAs and imports depend strongly on xrate.")
     why_ctx["notes"].append("When GEL depreciates, electricity prices generally rise because USD-denominated constituents (like imported gas) become more expensive.")
     why_ctx["notes"].append("If GEL depreciates, GEL-denominated balancing price rises due to USD-linked gas/import costs.")
     why_ctx["notes"].append("Composition shift toward thermal or import increases price; more hydro or renewable lowers it.")

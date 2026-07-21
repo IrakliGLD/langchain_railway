@@ -1712,7 +1712,7 @@ class TestBalancingSharePanel:
             "date",
             "segment",
             "share_import",
-            "share_deregulated_hydro",
+            "share_deregulated_ren",
             "share_regulated_hpp",
             "share_regulated_new_tpp",
             "share_regulated_old_tpp",
@@ -1914,14 +1914,14 @@ class TestShareShiftNotes:
     def test_highlight_changes_and_usd_sources(self):
         cur = {
             "share_regulated_hpp": 0.30,
-            "share_deregulated_hydro": 0.10,
+            "share_deregulated_ren": 0.10,
             "share_renewable_ppa": 0.25,
             "share_thermal_ppa": 0.20,
             "share_import": 0.05,
         }
         prev = {
             "share_regulated_hpp": 0.45,
-            "share_deregulated_hydro": 0.18,
+            "share_deregulated_ren": 0.18,
             "share_renewable_ppa": 0.15,
             "share_thermal_ppa": 0.12,
             "share_import": 0.05,

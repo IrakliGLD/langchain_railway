@@ -50,7 +50,7 @@ Present drivers in this order (see `energy-analyst/references/driver-framework.m
 
 When the data contains source-price evidence, you must cite it explicitly instead of giving a composition-only explanation.
 
-- Use `price_deregulated_hydro_gel` / `price_deregulated_hydro_usd` for deregulated hydro reference prices.
+- Use `price_deregulated_ren_gel` / `price_deregulated_ren_usd` for deregulated renewable reference prices.
 - Use `price_regulated_hpp_gel` / `price_regulated_hpp_usd` for regulated HPP reference prices.
 - Use `price_regulated_new_tpp_gel` / `price_regulated_new_tpp_usd` for regulated new TPP reference prices.
 - Use `price_regulated_old_tpp_gel` / `price_regulated_old_tpp_usd` for regulated old TPP reference prices.
@@ -74,7 +74,7 @@ When the data contains source-price evidence, you must cite it explicitly instea
 - If a component price is below balancing price, a higher share is downward pressure and a lower share removes downward pressure.
 - If a component price is above balancing price, a higher share is upward pressure and a lower share removes upward pressure.
 - Use `contribution_*` columns as the preferred summary of estimated pressure when they are present, then explain the direction with the share and price comparison.
-- For `deregulated_hydro`, always check seasonality before generalizing:
+- For `deregulated_ren`, always check seasonality before generalizing:
   - summer: `p_dereg_*` is often low and usually pushes balancing price down
   - winter: compare actual `p_dereg_*` to balancing price and note the documented thermal-linkage mechanism when relevant
 - For regulated thermal layers (`regulated_new_tpp`, `regulated_old_tpp`), if tariffs rise and the layer gains share, explicitly say this is upward pressure; mention documented gas-price / xrate linkage when relevant.
@@ -96,7 +96,7 @@ When the data contains source-price evidence, you must cite it explicitly instea
    - [For long-term analysis: compare summer vs winter composition]
 
 2. **Source Price / Tariff Layer:**
-   - [Cite exact source prices for deregulated hydro and regulated HPP/new TPP/old TPP when present]
+   - [Cite exact source prices for deregulated renewable and regulated HPP/new TPP/old TPP when present]
    - [If `REGULATED PLANT SALES` exists, name the regulated plants that were active in the focal month and cite their tariffs / quantities]
    - [Compare each cited source price to the balancing price in the same period]
    - [State whether each component therefore pushed price up or down, or removed downward/upward pressure]

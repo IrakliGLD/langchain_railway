@@ -61,7 +61,7 @@ COLUMN_LABELS = {
 DERIVED_LABELS = {
     "share_import": "Share of Imports in Balancing Electricity",
     "share_cfd_scheme": "Share of CfD scheme supported generation in Balancing Electricity",
-    "share_deregulated_hydro": "Share of Deregulated Hydro",
+    "share_deregulated_ren": "Share of Deregulated Renewable",
     "share_regulated_hpp": "Share of Regulated HPPs",
     "share_regulated_new_tpp": "Share of Regulated New TPPs",
     "share_regulated_old_tpp": "Share of Regulated Old TPPs",
@@ -175,7 +175,7 @@ VALUE_LABELS = {
     "bilateral_exchange": "Bilateral Contracts & Exchange",
     "renewable_ppa": "Renewable PPA",
     "thermal_ppa": "Thermal PPA",
-    "deregulated_hydro": "Deregulated HPP",
+    "deregulated_ren": "Deregulated Renewable",
     "regulated_hpp": "Regulated HPP",
     "regulated_new_tpp": "Regulated new TPP",
     "regulated_old_tpp": "Regulated old TPP",
@@ -257,7 +257,7 @@ segment values (trade_derived_entities):
 - Recommended filter: WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
 
 entity values (trade_derived_entities, balancing segment):
-- 'import', 'deregulated_hydro', 'regulated_hpp', 'regulated_new_tpp',
+- 'import', 'deregulated_ren', 'regulated_hpp', 'regulated_new_tpp',
   'regulated_old_tpp', 'renewable_ppa', 'thermal_ppa', 'CfD_scheme'
 - IMPORTANT: Use exact strings as shown above! Note CfD_scheme uses mixed case.
 

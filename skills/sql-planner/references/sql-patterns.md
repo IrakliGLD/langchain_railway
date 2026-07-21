@@ -29,11 +29,11 @@ WITH shares AS (
     t.date,
     SUM(t.quantity) AS total_qty,
     SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
-    SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+    SUM(CASE WHEN t.entity = 'deregulated_ren' THEN t.quantity ELSE 0 END) AS qty_dereg_ren,
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
   WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
-    AND t.entity IN ('import', 'deregulated_hydro', 'regulated_hpp',
+    AND t.entity IN ('import', 'deregulated_ren', 'regulated_hpp',
                      'regulated_new_tpp', 'regulated_old_tpp',
                      'renewable_ppa', 'thermal_ppa')
   GROUP BY t.date
@@ -42,7 +42,7 @@ SELECT
   TO_CHAR(p.date, 'YYYY-MM') AS month,
   p.p_bal_gel,
   (s.qty_import / NULLIF(s.total_qty,0)) AS share_import,
-  (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+  (s.qty_dereg_ren / NULLIF(s.total_qty,0)) AS share_deregulated_ren,
   (s.qty_reg_hpp / NULLIF(s.total_qty,0)) AS share_regulated_hpp
 FROM price_with_usd p
 LEFT JOIN shares s ON s.date = p.date

@@ -27,7 +27,7 @@ class TestBalancingSharePivotSQL:
     def test_all_eight_entity_shares_present(self):
         for col in [
             "share_import",
-            "share_deregulated_hydro",
+            "share_deregulated_ren",
             "share_regulated_hpp",
             "share_regulated_new_tpp",
             "share_regulated_old_tpp",
@@ -90,7 +90,7 @@ class TestBuildTradeSharCte:
         cte = self._get_cte()
         for col in [
             "share_import",
-            "share_deregulated_hydro",
+            "share_deregulated_ren",
             "share_regulated_hpp",
             "share_regulated_new_tpp",
             "share_regulated_old_tpp",
