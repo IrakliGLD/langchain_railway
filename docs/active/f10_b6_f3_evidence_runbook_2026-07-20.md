@@ -64,7 +64,7 @@ run is itself proof the artifact was built at the exact frozen SHA.
 | 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
 | 6 | Disposable-DB regression | carry-forward proof — see §7 (fresh CI stamp at G5 merge) | `fc44fd4` (via tree-identity to `a4c24a2`) | ✅ carry-forward proven; fresh CI `test:db` stamp lands at G5 |
 | 7 | `/versionz` | `dashboard.galdava.com/versionz` (`X-App-Key`) | `65cf93b` | ✅ `git_sha == 65cf93b697…` |
-| 8 | Manual a11y checklist | programmatic authenticated pass (2026-07-21, browser pane) — see §6 | `fc44fd4` | ⚠️ partial — structural pass green; SR-listen attestation remains operator-residual |
+| 8 | Manual a11y checklist | programmatic authenticated pass (§6) + SR-listen disposition | `fc44fd4` | ✅ structural pass green; SR-listen **dispositioned** (`F10-B6-A11Y-01`, approved 2026-07-21) |
 
 ## 4. Exit
 
@@ -135,10 +135,14 @@ axe scans (Live Browser Proof #8: login/public + dashboard/chat + admin, WCAG
 home has no `h1–h3` heading elements (limits SR heading navigation); admin
 mutations have no `aria-live` status region.
 
-**Operator-residual (the only part not programmatically verifiable):** an actual
-screen-reader *listening* pass (NVDA/VoiceOver) to confirm the announcements are
-spoken correctly. The underlying structure (names, roles, `aria-live`) is
-correct, so this is a confirmation formality.
+**Screen-reader *listening* pass — DISPOSITIONED.** The one part not
+programmatically verifiable (a human NVDA/VoiceOver listen confirming the
+announcements are spoken correctly) is formally deferred for this release by
+[`F10-B6-A11Y-01`](./f10_b6_a11y_disposition_2026-07-21.md) (approved by Irakli
+2026-07-21): the dashboard is data-viz-heavy, the admin panel is admin-only, and
+there is no current AT user base or WCAG-AA obligation; the aria-live chat is the
+priority surface to attest first if revisited. The structural accessibility above
+remains in force.
 
 Remaining (per the 2026-07-21 re-audit / closure-completion plan): the
 disposable-DB fresh CI stamp (G5), the SR-listen attestation (G4), and the B1.A
