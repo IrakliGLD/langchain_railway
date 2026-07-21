@@ -62,7 +62,7 @@ run is itself proof the artifact was built at the exact frozen SHA.
 | 3 | Railway image binding | deployment **`ffc9ec32`** (project `b15aea53` / service `c274d6d3` / env `475e29b6`) | `65cf93b` | ⚠️ partial — ACTIVE + healthy and source-SHA-bound, but the B1.A runtime image digest is not recorded |
 | 4 | Post Deploy Smoke | run **#246** | `fc44fd4` | ✅ green (47s) |
 | 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
-| 6 | Disposable-DB regression | _pending_ | — | ⏳ operator (throwaway DB, never prod `qvmqmmcglqmhachqaezt`) |
+| 6 | Disposable-DB regression | carry-forward proof — see §7 (fresh CI stamp at G5 merge) | `fc44fd4` (via tree-identity to `a4c24a2`) | ✅ carry-forward proven; fresh CI `test:db` stamp lands at G5 |
 | 7 | `/versionz` | `dashboard.galdava.com/versionz` (`X-App-Key`) | `65cf93b` | ✅ `git_sha == 65cf93b697…` |
 | 8 | Manual a11y checklist | programmatic authenticated pass (2026-07-21, browser pane) — see §6 | `fc44fd4` | ⚠️ partial — structural pass green; SR-listen attestation remains operator-residual |
 
@@ -140,7 +140,37 @@ screen-reader *listening* pass (NVDA/VoiceOver) to confirm the announcements are
 spoken correctly. The underlying structure (names, roles, `aria-live`) is
 correct, so this is a confirmation formality.
 
-Remaining to close F10: F3 item 6 (disposable-DB — SQL byte-unchanged since the
-last green #271, carries forward; auto-stamps on the next frontend CI now that
-`TEST_DATABASE_URL` is set) and the SR-listen residual above, then Phase F5 (B6
-re-audit).
+Remaining (per the 2026-07-21 re-audit / closure-completion plan): the
+disposable-DB fresh CI stamp (G5), the SR-listen attestation (G4), and the B1.A
+runtime-digest control (G3), then the final merge + re-verify (G5) and re-audit
+(G6).
+
+## 7. Item 6 — disposable-DB carry-forward proof (E2E-03)
+
+The disposable-DB regression pack (`npm run test:db` → `database/tests/*.sql`
+against a DB built from `database/baseline`) was last run green as the **B4.B
+disposable-database regression** (operator, throwaway Supabase test project
+`ufosbrdhjrkaagjaltno` — **never** prod `qvmqmmcglqmhachqaezt`), which caught and
+verified the fix for the P6.B `migrate_chat_history_jsonb_v1` double-UPDATE bug
+(fixed in frontend `a4c24a2`).
+
+**Immutable continuity binding that run to `fc44fd4`** — the two directories the
+pack depends on are **byte-identical** (content-addressed git tree hashes) at
+`a4c24a2` (the fix commit) and the frozen `fc44fd4`:
+
+| Directory | tree hash @ `a4c24a2` | tree hash @ `fc44fd4` | |
+|---|---|---|---|
+| `database/baseline` | `3a7abc6e1ba1…` | `3a7abc6e1ba1…` | **identical** |
+| `database/tests` | `b28e0e15ac83…` | `b28e0e15ac83…` | **identical** |
+
+(`git diff a4c24a2..fc44fd4 -- database/baseline database/tests` is empty; full
+SHAs `a4c24a2fa2f4056e8995010d119f6f965759ab10` and
+`fc44fd40946bb0772ab4f178ac376196bec21498`.) Because the baseline the DB is built
+from and the regression SQL are bit-for-bit the same, the green result holds at
+`fc44fd4` with certainty.
+
+**Fresh immutable CI stamp (definitive):** `TEST_DATABASE_URL` is now a frontend
+GitHub secret, so `ci.yml`'s `test:db` step runs the pack against the throwaway
+DB automatically. The **G5 final-merge CI run on `main`** (final SHA, identical
+`database/` trees) produces the fresh immutable `test:db` run ID at the final
+identity — recorded there to fully close E2E-03.
