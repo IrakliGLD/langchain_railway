@@ -59,7 +59,7 @@ run is itself proof the artifact was built at the exact frozen SHA.
 |---|---|---|---|---|
 | 1 | Frontend release evidence | `frontend-release-evidence` run **#2** (artifact `frontend-release-production-<fc44fd4>`) | `fc44fd4` | ✅ green (44s) |
 | 2 | Backend release evidence | run **`29761159168`** (artifact `backend-production-<65cf93b>`) | `65cf93b` | ✅ green — embedded **and** OCI-labeled revision == SHA, non-root, SBOM, pip-audit |
-| 3 | Railway image binding | deployment **`ffc9ec32`** (project `b15aea53` / service `c274d6d3` / env `475e29b6`) | `65cf93b` | ⚠️ partial — ACTIVE + healthy and source-SHA-bound, but the B1.A runtime image digest is not recorded |
+| 3 | Railway runtime image digest | current deploy `feff19e0` digest `sha256:b379121959…ffbe4a3` — see §8 (final digest captured at G5) | `65cf93b` | ✅ digest exposed + captured (REL-02 resolved; no amendment needed); final-deploy digest recorded at G5 |
 | 4 | Post Deploy Smoke | run **#246** | `fc44fd4` | ✅ green (47s) |
 | 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
 | 6 | Disposable-DB regression | carry-forward proof — see §7 (fresh CI stamp at G5 merge) | `fc44fd4` (via tree-identity to `a4c24a2`) | ✅ carry-forward proven; fresh CI `test:db` stamp lands at G5 |
@@ -174,3 +174,31 @@ GitHub secret, so `ci.yml`'s `test:db` step runs the pack against the throwaway
 DB automatically. The **G5 final-merge CI run on `main`** (final SHA, identical
 `database/` trees) produces the fresh immutable `test:db` run ID at the final
 identity — recorded there to fully close E2E-03.
+
+## 8. REL-02 — Railway runtime image digest (resolved 2026-07-21)
+
+**Correction:** the earlier claim that Railway "has no separate Docker digest"
+was wrong. Railway **does** expose the runtime image digest in the deployment's
+**Build log** (`exporting to docker image format` step). So B1.A is satisfied by
+**capturing** the digest — no control amendment is required.
+
+Captured for the current backend `65cf93b` deployment (`feff19e0`, EU West, 1
+replica; roll-forward redeploy from the F4 rollback rehearsal):
+
+| Field | Value |
+|---|---|
+| Source SHA (embedded `ENAI_RELEASE_SHA`) | `65cf93b697e44f08cd03e782aac9949d2336135a` |
+| Railway deployment ID | `feff19e0` |
+| **Runtime image manifest digest** | `sha256:b379121959aa418ea27b03f7bd4a130f54f8277972e3e8509ea2398c5ffbe4a3` |
+| Runtime image config digest | `sha256:ea41c441200d6419bbef863aea5ed6a902ff1bcd9194061c8da3c90dbb0e71fb` |
+| Base image | `python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba` |
+| Source snapshot | `sha256:4aaa6f96c9edc944cf9acb329ef18559f8b8557e840378dd91f6dcf263ea915a` |
+| OCI descriptor | manifest v1, size 4471, platform linux/amd64, created 2026-07-20T20:27:40Z |
+
+**Note (B1.A line 118):** Railway rebuilds from Git rather than promoting the
+`Backend release evidence` image, so each deploy of the same SHA gets its own
+digest and it will differ from the CI-attested image ID. Both are recorded; no
+byte-identical promotion is claimed. The **definitive closure digest is captured
+at the G5 final-merge deploy** (final SHA), bound there to `/versionz`, the
+Railway deployment, the release manifest, the SBOM/audit artifact, and the
+rollback target.

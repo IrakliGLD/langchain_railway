@@ -79,11 +79,13 @@ was separately unblocked by regenerating the requirements lock (upstream
 | Post Deploy Smoke | `fc44fd4` | run #246 green (47s) | ✅ |
 
 Railway source-builds the backend (Nixpacks) and rebuilds per deploy, so there
-is no stable Docker image digest in the captured console evidence. The source
-is bound to `65cf93b` + Railway deployment id `ffc9ec32`, but that substitution
-does **not** satisfy the unamended B1.A runtime-image-digest exit gate. Capture a
-platform-issued immutable runtime digest after the final deploy, or formally
-approve an amended control if Railway cannot expose one.
+exposes the runtime image digest in the deployment **Build log** (`exporting to
+docker image format`), so B1.A is satisfied by **capturing** it — no amendment
+needed. Captured for the current `65cf93b` deploy (`feff19e0`): manifest digest
+`sha256:b379121959…ffbe4a3` (full values + config/base/snapshot digests in the
+F3 runbook §8). The **definitive closure digest is recorded at the G5 final
+deploy**, bound to `/versionz`, the Railway deployment, release manifest, SBOM,
+and rollback target.
 
 **Frontend/source freeze reached:** browser + all nine Edge functions report the
 single frontend SHA `fc44fd4`; the backend runs `65cf93b` (deployment
