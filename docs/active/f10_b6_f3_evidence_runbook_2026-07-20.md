@@ -173,11 +173,15 @@ SHAs `a4c24a2fa2f4056e8995010d119f6f965759ab10` and
 from and the regression SQL are bit-for-bit the same, the green result holds at
 `fc44fd4` with certainty.
 
-**Fresh immutable CI stamp (definitive):** `TEST_DATABASE_URL` is now a frontend
-GitHub secret, so `ci.yml`'s `test:db` step runs the pack against the throwaway
-DB automatically. The **G5 final-merge CI run on `main`** (final SHA, identical
-`database/` trees) produces the fresh immutable `test:db` run ID at the final
-identity — recorded there to fully close E2E-03.
+This satisfies the audit's route (a) — the disposable-DB run identity (B4.B,
+throwaway `ufosbrdhjrkaagjaltno`) + the exact source/hash continuity proof
+binding it to `fc44fd4`. **E2E-03 is closed by this carry-forward.**
+
+*Optional fresh confirmation:* `TEST_DATABASE_URL` is now a frontend GitHub
+secret, so `frontend ci.yml`'s `test:db` step runs the pack against the throwaway
+DB on any frontend CI trigger (next frontend push, or a no-merge frontend PR off
+`fc44fd4`). Note the backend G5 merge does **not** run this — `test:db` is a
+frontend job. A fresh stamp is belt-and-suspenders, not required for closure.
 
 ## 8. REL-02 — Railway runtime image digest (resolved 2026-07-21)
 
