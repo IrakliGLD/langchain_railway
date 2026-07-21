@@ -13,7 +13,7 @@ them with B3, not silently.
 | Item | Disposition |
 |---|---|
 | `ENABLE_AGENT_LOOP` flag, its two pipeline branches, the `agent_loop_blocked_by_policy` trace field, 23 test monkeypatches, and two trace-shape assertions | **Removed in commit `a99e51c`** (this phase). The loop implementation itself was deleted in an earlier phase; this was dead residue. No public schema change (field was trace-only; contract drift gates green). |
-| `google.generativeai` lazy fallback branch in `knowledge/vector_embeddings.py` | **Expired-candidate, deferred**: unreachable in the hashed-lock container (`google-genai` is a hard pin, so the ImportError arm can never execute). Removal criterion: fold into the next change that touches the embedding provider class. Deadline: 2026-08-31. Kept this phase to avoid touching provider code in a cleanup slice. |
+| `google.generativeai` lazy fallback branch in `knowledge/vector_embeddings.py` | **Removed in commit `6769a08` (F10 B6 F1.1).** The legacy SDK is absent from `requirements.txt`/the lock and the provider now fails explicitly if the modern `google-genai` adapter is unavailable; there is no dormant import or fallback branch. Historical dependency-graph artifacts that mention `google-generativeai` are retained as superseded B2 evidence, not as a current runtime path. |
 
 ## 2. Rollout — retained while collecting two-release evidence (B5.A.4)
 
@@ -69,8 +69,8 @@ Operational gates and product configuration, excluded from removal planning:
 
 ## 6. Exit-gate position
 
-- Expired paths: deleted (§1), except one deferred expired-candidate with a
-  named criterion and deadline.
+- Expired paths: deleted (§1); the former Gemini fallback is removed and has no
+  current runtime or dependency entry.
 - Every retained path: classified with owner, criterion, deadline (§2–§4).
 - Two-release candidates: evidence collection starts at B3 promotion; none may
   be forced into the first release (plan §3).

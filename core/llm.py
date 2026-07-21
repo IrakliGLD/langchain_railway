@@ -553,7 +553,7 @@ def get_llm_for_stage(
                 temperature=0,
                 convert_system_message_to_human=True,
                 max_retries=1,
-                timeout=120,
+                request_timeout=max(0.001, float(GEMINI_TIMEOUT_SECONDS or 120.0)),
             )
             log.info("Stage-specific LLM cached: model=%s", stage_model)
         return _stage_model_cache[stage_model]
@@ -579,7 +579,7 @@ def get_llm_for_stage(
             temperature=0,
             convert_system_message_to_human=True,
             max_retries=max_retries if max_retries is not None else 2,
-            timeout=120,
+            request_timeout=max(0.001, float(GEMINI_TIMEOUT_SECONDS or 120.0)),
         )
         if thinking_budget is not None:
             kwargs["thinking_budget"] = thinking_budget

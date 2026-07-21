@@ -330,9 +330,9 @@ def get_gemini() -> ChatGoogleGenerativeAI:
             temperature=0,
             convert_system_message_to_human=True,
             max_retries=1,  # attempts includes the first call: no SDK retry
-            timeout=max(1, int((GEMINI_TIMEOUT_SECONDS or 120.0) * 1000)),
+            request_timeout=max(0.001, float(GEMINI_TIMEOUT_SECONDS or 120.0)),
         )
-        log.info("✅ Gemini LLM instance cached (max_retries=1, timeout=120s)")
+        log.info("✅ Gemini LLM instance cached (max_retries=1, timeout=%ss)", GEMINI_TIMEOUT_SECONDS or 120.0)
     return _gemini_llm
 
 

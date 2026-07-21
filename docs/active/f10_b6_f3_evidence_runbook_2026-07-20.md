@@ -11,43 +11,45 @@ surfaces before running anything below; if any reports a non-frozen SHA, **stop*
 — you would just re-capture the REL-02 drift.
 
 ```bash
-# browser (expect d52a97e3a3de34754444f5eeb02c2f3a9f1f5509)
+# browser (expect fc44fd40946bb0772ab4f178ac376196bec21498)
 curl -fsS https://dashboard.galdava.com/release-manifest.json | grep app_version
-# edge (expect d52a97e… ; the deploy workflow already checks all nine)
+# edge (expect fc44fd4… ; the deploy workflow already checks all nine)
 curl -fsS https://qvmqmmcglqmhachqaezt.supabase.co/functions/v1/healthcheck
 # backend (expect the F2.a merge SHA)
 git fetch origin && git rev-parse --short origin/main
-curl -H "X-App-Key: <gateway secret>" https://enai.galdava.com/versionz   # git_sha
+curl -H "X-App-Key: <evaluate-admin secret>" https://enai.galdava.com/versionz   # git_sha
 ```
 
-**Gate status as of 2026-07-20: NOT MET** — Edge live `193896745…` (`1938967`),
-backend `origin/main` `2f2a310` (F1 not merged). Do not start F3 until F2.a
-(backend merge) and F2.b (Edge realign to `d52a97e`) have landed.
+**Historical gate status as of 2026-07-20: NOT MET.** That precondition was
+subsequently satisfied and superseded by the final identities recorded below.
 
 ## 1. Frozen identities under test
 
-- **Frontend** — `d52a97e3a3de34754444f5eeb02c2f3a9f1f5509`
-- **Backend** — `<F2.a merge SHA>` + Railway runtime image digest `<sha256:…>`
+- **Frontend / browser / Edge** — `fc44fd40946bb0772ab4f178ac376196bec21498`
+- **Backend source** — `0684dc172eb2bb10a17a2e80941a6940b0882f2d`
+- **Railway deployment** — `e2e73849-c47d-4f4f-8073-76edd2e0df95`
+- **Railway runtime image manifest** —
+  `sha256:319f6774f8197acd88941abae1b81a57bb10d19d98fa28a82e9d5b63c3b5336b`
 
 ## 2. Evidence items (all at the frozen identity)
 
 | # | Item | How (all `workflow_dispatch`) | What it proves | Gate |
 |---|---|---|---|---|
-| 1 | **Frontend release evidence** | frontend Actions → *Build frontend release evidence* · `git_ref=d52a97e3a3de34754444f5eeb02c2f3a9f1f5509` · `environment=production` | immutable artifact (`artifact:verify`) + prod dep audit + CycloneDX SBOM at the frozen SHA; uploads `frontend-release-production-<sha>` | REL-02 / E2E-03 |
+| 1 | **Frontend release evidence** | frontend Actions → *Build frontend release evidence* · `git_ref=fc44fd40946bb0772ab4f178ac376196bec21498` · `environment=production` | immutable artifact (`artifact:verify`) + prod dep audit + CycloneDX SBOM at the frozen SHA; uploads `frontend-release-production-<sha>` | REL-02 / E2E-03 |
 | 2 | **Backend release evidence** | backend Actions → *Backend release evidence* · `git_ref=<merge SHA>` · `environment=production` | reproducible image whose embedded **and** OCI-labeled revision == SHA, non-root runtime, excluded `.git/.env/tests/docs`, current lock, SBOM, `pip-audit`, release manifest; uploads `backend-production-<sha>` | REL-02 / E2E-03 |
 | 3 | **Railway image-digest binding** | operator reads Railway → Deployments for the F2.a deploy | binds the **deployed runtime** image digest to the source SHA + records the rollback-target deployment ID | REL-02 |
-| 4 | **Authenticated Post Deploy Smoke** | frontend Actions → *Post Deploy Smoke* · `environment=production` (dispatch on `main`, which is `d52a97e`) | live app serves `app_version==d52a97e` + matching artifact `sha256`, and the authenticated browser→Edge→backend path works (`SMOKE_REQUIRE_AUTH=true`, `SMOKE_EXPECT_VERSION=d52a97e`) | E2E-03 |
+| 4 | **Authenticated Post Deploy Smoke** | frontend Actions → *Post Deploy Smoke* · `environment=production` (dispatch on `main`, which is `fc44fd4`) | live app serves `app_version==fc44fd4` + matching artifact `sha256`, and the authenticated browser→Edge path works (`SMOKE_REQUIRE_AUTH=true`, `SMOKE_EXPECT_VERSION=fc44fd4`) | E2E-03 |
 | 5 | **Live Browser Proof + axe (all three)** | frontend Actions → *Live Browser Proof* | authenticated dashboard + protected-RPC pipeline with no runtime errors (`test:e2e:live`); axe login/public + dashboard/chat + **admin** (`test:e2e:a11y` with `SMOKE_ADMIN_*`) | E2E-03 / A11Y-07 |
 | 6 | **Full disposable-DB regression** | re-run exactly as B4.B (`f10_b4b_*` / `d218174`) against a throwaway Postgres, at the merge SHA — **never** against production `qvmqmmcglqmhachqaezt` | schema + migrations + RLS + SECURITY DEFINER RPCs regress clean on a disposable DB | E2E-03 |
 | 7 | **`/versionz`** | `curl -H "X-App-Key: <secret>" https://enai.galdava.com/versionz` | `git_sha == <merge SHA>` (deployed backend identity) | REL-02 |
-| 8 | **Manual a11y checklist (F1.5)** | authenticated session at `d52a97e`: visible-focus ring, NVDA name+role on tabs/chart/chat-input/toast, live-region announce, responsive/touch at 375 & 768 px | records the honest observations (browser+AT versions, pages, viewport/zoom, SHA) the B4 doc marked PENDING | A11Y-07 |
+| 8 | **Manual a11y checklist (F1.5)** | authenticated session at `fc44fd4`: visible-focus ring, AT name+role on tabs/chart/chat-input/toast, live-region structure, responsive/touch at 375 & 768 px | records the honest observations (browser+AT versions, pages, viewport/zoom, SHA) the B4 doc marked PENDING | A11Y-07 |
 
 ## 3. Assistant verification role (after each run)
 
 Re-read the live identities, confirm the run/artifact targeted `fc44fd4`
-(frontend) or `65cf93b` (backend), and record run IDs + artifact names into the
+(frontend) or final main `0684dc1` (backend), and record run IDs + artifact names into the
 F3 evidence table below. **Any surface reporting a non-frozen SHA halts F3** and
-re-opens F2. The **frozen identities are backend `65cf93b` / frontend `fc44fd4`**
+re-opens F2. The **final identities are backend `0684dc1` / frontend `fc44fd4`**
 (the pre-freeze `d52a97e` was superseded by the F1.4-follow-on edge-manifest fix;
 see [`f10_b6_f2_freeze_evidence`](./f10_b6_f2_freeze_evidence_2026-07-20.md)).
 
@@ -58,12 +60,12 @@ run is itself proof the artifact was built at the exact frozen SHA.
 | # | Item | Run / artifact ID | Target SHA | Status |
 |---|---|---|---|---|
 | 1 | Frontend release evidence | `frontend-release-evidence` run **#2** (artifact `frontend-release-production-<fc44fd4>`) | `fc44fd4` | ✅ green (44s) |
-| 2 | Backend release evidence | run **`29761159168`** (artifact `backend-production-<65cf93b>`) | `65cf93b` | ✅ green — embedded **and** OCI-labeled revision == SHA, non-root, SBOM, pip-audit |
-| 3 | Railway runtime image digest | current deploy `feff19e0` digest `sha256:b379121959…ffbe4a3` — see §8 (final digest captured at G5) | `65cf93b` | ✅ digest exposed + captured (REL-02 resolved; no amendment needed); final-deploy digest recorded at G5 |
-| 4 | Post Deploy Smoke | run **#246** | `fc44fd4` | ✅ green (47s) |
+| 2 | Backend release evidence | run **`29812847819`** / job `88577462455`; artifact `8488198995`, `backend-production-0684dc172eb2bb10a17a2e80941a6940b0882f2d`, artifact digest `sha256:ab884b891de35f688ceef49644cde6190de2705c00c5f512acf4336a4ebfbd12` | `0684dc1` | ✅ green — exact checkout, embedded + OCI-labeled identity, non-root, lock, SBOM, pip-audit |
+| 3 | Railway runtime image digest | deployment `e2e73849-c47d-4f4f-8073-76edd2e0df95`; manifest `sha256:319f6774f8197acd88941abae1b81a57bb10d19d98fa28a82e9d5b63c3b5336b` | `0684dc1` | ✅ active, source/embedded SHA bound, healthcheck green; rollback target `feff19e0-69d6-42e9-818a-757d76090e2e` |
+| 4 | Post Deploy Smoke | run **`29812892495`** / #247, job `88577596025` | `fc44fd4` | ✅ green (43s); exact artifact, healthcheck, authenticated `/is-admin` |
 | 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
-| 6 | Disposable-DB regression | carry-forward proof — see §7 (fresh CI stamp at G5 merge) | `fc44fd4` (via tree-identity to `a4c24a2`) | ✅ carry-forward proven; fresh CI `test:db` stamp lands at G5 |
-| 7 | `/versionz` | `dashboard.galdava.com/versionz` (`X-App-Key`) | `65cf93b` | ✅ `git_sha == 65cf93b697…` |
+| 6 | Disposable-DB regression | frontend CI run **`29701996275`** / #271, job `88232468171`; `Run database regression tests` green (54s) | `a4c24a2`, byte-identical DB trees at `fc44fd4` | ✅ post-fix immutable run + continuity proof recorded in §7 |
+| 7 | `/versionz` | protected request from Railway Console on active deployment, using the container's evaluate-admin secret without displaying it | `0684dc1` | ✅ `application_version=20.0`, `git_sha=0684dc172eb2bb10a17a2e80941a6940b0882f2d`, schema `backend-release-identity-v1` |
 | 8 | Manual a11y checklist | programmatic authenticated pass (§6) + SR-listen disposition | `fc44fd4` | ✅ structural pass green; SR-listen **dispositioned** (`F10-B6-A11Y-01`, approved 2026-07-21) |
 
 ## 4. Exit
@@ -80,8 +82,10 @@ immutable identities).
 
 [`f10_b6_load_waiver_2026-07-20.md`](./f10_b6_load_waiver_2026-07-20.md),
 waiver `F10-B6-LOAD-01`, **approved by Irakli 2026-07-21**, expiring 2026-08-20.
-Frozen SHAs filled (backend `65cf93b` + Railway deployment `ffc9ec32`, frontend
-`fc44fd4`); five compensating controls; remediation ticket to run the envelope
+Final SHAs filled (backend `0684dc1` + Railway deployment
+`e2e73849-c47d-4f4f-8073-76edd2e0df95` + runtime digest
+`sha256:319f6774…c3b5336b`, frontend `fc44fd4`); five compensating controls;
+remediation ticket to run the envelope
 before expiry.
 
 ### 5.2 Rollback rehearsal — PASS (2026-07-21)
@@ -144,10 +148,9 @@ there is no current AT user base or WCAG-AA obligation; the aria-live chat is th
 priority surface to attest first if revisited. The structural accessibility above
 remains in force.
 
-Remaining (per the 2026-07-21 re-audit / closure-completion plan): the
-disposable-DB fresh CI stamp (G5), the SR-listen attestation (G4), and the B1.A
-runtime-digest control (G3), then the final merge + re-verify (G5) and re-audit
-(G6).
+The disposable-DB stamp, runtime-digest binding, and final merge/re-verification
+are complete. The SR listening item is governed by the approved, dated
+`F10-B6-A11Y-01` disposition rather than represented as performed evidence.
 
 ## 7. Item 6 — disposable-DB carry-forward proof (E2E-03)
 
@@ -190,23 +193,32 @@ was wrong. Railway **does** expose the runtime image digest in the deployment's
 **Build log** (`exporting to docker image format` step). So B1.A is satisfied by
 **capturing** the digest — no control amendment is required.
 
-Captured for the current backend `65cf93b` deployment (`feff19e0`, EU West, 1
-replica; roll-forward redeploy from the F4 rollback rehearsal):
+The final post-merge deployment is the current release identity. The earlier
+`65cf93b`/`feff19e0` deployment is retained only as the rehearsed rollback target;
+its digest must not be read as the active runtime identity:
 
 | Field | Value |
 |---|---|
-| Source SHA (embedded `ENAI_RELEASE_SHA`) | `65cf93b697e44f08cd03e782aac9949d2336135a` |
-| Railway deployment ID | `feff19e0` |
-| **Runtime image manifest digest** | `sha256:b379121959aa418ea27b03f7bd4a130f54f8277972e3e8509ea2398c5ffbe4a3` |
-| Runtime image config digest | `sha256:ea41c441200d6419bbef863aea5ed6a902ff1bcd9194061c8da3c90dbb0e71fb` |
+| Source SHA (embedded `ENAI_RELEASE_SHA`) | `0684dc172eb2bb10a17a2e80941a6940b0882f2d` |
+| Railway deployment ID | `e2e73849-c47d-4f4f-8073-76edd2e0df95` |
+| **Runtime image manifest digest** | `sha256:319f6774f8197acd88941abae1b81a57bb10d19d98fa28a82e9d5b63c3b5336b` |
+| Runtime image config digest | `sha256:75cca0a003a757719a3dd9389d7015f7471877178c6a0c2c7f653317e7e0e396` |
 | Base image | `python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba` |
-| Source snapshot | `sha256:4aaa6f96c9edc944cf9acb329ef18559f8b8557e840378dd91f6dcf263ea915a` |
-| OCI descriptor | manifest v1, size 4471, platform linux/amd64, created 2026-07-20T20:27:40Z |
+| Source snapshot | Railway Build Logs (final deployment) |
+| OCI descriptor | manifest v1, size 4471, platform linux/amd64, created 2026-07-21T07:05:17Z |
+
+The prior rollback deployment is recorded separately for rehearsal:
+`65cf93b697e44f08cd03e782aac9949d2336135a` / `feff19e0-69d6-42e9-818a-757d76090e2e`
+with prior manifest `sha256:b379121959aa418ea27b03f7bd4a130f54f8277972e3e8509ea2398c5ffbe4a3`.
+The final digest is bound to backend release-evidence run `29812847819`, job
+`88577462455`, artifact `8488198995` (artifact digest
+`sha256:ab884b891de35f688ceef49644cde6190de2705c00c5f512acf4336a4ebfbd12`),
+protected `/versionz` (`git_sha=0684dc1…`), the active Railway deployment, the
+release SBOM/audit artifact, and the rollback target above.
 
 **Note (B1.A line 118):** Railway rebuilds from Git rather than promoting the
 `Backend release evidence` image, so each deploy of the same SHA gets its own
 digest and it will differ from the CI-attested image ID. Both are recorded; no
-byte-identical promotion is claimed. The **definitive closure digest is captured
-at the G5 final-merge deploy** (final SHA), bound there to `/versionz`, the
-Railway deployment, the release manifest, the SBOM/audit artifact, and the
-rollback target.
+byte-identical promotion is claimed. The final deployment record above is the
+definitive closure digest, bound to `/versionz`, the Railway deployment, the
+release manifest, the SBOM/audit artifact, and the rollback target.

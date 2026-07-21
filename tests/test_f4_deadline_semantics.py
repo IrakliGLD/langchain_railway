@@ -270,7 +270,7 @@ def test_explicit_rate_limit_rejection_can_use_one_bounded_fallback(monkeypatch)
 @pytest.mark.parametrize(
     ("provider", "configured_seconds", "expected_timeout"),
     [
-        ("gemini", 5.0, 5_000),
+        ("gemini", 5.0, 5.0),
         ("openai", 7.0, 7.0),
         ("nvidia", 9.0, 9.0),
     ],
