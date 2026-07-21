@@ -1,6 +1,6 @@
 # Architecture Audit — `langchain_railway/`
 
-**Date:** 2026-06-30
+**Date:** 2026-06-30 (status reconciled 2026-07-21)
 **Scope:** Backend-wide architectural review of `langchain_railway/` (Python 3.11 / FastAPI, ~56K LOC, 142 source files).
 **Method:** Performed with the `architect-reviewer` agent (installed from `claude-code-templates`, `expert-advisors/architect-review`). Four focused passes — layering/dependencies, the core LLM seam, orchestration/planning, and enrichment/summarization — each grounding findings in `file:line` references. Key claims were spot-checked against the source (see [Grounding & verification](#grounding--verification)).
 **Reviewer principle:** *Good architecture enables change. Flag anything that makes future changes harder.*
@@ -11,8 +11,8 @@
 
 ## Progress update — 2026-07-05
 
-Status of the prioritized recommendations below, reconciled against `main` plus the pending
-`refactor/*` branch stack (PR #88 merged; loop-deletion and tool-routing safe-slice pending).
+Status of the prioritized recommendations below, reconciled against the current
+`main` release (PR #88 and the F10 B5 loop cleanup are merged).
 Legend: ✅ done · ◐ partial · ☐ open. The per-item line numbers further down are from the
 2026-06-30 revision and have since drifted; trust the symbols, not the lines.
 
@@ -28,7 +28,7 @@ Legend: ✅ done · ◐ partial · ☐ open. The per-item line numbers further d
 | P1-8 | Single `SeasonConfig`/`SUMMER_MONTHS` | ✅ | One canonical tuple at `config.py:353`; the duplicate/hardcoded defs are gone. |
 | P1-9 | Centralize DB in `core/db.py` | ✅ | Engine extracted to a `core/db.py` leaf (PR #88), cutting the `core ⇄ knowledge` cycle. Residual read-only `ENGINE.connect()` call-site cleanup in `pipeline.py` still tracked here. |
 | P1-10 | Declarative `(predicate, patch)` guardrail table | ☐ | Still 7 chained `_apply_*_guardrail` at `planner.py:1866-1898`. |
-| P2-11 | Delete/quarantine the legacy agent loop | ✅ | `orchestrator.py` deleted; `run_agent_loop` gone; `ENABLE_AGENT_LOOP` kept inert. |
+| P2-11 | Delete/quarantine the legacy agent loop | ✅ | `orchestrator.py`, `run_agent_loop`, `ENABLE_AGENT_LOOP`, and `agent_loop_blocked_by_policy` were removed; no inert flag or branch remains. |
 | P2-12 | Split `analyzer.py` along its seams | ☐ | Open. |
 | P2-13 | De-duplicate `_metric_aliases` / regex tables / scenario tuples | ☐ | Open. |
 | P2-14 | Re-seam `pipeline` ↔ `evidence_planner` | ☐ | Open. |
@@ -119,7 +119,9 @@ Ordered by **(impact × convergence × leverage) ÷ risk**. Every item is a sepa
 10. **Convert the 7 `planner.py` guardrails into a declarative `(predicate, patch)` table** evaluated by one applier. *(Theme 2)*
 
 ### P2 — Cleanups that compound once P0/P1 land
-11. **Delete/quarantine the legacy agent loop** (`orchestrator.py`, `ENABLE_AGENT_LOOP` branch) if Stage 0.2 is permanently active — it is effectively unreachable yet maintained as a second 459-line orchestration engine.
+11. **Legacy agent loop — complete (F10 B5.A, 2026-07-19).** `orchestrator.py`,
+    the `ENABLE_AGENT_LOOP` branch, and its trace residue were removed after Stage
+    0.2 became authoritative; no follow-up deletion remains open.
 12. **Split `analyzer.py` along its seams** → `forecast_cagr.py`, `why_context.py`, `share_resolution.py`, and move chart-building helpers to the visualization layer.
 13. **De-duplicate** `_metric_aliases` (keep `metric_registry.py`), the threshold-rule regex tables, and the scenario-signal tuples.
 14. **Re-seam `pipeline` ↔ `evidence_planner`** so the secondary-evidence loop has one owner (removes the lazy back-import).

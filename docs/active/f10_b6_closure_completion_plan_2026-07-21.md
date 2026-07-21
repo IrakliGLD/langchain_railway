@@ -1,5 +1,9 @@
 # F10 B6 Closure Completion Plan — 2026-07-21
 
+> **Historical completion plan.** The G1–G6 actions described here were the
+> pre-merge plan. They were completed and independently re-audited at the final
+> merge identity; see [`f10_b6_final_independent_closure_2026-07-21.md`](./f10_b6_final_independent_closure_2026-07-21.md).
+
 Response to the independent re-audit
 [`f10_b6_final_independent_closure_2026-07-21.md`](./f10_b6_final_independent_closure_2026-07-21.md)
 (decision: **F10 not yet closed; do not merge the evidence branch yet**).

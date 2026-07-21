@@ -69,7 +69,7 @@ def _runtime(dependencies):
 @pytest.mark.parametrize(
     ("provider", "timeout_seconds", "expected_kwargs"),
     [
-        ("gemini", 5.0, {"timeout": 5000, "max_retries": 1}),
+        ("gemini", 5.0, {"timeout": 5.0, "max_retries": 1}),
         ("openai", 7.0, {"timeout": 7.0}),
         ("nvidia", 9.0, {"timeout": 9.0}),
     ],
@@ -106,6 +106,30 @@ def test_successful_native_call_has_one_attempt_and_provider_specific_timeout(
     assert len(dependencies.claims) == 1
     assert dependencies.finishes == [(dependencies.claims[0], ProviderDeliveryDisposition.COMPLETED)]
     assert (breaker.successes, breaker.failures) == (1, 0)
+
+
+def test_gemini_constructor_timeout_uses_langchain_seconds(monkeypatch):
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+    monkeypatch.setenv("ENAI_GATEWAY_SECRET", "test-gateway")
+    monkeypatch.setenv("ENAI_SESSION_SIGNING_SECRET", "test-session")
+    monkeypatch.setenv("ENAI_EVALUATE_SECRET", "test-evaluate")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google")
+    import core.llm_runtime as llm_runtime
+
+    captured = {}
+
+    class _FakeGemini:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_runtime, "ChatGoogleGenerativeAI", _FakeGemini)
+    monkeypatch.setattr(llm_runtime, "_gemini_llm", None)
+
+    llm_runtime.get_gemini()
+
+    assert captured["request_timeout"] == max(0.001, float(llm_runtime.GEMINI_TIMEOUT_SECONDS or 120.0))
+    assert captured["max_retries"] == 1
+    assert "timeout" not in captured
 
 
 def test_clients_without_invoke_kwargs_preserve_the_historical_call_shape():

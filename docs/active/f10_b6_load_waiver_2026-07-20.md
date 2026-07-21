@@ -11,9 +11,11 @@ Waiver ID:            F10-B6-LOAD-01
 Finding:              F10-E2E-03 — Load gate: the approved representative chat-load
                       envelope (concurrency 2, ≤20 requests, ≤USD 2) was not run.
 Affected exact
-artifact SHA/digest:  backend 65cf93b697e44f08cd03e782aac9949d2336135a (Railway
-                      deployment ffc9ec32; source-build, SHA-bound, no Docker
-                      digest) and frontend
+artifact SHA/digest:  backend 0684dc172eb2bb10a17a2e80941a6940b0882f2d (Railway
+                      deployment e2e73849-c47d-4f4f-8073-76edd2e0df95;
+                      runtime image manifest digest
+                      sha256:319f6774f8197acd88941abae1b81a57bb10d19d98fa28a82e9d5b63c3b5336b)
+                      and frontend
                       fc44fd40946bb0772ab4f178ac376196bec21498. Filled at the
                       F2 freeze; identities verified live (F2 evidence §4).
 Reachable behavior:   No representative concurrent-chat-load observation exists
@@ -57,7 +59,8 @@ Rollback/disable
 action:               None — this waiver enables no code path; it defers an
                       evidence-gathering load run. If the deferred load run later
                       surfaces a defect, the standing rollback path (Railway
-                      redeploy-previous, rehearsed in Phase F4) applies.
+                      previous deployment feff19e0-69d6-42e9-818a-757d76090e2e,
+                      rehearsed in Phase F4) applies.
 ```
 
 ## Note

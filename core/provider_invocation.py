@@ -41,10 +41,11 @@ class ProviderInvocationRuntime:
     @staticmethod
     def _invoke_kwargs(provider: str, timeout_seconds: float) -> dict[str, float | int]:
         if provider == "gemini":
-            # google-genai uses milliseconds and counts the first attempt, so
-            # one attempt disables SDK-owned retries.
+            # langchain-google-genai accepts timeout in seconds and converts it
+            # to the google-genai HTTP millisecond value internally. The wrapper
+            # also counts the first attempt, so one attempt disables SDK retries.
             return {
-                "timeout": max(1, int(timeout_seconds * 1000)),
+                "timeout": max(0.001, float(timeout_seconds)),
                 "max_retries": 1,
             }
         return {"timeout": timeout_seconds}
