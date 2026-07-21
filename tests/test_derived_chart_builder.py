@@ -404,7 +404,7 @@ def _why_frame() -> pd.DataFrame:
             "share_regulated_old_tpp": [0.10 for _ in range(n)],
             "share_regulated_hpp": [0.05 for _ in range(n)],
             "share_ppa_import_total": [0.85 for _ in range(n)],  # aggregate — excluded
-            "price_deregulated_hydro_gel": [90.0 + (i % 12) for i in range(n)],
+            "price_deregulated_ren_gel": [90.0 + (i % 12) for i in range(n)],
         }
     )
 
@@ -693,14 +693,14 @@ class TestLimitDerivedNumCols:
         # The exact column shape from Q3's Stage 3 balancing_driver_enrichment.
         return [
             "balancing_price_gel", "balancing_price_usd",
-            "price_deregulated_hydro_gel", "price_deregulated_hydro_usd",
+            "price_deregulated_ren_gel", "price_deregulated_ren_usd",
             "price_regulated_hpp_gel", "price_regulated_hpp_usd",
             "price_regulated_new_tpp_gel", "price_regulated_new_tpp_usd",
             "price_regulated_old_tpp_gel", "price_regulated_old_tpp_usd",
-            "share_import", "share_deregulated_hydro", "share_regulated_hpp",
+            "share_import", "share_deregulated_ren", "share_regulated_hpp",
             "share_renewable_ppa", "share_thermal_ppa", "share_cfd_scheme",
             "regulated_hpp_tariff_gel", "regulated_old_tpp_tariff_gel",
-            "contribution_deregulated_hydro_gel", "xrate",
+            "contribution_deregulated_ren_gel", "xrate",
         ]
 
     def test_default_cap_is_5(self):

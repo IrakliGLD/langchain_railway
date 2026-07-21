@@ -52,7 +52,7 @@ Georgia’s balancing market is not a real-time balancing market. It functions a
 - Calculated as weighted average of all electricity sold as balancing energy during the month
 - Includes:
   - regulated tariffs
-  - deregulated hydro
+  - deregulated renewable
   - thermal generation
   - PPA/CfD electricity
   - imports
@@ -60,6 +60,16 @@ Georgia’s balancing market is not a real-time balancing market. It functions a
   - **NOT a marginal price**
   - **NOT an hourly market price**
 - Strongly influenced by generation composition and exchange rate
+
+---
+
+### Deregulated Renewable
+**Definition:** The canonical balancing-market category identified as `deregulated_ren`.
+
+**Georgia Context:**
+- Calculated as the configured broad Trade total minus regulated generation, PPA, import, and CfD quantities
+- Its balancing-market share is exposed as `share_deregulated_ren`
+- Use "deregulated renewable" in user-facing text; the former hydro-only name is no longer canonical
 
 ---
 

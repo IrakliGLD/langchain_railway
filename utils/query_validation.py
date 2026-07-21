@@ -372,7 +372,7 @@ def extract_sql_topics(sql: str) -> Set[str]:
         'bilateral': {'bilateral'},
         'renewable_ppa': {'ppa', 'renewable'},
         'thermal_ppa': {'ppa', 'thermal'},
-        'deregulated_hydro': {'hydro', 'deregulated'},
+        'deregulated_ren': {'renewable', 'hydro', 'deregulated'},
     }
 
     # Check tables

@@ -21,8 +21,8 @@ class _FakeResult:
     def keys(self):
         return [
             "date",
-            "price_deregulated_hydro_gel",
-            "price_deregulated_hydro_usd",
+            "price_deregulated_ren_gel",
+            "price_deregulated_ren_usd",
             "price_regulated_hpp_gel",
             "price_regulated_hpp_usd",
         ]
@@ -51,11 +51,11 @@ def test_compute_entity_price_contributions_includes_usd_columns_and_date_filter
     assert len(conn.calls) == 1
     sql, params = conn.calls[0]
 
-    assert "p.p_dereg_usd AS price_deregulated_hydro_usd" in sql
+    assert "p.p_dereg_usd AS price_deregulated_ren_usd" in sql
     assert "AS price_regulated_hpp_usd" in sql
     assert "AS price_regulated_new_tpp_usd" in sql
     assert "AS price_regulated_old_tpp_usd" in sql
-    assert "AS contribution_deregulated_hydro_usd" in sql
+    assert "AS contribution_deregulated_ren_usd" in sql
     assert "AS total_known_contributions_usd" in sql
     assert "AS residual_contribution_ppa_import_usd" in sql
     assert "AS known_price_coverage_ok" in sql
@@ -113,4 +113,4 @@ def test_build_balancing_correlation_df_uses_weighted_tariffs(monkeypatch):
     assert "CfD_scheme" in sql
     assert "qty_cfd_scheme" in sql
     assert "share_cfd_scheme" in sql
-    assert "(s.qty_dereg_hydro + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme)" in sql
+    assert "(s.qty_dereg_ren + s.qty_reg_hpp + s.qty_ren_ppa + s.qty_cfd_scheme)" in sql

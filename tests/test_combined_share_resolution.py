@@ -26,7 +26,7 @@ def test_combined_share_artifact_sums_full_requested_bucket():
             "share_regulated_hpp": [0.15, 0.15],
             "share_regulated_new_tpp": [0.12, 0.10],
             "share_regulated_old_tpp": [0.14, 0.10],
-            "share_deregulated_hydro": [0.135, 0.10],
+            "share_deregulated_ren": [0.135, 0.10],
             "share_import": [0.005, 0.30],
         }
     )
@@ -36,7 +36,7 @@ def test_combined_share_artifact_sums_full_requested_bucket():
         plan={},
         user_query=(
             "In which months was the aggregated share of renewable ppa, thermal ppa, CfD scheme, "
-            "regulated hydro, all regulated thermal and deregulated hydro in balancing electricity more than 99%?"
+            "regulated hydro, all regulated thermal and deregulated renewable in balancing electricity more than 99%?"
         ),
     )
 
@@ -44,7 +44,7 @@ def test_combined_share_artifact_sums_full_requested_bucket():
     assert "June 2020" in summary
     assert "July 2020" not in summary
     assert "99.5%" in summary
-    assert "Deregulated Hydro Generation exceeded" not in summary
+    assert "Deregulated Renewable Generation exceeded" not in summary
     assert "share_regulated_new_tpp" in grounding
     assert "share_cfd_scheme" in grounding
 

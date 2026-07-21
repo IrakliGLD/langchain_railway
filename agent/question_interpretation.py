@@ -679,17 +679,17 @@ _RESIDUAL_THERMAL_TOKENS = (
 )
 
 _RESIDUAL_DEREGULATED_TOKENS = (
-    "deregulated hydro",
+    "deregulated renewable",
+    "deregulated renewables",
     "deregulated plant",
     "deregulated plants",
     "deregulated power plant",
     "deregulated power plants",
-    "deregulated hpp",
 )
 
 _RESIDUAL_HYDRO_ENTITIES = frozenset({"regulated_hpp"})
 _RESIDUAL_THERMAL_ENTITIES = frozenset({"regulated_old_tpp", "regulated_new_tpp"})
-_RESIDUAL_DEREGULATED_ENTITIES = frozenset({"deregulated_hydro"})
+_RESIDUAL_DEREGULATED_ENTITIES = frozenset({"deregulated_ren"})
 
 _MONTH_PATTERN_BY_NUMBER = {
     1: r"\b(january|jan|январ[ьяею]?)\b|იანვ",

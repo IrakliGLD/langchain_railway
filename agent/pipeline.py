@@ -945,7 +945,7 @@ def _should_enrich_balancing_driver_context(
     if any(
         col in ctx.df.columns
         for col in (
-            "price_deregulated_hydro_gel",
+            "price_deregulated_ren_gel",
             "price_regulated_hpp_gel",
             "contribution_regulated_hpp_gel",
         )

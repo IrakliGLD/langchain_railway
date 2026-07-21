@@ -423,7 +423,7 @@ class TestAnalyzerDoesNotMutateAuthoritativePlan:
                 "p_bal_usd": [32.0, 38.0, 35.0],
                 "xrate": [3.1, 3.2, 3.15],
                 "share_import": [0.20, 0.25, 0.22],
-                "share_deregulated_hydro": [0.30, 0.28, 0.31],
+                "share_deregulated_ren": [0.30, 0.28, 0.31],
                 "share_regulated_hpp": [0.10, 0.09, 0.11],
                 "share_renewable_ppa": [0.20, 0.19, 0.18],
                 "enguri_tariff_gel": [10.0, 10.0, 10.0],

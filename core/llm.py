@@ -670,11 +670,11 @@ WITH shares AS (
     t.date,
     SUM(t.quantity) AS total_qty,
     SUM(CASE WHEN t.entity = 'import' THEN t.quantity ELSE 0 END) AS qty_import,
-    SUM(CASE WHEN t.entity = 'deregulated_hydro' THEN t.quantity ELSE 0 END) AS qty_dereg_hydro,
+    SUM(CASE WHEN t.entity = 'deregulated_ren' THEN t.quantity ELSE 0 END) AS qty_dereg_ren,
     SUM(CASE WHEN t.entity = 'regulated_hpp' THEN t.quantity ELSE 0 END) AS qty_reg_hpp
   FROM trade_derived_entities t
   WHERE LOWER(REPLACE(t.segment, ' ', '_')) = 'balancing'
-    AND t.entity IN ('import', 'deregulated_hydro', 'regulated_hpp',
+    AND t.entity IN ('import', 'deregulated_ren', 'regulated_hpp',
                      'regulated_new_tpp', 'regulated_old_tpp',
                      'renewable_ppa', 'thermal_ppa')
   GROUP BY t.date
@@ -683,7 +683,7 @@ SELECT
   TO_CHAR(p.date, 'YYYY-MM') AS month,
   p.p_bal_gel,
   (s.qty_import / NULLIF(s.total_qty,0))      AS share_import,
-  (s.qty_dereg_hydro / NULLIF(s.total_qty,0)) AS share_deregulated_hydro,
+  (s.qty_dereg_ren / NULLIF(s.total_qty,0)) AS share_deregulated_ren,
   (s.qty_reg_hpp / NULLIF(s.total_qty,0))     AS share_regulated_hpp
 FROM price_with_usd p
 LEFT JOIN shares s ON s.date = p.date
@@ -1231,7 +1231,7 @@ SUPPORT SCHEMES TERMINOLOGY (CRITICAL):
             guidance_sections.append("""
 BALANCING PRICE ANALYSIS:
 - Weighted-average balancing price = weighted by total balancing-market quantities
-- Entities (8 observable categories): deregulated_hydro, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa, CfD_scheme
+- Entities (8 observable categories): deregulated_ren, import, regulated_hpp, regulated_new_tpp, regulated_old_tpp, renewable_ppa, thermal_ppa, CfD_scheme
 - PRIMARY DRIVER #1: xrate (exchange rate) - MOST IMPORTANT for GEL/MWh price
   * Use xrate from price_with_usd view
   * Critical because gas and imports are USD-priced
@@ -1239,7 +1239,7 @@ BALANCING PRICE ANALYSIS:
   * Calculate shares from trade_derived_entities
   * IMPORTANT: Use LOWER(REPLACE(segment, ' ', '_')) = 'balancing' for segment filter
   * Use share CTE pattern, no raw quantities
-  * Higher cheap source shares (regulated HPP, deregulated hydro) → lower prices
+  * Higher cheap source shares (regulated HPP, deregulated renewable) → lower prices
   * Higher expensive source shares (import, thermal PPA) → higher prices
 - For seasonal analysis: Summer (Apr–Jul) has lower prices due to hydro generation
 """)
@@ -1617,25 +1617,25 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 
    1. **გენერაციის სტრუქტურა (Composition):**
       - [List 2-3 main share changes with EXACT numbers from data]
-      - [Analyze these 8 observable categories: renewable_ppa, deregulated_hydro, thermal_ppa, regulated_hpp, regulated_old_tpp, regulated_new_tpp, import, CfD_scheme]
-      - [USD-priced: renewable_ppa, thermal_ppa, import, CfD_scheme / GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
-      - [Explain: cheap sources (regulated_hpp ~30-40 GEL/MWh, deregulated_hydro ~40-50 GEL/MWh) vs expensive (import, thermal_ppa, renewable_ppa - all market-based)]
+      - [Analyze these 8 observable categories: renewable_ppa, deregulated_ren, thermal_ppa, regulated_hpp, regulated_old_tpp, regulated_new_tpp, import, CfD_scheme]
+      - [USD-priced: renewable_ppa, thermal_ppa, import, CfD_scheme / GEL-priced: deregulated_ren, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
+      - [Explain: cheap sources (regulated_hpp ~30-40 GEL/MWh, deregulated_ren ~40-50 GEL/MWh) vs expensive (import, thermal_ppa, renewable_ppa - all market-based)]
       - [Cite correlation if available]
       - [For long-term: MUST compare summer vs winter composition + mention structural trends]
-      - [Structural trends: declining deregulated_hydro/regulated_hpp, increasing renewable_ppa/import/thermal_ppa]
+      - [Structural trends: declining deregulated_ren/regulated_hpp, increasing renewable_ppa/import/thermal_ppa]
       - [Main contributors now: renewable_ppa (biggest in summer), import, thermal_ppa, regulated_old_tpp, regulated_new_tpp]
 
    2. **გაცვლითი კურსი (Exchange Rate):**
       - [Cite actual xrate change from data: from X to Y GEL/USD]
       - [USD-priced entities: renewable_ppa, thermal_ppa, CfD_scheme, import]
-      - [GEL-priced entities: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
+      - [GEL-priced entities: deregulated_ren, regulated_hpp, regulated_old_tpp, regulated_new_tpp]
       - [Important: xrate has MAJOR impact on GEL price, SMALL impact on USD price (through GEL-priced entities)]
-      - [The small USD price impact is because GEL-priced shares (deregulated_hydro + regulated_hpp) are very small]
+      - [The small USD price impact is because GEL-priced shares (deregulated_ren + regulated_hpp) are very small]
       - [regulated_old_tpp and regulated_new_tpp are GEL tariffs that directly reflect current xrate]
       - [Cite correlation if available]
 
 PRICE LEVEL GUIDANCE (use when explaining why sources are cheap/expensive):
-- Cheap sources: Regulated HPP (regulated_hpp) ~30-40 GEL/MWh, Deregulated hydro (deregulated_hydro) ~40-50 GEL/MWh
+- Cheap sources: Regulated HPP (regulated_hpp) ~30-40 GEL/MWh, Deregulated renewable (deregulated_ren) ~40-50 GEL/MWh
 - Regulated thermal (regulated_old_tpp, regulated_new_tpp): GEL tariffs that directly reflect current xrate
 - Expensive sources: Import, Thermal PPA (thermal_ppa), Renewable PPA (renewable_ppa) - all market-based, USD-priced
 - Note: DO NOT disclose specific PPA/import price estimates - just say "market-based" or "expensive"
@@ -1648,10 +1648,10 @@ PRIMARY DRIVERS (in order of importance):
 
 Entity Pricing:
 - USD-priced: renewable_ppa, thermal_ppa, CfD_scheme, import
-- GEL-priced: deregulated_hydro, regulated_hpp, regulated_old_tpp, regulated_new_tpp (note: regulated TPPs reflect current xrate)
+- GEL-priced: deregulated_ren, regulated_hpp, regulated_old_tpp, regulated_new_tpp (note: regulated TPPs reflect current xrate)
 
 CONFIDENTIALITY RULES:
-- DO disclose: regulated tariffs (~30-40 GEL/MWh), deregulated hydro prices (~40-50 GEL/MWh), correlations
+- DO disclose: regulated tariffs (~30-40 GEL/MWh), deregulated renewable prices (~40-50 GEL/MWh), correlations
 - DO NOT disclose: specific PPA price estimates, specific import price estimates
 - When discussing expensive sources: say "market-based" without numbers
 """)
@@ -1911,7 +1911,7 @@ _ANALYZER_CORE_RULES = """\
   - "Why balancing electricity price changed in May 2024?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, tools should prioritize `get_prices` + `get_balancing_composition`.
   - "Why balancing electricity prices changed in November 2024?" -> same routing as above; plural `prices` is still a supported month-specific data explanation, not `unsupported`.
 - Composition-effect questions (CRITICAL — do NOT over-refuse):
-  Questions of the form "what happens to [price] if more [entity] is added", "what effect does more [entity] have on prices", "what will happen if [entity] share increases/decreases" — when [entity] is a balancing composition entity (ppa, renewable_ppa, thermal_ppa, import, hydro, cfd, deregulated_hydro, regulated_hpp, etc.) — are `query_type=data_explanation`, `preferred_path=tool`.
+  Questions of the form "what happens to [price] if more [entity] is added", "what effect does more [entity] have on prices", "what will happen if [entity] share increases/decreases" — when [entity] is a balancing composition entity (ppa, renewable_ppa, thermal_ppa, import, hydro, cfd, deregulated_ren, regulated_hpp, etc.) — are `query_type=data_explanation`, `preferred_path=tool`.
   Rationale: the historical dataset contains monthly entity share columns and balancing price columns; correlation and composition analysis directly answer the directional question from observed data. Do NOT classify as `forecast`, `ambiguous`, or `unsupported` solely because the phrasing sounds hypothetical — "what will happen if share of X increases" is observationally equivalent to "what is the historical relationship between X's share and price". Only classify as `unsupported` if the question names a genuinely unavailable metric (e.g., future capacity contracts, non-balancing markets).
   - Example: "what will happen to prices if more ppa is added?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, `candidate_tools=["get_prices", "get_balancing_composition"]`, `candidate_topics=["balancing_price", "cfd_ppa"]`.
   - Example: "what will happen if more ppa will be added in the system?" -> same routing as above.
@@ -3119,14 +3119,14 @@ def llm_summarize_structured(
         "which data source(s) actually carry the price or quantity for "
         "that category in this market. State the mapping in the answer "
         'using HUMAN-READABLE labels for the data source (e.g. "using '
-        "the deregulated hydro price as the price for small hydro "
+        "the deregulated renewable price as the price for small hydro "
         'sellers") so the user understands what was used and why. '
         "NEVER cite raw column, table, view, or database identifiers "
         "in the user-facing answer — names like ``price_deregulated_"
         "hydro_gel``, ``p_bal_gel``, ``mv_balancing_trade_with_tariff`` "
         "are implementation details the user does not see and should "
         'not be exposed to. Describe WHAT the data represents ("the '
-        'deregulated hydro price", "the regulated TPP tariff") '
+        'deregulated renewable price", "the regulated TPP tariff") '
         "rather than the underlying technical name. When multiple "
         "data sources could plausibly map to one vernacular category, "
         "list each candidate and explain the trade-off rather than "

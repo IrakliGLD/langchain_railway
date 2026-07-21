@@ -344,7 +344,7 @@ def test_structured_summary_prompt_includes_data_shape_rule(monkeypatch):
     # labels and forbid raw column/database identifiers in the
     # user-facing answer. Before this revision the rule's own example
     # used ``<column_name>`` in backticks and the LLM copied that
-    # pattern verbatim — leaking ``price_deregulated_hydro_gel`` into
+    # pattern verbatim — leaking ``price_deregulated_ren_gel`` into
     # user-facing prose.
     assert "human-readable" in system_lower
     assert "never cite raw column" in system_lower or "raw column" in system_lower

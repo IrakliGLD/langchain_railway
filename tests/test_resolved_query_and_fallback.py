@@ -61,15 +61,15 @@ def test_normalize_passthrough_valid_entity():
 
 def test_normalize_underscore_form():
     """Space-separated form is normalized to underscore."""
-    result = normalize_balancing_entities(["deregulated hydro"])
-    assert "deregulated_hydro" in result
+    result = normalize_balancing_entities(["deregulated renewable"])
+    assert "deregulated_ren" in result
 
 
 def test_normalize_cheap_energy_expands_to_cheap_tier():
     """'cheap energy' expands to all cheap-tier entities."""
     result = normalize_balancing_entities(["cheap energy"])
     assert "regulated_hpp" in result
-    assert "deregulated_hydro" in result
+    assert "deregulated_ren" in result
     # Should not include expensive entities
     assert "thermal_ppa" not in result
     assert "import" not in result
@@ -90,7 +90,7 @@ def test_normalize_mixed_valid_and_semantic():
     result = normalize_balancing_entities(["import", "cheap energy"])
     assert "import" in result
     assert "regulated_hpp" in result
-    assert "deregulated_hydro" in result
+    assert "deregulated_ren" in result
 
 
 def test_normalize_mixed_valid_and_unresolved_returns_none():
@@ -101,10 +101,10 @@ def test_normalize_mixed_valid_and_unresolved_returns_none():
 
 def test_normalize_label_substring_match():
     """Label-based resolution works for partial matches."""
-    result = normalize_balancing_entities(["hydro"])
+    result = normalize_balancing_entities(["renewable"])
     assert len(result) > 0
-    # Should match at least deregulated_hydro via label "deregulated hydro"
-    assert "deregulated_hydro" in result
+    # Partial canonical label should resolve to deregulated_ren.
+    assert "deregulated_ren" in result
 
 
 def test_normalize_nonsense_returns_none():
@@ -146,7 +146,7 @@ def test_normalize_residual_bucket_alias_expands_to_canonical_residual_component
 def test_extract_balancing_entities_supports_full_eight_component_vocabulary():
     result = extract_balancing_entities(
         "aggregated share of renewable ppa, thermal ppa, cfd_scheme, regulated hydro, "
-        "all regulated thermal and deregulated hydro in balancing electricity"
+        "all regulated thermal and deregulated renewable in balancing electricity"
     )
     assert result == [
         "renewable_ppa",
@@ -155,13 +155,13 @@ def test_extract_balancing_entities_supports_full_eight_component_vocabulary():
         "regulated_hpp",
         "regulated_new_tpp",
         "regulated_old_tpp",
-        "deregulated_hydro",
+        "deregulated_ren",
     ]
 
 
 def test_extract_balancing_entities_does_not_match_regulated_inside_deregulated():
-    result = extract_balancing_entities("deregulated hydro")
-    assert result == ["deregulated_hydro"]
+    result = extract_balancing_entities("deregulated renewable")
+    assert result == ["deregulated_ren"]
 
 
 def test_extract_balancing_entities_does_not_match_old_group_inside_new_regulated_tpp():

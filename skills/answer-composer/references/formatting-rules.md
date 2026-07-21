@@ -30,7 +30,7 @@
 | tariff_gel | tariff in GEL |
 | tariff_usd | tariff in USD |
 | share_regulated_hpp | regulated HPP share |
-| share_deregulated_hydro | deregulated hydro share |
+| share_deregulated_ren | deregulated renewable share |
 | share_import | import share |
 | share_thermal_ppa | thermal PPA share |
 | share_renewable_ppa | renewable PPA share |

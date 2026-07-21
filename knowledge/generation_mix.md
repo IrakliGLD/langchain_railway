@@ -110,7 +110,7 @@ Thermal generation uses imported natural gas and cannot be considered fully dome
 ### 4.1 Correct Classification
 
 #### Local Generation (NO import dependence)
-- Hydro (regulated HPP, deregulated hydro, reservoir, run-of-river)
+- Hydro (HPP, reservoir, run-of-river)
 - Wind (renewable, no fuel imports)
 - Solar (renewable, no fuel imports)
 

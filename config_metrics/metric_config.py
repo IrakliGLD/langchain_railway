@@ -13,7 +13,7 @@ from typing import Any
 
 BALANCING_SHARE_METADATA: dict[str, dict[str, Any]] = {
     "share_regulated_hpp": {"label": "regulated HPP", "cost": "cheap", "usd_linked": False},
-    "share_deregulated_hydro": {"label": "deregulated hydro", "cost": "cheap", "usd_linked": False},
+    "share_deregulated_ren": {"label": "deregulated renewable", "cost": "cheap", "usd_linked": False},
     "share_renewable_ppa": {"label": "renewable PPA", "cost": "moderate", "usd_linked": True},
     "share_cfd_scheme": {"label": "CfD scheme", "cost": "moderate", "usd_linked": True},
     "share_thermal_ppa": {"label": "thermal PPA", "cost": "expensive", "usd_linked": True},
@@ -113,9 +113,9 @@ SEMANTIC_TO_COLUMNS: dict[str, list[str]] = {
     "energy security": ["import_dependency_ratio", "local_generation", "total_domestic_generation"],
     "self-sufficiency": ["local_generation", "total_domestic_generation", "import_dependency_ratio"],
     # Share-based metrics for correlation resolution
-    "hydro": ["share_all_hydro", "share_deregulated_hydro", "share_regulated_hpp"],
+    "hydro": ["share_all_hydro", "share_deregulated_ren", "share_regulated_hpp"],
     "import": ["share_import"],
-    "renewable": ["share_all_renewables", "share_renewable_ppa"],
+    "renewable": ["share_all_renewables", "share_deregulated_ren", "share_renewable_ppa"],
     "thermal": ["share_regulated_old_tpp", "share_regulated_new_tpp"],
     "ppa": ["share_all_ppa", "share_renewable_ppa", "share_thermal_ppa"],
     "cfd": ["share_cfd_scheme"],

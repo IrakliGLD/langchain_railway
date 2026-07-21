@@ -87,7 +87,7 @@ SELECT
     p.xrate,
     MAX(CASE WHEN t.entity = 'import' THEN t.share ELSE 0 END) as share_import,
     MAX(CASE WHEN t.entity = 'renewable_ppa' THEN t.share ELSE 0 END) as share_renewable_ppa,
-    MAX(CASE WHEN t.entity = 'deregulated_hydro' THEN t.share ELSE 0 END) as share_deregulated_hydro,
+    MAX(CASE WHEN t.entity = 'deregulated_ren' THEN t.share ELSE 0 END) as share_deregulated_ren,
     MAX(CASE WHEN t.entity = 'thermal_ppa' THEN t.share ELSE 0 END) as share_thermal_ppa
 FROM price_with_usd p
 LEFT JOIN (
@@ -144,7 +144,7 @@ SELECT
     p.p_bal_gel,
     p.xrate,
     MAX(CASE WHEN t.entity = 'regulated_hpp' THEN t.share ELSE 0 END) as share_regulated_hpp,
-    MAX(CASE WHEN t.entity = 'deregulated_hydro' THEN t.share ELSE 0 END) as share_deregulated_hydro,
+    MAX(CASE WHEN t.entity = 'deregulated_ren' THEN t.share ELSE 0 END) as share_deregulated_ren,
     MAX(CASE WHEN t.entity = 'thermal_ppa' THEN t.share ELSE 0 END) as share_thermal_ppa,
     MAX(CASE WHEN t.entity = 'renewable_ppa' THEN t.share ELSE 0 END) as share_renewable_ppa,
     MAX(CASE WHEN t.entity = 'import' THEN t.share ELSE 0 END) as share_import
@@ -176,7 +176,7 @@ SELECT
     p.p_bal_gel,
     p.xrate,
     MAX(CASE WHEN t.entity = 'renewable_ppa' THEN t.share ELSE 0 END) as share_renewable_ppa,
-    MAX(CASE WHEN t.entity = 'deregulated_hydro' THEN t.share ELSE 0 END) as share_deregulated_hydro
+    MAX(CASE WHEN t.entity = 'deregulated_ren' THEN t.share ELSE 0 END) as share_deregulated_ren
 FROM price_with_usd p
 LEFT JOIN (
     SELECT time_month, entity,
@@ -259,8 +259,8 @@ WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
 GROUP BY time_month
 ORDER BY time_month;
 
-EXAMPLE 3.3 - PPA vs Deregulated Hydro Comparison:
-Query: "Compare renewable PPA and deregulated hydro shares in balancing electricity"
+EXAMPLE 3.3 - PPA vs Deregulated Renewable Comparison:
+Query: "Compare renewable PPA and deregulated renewable shares in balancing electricity"
 Plan:
 {
   "intent": "comparison",
@@ -271,9 +271,9 @@ Plan:
 SELECT
     time_month,
     MAX(CASE WHEN entity = 'renewable_ppa' THEN share ELSE 0 END) as renewable_ppa_share_pct,
-    MAX(CASE WHEN entity = 'deregulated_hydro' THEN share ELSE 0 END) as deregulated_hydro_share_pct,
+    MAX(CASE WHEN entity = 'deregulated_ren' THEN share ELSE 0 END) as deregulated_ren_share_pct,
     MAX(CASE WHEN entity = 'renewable_ppa' THEN quantity ELSE 0 END) as renewable_ppa_thousand_mwh,
-    MAX(CASE WHEN entity = 'deregulated_hydro' THEN quantity ELSE 0 END) as deregulated_hydro_thousand_mwh
+    MAX(CASE WHEN entity = 'deregulated_ren' THEN quantity ELSE 0 END) as deregulated_ren_thousand_mwh
 FROM (
     SELECT
         time_month,
@@ -285,7 +285,7 @@ FROM (
       AND time_month >= '2022-01'
     GROUP BY time_month, entity
 ) sub
-WHERE entity IN ('renewable_ppa', 'deregulated_hydro')
+WHERE entity IN ('renewable_ppa', 'deregulated_ren')
 GROUP BY time_month
 ORDER BY time_month;
 
@@ -833,7 +833,7 @@ SELECT
     p.xrate,
     MAX(CASE WHEN t.entity = 'import' THEN t.share ELSE 0 END) as share_import,
     MAX(CASE WHEN t.entity = 'renewable_ppa' THEN t.share ELSE 0 END) as share_renewable_ppa,
-    MAX(CASE WHEN t.entity = 'deregulated_hydro' THEN t.share ELSE 0 END) as share_deregulated_hydro,
+    MAX(CASE WHEN t.entity = 'deregulated_ren' THEN t.share ELSE 0 END) as share_deregulated_ren,
     MAX(CASE WHEN t.entity = 'thermal_ppa' THEN t.share ELSE 0 END) as share_thermal_ppa
 FROM price_with_usd p
 LEFT JOIN (
@@ -890,7 +890,7 @@ SELECT
     p.p_bal_gel,
     p.xrate,
     MAX(CASE WHEN t.entity = 'regulated_hpp' THEN t.share ELSE 0 END) as share_regulated_hpp,
-    MAX(CASE WHEN t.entity = 'deregulated_hydro' THEN t.share ELSE 0 END) as share_deregulated_hydro,
+    MAX(CASE WHEN t.entity = 'deregulated_ren' THEN t.share ELSE 0 END) as share_deregulated_ren,
     MAX(CASE WHEN t.entity = 'thermal_ppa' THEN t.share ELSE 0 END) as share_thermal_ppa,
     MAX(CASE WHEN t.entity = 'renewable_ppa' THEN t.share ELSE 0 END) as share_renewable_ppa,
     MAX(CASE WHEN t.entity = 'import' THEN t.share ELSE 0 END) as share_import
@@ -922,7 +922,7 @@ SELECT
     p.p_bal_gel,
     p.xrate,
     MAX(CASE WHEN t.entity = 'renewable_ppa' THEN t.share ELSE 0 END) as share_renewable_ppa,
-    MAX(CASE WHEN t.entity = 'deregulated_hydro' THEN t.share ELSE 0 END) as share_deregulated_hydro
+    MAX(CASE WHEN t.entity = 'deregulated_ren' THEN t.share ELSE 0 END) as share_deregulated_ren
 FROM price_with_usd p
 LEFT JOIN (
     SELECT time_month, entity,
@@ -1006,8 +1006,8 @@ WHERE LOWER(REPLACE(segment, ' ', '_')) = 'balancing'
 GROUP BY time_month
 ORDER BY time_month;
 
-EXAMPLE 3.3 - PPA vs Deregulated Hydro Comparison:
-Query: "Compare renewable PPA and deregulated hydro shares in balancing electricity"
+EXAMPLE 3.3 - PPA vs Deregulated Renewable Comparison:
+Query: "Compare renewable PPA and deregulated renewable shares in balancing electricity"
 Plan:
 {
   "intent": "comparison",
@@ -1018,9 +1018,9 @@ Plan:
 SELECT
     time_month,
     MAX(CASE WHEN entity = 'renewable_ppa' THEN share ELSE 0 END) as renewable_ppa_share_pct,
-    MAX(CASE WHEN entity = 'deregulated_hydro' THEN share ELSE 0 END) as deregulated_hydro_share_pct,
+    MAX(CASE WHEN entity = 'deregulated_ren' THEN share ELSE 0 END) as deregulated_ren_share_pct,
     MAX(CASE WHEN entity = 'renewable_ppa' THEN quantity ELSE 0 END) as renewable_ppa_thousand_mwh,
-    MAX(CASE WHEN entity = 'deregulated_hydro' THEN quantity ELSE 0 END) as deregulated_hydro_thousand_mwh
+    MAX(CASE WHEN entity = 'deregulated_ren' THEN quantity ELSE 0 END) as deregulated_ren_thousand_mwh
 FROM (
     SELECT
         time_month,
@@ -1032,7 +1032,7 @@ FROM (
       AND time_month >= '2022-01'
     GROUP BY time_month, entity
 ) sub
-WHERE entity IN ('renewable_ppa', 'deregulated_hydro')
+WHERE entity IN ('renewable_ppa', 'deregulated_ren')
 GROUP BY time_month
 ORDER BY time_month;
 

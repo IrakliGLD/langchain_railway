@@ -566,7 +566,7 @@ def _build_clarification_options(ctx: QueryContext) -> List[str]:
 
     if clarify_reason == "underdefined_computed_target":
         if any(signal in query_lower for signal in ("remaining", "residual", "excluding", "except")):
-            _add("Treat remaining energy as the residual after excluding regulated hydro, regulated thermals, and deregulated hydro.")
+            _add("Treat remaining energy as the residual after excluding regulated hydro, regulated thermals, and deregulated renewable.")
             _add("Treat remaining energy as the existing PPA/CfD/import residual layer.")
             _add("List the exact components that should be included in the remaining-energy bucket, and I will calculate it for the requested months.")
             return options[:3]
@@ -1366,7 +1366,7 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
         (
             "Target bucket = Renewable PPA + Import + Thermal PPA + CfD Scheme."
             if explicit_components
-            else "Remaining bucket = balancing electricity excluding regulated hydro, regulated thermals, and deregulated hydro."
+            else "Remaining bucket = balancing electricity excluding regulated hydro, regulated thermals, and deregulated renewable."
         ),
         "This corresponds to the residual PPA/CfD/import layer in the current balancing-price decomposition.",
         "",
