@@ -59,16 +59,36 @@ Edge (the browser already moved).
 
 ✅ Already live at `d52a97e` (§1). No action.
 
-## 4. Post-freeze verification (assistant re-runs once F2.a/F2.b land)
+## 4. Post-freeze verification — COMPLETE (2026-07-20)
 
-| Surface | Expected (frozen) | Observed | Status |
+**The frozen frontend identity moved `d52a97e` → `fc44fd4` during F2.** Running
+the edge deploy at `d52a97e` failed `edge:verify`: the F1.4 `.gitattributes`
+edit had staled the edge-source-manifest (which hashes `.gitattributes`).
+Regenerating it produced frontend `main` `fc44fd40946bb0772ab4f178ac376196bec21498`,
+the browser auto-redeployed to it, and Edge was realigned to it. The backend CI
+was separately unblocked by regenerating the requirements lock (upstream
+`langsmith 0.10.7` drift) before the PR #136 merge.
+
+| Surface | Frozen identity | Observed | Status |
 |---|---|---|---|
-| Browser `app_version` | `d52a97e3a3de34754444f5eeb02c2f3a9f1f5509` | `d52a97e3a3de34754444f5eeb02c2f3a9f1f5509` | ✅ pre-verified |
-| Edge `X-Enai-Edge-Version` (all 9) | `d52a97e3a3de34754444f5eeb02c2f3a9f1f5509` | _fill after F2.b_ | ⏳ |
-| Backend `/versionz` `git_sha` | `<main merge SHA>` | _fill after F2.a_ | ⏳ |
-| Backend Railway image digest | recorded + bound to SHA + rollback target | _fill after F2.a_ | ⏳ |
+| Browser `app_version` | `fc44fd40946bb0772ab4f178ac376196bec21498` | same | ✅ live |
+| Edge `X-Enai-Edge-Version` (all 9) | `fc44fd40946bb0772ab4f178ac376196bec21498` | same (deploy #20 self-verified all 9) | ✅ live |
+| Backend `/versionz` `git_sha` | `65cf93b697e44f08cd03e782aac9949d2336135a` | same (via `dashboard.galdava.com/versionz`) | ✅ |
+| Backend Railway deployment | `65cf93b` (Merge PR #136) | deployment `ffc9ec32` ACTIVE + healthy (`/readyz` 200) | ✅ |
+| Backend rollback target | previous deploy | `2f2a310` (PR #135), REMOVED/redeployable | ✅ |
+| Post Deploy Smoke | `fc44fd4` | run #246 green (47s) | ✅ |
 
-**Exit:** browser + all nine Edge functions report the single frontend SHA
-`d52a97e…`; the backend runs the merge SHA bound to its Railway image digest and
-a named rollback target. Only then does Phase F3 gather integrated evidence at
-this frozen identity.
+Railway source-builds the backend (Nixpacks) and rebuilds per deploy, so there
+exposes the runtime image digest in the deployment **Build log** (`exporting to
+docker image format`), so B1.A is satisfied by **capturing** it — no amendment
+needed. Captured for the current `65cf93b` deploy (`feff19e0`): manifest digest
+`sha256:b379121959…ffbe4a3` (full values + config/base/snapshot digests in the
+F3 runbook §8). The **definitive closure digest is recorded at the G5 final
+deploy**, bound to `/versionz`, the Railway deployment, release manifest, SBOM,
+and rollback target.
+
+**Frontend/source freeze reached:** browser + all nine Edge functions report the
+single frontend SHA `fc44fd4`; the backend runs `65cf93b` (deployment
+`ffc9ec32`) with rollback target `2f2a310`. The B1.A runtime-digest control
+remains open. Phase F3 evidence is gathered at these identities — see
+[`f10_b6_f3_evidence_runbook`](./f10_b6_f3_evidence_runbook_2026-07-20.md) §3.
