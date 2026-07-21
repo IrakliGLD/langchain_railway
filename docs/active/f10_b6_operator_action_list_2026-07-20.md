@@ -1,4 +1,9 @@
-# F10 B6 — Remaining Operator Action List — 2026-07-20
+# F10 B6 — Historical Operator Dispatch Checklist — 2026-07-20
+
+> This file preserves the original dispatch sequence; its checkboxes are not a
+> current status ledger. Use
+> [`f10_b6_f3_evidence_runbook_2026-07-20.md`](./f10_b6_f3_evidence_runbook_2026-07-20.md)
+> and the latest independent closure audit for current pass/pending status.
 
 Single "start here" checklist for everything left to close F10, in order.
 All repo-side code/doc work (Phase F1) is done, audited, and pushed:

@@ -59,12 +59,12 @@ run is itself proof the artifact was built at the exact frozen SHA.
 |---|---|---|---|---|
 | 1 | Frontend release evidence | `frontend-release-evidence` run **#2** (artifact `frontend-release-production-<fc44fd4>`) | `fc44fd4` | ✅ green (44s) |
 | 2 | Backend release evidence | run **`29761159168`** (artifact `backend-production-<65cf93b>`) | `65cf93b` | ✅ green — embedded **and** OCI-labeled revision == SHA, non-root, SBOM, pip-audit |
-| 3 | Railway image binding | deployment **`ffc9ec32`** (project `b15aea53` / service `c274d6d3` / env `475e29b6`) | `65cf93b` | ✅ ACTIVE + healthy; Railway source-build ⇒ SHA-bound (no separate Docker digest), per plan |
+| 3 | Railway image binding | deployment **`ffc9ec32`** (project `b15aea53` / service `c274d6d3` / env `475e29b6`) | `65cf93b` | ⚠️ partial — ACTIVE + healthy and source-SHA-bound, but the B1.A runtime image digest is not recorded |
 | 4 | Post Deploy Smoke | run **#246** | `fc44fd4` | ✅ green (47s) |
 | 5 | Live Browser Proof + axe ×3 | run **#8** | `fc44fd4` | ✅ green (1m19s) |
 | 6 | Disposable-DB regression | _pending_ | — | ⏳ operator (throwaway DB, never prod `qvmqmmcglqmhachqaezt`) |
 | 7 | `/versionz` | `dashboard.galdava.com/versionz` (`X-App-Key`) | `65cf93b` | ✅ `git_sha == 65cf93b697…` |
-| 8 | Manual a11y checklist | programmatic authenticated pass (2026-07-21, browser pane) — see §6 | `fc44fd4` | ✅ structural pass green; only the SR-listen attestation is operator-residual |
+| 8 | Manual a11y checklist | programmatic authenticated pass (2026-07-21, browser pane) — see §6 | `fc44fd4` | ⚠️ partial — structural pass green; SR-listen attestation remains operator-residual |
 
 ## 4. Exit
 

@@ -1213,21 +1213,22 @@ class TestExecuteRemainingEvidenceParallel:
         return ctx
 
     def test_prefetch_runs_steps_concurrently(self, monkeypatch):
-        def slow_mock(inv):
-            time.sleep(0.3)
+        overlap_barrier = threading.Barrier(2)
+
+        def overlap_mock(inv):
+            # Prove both calls are in flight together. A serial implementation
+            # cannot satisfy the barrier and the evidence assertions below fail,
+            # without relying on host-specific scheduling or wall-clock speed.
+            overlap_barrier.wait(timeout=5.0)
             return self._df_result(f"val_{inv.name}")
 
-        monkeypatch.setattr("agent.evidence_planner.execute_tool", slow_mock)
+        monkeypatch.setattr("agent.evidence_planner.execute_tool", overlap_mock)
         ctx = self._two_step_ctx()
 
-        t0 = time.time()
         ctx = execute_remaining_evidence(ctx)
-        elapsed = time.time() - t0
 
         assert "r1" in ctx.evidence_collected
         assert "r2" in ctx.evidence_collected
-        # Two 0.3s calls serially take >= 0.6s; prefetched they overlap.
-        assert elapsed < 0.55, f"prefetch did not run concurrently: {elapsed:.2f}s"
 
     def test_storage_order_is_plan_order_even_when_first_step_slower(self, monkeypatch):
         def uneven_mock(inv):
