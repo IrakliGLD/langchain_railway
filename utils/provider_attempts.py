@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -137,6 +138,8 @@ def claim_provider_attempt(provider: str, stage: str) -> ProviderAttemptToken:
 def finish_provider_attempt(
     token: ProviderAttemptToken,
     disposition: ProviderDeliveryDisposition,
+    *,
+    failure_reason: str = "",
 ) -> None:
     if token.bound:
         with _ATTEMPT_LOCK:
@@ -144,14 +147,25 @@ def finish_provider_attempt(
             if record is not None:
                 record.state = disposition
                 record.updated_monotonic = time.monotonic()
-    log.info(
-        "Provider execution attempt finished. provider=%s stage=%s request_id=%s actor_binding=%s disposition=%s",
-        token.provider,
-        token.stage,
-        token.request_id,
-        token.actor_binding,
-        disposition.value,
-    )
+    if failure_reason:
+        log.info(
+            "Provider execution attempt finished. provider=%s stage=%s request_id=%s actor_binding=%s disposition=%s failure_reason=%s",
+            token.provider,
+            token.stage,
+            token.request_id,
+            token.actor_binding,
+            disposition.value,
+            failure_reason,
+        )
+    else:
+        log.info(
+            "Provider execution attempt finished. provider=%s stage=%s request_id=%s actor_binding=%s disposition=%s",
+            token.provider,
+            token.stage,
+            token.request_id,
+            token.actor_binding,
+            disposition.value,
+        )
 
 
 # Exception type names that identify a locally-enforced client timeout across
@@ -210,6 +224,66 @@ def classify_provider_failure(error: BaseException) -> ProviderDeliveryDispositi
     return ProviderDeliveryDisposition.AMBIGUOUS
 
 
+# Enum-shaped tokens only (INVALID_ARGUMENT, API_KEY_INVALID, ...). Provider
+# error MESSAGES can echo request content, so free text must never pass.
+_SAFE_REASON_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,40}$")
+
+
+def _error_info_reasons(details: Any) -> list[str]:
+    """Pull google.rpc ErrorInfo ``reason`` constants out of an error payload."""
+    if isinstance(details, dict):
+        inner = details.get("error")
+        details = inner.get("details") if isinstance(inner, dict) else details.get("details")
+    reasons: list[str] = []
+    if isinstance(details, list):
+        for item in details[:8]:
+            if isinstance(item, dict):
+                reason = item.get("reason")
+                if isinstance(reason, str) and _SAFE_REASON_RE.match(reason):
+                    reasons.append(reason)
+    return reasons
+
+
+def extract_failure_reason(error: BaseException) -> str:
+    """Best-effort content-free reason string for a provider failure.
+
+    Added after the 2026-07-22 embedding outage: every Gemini query-embedding
+    call was failing 400 for weeks of undiagnosable "provider call failed:
+    ClientError" logs, because this module (correctly) refuses to log provider
+    error messages. The compromise: emit only the HTTP status code plus
+    strictly enum-shaped provider constants (e.g. ``INVALID_ARGUMENT``,
+    ``API_KEY_INVALID``) validated by ``_SAFE_REASON_RE``, walking the cause
+    chain the same bounded way as ``_is_timeout_error``. Returns "" when
+    nothing safe is extractable.
+    """
+    status_code: int | None = None
+    tokens: list[str] = []
+    current: BaseException | None = error
+    seen = 0
+    while current is not None and seen < 5:
+        if status_code is None:
+            raw = getattr(current, "code", None)
+            if raw is None:
+                raw = getattr(current, "status_code", None)
+            if raw is None:
+                response = getattr(current, "response", None)
+                raw = getattr(response, "status_code", None)
+            try:
+                status_code = int(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                status_code = None
+        status = getattr(current, "status", None)
+        if isinstance(status, str) and _SAFE_REASON_RE.match(status) and status not in tokens:
+            tokens.append(status)
+        for reason in _error_info_reasons(getattr(current, "details", None)):
+            if reason not in tokens:
+                tokens.append(reason)
+        current = current.__cause__ or current.__context__
+        seen += 1
+    parts = ([str(status_code)] if status_code is not None else []) + tokens
+    return "/".join(parts)
+
+
 def wrap_provider_failure(
     error: BaseException,
     *,
@@ -220,8 +294,10 @@ def wrap_provider_failure(
     if isinstance(error, ProviderExecutionError):
         return error
     resolved = disposition or classify_provider_failure(error)
+    reason = extract_failure_reason(error)
+    suffix = f" [{reason}]" if reason else ""
     return ProviderExecutionError(
-        f"provider call failed: {type(error).__name__}",
+        f"provider call failed: {type(error).__name__}{suffix}",
         provider=provider,
         stage=stage,
         disposition=resolved,

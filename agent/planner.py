@@ -74,6 +74,13 @@ log = logging.getLogger("Enai")
 
 # Date/window helpers support analyzer guardrails and downstream tool parameter resolution.
 
+# Maximum age of an analyzer-resolved window end before it is treated as the
+# LLM's stale-calendar invention for a dateless query (see the stale-window
+# guard in ``resolve_tool_params``). Monthly data plus publication lag means a
+# legitimate "latest" window always ends within ~2 months of today; the
+# analyzer's hallucinated windows end 18+ months back.
+_STALE_ANALYZER_WINDOW_MAX_AGE_DAYS = 120
+
 
 def _expand_single_month_explanation_window(
     qa: QuestionAnalysis,
@@ -1015,6 +1022,32 @@ def resolve_tool_params(
             )
             start_date = None
             end_date = None
+
+    # Mirror guard for the OPPOSITE failure (2026-07-22): the analyzer LLM is
+    # never told the current date, so for queries whose text names no dates it
+    # can emit an absolute window from its training-era calendar (observed:
+    # 2023-01-01..2024-12-31 for a dateless drivers question asked in July
+    # 2026, silently analyzing 18-month-stale data). When regex extraction
+    # finds no dates in the query text and the resolved window ends more than
+    # ``_STALE_ANALYZER_WINDOW_MAX_AGE_DAYS`` before today, the window is the
+    # model's invention, not the user's request — clear it so tool defaults
+    # (latest rows) apply. Explicit user dates always survive because
+    # ``extract_date_range`` would have found them.
+    if end_date:
+        end_dt = _parse_iso_date(end_date)
+        if (
+            end_dt is not None
+            and (date.today() - end_dt).days > _STALE_ANALYZER_WINDOW_MAX_AGE_DAYS
+        ):
+            regex_start, regex_end = extract_date_range(effective_query)
+            if regex_start is None and regex_end is None:
+                log.info(
+                    "Analyzer resolved stale window (%s-%s) for dateless query; clearing so tools fetch latest data",
+                    start_date,
+                    end_date,
+                )
+                start_date = None
+                end_date = None
 
     # Sanity check: if the query is a comparison or trend but dates collapsed
     # to a single point, fall back to regex for a wider range.

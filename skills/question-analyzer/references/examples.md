@@ -117,3 +117,21 @@ Expected shape:
 - `routing.needs_sql = false`
 - `knowledge.candidate_topics` should prioritize `market_structure`
 - `classification.intent` should reflect eligibility or participation requirements, not a generic term definition
+
+## Example 6
+
+Input:
+
+`why price did not drop in surplus?`
+
+Expected shape:
+
+- `classification.query_type = conceptual_definition`
+- `classification.needs_clarification = false`
+- `routing.preferred_path = knowledge`
+- `routing.needs_sql = false`
+- `knowledge.candidate_topics` should include both `balancing_price` and `cross_border_trade`
+
+This is an answerable market-mechanism question (non-firm contracts and
+uncompensated curtailment remove the incentive to undercut during surplus),
+NOT an ambiguous query. Terse phrasing or typos do not make it ambiguous.

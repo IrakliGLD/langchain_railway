@@ -1008,6 +1008,15 @@ class TestResolveToolParams:
         ]
 
     def test_balancing_composition_secondary_does_not_inherit_currency(self):
+        # Dates are computed relative to today so the window stays within the
+        # stale-analyzer-window guard threshold (resolve_tool_params clears
+        # analyzer windows ending >120 days ago when the query text is
+        # dateless — see agent/planner.py). The test's subject is currency
+        # non-inheritance, not date staleness.
+        from datetime import date, timedelta
+
+        fresh_start = (date.today() - timedelta(days=61)).isoformat()
+        fresh_end = (date.today() - timedelta(days=30)).isoformat()
         payload = _make_qa_payload(
             query_type="data_explanation",
             tools=[
@@ -1018,8 +1027,8 @@ class TestResolveToolParams:
                     "params_hint": {
                         "metric": "balancing",
                         "currency": "usd",
-                        "start_date": "2023-12-01",
-                        "end_date": "2024-01-31",
+                        "start_date": fresh_start,
+                        "end_date": fresh_end,
                     },
                 },
                 {"name": "get_balancing_composition", "score": 0.7, "reason": "shares"},
@@ -1032,8 +1041,8 @@ class TestResolveToolParams:
         ctx = build_evidence_plan(ctx)
 
         composition_step = next(s for s in ctx.evidence_plan if s["tool_name"] == "get_balancing_composition")
-        assert composition_step["params"]["start_date"] == "2023-12-01"
-        assert composition_step["params"]["end_date"] == "2024-01-31"
+        assert composition_step["params"]["start_date"] == fresh_start
+        assert composition_step["params"]["end_date"] == fresh_end
         assert "currency" not in composition_step["params"]
 
     def test_all_steps_marked_unsatisfied(self):

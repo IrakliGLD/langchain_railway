@@ -167,3 +167,101 @@ class TestConceptualPathDegrades:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# Content-free failure reasons (2026-07-22 embedding outage)
+# ---------------------------------------------------------------------------
+
+import types
+
+
+class _FakeGoogleClientError(Exception):
+    """Shape-faithful google.genai.errors.ClientError double (probe-verified)."""
+
+    def __init__(self):
+        super().__init__("400 INVALID_ARGUMENT. {'error': {...}}")
+        self.code = 400
+        self.status = "INVALID_ARGUMENT"
+        self.message = "API key not valid. Please pass a valid API key."
+        self.details = {
+            "error": {
+                "code": 400,
+                "message": "API key not valid. Please pass a valid API key.",
+                "status": "INVALID_ARGUMENT",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "API_KEY_INVALID",
+                        "domain": "googleapis.com",
+                    }
+                ],
+            }
+        }
+        self.response = types.SimpleNamespace(status_code=400)
+
+
+def test_extract_failure_reason_google_client_error():
+    """The 2026-07-22 outage was undiagnosable because the wrapped message
+    collapsed to 'provider call failed: ClientError'. The extractor must
+    surface the enum-shaped reason chain without any free text."""
+    from utils.provider_attempts import extract_failure_reason
+
+    assert extract_failure_reason(_FakeGoogleClientError()) == "400/INVALID_ARGUMENT/API_KEY_INVALID"
+
+
+def test_extract_failure_reason_rejects_free_text_tokens():
+    """Only strictly enum-shaped tokens may reach logs — provider messages
+    can echo request content and this module is content-free by design."""
+    from utils.provider_attempts import extract_failure_reason
+
+    err = _FakeGoogleClientError()
+    err.status = "Bad key sk-abc123 leaked"
+    err.details = {"error": {"details": [{"reason": "not enum shaped!"}]}}
+    reason = extract_failure_reason(err)
+    assert reason == "400"
+    assert "sk-abc123" not in reason
+
+
+def test_extract_failure_reason_empty_for_plain_error():
+    from utils.provider_attempts import extract_failure_reason
+
+    assert extract_failure_reason(RuntimeError("boom")) == ""
+
+
+def test_wrap_provider_failure_carries_reason_not_content():
+    from utils.provider_attempts import (
+        ProviderDeliveryDisposition,
+        wrap_provider_failure,
+    )
+
+    wrapped = wrap_provider_failure(
+        _FakeGoogleClientError(), provider="gemini", stage="query_embedding",
+    )
+    msg = str(wrapped)
+    assert "[400/INVALID_ARGUMENT/API_KEY_INVALID]" in msg
+    assert "API key not valid" not in msg
+    assert wrapped.disposition == ProviderDeliveryDisposition.PERMANENT_FAILURE
+
+
+def test_finish_provider_attempt_logs_failure_reason(caplog):
+    import logging
+
+    from utils.provider_attempts import (
+        ProviderAttemptToken,
+        ProviderDeliveryDisposition,
+        finish_provider_attempt,
+    )
+
+    token = ProviderAttemptToken("", "gemini", "query_embedding", "", "", False)
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        finish_provider_attempt(
+            token,
+            ProviderDeliveryDisposition.PERMANENT_FAILURE,
+            failure_reason="400/INVALID_ARGUMENT/API_KEY_INVALID",
+        )
+        finish_provider_attempt(token, ProviderDeliveryDisposition.COMPLETED)
+
+    lines = [r.getMessage() for r in caplog.records if "attempt finished" in r.getMessage()]
+    assert any("failure_reason=400/INVALID_ARGUMENT/API_KEY_INVALID" in line for line in lines)
+    assert not any("failure_reason" in line for line in lines if "disposition=completed" in line)

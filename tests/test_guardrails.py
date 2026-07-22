@@ -7602,3 +7602,91 @@ def test_scenario_fallback_returns_defaults_for_non_scenario():
     ctx = QueryContext(query="Show me balancing price trend")
     requests = analyzer._active_analysis_requests(ctx)
     assert any(r["metric_name"] == "mom_absolute_change" for r in requests)
+
+
+# ---------------------------------------------------------------------------
+# Stale analyzer date-window guard (resolve_tool_params)
+# ---------------------------------------------------------------------------
+
+
+def _price_tool_payload(canonical_query: str, start_date, end_date):
+    """Payload with a get_prices candidate carrying analyzer-sourced dates."""
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.9)
+    payload["raw_query"] = canonical_query
+    payload["canonical_query_en"] = canonical_query
+    payload["tooling"]["candidate_tools"] = [{
+        "name": "get_prices",
+        "score": 0.9,
+        "reason": "price driver explanation",
+        "params_hint": {
+            "metric": "p_bal_gel",
+            "currency": None,
+            "granularity": "monthly",
+            "start_date": start_date,
+            "end_date": end_date,
+            "entities": [],
+            "types": [],
+            "mode": None,
+        },
+    }]
+    return payload
+
+
+def test_stale_analyzer_window_cleared_for_dateless_query():
+    """Prod incident 2026-07-22: the analyzer LLM (never told the current
+    date) emitted 2023-01..2024-12 for the dateless query "what affects
+    market prices?", silently analyzing ~18-month-old data. Regex extraction
+    finds no dates in the query text, so a stale window is the model's
+    invention, not the user's request — it must be cleared so tools fetch
+    the latest rows."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = _price_tool_payload(
+        "What affects market prices?", "2023-01-01", "2024-12-31",
+    )
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.params.get("start_date") is None
+    assert inv.params.get("end_date") is None
+
+
+def test_explicit_range_in_query_preserves_old_window():
+    """Old windows the USER asked for stay untouched — regex sees the years
+    in the query text, so the guard must not fire."""
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    payload = _price_tool_payload(
+        "Compare balancing prices from 2022 to 2023", "2022-01-01", "2023-12-31",
+    )
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.params.get("start_date") == "2022-01-01"
+    assert inv.params.get("end_date") == "2023-12-31"
+
+
+def test_recent_analyzer_window_preserved_for_dateless_query():
+    """A dateless query with a FRESH analyzer window (ending within the
+    staleness threshold) keeps the analyzer's dates — the guard only fires
+    on windows ending far in the past."""
+    from datetime import date as _date, timedelta
+
+    from agent.planner import build_tool_invocation_from_analysis
+    from contracts.question_analysis import QuestionAnalysis
+
+    recent_end = (_date.today() - timedelta(days=30)).isoformat()
+    recent_start = (_date.today() - timedelta(days=395)).isoformat()
+    payload = _price_tool_payload(
+        "What affects market prices?", recent_start, recent_end,
+    )
+    qa = QuestionAnalysis.model_validate(payload)
+    inv = build_tool_invocation_from_analysis(qa, payload["raw_query"])
+
+    assert inv is not None
+    assert inv.params.get("start_date") == recent_start
+    assert inv.params.get("end_date") == recent_end
