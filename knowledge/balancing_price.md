@@ -390,6 +390,35 @@ Therefore:
 
 ---
 
+## Why the Balancing Price Does NOT Fall During Surplus (Market-Model Mechanism)
+
+**CRITICAL:** Under the current transitional model, an oversupply / excess-supply / low-demand situation does **NOT** push the balancing price down — the price typically stays high or even **rises**. This is the opposite of normal supply-and-demand intuition and is a common source of confusion. The cause is the market model's contract-and-curtailment structure, **not** the balance of supply and demand.
+
+This answers questions like: *"there was a big electricity surplus / demand collapsed / exports fell — why didn't the price drop?"*
+
+### Why no producer has an incentive to sell cheap
+
+The balancing price is already **composition-driven, not demand-cleared** (see "Core Pricing Logic (System Level)" above). The contract structure then removes any remaining incentive to undercut during surplus:
+
+1. **Contracts are not firm.** Even a producer holding a bilateral / direct contract with a consumer can still be **curtailed** by central dispatch (GSE). A contract does not guarantee delivery. (TSO restriction powers: `cross_border_trade.md` §6, Article 16^1.)
+2. **Curtailed electricity is not compensated.** Curtailed volume is simply lost — never produced, never delivered under the contract, and no payment is made for it. This is the transitional model's **quantity risk** (`cfd_ppa.md` §3.2–3.3: *curtailment not compensated*).
+3. **A low price buys no protection from curtailment.** Since the price does not change whether — or how much — you are curtailed, selling cheap gives you the **worst of both**: a low price *and* still-curtailed volume. Holding a high price leaves you with the **same** curtailment but a better price on whatever is actually delivered.
+4. **Underpricing does not win extra volume.** In a normal market you cut price to sell more. Here your delivered quantity is set by dispatch and curtailment, not by your offered price — so cutting price wins nothing. There is no competitive reason to go low.
+5. **Export is only a partial escape.** Curtailment does not apply to electricity produced for export (`cross_border_trade.md` §6), so exporting shields the **exported share** from curtailment. But it shields only that share — the rest of the plant's output stays curtailable — and exporting at a very low price is itself unattractive. So export does not create general downward pressure on the price either.
+
+**Result — the "reference price minus a discount" rule.** Because no seller gains by underpricing, sellers price at the **balancing price (the system reference price) minus a modest discount**. The balancing price therefore acts as a self-referential **anchor** for the whole market — including bilateral / direct contracts outside the balancing segment — instead of a demand-cleared price. This is the mechanism behind the "reference price for the system" role stated in the Definition and Core Pricing Logic sections: contract prices are pinned to the balancing price, so they cannot fall simply because supply is abundant.
+
+**What absorbs the surplus, if not the price?** **Curtailment**, not cheaper prices. During surplus, central dispatch curtails generation — generally in proportion to expected load-balance quantities, with exceptions for PSO plants, export-destined volumes, and support-scheme (GEP/PPA/CfD) obligations — while the balancing price stays high or rises. See `cross_border_trade.md` §6–§7 for the curtailment and Article 60 mechanics.
+
+### Empirical cases (surplus WITHOUT a price drop)
+
+- **May–June 2020 (COVID demand collapse):** demand fell sharply both in Georgia and in the neighbouring markets Georgia would normally export to, so the resulting excess generation could not be exported away. Balancing prices nonetheless **did not fall — they rose**, exactly as the weighted-average, composition-driven formula plus the no-undercut mechanism above predict. A partial *downward* counter-force was also active that year — deliberate cheap state-hydro allocation (see *"State-owned plant allocation as a balancing-price-reduction lever"* in Key Events) — but it moderated the increase rather than reversing it.
+- **May–June 2026 (Turkish export collapse):** prices in Turkey, Georgia's main export destination, dropped sharply, so Georgian export fell; domestic generation spiked and the system moved into large surplus with **massive curtailment**. Curtailment was applied **proportionally across power plants, except PSO plants** (consistent with the Article 16^1 proportional rule and the temporary Article 60 treatment — see the Article 60 entry in Key Events and `cross_border_trade.md` §6–§7). The pattern held again: balancing prices were at **record highs** for the period, not lows.
+
+**RULE for surplus / oversupply / low-demand price questions:** Do **not** explain a surplus-period price with supply-demand intuition ("surplus ⇒ lower price"). State that the current model is composition-driven and that **non-firm contracts + uncompensated curtailment** remove any incentive to undercut, so a surplus is absorbed by **curtailment** while the balancing price stays high or rises. Then, where data allows, show the actual balancing composition for the period to explain the level.
+
+---
+
 ## Data Source
 Table: `price_with_usd` — columns: `p_bal_gel` (GEL/MWh), `p_bal_usd` (USD/MWh).  
 Coverage: January 2015–present, monthly granularity.
@@ -598,7 +627,7 @@ This is the canonical timeline of policy decisions that have shifted balancing-p
 - **May–June 2025 (allocation pattern):** Enguri HPP, the largest state-owned hydropower plant and one of the cheapest electricity sources in the system, sold exactly **16.698 thousand MWh** as balancing electricity in **both May 2025 and June 2025**. This is one instance of a broader state-owned plant allocation pattern — see the *"State-owned plant allocation as a balancing-price-reduction lever"* subsection below for the full case list and detection methodology.
 - **2020 onwards:** Entity-level data available (no composition-based driver evidence before 2020).
 - **From May 2025:** Enguri/Vardnili tariffs increased to cover Abkhazia supply costs (see `market_structure.md` §14).
-- **May-Jul 2026 temporary surplus rule:** Article 60 creates a temporary surplus/production-restriction treatment. If PSO plants export during surplus, an equivalent volume from other plants may be settled through the balancing/direct-contract logic, with exceptions for PSO plants, GEP/PPA/CfD or mandatory ESCO-sale/CfD-compensation obligations, and exported portions. Treat this as a temporary 2026 allocation rule, not the normal price-formation rule.
+- **May-Jul 2026 temporary surplus rule:** Article 60 creates a temporary surplus/production-restriction treatment. If PSO plants export during surplus, an equivalent volume from other plants may be settled through the balancing/direct-contract logic, with exceptions for PSO plants, GEP/PPA/CfD or mandatory ESCO-sale/CfD-compensation obligations, and exported portions. Treat this as a temporary 2026 allocation rule, not the normal price-formation rule. For why the surplus itself did **not** lower the balancing price — May–June 2026 saw record-high prices despite heavy curtailment — see *"Why the Balancing Price Does NOT Fall During Surplus"* above.
 - **Jul 2027 (planned):** target market model launch (hourly marginal pricing under self-dispatch) — see `market_structure.md` §3 for the regime-break detail. Forecasts crossing this horizon must flag the structural break.
 
 ### State-owned plant allocation as a balancing-price-reduction lever (analytical inference)
@@ -627,7 +656,7 @@ A single occurrence of either signal is weak evidence; a cluster of them concent
 
 **Interpretation.**
 
-- **2020:** Despite global COVID-period demand softness, Georgian balancing prices did **not** collapse — a direct consequence of the weighted-average pricing formula, which is composition-driven rather than demand-cleared. The clustered Enguri and Vardnili round-number summer allocations are best read as deliberate policy intervention to keep balancing prices in check during a year when the price would otherwise have been determined by an expensive composition.
+- **2020:** Despite global COVID-period demand softness, Georgian balancing prices did **not** collapse — a direct consequence of the weighted-average pricing formula, which is composition-driven rather than demand-cleared. The clustered Enguri and Vardnili round-number summer allocations are best read as deliberate policy intervention to keep balancing prices in check during a year when the price would otherwise have been determined by an expensive composition. (The deeper market-model reason a surplus does not lower prices — non-firm contracts and uncompensated curtailment leaving no incentive to undercut — is set out in *"Why the Balancing Price Does NOT Fall During Surplus"* above.)
 - **2025:** A clear two-season toolkit emerges — **Enguri HPP in summer** and **Gardabani TPP in winter**. Each plant is the cheap option in its respective season relative to the alternative balancing mix (imports and PPA/CfD in summer; imports in winter).
 
 **Why summer Enguri vs winter Gardabani.** In summer the alternative balancing supply is dominated by PPA/CfD (~55–57 USD/MWh) and imports, both of which are *above* Enguri's regulated GEL tariff — so pushing Enguri into balancing lowers the weighted average. In winter, hydro is scarce and the alternative balancing mix is dominated by expensive imports; Gardabani's regulated upper-cap tariff (gas + xrate driven) is typically below the import upper-cap, so steering Gardabani volumes into balancing lowers the winter weighted average.
