@@ -2089,3 +2089,17 @@ def test_summarize_data_non_energy_comparison_skips_domain_knowledge(monkeypatch
 
     assert ctx.summary_domain_knowledge == ""
     assert captured["kwargs"]["domain_knowledge"] == ""
+
+
+def test_analyzer_system_message_carries_current_date():
+    """The analyzer model's internal calendar ends at its training cutoff;
+    the system message must pin today's date so dateless queries resolve
+    periods against the real 'now' (prod incident 2026-07-22: a dateless
+    drivers question was analyzed over Jan 2023-Dec 2024)."""
+    from datetime import date
+
+    from core.llm import _analyzer_system_message
+
+    message = _analyzer_system_message()
+    assert f"Current date: {date.today().isoformat()}." in message
+    assert "never assume an earlier 'today'" in message

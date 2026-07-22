@@ -102,6 +102,8 @@ Important exceptions:
 - annual-regulation reservoir HPPs under PSO can be restricted or spilled only for hydrotechnical safety reasons
 - Article 60 creates a temporary May-July 2026 rule for surplus and production restrictions
 
+**Price effect of surplus (pointer):** under the current transitional model, a surplus does NOT lower electricity prices — contracts are not firm and curtailed electricity is not compensated, so no producer gains by offering a low price; the surplus is absorbed by curtailment while the balancing price stays high or rises (observed May–June 2020 and May–June 2026). For the full mechanism and the "reference price minus a discount" pricing behavior, see *"Why the Balancing Price Does NOT Fall During Surplus"* in `balancing_price.md`.
+
 ---
 
 ## 7. Article 60 Temporary 2026 Rule

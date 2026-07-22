@@ -10,6 +10,7 @@ from utils.provider_attempts import (
     ProviderDeliveryDisposition,
     claim_provider_attempt,
     classify_provider_failure,
+    extract_failure_reason,
     finish_provider_attempt,
     wrap_provider_failure,
 )
@@ -52,7 +53,9 @@ def _execute_embedding_call(provider: str, stage: str, call: Callable[[], Any]) 
         result = call()
     except Exception as error:
         disposition = classify_provider_failure(error)
-        finish_provider_attempt(token, disposition)
+        finish_provider_attempt(
+            token, disposition, failure_reason=extract_failure_reason(error),
+        )
         raise wrap_provider_failure(
             error,
             provider=provider,

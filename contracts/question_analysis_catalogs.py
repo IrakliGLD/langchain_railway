@@ -119,8 +119,9 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "balancing_price",
-        "concepts": ["balancing price", "p_bal", "price drivers", "shares", "xrate", "variation"],
-        "use_for": "Balancing price formation, variation, drivers, and seasonal patterns.",
+        "concepts": ["balancing price", "p_bal", "price drivers", "shares", "xrate", "variation",
+                      "surplus price behavior", "oversupply", "excess supply", "curtailment price impact"],
+        "use_for": "Balancing price formation, variation, drivers, and seasonal patterns; also why prices stay high or rise during surplus/oversupply/curtailment — answerable conceptual questions (pair with cross_border_trade), not ambiguous.",
     },
     {
         "name": "market_structure",

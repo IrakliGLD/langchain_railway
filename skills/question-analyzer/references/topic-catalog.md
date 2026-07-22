@@ -8,7 +8,7 @@ Runtime source of truth: [contracts/question_analysis_catalogs.py](../../../cont
 
 ## balancing_price
 
-- Use for: balancing price formation, drivers, variation, seasonality, xrate linkage
+- Use for: balancing price formation, drivers, variation, seasonality, xrate linkage; also why prices stay high or rise during surplus/oversupply/curtailment — answerable conceptual questions (pair with cross_border_trade), not ambiguous
 
 ## market_structure
 
