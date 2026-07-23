@@ -50,8 +50,8 @@ for _canonical, _aliases in METRIC_VALUE_ALIASES.items():
 
 
 _DEFAULT_MAX_SERIES = 3
-# Compositions (all-share chart groups) keep up to the contract maximum so a
-# stacked mix is not chopped to an arbitrary 3 components.
+# Energy component groups and all-share groups keep up to the contract maximum
+# so a stacked composition is not chopped to an arbitrary 3 components.
 _COMPOSITION_MAX_SERIES = 8
 _AUTO_PANEL_DIMENSION_ORDER = [
     "price_tariff",
@@ -138,6 +138,28 @@ _MIXED_ENERGY_QUERY_TOKENS = (
     "system balance",
     "supply-demand",
 )
+_SUPPLY_COVERAGE_PATTERNS = (
+    re.compile(
+        r"\b(?:meet|meets|met|cover|covers|covered|satisfy|satisfies|satisfied|"
+        r"serve|serves|served)\b[^.!?]{0,64}\b(?:electricity\s+)?demand\b"
+    ),
+    re.compile(
+        r"\b(?:electricity\s+)?demand\b[^.!?]{0,64}"
+        r"\b(?:is\s+|was\s+|being\s+)?(?:met|covered|satisfied|served)\b"
+    ),
+)
+
+
+def _is_supply_coverage_query(query: str) -> bool:
+    """Return whether the question asks which sources cover electricity demand."""
+    query_lower = str(query or "").lower()
+    # A bare "does supply meet demand?" is an adequacy comparison and needs
+    # both totals. Coverage semantics require an explanatory/source question.
+    if not re.search(r"\b(?:how|what|which)\b", query_lower):
+        return False
+    if re.search(r"\bhow\s+(?:much|many)\b", query_lower):
+        return False
+    return any(pattern.search(query_lower) for pattern in _SUPPLY_COVERAGE_PATTERNS)
 
 
 def _resolve_energy_chart_side(query: str) -> Optional[str]:
@@ -146,6 +168,11 @@ def _resolve_energy_chart_side(query: str) -> Optional[str]:
         return None
     if any(token in query_lower for token in _MIXED_ENERGY_QUERY_TOKENS):
         return "mixed"
+    # "How is demand met?" is supply-coverage semantics. Treating the noun
+    # "demand" as consumer-side intent removes the generation/import series
+    # that actually answer the question.
+    if _is_supply_coverage_query(query_lower):
+        return "supply"
     has_supply = any(token in query_lower for token in _SUPPLY_QUERY_TOKENS)
     has_demand = any(token in query_lower for token in _DEMAND_QUERY_TOKENS)
     has_transit = any(token in query_lower for token in _TRANSIT_QUERY_TOKENS)
@@ -811,8 +838,19 @@ def _resolve_chart_groups(
     seen_signatures: set[Tuple[str, str, Tuple[str, ...]]] = set()
     for group in groups:
         metrics = list(group.get("metrics", []))
+        metrics, complete_energy_composition = _select_energy_composition_metrics(
+            ctx,
+            group,
+            visualization,
+            metrics,
+        )
         preserve_order = group.get("source") == "plan"
-        if requested_max_series:
+        if complete_energy_composition:
+            # max_series is a readability budget for independent trend lines.
+            # Dropping members from a part-to-whole chart changes its meaning;
+            # top_n remains the explicit contract for deliberate narrowing.
+            max_series = _COMPOSITION_MAX_SERIES
+        elif requested_max_series:
             max_series = requested_max_series
         elif metrics and all(infer_dimension(col) == "share" for col in metrics):
             # A composition needs every component visible: the 3-series
@@ -841,8 +879,76 @@ def _resolve_chart_groups(
         seen_signatures.add(signature)
         normalized = dict(group)
         normalized["metrics"] = metrics
+        normalized["_max_series_cap"] = max_series
         normalized_groups.append(normalized)
     return normalized_groups
+
+
+def _select_energy_composition_metrics(
+    ctx: QueryContext,
+    group: Dict[str, Any],
+    visualization: Optional[Any],
+    metrics: List[str],
+) -> Tuple[List[str], bool]:
+    """Choose one complete component family for an energy composition chart.
+
+    Canonical energy frames contain component quantities, component shares,
+    and derived totals together. A stacked chart must use one component family
+    instead of mixing shares, quantities, and overlapping aggregates.
+    """
+    query = _chart_intent_query(ctx)
+    side = _resolve_energy_chart_side(query)
+    if side not in {"supply", "demand", "transit", "generation"}:
+        return metrics, False
+
+    explicit_type = _normalize_chart_type(group.get("type"))
+    preferred_type = _normalize_chart_type(
+        getattr(getattr(visualization, "preferred_chart_family", None), "value", None)
+    )
+    visual_goal = getattr(getattr(visualization, "visual_goal", None), "value", None)
+    is_composition = (
+        explicit_type == "stackedbar"
+        or preferred_type == "stackedbar"
+        or visual_goal in {"composition", "decomposition"}
+        or (metrics and all(infer_dimension(col) == "share" for col in metrics))
+    )
+    if not is_composition:
+        return metrics, False
+
+    quantity_components = [
+        col
+        for col in metrics
+        if col.lower().startswith("quantity_") and _metric_energy_side(col) is not None
+    ]
+    share_components = [
+        col
+        for col in metrics
+        if col.lower().startswith("share_") and _metric_energy_side(col) is not None
+    ]
+    if not quantity_components and not share_components:
+        return metrics, False
+
+    measure_transform = getattr(
+        getattr(visualization, "measure_transform", None),
+        "value",
+        "raw",
+    )
+    query_mode = extract_generation_mode(query.lower())
+    if query_mode == "share" and measure_transform != "share_of_total":
+        selected = share_components or quantity_components
+        family = "share"
+    else:
+        selected = quantity_components or share_components
+        family = "quantity"
+
+    if selected != metrics:
+        log.info(
+            "Energy composition: selected all %d %s components from %d eligible metrics",
+            len(selected),
+            family,
+            len(metrics),
+        )
+    return selected, True
 
 
 def _resolve_group_metrics(requested_metrics: Any, available_num_cols: List[str]) -> List[str]:
@@ -1096,7 +1202,11 @@ def _build_chart_spec(
     # No-op when sort_rule is not a value rule or top_n is unset.
     sort_rule_value = getattr(getattr(visualization, "sort_rule", None), "value", None)
     top_n_value = getattr(visualization, "top_n", None)
-    max_series_cap = getattr(visualization, "max_series", None) or _DEFAULT_MAX_SERIES
+    max_series_cap = (
+        group.get("_max_series_cap")
+        or getattr(visualization, "max_series", None)
+        or _DEFAULT_MAX_SERIES
+    )
     metrics = _reorder_metrics_by_value(
         transformed_df,
         metrics,
