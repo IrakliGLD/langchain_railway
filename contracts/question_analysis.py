@@ -108,6 +108,7 @@ class KnowledgeTopicName(str, Enum):
     MARKET_STRUCTURE = "market_structure"
     DIRECT_CONTRACTS = "direct_contracts"
     CROSS_BORDER_TRADE = "cross_border_trade"
+    CROSS_BORDER_CAPACITY = "cross_border_capacity"
     EXCHANGE_TRANSITION = "exchange_transition"
     TARIFFS = "tariffs"
     CFD_PPA = "cfd_ppa"

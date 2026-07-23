@@ -72,6 +72,8 @@ Do not confuse:
 
 In the app data, `tech_quantity_view` contains physical import/export quantities, not interconnection capacity.
 
+For the **physical interconnection layer** — per-interconnection Total Transfer Capacity (TTC), operating modes, HVDC/transformer limits, the Russia–Georgia–Azerbaijan synchronous-ring constraint, and planned interconnection projects — see `cross_border_capacity.md`. This file governs the *rules and allocation* of cross-border flows; `cross_border_capacity.md` describes *the physical capacity and configuration* that bound them.
+
 ---
 
 ## 5. Export Priority and Auctions

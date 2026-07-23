@@ -138,9 +138,17 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "cross_border_trade",
-        "concepts": ["import", "export", "transit", "cross-border capacity", "interconnection",
+        "concepts": ["import", "export", "transit", "cross-border capacity allocation",
                       "ATC", "NTC", "surplus", "curtailment", "emergency import"],
-        "use_for": "Import/export/transit rules, cross-border capacity allocation, emergency cross-border trade, surplus, curtailment, and TSO restriction powers.",
+        "use_for": "Import/export/transit RULES: cross-border capacity allocation, export priority, emergency cross-border trade, surplus, curtailment, and TSO restriction powers. For physical interconnection capacity (TTC values, operating modes, HVDC/transformer limits, the synchronous ring, planned interconnections), use cross_border_capacity.",
+    },
+    {
+        "name": "cross_border_capacity",
+        "concepts": ["interconnection", "interconnection capacity", "total transfer capacity", "TTC",
+                      "operating mode", "synchronous", "back-to-back", "HVDC", "converter station",
+                      "Kavkasioni", "Stepantsminda", "Gardabani interconnection", "Meskheti",
+                      "Akhaltsikhe", "Marneuli-Ayrum", "synchronous ring", "Black Sea interconnection"],
+        "use_for": "Physical cross-border interconnection infrastructure: TTC values, summer/winter transfer capacity, operating modes (synchronous/isolated/back-to-back), the Akhaltsikhe HVDC and Gardabani transformer limits, the Russia-Georgia-Azerbaijan synchronous-ring limitation, and planned interconnection projects (including the Black Sea/Romania link). Pair with cross_border_trade for the rules/rights side.",
     },
     {
         "name": "exchange_transition",

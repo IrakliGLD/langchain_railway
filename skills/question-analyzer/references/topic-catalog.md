@@ -20,7 +20,11 @@ Runtime source of truth: [contracts/question_analysis_catalogs.py](../../../cont
 
 ## cross_border_trade
 
-- Use for: import/export/transit rules, cross-border capacity, emergency import/export, surplus, curtailment
+- Use for: import/export/transit rules, cross-border capacity allocation, export priority, emergency import/export, surplus, curtailment
+
+## cross_border_capacity
+
+- Use for: physical interconnection capacity — TTC values, summer/winter transfer capacity, operating modes (synchronous/isolated/back-to-back), Akhaltsikhe HVDC and Gardabani transformer limits, the Russia-Georgia-Azerbaijan synchronous ring, planned interconnections and the Black Sea/Romania link
 
 ## exchange_transition
 

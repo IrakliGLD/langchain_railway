@@ -152,6 +152,7 @@ def test_tier_market_structure_topics_each_individually_rescue():
         KnowledgeTopicName.MARKET_STRUCTURE,
         KnowledgeTopicName.DIRECT_CONTRACTS,
         KnowledgeTopicName.CROSS_BORDER_TRADE,
+        KnowledgeTopicName.CROSS_BORDER_CAPACITY,
         KnowledgeTopicName.EXCHANGE_TRANSITION,
         KnowledgeTopicName.CFD_PPA,
         KnowledgeTopicName.PSO_TRADING,

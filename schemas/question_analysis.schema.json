@@ -358,6 +358,7 @@
         "market_structure",
         "direct_contracts",
         "cross_border_trade",
+        "cross_border_capacity",
         "exchange_transition",
         "tariffs",
         "cfd_ppa",
