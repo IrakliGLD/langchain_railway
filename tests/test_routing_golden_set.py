@@ -74,3 +74,16 @@ def test_invalid_enum_value_rejected():
 
 def test_dry_run_needs_no_llm_and_exits_zero():
     assert main(["--dry-run"]) == 0
+
+
+def test_liberalization_policy_regression_is_pinned():
+    case = next(
+        (item for item in load_fixtures() if item["id"] == "r015"),
+        None,
+    )
+    assert case is not None
+    assert case["expected"] == {
+        "query_type": "conceptual_definition",
+        "answer_kind": "knowledge",
+        "preferred_path": "knowledge",
+    }

@@ -918,6 +918,22 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
 
 
 def _enforce_provenance_gate(ctx: QueryContext) -> None:
+    if ctx.summary_source == "structured_summary_grounding_fallback":
+        ctx.summary_provenance_gate_passed = False
+        ctx.summary_provenance_gate_reason = "grounding_guardrail_fallback"
+        ctx.summary_provenance_coverage = 0.0
+        trace_detail(
+            log,
+            ctx,
+            "stage_4_summarize_data",
+            "provenance_gate",
+            gate_passed=False,
+            gate_reason=ctx.summary_provenance_gate_reason,
+            numeric_claims=0,
+            coverage=0.0,
+        )
+        return
+
     claim_entries = list(ctx.summary_claim_provenance or [])
     numeric_claims = [entry for entry in claim_entries if entry.get("tokens")]
     if not claim_entries:
