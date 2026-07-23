@@ -19,6 +19,12 @@
 - For generated electricity from regulated thermal plants, no tariff is set fully in advance. After each month, the regulated variable price is defined based on actual cost and generated electricity, i.e. tariff = cost / generation.
 - Because regulated thermal variable cost is recalculated based on actual monthly cost, exchange rate and gas price changes are reflected in tariff immediately.
 
+### Current-status and freshness rule
+- This document is a knowledge snapshot, not a live registry of regulated plants.
+- Dates described as **scheduled**, **planned**, or **expected** must not be treated as confirmation that deregulation occurred.
+- Rows marked **deregulated from** record completed historical transitions and must not be counted as currently regulated after their effective dates.
+- For questions asking how many plants are regulated **now**, or whether a planned deregulation has been implemented, state this limitation and verify the current status against an authoritative, up-to-date registry or decision before giving a definitive count.
+
 ---
 
 ## Components
@@ -67,11 +73,11 @@
 
 ---
 
-#### Energo-Pro owned tariff-regulated hydro power plants
+#### Energo-Pro owned hydro plants with historic or scheduled tariff regulation
 
 | Entity | Label | Installed capacity | Approximate share in total installed capacity | Deregulation |
 |---|---|---:|---:|---|
-| `dzevrula hpp` | Dzevruli HPP | 80 MW | 1.6% | expected from May 2026 |
+| `dzevrula hpp` | Dzevruli HPP | 80 MW | 1.6% | scheduled from May 2026; completion unverified |
 | `gumati hpp` | Gumati HPP | 71.2 MW | 1.4% | deregulated from May 2024 |
 | `shaori hpp` | Shaori HPP | 40.4 MW | <1% | deregulated from Jan 2021 |
 | `rioni hpp` | Rioni HPP | 54 MW | 1% | deregulated from May 2022 |

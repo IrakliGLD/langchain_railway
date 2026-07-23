@@ -75,19 +75,17 @@ def get_grounding_fallback_message(lang_code: str) -> str:
     """
     messages = {
         "ka": (
-            "მოწოდებული მონაცემების საფუძველზე ვერ მოვახერხე დეტალური "
-            "პასუხის სრულად დასაბუთება. გთხოვთ, დააზუსტოთ კითხვა ან "
-            "შეავიწროვოთ პერიოდი უფრო ზუსტი, დასაბუთებული პასუხისთვის."
+            "ხელმისაწვდომ მტკიცებულებებში პასუხის სრულად დასაბუთება ვერ "
+            "მოვახერხე. გთხოვთ, დააზუსტოთ, რომელი ფაქტის ან საკითხის "
+            "შემოწმება გსურთ."
         ),
         "ru": (
-            "Не удалось полностью обосновать развёрнутый ответ на основе "
-            "предоставленных данных. Уточните запрос или сузьте период для "
-            "более точного обоснованного ответа."
+            "Не удалось полностью обосновать ответ доступными доказательствами. "
+            "Уточните, какой факт или аспект нужно проверить."
         ),
         "en": (
-            "I could not fully ground a detailed narrative from the provided "
-            "data preview. Please refine the query or narrow the period for a "
-            "more precise grounded answer."
+            "I could not fully ground the answer in the available evidence. "
+            "Please clarify which fact or aspect you want checked."
         ),
     }
     return messages.get(lang_code, messages["en"])

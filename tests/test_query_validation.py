@@ -6,9 +6,16 @@ Regression coverage for:
     were mis-classified as conceptual because the temporal guard regex only matched
     "in YYYY" / "for YYYY" patterns, not bare four-digit years.
 """
+from types import SimpleNamespace
+
 import pytest
 
-from utils.query_validation import is_conceptual_question
+from utils.query_validation import (
+    extract_query_topics,
+    is_conceptual_question,
+    validate_sql_relevance,
+    validate_tool_relevance,
+)
 
 # ---------------------------------------------------------------------------
 # Queries that SHOULD be classified as data-driven (not conceptual)
@@ -70,6 +77,7 @@ CONCEPTUAL_QUERIES = [
     "Explain the role of ESCO",
     "What is the purpose of the balancing market?",
     "Define micro-generator under Georgian regulation",
+    "What is the situation with power plant liberalization? Are many plants still regulated?",
 ]
 
 
@@ -126,3 +134,108 @@ def test_pure_conceptual_with_explanation_intent_skips_sql(query, plan):
     assert skip is True, (
         f"Expected SQL to be skipped, but got skip=False for: {query!r}\nReason: {reason}"
     )
+
+
+def test_liberalization_query_exposes_market_structure_capability():
+    topics = extract_query_topics(
+        "What is the situation with power plant liberalization? Are many plants still regulated?"
+    )
+    assert "market_structure" in topics
+
+
+def test_raw_liberalization_intent_blocks_analyzer_derived_tariff_overlap():
+    """A wrong analyzer metric must not override an incompatible raw-query topic."""
+    question_analysis = SimpleNamespace(
+        sql_hints=SimpleNamespace(metric="tariff"),
+        analysis_requirements=SimpleNamespace(derived_metrics=[]),
+        tooling=SimpleNamespace(candidate_tools=[]),
+    )
+
+    relevant, reason = validate_tool_relevance(
+        "What is the situation with power plant liberalization? Are many plants still regulated?",
+        "get_tariffs",
+        question_analysis=question_analysis,
+    )
+
+    assert relevant is False
+    assert "raw query" in reason.lower()
+
+
+def test_raw_liberalization_intent_survives_analyzer_canonical_rewrite():
+    question_analysis = SimpleNamespace(
+        sql_hints=SimpleNamespace(metric="tariff"),
+        analysis_requirements=SimpleNamespace(derived_metrics=[]),
+        tooling=SimpleNamespace(candidate_tools=[]),
+    )
+
+    relevant, reason = validate_tool_relevance(
+        "Show regulated tariff values",
+        "get_tariffs",
+        question_analysis=question_analysis,
+        raw_query=(
+            "What is the situation with power plant liberalization? "
+            "Are many plants still regulated?"
+        ),
+    )
+
+    assert relevant is False
+    assert "raw query" in reason.lower()
+
+
+def test_energy_security_accepts_import_and_system_quantity_sql():
+    relevant, reason, skip_chart = validate_sql_relevance(
+        "Review the energy security situation in Georgia.",
+        """
+        SELECT date, type_tech, SUM(quantity_tech)
+        FROM tech_quantity_view
+        WHERE type_tech IN ('hydro', 'thermal', 'import', 'demand')
+        GROUP BY date, type_tech
+        """,
+        {"intent": "energy_security_review"},
+    )
+
+    assert relevant is True
+    assert skip_chart is False
+    assert "energy_security" in reason
+
+
+def test_energy_security_still_rejects_unrelated_price_sql():
+    relevant, _, skip_chart = validate_sql_relevance(
+        "Review the energy security situation in Georgia.",
+        "SELECT date, p_bal_gel FROM price_with_usd",
+        {"intent": "energy_security_review"},
+    )
+
+    assert relevant is False
+    assert skip_chart is True
+
+
+def test_energy_security_rejects_import_only_quantity_sql():
+    relevant, _, skip_chart = validate_sql_relevance(
+        "Review the energy security situation in Georgia.",
+        """
+        SELECT date, SUM(quantity_tech)
+        FROM tech_quantity_view
+        WHERE type_tech = 'import'
+        GROUP BY date
+        """,
+        {"intent": "energy_security_review"},
+    )
+
+    assert relevant is False
+    assert skip_chart is True
+
+
+def test_energy_security_accepts_named_import_and_domestic_generation_columns():
+    relevant, reason, skip_chart = validate_sql_relevance(
+        "Review the energy security situation in Georgia.",
+        """
+        SELECT date, share_import, total_domestic_generation
+        FROM energy_security_mv
+        """,
+        {"intent": "energy_security_review"},
+    )
+
+    assert relevant is True
+    assert "energy_security" in reason
+    assert skip_chart is False

@@ -126,8 +126,9 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "market_structure",
         "concepts": ["GENEX", "ESCO", "GSE", "participants", "market roles", "balancing market",
-                      "transitory period", "market design", "market model", "target model"],
-        "use_for": "Market participants, institutions, market structure, and market model design questions.",
+                      "transitory period", "market design", "market model", "target model",
+                      "power-plant liberalization", "deregulation plan", "regulation status"],
+        "use_for": "Market participants, institutions, market structure, market model design, and policy/status questions about power-plant liberalization or deregulation.",
     },
     {
         "name": "direct_contracts",
@@ -218,7 +219,7 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "name": "get_tariffs",
         "concepts": ["regulated tariffs", "GNERC", "Enguri", "Gardabani", "cost-plus"],
         "use_for": "Tariff lookups and tariff comparisons.",
-        "avoid_for": "Balancing price questions, conceptual definitions, and generation mix questions.",
+        "avoid_for": "Balancing price questions, conceptual definitions, generation mix questions, and policy/status questions about liberalization or deregulation.",
         "main_params": ["entities", "currency", "start_date", "end_date"],
         "combined_with": [
             {"tool": "get_prices", "when": "comparing tariffs against market prices"},

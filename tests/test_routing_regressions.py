@@ -397,6 +397,17 @@ class TestAnalyzerPromptContent:
             "regress on typo'd phrasings"
         )
 
+    def test_liberalization_policy_few_shot_routes_to_knowledge(self, core_rules: str):
+        lower = core_rules.lower()
+        start = lower.find("power plant liberalization")
+        assert start >= 0, "Liberalization-policy routing example is missing"
+        section = lower[start:start + 1200]
+        assert "query_type=conceptual_definition" in section
+        assert "preferred_path=knowledge" in section
+        assert "answer_kind=knowledge" in section
+        assert "get_tariffs" in section
+        assert "do not" in section
+
     def test_multi_clause_data_intent_rule_present(self, core_rules: str):
         """Fix E (2026-05-17) — Q7 production trace 5ba12f3c.
 

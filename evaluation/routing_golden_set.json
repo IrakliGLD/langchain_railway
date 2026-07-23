@@ -87,6 +87,16 @@
       "expected": {"answer_kind": "list"}
     },
     {
+      "id": "r015",
+      "query": "What is the situation with power plant liberalization? Are many plants still regulated?",
+      "note": "production regression 2026-07-22: liberalization policy/status must not route to tariff scalar data",
+      "expected": {
+        "query_type": "conceptual_definition",
+        "answer_kind": "knowledge",
+        "preferred_path": "knowledge"
+      }
+    },
+    {
       "id": "c001",
       "query": "and for 2023?",
       "note": "continuity follow-up after r002 (monthly balancing prices); requires previous-contract injection — runner turn-chaining pending",

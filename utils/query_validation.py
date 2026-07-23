@@ -305,6 +305,17 @@ def extract_query_topics(query: str) -> Set[str]:
         'cpi': ['cpi', 'inflation', 'ინფლაცია', 'инфляция'],
     }
 
+    topic_map["market_structure"] = [
+        "liberalization",
+        "liberalisation",
+        "power plant liberalization",
+        "power plant liberalisation",
+        "market liberalization",
+        "market liberalisation",
+        "deregulation",
+        "deregulation plan",
+        "deregulation status",
+    ]
     topic_map["import_dependency"] = ["import dependency", "import dependence"]
     topic_map["energy_security"] = ["energy security", "self-sufficiency", "self sufficiency"]
     topic_map["trend"] = ["trend", "trends", "evolution", "trajectory", "evolve"]
@@ -393,6 +404,65 @@ def extract_sql_topics(sql: str) -> Set[str]:
     return topics
 
 
+_QUERY_TOPIC_EVIDENCE_REQUIREMENTS = {
+    # Security/dependency is not a physical column name. It is established by
+    # comparing import with system quantities; require both sides so a lone
+    # import or generation reference cannot pass as a complete match.
+    "energy_security": (
+        {"import"},
+        {"generation", "demand"},
+    ),
+    "import_dependency": (
+        {"import"},
+        {"generation", "demand"},
+    ),
+}
+
+
+def _extract_explicit_sql_evidence_topics(sql: str) -> Set[str]:
+    """Extract comparison sides named in SQL, excluding broad table metadata."""
+
+    sql_lower = str(sql or "").lower()
+    explicit_topics: Set[str] = set()
+    signals = {
+        "import": ("import",),
+        "generation": (
+            "generation",
+            "hydro",
+            "thermal",
+            "wind",
+            "solar",
+            "renewable",
+        ),
+        "demand": ("demand", "consumption", "load"),
+    }
+    for topic, tokens in signals.items():
+        if any(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])",
+                sql_lower,
+            )
+            for token in tokens
+        ):
+            explicit_topics.add(topic)
+    return explicit_topics
+
+
+def _covered_query_topics(
+    query_topics: Set[str],
+    evidence_topics: Set[str],
+    *,
+    requirement_topics: Optional[Set[str]] = None,
+) -> Set[str]:
+    covered = query_topics & evidence_topics
+    requirement_evidence = evidence_topics if requirement_topics is None else requirement_topics
+    for topic in query_topics - covered:
+        requirements = _QUERY_TOPIC_EVIDENCE_REQUIREMENTS.get(topic)
+        if requirements and all(group & requirement_evidence for group in requirements):
+            covered.add(topic)
+    return covered
+
+
 def validate_sql_relevance(
     query: str,
     sql: str,
@@ -436,7 +506,11 @@ def validate_sql_relevance(
         return True, "No specific topics detected, proceeding", False
 
     # Calculate overlap
-    common_topics = query_topics & sql_topics
+    common_topics = _covered_query_topics(
+        query_topics,
+        sql_topics,
+        requirement_topics=_extract_explicit_sql_evidence_topics(sql),
+    )
     overlap_ratio = len(common_topics) / len(query_topics) if query_topics else 0
 
     log.info(f"📊 Topic analysis: Query={query_topics}, SQL={sql_topics}, Overlap={common_topics}")
@@ -526,11 +600,17 @@ def validate_tool_relevance(
     tool_name: str,
     min_overlap: float = TOOL_RELEVANCE_OVERLAP_THRESHOLD,
     question_analysis: Optional[QuestionAnalysis] = None,
+    raw_query: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Validate if selected typed tool is relevant to the resolved query capabilities."""
-    query_topics = _semantic_capabilities_from_query(query)
+    resolved_query_topics = _semantic_capabilities_from_query(query)
+    raw_query_topics = _semantic_capabilities_from_query(
+        query if raw_query is None else raw_query
+    )
+    analysis_topics: Set[str] = set()
     if question_analysis is not None:
-        query_topics.update(_semantic_capabilities_from_analysis(question_analysis))
+        analysis_topics = _semantic_capabilities_from_analysis(question_analysis)
+    query_topics = raw_query_topics | resolved_query_topics | analysis_topics
     if not query_topics:
         return True, "No specific query topics detected"
 
@@ -564,6 +644,14 @@ def validate_tool_relevance(
 
     if not tool_topics:
         return False, f"Unknown tool relevance mapping: {tool_name}"
+
+    raw_common = raw_query_topics & tool_topics
+    if question_analysis is not None and raw_query_topics and not raw_common:
+        return (
+            False,
+            "Tool relevance mismatch with raw query: "
+            f"query={sorted(raw_query_topics)} tool={sorted(tool_topics)}",
+        )
 
     common = query_topics & tool_topics
     if question_analysis is not None:

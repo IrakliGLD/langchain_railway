@@ -44,10 +44,15 @@ def test_narrative_and_gate_fields():
                summary_provenance_gate_reason="coverage_below_threshold",
                summary_provenance_coverage=0.42)
     block = build_answer_provenance(ctx)
-    assert block["answer_path"] == "narrative_llm"
+    assert block["answer_path"] == "guardrail_fallback"
     assert block["grounding_gate"] == {
         "passed": False, "reason": "coverage_below_threshold", "coverage": 0.42,
     }
+
+
+def test_citation_gate_fallback_has_explicit_guardrail_path():
+    block = build_answer_provenance(_ctx(summary_source="citation_gate_fallback"))
+    assert block["answer_path"] == "guardrail_fallback"
 
 
 def test_sql_fallback_flagged():

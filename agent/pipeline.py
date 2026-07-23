@@ -102,7 +102,7 @@ from knowledge.vector_retrieval import (
 from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
 from utils.privacy_logging import hash_private_identifier
-from utils.query_validation import validate_tool_relevance
+from utils.query_validation import extract_query_topics, validate_tool_relevance
 from utils.request_deadline import (
     RequestDeadlineExceeded,
     bind_request_execution_scope,
@@ -300,6 +300,15 @@ def _derive_response_mode(ctx: QueryContext) -> str:
         )
         query_lower = query_text.lower()
         if (
+            qa_type in _ALWAYS_DATA_TYPES
+            and ctx.is_conceptual
+            and "market_structure" in extract_query_topics(query_text)
+        ):
+            # Deterministic policy-intent guard: retrieval availability must not
+            # decide whether a liberalization/status question becomes a tariff
+            # data lookup when the raw query is conceptual.
+            return ResponseMode.KNOWLEDGE_PRIMARY
+        if (
             qa_type == "conceptual_definition"
             and any(token in query_lower for token in _TECHNICAL_CONCEPT_TOKENS)
             and any(token in query_lower for token in _TECHNICAL_CONCEPT_EXPLORATION_TOKENS)
@@ -322,7 +331,13 @@ def _derive_response_mode(ctx: QueryContext) -> str:
             # (claims_count=0, conservative fallback fired).
             if (
                 ctx.is_conceptual
-                and getattr(ctx.vector_knowledge, "chunk_count", 0) > 0
+                and (
+                    getattr(ctx.vector_knowledge, "chunk_count", 0) > 0
+                    or (
+                        qa_type == "factual_lookup"
+                        and bool(getattr(ctx, "vector_knowledge_error", ""))
+                    )
+                )
             ):
                 return ResponseMode.KNOWLEDGE_PRIMARY
             return ResponseMode.DATA_PRIMARY
@@ -1205,9 +1220,10 @@ def _apply_tool_result(
         ctx.plan.setdefault("target", invocation.name)
 
     tool_relevant, tool_reason = validate_tool_relevance(
-        (relevance_query or ctx.query),
+        (relevance_query or ctx.resolved_query or ctx.query),
         invocation.name,
         question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+        raw_query=ctx.query,
     )
     if not tool_relevant:
         metrics.log_relevance_block()
@@ -1579,6 +1595,7 @@ def _execute_evidence_step(
             _relevance_q,
             invocation.name,
             question_analysis=ctx.question_analysis if ctx.has_authoritative_question_analysis else None,
+            raw_query=ctx.query,
         )
 
         if not tool_relevant:

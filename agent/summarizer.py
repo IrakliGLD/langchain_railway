@@ -1859,7 +1859,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     Writes: ctx.summary
     """
     # Choose the strongest deterministic answer path first, then fall back to LLM summarization.
-    strict_grounding_retry = False
+    grounding_guardrail_triggered = False
     ctx.summary_source = ""
     ctx.grounding_policy = ""
     ctx.summary_domain_knowledge = ""
@@ -1988,7 +1988,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 comparison_focus=comparison_focus,
             )
             if not _is_summary_grounded(envelope, ctx):
-                strict_grounding_retry = True
+                grounding_guardrail_triggered = True
                 metrics.log_summary_grounding_failure()
                 # Try deterministic scenario fallback before generic message.
                 scenario_answer = _build_scenario_fallback_answer(ctx)
@@ -2084,7 +2084,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         "stage_4_summarize_data",
         "pre_gate",
         summary_source=ctx.summary_source,
-        strict_grounding_retry=strict_grounding_retry,
+        grounding_guardrail_triggered=grounding_guardrail_triggered,
         grounding_policy=ctx.grounding_policy,
         claims_count=len(ctx.summary_claims or []),
         citations=list(ctx.summary_citations or []),

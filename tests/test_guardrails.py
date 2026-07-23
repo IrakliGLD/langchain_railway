@@ -3,6 +3,7 @@ Tests for Stage-0 firewall and prompt/guardrail enforcement paths.
 """
 import importlib
 import json
+import logging
 import os
 from types import SimpleNamespace
 
@@ -309,8 +310,9 @@ def test_sql_executor_recovers_from_disallowed_function_400():
     assert "sql_validation_failed" in (out.skip_sql_reason or "")
 
 
-def test_summarizer_falls_back_when_grounding_fails(monkeypatch):
+def test_summarizer_falls_back_when_grounding_fails(monkeypatch, caplog):
     calls = {"count": 0}
+    caplog.set_level(logging.INFO, logger="Enai")
 
     def _fake_structured(*_args, **kwargs):
         calls["count"] += 1
@@ -335,6 +337,11 @@ def test_summarizer_falls_back_when_grounding_fails(monkeypatch):
     assert calls["count"] == 1
     assert "guardrail_grounding_fallback" in out.summary_citations
     assert out.summary_confidence == pytest.approx(0.2, rel=1e-6)
+    assert out.summary_source == "structured_summary_grounding_fallback"
+    assert out.summary_provenance_gate_passed is False
+    assert out.summary_provenance_gate_reason == "grounding_guardrail_fallback"
+    assert '"grounding_guardrail_triggered": true' in caplog.text
+    assert "strict_grounding_retry" not in caplog.text
 
 
 def test_grounding_token_normalization_handles_large_and_decimal_values():
@@ -2740,6 +2747,8 @@ def _mock_ctx_for_response_mode(
     preferred_path: str = "tool",
     is_conceptual: bool = False,
     vector_chunk_count: int = 0,
+    vector_knowledge_error: str = "",
+    query: str = "what is a price of electricity esco paying to sellers of balancing electricity?",
 ):
     """Build a minimal SimpleNamespace ctx for _derive_response_mode tests.
 
@@ -2754,10 +2763,11 @@ def _mock_ctx_for_response_mode(
     return SimpleNamespace(
         has_authoritative_question_analysis=True,
         question_analysis=question_analysis,
-        query="what is a price of electricity esco paying to sellers of balancing electricity?",
+        query=query,
         effective_query="",
         is_conceptual=is_conceptual,
         vector_knowledge=vector_knowledge,
+        vector_knowledge_error=vector_knowledge_error,
         clarify_selection_override=False,
     )
 
@@ -2802,6 +2812,53 @@ def test_response_mode_factual_lookup_with_conceptual_but_zero_chunks_stays_data
         query_type="factual_lookup",
         is_conceptual=True,
         vector_chunk_count=0,
+    )
+    assert _derive_response_mode(ctx) == ResponseMode.DATA_PRIMARY
+
+
+def test_response_mode_factual_lookup_with_conceptual_and_retrieval_error_is_knowledge():
+    """A retrieval outage must not make an analyzer/heuristic disagreement
+    silently choose irrelevant tabular evidence for a conceptual question.
+    """
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="factual_lookup",
+        is_conceptual=True,
+        vector_chunk_count=0,
+        vector_knowledge_error="embedding provider unavailable",
+    )
+    assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
+
+
+def test_response_mode_liberalization_policy_disagreement_is_always_knowledge():
+    """Raw policy intent must win even when retrieval returns no chunks and no error."""
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="factual_lookup",
+        is_conceptual=True,
+        vector_chunk_count=0,
+        query=(
+            "What is the situation with power plant liberalization? "
+            "Are many plants still regulated?"
+        ),
+    )
+    assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
+
+
+def test_response_mode_data_explanation_with_retrieval_error_stays_data():
+    """A vector outage alone must not override an authoritative analytical route."""
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="data_explanation",
+        is_conceptual=True,
+        vector_chunk_count=0,
+        vector_knowledge_error="embedding provider unavailable",
     )
     assert _derive_response_mode(ctx) == ResponseMode.DATA_PRIMARY
 
@@ -6409,6 +6466,8 @@ def test_grounding_fallback_message_is_localized():
     assert any("Ѐ" <= ch <= "ӿ" for ch in ru)
     # English message is ASCII prose; unknown codes fall back to English.
     assert "could not fully ground" in en
+    assert "available evidence" in en
+    assert "narrow the period" not in en
     assert get_grounding_fallback_message("xx") == en
 
 
