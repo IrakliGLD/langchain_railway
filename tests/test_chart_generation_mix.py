@@ -4,6 +4,7 @@ generation-mix composition restricted to generation techs (Bug B)."""
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
@@ -183,6 +184,20 @@ def test_mixed_supply_and_demand_prepare_keeps_both_sides():
 
     assert "quantity_hydro" in num_cols
     assert "quantity_abkhazeti" in num_cols
+    assert "total_supply" in num_cols
+    assert "total_demand" in num_cols
+
+
+def test_supply_adequacy_question_keeps_both_sides():
+    """A yes/no adequacy question compares supply with demand; it is not a
+    request for the supply components used to cover demand."""
+    df = _wide_supply_demand_frame()
+    ctx = QueryContext(query="does electricity supply meet demand?")
+    ctx.df = df
+    ctx.cols = list(df.columns)
+
+    _prepared, _time_key, _labels, _cat, num_cols = _prepare_chart_source(ctx)
+
     assert "total_supply" in num_cols
     assert "total_demand" in num_cols
 
@@ -379,3 +394,76 @@ def test_generation_quantities_stay_line_chart():
 
     assert out.chart_meta is not None
     assert out.chart_type == "line"
+
+
+def test_supply_coverage_chart_keeps_every_supply_component():
+    """A demand-coverage question asks what supplies demand, not who consumes it.
+
+    A stacked composition must also keep every component even when the
+    analyzer's generic readability hint says max_series=3.
+    """
+    df = _canonicalized_mix_frame()
+    demand_components = {
+        "quantity_abkhazeti": 90.0,
+        "quantity_supply-distribution": 210.0,
+        "quantity_direct customers": 120.0,
+        "quantity_losses": 35.0,
+        "quantity_export": 45.0,
+        "share_abkhazeti": 0.18,
+        "share_supply-distribution": 0.42,
+        "share_direct customers": 0.24,
+        "share_losses": 0.07,
+        "share_export": 0.09,
+        "total_demand": 500.0,
+    }
+    for col, start in demand_components.items():
+        step = 0.001 if start < 1 else 1.0
+        df[col] = [start + i * step for i in range(len(df))]
+
+    def enum(value):
+        return SimpleNamespace(value=value)
+    visualization = SimpleNamespace(
+        chart_requested_by_user=False,
+        chart_recommended=True,
+        primary_presentation=None,
+        preferred_chart_family=enum("stacked"),
+        visual_goal=enum("composition"),
+        measure_transform=enum("raw"),
+        time_grain=None,
+        series_split_mode=enum("single_chart"),
+        max_series=3,
+        sort_rule=enum("time_asc"),
+        top_n=None,
+    )
+    def build_composition(query):
+        ctx = QueryContext(query=query)
+        ctx.question_analysis = SimpleNamespace(
+            visualization=visualization,
+            answer_kind=enum("timeseries"),
+        )
+        ctx.question_analysis_source = "llm_active"
+        ctx.response_mode = "data_primary"
+        ctx.df = df
+        ctx.cols = list(df.columns)
+        ctx.rows = list(df.itertuples(index=False, name=None))
+        return build_chart(ctx)
+
+    out = build_composition("How does Georgia meet its demand for electricity?")
+    assert out.chart_type == "stackedbar"
+    assert set(out.chart_meta["sourceMetrics"]) == {
+        "quantity_hydro",
+        "quantity_import",
+        "quantity_self-cons",
+        "quantity_solar",
+        "quantity_thermal",
+        "quantity_wind",
+    }
+
+    demand_out = build_composition("Show the composition of electricity demand")
+    assert set(demand_out.chart_meta["sourceMetrics"]) == {
+        "share_abkhazeti",
+        "share_supply-distribution",
+        "share_direct customers",
+        "share_losses",
+        "share_export",
+    }
