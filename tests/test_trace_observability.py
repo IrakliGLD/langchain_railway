@@ -140,21 +140,26 @@ def test_why_context_emits_signal_trace(monkeypatch, caplog):
 
 
 def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
-    # Hermetic grounding: domain knowledge is a legitimate provenance source,
-    # and once any TestClient test has warmed the knowledge cache the merged
-    # balancing pack contains 60-family tokens that cover the claim below
-    # (2026-07-08: the knowledge expansion in b0052a8 flipped this gate to
-    # PASS in full-suite order). This test reasons about provenance_rows vs
-    # preview only, so it must pin the knowledge source to empty.
+    # Hermetic grounding: pin domain knowledge to empty so the merged balancing
+    # pack can't coincidentally ground the claim (2026-07-08: the knowledge
+    # expansion in b0052a8 flipped this gate to PASS in full-suite order).
     monkeypatch.setattr(
         summarizer, "get_relevant_domain_knowledge", lambda *a, **k: "",
     )
+    # Fix #1 unified the provenance gate onto the guardrail corpus, so a number
+    # merely present in the preview no longer fails the gate. This test isolates
+    # the CLAIM-level gate (guardrail mocked to pass, as in
+    # test_provenance_gate_blocks_partially_grounded_numeric_claims) and asserts
+    # it still fails — and logs the failure — when a claim cites a number absent
+    # from EVERY corpus (preview, provenance_rows, stats, domain). 999.0 is that
+    # genuine hallucination.
+    monkeypatch.setattr(summarizer, "_is_summary_grounded", lambda *_a, **_k: True)
     monkeypatch.setattr(
         summarizer,
         "llm_summarize_structured",
         lambda *_args, **_kwargs: SummaryEnvelope(
-            answer="Balancing price was 60.0 GEL/MWh.",
-            claims=["Balancing price was 60.0 GEL/MWh."],
+            answer="Balancing price was 999.0 GEL/MWh.",
+            claims=["Balancing price was 999.0 GEL/MWh."],
             citations=["data_preview", "statistics"],
             confidence=0.8,
         ),
@@ -164,11 +169,10 @@ def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
         query="why did balancing electricity price change in november 2021?",
         trace_id="trace-sum",
         session_id="session-sum",
-        preview="date balancing_price_gel\n2021-11-01 60.0",
+        preview="date balancing_price_gel\n2021-11-01 45.0",
         stats_hint="Trend: stable.",
-        # Provenance rows contain 45.0, but summary claims 60.0 —
-        # grounding passes (60.0 is in preview) but provenance fails
-        # because provenance_rows don't contain 60.0.
+        # 999.0 is absent from preview, provenance_rows, stats, and domain — a
+        # genuine ungrounded claim, so the gate fails closed and logs it.
         provenance_cols=["date", "balancing_price_gel"],
         provenance_rows=[("2021-11-01", 45.0)],
     )

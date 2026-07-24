@@ -20,6 +20,10 @@ _PATH_BY_SUMMARY_SOURCE = {
     "clarification_request": "clarify",
     "structured_summary_grounding_fallback": "guardrail_fallback",
     "citation_gate_fallback": "guardrail_fallback",
+    # Partial-but-grounded: the gate rejected the full answer and shipped only
+    # its grounded claims. Distinct from the apology (guardrail_fallback) and
+    # from a full narrative answer (narrative_llm).
+    "grounded_subset": "grounded_subset",
 }
 
 

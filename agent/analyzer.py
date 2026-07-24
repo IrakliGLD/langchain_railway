@@ -2686,6 +2686,9 @@ def enrich(ctx: QueryContext) -> QueryContext:
                     indent=2,
                 )
                 log.info(f"✅ Consolidated correlations computed: {list(ctx.correlation_results.keys())}")
+                # Surface each target's current/previous LEVEL (not just the
+                # coefficient) so a why-answer can cite grounded price levels.
+                _add_correlation_target_levels(ctx)
             else:
                 log.info("⚠️ No valid correlations found")
 
@@ -2931,6 +2934,59 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
     if len(lines) > 1:
         ctx.stats_hint += "\n".join(lines)
         log.info("Added column aggregates to stats_hint for %d numeric columns", len(numeric_cols))
+
+
+def _add_correlation_target_levels(ctx: QueryContext) -> None:
+    """Serialize each correlation target's current & previous LEVEL to stats_hint.
+
+    The correlation matrix exposes coefficients and ``_add_column_aggregates``
+    exposes min/mean/max, but a "why did X change" answer cites the actual
+    current and previous LEVELS of the driven metric (e.g. this month's
+    balancing price vs last month's). Those temporal levels otherwise live only
+    in the raw frame — and were absent as labeled facts when why-context signal
+    extraction returned null (prod trace span-7b62…), so the summarizer had no
+    grounded price level to cite. Emitting them as labeled stats makes the
+    levels visible to the summarizer and grounded via stats_hint. Additive and
+    computed from real frame values, so it cannot introduce ungrounded numbers.
+    """
+    if ctx.df is None or ctx.df.empty or not ctx.correlation_results:
+        return
+    time_col = _find_time_series_column(ctx.df)
+    if not time_col or time_col not in ctx.df.columns:
+        return
+    frame = ctx.df.copy()
+    frame[time_col] = normalize_period_series(frame[time_col])
+    frame = frame.dropna(subset=[time_col]).sort_values(time_col)
+    if frame.empty:
+        return
+
+    from context import COLUMN_LABELS
+
+    def _fmt_period(value: Any) -> str:
+        try:
+            return pd.Timestamp(value).strftime("%Y-%m")
+        except (ValueError, TypeError):
+            return str(value)
+
+    lines: list[str] = []
+    for target in ctx.correlation_results:
+        if target not in frame.columns:
+            continue
+        series = pd.to_numeric(frame[target], errors="coerce")
+        mask = series.notna()
+        if not mask.any():
+            continue
+        values = series[mask].tolist()
+        periods = frame.loc[mask, time_col].tolist()
+        label = COLUMN_LABELS.get(target, target)
+        parts = [f"latest={values[-1]:.4f} ({_fmt_period(periods[-1])})"]
+        if len(values) >= 2:
+            parts.append(f"previous={values[-2]:.4f} ({_fmt_period(periods[-2])})")
+        lines.append(f"{label}: " + ", ".join(parts))
+
+    if lines:
+        ctx.stats_hint += "\n\n--- SERIES LEVELS ---\n" + "\n".join(lines)
+        log.info("Added correlation target levels to stats_hint for %d targets", len(lines))
 
 
 # Scenario metric registry keys (kept as strings to mirror METRIC_REGISTRY).
