@@ -732,6 +732,126 @@ def test_build_claim_provenance_unrelated_number_still_fails():
     assert coverage == pytest.approx(0.0, rel=1e-6)
 
 
+# ---------------------------------------------------------------------------
+# Fix #1 — provenance gate must be FAITHFUL to the guardrail corpus.
+#
+# Production trace span-7b62… : the structured answer passed the token-level
+# guardrail (_is_summary_grounded, grounding_guardrail_triggered=false) but the
+# claim-level provenance gate rejected it (coverage=0.5, 1/2 claims). Root
+# cause: the gate's corpus (_build_claim_provenance over provenance_rows +
+# stats_hint + domain + vector) is NARROWER than the guardrail's corpus
+# (_build_grounding_tokens, which also includes ctx.preview, ctx.df, and the
+# derived aggregate/evidence/join adders). A number the LLM lifted from the
+# shown preview grounded for the guardrail but not the gate. The gate must
+# never reject a token the guardrail corpus already contains, while still
+# rejecting numbers absent from EVERY corpus.
+# ---------------------------------------------------------------------------
+
+
+def test_build_claim_provenance_grounds_token_present_in_guardrail_corpus():
+    """A token in the guardrail corpus (preview/df/derived) but absent from
+    provenance_rows and stats_hint must ground via extra_grounding_tokens."""
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The balancing price was 55 USD/MWh."],
+        cols=["share_import"],
+        rows=[(0.09,)],            # provenance rows carry NO price level
+        stats_hint="Rows: 1",      # stats_hint carries NO price level
+        extra_grounding_tokens={"55"},  # guardrail corpus DID contain 55
+    )
+
+    assert claim_entries[0]["matched_tokens"] == ["55"]
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
+
+
+def test_build_claim_provenance_guardrail_fallback_tolerates_rounding():
+    """The guardrail-corpus fallback honours claim-side rounding tolerance.
+
+    The real guardrail set (_build_grounding_tokens) is already rounding-
+    expanded, so it holds the 2-decimal form ``44.32`` of a ``44.3214`` cell;
+    a higher-precision claim ``44.321`` grounds via _rounded_match_variants."""
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The balancing price was 44.321 USD/MWh."],
+        cols=["share_import"],
+        rows=[(0.09,)],
+        stats_hint="Rows: 1",
+        extra_grounding_tokens={"44.32"},  # already-expanded guardrail token
+    )
+
+    assert claim_entries[0]["unmatched_tokens"] == []
+    assert claim_entries[0]["is_fully_grounded"] is True
+
+
+def test_build_claim_provenance_guardrail_fallback_still_rejects_absent_number():
+    """The fallback must NOT ground a number absent from every corpus, incl.
+    the guardrail corpus — true hallucinations still fail closed."""
+    claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The balancing price was 999 USD/MWh."],
+        cols=["share_import"],
+        rows=[(0.09,)],
+        stats_hint="Rows: 1",
+        extra_grounding_tokens={"55"},  # 999 is nowhere
+    )
+
+    assert "999" in claim_entries[0]["unmatched_tokens"]
+    assert claim_entries[0]["is_fully_grounded"] is False
+    assert coverage == pytest.approx(0.0, rel=1e-6)
+
+
+def test_build_claim_provenance_defaults_no_guardrail_fallback():
+    """Backward compatibility: without extra_grounding_tokens the corpus is
+    exactly the explicit sources — a preview-only number stays ungrounded."""
+    claim_entries, _coverage, _anchors = summarizer._build_claim_provenance(
+        claims=["The balancing price was 55 USD/MWh."],
+        cols=["share_import"],
+        rows=[(0.09,)],
+        stats_hint="Rows: 1",
+    )
+
+    assert "55" in claim_entries[0]["unmatched_tokens"]
+    assert claim_entries[0]["is_fully_grounded"] is False
+
+
+def test_provenance_gate_accepts_preview_sourced_number(monkeypatch):
+    """End-to-end: a number shown in the data preview (hence in the guardrail
+    corpus) but not present in provenance_rows must pass the provenance gate
+    once the gate is unified onto the guardrail corpus. Reproduces the
+    guardrail-passes/gate-fails split from production trace span-7b62…."""
+    from models import GroundingPolicy
+
+    def _fake_structured(*_args, **_kwargs):
+        return SummaryEnvelope(
+            answer="Balancing price was 55 USD/MWh; import share was 9%.",
+            claims=["Balancing price was 55 USD/MWh.", "Import share was 9%."],
+            citations=["data_preview"],
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+    # Guardrail passes, exactly as in production (grounding_guardrail_triggered=false).
+    monkeypatch.setattr(summarizer, "_is_summary_grounded", lambda *_a, **_k: True)
+
+    ctx = QueryContext(
+        query="why did the balancing price change",
+        preview="date share_import p_bal_usd\n2026-05 0.09 55",  # preview HAS 55
+        stats_hint="Rows: 1",
+        cols=["date", "share_import"],
+        rows=[("2026-05", 0.09)],                 # provenance rows have NO 55
+        provenance_cols=["date", "share_import"],
+        provenance_rows=[("2026-05", 0.09)],
+        provenance_query_hash="abc123",
+        provenance_source="tool",
+    )
+    ctx.grounding_policy = GroundingPolicy.EVIDENCE_AWARE
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_provenance_gate_passed is True
+    assert out.summary_source == "structured_summary"
+    assert "could not fully ground" not in out.summary
+
+
 def test_serialize_scalar_normalizes_pandas_numpy_scalars():
     scalar = pd.Series([5]).iloc[0]
     assert summarizer._serialize_scalar(scalar) == 5
@@ -764,6 +884,153 @@ def test_provenance_gate_blocks_partially_grounded_numeric_claims(monkeypatch):
     # Fallback is the localized grounding message (lang_code unset → English).
     assert "could not fully ground" in out.summary
     assert out.summary_citations == ["citation_gate_fallback"]
+
+
+# ---------------------------------------------------------------------------
+# Fix #4 — repair-not-nuke. On a gate failure where SOME claims are grounded,
+# ship the grounded subset (strict-compliant: no ungrounded number leaks)
+# instead of discarding the whole answer for the generic apology. Keep the
+# apology only when ZERO claims are grounded.
+# ---------------------------------------------------------------------------
+
+
+def test_provenance_gate_repairs_to_grounded_subset():
+    from models import GroundingPolicy
+
+    ctx = QueryContext(query="why did the balancing price change", lang_code="en")
+    ctx.grounding_policy = GroundingPolicy.EVIDENCE_AWARE
+    ctx.summary = "Import share rose to 9.1%. The balancing price hit 999 GEL."
+    ctx.summary_source = "structured_summary"
+    ctx.summary_confidence = 0.9
+    ctx.summary_claim_provenance = [
+        {
+            "claim_index": 0,
+            "claim_text": "Import share rose to 9.1%.",
+            "tokens": ["9.1"],
+            "unmatched_tokens": [],
+            "is_fully_grounded": True,
+        },
+        {
+            "claim_index": 1,
+            "claim_text": "The balancing price hit 999 GEL.",
+            "tokens": ["999"],
+            "unmatched_tokens": ["999"],
+            "is_fully_grounded": False,
+        },
+    ]
+    ctx.summary_provenance_coverage = 0.5
+
+    summarizer._enforce_provenance_gate(ctx)
+
+    # The original answer failed the gate, but the grounded subset ships.
+    assert ctx.summary_provenance_gate_passed is False
+    assert ctx.summary_source == "grounded_subset"
+    assert ctx.summary_claims == ["Import share rose to 9.1%."]
+    # Grounded content kept; ungrounded number never leaks; not the apology.
+    assert "9.1" in ctx.summary
+    assert "999" not in ctx.summary
+    assert "could not fully ground" not in ctx.summary
+
+
+def test_provenance_gate_full_failure_keeps_apology():
+    """Zero grounded claims → the generic localized apology, unchanged."""
+    from models import GroundingPolicy
+
+    ctx = QueryContext(query="why did the balancing price change", lang_code="en")
+    ctx.grounding_policy = GroundingPolicy.EVIDENCE_AWARE
+    ctx.summary = "The balancing price hit 999 GEL."
+    ctx.summary_source = "structured_summary"
+    ctx.summary_confidence = 0.9
+    ctx.summary_claim_provenance = [
+        {
+            "claim_index": 0,
+            "claim_text": "The balancing price hit 999 GEL.",
+            "tokens": ["999"],
+            "unmatched_tokens": ["999"],
+            "is_fully_grounded": False,
+        },
+    ]
+    ctx.summary_provenance_coverage = 0.0
+
+    summarizer._enforce_provenance_gate(ctx)
+
+    assert ctx.summary_source == "citation_gate_fallback"
+    assert "could not fully ground" in ctx.summary
+    assert "999" not in ctx.summary
+
+
+def test_provenance_gate_subset_ignores_claims_without_text():
+    """A grounded claim entry without usable claim_text cannot be shipped, so
+    an all-textless failure still falls back to the apology (fail-safe)."""
+    from models import GroundingPolicy
+
+    ctx = QueryContext(query="why did the balancing price change", lang_code="en")
+    ctx.grounding_policy = GroundingPolicy.EVIDENCE_AWARE
+    ctx.summary = "original prose"
+    ctx.summary_source = "structured_summary"
+    ctx.summary_confidence = 0.9
+    ctx.summary_claim_provenance = [
+        {"tokens": ["1"], "is_fully_grounded": True, "unmatched_tokens": []},
+        {"tokens": ["3"], "is_fully_grounded": False, "unmatched_tokens": ["3"]},
+    ]
+    ctx.summary_provenance_coverage = 0.5
+
+    summarizer._enforce_provenance_gate(ctx)
+
+    assert ctx.summary_source == "citation_gate_fallback"
+
+
+# ---------------------------------------------------------------------------
+# Fix #2 — serialize correlation-target LEVELS into stats_hint. The correlation
+# matrix exposes coefficients and column aggregates expose min/mean/max, but a
+# "why did X change" answer cites the actual current & previous LEVELS of the
+# driven metric. Those were absent as labeled facts when why-context signal
+# extraction returned null (prod trace span-7b62…). Emitting them makes the
+# levels visible to the summarizer and grounded via stats_hint.
+# ---------------------------------------------------------------------------
+
+
+def test_add_correlation_target_levels_serializes_current_and_previous():
+    ctx = QueryContext(query="why did the balancing price change")
+    ctx.df = pd.DataFrame(
+        {
+            "date": ["2026-03-01", "2026-04-01", "2026-05-01"],
+            "p_bal_gel": [40.0, 45.0, 55.0],
+            "share_import": [0.05, 0.07, 0.09],
+        }
+    )
+    ctx.correlation_results = {"p_bal_gel": {"share_import": 0.9}}
+    ctx.stats_hint = ""
+
+    analyzer._add_correlation_target_levels(ctx)
+
+    assert "SERIES LEVELS" in ctx.stats_hint
+    assert "55.0000" in ctx.stats_hint  # current level (2026-05)
+    assert "45.0000" in ctx.stats_hint  # previous level (2026-04)
+
+
+def test_add_correlation_target_levels_noop_without_time_column():
+    ctx = QueryContext(query="why did the balancing price change")
+    ctx.df = pd.DataFrame({"p_bal_gel": [40.0, 55.0]})  # no time column
+    ctx.correlation_results = {"p_bal_gel": {"x": 0.9}}
+    ctx.stats_hint = "base"
+
+    analyzer._add_correlation_target_levels(ctx)
+
+    assert ctx.stats_hint == "base"  # ill-defined without time → unchanged
+
+
+def test_add_correlation_target_levels_noop_without_correlations():
+    ctx = QueryContext(query="why did the balancing price change")
+    ctx.df = pd.DataFrame(
+        {"date": ["2026-04-01", "2026-05-01"], "p_bal_gel": [45.0, 55.0]}
+    )
+    ctx.correlation_results = {}
+    ctx.stats_hint = "base"
+
+    analyzer._add_correlation_target_levels(ctx)
+
+    assert ctx.stats_hint == "base"
 
 
 @pytest.mark.parametrize(

@@ -712,6 +712,28 @@ def _build_row_context(cols: List[Any], row: tuple) -> Dict[str, Any]:
     return context
 
 
+def _grounding_corpus_ref(token: str, query_hash: str) -> Dict[str, Any]:
+    """Synthetic provenance ref for a token grounded via the guardrail corpus.
+
+    The guardrail corpus (:func:`_build_grounding_tokens`) is a bare token set
+    with no cell coordinates, so a token grounded only through it cannot cite an
+    exact row/column. The ref records the corpus as the source so the claim is
+    counted grounded (``is_fully_grounded`` needs a non-empty ref list) while
+    staying transparent that the anchor is corpus-level, not cell-level.
+    """
+    return {
+        "source": "grounding_corpus",
+        "row_number": 0,
+        "row_index": -1,
+        "column": "Grounding Corpus",
+        "value": token,
+        "cell_id": f"grounding_corpus:{hashlib.md5(token.encode()).hexdigest()[:8]}",
+        "row_context": {"Type": "Grounding Corpus"},
+        "coordinate": "grounding_corpus",
+        "query_hash": query_hash,
+    }
+
+
 def _build_claim_provenance(
     claims: List[str],
     cols: List[Any],
@@ -721,6 +743,7 @@ def _build_claim_provenance(
     stats_hint: str = "",
     domain_knowledge: str = "",
     external_source_passages: str = "",
+    extra_grounding_tokens: Optional[Set[str]] = None,
 ) -> tuple[List[Dict[str, Any]], float, List[str]]:
     token_index: Dict[str, List[Dict[str, Any]]] = {}
     source_priority = {
@@ -728,6 +751,7 @@ def _build_claim_provenance(
         "tool": 0,
         "derived_analysis": 1,
         "external_source_passages": 2,
+        "grounding_corpus": 2,
         "domain_knowledge": 3,
         "unknown": 4,
     }
@@ -833,6 +857,20 @@ def _build_claim_provenance(
                     if variant in token_index:
                         raw_refs = token_index[variant]
                         break
+            if not raw_refs and extra_grounding_tokens:
+                # Faithful-to-guardrail fallback: the token (or a rounded form)
+                # is present in the guardrail grounding corpus
+                # (_build_grounding_tokens: ctx.preview, ctx.df, and the derived
+                # aggregate/evidence/join adders) which the token_index does not
+                # carry. The provenance gate must not reject a number the
+                # guardrail already accepts, so count it grounded with a
+                # synthetic corpus ref. Numbers absent from the corpus stay
+                # unmatched, so true hallucinations still fail closed.
+                if token in extra_grounding_tokens or any(
+                    variant in extra_grounding_tokens
+                    for variant in _rounded_match_variants(token)
+                ):
+                    raw_refs = [_grounding_corpus_ref(token, query_hash)]
             refs = sorted(
                 raw_refs or [],
                 key=lambda ref: (
@@ -900,6 +938,15 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         ctx.summary_claim_provenance = []
         ctx.summary_provenance_coverage = 0.0
         return
+    # Unify the gate onto the guardrail corpus: a number the guardrail check
+    # (_build_grounding_tokens) already accepts — sourced from ctx.preview,
+    # ctx.df, or the derived aggregate/evidence/join adders that the claim
+    # provenance index does not carry — must not be rejected by the provenance
+    # gate. Fail-open on the token build so grounding never crashes a response.
+    try:
+        grounding_tokens = _build_grounding_tokens(ctx)
+    except Exception:  # pragma: no cover - defensive
+        grounding_tokens = set()
     claim_prov, coverage, anchors = _build_claim_provenance(
         claims,
         source_cols,
@@ -909,6 +956,7 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         stats_hint=ctx.stats_hint or "",
         domain_knowledge=ctx.summary_domain_knowledge or "",
         external_source_passages=ctx.vector_knowledge_prompt or "",
+        extra_grounding_tokens=grounding_tokens,
     )
     ctx.summary_claim_provenance = claim_prov
     ctx.summary_provenance_coverage = round(float(coverage), 4)
@@ -1003,12 +1051,77 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
         )
         return
 
-    # When coverage is too low, replace the draft answer with a safe retry prompt.
+    # Coverage too low: the original structured answer is not shippable as-is.
+    # Record the failure, then prefer REPAIR over discard.
     metrics.log_summary_grounding_failure()
     if hasattr(metrics, "log_provenance_gate_failure"):
         metrics.log_provenance_gate_failure()
     log_fixture_candidate("provenance_gate_failure", ctx)
     ctx.summary_provenance_gate_passed = False
+    unmatched = [
+        {
+            "claim_index": entry.get("claim_index"),
+            "unmatched_tokens": list(entry.get("unmatched_tokens") or []),
+        }
+        for entry in numeric_claims
+        if entry.get("unmatched_tokens")
+    ]
+
+    # Repair-not-nuke: ship the subset of claims that carry no ungrounded number
+    # (fully grounded numeric claims AND number-free claims) with usable text.
+    # Every number in the shipped text is then grounded, so strict grounding
+    # holds while the user keeps the substantive facts instead of a blanket
+    # apology. Fall back to the apology only when nothing is grounded.
+    #
+    # Scoped to structured_summary: only the LLM's structured claims[] contract
+    # yields well-formed, independently-shippable sentences. The legacy text
+    # fallback derives claims by line-splitting unstructured prose, so a subset
+    # could split mid-thought; it keeps its deliberate fail-closed stance.
+    safe_entries = [
+        entry
+        for entry in claim_entries
+        if not entry.get("unmatched_tokens")
+        and str(entry.get("claim_text") or "").strip()
+    ]
+    if safe_entries and ctx.summary_source == "structured_summary":
+        safe_claims = [str(entry["claim_text"]).strip() for entry in safe_entries]
+        ctx.summary = " ".join(safe_claims)
+        ctx.summary_source = "grounded_subset"
+        ctx.summary_claims = safe_claims
+        ctx.summary_citations = ["grounded_subset"]
+        ctx.summary_confidence = min(float(ctx.summary_confidence or 0.0), 0.6)
+        # Keep only the provenance backing the shipped claims. Coverage retains
+        # the ORIGINAL value (it explains why the full answer was rejected); the
+        # gate flag stays False to record that the original did not pass.
+        ctx.summary_claim_provenance = safe_entries
+        ctx.summary_provenance_gate_reason = (
+            f"coverage={coverage:.4f}, min={min_coverage:.4f}, "
+            f"repaired_to_grounded_subset={len(safe_claims)}_of_{len(claim_entries)}_claims"
+        )
+        trace_detail(
+            log,
+            ctx,
+            "stage_4_summarize_data",
+            "provenance_gate",
+            gate_passed=False,
+            gate_reason=ctx.summary_provenance_gate_reason,
+            numeric_claims=len(numeric_claims),
+            coverage=coverage,
+            unmatched_tokens=unmatched,
+            repaired="grounded_subset",
+            shipped_claims=len(safe_claims),
+        )
+        trace_detail(
+            log,
+            ctx,
+            "stage_4_summarize_data",
+            "artifact",
+            debug=True,
+            summary_claim_provenance=claim_entries,
+        )
+        return
+
+    # Nothing grounded: fail closed with the localized apology (unchanged).
     ctx.summary_provenance_gate_reason = (
         f"coverage={coverage:.4f}, min={min_coverage:.4f}, ungrounded_numeric_claims={int(has_ungrounded_claim)}"
     )
@@ -1019,14 +1132,6 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
     ctx.summary_confidence = min(float(ctx.summary_confidence or 0.0), 0.2)
     ctx.summary_claim_provenance = []
     ctx.summary_provenance_coverage = 0.0
-    unmatched = [
-        {
-            "claim_index": entry.get("claim_index"),
-            "unmatched_tokens": list(entry.get("unmatched_tokens") or []),
-        }
-        for entry in numeric_claims
-        if entry.get("unmatched_tokens")
-    ]
     trace_detail(
         log,
         ctx,

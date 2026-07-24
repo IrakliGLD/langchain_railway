@@ -55,6 +55,13 @@ def test_citation_gate_fallback_has_explicit_guardrail_path():
     assert block["answer_path"] == "guardrail_fallback"
 
 
+def test_grounded_subset_has_own_answer_path():
+    """A repaired grounded-subset answer is a partial-but-grounded path, distinct
+    from the guardrail apology and from a full narrative answer."""
+    block = build_answer_provenance(_ctx(summary_source="grounded_subset"))
+    assert block["answer_path"] == "grounded_subset"
+
+
 def test_sql_fallback_flagged():
     ctx = _ctx(summary_source="structured_summary", used_tool=False,
                safe_sql="SELECT 1", tool_name="")
