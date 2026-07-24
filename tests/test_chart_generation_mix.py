@@ -15,7 +15,12 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import pandas as pd
 
-from agent.chart_pipeline import _prepare_chart_source, build_chart
+from agent.chart_pipeline import (
+    _apply_composition_series_budget,
+    _limit_series,
+    _prepare_chart_source,
+    build_chart,
+)
 from agent.derived_chart_builder import _build_decomposition_spec, _resolve_time_key
 from models import QueryContext
 
@@ -396,6 +401,72 @@ def test_generation_quantities_stay_line_chart():
     assert out.chart_type == "line"
 
 
+def test_time_sort_does_not_choose_which_series_survive():
+    metrics = ["p_bal_gel", "xrate"]
+
+    selected = _limit_series(
+        metrics,
+        "show the exchange rate over time",
+        1,
+        preserve_order=False,
+        sort_rule="time_asc",
+        top_n=None,
+    )
+
+    assert selected == ["xrate"]
+
+
+def test_composition_budget_preserves_overflow_as_other():
+    metrics = [f"quantity_component_{idx}" for idx in range(10)]
+    df = pd.DataFrame(
+        {
+            metric: [float(idx + 1), float((idx + 1) * 2)]
+            for idx, metric in enumerate(metrics)
+        }
+    )
+    original_totals = df[metrics].sum(axis=1)
+
+    budgeted_df, budgeted_metrics, budget_meta = _apply_composition_series_budget(
+        df,
+        metrics,
+        max_series=8,
+        top_n=None,
+    )
+
+    assert len(budgeted_metrics) == 8
+    assert budgeted_metrics[-1] == "quantity_other"
+    assert len(budget_meta["otherMembers"]) == 3
+    pd.testing.assert_series_equal(
+        budgeted_df[budgeted_metrics].sum(axis=1),
+        original_totals,
+        check_names=False,
+    )
+
+
+def test_explicit_top_n_is_the_only_composition_omission():
+    metrics = [f"quantity_component_{idx}" for idx in range(6)]
+    df = pd.DataFrame(
+        {
+            metric: [float(idx + 1), float(idx + 1)]
+            for idx, metric in enumerate(metrics)
+        }
+    )
+
+    _budgeted_df, budgeted_metrics, budget_meta = _apply_composition_series_budget(
+        df,
+        metrics,
+        max_series=8,
+        top_n=3,
+    )
+
+    assert budgeted_metrics == [
+        "quantity_component_5",
+        "quantity_component_4",
+        "quantity_component_3",
+    ]
+    assert budget_meta == {"topN": 3}
+
+
 def test_supply_coverage_chart_keeps_every_supply_component():
     """A demand-coverage question asks what supplies demand, not who consumes it.
 
@@ -426,8 +497,10 @@ def test_supply_coverage_chart_keeps_every_supply_component():
         chart_requested_by_user=False,
         chart_recommended=True,
         primary_presentation=None,
-        preferred_chart_family=enum("stacked"),
-        visual_goal=enum("composition"),
+        # Exact production-log mismatch: the pre-data analyzer called this a
+        # three-series trend even though the returned frame is a composition.
+        preferred_chart_family=enum("line"),
+        visual_goal=enum("trend"),
         measure_transform=enum("raw"),
         time_grain=None,
         series_split_mode=enum("single_chart"),
@@ -443,6 +516,9 @@ def test_supply_coverage_chart_keeps_every_supply_component():
         )
         ctx.question_analysis_source = "llm_active"
         ctx.response_mode = "data_primary"
+        ctx.used_tool = True
+        ctx.tool_name = "get_generation_mix"
+        ctx.tool_params = {"mode": "quantity", "types": []}
         ctx.df = df
         ctx.cols = list(df.columns)
         ctx.rows = list(df.itertuples(index=False, name=None))
@@ -458,6 +534,18 @@ def test_supply_coverage_chart_keeps_every_supply_component():
         "quantity_thermal",
         "quantity_wind",
     }
+
+    visualization.chart_requested_by_user = True
+    generic_chart_out = build_composition(
+        "Show a chart of how Georgia meets its demand for electricity"
+    )
+    assert generic_chart_out.chart_type == "stackedbar"
+
+    explicit_line_out = build_composition(
+        "Show as a line chart how Georgia meets its demand for electricity"
+    )
+    assert explicit_line_out.chart_type == "line"
+    visualization.chart_requested_by_user = False
 
     demand_out = build_composition("Show the composition of electricity demand")
     assert set(demand_out.chart_meta["sourceMetrics"]) == {

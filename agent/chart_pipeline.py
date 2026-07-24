@@ -72,6 +72,12 @@ _NORMALIZED_CHART_TYPES = {
     "stackedarea": "stackedbar",
     "stacked_area": "stackedbar",
 }
+_EXPLICIT_CHART_FAMILY_PATTERNS = (
+    ("stackedbar", re.compile(r"\bstacked\s+(?:bar|area)(?:\s+(?:chart|graph|plot))?\b")),
+    ("line", re.compile(r"\bline\s+(?:chart|graph|plot)\b")),
+    ("bar", re.compile(r"\bbar\s+(?:chart|graph|plot)\b")),
+    ("pie", re.compile(r"\bpie\s+(?:chart|graph)\b")),
+)
 
 _SUPPLY_CHART_METRIC_COLS = frozenset(
     [f"quantity_{tech}".lower() for tech in SUPPLY_TECH_TYPES]
@@ -859,14 +865,15 @@ def _resolve_chart_groups(
             max_series = _COMPOSITION_MAX_SERIES
         else:
             max_series = _DEFAULT_MAX_SERIES
-        metrics = _limit_series(
-            metrics,
-            query_lower,
-            max_series,
-            preserve_order=preserve_order,
-            sort_rule=sort_rule,
-            top_n=top_n,
-        )
+        if not complete_energy_composition:
+            metrics = _limit_series(
+                metrics,
+                query_lower,
+                max_series,
+                preserve_order=preserve_order,
+                sort_rule=sort_rule,
+                top_n=top_n,
+            )
         if not metrics:
             continue
         signature = (
@@ -880,6 +887,26 @@ def _resolve_chart_groups(
         normalized = dict(group)
         normalized["metrics"] = metrics
         normalized["_max_series_cap"] = max_series
+        normalized["_complete_energy_composition"] = complete_energy_composition
+        preferred_type = _normalize_chart_type(
+            getattr(getattr(visualization, "preferred_chart_family", None), "value", None)
+        )
+        explicit_user_type = _explicit_user_chart_type(ctx.query)
+        if complete_energy_composition and explicit_user_type:
+            normalized["type"] = explicit_user_type
+        elif complete_energy_composition:
+            # The analyzer runs before retrieval and can mistake a component
+            # time series for independent trends. The observed coherent
+            # component family is authoritative for the final render shape.
+            prior_type = _normalize_chart_type(normalized.get("type")) or preferred_type or "auto"
+            if prior_type != "stackedbar":
+                log.info(
+                    "Post-retrieval chart override: %s -> stackedbar for complete "
+                    "energy composition from %s",
+                    prior_type,
+                    ctx.tool_name or "retrieved data",
+                )
+            normalized["type"] = "stackedbar"
         normalized_groups.append(normalized)
     return normalized_groups
 
@@ -906,8 +933,14 @@ def _select_energy_composition_metrics(
         getattr(getattr(visualization, "preferred_chart_family", None), "value", None)
     )
     visual_goal = getattr(getattr(visualization, "visual_goal", None), "value", None)
+    tool_mode = str((ctx.tool_params or {}).get("mode") or "").lower()
+    retrieved_composition = (
+        ctx.tool_name == "get_generation_mix"
+        and (tool_mode == "share" or _is_supply_coverage_query(query))
+    )
     is_composition = (
-        explicit_type == "stackedbar"
+        retrieved_composition
+        or explicit_type == "stackedbar"
         or preferred_type == "stackedbar"
         or visual_goal in {"composition", "decomposition"}
         or (metrics and all(infer_dimension(col) == "share" for col in metrics))
@@ -949,6 +982,76 @@ def _select_energy_composition_metrics(
             len(metrics),
         )
     return selected, True
+
+
+def _apply_composition_series_budget(
+    df: pd.DataFrame,
+    metrics: List[str],
+    *,
+    max_series: int,
+    top_n: Optional[int],
+) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
+    """Apply a display budget without silently losing composition mass.
+
+    Components are ranked by their contribution across the displayed frame.
+    An explicit ``top_n`` narrows the semantic candidate set. If that set still
+    exceeds the display budget, overflow components are summed into ``Other``.
+    """
+    present = [metric for metric in metrics if metric in df.columns]
+    if not present:
+        return df, [], {}
+
+    budget = max(1, int(max_series))
+    if not (top_n is not None and top_n > 0) and len(present) <= budget:
+        # Preserve the domain/configured order when every component fits.
+        # Ranking is only needed to choose top-N members or display overflow.
+        return df, present, {}
+
+    contributions: Dict[str, float] = {}
+    for metric in present:
+        values = pd.to_numeric(df[metric], errors="coerce")
+        contributions[metric] = float(values.abs().sum(skipna=True))
+    original_order = {metric: index for index, metric in enumerate(present)}
+    ranked = sorted(
+        present,
+        key=lambda metric: (-contributions[metric], original_order[metric]),
+    )
+
+    metadata: Dict[str, Any] = {}
+    selected = ranked
+    if top_n is not None and top_n > 0:
+        selected = ranked[: int(top_n)]
+        metadata["topN"] = int(top_n)
+
+    if len(selected) <= budget:
+        return df, selected, metadata
+
+    kept = selected[: budget - 1]
+    other_members = selected[budget - 1 :]
+    prefixes = {
+        metric.split("_", 1)[0]
+        for metric in selected
+        if "_" in metric and metric.split("_", 1)[0] in {"quantity", "share"}
+    }
+    other_metric = f"{next(iter(prefixes))}_other" if len(prefixes) == 1 else "other_components"
+    while other_metric in df.columns or other_metric in selected:
+        other_metric = f"{other_metric}_grouped"
+
+    budgeted_df = df.copy()
+    budgeted_df[other_metric] = budgeted_df[other_members].sum(axis=1, min_count=1)
+    metadata.update(
+        {
+            "otherMetric": other_metric,
+            "otherMembers": other_members,
+        }
+    )
+    log.info(
+        "Composition display budget: kept %d components and grouped %d into %s",
+        len(kept),
+        len(other_members),
+        other_metric,
+    )
+    return budgeted_df, kept + [other_metric], metadata
 
 
 def _resolve_group_metrics(requested_metrics: Any, available_num_cols: List[str]) -> List[str]:
@@ -1033,10 +1136,10 @@ def _limit_series(
         log.info("Limited to %d series via category_alpha: %s", effective_cap, trimmed)
         return trimmed
 
-    # Time-based sort rules describe the x-axis, not series selection. When
-    # they are active we want to preserve the caller's column order so the
-    # time axis is not reshuffled by a name-based fallback.
-    if sort_rule in {"time_asc", "time_desc"} or preserve_order:
+    # A planner-authored metric order is intentional and remains stable.
+    # Time-based sort rules describe the x-axis only; they must not decide
+    # which series survive the cap.
+    if preserve_order:
         trimmed = list(metrics[:effective_cap])
         log.info("Trimmed chart group to %d series (preserve_order): %s", effective_cap, trimmed)
         return trimmed
@@ -1134,6 +1237,21 @@ def _build_chart_spec(
     group_index: int,
 ) -> Optional[Dict[str, Any]]:
     metrics = [metric for metric in group.get("metrics", []) if metric in source_df.columns]
+    if not metrics:
+        return None
+
+    composition_budget_meta: Dict[str, Any] = {}
+    if group.get("_complete_energy_composition"):
+        source_df, metrics, composition_budget_meta = _apply_composition_series_budget(
+            source_df,
+            metrics,
+            max_series=group.get("_max_series_cap") or _COMPOSITION_MAX_SERIES,
+            top_n=getattr(visualization, "top_n", None),
+        )
+        other_metric = composition_budget_meta.get("otherMetric")
+        if other_metric:
+            label_map_all = dict(label_map_all)
+            label_map_all[other_metric] = "Other"
     if not metrics:
         return None
 
@@ -1264,6 +1382,7 @@ def _build_chart_spec(
         chart_meta["aggregation"] = aggregation_value
 
     chart_meta.update(transform_meta)
+    chart_meta.update(composition_budget_meta)
 
     if group.get("title"):
         chart_meta["title"] = group["title"]
@@ -1461,6 +1580,15 @@ def _normalize_chart_type(raw_type: Any) -> Optional[str]:
         return None
     normalized = str(raw_type).strip().lower().replace("-", "_")
     return _NORMALIZED_CHART_TYPES.get(normalized)
+
+
+def _explicit_user_chart_type(query: str) -> Optional[str]:
+    """Return a chart family only when the user's wording names one."""
+    query_lower = str(query or "").lower()
+    for chart_type, pattern in _EXPLICIT_CHART_FAMILY_PATTERNS:
+        if pattern.search(query_lower):
+            return chart_type
+    return None
 
 
 def _format_time_labels(df: pd.DataFrame, time_key: Optional[str]) -> None:
