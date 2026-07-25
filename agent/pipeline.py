@@ -110,7 +110,7 @@ from utils.request_deadline import (
     cap_request_deadline,
     current_request_execution_scope,
 )
-from utils.residual_price import is_implied_ppa_cfd_price_query
+from utils.residual_price import has_residual_direct_intent, is_implied_ppa_cfd_price_query
 from utils.trace_logging import trace_detail
 
 log = logging.getLogger("Enai")
@@ -972,6 +972,12 @@ def _should_enrich_balancing_driver_context(
         return True
 
     if _has_residual_weighted_price_signal(ctx.query):
+        return True
+
+    # An analyzer-emitted residual intent needs the same driver columns as the
+    # keyword-matched path. Without this the contract route (item 3) would ask
+    # for a calculation whose inputs were never fetched.
+    if has_residual_direct_intent(ctx):
         return True
 
     if ctx.has_authoritative_question_analysis:

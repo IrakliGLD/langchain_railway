@@ -344,6 +344,117 @@ def test_summarizer_falls_back_when_grounding_fails(monkeypatch, caplog):
     assert "strict_grounding_retry" not in caplog.text
 
 
+def test_guardrail_failure_repairs_to_grounded_subset(monkeypatch):
+    """Gap ① — the guardrail must repair, not nuke.
+
+    The provenance gate learned repair-not-nuke, but the token-ratio guardrail
+    still discarded the whole answer and set summary_source to
+    structured_summary_grounding_fallback, on which the gate short-circuits
+    (summary_grounding.py) — so an 8/9-grounded answer shipped as a generic
+    apology (prod trace span-f00ddad4, 2026-07-24: ratio=0.89 vs 0.90).
+    """
+    def _fake_structured(*_args, **_kwargs):
+        return SummaryEnvelope(
+            answer="Import share was 9%. The balancing price hit 999 GEL.",
+            claims=["Import share was 9%.", "The balancing price hit 999 GEL."],
+            citations=["data_preview"],
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", lambda *a, **k: "")
+    # Guardrail rejects the answer as a whole (its real 8/9-style verdict).
+    monkeypatch.setattr(summarizer, "_is_summary_grounded", lambda *_a, **_k: False)
+
+    ctx = QueryContext(
+        query="what was the import share",
+        preview="date share_import\n2026-05 0.09",
+        stats_hint="Rows: 1",
+        cols=["date", "share_import"],
+        rows=[("2026-05", 0.09)],
+        provenance_cols=["date", "share_import"],
+        provenance_rows=[("2026-05", 0.09)],
+        provenance_query_hash="abc123",
+        provenance_source="tool",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "grounded_subset"
+    assert "9" in out.summary
+    assert "999" not in out.summary
+    assert "could not fully ground" not in out.summary
+
+
+def test_guardrail_failure_keeps_apology_when_nothing_grounded(monkeypatch):
+    """No claim survives → the conservative apology, exactly as before."""
+    def _fake_structured(*_args, **_kwargs):
+        return SummaryEnvelope(
+            answer="The balancing price hit 999 GEL and demand was 888 GWh.",
+            claims=["The balancing price hit 999 GEL.", "Demand was 888 GWh."],
+            citations=["data_preview"],
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", lambda *a, **k: "")
+    monkeypatch.setattr(summarizer, "_is_summary_grounded", lambda *_a, **_k: False)
+
+    ctx = QueryContext(
+        query="what was the import share",
+        preview="date share_import\n2026-05 0.09",
+        stats_hint="Rows: 1",
+        cols=["date", "share_import"],
+        rows=[("2026-05", 0.09)],
+        provenance_cols=["date", "share_import"],
+        provenance_rows=[("2026-05", 0.09)],
+        provenance_query_hash="abc123",
+        provenance_source="tool",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "structured_summary_grounding_fallback"
+    assert "999" not in out.summary
+    assert "888" not in out.summary
+
+
+def test_guardrail_repair_does_not_preempt_scenario_fallback(monkeypatch):
+    """The deterministic scenario answer stays higher-priority than a subset."""
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_a, **_k: SummaryEnvelope(
+            answer="Import share was 9%. Price hit 999 GEL.",
+            claims=["Import share was 9%.", "Price hit 999 GEL."],
+            citations=["data_preview"],
+            confidence=0.9,
+        ),
+    )
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", lambda *a, **k: "")
+    monkeypatch.setattr(summarizer, "_is_summary_grounded", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        summarizer, "_build_scenario_fallback_answer", lambda *_a, **_k: "Scenario answer.",
+    )
+
+    ctx = QueryContext(
+        query="what was the import share",
+        preview="date share_import\n2026-05 0.09",
+        stats_hint="Rows: 1",
+        cols=["date", "share_import"],
+        rows=[("2026-05", 0.09)],
+        provenance_cols=["date", "share_import"],
+        provenance_rows=[("2026-05", 0.09)],
+        provenance_query_hash="abc123",
+        provenance_source="tool",
+    )
+
+    out = summarizer.summarize_data(ctx)
+
+    assert out.summary_source == "deterministic_scenario_fallback"
+    assert out.summary == "Scenario answer."
+
+
 def test_grounding_token_normalization_handles_large_and_decimal_values():
     tokens = summarizer._extract_number_tokens("Result moved from 9999 to 10.0 and then 10")
     assert "9999" in tokens

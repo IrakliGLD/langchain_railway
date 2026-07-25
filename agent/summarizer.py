@@ -43,6 +43,7 @@ from agent.summary_grounding import (
     _normalize_number_token,
     _normalized_decimal_token,
     _rounded_match_variants,
+    _select_grounded_claims,
     _serialize_scalar,
     _tokenize_cell_value,
     compare_grounding_policies,
@@ -71,6 +72,7 @@ from core.llm import (
 from models import GroundingPolicy, QueryContext, ResolutionPolicy, TerminalOutcome
 from utils.language import get_evidence_unavailable_message, get_grounding_fallback_message
 from utils.metrics import metrics
+from utils.residual_price import RESIDUAL_DIRECT_INTENTS, resolve_import_share_filter
 from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
 
@@ -1118,11 +1120,9 @@ _RESIDUAL_THRESHOLD_RULES: list[tuple[str, str, str]] = [
 ]
 
 
-_RESIDUAL_DIRECT_INTENTS = frozenset({
-    "residual_weighted_price_calculation",
-    "residual_weighted_price_followup",
-    "implied_ppa_cfd_price_approximation",
-})
+# Single authority lives in utils.residual_price so the pipeline's enrichment
+# gate and this authorization check cannot drift apart.
+_RESIDUAL_DIRECT_INTENTS = RESIDUAL_DIRECT_INTENTS
 _RESIDUAL_DIRECT_ANSWER_KINDS = frozenset({
     AnswerKind.SCALAR,
     AnswerKind.TIMESERIES,
@@ -1278,7 +1278,18 @@ def _build_residual_weighted_price_direct_answer(ctx: QueryContext) -> str | Non
     if df.empty:
         return None
 
-    threshold_rule = _extract_residual_share_threshold(ctx.query)
+    # The implied PPA/CfD approximation resolves its month filter through the
+    # shared residual-threshold authority so routing and filtering agree on the
+    # SAME normalized constraint. The user may state it from either side
+    # ("import < 0.5%" or "covered buckets > 99.5%"); both must filter import
+    # share DOWNWARD. Reading the raw coverage-side rule here would filter
+    # `share_import > 0.995` and return a confident "no months found" (prod
+    # trace span-28451264). Other residual intents keep the generic extractor.
+    threshold_rule = (
+        resolve_import_share_filter(ctx.query)
+        if is_ppa_cfd_approximation
+        else _extract_residual_share_threshold(ctx.query)
+    )
     if threshold_rule:
         operator, threshold, phrase = threshold_rule
         threshold_col = "share_import" if is_ppa_cfd_approximation else "share_ppa_import_total"
@@ -1992,6 +2003,15 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 metrics.log_summary_grounding_failure()
                 # Try deterministic scenario fallback before generic message.
                 scenario_answer = _build_scenario_fallback_answer(ctx)
+                # Computed once: _select_grounded_claims rebuilds the whole
+                # grounding corpus, so it must not run in both the branch test
+                # and the branch body. Skipped entirely when the deterministic
+                # scenario answer already wins.
+                _grounded_claims = (
+                    []
+                    if scenario_answer is not None
+                    else _select_grounded_claims(list(envelope.claims or []), ctx)
+                )
                 if scenario_answer is not None:
                     log.info("Summary grounding failed; using deterministic scenario fallback.")
                     envelope = SummaryEnvelope(
@@ -1999,6 +2019,24 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                         claims=[],
                         citations=["deterministic_scenario_fallback"],
                         confidence=0.95,
+                    )
+                elif _grounded_claims:
+                    # Gap ①: repair instead of nuking. The guardrail scores the
+                    # answer as a whole, so one fabricated figure among many
+                    # correct ones used to cost the user the entire answer (prod
+                    # trace span-f00ddad4: ratio=0.89 vs 0.90 → generic apology).
+                    # Ship only the claims whose numbers are all grounded; the
+                    # prose is rebuilt from them so no ungrounded number can leak
+                    # through the original narrative.
+                    log.warning(
+                        "Summary grounding check failed; shipping %d of %d grounded claims.",
+                        len(_grounded_claims), len(envelope.claims or []),
+                    )
+                    envelope = SummaryEnvelope(
+                        answer=" ".join(_grounded_claims),
+                        claims=_grounded_claims,
+                        citations=["grounded_subset"],
+                        confidence=min(float(envelope.confidence or 0.0), 0.6),
                     )
                 else:
                     log.warning("Summary grounding check failed; using conservative fallback answer.")
@@ -2015,6 +2053,11 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 ctx.summary_source = "structured_summary_grounding_fallback"
             elif "deterministic_scenario_fallback" in _fallback_citations:
                 ctx.summary_source = "deterministic_scenario_fallback"
+            elif "grounded_subset" in _fallback_citations:
+                # Repaired by the guardrail: partial but fully grounded, so it
+                # must NOT be labeled a guardrail fallback (that source makes the
+                # provenance gate short-circuit and skips claim validation).
+                ctx.summary_source = "grounded_subset"
             else:
                 ctx.summary_source = "structured_summary"
             ctx.summary_claims = list(envelope.claims)

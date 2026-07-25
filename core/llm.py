@@ -1918,7 +1918,23 @@ _ANALYZER_CORE_RULES = """\
   - Example: "what will happen to prices if more ppa is added?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, `candidate_tools=["get_prices", "get_balancing_composition"]`, `candidate_topics=["balancing_price", "cfd_ppa"]`.
   - Example: "what will happen if more ppa will be added in the system?" -> same routing as above.
 - For unusual numeric calculation requests with data/tool signals, do not fall back to `knowledge` just because the computed target is underdefined.
-  Example: "calculate the weighted average price of the remaining energy for these months" should stay on the data path; if the residual bucket is unclear, prefer `query_type=ambiguous` with `preferred_path=clarify`.
+  Example: "calculate the weighted average price of the remaining energy for these months" should stay on the data path; if the residual bucket is unclear AND no threshold is given, prefer `query_type=ambiguous` with `preferred_path=clarify`.
+- Implied PPA/CfD price from the balancing residual (SUPPORTED deterministic calculation — do NOT send to clarify):
+  The balancing price is a weighted average over buckets. Prices are KNOWN for regulated thermal/hydro and
+  deregulated renewables, and UNKNOWN for import, PPA and CfD. When the unknown layer is negligible, the
+  combined PPA/CfD price is recoverable by subtracting the known contributions from the balancing price.
+  Classify such a request as `query_type=data_retrieval`, `preferred_path=tool`, `answer_kind=timeseries`,
+  `render_style=deterministic`, `intent=implied_ppa_cfd_price_approximation`, `candidate_tools=["get_prices"]`,
+  `candidate_topics=["balancing_price", "cfd_ppa"]`. Keep `render_style=deterministic` — the answer is computed
+  in code, not narrated, so vector retrieval is skipped.
+  The negligible-residual constraint may be stated from EITHER side, and both mean the same thing:
+  - uncovered side: "months where the import share is less than 0.5%"
+  - covered side:   "months where ppa, cfd, regulated and deregulated combined are more than 99.5%"
+  Do NOT classify as `ambiguous`/`clarify` merely because the request is long, spans several sentences, states
+  which prices are available, or phrases the threshold from the covered side. Use `clarify` ONLY when no
+  threshold is stated at all and the residual bucket is genuinely unidentifiable.
+  - Example: "prices of regulated and deregulated plants are known; find months where the share of import is less than 0.2% and calculate the weighted average PPA/CfD price" -> the routing above.
+  - Example: "balancing price is a weighted average of regulated thermal and hydro, deregulated renewables, import, ppa and cfd; ppa and cfd prices are unavailable; find months where ppa, cfd, regulated and deregulated combined are more than 99.5% and estimate the average price of cfd and ppa combined" -> the same routing.
 - Eligibility / participation / requirements questions (legal-list pattern):
   Questions of the form "who can / who may / who is eligible to [participate|trade|register|supply]", "what are the requirements to [register|participate]", "what documents are required", "what conditions must be met" — when the answer comes from a legal/regulatory text — are `query_type=regulatory_procedure`, `preferred_path=knowledge`, `answer_kind=list`. The expected answer is an enumeration of the categories from the source, not a paraphrased narrative.
   - Example: "who can trade on the exchange during the transitory market model?" -> `query_type=regulatory_procedure`, `preferred_path=knowledge`, `answer_kind=list`, `candidate_topics=["eligible_participants", "exchange_participation"]`.

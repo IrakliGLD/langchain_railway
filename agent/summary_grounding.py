@@ -429,6 +429,35 @@ def compare_grounding_policies(envelope: SummaryEnvelope, ctx: QueryContext) -> 
     )
 
 
+def select_grounded_claims(claims: List[str], ctx: QueryContext) -> List[str]:
+    """Return the claims whose every numeric token is in the grounding corpus.
+
+    Used to REPAIR rather than discard an answer the token-ratio guardrail
+    rejected: claims carrying only grounded numbers (and number-free claims)
+    are safe to ship, so a single fabricated figure no longer costs the user
+    the whole answer. Scored against the same corpus the guardrail itself uses
+    (:func:`_build_grounding_tokens`), so the two cannot disagree. Fails closed
+    — on any error it returns no claims and the caller keeps its fallback.
+    """
+    try:
+        source_tokens = _build_grounding_tokens(ctx)
+    except Exception:  # pragma: no cover - defensive
+        return []
+    if not source_tokens:
+        return []
+
+    grounded: List[str] = []
+    for claim in claims or []:
+        text = str(claim or "").strip()
+        if not text:
+            continue
+        tokens = _extract_number_tokens(text)
+        if any(token not in source_tokens for token in tokens):
+            continue
+        grounded.append(text)
+    return grounded
+
+
 def _has_unsupported_absence_claims(summary: str) -> bool:
     text = str(summary or "").strip()
     if not text:
@@ -1155,6 +1184,7 @@ def _enforce_provenance_gate(ctx: QueryContext) -> None:
 
 # Stable public boundary; underscored names remain available for compatibility.
 build_grounding_tokens = _build_grounding_tokens
+_select_grounded_claims = select_grounded_claims
 apply_absence_claim_guardrail = _apply_absence_claim_guardrail
 derive_claims_from_text = _derive_claims_from_text
 attach_claim_provenance = _attach_claim_provenance
