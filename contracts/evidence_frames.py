@@ -119,7 +119,12 @@ class ScenarioFrame:
     # Expected keys per row:
     #   metric_name: str          — "scenario_payoff" | "scenario_scale" | "scenario_offset"
     #   scenario_factor: float    — strike price / scale factor / offset amount
-    #   scenario_volume: float | None  — MW capacity (optional)
+    #   scenario_energy_mwh: float | None  — delivered MWh per observation
+    #   scenario_capacity_mw: float | None — stated capacity, never used as energy
+    #   scenario_scope: str          — latest | requested_period | full_series
+    #   scenario_aggregation: str    — sum | mean | min | max
+    #   source_unit: str             — physical unit of the observed metric
+    #   result_unit: str             — unit of aggregate_result
     #   aggregate_result: float   — main computed result
     #   row_count: int            — number of periods
     #   period_range: str         — e.g. "Jan 2024 – Dec 2024"

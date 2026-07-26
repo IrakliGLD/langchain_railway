@@ -22,6 +22,14 @@ from contracts.question_analysis import QuestionAnalysis, ToolName
 from contracts.vector_knowledge import VectorKnowledgeBundle
 
 
+class AnswerMode(str, Enum):
+    """User-selected response length/workflow carried across trusted boundaries."""
+
+    BRIEF = "brief"
+    STANDARD = "standard"
+    REPORT = "report"
+
+
 class ResponseMode(str, Enum):
     """Single authoritative answer-mode policy set once after Stage 0.2.
 
@@ -237,6 +245,10 @@ class QueryContext:
     # --- timing ---
     exec_time: float = 0.0
     stage_timings_ms: Dict[str, float] = dc_field(default_factory=dict)
+
+    # Additive user preference appended to preserve every existing positional
+    # QueryContext constructor slot. Pipeline code must pass it by keyword.
+    answer_mode: str = AnswerMode.STANDARD.value  # brief | standard | report
 
     @property
     def effective_query(self) -> str:

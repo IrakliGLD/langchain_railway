@@ -15,6 +15,11 @@ import numpy as np
 import pandas as pd
 
 from config_metrics.metric_config import METRIC_VALUE_ALIASES, SEMANTIC_TO_COLUMNS, SUMMER_MONTHS
+from config_metrics.metric_units import (
+    metric_currency,
+    metric_is_additive,
+    metric_value_unit,
+)
 
 log = logging.getLogger("Enai")
 
@@ -90,14 +95,25 @@ def _period_str(ts: Optional[pd.Timestamp]) -> Optional[str]:
     return str(ts)
 
 
-def _scenario_formula(metric_name: str, metric: str, factor: float, volume: float, agg: str, n: int) -> str:
+def _scenario_formula(
+    metric_name: str,
+    metric: str,
+    factor: float,
+    energy_mwh: float | None,
+    agg: str,
+    n: int,
+) -> str:
     """Build a human-readable formula string for scenario evidence records."""
     if metric_name == "scenario_scale":
         return f"{metric} * {factor}, {agg} over {n} periods"
     elif metric_name == "scenario_offset":
         return f"{metric} + {factor}, {agg} over {n} periods"
-    else:
-        return f"({factor} - {metric}) * {volume}, {agg} over {n} periods"
+    if energy_mwh is None:
+        return f"{factor} - {metric}, {agg} payoff rate over {n} periods"
+    return (
+        f"({factor} - {metric}) * {energy_mwh} MWh per period, "
+        f"{agg} over {n} periods"
+    )
 
 
 def _apply_season_filter(df: pd.DataFrame, time_col: str, season: Optional[str]) -> pd.DataFrame:
@@ -337,15 +353,52 @@ def compute_scenario(
     value_col = next((c for c in candidates if c in df.columns), None)
     if value_col is None:
         return None
-    raw = pd.to_numeric(df[value_col], errors="coerce")
-    valid_mask = raw.notna()
-    if valid_mask.sum() == 0:
+    working = df.copy()
+    working["_scenario_value"] = pd.to_numeric(working[value_col], errors="coerce")
+    working = working.dropna(subset=["_scenario_value"])
+    if working.empty:
         return None
-    series = raw[valid_mask]
+    if mctx.time_col in working.columns:
+        sortable = pd.to_datetime(working[mctx.time_col], errors="coerce")
+        if sortable.notna().any():
+            working = (
+                working.assign(_scenario_time=sortable)
+                .sort_values("_scenario_time")
+                .drop(columns=["_scenario_time"])
+            )
 
     factor = float(request.get("scenario_factor", 0) or 0)
-    volume = float(request.get("scenario_volume", 1) or 1)
-    agg_name = str(request.get("scenario_aggregation", "sum") or "sum")
+    energy_raw = request.get("scenario_energy_mwh")
+    energy_mwh = float(energy_raw) if energy_raw is not None else None
+    capacity_raw = request.get("scenario_capacity_mw")
+    capacity_mw = float(capacity_raw) if capacity_raw is not None else None
+    scope = str(request.get("scenario_scope", "latest") or "latest")
+
+    if scope == "latest":
+        if mctx.time_col in working.columns:
+            sortable = pd.to_datetime(working[mctx.time_col], errors="coerce")
+            if sortable.notna().any():
+                working = working.loc[[sortable.idxmax()]]
+            else:
+                working = working.tail(1)
+        else:
+            working = working.tail(1)
+
+    series = working["_scenario_value"].astype(float)
+
+    requested_agg = str(request.get("scenario_aggregation") or "").lower()
+    if requested_agg not in {"sum", "mean", "min", "max"}:
+        requested_agg = (
+            "sum"
+            if metric_name == "scenario_payoff" and energy_mwh is not None
+            else "mean"
+        )
+    additive_result = (
+        metric_name == "scenario_payoff" and energy_mwh is not None
+    ) or metric_is_additive(value_col)
+    agg_name = requested_agg
+    if agg_name == "sum" and not additive_result:
+        agg_name = "mean"
 
     # Skip identity transforms
     if metric_name == "scenario_scale" and abs(factor - 1.0) < 1e-9:
@@ -360,8 +413,11 @@ def compute_scenario(
         # Offset scenarios add or subtract a fixed amount per observation.
         scenario_series = series + factor
     else:  # scenario_payoff
-        # Payoff scenarios compare the observed market price against a strike/reference price.
-        scenario_series = (factor - series) * volume
+        # A strike-price spread is a currency/MWh rate. It becomes a monetary
+        # amount only when delivered energy in MWh is explicitly grounded.
+        scenario_series = factor - series
+        if energy_mwh is not None:
+            scenario_series = scenario_series * energy_mwh
 
     agg_result = float(getattr(scenario_series, agg_name)())
 
@@ -369,12 +425,29 @@ def compute_scenario(
     if metric_name == "scenario_payoff":
         _pos_mask = scenario_series > 0
         _neg_mask = scenario_series < 0
-        positive_sum = round(float(scenario_series[_pos_mask].sum()), 2) if _pos_mask.any() else 0.0
-        negative_sum = round(float(scenario_series[_neg_mask].sum()), 2) if _neg_mask.any() else 0.0
         positive_count = int(_pos_mask.sum())
         negative_count = int(_neg_mask.sum())
-        market_component_result = float(getattr(series * volume, agg_name)())
-        combined_total_result = float(getattr((series * volume) + scenario_series, agg_name)())
+        if energy_mwh is not None:
+            positive_sum = (
+                round(float(scenario_series[_pos_mask].sum()), 2)
+                if _pos_mask.any()
+                else 0.0
+            )
+            negative_sum = (
+                round(float(scenario_series[_neg_mask].sum()), 2)
+                if _neg_mask.any()
+                else 0.0
+            )
+            market_series = series * energy_mwh
+            market_component_result = float(getattr(market_series, agg_name)())
+            combined_total_result = float(
+                getattr(market_series + scenario_series, agg_name)()
+            )
+        else:
+            positive_sum = None
+            negative_sum = None
+            market_component_result = None
+            combined_total_result = None
     else:
         positive_sum = None
         negative_sum = None
@@ -394,25 +467,52 @@ def compute_scenario(
         delta_pct = None
 
     period_range = ""
-    if mctx.time_col in df.columns:
-        time_vals = df.loc[valid_mask[valid_mask].index, mctx.time_col]
+    if mctx.time_col in working.columns:
+        time_vals = working[mctx.time_col]
         if not time_vals.empty:
             period_range = f"{time_vals.iloc[0]} to {time_vals.iloc[-1]}"
+
+    source_unit = metric_value_unit(value_col)
+    currency = metric_currency(value_col)
+    result_unit = (
+        currency
+        if metric_name == "scenario_payoff"
+        and energy_mwh is not None
+        and currency is not None
+        else source_unit
+    )
+    row_count = int(len(series))
 
     record.update({
         "record_type": "scenario",
         "source_column": value_col,
-        "source_row_count": int(valid_mask.sum()),
+        "source_row_count": row_count,
         "scenario_factor": factor,
-        "scenario_volume": volume if metric_name == "scenario_payoff" else None,
+        "scenario_energy_mwh": (
+            energy_mwh if metric_name == "scenario_payoff" else None
+        ),
+        "scenario_capacity_mw": (
+            capacity_mw if metric_name == "scenario_payoff" else None
+        ),
         "scenario_aggregation": agg_name,
+        "scenario_scope": scope,
+        "source_unit": source_unit,
+        "result_unit": result_unit,
+        "factor_unit": source_unit if metric_name != "scenario_scale" else "multiplier",
         "aggregate_result": round(agg_result, 2),
         "baseline_aggregate": round(baseline_result, 2) if baseline_result is not None else None,
         "delta_aggregate": round(delta, 2) if delta is not None else None,
         "delta_percent": round(delta_pct, 2) if delta_pct is not None else None,
-        "row_count": int(valid_mask.sum()),
+        "row_count": row_count,
         "period_range": period_range,
-        "formula": _scenario_formula(metric_name, metric, factor, volume, agg_name, int(valid_mask.sum())),
+        "formula": _scenario_formula(
+            metric_name,
+            metric,
+            factor,
+            energy_mwh,
+            agg_name,
+            row_count,
+        ),
         "min_period_value": round(float(scenario_series.min()), 2),
         "max_period_value": round(float(scenario_series.max()), 2),
         "mean_period_value": round(float(scenario_series.mean()), 2),
@@ -430,7 +530,7 @@ def compute_scenario(
             {
                 "column": value_col,
                 "role": "scenario_series",
-                "row_count": int(valid_mask.sum()),
+                "row_count": row_count,
                 "min_value": round(float(series.min()), 6),
                 "max_value": round(float(series.max()), 6),
             },

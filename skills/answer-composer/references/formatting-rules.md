@@ -72,10 +72,9 @@ When discussing prices: ALWAYS separate summer (April-July) and winter (August-M
 - When referring to a regulation article, clause, or section, always include the regulation/document title together with that identifier
 - If no article number is available, cite the regulation/document title together with the available section heading or locator
 
-## Prohibited language when data is available
+## Calibrated language when data is available
 
-- "probably" / "სავარაუდოდ" / "вероятно"
-- "possibly" / "შესაძლოა" / "возможно"
-- "perhaps" / "ალბათ" / "пожалуй"
-
-Use instead: "because" / "იმის გამო, რომ" / "which is caused by" / "რაც გამოწვეულია"
+- State observed values and arithmetic directly, without unnecessary qualifiers.
+- For correlations and historical co-movement, use "observed", "associated with", or "consistent with".
+- Do not replace uncertainty with "because" or "which is caused by": correlation does not establish causality.
+- Use causal wording only when a causal design or authoritative source establishes the mechanism.

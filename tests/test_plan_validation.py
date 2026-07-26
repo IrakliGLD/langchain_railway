@@ -208,8 +208,50 @@ class TestValidatorTypedResult:
             }],
         )
         steps = [_primary_step(params={"metric": "balancing"})]
-        result = _validate_plan_against_answer_kind(steps, qa, "what if prices rise 20%")
+        result = _validate_plan_against_answer_kind(
+            steps,
+            qa,
+            "what if balancing prices rise 20%",
+        )
         assert result.rejects == []
+
+    def test_scenario_with_analyzer_fabricated_factor_is_rejected(self):
+        qa = _qa(
+            answer_kind="scenario",
+            derived_metrics=[{
+                "metric_name": "scenario_scale",
+                "metric": "p_bal_gel",
+                "scenario_factor": 1.34,
+            }],
+        )
+        steps = [_primary_step(params={"metric": "balancing"})]
+
+        result = _validate_plan_against_answer_kind(
+            steps,
+            qa,
+            "what if balancing prices rise by 20%?",
+        )
+
+        assert [i.rule for i in result.rejects] == ["scenario_ungrounded_parameter"]
+
+    def test_scenario_date_only_number_is_rejected(self):
+        qa = _qa(
+            answer_kind="scenario",
+            derived_metrics=[{
+                "metric_name": "scenario_scale",
+                "metric": "p_bal_gel",
+                "scenario_factor": 1.34,
+            }],
+        )
+        steps = [_primary_step(params={"metric": "balancing"})]
+
+        result = _validate_plan_against_answer_kind(
+            steps,
+            qa,
+            "what if balancing prices change in 2024?",
+        )
+
+        assert [i.rule for i in result.rejects] == ["scenario_ungrounded_parameter"]
 
     def test_list_not_enumerated_warns(self):
         qa = _qa(answer_kind="list")

@@ -234,7 +234,8 @@ def _add_evidence_record_tokens(tokens: Set[str], ctx: QueryContext) -> None:
         "market_component_aggregate",
         "combined_total_aggregate",
         "scenario_factor",
-        "scenario_volume",
+        "scenario_energy_mwh",
+        "scenario_capacity_mw",
     )
     for record in ctx.analysis_evidence:
         if not isinstance(record, dict):
@@ -522,7 +523,11 @@ def _serialize_scalar(value: Any) -> Any:
     return str(value)
 
 
-def _expand_text_number_token(raw_token: str) -> Set[str]:
+def _expand_text_number_token(
+    raw_token: str,
+    *,
+    emit_ratio_percent: bool = True,
+) -> Set[str]:
     """Expand a number token extracted from free-form text to its rounded
     and unsigned variants.
 
@@ -577,7 +582,7 @@ def _expand_text_number_token(raw_token: str) -> Set[str]:
     # Text evidence often carries ratios in stats/citation snippets while the
     # model writes the same value as a percent. Keep this aligned with the live
     # grounding-token path, which already expands ratio cells into percentages.
-    if abs(numeric) <= 1:
+    if emit_ratio_percent and abs(numeric) <= 1:
         _add_decimal_rounding_variants(result, numeric * Decimal("100"))
 
     # Unsigned versions for ALL tokens generated so far.
@@ -741,28 +746,6 @@ def _build_row_context(cols: List[Any], row: tuple) -> Dict[str, Any]:
     return context
 
 
-def _grounding_corpus_ref(token: str, query_hash: str) -> Dict[str, Any]:
-    """Synthetic provenance ref for a token grounded via the guardrail corpus.
-
-    The guardrail corpus (:func:`_build_grounding_tokens`) is a bare token set
-    with no cell coordinates, so a token grounded only through it cannot cite an
-    exact row/column. The ref records the corpus as the source so the claim is
-    counted grounded (``is_fully_grounded`` needs a non-empty ref list) while
-    staying transparent that the anchor is corpus-level, not cell-level.
-    """
-    return {
-        "source": "grounding_corpus",
-        "row_number": 0,
-        "row_index": -1,
-        "column": "Grounding Corpus",
-        "value": token,
-        "cell_id": f"grounding_corpus:{hashlib.md5(token.encode()).hexdigest()[:8]}",
-        "row_context": {"Type": "Grounding Corpus"},
-        "coordinate": "grounding_corpus",
-        "query_hash": query_hash,
-    }
-
-
 def _build_claim_provenance(
     claims: List[str],
     cols: List[Any],
@@ -772,20 +755,30 @@ def _build_claim_provenance(
     stats_hint: str = "",
     domain_knowledge: str = "",
     external_source_passages: str = "",
-    extra_grounding_tokens: Optional[Set[str]] = None,
+    data_preview: str = "",
+    supplemental_cols: Optional[List[Any]] = None,
+    supplemental_rows: Optional[List[tuple]] = None,
 ) -> tuple[List[Dict[str, Any]], float, List[str]]:
     token_index: Dict[str, List[Dict[str, Any]]] = {}
     source_priority = {
         "sql": 0,
         "tool": 0,
+        "context_dataframe": 1,
         "derived_analysis": 1,
+        "data_preview": 2,
         "external_source_passages": 2,
-        "grounding_corpus": 2,
         "domain_knowledge": 3,
         "unknown": 4,
     }
 
-    def _index_text_source(text: str, *, source_name: str, column_label: str, coordinate: str) -> None:
+    def _index_text_source(
+        text: str,
+        *,
+        source_name: str,
+        column_label: str,
+        coordinate: str,
+        emit_ratio_percent: bool = True,
+    ) -> None:
         if not text:
             return
         for raw_token in _extract_number_tokens(text):
@@ -805,7 +798,10 @@ def _build_claim_provenance(
             # Index under raw_token AND its rounded/unsigned variants so the
             # gate accepts LLM-rounded numbers as grounded.  See the docstring
             # on _expand_text_number_token for the asymmetry this fixes.
-            for indexed_token in _expand_text_number_token(raw_token):
+            for indexed_token in _expand_text_number_token(
+                raw_token,
+                emit_ratio_percent=emit_ratio_percent,
+            ):
                 token_index.setdefault(indexed_token, []).append(ref_entry)
 
     # --- Index statistics and derived analysis ---
@@ -836,30 +832,63 @@ def _build_claim_provenance(
         column_label="External Source Passages",
         coordinate="external_source_passages",
     )
-    for row_idx, row in enumerate(rows):
-        row_context = _build_row_context(cols, row)
-        for col_idx, col_name in enumerate(cols):
-            if col_idx >= len(row):
-                continue
-            value = row[col_idx]
-            for token in _tokenize_cell_value(value):
-                refs = token_index.setdefault(token, [])
-                refs.append(
-                    {
-                        "row_index": row_idx,
-                        "row_number": row_idx + 1,
-                        "column": str(col_name),
-                        "value": _serialize_scalar(value),
-                        "coordinate": f"r{row_idx + 1}.c[{col_name}]",
-                        "query_hash": query_hash,
-                        "source": source or "unknown",
-                        "row_fingerprint": hashlib.sha256(
-                            f"{query_hash}|{row_idx + 1}|{repr(row)}".encode("utf-8")
-                        ).hexdigest()[:16],
-                        "cell_id": f"{query_hash}:r{row_idx + 1}:c[{col_name}]",
-                        "row_context": row_context,
-                    }
-                )
+    _index_text_source(
+        data_preview,
+        source_name="data_preview",
+        column_label="Data Preview",
+        coordinate="data_preview",
+        # Preview text has no reliable column typing. Keep exact/rounded values
+        # but do not infer percentages from bare decimals.
+        emit_ratio_percent=False,
+    )
+
+    def _index_rows(
+        index_cols: List[Any],
+        index_rows: List[tuple],
+        *,
+        source_name: str,
+        scope: str = "",
+    ) -> None:
+        for row_idx, row in enumerate(index_rows):
+            row_context = _build_row_context(index_cols, row)
+            for col_idx, col_name in enumerate(index_cols):
+                if col_idx >= len(row):
+                    continue
+                value = row[col_idx]
+                for token in _tokenize_cell_value(
+                    value,
+                    emit_ratio_percent=_is_ratio_column(col_name),
+                ):
+                    refs = token_index.setdefault(token, [])
+                    coordinate_prefix = f"{scope}." if scope else ""
+                    cell_id_scope = f"{scope}:" if scope else ""
+                    refs.append(
+                        {
+                            "row_index": row_idx,
+                            "row_number": row_idx + 1,
+                            "column": str(col_name),
+                            "value": _serialize_scalar(value),
+                            "coordinate": f"{coordinate_prefix}r{row_idx + 1}.c[{col_name}]",
+                            "query_hash": query_hash,
+                            "source": source_name or "unknown",
+                            "row_fingerprint": hashlib.sha256(
+                                f"{query_hash}|{scope}|{row_idx + 1}|{repr(row)}".encode("utf-8")
+                            ).hexdigest()[:16],
+                            "cell_id": (
+                                f"{query_hash}:{cell_id_scope}r{row_idx + 1}:c[{col_name}]"
+                            ),
+                            "row_context": row_context,
+                        }
+                    )
+
+    _index_rows(cols, rows, source_name=source or "unknown")
+    if supplemental_cols and supplemental_rows:
+        _index_rows(
+            list(supplemental_cols),
+            [tuple(row) for row in supplemental_rows],
+            source_name="context_dataframe",
+            scope="context_df",
+        )
 
     claim_entries: List[Dict[str, Any]] = []
     citation_anchors: List[str] = []
@@ -886,20 +915,6 @@ def _build_claim_provenance(
                     if variant in token_index:
                         raw_refs = token_index[variant]
                         break
-            if not raw_refs and extra_grounding_tokens:
-                # Faithful-to-guardrail fallback: the token (or a rounded form)
-                # is present in the guardrail grounding corpus
-                # (_build_grounding_tokens: ctx.preview, ctx.df, and the derived
-                # aggregate/evidence/join adders) which the token_index does not
-                # carry. The provenance gate must not reject a number the
-                # guardrail already accepts, so count it grounded with a
-                # synthetic corpus ref. Numbers absent from the corpus stay
-                # unmatched, so true hallucinations still fail closed.
-                if token in extra_grounding_tokens or any(
-                    variant in extra_grounding_tokens
-                    for variant in _rounded_match_variants(token)
-                ):
-                    raw_refs = [_grounding_corpus_ref(token, query_hash)]
             refs = sorted(
                 raw_refs or [],
                 key=lambda ref: (
@@ -962,20 +977,22 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
     claims = [str(c).strip() for c in (ctx.summary_claims or []) if str(c).strip()]
     source_cols = list(ctx.provenance_cols or ctx.cols or [])
     source_rows = [tuple(r) for r in (ctx.provenance_rows or ctx.rows or [])]
+    supplemental_cols: List[Any] = []
+    supplemental_rows: List[tuple] = []
+    if ctx.df is not None and not ctx.df.empty:
+        supplemental = ctx.df.head(200)
+        supplemental_cols = list(supplemental.columns)
+        supplemental_rows = [
+            tuple(row) for row in supplemental.itertuples(index=False, name=None)
+        ]
+    elif ctx.cols and ctx.rows:
+        supplemental_cols = list(ctx.cols)
+        supplemental_rows = [tuple(row) for row in ctx.rows]
 
     if not claims:
         ctx.summary_claim_provenance = []
         ctx.summary_provenance_coverage = 0.0
         return
-    # Unify the gate onto the guardrail corpus: a number the guardrail check
-    # (_build_grounding_tokens) already accepts — sourced from ctx.preview,
-    # ctx.df, or the derived aggregate/evidence/join adders that the claim
-    # provenance index does not carry — must not be rejected by the provenance
-    # gate. Fail-open on the token build so grounding never crashes a response.
-    try:
-        grounding_tokens = _build_grounding_tokens(ctx)
-    except Exception:  # pragma: no cover - defensive
-        grounding_tokens = set()
     claim_prov, coverage, anchors = _build_claim_provenance(
         claims,
         source_cols,
@@ -985,7 +1002,9 @@ def _attach_claim_provenance(ctx: QueryContext) -> None:
         stats_hint=ctx.stats_hint or "",
         domain_knowledge=ctx.summary_domain_knowledge or "",
         external_source_passages=ctx.vector_knowledge_prompt or "",
-        extra_grounding_tokens=grounding_tokens,
+        data_preview=ctx.preview or "",
+        supplemental_cols=supplemental_cols,
+        supplemental_rows=supplemental_rows,
     )
     ctx.summary_claim_provenance = claim_prov
     ctx.summary_provenance_coverage = round(float(coverage), 4)

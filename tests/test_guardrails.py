@@ -844,65 +844,57 @@ def test_build_claim_provenance_unrelated_number_still_fails():
 
 
 # ---------------------------------------------------------------------------
-# Fix #1 — provenance gate must be FAITHFUL to the guardrail corpus.
+# Fix #1 — provenance gate must index every legitimate evidence source.
 #
 # Production trace span-7b62… : the structured answer passed the token-level
 # guardrail (_is_summary_grounded, grounding_guardrail_triggered=false) but the
 # claim-level provenance gate rejected it (coverage=0.5, 1/2 claims). Root
-# cause: the gate's corpus (_build_claim_provenance over provenance_rows +
-# stats_hint + domain + vector) is NARROWER than the guardrail's corpus
-# (_build_grounding_tokens, which also includes ctx.preview, ctx.df, and the
-# derived aggregate/evidence/join adders). A number the LLM lifted from the
-# shown preview grounded for the guardrail but not the gate. The gate must
-# never reject a token the guardrail corpus already contains, while still
-# rejecting numbers absent from EVERY corpus.
+# cause: the gate did not index ctx.preview or ctx.df. Index those sources with
+# real provenance rather than inheriting the guardrail's anonymous token set:
+# typed dataframe columns can safely distinguish ratios from other decimals.
 # ---------------------------------------------------------------------------
 
 
-def test_build_claim_provenance_grounds_token_present_in_guardrail_corpus():
-    """A token in the guardrail corpus (preview/df/derived) but absent from
-    provenance_rows and stats_hint must ground via extra_grounding_tokens."""
+def test_build_claim_provenance_grounds_token_present_in_data_preview():
+    """A preview token absent from provenance rows and stats still grounds."""
     claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 55 USD/MWh."],
         cols=["share_import"],
         rows=[(0.09,)],            # provenance rows carry NO price level
         stats_hint="Rows: 1",      # stats_hint carries NO price level
-        extra_grounding_tokens={"55"},  # guardrail corpus DID contain 55
+        data_preview="balancing_price\n55",
     )
 
     assert claim_entries[0]["matched_tokens"] == ["55"]
     assert claim_entries[0]["unmatched_tokens"] == []
     assert claim_entries[0]["is_fully_grounded"] is True
     assert coverage == pytest.approx(1.0, rel=1e-6)
+    assert claim_entries[0]["cell_refs"][0]["source"] == "data_preview"
 
 
-def test_build_claim_provenance_guardrail_fallback_tolerates_rounding():
-    """The guardrail-corpus fallback honours claim-side rounding tolerance.
-
-    The real guardrail set (_build_grounding_tokens) is already rounding-
-    expanded, so it holds the 2-decimal form ``44.32`` of a ``44.3214`` cell;
-    a higher-precision claim ``44.321`` grounds via _rounded_match_variants."""
+def test_build_claim_provenance_data_preview_tolerates_rounding():
+    """A higher-precision claim can ground against a rounded preview value."""
     claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 44.321 USD/MWh."],
         cols=["share_import"],
         rows=[(0.09,)],
         stats_hint="Rows: 1",
-        extra_grounding_tokens={"44.32"},  # already-expanded guardrail token
+        data_preview="balancing_price\n44.32",
     )
 
     assert claim_entries[0]["unmatched_tokens"] == []
     assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
 
 
-def test_build_claim_provenance_guardrail_fallback_still_rejects_absent_number():
-    """The fallback must NOT ground a number absent from every corpus, incl.
-    the guardrail corpus — true hallucinations still fail closed."""
+def test_build_claim_provenance_data_preview_still_rejects_absent_number():
+    """A number absent from every indexed source still fails closed."""
     claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 999 USD/MWh."],
         cols=["share_import"],
         rows=[(0.09,)],
         stats_hint="Rows: 1",
-        extra_grounding_tokens={"55"},  # 999 is nowhere
+        data_preview="balancing_price\n55",
     )
 
     assert "999" in claim_entries[0]["unmatched_tokens"]
@@ -910,9 +902,8 @@ def test_build_claim_provenance_guardrail_fallback_still_rejects_absent_number()
     assert coverage == pytest.approx(0.0, rel=1e-6)
 
 
-def test_build_claim_provenance_defaults_no_guardrail_fallback():
-    """Backward compatibility: without extra_grounding_tokens the corpus is
-    exactly the explicit sources — a preview-only number stays ungrounded."""
+def test_build_claim_provenance_defaults_to_explicit_sources():
+    """Without preview input, a preview-only number stays ungrounded."""
     claim_entries, _coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 55 USD/MWh."],
         cols=["share_import"],
@@ -961,6 +952,59 @@ def test_provenance_gate_accepts_preview_sourced_number(monkeypatch):
     assert out.summary_provenance_gate_passed is True
     assert out.summary_source == "structured_summary"
     assert "could not fully ground" not in out.summary
+    assert any(
+        ref["source"] == "data_preview"
+        for claim in out.summary_claim_provenance
+        for ref in claim["cell_refs"]
+        if ref["value"] == "55"
+    )
+
+
+def test_claim_provenance_rejects_non_ratio_x100_from_context_dataframe():
+    """A correlation coefficient must not ground an unrelated whole-number claim."""
+    ctx = QueryContext(
+        query="What was the balancing price?",
+        preview="correlation_value\n0.85",
+        cols=["correlation_value"],
+        rows=[(0.85,)],
+        provenance_cols=["other_value"],
+        provenance_rows=[(1.0,)],
+        provenance_query_hash="typed-context",
+        provenance_source="tool",
+    )
+    ctx.df = pd.DataFrame({"correlation_value": [0.85]})
+    ctx.summary_claims = ["The balancing price was 85 GEL/MWh."]
+
+    summarizer._attach_claim_provenance(ctx)
+
+    assert ctx.summary_provenance_coverage == pytest.approx(0.0)
+    assert ctx.summary_claim_provenance[0]["unmatched_tokens"] == ["85"]
+    assert ctx.summary_claim_provenance[0]["cell_refs"] == []
+
+
+def test_claim_provenance_preserves_ratio_x100_from_context_dataframe():
+    """A genuine share column still grounds the equivalent percentage."""
+    ctx = QueryContext(
+        query="What was the import share?",
+        preview="share_import\n0.85",
+        cols=["share_import"],
+        rows=[(0.85,)],
+        provenance_cols=["other_value"],
+        provenance_rows=[(1.0,)],
+        provenance_query_hash="typed-context",
+        provenance_source="tool",
+    )
+    ctx.df = pd.DataFrame({"share_import": [0.85]})
+    ctx.summary_claims = ["The import share was 85%."]
+
+    summarizer._attach_claim_provenance(ctx)
+
+    assert ctx.summary_provenance_coverage == pytest.approx(1.0)
+    assert ctx.summary_claim_provenance[0]["unmatched_tokens"] == []
+    assert any(
+        ref["column"] == "share_import"
+        for ref in ctx.summary_claim_provenance[0]["cell_refs"]
+    )
 
 
 def test_serialize_scalar_normalizes_pandas_numpy_scalars():
@@ -7153,9 +7197,10 @@ def _run_scenario(metric_name, factor, volume=None, agg="sum"):
         "metric": "p_bal_usd",
         "scenario_factor": factor,
         "scenario_aggregation": agg,
+        "scenario_scope": "full_series",
     }
     if volume is not None:
-        req["scenario_volume"] = volume
+        req["scenario_energy_mwh"] = volume
     az.DERIVED_METRIC_DEFAULTS = [req]
     try:
         ctx = QueryContext(query="test scenario")
@@ -7194,9 +7239,10 @@ def _make_chart_hint_question_analysis(
         "rank_limit": None,
         "scenario_factor": factor,
         "scenario_aggregation": "sum",
+        "scenario_scope": "full_series",
     }
     if volume is not None:
-        request["scenario_volume"] = volume
+        request["scenario_energy_mwh"] = volume
     payload["analysis_requirements"]["derived_metrics"] = [request]
     return QuestionAnalysis.model_validate(payload)
 
@@ -7307,7 +7353,7 @@ def test_materialize_chart_override_falls_back_to_decomposition_without_chart_hi
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]
@@ -7378,7 +7424,7 @@ def test_materialize_chart_override_payoff_without_total_income_signals_stays_tr
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]
@@ -7550,22 +7596,63 @@ def test_build_chart_prefers_override_over_raw_heuristics():
 
 
 def test_scenario_scale_computation():
-    # [40, 50, 30, 60] * 1.5 = [60, 75, 45, 90] -> sum=270
+    # Price scenarios aggregate by mean, never by a meaningless cross-period sum.
     row = _run_scenario("scenario_scale", factor=1.5)
-    assert row["aggregate_result"] == 270.0
-    assert row["baseline_aggregate"] == 180.0
-    assert row["delta_aggregate"] == 90.0
+    assert row["aggregate_result"] == 67.5
+    assert row["baseline_aggregate"] == 45.0
+    assert row["delta_aggregate"] == 22.5
     assert row["delta_percent"] == 50.0
     assert row["record_type"] == "scenario"
     assert row["row_count"] == 4
 
 
 def test_scenario_offset_computation():
-    # [40, 50, 30, 60] + 10 = [50, 60, 40, 70] -> sum=220
+    # Mean baseline 45 + 10 = mean scenario result 55.
     row = _run_scenario("scenario_offset", factor=10.0)
-    assert row["aggregate_result"] == 220.0
-    assert row["baseline_aggregate"] == 180.0
-    assert row["delta_aggregate"] == 40.0
+    assert row["aggregate_result"] == 55.0
+    assert row["baseline_aggregate"] == 45.0
+    assert row["delta_aggregate"] == 10.0
+
+
+def test_multi_factor_sensitivity_builds_observed_and_each_scenario_series():
+    first = _run_scenario("scenario_scale", factor=1.1)
+    second = _run_scenario("scenario_scale", factor=1.2)
+    ctx = QueryContext(
+        query="Show balancing price sensitivity at 10% and 20% higher",
+        analysis_evidence=[first, second],
+    )
+    ctx.df = _scenario_df().iloc[::-1].reset_index(drop=True)
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_data is not None
+    assert len(ctx.chart_override_data) == 4
+    assert ctx.chart_override_data[0]["date"] == "2024-01"
+    assert ctx.chart_override_data[-1]["date"] == "2024-04"
+    keys = set(ctx.chart_override_data[0])
+    assert "Balancing electricity price (USD/MWh)" in keys
+    assert "Scaled Balancing electricity price (USD/MWh) (×1.1)" in keys
+    assert "Scaled Balancing electricity price (USD/MWh) (×1.2)" in keys
+
+
+def test_multi_strike_sensitivity_builds_each_reference_series():
+    first = _run_scenario("scenario_payoff", factor=55.0)
+    second = _run_scenario("scenario_payoff", factor=60.0)
+    ctx = QueryContext(
+        query="Show CfD strike sensitivity at 55 and 60 USD/MWh",
+        analysis_evidence=[first, second],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_data is not None
+    keys = set(ctx.chart_override_data[0])
+    assert "Balancing electricity price (USD/MWh)" in keys
+    assert "Strike Price (55)" in keys
+    assert "Strike Price (60)" in keys
 
 
 def test_scenario_payoff_computation():
@@ -7606,8 +7693,14 @@ def test_scenario_via_question_analysis_payload():
     # Minimal valid QA payload with a scenario_payoff request
     payload = {
         "version": "question_analysis_v1",
-        "raw_query": "Calculate CfD payoff with strike 55",
-        "canonical_query_en": "Calculate CfD payoff with strike price 55 USD",
+        "raw_query": (
+            "Calculate CfD payoff against balancing price with strike "
+            "55 USD/MWh for 1 MWh per month from January to April 2024"
+        ),
+        "canonical_query_en": (
+            "Calculate CfD payoff against balancing price with strike "
+            "55 USD/MWh for 1 MWh per month from January to April 2024"
+        ),
         "language": {"input_language": "en", "answer_language": "en"},
         "classification": {
             "query_type": "data_retrieval",
@@ -7631,7 +7724,7 @@ def test_scenario_via_question_analysis_payload():
                     "metric_name": "scenario_payoff",
                     "metric": "p_bal_usd",
                     "scenario_factor": 55.0,
-                    "scenario_volume": 1.0,
+                    "scenario_energy_mwh": 1.0,
                     "scenario_aggregation": "sum",
                 },
             ],
@@ -7639,7 +7732,7 @@ def test_scenario_via_question_analysis_payload():
     }
 
     qa = QuestionAnalysis.model_validate(payload)
-    ctx = QueryContext(query="Calculate CfD payoff with strike 55")
+    ctx = QueryContext(query=payload["raw_query"])
     ctx.question_analysis = qa
     ctx.question_analysis_source = "llm_active"
 
@@ -7647,7 +7740,7 @@ def test_scenario_via_question_analysis_payload():
     assert len(requests) == 1
     assert requests[0]["metric_name"] == "scenario_payoff"
     assert requests[0]["scenario_factor"] == 55.0
-    assert requests[0]["scenario_volume"] == 1.0
+    assert requests[0]["scenario_energy_mwh"] == 1.0
 
     # Run computation
     df = _scenario_df()  # p_bal_usd = [40, 50, 30, 60]
@@ -7664,21 +7757,50 @@ def test_scenario_via_question_analysis_payload():
 
 def test_scenario_fallback_extracts_scale_from_query():
     """When question_analysis is None, fallback extracts scenario from query text."""
-    ctx = QueryContext(query="What if prices were 34% higher?")
+    ctx = QueryContext(query="What if balancing prices were 34% higher?")
     requests = analyzer._active_analysis_requests(ctx)
     assert len(requests) == 1
     assert requests[0]["metric_name"] == "scenario_scale"
+    assert requests[0]["metric"] == "balancing"
     assert abs(requests[0]["scenario_factor"] - 1.34) < 1e-6
 
 
-def test_scenario_fallback_extracts_payoff_from_query():
-    """Fallback extracts strike from 'strike 60' pattern."""
-    ctx = QueryContext(query="Calculate payoff with strike 60")
-    requests = analyzer._active_analysis_requests(ctx)
-    assert len(requests) == 1
-    assert requests[0]["metric_name"] == "scenario_payoff"
-    assert requests[0]["scenario_factor"] == 60.0
-    assert requests[0]["scenario_volume"] == 1.0
+def test_scenario_fallback_payoff_without_reference_metric_fails_closed():
+    assert analyzer._scenario_fallback_requests(
+        "Calculate payoff with strike 60 USD/MWh"
+    ) == []
+
+
+def test_scenario_fallback_does_not_default_anaphoric_target():
+    assert analyzer._scenario_fallback_requests(
+        "What if it were 10% higher?"
+    ) == []
+
+
+def test_scenario_fallback_resolves_non_price_subject():
+    requests = analyzer._scenario_fallback_requests(
+        "What if the exchange rate were 10% higher?"
+    )
+
+    assert requests == [{
+        "metric_name": "scenario_scale",
+        "metric": "exchange_rate",
+        "scenario_factor": 1.1,
+        "scenario_energy_mwh": None,
+        "scenario_capacity_mw": None,
+        "scenario_aggregation": "mean",
+        "scenario_scope": "latest",
+    }]
+
+
+def test_scenario_fallback_extracts_negative_offset():
+    requests = analyzer._scenario_fallback_requests(
+        "What if balancing price were 30 GEL/MWh lower?"
+    )
+
+    assert requests[0]["metric_name"] == "scenario_offset"
+    assert requests[0]["metric"] == "p_bal_gel"
+    assert requests[0]["scenario_factor"] == -30.0
 
 
 def test_scenario_fallback_extracts_payoff_from_real_cfd_query():
@@ -7693,7 +7815,8 @@ def test_scenario_fallback_extracts_payoff_from_real_cfd_query():
     assert len(requests) == 1, f"Expected 1 scenario request, got {len(requests)}: {requests}"
     assert requests[0]["metric_name"] == "scenario_payoff"
     assert requests[0]["scenario_factor"] == 60.0
-    assert requests[0]["scenario_volume"] == 1.0
+    assert requests[0]["scenario_energy_mwh"] is None
+    assert requests[0]["scenario_capacity_mw"] == 1.0
 
 
 def test_scenario_payoff_positive_negative_breakdown():
@@ -7966,7 +8089,7 @@ def test_scenario_data_explanation_tool_route_not_treated_as_explanation():
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]
@@ -7995,7 +8118,7 @@ def test_comparison_with_scenario_metrics_not_overridden_to_scenario():
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]

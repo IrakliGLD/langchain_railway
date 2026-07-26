@@ -42,7 +42,7 @@ def test_derived_scenario_frame_preserves_all_parent_refs_and_serializes_them():
         "derived_metric_name": "scenario_scale",
         "metric": "p_bal_gel",
         "scenario_factor": 1.2,
-        "scenario_volume": None,
+        "scenario_energy_mwh": None,
         "aggregate_result": 120.0,
         "source_row_count": 2,
         "period_range": "2023 to 2024",

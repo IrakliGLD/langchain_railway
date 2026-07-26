@@ -2,7 +2,7 @@
 Pipeline Stage 3: Analysis & Enrichment
 
 Handles share resolution, correlation analysis, forecast mode (CAGR),
-"why" causal reasoning, trendline pre-calculation, and seasonal stats.
+"why" driver/association reasoning, trendline pre-calculation, and seasonal stats.
 """
 import json
 import logging
@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from agent.provenance import sql_query_hash, stamp_provenance
 from agent.router import extract_balancing_entities
+from agent.scenario_contract import extract_scenario_requests, ground_scenario_requests
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
 from analysis.seasonal_stats import (
     calculate_seasonal_stats,
@@ -55,6 +56,7 @@ from config_metrics.metric_config import (
     SEMANTIC_TO_COLUMNS,
     SUMMER_MONTHS,
 )
+from config_metrics.metric_units import metric_currency, metric_value_unit
 
 MONTH_NAME_TO_NUMBER = {
     "january": 1, "jan": 1, "february": 2, "feb": 2,
@@ -565,76 +567,22 @@ def _build_correlation_metadata(
     return metadata
 
 
-_SCENARIO_FALLBACK_PATTERNS: list[tuple[str, str, str]] = [
-    # (regex, metric_name, factor_group_meaning)
-    # "X% higher/lower" → scenario_scale
-    (r"(\d+(?:\.\d+)?)\s*%\s*(?:higher|more|increase)", "scenario_scale", "pct_higher"),
-    (r"(\d+(?:\.\d+)?)\s*%\s*(?:lower|less|decrease)", "scenario_scale", "pct_lower"),
-    # "double/twice" → scenario_scale factor=2.0
-    (r"\b(?:double|twice)\b", "scenario_scale", "double"),
-    (r"\b(?:half)\b", "scenario_scale", "half"),
-    # "strike X" or "strike price X" (adjacent) → scenario_payoff
-    (r"strike\s*(?:price)?\s*(\d+(?:\.\d+)?)", "scenario_payoff", "strike"),
-    # CfD/PPA contract with a price in USD/GEL/EUR (may be far from "strike")
-    (r"(?:cfd|ppa|contract for difference).{0,120}?(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)(?:/mwh)?", "scenario_payoff", "strike"),
-    # "strike" anywhere ... number with currency unit later
-    (r"strike.{0,120}?(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)(?:/mwh)?", "scenario_payoff", "strike"),
-    # "X USD/GEL higher/more" → scenario_offset
-    (r"(\d+(?:\.\d+)?)\s*(?:usd|gel|eur)\s*(?:higher|more)", "scenario_offset", "offset"),
-]
+def _scenario_fallback_requests(
+    query: str,
+    canonical_query: str | None = None,
+) -> list[dict[str, Any]]:
+    """Extract a subject-aware scenario request or fail closed."""
 
-_DEFAULT_SCENARIO_METRIC = "p_bal_usd"
-_VOLUME_RE = re.compile(r"(\d+(?:\.\d+)?)\s*mw(?:\b|/)", re.IGNORECASE)
-
-
-def _scenario_fallback_requests(query: str) -> list[dict[str, Any]]:
-    """Try to extract a scenario request from the raw query text.
-
-    This is a best-effort heuristic for when the LLM question-analyzer
-    fails to produce a QuestionAnalysis with scenario-type derived metrics.
-    Returns an empty list if no scenario pattern is found.
-    """
-    q = query.lower()
-    for pattern, metric_name, meaning in _SCENARIO_FALLBACK_PATTERNS:
-        m = re.search(pattern, q)
-        if not m:
-            continue
-
-        req: dict[str, Any] = {
-            "metric_name": metric_name,
-            "metric": _DEFAULT_SCENARIO_METRIC,
-            "scenario_aggregation": "sum",
-        }
-
-        if meaning == "pct_higher":
-            req["scenario_factor"] = 1.0 + float(m.group(1)) / 100.0
-        elif meaning == "pct_lower":
-            req["scenario_factor"] = 1.0 - float(m.group(1)) / 100.0
-        elif meaning == "double":
-            req["scenario_factor"] = 2.0
-        elif meaning == "half":
-            req["scenario_factor"] = 0.5
-        elif meaning == "strike":
-            req["scenario_factor"] = float(m.group(1))
-            req["scenario_volume"] = 1.0
-        elif meaning == "offset":
-            req["scenario_factor"] = float(m.group(1))
-        else:
-            continue
-
-        # Try to detect GEL metric from query
-        if "gel" in q and "usd" not in q:
-            req["metric"] = "p_bal_gel"
-
-        # Extract volume from "X mw" or "X mw/month" if present
-        vol_match = _VOLUME_RE.search(q)
-        if vol_match and metric_name == "scenario_payoff":
-            req["scenario_volume"] = float(vol_match.group(1))
-
-        log.info("Scenario fallback: extracted %s from query (factor=%.2f)", metric_name, req["scenario_factor"])
-        return [req]
-
-    return []
+    requests = extract_scenario_requests(query, canonical_query=canonical_query)
+    if requests:
+        request = requests[0]
+        log.info(
+            "Scenario fallback: grounded %s on %s (factor=%.2f)",
+            request["metric_name"],
+            request["metric"],
+            request["scenario_factor"],
+        )
+    return requests
 
 
 def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
@@ -651,7 +599,11 @@ def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
                 )
             requests.append(payload)
         if requests:
-            return requests
+            return ground_scenario_requests(
+                ctx.query,
+                requests,
+                canonical_query=ctx.question_analysis.canonical_query_en,
+            )
         log.info(
             "QA derived_metrics empty, trying scenario fallback for: %.80s",
             ctx.query,
@@ -659,7 +611,14 @@ def _active_analysis_requests(ctx: QueryContext) -> list[dict[str, Any]]:
 
     # When the LLM question-analyzer didn't produce scenario requests,
     # try heuristic extraction from the raw query text.
-    scenario_reqs = _scenario_fallback_requests(ctx.query)
+    scenario_reqs = _scenario_fallback_requests(
+        ctx.query,
+        (
+            ctx.question_analysis.canonical_query_en
+            if ctx.question_analysis is not None
+            else (ctx.resolved_query or None)
+        ),
+    )
     if scenario_reqs:
         return scenario_reqs
 
@@ -929,25 +888,11 @@ def _format_chart_time_values(values: pd.Series) -> list[str]:
 
 
 def _price_unit_for_metric(metric: str) -> str:
-    metric_lower = metric.lower()
-    if "_usd" in metric_lower:
-        return "USD/MWh"
-    if "_gel" in metric_lower:
-        return "GEL/MWh"
-    if metric_lower == "xrate":
-        return "GEL per USD"
-    if metric_lower.startswith("share_"):
-        return "Share (0-1)"
-    return "Value"
+    return metric_value_unit(metric)
 
 
 def _amount_unit_for_metric(metric: str) -> str:
-    metric_lower = metric.lower()
-    if "_usd" in metric_lower:
-        return "USD"
-    if "_gel" in metric_lower:
-        return "GEL"
-    return "Value"
+    return metric_currency(metric) or metric_value_unit(metric)
 
 
 def _metric_label(metric: str) -> str:
@@ -974,8 +919,10 @@ def _scenario_chart_request(
         "metric_name": scenario_row.get("derived_metric_name"),
         "metric": scenario_row.get("metric"),
         "scenario_factor": scenario_row.get("scenario_factor"),
-        "scenario_volume": scenario_row.get("scenario_volume"),
+        "scenario_energy_mwh": scenario_row.get("scenario_energy_mwh"),
+        "scenario_capacity_mw": scenario_row.get("scenario_capacity_mw"),
         "scenario_aggregation": scenario_row.get("scenario_aggregation"),
+        "scenario_scope": scenario_row.get("scenario_scope"),
     }
 
     chart_intent: Optional[ChartIntent] = None
@@ -1029,35 +976,156 @@ def _default_scenario_chart_hint(
     return ChartIntent.TREND_COMPARE, [SemanticRole.OBSERVED, SemanticRole.REFERENCE]
 
 
+def _scenario_chart_base(
+    ctx: QueryContext,
+    metric: str,
+    scope: str,
+) -> Optional[Tuple[pd.Series, list[str], str, str]]:
+    """Resolve the observed scenario series once for single or multi charts."""
+
+    if ctx.df.empty:
+        return None
+    time_col = _find_chart_time_column(ctx.df)
+    if not time_col or time_col not in ctx.df.columns:
+        return None
+    value_col = next(
+        (alias for alias in _metric_aliases(metric) if alias in ctx.df.columns),
+        None,
+    )
+    if value_col is None:
+        return None
+    raw = pd.to_numeric(ctx.df[value_col], errors="coerce")
+    chart_df = ctx.df.loc[raw.notna()].copy()
+    if chart_df.empty:
+        return None
+    sortable = pd.to_datetime(chart_df[time_col], errors="coerce")
+    if sortable.notna().any():
+        chart_df = (
+            chart_df.assign(_scenario_time=sortable)
+            .sort_values("_scenario_time")
+            .drop(columns=["_scenario_time"])
+        )
+    if scope == "latest":
+        chart_df = chart_df.tail(1)
+    base_series = (
+        pd.to_numeric(chart_df[value_col], errors="coerce")
+        .astype(float)
+        .reset_index(drop=True)
+    )
+    time_values = _format_chart_time_values(chart_df[time_col])
+    if not time_values or len(time_values) != len(base_series):
+        return None
+    return base_series, time_values, value_col, time_col
+
+
+def _resolve_multi_scenario_chart_roles(ctx: QueryContext) -> Optional[Dict[str, Any]]:
+    """Build one observed series plus every compatible sensitivity scenario."""
+
+    rows = [
+        row
+        for row in (ctx.analysis_evidence or [])
+        if row.get("record_type") == "scenario"
+    ]
+    if len(rows) <= 1:
+        return None
+    metric_names = {str(row.get("derived_metric_name") or "") for row in rows}
+    metrics = {str(row.get("metric") or "") for row in rows}
+    scopes = {str(row.get("scenario_scope") or "latest") for row in rows}
+    if (
+        len(metric_names) != 1
+        or len(metrics) != 1
+        or len(scopes) != 1
+        or not metric_names.issubset({
+            "scenario_scale",
+            "scenario_offset",
+            "scenario_payoff",
+        })
+    ):
+        return None
+
+    metric_name = next(iter(metric_names))
+    metric = next(iter(metrics))
+    scope = next(iter(scopes))
+    base = _scenario_chart_base(ctx, metric, scope)
+    if base is None:
+        return None
+    base_series, time_values, value_col, time_col = base
+    unit = _price_unit_for_metric(value_col)
+    base_label = _metric_label(value_col)
+    resolved_series: list[dict[str, Any]] = [{
+        "role": SemanticRole.OBSERVED.value,
+        "label": base_label,
+        "values": base_series.round(6).tolist(),
+        "unit": unit,
+    }]
+
+    seen_labels = {base_label}
+    for row in rows:
+        factor = float(row.get("scenario_factor") or 0.0)
+        if metric_name == "scenario_scale":
+            values = (base_series * factor).round(6).tolist()
+            label = f"Scaled {base_label} (×{factor:g})"
+            role = SemanticRole.DERIVED.value
+        elif metric_name == "scenario_offset":
+            values = (base_series + factor).round(6).tolist()
+            label = f"Adjusted {base_label} ({factor:+g})"
+            role = SemanticRole.DERIVED.value
+        else:
+            values = [round(factor, 6)] * len(base_series)
+            label = f"Strike Price ({factor:g})"
+            role = SemanticRole.REFERENCE.value
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        resolved_series.append({
+            "role": role,
+            "label": label,
+            "values": values,
+            "unit": unit,
+        })
+
+    if len(resolved_series) <= 2:
+        return None
+    return {
+        "intent": ChartIntent.TREND_COMPARE.value,
+        "time_field": "date",
+        "x_axis_title": time_col,
+        "time_values": time_values,
+        "series": resolved_series,
+        "unit": unit,
+    }
+
+
 def _resolve_chart_roles(ctx: QueryContext) -> Optional[Dict[str, Any]]:
     """Resolve semantic chart roles into chart-ready deterministic series."""
+    multi = _resolve_multi_scenario_chart_roles(ctx)
+    if multi is not None:
+        return multi
+
     resolved_request = _scenario_chart_request(ctx)
     if resolved_request is None or ctx.df.empty:
         return None
 
     chart_intent, target_roles, request, evidence_row = resolved_request
-    time_col = _find_chart_time_column(ctx.df)
-    if not time_col or time_col not in ctx.df.columns:
-        return None
-
     metric = str(request.get("metric", "")).strip()
-    value_col = next((alias for alias in _metric_aliases(metric) if alias in ctx.df.columns), None)
-    if value_col is None:
+    scope = str(
+        request.get("scenario_scope")
+        or evidence_row.get("scenario_scope")
+        or "latest"
+    )
+    base = _scenario_chart_base(ctx, metric, scope)
+    if base is None:
         return None
-
-    raw = pd.to_numeric(ctx.df[value_col], errors="coerce")
-    valid_mask = raw.notna()
-    if valid_mask.sum() == 0:
-        return None
-
-    base_series = raw[valid_mask].astype(float).reset_index(drop=True)
-    time_values = _format_chart_time_values(ctx.df.loc[valid_mask, time_col])
-    if not time_values or len(time_values) != len(base_series):
-        return None
+    base_series, time_values, value_col, time_col = base
 
     metric_name = str(request.get("metric_name", "")).strip()
     factor = float(request.get("scenario_factor") or evidence_row.get("scenario_factor") or 0.0)
-    volume = float(request.get("scenario_volume") or evidence_row.get("scenario_volume") or 1.0)
+    energy_raw = (
+        request.get("scenario_energy_mwh")
+        if request.get("scenario_energy_mwh") is not None
+        else evidence_row.get("scenario_energy_mwh")
+    )
+    energy_mwh = float(energy_raw) if energy_raw is not None else None
     base_label = _metric_label(value_col)
 
     if chart_intent == ChartIntent.TREND_COMPARE:
@@ -1097,9 +1165,20 @@ def _resolve_chart_roles(ctx: QueryContext) -> Optional[Dict[str, Any]]:
                     label = f"Adjusted {base_label}"
                     unit = _price_unit_for_metric(value_col)
                 elif metric_name == "scenario_payoff":
-                    values = ((factor - base_series) * volume).round(6).tolist()
-                    label = "CfD Financial Compensation"
-                    unit = _amount_unit_for_metric(value_col)
+                    payoff_series = factor - base_series
+                    if energy_mwh is not None:
+                        payoff_series = payoff_series * energy_mwh
+                    values = payoff_series.round(6).tolist()
+                    label = (
+                        "CfD Financial Compensation"
+                        if energy_mwh is not None
+                        else "CfD Payoff Rate"
+                    )
+                    unit = (
+                        _amount_unit_for_metric(value_col)
+                        if energy_mwh is not None
+                        else _price_unit_for_metric(value_col)
+                    )
                 else:
                     return None
                 resolved_series.append(
@@ -1127,17 +1206,17 @@ def _resolve_chart_roles(ctx: QueryContext) -> Optional[Dict[str, Any]]:
         }
 
     if chart_intent == ChartIntent.DECOMPOSITION:
-        if metric_name != "scenario_payoff":
+        if metric_name != "scenario_payoff" or energy_mwh is None:
             return None
 
         component_map = {
             SemanticRole.COMPONENT_PRIMARY: {
                 "label": "Balancing Market Sales Income",
-                "values": (base_series * volume).round(6).tolist(),
+                "values": (base_series * energy_mwh).round(6).tolist(),
             },
             SemanticRole.COMPONENT_SECONDARY: {
                 "label": "CfD Financial Compensation",
-                "values": ((factor - base_series) * volume).round(6).tolist(),
+                "values": ((factor - base_series) * energy_mwh).round(6).tolist(),
             },
         }
 

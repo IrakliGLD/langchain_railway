@@ -200,7 +200,22 @@
           "default": null,
           "title": "Scenario Factor"
         },
-        "scenario_volume": {
+        "scenario_energy_mwh": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Delivered energy in MWh in each scenario observation. Never MW capacity. When absent, scenario_payoff is a currency-per-MWh rate, not a currency total.",
+          "title": "Scenario Energy Mwh"
+        },
+        "scenario_capacity_mw": {
           "anyOf": [
             {
               "exclusiveMinimum": 0,
@@ -212,12 +227,24 @@
             }
           ],
           "default": null,
-          "title": "Scenario Volume"
+          "description": "Optional stated capacity retained for transparency. It is not used in payoff arithmetic without delivered-energy evidence.",
+          "title": "Scenario Capacity Mw"
         },
         "scenario_aggregation": {
           "anyOf": [
             {
               "$ref": "#/$defs/ScenarioAggregation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scenario_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioScope"
             },
             {
               "type": "null"
@@ -581,6 +608,16 @@
         "max"
       ],
       "title": "ScenarioAggregation",
+      "type": "string"
+    },
+    "ScenarioScope": {
+      "description": "Observation window used as the deterministic scenario baseline.",
+      "enum": [
+        "latest",
+        "requested_period",
+        "full_series"
+      ],
+      "title": "ScenarioScope",
       "type": "string"
     },
     "Season": {

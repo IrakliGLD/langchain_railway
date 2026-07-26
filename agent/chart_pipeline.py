@@ -892,8 +892,9 @@ def _resolve_chart_groups(
             getattr(getattr(visualization, "preferred_chart_family", None), "value", None)
         )
         explicit_user_type = _explicit_user_chart_type(ctx.query)
-        if complete_energy_composition and explicit_user_type:
+        if explicit_user_type:
             normalized["type"] = explicit_user_type
+            normalized["_explicit_user_chart_type"] = explicit_user_type
         elif complete_energy_composition:
             # The analyzer runs before retrieval and can mistake a component
             # time series for independent trends. The observed coherent
@@ -1531,7 +1532,11 @@ def _choose_chart_type(
                     category_count=category_count,
                 )
 
-    if dimensions == {"share"} and has_time:
+    if (
+        dimensions == {"share"}
+        and has_time
+        and not _normalize_chart_type(group.get("_explicit_user_chart_type"))
+    ):
         chart_type = "stackedbar"
 
     if ("price_tariff" in dimensions or "xrate" in dimensions) and "share" not in dimensions:

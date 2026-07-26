@@ -888,6 +888,72 @@ def test_ask_rejects_invalid_gateway_budget_before_pipeline(monkeypatch):
     _clear_rate_limit_buckets()
 
 
+@pytest.mark.parametrize(
+    ("answer_mode_header", "expected_mode"),
+    [
+        (None, "standard"),
+        ("brief", "brief"),
+        ("standard", "standard"),
+        ("report", "report"),
+    ],
+)
+def test_ask_normalizes_answer_mode_before_pipeline(
+    monkeypatch,
+    answer_mode_header,
+    expected_mode,
+):
+    captured = {}
+
+    def _capture_pipeline(**kwargs):
+        captured["pipeline"] = kwargs
+        return _fake_query_context()
+
+    monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
+    monkeypatch.setattr(SessionTurn, "record_exchange", lambda *_args, **_kwargs: None)
+    _clear_rate_limit_buckets()
+    headers = {"X-App-Key": "test-gateway-key"}
+    if answer_mode_header is not None:
+        headers["X-Enai-Answer-Mode"] = answer_mode_header
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["pipeline"]["answer_mode"] == expected_mode
+    _clear_rate_limit_buckets()
+
+
+def test_ask_rejects_invalid_answer_mode_before_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for an invalid answer mode"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-invalid-answer-mode",
+            "X-Enai-Answer-Mode": "essay",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "INVALID_ANSWER_MODE",
+        "message": "Invalid answer mode",
+        "retryable": False,
+        "request_id": "req-invalid-answer-mode",
+    }
+    _clear_rate_limit_buckets()
+
+
 def test_ask_maps_pipeline_deadline_expiry_to_typed_408(monkeypatch):
     _install_successful_ask_mocks(monkeypatch)
 

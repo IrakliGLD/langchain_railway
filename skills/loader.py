@@ -206,6 +206,44 @@ def get_forecast_caveats() -> str:
 
 
 # ---------------------------------------------------------------------------
+# User-selected answer length guidance
+# ---------------------------------------------------------------------------
+
+def get_answer_length_guidance(answer_mode: str) -> str:
+    """Return authoritative prompt guidance for an additive answer mode."""
+    if answer_mode == "standard" or not answer_mode:
+        return ""
+    if answer_mode != "brief":
+        raise ValueError(f"Unsupported synchronous answer mode: {answer_mode!r}")
+    full = load_reference("answer-composer", "answer-length-modes.md")
+    return _extract_section(full, "## Brief mode") if full else ""
+
+
+# ---------------------------------------------------------------------------
+# Report-composer stage guidance
+# ---------------------------------------------------------------------------
+
+_REPORT_GUIDANCE_FILES: dict[str, str] = {
+    "structure": "standard-structure.md",
+    "planning": "planning-contract.md",
+    "section_writing": "section-writing.md",
+    "chart_integration": "chart-integration.md",
+    "final_assembly": "final-assembly.md",
+}
+
+
+def get_report_guidance(stage: str) -> str:
+    """Return the narrowly-scoped report-composer reference for one stage."""
+    ref_name = _REPORT_GUIDANCE_FILES.get(stage)
+    if ref_name is None:
+        allowed = ", ".join(sorted(_REPORT_GUIDANCE_FILES))
+        raise ValueError(
+            f"Unknown report guidance stage {stage!r}; expected one of: {allowed}"
+        )
+    return load_reference("report-composer", ref_name)
+
+
+# ---------------------------------------------------------------------------
 # Startup validation
 # ---------------------------------------------------------------------------
 
@@ -227,6 +265,13 @@ _EXPECTED_FILES: list[tuple[str, str]] = [
     ("answer-composer", "balancing-analysis-template.md"),
     ("answer-composer", "focus-guidance-catalog.md"),
     ("answer-composer", "forecast-caveats.md"),
+    ("answer-composer", "answer-length-modes.md"),
+    # report-composer
+    ("report-composer", "standard-structure.md"),
+    ("report-composer", "planning-contract.md"),
+    ("report-composer", "section-writing.md"),
+    ("report-composer", "chart-integration.md"),
+    ("report-composer", "final-assembly.md"),
 ]
 
 

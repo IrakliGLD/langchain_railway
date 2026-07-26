@@ -57,6 +57,12 @@ from agent.provenance import (
 )
 from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
+from agent.scenario_contract import (
+    extract_scenario_requests,
+    ground_scenario_request,
+    is_cross_metric_counterfactual,
+    query_has_scenario_parameter,
+)
 from agent.stage_orchestrator import PipelineStageOrchestrator
 from agent.tools import execute_tool
 from agent.tools.types import ToolInvocation
@@ -84,6 +90,7 @@ from config import (
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
     AnswerKind,
+    DerivedMetricRequest,
     KnowledgeTopicName,
     PreferredPath,
     RenderStyle,
@@ -99,7 +106,7 @@ from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
 )
-from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
+from models import AnswerMode, QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
 from utils.privacy_logging import hash_private_identifier
 from utils.query_validation import extract_query_topics, validate_tool_relevance
@@ -154,47 +161,53 @@ _SCENARIO_OVERRIDE_ELIGIBLE = frozenset({
     AnswerKind.TIMESERIES,
 })
 
-# --- Scenario quantitative-anchor gate ---
-# Production logs (2026-05-13) showed a query "if more ppa will be signed, how
-# this will affect the price?" routed to SCENARIO because the analyzer emitted
-# a fabricated scenario_factor=1.34 from a query containing no number.  The
-# generic renderer then produced a meaningless "Result: 24511.48 (× 1.34)"
-# from summing 132 historical balancing prices and scaling.
-#
-# The override now requires the user query to contain an explicit quantitative
-# anchor — a digit, a percentage, or a multiplicative/directional word — before
-# upgrading EXPLANATION/SCALAR/TIMESERIES → SCENARIO.  When the anchor is
-# absent, the request stays on the narrative path (LLM summarizer with full
-# evidence frames), which is the safer fallback.
-#
-# Conservative by design: any digit anywhere in the query counts, even dates,
-# to avoid false-positives suppressing legitimate scenario queries.  Multilingual
-# support is digit-based today; non-Latin multiplicative vocabulary can be
-# added when a real failure case emerges.
-_QUANTITATIVE_ANCHOR_RE = re.compile(
-    r"\b("
-    r"\d+(?:[.,]\d+)?\s*(?:%|percent|gel|usd|eur|mwh|gwh|mw|gw|kwh)?"
-    r"|double|doubles|doubling"
-    r"|halve|halves|halving|half"
-    r"|triple|triples|tripling"
-    r"|quadruple|twice"
-    r"|(?:increases?|increasing|decreases?|decreasing"
-    r"|raises?|raising|cuts?|cutting"
-    r"|grows?|growing|shrinks?|shrinking"
-    r"|rises?|rising|falls?|falling"
-    r"|drops?|dropping)\s+by\b"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
+# Scenario parameters are accepted only through agent.scenario_contract, which
+# binds a numerical change to the subject being transformed. This closes the
+# former date-only and fabricated-factor override paths.
 def _query_has_quantitative_anchor(query: str) -> bool:
-    """Return True iff *query* contains a numeric or multiplicative anchor.
+    """Return whether a scenario parameter is directionally tied to a subject."""
 
-    Used as the SCENARIO override gate at the answer_kind derivation site.
-    See ``_QUANTITATIVE_ANCHOR_RE`` for the failure case that motivated it.
+    return query_has_scenario_parameter(query)
+
+
+def _ground_analyzer_scenario_requests(ctx: QueryContext) -> tuple[bool, bool]:
+    """Normalize analyzer scenario requests and discard ungrounded proposals.
+
+    Returns ``(had_scenario_request, has_grounded_scenario_request)``. The raw
+    user query is the numerical authority; the canonical translation is used
+    only as optional language context by the shared grounding module.
     """
-    return bool(_QUANTITATIVE_ANCHOR_RE.search(query or ""))
+
+    qa = ctx.question_analysis
+    if qa is None:
+        return False, False
+    normalized = []
+    had_scenario = False
+    has_grounded = False
+    for request in qa.analysis_requirements.derived_metrics or []:
+        if request.metric_name not in _SCENARIO_DERIVED_METRICS:
+            normalized.append(request)
+            continue
+        had_scenario = True
+        grounded = ground_scenario_request(
+            ctx.query,
+            request.model_dump(mode="json"),
+            canonical_query=qa.canonical_query_en,
+        )
+        if grounded is None:
+            metrics.log_analyzer_cross_check("scenario_request_ungrounded")
+            log.warning(
+                "Discarding ungrounded analyzer scenario request: metric=%s "
+                "factor=%s query=%.80s",
+                request.metric,
+                request.scenario_factor,
+                ctx.query,
+            )
+            continue
+        normalized.append(DerivedMetricRequest.model_validate(grounded))
+        has_grounded = True
+    qa.analysis_requirements.derived_metrics = normalized
+    return had_scenario, has_grounded
 
 
 # --- Response-mode derivation constants ---
@@ -468,6 +481,15 @@ def _resolve_effective_answer_kind(ctx) -> AnswerKind | None:
     query_lower = str(ctx.query or "").strip().lower()
     if not query_lower:
         return None
+
+    if is_cross_metric_counterfactual(ctx.query):
+        return AnswerKind.EXPLANATION
+
+    if extract_scenario_requests(
+        ctx.query,
+        canonical_query=(ctx.resolved_query or None),
+    ):
+        return AnswerKind.SCENARIO
 
     if any(signal in query_lower for signal in _FORECAST_ROUTING_SIGNALS):
         return AnswerKind.FORECAST
@@ -2355,27 +2377,31 @@ def _finalize_answer_kind(ctx: QueryContext) -> None:
     early return.
     """
     # --- answer_kind cross-check (before Stage 0.3 so we can skip retrieval) ---
+    analyzer_declared_scenario = bool(
+        ctx.has_authoritative_question_analysis
+        and ctx.question_analysis.answer_kind == AnswerKind.SCENARIO
+    )
     _cross_check_answer_kind(ctx)
     if ctx.has_authoritative_question_analysis:
         qa = ctx.question_analysis
         # Fallback: if LLM did not emit answer_kind, derive it from query_type.
         if qa.answer_kind is None:
             qa.answer_kind = _derive_answer_kind_from_query_type(ctx)
+        had_scenario_metric, has_grounded_scenario = _ground_analyzer_scenario_requests(ctx)
         # Override: scenario-family derived metrics signal SCENARIO when the
         # LLM misclassified a scenario query as data_explanation or similar.
         # Strong structural answer_kinds (COMPARISON, LIST, KNOWLEDGE, CLARIFY)
         # are never overridden — they represent a deliberate shape choice.
         #
-        # Gated on a quantitative anchor in the user query: see comment near
-        # ``_QUANTITATIVE_ANCHOR_RE``.  Without an anchor, the analyzer is
-        # likely hallucinating ``scenario_factor`` (production log 2026-05-13);
-        # we stay on the narrative path instead of computing a garbage number.
+        # The shared contract verifies both the numerical parameter and its
+        # transformed subject against the raw user query. Without that
+        # provenance, we stay on the narrative/clarification path.
         if qa.answer_kind in _SCENARIO_OVERRIDE_ELIGIBLE:
             derived = qa.analysis_requirements.derived_metrics or []
             has_scenario_metric = any(
                 m.metric_name in _SCENARIO_DERIVED_METRICS for m in derived
             )
-            if has_scenario_metric and _query_has_quantitative_anchor(ctx.query):
+            if has_scenario_metric and has_grounded_scenario:
                 metrics.log_analyzer_cross_check("scenario_override_applied")
                 log.info(
                     "answer_kind override: %s → SCENARIO (scenario derived metrics present)",
@@ -2386,10 +2412,25 @@ def _finalize_answer_kind(ctx: QueryContext) -> None:
                 metrics.log_analyzer_cross_check("scenario_override_gated")
                 log.info(
                     "answer_kind override suppressed: scenario derived metrics present "
-                    "but no quantitative anchor in query (kind=%s, query=%.80s)",
+                    "but no grounded parameter/subject in query (kind=%s, query=%.80s)",
                     qa.answer_kind.value if qa.answer_kind else None,
                     ctx.query,
                 )
+        if had_scenario_metric and not has_grounded_scenario:
+            query_type = qa.classification.query_type.value
+            if analyzer_declared_scenario and query_type != "data_explanation":
+                qa.answer_kind = AnswerKind.CLARIFY
+                qa.routing.preferred_path = PreferredPath.CLARIFY
+                qa.classification.needs_clarification = True
+                clarification = (
+                    "Specify the scenario subject and a numerical change that "
+                    "appears in the question."
+                )
+                if clarification not in qa.classification.ambiguities:
+                    qa.classification.ambiguities.append(clarification)
+                ctx.clarify_reason = "scenario_parameter_not_grounded"
+            elif qa.answer_kind == AnswerKind.SCENARIO:
+                qa.answer_kind = AnswerKind.EXPLANATION
         # Fallback: if LLM did not emit render_style, default to narrative (safer).
         if qa.render_style is None:
             qa.render_style = RenderStyle.NARRATIVE
@@ -2849,6 +2890,7 @@ def _process_query_impl(
     request_deadline=None,
     actor_id: str = "",
     request_id: str = "",
+    answer_mode: str = AnswerMode.STANDARD.value,
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -2865,6 +2907,7 @@ def _process_query_impl(
         conversation_history=conversation_history,
         trace_id=trace_id,
         session_id=session_id,
+        answer_mode=answer_mode,
         request_deadline=request_deadline,
         previous_contract_snapshot=previous_contract_snapshot,
         clarify_selection_override=selected is not None,
@@ -3157,6 +3200,7 @@ def process_query(
     request_deadline=None,
     actor_id: str = "",
     request_id: str = "",
+    answer_mode: str = AnswerMode.STANDARD.value,
 ) -> QueryContext:
     """Bind the trusted request identity/deadline around every deep I/O call."""
     with bind_request_execution_scope(
@@ -3173,4 +3217,5 @@ def process_query(
             request_deadline=request_deadline,
             actor_id=actor_id,
             request_id=request_id,
+            answer_mode=answer_mode,
         )
