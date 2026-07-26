@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.pool import QueuePool
 
+import knowledge as knowledge_module
 from config import (
     DB_CONNECT_TIMEOUT_SECONDS,
     DB_POOL_TIMEOUT_SECONDS,
@@ -104,6 +105,7 @@ def main() -> int:
         )
         return 0
 
+    knowledge_module.load_knowledge()
     worker, processor, engine = build_report_worker_runtime()
     stop_event = threading.Event()
 

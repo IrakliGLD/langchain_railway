@@ -800,6 +800,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
                 "Capped domain_knowledge to %d chars (synthesizing with vector evidence)",
                 _dk_cap,
             )
+    ctx.summary_domain_knowledge = domain_knowledge_for_summary
     # Diagnostic: log prompt composition BEFORE the LLM call so we can correlate
     # input volume / shape with output quality.  Critical for debugging
     # "answer is shallow despite all rescue layers" cases like trace 226a56ef
