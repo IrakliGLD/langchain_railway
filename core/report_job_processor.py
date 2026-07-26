@@ -199,7 +199,12 @@ class ReportJobProcessor:
                     else ReportPlan.model_validate(raw_plan)
                 )
                 evaluation = self._evaluator(plan, manifest)
-            except (ReportPlanEvidenceError, ValidationError, ValueError) as exc:
+            except ReportPlanEvidenceError as exc:
+                raise ReportJobFailure(
+                    "REPORT_PLAN_INVALID",
+                    retryable=False,
+                ) from exc
+            except (ValidationError, ValueError) as exc:
                 raise ReportJobFailure(
                     "REPORT_PLAN_INVALID",
                     retryable=True,
@@ -207,7 +212,7 @@ class ReportJobProcessor:
             if not evaluation.ready_for_generation:
                 raise ReportJobFailure(
                     "REPORT_PLAN_NOT_READY",
-                    retryable=True,
+                    retryable=False,
                 )
             completed_by_id: dict[str, ReportSectionDraft] = {}
             progress = max(progress, 25)

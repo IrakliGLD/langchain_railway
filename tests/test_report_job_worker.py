@@ -182,14 +182,16 @@ def test_worker_honours_cancellation_that_arrives_before_completion():
     ]
 
 
-def test_worker_maps_expected_failure_to_bounded_retry_metadata():
+def test_worker_maps_and_logs_expected_failure_with_bounded_metadata(caplog):
     lease = _lease()
     repository = _Repository(lease)
 
     def handler(*_):
         raise ReportJobFailure("REPORT_EVIDENCE_TEMPORARILY_UNAVAILABLE", retryable=True)
 
-    assert _worker(repository).run_once(handler) is True
+    with caplog.at_level(logging.WARNING, logger="test.report_worker"):
+        assert _worker(repository).run_once(handler) is True
+
     assert repository.calls[-1] == (
         "fail",
         lease.job_id,
@@ -198,6 +200,8 @@ def test_worker_maps_expected_failure_to_bounded_retry_metadata():
         True,
         30,
     )
+    assert "Report job attempt failed" in caplog.text
+    assert "REPORT_EVIDENCE_TEMPORARILY_UNAVAILABLE" in caplog.text
 
 
 def test_worker_redacts_unexpected_exception_content_from_persistence():

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from agent.report_planner import ReportPlanEvidenceError
 from agent.report_sections import generate_report_sections
 from contracts.report import ReportPlan
 from contracts.report_generation import ReportGenerationCheckpoint
@@ -237,4 +238,26 @@ def test_checkpoint_for_a_different_query_fails_closed():
         _processor()(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_CHECKPOINT_INVALID"
+    assert exc_info.value.retryable is False
+
+
+def test_irreparable_evidence_bound_plan_is_not_retried():
+    lease = _lease()
+
+    def pipeline(query, **_kwargs):
+        return _pipeline_context(query)
+
+    def invalid_planner(*_args):
+        raise ReportPlanEvidenceError("Bounded planner validation failed.")
+
+    processor = ReportJobProcessor(
+        query_pipeline=pipeline,
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=invalid_planner,
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
     assert exc_info.value.retryable is False
