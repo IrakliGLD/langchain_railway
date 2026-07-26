@@ -6,6 +6,8 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -79,8 +81,20 @@ def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):
     )
     captured = {}
 
-    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda key: (None, "repair-token"))
-    monkeypatch.setattr(llm, "_cache_set", lambda *_: None)
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("section repairs must not use the response cache")
+        ),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_set",
+        lambda *_: (_ for _ in ()).throw(
+            AssertionError("section repairs must not populate the response cache")
+        ),
+    )
     monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
 
     def invoke(_factory, _model, messages, **kwargs):
@@ -103,3 +117,41 @@ def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):
     assert captured["label"] == "Report section repair"
     assert "WORD_COUNT_OUT_OF_RANGE" in captured["messages"][1][1]
     assert candidate.paragraphs[0].text in captured["messages"][1][1]
+
+
+def test_section_writer_cancels_cache_reservation_on_provider_failure(
+    monkeypatch,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[0]
+    cancelled = {}
+
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "writer-token"),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_cancel_in_flight",
+        lambda key, token: cancelled.update(key=key, token=token),
+    )
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("provider timed out")
+        ),
+    )
+
+    with pytest.raises(TimeoutError, match="provider timed out"):
+        llm.llm_write_report_section(
+            "Explain the price trend.",
+            plan,
+            section,
+            _manifest(),
+        )
+
+    assert cancelled["token"] == "writer-token"
+    assert section.section_id in cancelled["key"]

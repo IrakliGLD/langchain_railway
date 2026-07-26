@@ -17,6 +17,7 @@ from contracts.report_sections import (
     ReportSectionDraft,
     ReportSectionValidation,
 )
+from utils.provider_attempts import ProviderExecutionError
 
 _WORD_PATTERN = re.compile(r"\b[\w]+(?:[.,'-][\w]+)*\b", re.UNICODE)
 _NUMERIC_PATTERN = re.compile(
@@ -150,12 +151,18 @@ def generate_report_sections(
             completed[section.section_id] = existing
 
     def generate_one(section: ReportSectionSpec) -> ReportSectionDraft:
-        raw_draft: ReportSectionDraft | dict[str, Any] = generate_section(
-            query,
-            plan,
-            section,
-            manifest,
-        )
+        try:
+            raw_draft: ReportSectionDraft | dict[str, Any] = generate_section(
+                query,
+                plan,
+                section,
+                manifest,
+            )
+        except ProviderExecutionError as exc:
+            raise ReportSectionGenerationError(
+                section.section_id,
+                ["SECTION_WRITE_PROVIDER_FAILED"],
+            ) from exc
         try:
             draft = (
                 raw_draft
@@ -174,14 +181,20 @@ def generate_report_sections(
                 from core.llm import llm_repair_report_section
 
                 effective_repair = llm_repair_report_section
-            repaired_raw = effective_repair(
-                query,
-                plan,
-                section,
-                manifest,
-                draft,
-                error_codes,
-            )
+            try:
+                repaired_raw = effective_repair(
+                    query,
+                    plan,
+                    section,
+                    manifest,
+                    draft,
+                    error_codes,
+                )
+            except ProviderExecutionError as exc:
+                raise ReportSectionGenerationError(
+                    section.section_id,
+                    ["SECTION_REPAIR_PROVIDER_FAILED"],
+                ) from exc
             try:
                 repaired = (
                     repaired_raw

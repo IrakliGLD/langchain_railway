@@ -3146,29 +3146,33 @@ def _invoke_report_section_contract(
     system: str,
     prompt: str,
     label: str,
+    use_cache: bool = True,
 ) -> ReportSectionDraft:
-    cached_response, cache_token = _cache_get_or_reserve(cache_input)
-    if cached_response:
-        return ReportSectionDraft.model_validate(
-            _extract_json_payload(cached_response)
-        )
-
-    llm_start = time.time()
-    primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
-    message = _invoke_with_openai_fallback(
-        lambda: get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1),
-        primary_model_name,
-        [("system", system), ("user", prompt)],
-        llm_start=llm_start,
-        label=label,
-    )
+    cache_token = None
+    if use_cache:
+        cached_response, cache_token = _cache_get_or_reserve(cache_input)
+        if cached_response:
+            return ReportSectionDraft.model_validate(
+                _extract_json_payload(cached_response)
+            )
     try:
+        llm_start = time.time()
+        primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
+        message = _invoke_with_openai_fallback(
+            lambda: get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1),
+            primary_model_name,
+            [("system", system), ("user", prompt)],
+            llm_start=llm_start,
+            label=label,
+        )
         result = ReportSectionDraft.model_validate(
             _extract_json_payload(message.content.strip())
         )
-        _cache_set(cache_input, result.model_dump_json(), cache_token)
+        if use_cache:
+            _cache_set(cache_input, result.model_dump_json(), cache_token)
     except Exception:
-        _cache_cancel_in_flight(cache_input, cache_token)
+        if use_cache:
+            _cache_cancel_in_flight(cache_input, cache_token)
         raise
     return result
 
@@ -3282,6 +3286,7 @@ def llm_repair_report_section(
         system=system,
         prompt=prompt,
         label="Report section repair",
+        use_cache=False,
     )
 
 
