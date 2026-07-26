@@ -39,7 +39,7 @@ For price driver queries, structure the answer as:
 ## Causality Rules
 
 - Use `observed`, `associated with`, `consistent with`, and `likely pressure` for observational data.
-- Use stronger causal wording only when both a correlation coefficient and a documented mechanism are available.
+- A correlation coefficient plus a plausible mechanism is still observational evidence. Use stronger causal wording only when a causal design or authoritative source establishes the effect.
 - Source-price and contribution layers are analytical evidence, not a perfect decomposition of balancing price.
 - Use numeric values only from `data preview`, `CAUSAL CONTEXT`, `COMPONENT PRESSURE SUMMARY`, `DERIVED ANALYSIS EVIDENCE`, or explicit tariff/source-price columns.
 - Use `REGULATED PLANT SALES` for plant-level seller names, tariffs, balancing quantities, and within-group shares when that block is available.

@@ -1603,11 +1603,11 @@ CRITICAL ANALYSIS GUIDELINES for balancing electricity price:
 4. **USE CORRELATION DATA**: If stats_hint contains correlation coefficients, YOU MUST cite them
    - Example: "კორელაცია -0.66 რეგულირებულ ჰესებსა და ფასს შორის"
    - Example: "კორელაცია 0.61 გაცვლით კურსსა და ფასს შორის"
-   - NEVER say "probably" when you have correlation proving causality
+   - Correlation does not establish causality. Describe it as an observed association and separate any documented mechanism from the statistical result.
 
-5. **NO HEDGING LANGUAGE** when you have data:
-   - ❌ FORBIDDEN: "სავარაუდოდ" (probably), "შესაძლოა" (possibly), "ალბათ" (perhaps)
-   - ✅ REQUIRED: "იმის გამო, რომ" (because), "რაც გამოწვეულია" (which is caused by)
+5. **CALIBRATED LANGUAGE FOR OBSERVATIONAL DATA**:
+   - Use "observed", "associated with", and "consistent with" for correlations and historical composition changes.
+   - Use direct causal wording only when the supplied evidence comes from a causal design or an authoritative source explicitly establishes the mechanism.
 
 6. **STRUCTURED ANALYSIS FORMAT**:
 
@@ -1766,12 +1766,12 @@ FOR ANALYTICAL QUERIES (drivers, correlations, trends, price analysis):
 - MANDATORY: If correlation data is available, cite it explicitly
 - Structure should include:
   1. Opening paragraph with overall finding
-  2. Factor 1 with detailed explanation, data citations, correlation, causality (2-3 paragraphs)
-  3. Factor 2 with detailed explanation, data citations, correlation, causality (2-3 paragraphs)
+  2. Factor 1 with detailed explanation, data citations, observed association, and documented mechanism (2-3 paragraphs)
+  3. Factor 2 with detailed explanation, data citations, observed association, and documented mechanism (2-3 paragraphs)
   4. Additional factors if relevant
   5. For long-term trends: MUST separate summer vs winter analysis
 - NO LENGTH RESTRICTION for analytical queries - provide comprehensive insights
-- When summarizing, combine numeric findings (averages, CAGRs, correlations, share changes) with detailed explanatory paragraphs showing causality and mechanisms from domain knowledge
+- When summarizing, combine numeric findings (averages, CAGRs, correlations, share changes) with observed associations and clearly separated documented mechanisms from domain knowledge
 """)
 
     # Assemble final prompt
@@ -1883,7 +1883,7 @@ _ANALYZER_CORE_RULES = """\
   - VOCABULARY: `answer_kind` and `query_type` are DIFFERENT fields with DIFFERENT enums. Do not reuse a `query_type` value (e.g. `data_explanation`, `data_retrieval`, `factual_lookup`, `regulatory_procedure`, `conceptual_definition`) for `answer_kind`.
   - Allowed `answer_kind` values are exactly: `scalar`, `list`, `timeseries`, `comparison`, `explanation`, `forecast`, `scenario`, `knowledge`, `clarify`. Any other value will fail validation.
   - `scalar`: single value/fact. `list`: entity enumeration. `timeseries`: period-indexed data.
-  - `comparison`: side-by-side periods/entities. `explanation`: why/how causal reasoning.
+  - `comparison`: side-by-side periods/entities. `explanation`: why/how driver and association reasoning.
   - `forecast`: explicit forward-looking projection or trendline extension beyond observed data.
     Historical trend summaries stay `timeseries`, not `forecast`.
   - `scenario`: what-if/CfD. `knowledge`: conceptual/regulatory. `clarify`: ambiguous.
@@ -1914,7 +1914,8 @@ _ANALYZER_CORE_RULES = """\
   - "Why balancing electricity prices changed in November 2024?" -> same routing as above; plural `prices` is still a supported month-specific data explanation, not `unsupported`.
 - Composition-effect questions (CRITICAL — do NOT over-refuse):
   Questions of the form "what happens to [price] if more [entity] is added", "what effect does more [entity] have on prices", "what will happen if [entity] share increases/decreases" — when [entity] is a balancing composition entity (ppa, renewable_ppa, thermal_ppa, import, hydro, cfd, deregulated_ren, regulated_hpp, etc.) — are `query_type=data_explanation`, `preferred_path=tool`.
-  Rationale: the historical dataset contains monthly entity share columns and balancing price columns; correlation and composition analysis directly answer the directional question from observed data. Do NOT classify as `forecast`, `ambiguous`, or `unsupported` solely because the phrasing sounds hypothetical — "what will happen if share of X increases" is observationally equivalent to "what is the historical relationship between X's share and price". Only classify as `unsupported` if the question names a genuinely unavailable metric (e.g., future capacity contracts, non-balancing markets).
+  Rationale: the historical dataset can describe association between monthly entity shares and balancing prices, but this is not a causal counterfactual and cannot substitute for one. Route the question to historical association analysis; explicitly state that observational correlation does not establish the price change that an intervention would cause.
+  Never emit `scenario_scale`/`scenario_offset` on the target price when the numeric change applies to a different driver metric. The runtime has no validated causal response model. If the user demands an exact target-price effect, explain that limitation or clarify what modeling assumptions they want rather than fabricating a coefficient.
   - Example: "what will happen to prices if more ppa is added?" -> `query_type=data_explanation`, `preferred_path=tool`, `needs_multi_tool=true`, `candidate_tools=["get_prices", "get_balancing_composition"]`, `candidate_topics=["balancing_price", "cfd_ppa"]`.
   - Example: "what will happen if more ppa will be added in the system?" -> same routing as above.
 - For unusual numeric calculation requests with data/tool signals, do not fall back to `knowledge` just because the computed target is underdefined.
@@ -1987,13 +1988,23 @@ _ANALYZER_SCENARIO_RULES = """\
 - For scenario/hypothetical queries, set `analysis_mode` to `analyst` and add a scenario-type derived_metric:
   - Trigger phrases: "what if", "hypothetical", "calculate payoff/income", "if price were X",
     "CfD contract", "PPA contract", "what would be my income/payoff", "financial compensation",
-    or any query that specifies a strike price and volume/capacity.
+    or any query that specifies a strike price and delivered energy.
+  - A scenario request is valid only when its numerical parameter AND the metric being mechanically transformed
+    are explicit in the user question. Never invent or infer a factor from dates, context, or domain expectations.
   - `scenario_scale`: "X% higher/lower" → `scenario_factor` = multiplier (1.34 for 34% higher, 0.8 for 20% lower).
-  - `scenario_offset`: "X units more/less" → `scenario_factor` = the addend.
-  - `scenario_payoff`: CfD/PPA payoff → `scenario_factor` = strike price, `scenario_volume` = MW capacity (default 1.0).
-    When the query mentions a CfD/PPA contract with a price (e.g. "60 usd/mwh") and a capacity (e.g. "1 mw"),
-    use scenario_payoff with that price as scenario_factor and capacity as scenario_volume.
-  - `scenario_aggregation` defaults to `sum` unless the user asks for average/min/max.
+  - `scenario_offset`: "X units more/less" → `scenario_factor` = the signed addend.
+  - `scenario_payoff`: CfD/PPA payoff → `scenario_factor` = strike price.
+    - `scenario_energy_mwh` is delivered energy in MWh IN EACH OBSERVATION. Set it only when the query explicitly
+      supplies MWh (convert GWh to MWh). Without it, the result is a payoff RATE in currency/MWh, not a currency total.
+    - `scenario_capacity_mw` may retain explicitly stated MW capacity as context, but MW is power, not energy:
+      never put MW into `scenario_energy_mwh` and never use capacity alone to calculate a monetary total.
+  - `scenario_scope`: `latest` unless the user names a period (`requested_period`) or explicitly asks for the entire
+    history (`full_series`).
+  - `scenario_aggregation`: `mean` for scale/offset and per-MWh payoff unless the user explicitly asks for
+    sum/min/max. For payoff with delivered MWh per observation, default to `sum`.
+  - A driver-effect question such as "if PPA share rises 20%, how will balancing price change?" is NOT
+    `scenario_scale` on balancing price. Route it as `data_explanation` for historical association; the runtime
+    has no validated causal response model for converting a driver change into a target-price counterfactual.
   - Extract numeric parameters directly from the query text.
 """
 
@@ -3297,10 +3308,11 @@ def llm_summarize_structured(
                 "- Cite aggregate_result as the primary answer.\n"
                 "- For scenario_scale and scenario_offset: compare to baseline_aggregate and cite delta_percent.\n"
                 "- For scenario_payoff: baseline/delta fields are null (different dimensions).\n"
-                "  Use positive_sum for total income from favorable periods (market price < strike).\n"
-                "  Use negative_sum for total compensation cost from unfavorable periods (market price > strike).\n"
+                "  If scenario_energy_mwh is null, aggregate_result is a payoff rate in result_unit (currency/MWh), not a currency total.\n"
+                "  If scenario_energy_mwh is present, aggregate_result is a currency amount and may include income components.\n"
+                "  Use positive_sum/negative_sum only when they are non-null (sum aggregation with delivered energy).\n"
                 "  Use positive_count and negative_count for how many periods were favorable vs unfavorable.\n"
-                "  aggregate_result = positive_sum + negative_sum (net total payoff).\n"
+                "  For summed monetary payoff, aggregate_result = positive_sum + negative_sum.\n"
                 "  Explain what negative periods mean: the producer pays the CfD counterparty.\n"
                 "- Mention period_range and row_count for context.\n"
                 "- Do NOT recalculate or derive values from raw data rows — cite ONLY pre-computed values.\n"

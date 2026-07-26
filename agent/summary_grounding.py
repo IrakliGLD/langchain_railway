@@ -234,7 +234,8 @@ def _add_evidence_record_tokens(tokens: Set[str], ctx: QueryContext) -> None:
         "market_component_aggregate",
         "combined_total_aggregate",
         "scenario_factor",
-        "scenario_volume",
+        "scenario_energy_mwh",
+        "scenario_capacity_mw",
     )
     for record in ctx.analysis_evidence:
         if not isinstance(record, dict):

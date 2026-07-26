@@ -543,10 +543,29 @@ def _render_scenario(frame: CanonicalFrame) -> str | None:
     if not isinstance(frame, ScenarioFrame) or frame.is_empty():
         return None
 
-    rec = frame.rows[0]
+    rendered = [
+        section
+        for rec in frame.rows
+        if (section := _render_scenario_row(rec)) is not None
+    ]
+    if not rendered:
+        return None
+    if len(rendered) == 1:
+        return rendered[0]
+    return "\n\n---\n\n".join(
+        f"### Scenario {index}\n\n{section}"
+        for index, section in enumerate(rendered, start=1)
+    )
+
+
+def _render_scenario_row(rec: dict) -> str | None:
     metric_name = rec.get("metric_name", "")
     factor = rec.get("scenario_factor")
-    volume = rec.get("scenario_volume")
+    energy_mwh = rec.get("scenario_energy_mwh")
+    capacity_mw = rec.get("scenario_capacity_mw")
+    scope = rec.get("scenario_scope", "latest")
+    source_unit = rec.get("source_unit") or ""
+    result_unit = rec.get("result_unit") or source_unit
     agg_result = rec.get("aggregate_result")
     if agg_result is None:
         return None
@@ -559,6 +578,11 @@ def _render_scenario(frame: CanonicalFrame) -> str | None:
     formula = rec.get("formula", "")
 
     parts: list[str] = []
+    scope_labels = {
+        "latest": "latest observation",
+        "requested_period": "requested period",
+        "full_series": "full retrieved series",
+    }
 
     if metric_name == "scenario_payoff":
         positive_sum = rec.get("positive_sum", 0.0)
@@ -580,31 +604,60 @@ def _render_scenario(frame: CanonicalFrame) -> str | None:
 
         parts.append(
             f"**{'CfD Payoff and Income Analysis' if include_income_breakdown else 'CfD Payoff Analysis'}** "
-            f"(strike: {factor} USD/MWh"
-            + (f", volume: {volume} MW" if volume is not None else "")
+            f"(strike: {factor} {source_unit}"
+            + (
+                f", delivered energy: {energy_mwh} MWh per period"
+                if energy_mwh is not None
+                else ""
+            )
+            + (f", stated capacity: {capacity_mw} MW" if capacity_mw is not None else "")
             + ")"
         )
-        if period_range:
-            parts.append(f"**Period:** {period_range} ({row_count} months)")
-        parts.append(f"**Formula:** {formula}")
-        if include_income_breakdown:
-            parts.append(f"**{market_label}:** {market_component} USD")
-            parts.append(f"**CfD financial compensation:** {agg_result} USD")
-            parts.append(f"**Total combined income:** {combined_total} USD")
-        parts.append(f"**Net total payoff:** {agg_result} USD")
-        if positive_sum and positive_sum != 0:
-            parts.append(
-                f"**Income from favorable periods** (market price below strike): "
-                f"{positive_sum} USD across {positive_count} months"
-            )
-        if negative_sum and negative_sum != 0:
-            parts.append(
-                f"**Compensation cost in unfavorable periods** (market price above strike): "
-                f"{negative_sum} USD across {negative_count} months"
-            )
         parts.append(
-            f"**Per-period range:** min {min_val} to max {max_val} USD "
-            f"(average {mean_val} USD/month)"
+            f"**Baseline scope:** {scope_labels.get(str(scope), str(scope))}"
+        )
+        if period_range:
+            parts.append(f"**Period:** {period_range} ({row_count} observations)")
+        parts.append(f"**Formula:** {formula}")
+        if energy_mwh is None:
+            parts.append(
+                f"**Payoff rate:** {_fmt_number(agg_result)} {result_unit}"
+            )
+            if capacity_mw is not None:
+                parts.append(
+                    "**Energy limitation:** Capacity alone does not establish "
+                    "delivered energy; no currency total is calculated."
+                )
+        else:
+            if include_income_breakdown:
+                parts.append(
+                    f"**{market_label}:** {_fmt_number(market_component)} {result_unit}"
+                )
+                parts.append(
+                    f"**CfD financial compensation:** {_fmt_number(agg_result)} {result_unit}"
+                )
+                parts.append(
+                    f"**Total combined income:** {_fmt_number(combined_total)} {result_unit}"
+                )
+            parts.append(
+                f"**Net total payoff:** {_fmt_number(agg_result)} {result_unit}"
+            )
+            if positive_sum and positive_sum != 0:
+                parts.append(
+                    f"**Income from favorable periods** (market price below strike): "
+                    f"{_fmt_number(positive_sum)} {result_unit} across "
+                    f"{positive_count} observations"
+                )
+            if negative_sum and negative_sum != 0:
+                parts.append(
+                    f"**Compensation cost in unfavorable periods** "
+                    f"(market price above strike): {_fmt_number(negative_sum)} "
+                    f"{result_unit} across {negative_count} observations"
+                )
+        parts.append(
+            f"**Per-observation range:** min {_fmt_number(min_val)} to "
+            f"max {_fmt_number(max_val)} {result_unit} "
+            f"(mean {_fmt_number(mean_val)} {result_unit})"
         )
 
     elif metric_name in ("scenario_scale", "scenario_offset"):
@@ -613,17 +666,23 @@ def _render_scenario(frame: CanonicalFrame) -> str | None:
         delta_pct = rec.get("delta_percent")
         op = "\u00d7" if metric_name == "scenario_scale" else "+"
         parts.append(f"**Scenario Analysis** ({op} {factor})")
+        parts.append(
+            f"**Baseline scope:** {scope_labels.get(str(scope), str(scope))}"
+        )
         if period_range:
             parts.append(f"**Period:** {period_range} ({row_count} periods)")
-        parts.append(f"**Result:** {agg_result}")
+        parts.append(f"**Result:** {_fmt_number(agg_result)} {result_unit}")
         if baseline is not None:
-            parts.append(f"**Baseline:** {baseline}")
+            parts.append(f"**Baseline:** {_fmt_number(baseline)} {result_unit}")
         if delta is not None:
             parts.append(
-                f"**Change:** {delta}"
+                f"**Change:** {_fmt_number(delta)} {result_unit}"
                 + (f" ({delta_pct}%)" if delta_pct is not None else "")
             )
-        parts.append(f"**Range:** {min_val} to {max_val} (mean {mean_val})")
+        parts.append(
+            f"**Range:** {_fmt_number(min_val)} to {_fmt_number(max_val)} "
+            f"{result_unit} (mean {_fmt_number(mean_val)} {result_unit})"
+        )
 
     else:
         return None

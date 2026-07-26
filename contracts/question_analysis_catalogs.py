@@ -324,7 +324,7 @@ QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "scenario_scale",
-        "use_for": "Hypothetical scaling: 'What if prices were X% higher/lower?' Set scenario_factor to the multiplier (e.g. 1.34 for 34% higher, 0.8 for 20% lower).",
+        "use_for": "Mechanical scaling of the same metric named next to a grounded percentage or multiplier. Set scenario_factor to the multiplier (e.g. 1.34 for 34% higher, 0.8 for 20% lower). This does not estimate one metric's causal effect on another.",
         "examples": ["balancing * 1.34", "exchange_rate * 0.9"],
     },
     {
@@ -334,7 +334,7 @@ QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "scenario_payoff",
-        "use_for": "CfD / PPA payoff calculation: '(strike - market_price) * volume per period'. Set scenario_factor to strike price, scenario_volume to MW capacity (default 1.0).",
-        "examples": ["(60 - balancing) * 1.0", "(50 - balancing) * 2.5"],
+        "use_for": "CfD/PPA payoff rate: strike - market_price. Set scenario_factor to the grounded strike price. Set scenario_energy_mwh only when delivered MWh per observation is explicit; then total payoff is (strike - market_price) * MWh. MW capacity is scenario_capacity_mw context and is never used as energy.",
+        "examples": ["60 - balancing (USD/MWh)", "(50 - balancing) * 200 MWh"],
     },
 ]

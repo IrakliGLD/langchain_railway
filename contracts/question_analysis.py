@@ -272,6 +272,14 @@ class ScenarioAggregation(str, Enum):
     MAX = "max"
 
 
+class ScenarioScope(str, Enum):
+    """Observation window used as the deterministic scenario baseline."""
+
+    LATEST = "latest"
+    REQUESTED_PERIOD = "requested_period"
+    FULL_SERIES = "full_series"
+
+
 class DerivedMetricName(str, Enum):
     MOM_ABSOLUTE_CHANGE = "mom_absolute_change"
     MOM_PERCENT_CHANGE = "mom_percent_change"
@@ -569,8 +577,26 @@ class DerivedMetricRequest(BaseModel):
     target_metric: Optional[str] = Field(default=None, max_length=64)
     rank_limit: Optional[int] = Field(default=None, ge=1, le=10)
     scenario_factor: Optional[float] = Field(default=None, ge=-1e9, le=1e9)
-    scenario_volume: Optional[float] = Field(default=None, gt=0, le=1e6)
+    scenario_energy_mwh: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=1e9,
+        description=(
+            "Delivered energy in MWh in each scenario observation. Never MW capacity. "
+            "When absent, scenario_payoff is a currency-per-MWh rate, not a currency total."
+        ),
+    )
+    scenario_capacity_mw: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=1e6,
+        description=(
+            "Optional stated capacity retained for transparency. It is not used in "
+            "payoff arithmetic without delivered-energy evidence."
+        ),
+    )
     scenario_aggregation: Optional[ScenarioAggregation] = Field(default=None)
+    scenario_scope: Optional[ScenarioScope] = Field(default=None)
     season: Optional[Season] = Field(default=None)
 
     @field_validator("metric", "target_metric")
@@ -589,10 +615,32 @@ class DerivedMetricRequest(BaseModel):
         if is_scenario:
             if self.scenario_factor is None:
                 raise ValueError("scenario_factor is required for scenario metrics")
-            if self.metric_name == DerivedMetricName.SCENARIO_PAYOFF and self.scenario_volume is None:
-                self.scenario_volume = 1.0
+            if (
+                self.metric_name == DerivedMetricName.SCENARIO_SCALE
+                and self.scenario_factor < 0
+            ):
+                raise ValueError("scenario_factor must be non-negative for scenario_scale")
+            if self.scenario_scope is None:
+                self.scenario_scope = ScenarioScope.LATEST
+            if self.scenario_aggregation is None:
+                if (
+                    self.metric_name == DerivedMetricName.SCENARIO_PAYOFF
+                    and self.scenario_energy_mwh is not None
+                ):
+                    self.scenario_aggregation = ScenarioAggregation.SUM
+                else:
+                    self.scenario_aggregation = ScenarioAggregation.MEAN
         else:
-            if any(v is not None for v in [self.scenario_factor, self.scenario_volume, self.scenario_aggregation]):
+            if any(
+                v is not None
+                for v in [
+                    self.scenario_factor,
+                    self.scenario_energy_mwh,
+                    self.scenario_capacity_mw,
+                    self.scenario_aggregation,
+                    self.scenario_scope,
+                ]
+            ):
                 raise ValueError("scenario fields must be None for non-scenario metrics")
         return self
 

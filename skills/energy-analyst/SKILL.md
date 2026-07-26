@@ -18,7 +18,7 @@ Read references conditionally:
 
 ## Non-negotiable rules
 
-- Use observational language ("data shows", "associated with", "consistent with") not causal ("X caused Y") unless correlation data backs the claim.
+- Use observational language ("data shows", "associated with", "consistent with") for correlations. Correlation alone never backs a causal claim; use causal wording only when a causal design or authoritative source establishes it.
 - Mandatory seasonal separation (summer Apr-Jul / winter Aug-Mar) for any analysis spanning more than 6 months.
 - Never disclose PPA or import price estimates — say "market-based" or "expensive".
 - Always say "balancing market" or "balancing electricity" — never shorten to just "market".

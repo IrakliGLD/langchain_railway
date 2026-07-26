@@ -254,17 +254,50 @@ def test_scenario_scale_valid():
         scenario_factor=1.34,
     )
     assert req.scenario_factor == 1.34
-    assert req.scenario_volume is None
-    assert req.scenario_aggregation is None
+    assert req.scenario_energy_mwh is None
+    assert req.scenario_capacity_mw is None
+    assert req.scenario_aggregation == ScenarioAggregation.MEAN
+    assert req.scenario_scope.value == "latest"
 
 
-def test_scenario_payoff_volume_defaults_to_1():
+def test_scenario_payoff_without_energy_stays_per_mwh():
     req = DerivedMetricRequest(
         metric_name="scenario_payoff",
         metric="p_bal_usd",
         scenario_factor=60.0,
     )
-    assert req.scenario_volume == 1.0
+    assert req.scenario_energy_mwh is None
+    assert req.scenario_aggregation == ScenarioAggregation.MEAN
+
+
+def test_scenario_payoff_with_energy_defaults_to_sum():
+    req = DerivedMetricRequest(
+        metric_name="scenario_payoff",
+        metric="p_bal_usd",
+        scenario_factor=60.0,
+        scenario_energy_mwh=100.0,
+    )
+    assert req.scenario_energy_mwh == 100.0
+    assert req.scenario_aggregation == ScenarioAggregation.SUM
+
+
+def test_legacy_scenario_volume_is_rejected_instead_of_treated_as_mw_times_price():
+    with pytest.raises(ValidationError):
+        DerivedMetricRequest.model_validate({
+            "metric_name": "scenario_payoff",
+            "metric": "p_bal_usd",
+            "scenario_factor": 60.0,
+            "scenario_volume": 2.0,
+        })
+
+
+def test_negative_scenario_scale_is_rejected():
+    with pytest.raises(ValidationError, match="scenario_factor"):
+        DerivedMetricRequest(
+            metric_name="scenario_scale",
+            metric="p_bal_usd",
+            scenario_factor=-0.2,
+        )
 
 
 def test_scenario_factor_required_for_scenario_metrics():

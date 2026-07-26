@@ -319,16 +319,23 @@ class TestComputeScenario:
     def test_scenario_scale(self):
         mctx = _make_context()
         record = _base_record("scenario_scale", "p_bal_gel", mctx.current_ts)
-        request = {"scenario_factor": 1.2, "scenario_volume": 1, "scenario_aggregation": "sum"}
+        request = {
+            "scenario_factor": 1.2,
+            "scenario_aggregation": "sum",
+            "scenario_scope": "full_series",
+        }
         result = compute_scenario(request, record, mctx)
 
         assert result is not None
         assert result["record_type"] == "scenario"
         assert result["scenario_factor"] == 1.2
-        # baseline = sum(50, 55, 60) = 165; scaled = 165 * 1.2 = 198
-        assert result["aggregate_result"] == pytest.approx(198.0, abs=0.1)
-        assert result["baseline_aggregate"] == pytest.approx(165.0, abs=0.1)
-        assert result["delta_aggregate"] == pytest.approx(33.0, abs=0.1)
+        # Price sums are dimensionally meaningless, so runtime normalizes to mean.
+        assert result["scenario_aggregation"] == "mean"
+        assert result["aggregate_result"] == pytest.approx(66.0, abs=0.1)
+        assert result["baseline_aggregate"] == pytest.approx(55.0, abs=0.1)
+        assert result["delta_aggregate"] == pytest.approx(11.0, abs=0.1)
+        assert result["source_unit"] == "GEL/MWh"
+        assert result["result_unit"] == "GEL/MWh"
         assert "source_cells" in result
         assert result["source_cells"][0]["role"] == "scenario_series"
         assert "min_value" in result["source_cells"][0]
@@ -336,37 +343,82 @@ class TestComputeScenario:
     def test_scenario_offset(self):
         mctx = _make_context()
         record = _base_record("scenario_offset", "p_bal_gel", mctx.current_ts)
-        request = {"scenario_factor": 10, "scenario_volume": 1, "scenario_aggregation": "sum"}
+        request = {"scenario_factor": 10, "scenario_scope": "latest"}
         result = compute_scenario(request, record, mctx)
 
         assert result is not None
-        # baseline = 165; offset = sum(60, 65, 70) = 195
-        assert result["aggregate_result"] == pytest.approx(195.0, abs=0.1)
-        assert result["delta_aggregate"] == pytest.approx(30.0, abs=0.1)
+        assert result["row_count"] == 1
+        assert result["baseline_aggregate"] == pytest.approx(60.0, abs=0.1)
+        assert result["aggregate_result"] == pytest.approx(70.0, abs=0.1)
+        assert result["delta_aggregate"] == pytest.approx(10.0, abs=0.1)
 
     def test_scenario_payoff(self):
         mctx = _make_context()
         record = _base_record("scenario_payoff", "p_bal_gel", mctx.current_ts)
-        request = {"scenario_factor": 55.0, "scenario_volume": 100, "scenario_aggregation": "sum"}
+        request = {
+            "scenario_factor": 70.0,
+            "scenario_energy_mwh": 100,
+            "scenario_scope": "full_series",
+            "scenario_aggregation": "sum",
+        }
         result = compute_scenario(request, record, mctx)
 
         assert result is not None
         assert result["positive_sum"] is not None or result["negative_sum"] is not None
         assert result["market_component_aggregate"] is not None
         assert result["combined_total_aggregate"] is not None
-        assert result["scenario_volume"] == 100
+        assert result["scenario_energy_mwh"] == 100
+        assert result["aggregate_result"] == pytest.approx(4500.0, abs=0.1)
+        assert result["result_unit"] == "GEL"
+
+    def test_energy_backed_payoff_mean_stays_a_currency_amount(self):
+        mctx = _make_context()
+        record = _base_record("scenario_payoff", "p_bal_gel", mctx.current_ts)
+        request = {
+            "scenario_factor": 70.0,
+            "scenario_energy_mwh": 100,
+            "scenario_scope": "full_series",
+            "scenario_aggregation": "mean",
+        }
+
+        result = compute_scenario(request, record, mctx)
+
+        assert result is not None
+        assert result["aggregate_result"] == pytest.approx(1500.0, abs=0.1)
+        assert result["market_component_aggregate"] == pytest.approx(5500.0, abs=0.1)
+        assert result["combined_total_aggregate"] == pytest.approx(7000.0, abs=0.1)
+        assert result["result_unit"] == "GEL"
+
+    def test_payoff_without_energy_is_a_per_mwh_rate(self):
+        mctx = _make_context()
+        record = _base_record("scenario_payoff", "p_bal_gel", mctx.current_ts)
+        request = {
+            "scenario_factor": 70.0,
+            "scenario_capacity_mw": 2.0,
+            "scenario_scope": "latest",
+        }
+
+        result = compute_scenario(request, record, mctx)
+
+        assert result is not None
+        assert result["aggregate_result"] == pytest.approx(10.0, abs=0.1)
+        assert result["scenario_energy_mwh"] is None
+        assert result["scenario_capacity_mw"] == 2.0
+        assert result["result_unit"] == "GEL/MWh"
+        assert result["market_component_aggregate"] is None
+        assert result["combined_total_aggregate"] is None
 
     def test_scenario_identity_scale_skipped(self):
         mctx = _make_context()
         record = _base_record("scenario_scale", "p_bal_gel", mctx.current_ts)
-        request = {"scenario_factor": 1.0, "scenario_volume": 1, "scenario_aggregation": "sum"}
+        request = {"scenario_factor": 1.0}
         result = compute_scenario(request, record, mctx)
         assert result is None
 
     def test_scenario_zero_offset_skipped(self):
         mctx = _make_context()
         record = _base_record("scenario_offset", "p_bal_gel", mctx.current_ts)
-        request = {"scenario_factor": 0, "scenario_volume": 1, "scenario_aggregation": "sum"}
+        request = {"scenario_factor": 0}
         result = compute_scenario(request, record, mctx)
         assert result is None
 
@@ -491,7 +543,7 @@ class TestBuildRequestedAnalysisEvidence:
                 "metric_name": "scenario_scale",
                 "metric": "p_bal_gel",
                 "scenario_factor": 1.5,
-                "scenario_volume": 1,
+                "scenario_energy_mwh": 1,
                 "scenario_aggregation": "sum",
             },
         ]

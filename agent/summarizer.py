@@ -162,23 +162,6 @@ _REGULATED_TARIFF_ENTITY_DISPLAY_NAMES = {
     "mktvari tpp": "Mtkvari Energy",
     "tbilsresi tpp": "Tbilisi TPP",
 }
-_TOTAL_INCOME_QUERY_SIGNALS = (
-    "total income",
-    "total revenue",
-    "combined income",
-    "combined revenue",
-    "overall income",
-    "overall revenue",
-    "market sale",
-    "market sales",
-    "sell",
-    "sales",
-)
-_CFD_COMPONENT_QUERY_SIGNALS = (
-    "cfd",
-    "compensation",
-    "payoff",
-)
 _MIXED_EVIDENCE_QUERY_TYPES = {"forecast", "comparison"}
 # answer_kind values whose summaries inherently contain derived values
 # (MoM changes, percentages, projections, scenario payoffs) that strict
@@ -909,102 +892,10 @@ def _build_scenario_fallback_answer(ctx: QueryContext) -> Optional[str]:
     Returns None if no scenario evidence is available, allowing the caller
     to fall back to the generic grounding failure message.
     """
-    evidence = ctx.analysis_evidence or []
-    scenario_records = [r for r in evidence if r.get("record_type") == "scenario"]
-    if not scenario_records:
+    frame = _build_scenario_frame(ctx)
+    if frame is None:
         return None
-    rec = scenario_records[0]
-    query_lower = (ctx.query or "").strip().lower()
-
-    metric_name = rec.get("derived_metric_name", "")
-    factor = rec.get("scenario_factor")
-    volume = rec.get("scenario_volume")
-    agg_result = rec.get("aggregate_result")
-    if agg_result is None:
-        return None
-
-    row_count = rec.get("row_count")
-    period_range = rec.get("period_range", "")
-    min_val = rec.get("min_period_value")
-    max_val = rec.get("max_period_value")
-    mean_val = rec.get("mean_period_value")
-    formula = rec.get("formula", "")
-
-    parts: list[str] = []
-
-    if metric_name == "scenario_payoff":
-        positive_sum = rec.get("positive_sum", 0.0)
-        negative_sum = rec.get("negative_sum", 0.0)
-        positive_count = rec.get("positive_count", 0)
-        negative_count = rec.get("negative_count", 0)
-        market_component = rec.get("market_component_aggregate")
-        combined_total = rec.get("combined_total_aggregate")
-        metric_key = str(rec.get("metric") or "").strip()
-        market_label = (
-            "Balancing market sales income"
-            if metric_key in {"p_bal_usd", "p_bal_gel"}
-            else "Market sales income at observed prices"
-        )
-        include_income_breakdown = (
-            market_component is not None
-            and combined_total is not None
-            and (
-                any(signal in query_lower for signal in _TOTAL_INCOME_QUERY_SIGNALS)
-                and any(signal in query_lower for signal in _CFD_COMPONENT_QUERY_SIGNALS)
-            )
-        )
-
-        parts.append(
-            f"**{'CfD Payoff and Income Analysis' if include_income_breakdown else 'CfD Payoff Analysis'}** "
-            f"(strike: {factor} USD/MWh"
-            + (f", volume: {volume} MW" if volume is not None else "")
-            + ")"
-        )
-        if period_range:
-            parts.append(f"**Period:** {period_range} ({row_count} months)")
-        parts.append(f"**Formula:** {formula}")
-        if include_income_breakdown:
-            parts.append(f"**{market_label}:** {market_component} USD")
-            parts.append(f"**CfD financial compensation:** {agg_result} USD")
-            parts.append(f"**Total combined income:** {combined_total} USD")
-        parts.append(f"**Net total payoff:** {agg_result} USD")
-        if positive_sum and positive_sum != 0:
-            parts.append(
-                f"**Income from favorable periods** (market price below strike): "
-                f"{positive_sum} USD across {positive_count} months"
-            )
-        if negative_sum and negative_sum != 0:
-            parts.append(
-                f"**Compensation cost in unfavorable periods** (market price above strike): "
-                f"{negative_sum} USD across {negative_count} months"
-            )
-        parts.append(
-            f"**Per-period range:** min {min_val} to max {max_val} USD "
-            f"(average {mean_val} USD/month)"
-        )
-
-    elif metric_name in ("scenario_scale", "scenario_offset"):
-        baseline = rec.get("baseline_aggregate")
-        delta = rec.get("delta_aggregate")
-        delta_pct = rec.get("delta_percent")
-        op = "\u00d7" if metric_name == "scenario_scale" else "+"
-        parts.append(f"**Scenario Analysis** ({op} {factor})")
-        if period_range:
-            parts.append(f"**Period:** {period_range} ({row_count} periods)")
-        parts.append(f"**Result:** {agg_result}")
-        if baseline is not None:
-            parts.append(f"**Baseline:** {baseline}")
-        if delta is not None:
-            parts.append(
-                f"**Change:** {delta}"
-                + (f" ({delta_pct}%)" if delta_pct is not None else "")
-            )
-        parts.append(f"**Range:** {min_val} to {max_val} (mean {mean_val})")
-
-    else:
-        return None
-
-    return "\n\n".join(parts)
+    return generic_render(frame, AnswerKind.SCENARIO)
 
 
 def _tariff_alias_has_observations(df: pd.DataFrame, alias: str) -> bool:
@@ -1515,7 +1406,12 @@ def _build_scenario_frame(ctx: QueryContext) -> ScenarioFrame | None:
         rows.append({
             "metric_name": rec.get("derived_metric_name", ""),
             "scenario_factor": rec.get("scenario_factor"),
-            "scenario_volume": rec.get("scenario_volume"),
+            "scenario_energy_mwh": rec.get("scenario_energy_mwh"),
+            "scenario_capacity_mw": rec.get("scenario_capacity_mw"),
+            "scenario_scope": rec.get("scenario_scope"),
+            "scenario_aggregation": rec.get("scenario_aggregation"),
+            "source_unit": rec.get("source_unit"),
+            "result_unit": rec.get("result_unit"),
             "aggregate_result": rec.get("aggregate_result"),
             "row_count": rec.get("row_count"),
             "period_range": rec.get("period_range", ""),

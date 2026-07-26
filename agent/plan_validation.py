@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from agent.shape_requirements import get_requirement
+from agent.scenario_contract import ground_scenario_request
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
     AnswerKind,
@@ -103,10 +104,8 @@ def validate_plan_against_answer_kind(
     - FORECAST → primary step has a date range (historical basis for
       trendline extrapolation).
     - SCENARIO → analysis_requirements contains at least one scenario-family
-      derived metric.  (The request-level contract validator in
-      ``contracts/question_analysis.py`` already enforces that any scenario
-      metric request has a populated ``scenario_factor``, so a planner-level
-      param check would be redundant.)
+      derived metric whose numerical parameter and transformed subject are
+      grounded in the raw user query.
     - LIST → primary step's entities param is non-empty or tool naturally
       returns entity-enumerated rows (get_balancing_composition,
       get_generation_mix).
@@ -230,10 +229,9 @@ def validate_plan_against_answer_kind(
             )
 
     elif answer_kind == AnswerKind.SCENARIO:
-        # `DerivedMetricRequest` at contracts/question_analysis.py:397-408
-        # already enforces `scenario_factor is not None` on any scenario-family
-        # metric request, so we only need to verify at least one such request
-        # is present.  Missing `scenario_factor` cannot reach this point.
+        # The schema guarantees a factor is present; the shared grounding
+        # contract additionally proves that factor and subject came from the
+        # raw question.
         derived = qa.analysis_requirements.derived_metrics or []
         has_scenario = any(m.metric_name in _SCENARIO_METRIC_NAMES for m in derived)
         if not has_scenario:
@@ -247,6 +245,26 @@ def validate_plan_against_answer_kind(
             log.warning(
                 "Plan validation: answer_kind=SCENARIO but no scenario-family "
                 "derived metric found. query=%.80s",
+                raw_query,
+            )
+        elif not any(
+            ground_scenario_request(
+                raw_query,
+                request.model_dump(mode="json"),
+                canonical_query=qa.canonical_query_en,
+            )
+            is not None
+            for request in derived
+            if request.metric_name in _SCENARIO_METRIC_NAMES
+        ):
+            result.add(
+                "scenario_ungrounded_parameter",
+                SEVERITY_REJECT,
+                "SCENARIO parameter or transformed subject is not grounded in the user query",
+            )
+            log.warning(
+                "Plan validation: answer_kind=SCENARIO but no scenario request "
+                "has a query-grounded parameter and subject. query=%.80s",
                 raw_query,
             )
 

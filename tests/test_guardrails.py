@@ -7197,9 +7197,10 @@ def _run_scenario(metric_name, factor, volume=None, agg="sum"):
         "metric": "p_bal_usd",
         "scenario_factor": factor,
         "scenario_aggregation": agg,
+        "scenario_scope": "full_series",
     }
     if volume is not None:
-        req["scenario_volume"] = volume
+        req["scenario_energy_mwh"] = volume
     az.DERIVED_METRIC_DEFAULTS = [req]
     try:
         ctx = QueryContext(query="test scenario")
@@ -7238,9 +7239,10 @@ def _make_chart_hint_question_analysis(
         "rank_limit": None,
         "scenario_factor": factor,
         "scenario_aggregation": "sum",
+        "scenario_scope": "full_series",
     }
     if volume is not None:
-        request["scenario_volume"] = volume
+        request["scenario_energy_mwh"] = volume
     payload["analysis_requirements"]["derived_metrics"] = [request]
     return QuestionAnalysis.model_validate(payload)
 
@@ -7351,7 +7353,7 @@ def test_materialize_chart_override_falls_back_to_decomposition_without_chart_hi
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]
@@ -7422,7 +7424,7 @@ def test_materialize_chart_override_payoff_without_total_income_signals_stays_tr
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]
@@ -7594,22 +7596,63 @@ def test_build_chart_prefers_override_over_raw_heuristics():
 
 
 def test_scenario_scale_computation():
-    # [40, 50, 30, 60] * 1.5 = [60, 75, 45, 90] -> sum=270
+    # Price scenarios aggregate by mean, never by a meaningless cross-period sum.
     row = _run_scenario("scenario_scale", factor=1.5)
-    assert row["aggregate_result"] == 270.0
-    assert row["baseline_aggregate"] == 180.0
-    assert row["delta_aggregate"] == 90.0
+    assert row["aggregate_result"] == 67.5
+    assert row["baseline_aggregate"] == 45.0
+    assert row["delta_aggregate"] == 22.5
     assert row["delta_percent"] == 50.0
     assert row["record_type"] == "scenario"
     assert row["row_count"] == 4
 
 
 def test_scenario_offset_computation():
-    # [40, 50, 30, 60] + 10 = [50, 60, 40, 70] -> sum=220
+    # Mean baseline 45 + 10 = mean scenario result 55.
     row = _run_scenario("scenario_offset", factor=10.0)
-    assert row["aggregate_result"] == 220.0
-    assert row["baseline_aggregate"] == 180.0
-    assert row["delta_aggregate"] == 40.0
+    assert row["aggregate_result"] == 55.0
+    assert row["baseline_aggregate"] == 45.0
+    assert row["delta_aggregate"] == 10.0
+
+
+def test_multi_factor_sensitivity_builds_observed_and_each_scenario_series():
+    first = _run_scenario("scenario_scale", factor=1.1)
+    second = _run_scenario("scenario_scale", factor=1.2)
+    ctx = QueryContext(
+        query="Show balancing price sensitivity at 10% and 20% higher",
+        analysis_evidence=[first, second],
+    )
+    ctx.df = _scenario_df().iloc[::-1].reset_index(drop=True)
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_data is not None
+    assert len(ctx.chart_override_data) == 4
+    assert ctx.chart_override_data[0]["date"] == "2024-01"
+    assert ctx.chart_override_data[-1]["date"] == "2024-04"
+    keys = set(ctx.chart_override_data[0])
+    assert "Balancing electricity price (USD/MWh)" in keys
+    assert "Scaled Balancing electricity price (USD/MWh) (×1.1)" in keys
+    assert "Scaled Balancing electricity price (USD/MWh) (×1.2)" in keys
+
+
+def test_multi_strike_sensitivity_builds_each_reference_series():
+    first = _run_scenario("scenario_payoff", factor=55.0)
+    second = _run_scenario("scenario_payoff", factor=60.0)
+    ctx = QueryContext(
+        query="Show CfD strike sensitivity at 55 and 60 USD/MWh",
+        analysis_evidence=[first, second],
+    )
+    ctx.df = _scenario_df()
+
+    analyzer._materialize_chart_override(ctx)
+
+    assert ctx.chart_override_type == "line"
+    assert ctx.chart_override_data is not None
+    keys = set(ctx.chart_override_data[0])
+    assert "Balancing electricity price (USD/MWh)" in keys
+    assert "Strike Price (55)" in keys
+    assert "Strike Price (60)" in keys
 
 
 def test_scenario_payoff_computation():
@@ -7650,8 +7693,14 @@ def test_scenario_via_question_analysis_payload():
     # Minimal valid QA payload with a scenario_payoff request
     payload = {
         "version": "question_analysis_v1",
-        "raw_query": "Calculate CfD payoff with strike 55",
-        "canonical_query_en": "Calculate CfD payoff with strike price 55 USD",
+        "raw_query": (
+            "Calculate CfD payoff against balancing price with strike "
+            "55 USD/MWh for 1 MWh per month from January to April 2024"
+        ),
+        "canonical_query_en": (
+            "Calculate CfD payoff against balancing price with strike "
+            "55 USD/MWh for 1 MWh per month from January to April 2024"
+        ),
         "language": {"input_language": "en", "answer_language": "en"},
         "classification": {
             "query_type": "data_retrieval",
@@ -7675,7 +7724,7 @@ def test_scenario_via_question_analysis_payload():
                     "metric_name": "scenario_payoff",
                     "metric": "p_bal_usd",
                     "scenario_factor": 55.0,
-                    "scenario_volume": 1.0,
+                    "scenario_energy_mwh": 1.0,
                     "scenario_aggregation": "sum",
                 },
             ],
@@ -7683,7 +7732,7 @@ def test_scenario_via_question_analysis_payload():
     }
 
     qa = QuestionAnalysis.model_validate(payload)
-    ctx = QueryContext(query="Calculate CfD payoff with strike 55")
+    ctx = QueryContext(query=payload["raw_query"])
     ctx.question_analysis = qa
     ctx.question_analysis_source = "llm_active"
 
@@ -7691,7 +7740,7 @@ def test_scenario_via_question_analysis_payload():
     assert len(requests) == 1
     assert requests[0]["metric_name"] == "scenario_payoff"
     assert requests[0]["scenario_factor"] == 55.0
-    assert requests[0]["scenario_volume"] == 1.0
+    assert requests[0]["scenario_energy_mwh"] == 1.0
 
     # Run computation
     df = _scenario_df()  # p_bal_usd = [40, 50, 30, 60]
@@ -7708,21 +7757,50 @@ def test_scenario_via_question_analysis_payload():
 
 def test_scenario_fallback_extracts_scale_from_query():
     """When question_analysis is None, fallback extracts scenario from query text."""
-    ctx = QueryContext(query="What if prices were 34% higher?")
+    ctx = QueryContext(query="What if balancing prices were 34% higher?")
     requests = analyzer._active_analysis_requests(ctx)
     assert len(requests) == 1
     assert requests[0]["metric_name"] == "scenario_scale"
+    assert requests[0]["metric"] == "balancing"
     assert abs(requests[0]["scenario_factor"] - 1.34) < 1e-6
 
 
-def test_scenario_fallback_extracts_payoff_from_query():
-    """Fallback extracts strike from 'strike 60' pattern."""
-    ctx = QueryContext(query="Calculate payoff with strike 60")
-    requests = analyzer._active_analysis_requests(ctx)
-    assert len(requests) == 1
-    assert requests[0]["metric_name"] == "scenario_payoff"
-    assert requests[0]["scenario_factor"] == 60.0
-    assert requests[0]["scenario_volume"] == 1.0
+def test_scenario_fallback_payoff_without_reference_metric_fails_closed():
+    assert analyzer._scenario_fallback_requests(
+        "Calculate payoff with strike 60 USD/MWh"
+    ) == []
+
+
+def test_scenario_fallback_does_not_default_anaphoric_target():
+    assert analyzer._scenario_fallback_requests(
+        "What if it were 10% higher?"
+    ) == []
+
+
+def test_scenario_fallback_resolves_non_price_subject():
+    requests = analyzer._scenario_fallback_requests(
+        "What if the exchange rate were 10% higher?"
+    )
+
+    assert requests == [{
+        "metric_name": "scenario_scale",
+        "metric": "exchange_rate",
+        "scenario_factor": 1.1,
+        "scenario_energy_mwh": None,
+        "scenario_capacity_mw": None,
+        "scenario_aggregation": "mean",
+        "scenario_scope": "latest",
+    }]
+
+
+def test_scenario_fallback_extracts_negative_offset():
+    requests = analyzer._scenario_fallback_requests(
+        "What if balancing price were 30 GEL/MWh lower?"
+    )
+
+    assert requests[0]["metric_name"] == "scenario_offset"
+    assert requests[0]["metric"] == "p_bal_gel"
+    assert requests[0]["scenario_factor"] == -30.0
 
 
 def test_scenario_fallback_extracts_payoff_from_real_cfd_query():
@@ -7737,7 +7815,8 @@ def test_scenario_fallback_extracts_payoff_from_real_cfd_query():
     assert len(requests) == 1, f"Expected 1 scenario request, got {len(requests)}: {requests}"
     assert requests[0]["metric_name"] == "scenario_payoff"
     assert requests[0]["scenario_factor"] == 60.0
-    assert requests[0]["scenario_volume"] == 1.0
+    assert requests[0]["scenario_energy_mwh"] is None
+    assert requests[0]["scenario_capacity_mw"] == 1.0
 
 
 def test_scenario_payoff_positive_negative_breakdown():
@@ -8010,7 +8089,7 @@ def test_scenario_data_explanation_tool_route_not_treated_as_explanation():
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]
@@ -8039,7 +8118,7 @@ def test_comparison_with_scenario_metrics_not_overridden_to_scenario():
             "target_metric": None,
             "rank_limit": None,
             "scenario_factor": 55.0,
-            "scenario_volume": 1.0,
+            "scenario_energy_mwh": 1.0,
             "scenario_aggregation": "sum",
         }
     ]

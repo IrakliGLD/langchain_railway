@@ -36,6 +36,7 @@ shipping. The relevant patterns are documented in
 ``skills/pipeline-failure-diagnostics/references/failure-taxonomy.md``.
 """
 
+import inspect
 import os
 
 # Ensure config validation passes before importing pipeline modules.
@@ -78,10 +79,12 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 import pytest  # noqa: E402
 
+from agent import pipeline  # noqa: E402
 from agent.pipeline import _cross_check_answer_kind  # noqa: E402
 from contracts.question_analysis import (  # noqa: E402
     AnswerKind,
     QuestionAnalysis,
+    QueryType,
     VisualizationInfo,
 )
 from models import QueryContext  # noqa: E402
@@ -459,7 +462,11 @@ class TestAnalyzerPromptContent:
 
 
 def _make_qa_with_scenario_metric(
-    *, raw_query: str, scenario_factor: float = 1.34
+    *,
+    raw_query: str,
+    scenario_factor: float = 1.34,
+    metric_name: str = "scenario_scale",
+    metric: str = "balancing",
 ) -> QuestionAnalysis:
     """Build a QA where the analyzer emits a scenario derived metric on top
     of an EXPLANATION answer_kind — the configuration that triggered the
@@ -500,13 +507,15 @@ def _make_qa_with_scenario_metric(
             "needs_correlation_context": False,
             "derived_metrics": [
                 {
-                    "metric": "balancing",
-                    "metric_name": "scenario_scale",
-                    "target_metric": "balancing",
+                    "metric": metric,
+                    "metric_name": metric_name,
+                    "target_metric": None,
                     "rank_limit": None,
                     "scenario_factor": scenario_factor,
-                    "scenario_volume": 1.0,
+                    "scenario_energy_mwh": None,
+                    "scenario_capacity_mw": None,
                     "scenario_aggregation": None,
+                    "scenario_scope": None,
                     "season": None,
                 }
             ],
@@ -519,23 +528,12 @@ def _make_qa_with_scenario_metric(
 
 
 def _simulate_scenario_override_block(ctx: QueryContext) -> AnswerKind | None:
-    """Run the exact override logic from process_query around line 1893
-    against the supplied context, then return the resulting answer_kind.
-
-    The function in pipeline.py mutates ``ctx.question_analysis.answer_kind``
-    in place; we mirror that here so the test pins observable behaviour.
-    """
+    """Run the production answer-kind finalizer and return its decision."""
     from agent import pipeline
 
     qa = ctx.question_analysis
     assert qa is not None, "fixture must supply question_analysis"
-    if qa.answer_kind in pipeline._SCENARIO_OVERRIDE_ELIGIBLE:
-        derived = qa.analysis_requirements.derived_metrics or []
-        has_scenario_metric = any(
-            m.metric_name in pipeline._SCENARIO_DERIVED_METRICS for m in derived
-        )
-        if has_scenario_metric and pipeline._query_has_quantitative_anchor(ctx.query):
-            qa.answer_kind = AnswerKind.SCENARIO
+    pipeline._finalize_answer_kind(ctx)
     return qa.answer_kind
 
 
@@ -564,31 +562,35 @@ class TestScenarioOverrideAnchorGate:
             "production fix (2026-05-13)"
         )
 
-    def test_explicit_percent_anchor_does_override_to_scenario(self):
-        """Real scenario queries with a percent must still route to SCENARIO."""
+    def test_driver_target_percent_question_stays_explanation(self):
+        """A driver change is not a mechanical transformation of its target."""
         qa = _make_qa_with_scenario_metric(
             raw_query="if PPA share rises by 20%, how will the balancing price change?",
             scenario_factor=1.20,
+            metric="share_all_ppa",
         )
         ctx = _make_ctx(qa)
         result = _simulate_scenario_override_block(ctx)
-        assert result == AnswerKind.SCENARIO
+        assert result == AnswerKind.EXPLANATION
+        assert qa.analysis_requirements.derived_metrics == []
 
     def test_double_keyword_anchors_override(self):
         """Multiplicative words (double / halve / triple) count as anchors."""
         qa = _make_qa_with_scenario_metric(
             raw_query="what if we double imports?",
             scenario_factor=2.0,
+            metric="share_import",
         )
         ctx = _make_ctx(qa)
         result = _simulate_scenario_override_block(ctx)
         assert result == AnswerKind.SCENARIO
 
-    def test_increase_by_anchors_override(self):
-        """Directional verbs followed by 'by' count as anchors."""
+    def test_grounded_offset_overrides(self):
         qa = _make_qa_with_scenario_metric(
-            raw_query="if thermal generation increases by 30 GEL/MWh, what happens?",
-            scenario_factor=1.3,
+            raw_query="if balancing price increases by 30 GEL/MWh, what happens?",
+            scenario_factor=30.0,
+            metric_name="scenario_offset",
+            metric="p_bal_gel",
         )
         ctx = _make_ctx(qa)
         result = _simulate_scenario_override_block(ctx)
@@ -608,8 +610,8 @@ class TestScenarioOverrideAnchorGate:
         ctx = _make_ctx(qa)
         result = _simulate_scenario_override_block(ctx)
         assert result == AnswerKind.EXPLANATION
-        # Sanity: the anchor helper is independent of this path.
-        assert pipeline._query_has_quantitative_anchor(ctx.query)
+        # A historical observation is not a directional scenario parameter.
+        assert not pipeline._query_has_quantitative_anchor(ctx.query)
 
     def test_quantitative_anchor_helper_unit_cases(self):
         """Direct unit tests on the helper for regex-edge confidence."""
@@ -618,6 +620,7 @@ class TestScenarioOverrideAnchorGate:
         # Negative cases — the failure modes from production
         assert not has_anchor("if more ppa will be signed, how will it affect price?")
         assert not has_anchor("what if rules change in the future?")
+        assert not has_anchor("what if balancing prices change in 2024?")
         assert not has_anchor("")
         assert not has_anchor(None)  # type: ignore[arg-type]
 
@@ -626,5 +629,69 @@ class TestScenarioOverrideAnchorGate:
         assert has_anchor("what if we double thermal output")
         assert has_anchor("halve the import share and recompute")
         assert has_anchor("price increases by 20 GEL")
-        assert has_anchor("100 MW added scenario")
+        assert not has_anchor("100 MW added scenario")
         assert has_anchor("scenario where imports triple")
+
+    def test_direct_scenario_with_ungrounded_factor_is_downgraded_to_clarify(self):
+        qa = _make_qa_with_scenario_metric(
+            raw_query="what if balancing prices change in 2024?",
+            scenario_factor=1.34,
+        )
+        qa.classification.query_type = QueryType.DATA_RETRIEVAL
+        qa.answer_kind = AnswerKind.SCENARIO
+        ctx = _make_ctx(qa)
+
+        pipeline._finalize_answer_kind(ctx)
+
+        assert qa.answer_kind == AnswerKind.CLARIFY
+        assert qa.routing.preferred_path.value == "clarify"
+        assert qa.analysis_requirements.derived_metrics == []
+
+    def test_explanation_with_ungrounded_scenario_metric_stays_explanation(self):
+        qa = _make_qa_with_scenario_metric(
+            raw_query="if more ppa will be signed, how will it affect price?",
+            scenario_factor=1.34,
+        )
+        ctx = _make_ctx(qa)
+
+        pipeline._finalize_answer_kind(ctx)
+
+        assert qa.answer_kind == AnswerKind.EXPLANATION
+        assert qa.analysis_requirements.derived_metrics == []
+
+
+def test_composition_what_if_prompt_requires_observational_noncausal_language():
+    from core import llm
+
+    rules = llm._ANALYZER_CORE_RULES.lower()
+    assert "not a causal counterfactual" in rules
+    assert "historical association" in rules
+    assert "observationally equivalent" not in rules
+
+
+def test_legacy_summary_prompt_never_claims_correlation_proves_causality():
+    from core import llm
+
+    source = inspect.getsource(llm).lower()
+    assert "correlation proving causality" not in source
+    assert "correlation does not establish causality" in source
+
+
+def test_analyzer_failure_routes_grounded_what_if_to_scenario():
+    ctx = QueryContext(query="What if the exchange rate were 10% higher?")
+
+    assert pipeline._resolve_effective_answer_kind(ctx) == AnswerKind.SCENARIO
+
+
+def test_analyzer_failure_routes_cross_metric_what_if_to_explanation():
+    ctx = QueryContext(
+        query="If PPA share rises by 20%, how will balancing price change?"
+    )
+
+    assert pipeline._resolve_effective_answer_kind(ctx) == AnswerKind.EXPLANATION
+
+
+def test_analyzer_failure_does_not_route_anaphoric_what_if_to_scenario():
+    ctx = QueryContext(query="What if it were 10% higher?")
+
+    assert pipeline._resolve_effective_answer_kind(ctx) != AnswerKind.SCENARIO
