@@ -15,6 +15,10 @@ from agent.report_sections import (
 from contracts.report import ReportPlan
 from contracts.report_sections import ReportSectionDraft
 from tests.test_report_planner import _manifest, _plan_payload
+from utils.provider_attempts import (
+    ProviderDeliveryDisposition,
+    ProviderExecutionError,
+)
 
 
 def _words(count: int, *, prefix: str = "Evidence") -> str:
@@ -173,6 +177,38 @@ def test_failed_repair_aborts_with_typed_section_error():
         section.section_id for section in plan.sections
     }
     assert "WORD_COUNT_OUT_OF_RANGE" in exc_info.value.error_codes
+
+
+def test_provider_failure_during_repair_becomes_typed_section_error():
+    plan = ReportPlan.model_validate(_plan_payload())
+
+    def repair(*_args):
+        raise ProviderExecutionError(
+            "provider call failed",
+            provider="nvidia",
+            stage="report_section_repair",
+            disposition=ProviderDeliveryDisposition.TIMED_OUT,
+        )
+
+    with pytest.raises(ReportSectionGenerationError) as exc_info:
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            generate_section=lambda _q, _p, section, _m: {
+                **_draft(section),
+                "paragraphs": [
+                    {
+                        "text": "This section remains much too short.",
+                        "evidence_refs": section.required_evidence_refs,
+                    }
+                ],
+            },
+            repair_section=repair,
+            max_workers=len(plan.sections),
+        )
+
+    assert exc_info.value.error_codes == ["SECTION_REPAIR_PROVIDER_FAILED"]
 
 
 def test_valid_resume_drafts_are_not_regenerated_and_progress_is_checkpointable():
