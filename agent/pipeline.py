@@ -106,7 +106,7 @@ from knowledge.vector_retrieval import (
     pack_vector_knowledge_for_prompt,
     retrieve_vector_knowledge,
 )
-from models import QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
+from models import AnswerMode, QueryContext, ResolutionPolicy, ResponseMode, TerminalOutcome
 from utils.metrics import metrics
 from utils.privacy_logging import hash_private_identifier
 from utils.query_validation import extract_query_topics, validate_tool_relevance
@@ -2890,6 +2890,7 @@ def _process_query_impl(
     request_deadline=None,
     actor_id: str = "",
     request_id: str = "",
+    answer_mode: str = AnswerMode.STANDARD.value,
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -2906,6 +2907,7 @@ def _process_query_impl(
         conversation_history=conversation_history,
         trace_id=trace_id,
         session_id=session_id,
+        answer_mode=answer_mode,
         request_deadline=request_deadline,
         previous_contract_snapshot=previous_contract_snapshot,
         clarify_selection_override=selected is not None,
@@ -3198,6 +3200,7 @@ def process_query(
     request_deadline=None,
     actor_id: str = "",
     request_id: str = "",
+    answer_mode: str = AnswerMode.STANDARD.value,
 ) -> QueryContext:
     """Bind the trusted request identity/deadline around every deep I/O call."""
     with bind_request_execution_scope(
@@ -3214,4 +3217,5 @@ def process_query(
             request_deadline=request_deadline,
             actor_id=actor_id,
             request_id=request_id,
+            answer_mode=answer_mode,
         )

@@ -73,6 +73,40 @@ def _read_single_worker_count(*names: str) -> int:
     return 1
 
 
+# Durable analytical reports run in a separate, explicitly enabled process.
+# Its database identity must be write-capable and is intentionally not inferred
+# from the read-only API runtime identity.
+REPORT_WORKER_ENABLED = (
+    os.getenv("ENAI_REPORT_WORKER_ENABLED", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+REPORT_WORKER_DB_URL = _read_secret_env("ENAI_REPORT_WORKER_DB_URL")
+REPORT_WORKER_LEASE_SECONDS = _read_bounded_int_env(
+    "ENAI_REPORT_WORKER_LEASE_SECONDS",
+    900,
+    30,
+    3600,
+)
+REPORT_WORKER_RETRY_DELAY_SECONDS = _read_bounded_int_env(
+    "ENAI_REPORT_WORKER_RETRY_DELAY_SECONDS",
+    30,
+    1,
+    3600,
+)
+REPORT_WORKER_POLL_INTERVAL_MS = _read_bounded_int_env(
+    "ENAI_REPORT_WORKER_POLL_INTERVAL_MS",
+    2000,
+    10,
+    60_000,
+)
+REPORT_SECTION_MAX_WORKERS = _read_bounded_int_env(
+    "ENAI_REPORT_SECTION_MAX_WORKERS",
+    4,
+    1,
+    8,
+)
+
+
 # API Security
 # Prefer the new ENAI_* names; fall back to the earlier split-secret names during rollout.
 GATEWAY_SHARED_SECRET = _read_secret_env("ENAI_GATEWAY_SECRET", "GATEWAY_SHARED_SECRET")
@@ -660,4 +694,3 @@ BALANCING_SEGMENT_NORMALIZER = "LOWER(REPLACE(segment, ' ', '_'))"
 
 # Balancing share pivot SQL — canonical definition lives in agent/sql_executor.py.
 # Do not define a separate copy here to avoid drift.
-

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set
 import pandas as pd
 
 from agent.analyzer import _extract_forecast_horizon
+from agent.answer_mode_policy import apply_answer_mode_policy
 from agent.generic_renderer import render as generic_render
 from agent.render_fitness import evaluate_render_fitness
 from agent.summary_grounding import (
@@ -818,6 +819,11 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         ),
     )
     try:
+        answer_mode_kwargs = (
+            {"answer_mode": ctx.answer_mode}
+            if ctx.answer_mode == "brief"
+            else {}
+        )
         envelope = llm_summarize_structured(
             ctx.effective_query,
             data_preview="",
@@ -830,6 +836,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             effective_answer_kind=getattr(ctx, "effective_answer_kind", None),
             vector_knowledge_bundle=ctx.vector_knowledge,
             response_mode=ctx.response_mode,
+            **answer_mode_kwargs,
         )
         ctx.summary = envelope.answer
         ctx.summary_source = "structured_conceptual_summary"
@@ -882,6 +889,8 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "not_applicable_conceptual"
     ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
+    if apply_answer_mode_policy(ctx) and ctx.summary_claims:
+        ctx.summary_claims = _derive_claims_from_text(ctx.summary)
     log.info("✅ Conceptual answer generated")
     return ctx
 
@@ -1878,6 +1887,11 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
         )
 
         try:
+            answer_mode_kwargs = (
+                {"answer_mode": ctx.answer_mode}
+                if ctx.answer_mode == "brief"
+                else {}
+            )
             envelope = llm_summarize_structured(
                 routing_query,
                 ctx.preview,
@@ -1893,6 +1907,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 resolution_policy=ctx.resolution_policy,
                 grounding_policy=ctx.grounding_policy,
                 comparison_focus=comparison_focus,
+                **answer_mode_kwargs,
             )
             if not _is_summary_grounded(envelope, ctx):
                 grounding_guardrail_triggered = True
@@ -1998,6 +2013,8 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
 
     ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
     _apply_absence_claim_guardrail(ctx)
+    if apply_answer_mode_policy(ctx) and ctx.summary_claims:
+        ctx.summary_claims = _derive_claims_from_text(ctx.summary)
 
     # Shadow fitness check on deterministic renders (§3.9): observe-only —
     # the provenance gate below is a no-op for these paths, so this is the

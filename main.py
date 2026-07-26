@@ -146,6 +146,7 @@ from models import (
     CHAT_GATEWAY_CONTRACT_VERSION,
     CHAT_GATEWAY_V2_CONTRACT_VERSION,
     SUPPORTED_CHAT_GATEWAY_CONTRACT_VERSIONS,
+    AnswerMode,
     APIErrorResponse,
     APIResponse,
     MetricsResponse,
@@ -362,6 +363,16 @@ class AskAPIError(HTTPException):
         super().__init__(status_code=status_code, detail=message)
         self.code = code
         self.retryable = retryable
+
+
+def parse_answer_mode(value: Optional[str]) -> AnswerMode:
+    """Validate the trusted gateway answer-mode header with a stable default."""
+    if value is None:
+        return AnswerMode.STANDARD
+    try:
+        return AnswerMode(value)
+    except ValueError as exc:
+        raise AskAPIError(400, "INVALID_ANSWER_MODE", "Invalid answer mode") from exc
 
 
 _ASK_ERROR_DEFAULTS: Dict[int, Tuple[str, str, bool]] = {
@@ -1126,6 +1137,7 @@ def ask_post(
     x_app_key: Optional[str] = Header(None, alias='X-App-Key'),
     x_session_token: Optional[str] = Header(None, alias='X-Session-Token'),
     x_enai_contract_version: Optional[str] = Header(None, alias='X-Enai-Contract-Version'),
+    x_enai_answer_mode: Optional[str] = Header(None, alias='X-Enai-Answer-Mode'),
     x_enai_request_budget_ms: Optional[str] = Header(None, alias='X-Enai-Request-Budget-Ms'),
     x_enai_actor_id: Optional[str] = Header(None, alias='X-Enai-Actor-Id'),
     x_enai_session_id: Optional[str] = Header(None, alias='X-Enai-Session-Id'),
@@ -1224,6 +1236,16 @@ def ask_post(
         )
         raise
     request.state.caller = caller
+    try:
+        answer_mode = parse_answer_mode(x_enai_answer_mode)
+    except AskAPIError:
+        _finalize_request_telemetry()
+        log_security_event(
+            "invalid_answer_mode",
+            request=request,
+            supplied=bool(x_enai_answer_mode),
+        )
+        raise
     if q.user_id is not None:
         log_security_event(
             "non_authoritative_user_id_ignored",
@@ -1519,6 +1541,7 @@ def ask_post(
                 request_deadline=request_deadline,
                 actor_id=caller.actor_id,
                 request_id=request_id,
+                answer_mode=answer_mode.value,
             )
         except RequestDeadlineExceeded as exc:
             _finalize_request_telemetry()
