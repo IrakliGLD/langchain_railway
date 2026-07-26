@@ -202,6 +202,7 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
     assert "EXPOSE 3000" in dockerfile
     assert "COPY . ." not in dockerfile
     assert "prompts ./prompts" not in dockerfile
+    assert "COPY --chown=enai:enai report_worker.py ./" in dockerfile
     assert "ARG RAILWAY_GIT_COMMIT_SHA" in dockerfile
     assert "ARG ENAI_RELEASE_SHA" in dockerfile
     assert 'org.opencontainers.image.revision="${ENAI_RELEASE_SHA}"' in dockerfile

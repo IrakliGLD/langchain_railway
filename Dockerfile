@@ -28,9 +28,11 @@ COPY requirements-lock.txt ./requirements-lock.txt
 RUN python -m pip install --no-cache-dir --require-hashes --only-binary :all: \
     --requirement requirements-lock.txt
 
-# Explicit runtime allow-list: no repository-wide COPY and no tests, reports,
-# exports, VCS data, operator scripts, or local environment files.
+# Explicit runtime allow-list: no repository-wide COPY and no tests, generated
+# report artifacts, exports, VCS data, operator scripts, or local environment
+# files.
 COPY --chown=enai:enai main.py config.py context.py models.py ./
+COPY --chown=enai:enai report_worker.py ./
 COPY --chown=enai:enai agent ./agent
 COPY --chown=enai:enai analysis ./analysis
 COPY --chown=enai:enai config_metrics ./config_metrics
