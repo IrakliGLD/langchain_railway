@@ -844,65 +844,57 @@ def test_build_claim_provenance_unrelated_number_still_fails():
 
 
 # ---------------------------------------------------------------------------
-# Fix #1 — provenance gate must be FAITHFUL to the guardrail corpus.
+# Fix #1 — provenance gate must index every legitimate evidence source.
 #
 # Production trace span-7b62… : the structured answer passed the token-level
 # guardrail (_is_summary_grounded, grounding_guardrail_triggered=false) but the
 # claim-level provenance gate rejected it (coverage=0.5, 1/2 claims). Root
-# cause: the gate's corpus (_build_claim_provenance over provenance_rows +
-# stats_hint + domain + vector) is NARROWER than the guardrail's corpus
-# (_build_grounding_tokens, which also includes ctx.preview, ctx.df, and the
-# derived aggregate/evidence/join adders). A number the LLM lifted from the
-# shown preview grounded for the guardrail but not the gate. The gate must
-# never reject a token the guardrail corpus already contains, while still
-# rejecting numbers absent from EVERY corpus.
+# cause: the gate did not index ctx.preview or ctx.df. Index those sources with
+# real provenance rather than inheriting the guardrail's anonymous token set:
+# typed dataframe columns can safely distinguish ratios from other decimals.
 # ---------------------------------------------------------------------------
 
 
-def test_build_claim_provenance_grounds_token_present_in_guardrail_corpus():
-    """A token in the guardrail corpus (preview/df/derived) but absent from
-    provenance_rows and stats_hint must ground via extra_grounding_tokens."""
+def test_build_claim_provenance_grounds_token_present_in_data_preview():
+    """A preview token absent from provenance rows and stats still grounds."""
     claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 55 USD/MWh."],
         cols=["share_import"],
         rows=[(0.09,)],            # provenance rows carry NO price level
         stats_hint="Rows: 1",      # stats_hint carries NO price level
-        extra_grounding_tokens={"55"},  # guardrail corpus DID contain 55
+        data_preview="balancing_price\n55",
     )
 
     assert claim_entries[0]["matched_tokens"] == ["55"]
     assert claim_entries[0]["unmatched_tokens"] == []
     assert claim_entries[0]["is_fully_grounded"] is True
     assert coverage == pytest.approx(1.0, rel=1e-6)
+    assert claim_entries[0]["cell_refs"][0]["source"] == "data_preview"
 
 
-def test_build_claim_provenance_guardrail_fallback_tolerates_rounding():
-    """The guardrail-corpus fallback honours claim-side rounding tolerance.
-
-    The real guardrail set (_build_grounding_tokens) is already rounding-
-    expanded, so it holds the 2-decimal form ``44.32`` of a ``44.3214`` cell;
-    a higher-precision claim ``44.321`` grounds via _rounded_match_variants."""
+def test_build_claim_provenance_data_preview_tolerates_rounding():
+    """A higher-precision claim can ground against a rounded preview value."""
     claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 44.321 USD/MWh."],
         cols=["share_import"],
         rows=[(0.09,)],
         stats_hint="Rows: 1",
-        extra_grounding_tokens={"44.32"},  # already-expanded guardrail token
+        data_preview="balancing_price\n44.32",
     )
 
     assert claim_entries[0]["unmatched_tokens"] == []
     assert claim_entries[0]["is_fully_grounded"] is True
+    assert coverage == pytest.approx(1.0, rel=1e-6)
 
 
-def test_build_claim_provenance_guardrail_fallback_still_rejects_absent_number():
-    """The fallback must NOT ground a number absent from every corpus, incl.
-    the guardrail corpus — true hallucinations still fail closed."""
+def test_build_claim_provenance_data_preview_still_rejects_absent_number():
+    """A number absent from every indexed source still fails closed."""
     claim_entries, coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 999 USD/MWh."],
         cols=["share_import"],
         rows=[(0.09,)],
         stats_hint="Rows: 1",
-        extra_grounding_tokens={"55"},  # 999 is nowhere
+        data_preview="balancing_price\n55",
     )
 
     assert "999" in claim_entries[0]["unmatched_tokens"]
@@ -910,9 +902,8 @@ def test_build_claim_provenance_guardrail_fallback_still_rejects_absent_number()
     assert coverage == pytest.approx(0.0, rel=1e-6)
 
 
-def test_build_claim_provenance_defaults_no_guardrail_fallback():
-    """Backward compatibility: without extra_grounding_tokens the corpus is
-    exactly the explicit sources — a preview-only number stays ungrounded."""
+def test_build_claim_provenance_defaults_to_explicit_sources():
+    """Without preview input, a preview-only number stays ungrounded."""
     claim_entries, _coverage, _anchors = summarizer._build_claim_provenance(
         claims=["The balancing price was 55 USD/MWh."],
         cols=["share_import"],
@@ -961,6 +952,59 @@ def test_provenance_gate_accepts_preview_sourced_number(monkeypatch):
     assert out.summary_provenance_gate_passed is True
     assert out.summary_source == "structured_summary"
     assert "could not fully ground" not in out.summary
+    assert any(
+        ref["source"] == "data_preview"
+        for claim in out.summary_claim_provenance
+        for ref in claim["cell_refs"]
+        if ref["value"] == "55"
+    )
+
+
+def test_claim_provenance_rejects_non_ratio_x100_from_context_dataframe():
+    """A correlation coefficient must not ground an unrelated whole-number claim."""
+    ctx = QueryContext(
+        query="What was the balancing price?",
+        preview="correlation_value\n0.85",
+        cols=["correlation_value"],
+        rows=[(0.85,)],
+        provenance_cols=["other_value"],
+        provenance_rows=[(1.0,)],
+        provenance_query_hash="typed-context",
+        provenance_source="tool",
+    )
+    ctx.df = pd.DataFrame({"correlation_value": [0.85]})
+    ctx.summary_claims = ["The balancing price was 85 GEL/MWh."]
+
+    summarizer._attach_claim_provenance(ctx)
+
+    assert ctx.summary_provenance_coverage == pytest.approx(0.0)
+    assert ctx.summary_claim_provenance[0]["unmatched_tokens"] == ["85"]
+    assert ctx.summary_claim_provenance[0]["cell_refs"] == []
+
+
+def test_claim_provenance_preserves_ratio_x100_from_context_dataframe():
+    """A genuine share column still grounds the equivalent percentage."""
+    ctx = QueryContext(
+        query="What was the import share?",
+        preview="share_import\n0.85",
+        cols=["share_import"],
+        rows=[(0.85,)],
+        provenance_cols=["other_value"],
+        provenance_rows=[(1.0,)],
+        provenance_query_hash="typed-context",
+        provenance_source="tool",
+    )
+    ctx.df = pd.DataFrame({"share_import": [0.85]})
+    ctx.summary_claims = ["The import share was 85%."]
+
+    summarizer._attach_claim_provenance(ctx)
+
+    assert ctx.summary_provenance_coverage == pytest.approx(1.0)
+    assert ctx.summary_claim_provenance[0]["unmatched_tokens"] == []
+    assert any(
+        ref["column"] == "share_import"
+        for ref in ctx.summary_claim_provenance[0]["cell_refs"]
+    )
 
 
 def test_serialize_scalar_normalizes_pandas_numpy_scalars():

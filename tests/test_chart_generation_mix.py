@@ -377,6 +377,19 @@ def test_generation_mix_chart_is_stacked_generation_shares():
     ]
 
 
+def test_explicit_line_chart_preserves_complete_generation_shares():
+    out = _build("show the generation mix shares over time as a line chart")
+
+    assert out.chart_meta is not None
+    assert out.chart_type == "line"
+    assert sorted(out.chart_meta["sourceMetrics"]) == [
+        "share_hydro",
+        "share_solar",
+        "share_thermal",
+        "share_wind",
+    ]
+
+
 def test_supply_mix_chart_keeps_all_supply_shares_stacked():
     out = _build("show the electricity supply mix over time")
 

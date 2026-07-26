@@ -87,6 +87,34 @@ def test_both_framings_normalize_to_same_uncovered_share():
     assert complement.framing == "uncovered"
 
 
+def test_explicit_import_threshold_wins_over_unrelated_high_percentage():
+    from utils.residual_price import extract_residual_coverage_threshold
+
+    query = (
+        "The balancing price changed by more than 99.9% in one month. "
+        "Prices of regulated and deregulated plants are known. Find months "
+        "where the share of import in the balancing basket is less than 0.2% "
+        "and calculate the weighted average PPA/CfD price."
+    )
+
+    threshold = extract_residual_coverage_threshold(query)
+
+    assert threshold is not None
+    assert threshold.framing == "uncovered"
+    assert threshold.max_uncovered_share == pytest.approx(0.002)
+
+
+def test_unrelated_percentage_is_not_a_residual_coverage_threshold():
+    from utils.residual_price import extract_residual_coverage_threshold
+
+    assert (
+        extract_residual_coverage_threshold(
+            "The balancing price changed by more than 99.9% year over year."
+        )
+        is None
+    )
+
+
 def test_threshold_authority_rejects_non_negligible_framings():
     from utils.residual_price import extract_residual_coverage_threshold
 
@@ -186,8 +214,9 @@ def test_driver_enrichment_honours_analyzer_emitted_residual_intent():
     data_retrieval question therefore skipped enrichment, leaving
     `residual_contribution_*` / `known_price_coverage_ok` absent so
     _build_residual_weighted_price_direct_answer returned None."""
-    import pandas as pd
     from types import SimpleNamespace
+
+    import pandas as pd
 
     from agent import pipeline
     from contracts.question_analysis import AnswerKind, RenderStyle
@@ -212,3 +241,33 @@ def test_driver_enrichment_honours_analyzer_emitted_residual_intent():
     assert pipeline._should_enrich_balancing_driver_context(
         ctx, invocation, is_explanation=False,
     ) is True
+
+
+def test_driver_enrichment_ignores_shadow_analyzer_residual_intent():
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from agent import pipeline
+    from contracts.question_analysis import AnswerKind, RenderStyle
+
+    ctx = QueryContext(query="estimate the combined ppa and cfd price")
+    ctx.df = pd.DataFrame({"date": ["2026-05-01"], "p_bal_gel": [137.0]})
+    ctx.question_analysis = SimpleNamespace(
+        answer_kind=AnswerKind.TIMESERIES,
+        render_style=RenderStyle.DETERMINISTIC,
+        classification=SimpleNamespace(
+            intent="implied_ppa_cfd_price_approximation",
+            query_type=SimpleNamespace(value="data_retrieval"),
+        ),
+        analysis_requirements=SimpleNamespace(
+            needs_driver_analysis=False,
+            needs_correlation_context=False,
+        ),
+    )
+    ctx.question_analysis_source = "llm_shadow"
+    invocation = SimpleNamespace(name="get_prices", params={"metric": "balancing"})
+
+    assert pipeline._should_enrich_balancing_driver_context(
+        ctx, invocation, is_explanation=False,
+    ) is False

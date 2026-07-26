@@ -45,6 +45,8 @@ RESIDUAL_DIRECT_INTENTS = frozenset({
 
 def has_residual_direct_intent(ctx: object) -> bool:
     """True when an authoritative analysis requests a residual-price answer."""
+    if not bool(getattr(ctx, "has_authoritative_question_analysis", False)):
+        return False
     qa = getattr(ctx, "question_analysis", None)
     if qa is None:
         return False
@@ -52,10 +54,6 @@ def has_residual_direct_intent(ctx: object) -> bool:
         getattr(getattr(qa, "classification", None), "intent", "") or ""
     ).strip().lower()
     return intent in RESIDUAL_DIRECT_INTENTS
-
-# A "covered" reading is only credible when the stated percentage is high enough
-# that it cannot be describing the small unknown layer itself.
-_MIN_COVERAGE_PERCENT = 90.0
 
 _UNCOVERED_THRESHOLD_RE = re.compile(
     r"(?:less than|below|under|at most|no more than|fewer than|maximum of)\s+"
@@ -66,6 +64,11 @@ _UNCOVERED_THRESHOLD_RE = re.compile(
 _COVERED_THRESHOLD_RE = re.compile(
     r"(?:more than|greater than|above|over|exceed(?:ed|s|ing)?|at least|not less than|minimum of)\s+"
     r"(?P<value>\d+(?:\.\d+)?)\s*%",
+    re.IGNORECASE,
+)
+
+_THRESHOLD_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[.;!?]|\b(?:but|when|where|while)\b",
     re.IGNORECASE,
 )
 
@@ -96,11 +99,42 @@ class ResidualCoverageThreshold:
     phrase: str
 
 
+def _threshold_clause(query: str, match: re.Match[str]) -> str:
+    """Return the local clause that gives a percentage its semantic subject."""
+    preceding_boundaries = list(
+        _THRESHOLD_CLAUSE_BOUNDARY_RE.finditer(query, 0, match.start())
+    )
+    start = preceding_boundaries[-1].end() if preceding_boundaries else 0
+    following_boundary = _THRESHOLD_CLAUSE_BOUNDARY_RE.search(query, match.end())
+    end = following_boundary.start() if following_boundary else len(query)
+    return query[start:end].strip()
+
+
+def _is_uncovered_threshold_clause(clause: str) -> bool:
+    return bool(
+        re.search(r"\b(?:share\s+of\s+import|import\s+share)\b", clause)
+        or re.search(r"\b(?:uncovered|unknown-price\s+residual)\b", clause)
+    )
+
+
+def _is_covered_threshold_clause(clause: str) -> bool:
+    explicitly_covered = bool(re.search(r"\b(?:covered|coverage)\b", clause))
+    covered_basket = (
+        "share" in clause
+        and all(
+            re.search(rf"\b{component}\b", clause)
+            for component in ("ppa", "cfd", "regulated", "deregulated")
+        )
+    )
+    return explicitly_covered or covered_basket
+
+
 def extract_residual_coverage_threshold(query: str) -> Optional[ResidualCoverageThreshold]:
     """Parse the negligible-residual constraint from either framing.
 
-    Returns ``None`` when the query states no percentage constraint. A returned
-    threshold is NOT automatically negligible — callers gate on
+    Returns ``None`` when no percentage constraint is scoped to import share,
+    the uncovered residual, or the covered price basket. A returned threshold
+    is NOT automatically negligible — callers gate on
     ``max_uncovered_share <= NEGLIGIBLE_UNCOVERED_SHARE_MAX`` so that
     "more than 5%" / "less than 20%" are parsed but correctly refused.
     """
@@ -108,20 +142,19 @@ def extract_residual_coverage_threshold(query: str) -> Optional[ResidualCoverage
     if not query_lower:
         return None
 
-    # Prefer the coverage reading only when the number is high enough to be
-    # describing the covered basket; otherwise a phrase like "more than 5%"
-    # would masquerade as a 95%-uncovered constraint.
-    covered = _COVERED_THRESHOLD_RE.search(query_lower)
-    if covered is not None:
-        value = float(covered.group("value"))
-        if value >= _MIN_COVERAGE_PERCENT:
-            return ResidualCoverageThreshold(
-                max_uncovered_share=round((100.0 - value) / 100.0, 6),
-                framing="covered",
-                phrase=covered.group(0).strip(),
+    # Prefer a directly stated import/uncovered limit when both equivalent
+    # framings appear. Percentages about price changes or other subjects are
+    # ignored instead of becoming the residual threshold.
+    uncovered = next(
+        (
+            match
+            for match in _UNCOVERED_THRESHOLD_RE.finditer(query_lower)
+            if _is_uncovered_threshold_clause(
+                _threshold_clause(query_lower, match)
             )
-
-    uncovered = _UNCOVERED_THRESHOLD_RE.search(query_lower)
+        ),
+        None,
+    )
     if uncovered is not None:
         return ResidualCoverageThreshold(
             max_uncovered_share=round(float(uncovered.group("value")) / 100.0, 6),
@@ -129,10 +162,17 @@ def extract_residual_coverage_threshold(query: str) -> Optional[ResidualCoverage
             phrase=uncovered.group(0).strip(),
         )
 
+    covered = next(
+        (
+            match
+            for match in _COVERED_THRESHOLD_RE.finditer(query_lower)
+            if _is_covered_threshold_clause(
+                _threshold_clause(query_lower, match)
+            )
+        ),
+        None,
+    )
     if covered is not None:
-        # A low "more than X%" reading: parsed, but far from negligible. Report
-        # it as the complement so the caller's negligibility gate refuses it
-        # instead of silently falling through to no-constraint.
         value = float(covered.group("value"))
         return ResidualCoverageThreshold(
             max_uncovered_share=round((100.0 - value) / 100.0, 6),
