@@ -165,6 +165,12 @@ class ReportJobWorker:
                 result=result,
             )
         except ReportJobFailure as exc:
+            self._logger.warning(
+                "Report job attempt failed: job_id=%s error_code=%s retryable=%s",
+                lease.job_id,
+                exc.error_code,
+                exc.retryable,
+            )
             self._repository.fail(
                 job_id=lease.job_id,
                 worker_id=self._worker_id,

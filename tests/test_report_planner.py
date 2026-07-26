@@ -199,12 +199,57 @@ def test_planner_validates_model_output_before_returning_it():
     )
 
     assert plan.title == "Electricity price trend report"
+    assert [chart.chart_id for chart in plan.charts] == ["price_trend"]
     assert calls == [("Explain the price trend.", _manifest().manifest_id)]
 
+
+def test_planner_repairs_schema_valid_evidence_bindings_before_returning():
     def invalid_model(*_):
-        return {
-            **deepcopy(_plan_payload()),
-            "evidence_manifest_id": "manifest:" + "0" * 32,
-        }
-    with pytest.raises(ReportPlanEvidenceError):
-        plan_report("Explain the price trend.", _manifest(), invoke_model=invalid_model)
+        payload = deepcopy(_plan_payload())
+        payload["evidence_manifest_id"] = "manifest:" + "0" * 32
+        for section in payload["sections"]:
+            section["required_evidence_refs"] = [
+                "evidence:statistics:" + "9" * 16
+            ]
+        payload["charts"][0]["evidence_refs"] = [STATS_REF]
+        payload["charts"][0]["x_field"] = "invented_period"
+        payload["charts"][0]["series_fields"] = ["invented_value"]
+        return payload
+
+    plan = plan_report(
+        "Explain the price trend.",
+        _manifest(),
+        invoke_model=invalid_model,
+    )
+
+    validate_report_plan_evidence(plan, _manifest())
+    assert plan.evidence_manifest_id == _manifest().manifest_id
+    assert all(
+        set(section.required_evidence_refs)
+        <= {TABLE_REF, STATS_REF, LIMIT_REF}
+        for section in plan.sections
+    )
+    assert LIMIT_REF in next(
+        section
+        for section in plan.sections
+        if section.kind.value == "limitations"
+    ).required_evidence_refs
+    assert plan.charts == []
+    assert all(section.chart_refs == [] for section in plan.sections)
+
+
+def test_planner_removes_required_chart_that_cannot_be_built():
+    def invalid_chart_model(*_):
+        payload = deepcopy(_plan_payload())
+        payload["charts"][0]["purpose"] = "relationship"
+        return payload
+
+    plan = plan_report(
+        "Explain the price trend.",
+        _manifest(),
+        invoke_model=invalid_chart_model,
+    )
+
+    validate_report_plan_evidence(plan, _manifest())
+    assert plan.charts == []
+    assert all(section.chart_refs == [] for section in plan.sections)

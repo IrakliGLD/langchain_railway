@@ -202,6 +202,7 @@ def test_backend_container_is_pinned_non_root_and_uses_runtime_dependencies_only
     assert "EXPOSE 3000" in dockerfile
     assert "COPY . ." not in dockerfile
     assert "prompts ./prompts" not in dockerfile
+    assert "COPY --chown=enai:enai report_worker.py ./" in dockerfile
     assert "ARG RAILWAY_GIT_COMMIT_SHA" in dockerfile
     assert "ARG ENAI_RELEASE_SHA" in dockerfile
     assert 'org.opencontainers.image.revision="${ENAI_RELEASE_SHA}"' in dockerfile
@@ -222,6 +223,16 @@ def test_docker_context_and_railway_config_are_fail_closed():
     assert railway["deploy"]["overlapSeconds"] == 0
     assert railway["deploy"]["drainingSeconds"] == 30
     assert "buildCommand" not in railway["build"]
+
+    worker = json.loads(
+        (ROOT / "railway.worker.json").read_text(encoding="utf-8")
+    )
+    assert worker["build"] == railway["build"]
+    assert worker["deploy"]["startCommand"] == "python report_worker.py"
+    assert worker["deploy"]["healthcheckPath"] is None
+    assert worker["deploy"]["restartPolicyType"] == "ON_FAILURE"
+    assert worker["deploy"]["overlapSeconds"] == 0
+    assert worker["deploy"]["drainingSeconds"] == 30
 
 
 def test_release_evidence_workflow_builds_exact_sha_and_emits_scan_artifacts():

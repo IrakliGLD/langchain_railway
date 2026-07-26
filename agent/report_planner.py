@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
+from agent.report_charts import build_report_charts
 from contracts.report import ReportPlan, ReportSectionKind
 from contracts.report_evidence import (
     ReportEvidenceKind,
     ReportEvidenceManifest,
 )
+
+_LOGGER = logging.getLogger("Enai.ReportPlanner")
 
 
 class ReportPlanEvidenceError(ValueError):
@@ -102,6 +106,116 @@ def validate_report_plan_evidence(
             )
 
 
+def _repair_report_plan_evidence(
+    plan: ReportPlan,
+    manifest: ReportEvidenceManifest,
+) -> ReportPlan:
+    """Repair only evidence bindings that code can verify deterministically."""
+
+    item_by_ref = manifest.item_by_ref()
+    known_refs = set(item_by_ref)
+    substantive_refs = [
+        item.evidence_ref
+        for item in manifest.items
+        if item.kind is not ReportEvidenceKind.LIMITATION
+    ]
+    limitation_refs = [
+        item.evidence_ref
+        for item in manifest.items
+        if item.kind is ReportEvidenceKind.LIMITATION
+    ]
+    if not substantive_refs:
+        raise ReportPlanEvidenceError(
+            "A report plan requires at least one substantive evidence item."
+        )
+    if not limitation_refs:
+        raise ReportPlanEvidenceError(
+            "A report plan requires at least one typed limitation."
+        )
+
+    payload = plan.model_dump(mode="json")
+    payload["evidence_manifest_id"] = manifest.manifest_id
+
+    substantive_set = set(substantive_refs)
+    limitation_set = set(limitation_refs)
+    for section in payload["sections"]:
+        refs = list(
+            dict.fromkeys(
+                ref
+                for ref in section["required_evidence_refs"]
+                if ref in known_refs
+            )
+        )
+        if section["kind"] == ReportSectionKind.LIMITATIONS.value:
+            if not limitation_set.intersection(refs):
+                refs.append(limitation_refs[0])
+        elif not substantive_set.intersection(refs):
+            refs.extend(ref for ref in substantive_refs[:8] if ref not in refs)
+        section["required_evidence_refs"] = refs[:32]
+
+    repaired_charts: list[dict[str, Any]] = []
+    for chart in payload["charts"]:
+        table_refs = [
+            ref
+            for ref in dict.fromkeys(chart["evidence_refs"])
+            if (
+                ref in item_by_ref
+                and item_by_ref[ref].kind is ReportEvidenceKind.TABLE
+            )
+        ]
+        if not table_refs:
+            continue
+
+        first_columns = item_by_ref[table_refs[0]].columns
+        table_refs = [
+            ref
+            for ref in table_refs
+            if item_by_ref[ref].columns == first_columns
+        ]
+        available_columns = set(first_columns)
+        x_field = chart.get("x_field")
+        if x_field not in available_columns:
+            x_field = None
+        chart["x_field"] = x_field
+        chart["series_fields"] = [
+            field
+            for field in dict.fromkeys(chart.get("series_fields", []))
+            if field in available_columns and field != x_field
+        ]
+        chart["evidence_refs"] = table_refs
+        repaired_charts.append(chart)
+
+    payload["charts"] = repaired_charts
+    retained_chart_ids = {chart["chart_id"] for chart in repaired_charts}
+    for section in payload["sections"]:
+        section["chart_refs"] = [
+            chart_ref
+            for chart_ref in section["chart_refs"]
+            if chart_ref in retained_chart_ids
+        ]
+
+    repaired = ReportPlan.model_validate(payload)
+    omitted_chart_ids = {
+        decision.chart_id
+        for decision in build_report_charts(repaired, manifest)
+        if decision.status == "omitted"
+    }
+    if omitted_chart_ids:
+        payload["charts"] = [
+            chart
+            for chart in payload["charts"]
+            if chart["chart_id"] not in omitted_chart_ids
+        ]
+        for section in payload["sections"]:
+            section["chart_refs"] = [
+                chart_ref for chart_ref in section["chart_refs"] if chart_ref not in omitted_chart_ids
+            ]
+        repaired = ReportPlan.model_validate(payload)
+
+    validate_report_plan_evidence(repaired, manifest)
+    return repaired
+
+
 ReportPlanInvoker = Callable[[str, ReportEvidenceManifest], Any]
 
 
@@ -117,5 +231,20 @@ def plan_report(
         invoke_model = llm_plan_report
     raw_plan = invoke_model(query, manifest)
     plan = raw_plan if isinstance(raw_plan, ReportPlan) else ReportPlan.model_validate(raw_plan)
-    validate_report_plan_evidence(plan, manifest)
+    requires_repair = False
+    try:
+        validate_report_plan_evidence(plan, manifest)
+    except ReportPlanEvidenceError:
+        requires_repair = True
+    else:
+        requires_repair = any(
+            decision.status == "omitted"
+            for decision in build_report_charts(plan, manifest)
+        )
+    if requires_repair:
+        plan = _repair_report_plan_evidence(plan, manifest)
+        _LOGGER.warning(
+            "Stabilized report plan evidence/chart bindings: manifest_id=%s",
+            manifest.manifest_id,
+        )
     return plan
