@@ -7,6 +7,7 @@ import math
 import pytest
 from pydantic import ValidationError
 
+from agent import summarizer
 from agent.report_evidence import build_report_evidence_manifest
 from contracts.report_evidence import (
     REPORT_EVIDENCE_MANIFEST_VERSION,
@@ -14,6 +15,7 @@ from contracts.report_evidence import (
     ReportEvidenceKind,
     ReportEvidenceManifest,
 )
+from core.llm import SummaryEnvelope
 from models import QueryContext
 
 
@@ -149,3 +151,42 @@ def test_manifest_rejects_duplicate_refs_and_oversized_serialized_content():
     }
     with pytest.raises(ValidationError, match="unique evidence_ref"):
         ReportEvidenceManifest.model_validate(payload)
+
+
+def test_conceptual_answer_exposes_curated_knowledge_to_report_manifest(
+    monkeypatch,
+):
+    curated_knowledge = (
+        '{"market_structure":"GENEX operates Georgian day-ahead and '
+        'intraday electricity markets."}'
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: curated_knowledge,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: SummaryEnvelope(
+            answer="GENEX is part of the Georgian electricity market model.",
+            claims=["GENEX is part of the Georgian electricity market model."],
+            citations=["domain_knowledge"],
+            confidence=0.9,
+        ),
+    )
+    ctx = QueryContext(
+        query="Explain the Georgian electricity market model.",
+        lang_instruction="Respond in English.",
+    )
+
+    summarizer.answer_conceptual(ctx)
+    manifest = build_report_evidence_manifest(ctx)
+
+    knowledge_item = next(
+        item
+        for item in manifest.items
+        if item.kind is ReportEvidenceKind.KNOWLEDGE
+    )
+    assert ctx.summary_domain_knowledge == curated_knowledge
+    assert knowledge_item.content == curated_knowledge

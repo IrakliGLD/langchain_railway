@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import knowledge as knowledge_module
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -89,3 +91,29 @@ def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch)
     assert captured["processor_kwargs"]["max_section_workers"] == (
         report_worker.REPORT_SECTION_MAX_WORKERS
     )
+
+
+def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch):
+    events = []
+    engine = SimpleNamespace(dispose=lambda: events.append("disposed"))
+    worker = SimpleNamespace(
+        run_until_stopped=lambda _processor, *, stop_event: events.append(
+            "polled"
+        )
+    )
+
+    monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", True)
+    monkeypatch.setattr(
+        knowledge_module,
+        "load_knowledge",
+        lambda: events.append("knowledge_loaded"),
+    )
+    monkeypatch.setattr(
+        report_worker,
+        "build_report_worker_runtime",
+        lambda: (worker, object(), engine),
+    )
+    monkeypatch.setattr(report_worker.signal, "signal", lambda *_args: None)
+
+    assert report_worker.main() == 0
+    assert events == ["knowledge_loaded", "polled", "disposed"]
