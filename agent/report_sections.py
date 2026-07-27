@@ -8,7 +8,8 @@ import math
 import re
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from contextvars import copy_context
 from typing import Any
 
 from pydantic import ValidationError
@@ -201,11 +202,16 @@ def generate_report_sections(
     progress_callback: ProgressCallback | None = None,
     max_workers: int = 4,
     max_repair_attempts: int = 2,
+    failure_drain_timeout_seconds: float = 0.25,
 ) -> list[ReportSectionDraft]:
     if not 1 <= max_workers <= 8:
         raise ValueError("max_workers must be between 1 and 8.")
     if not 1 <= max_repair_attempts <= 3:
         raise ValueError("max_repair_attempts must be between 1 and 3.")
+    if not 0 <= failure_drain_timeout_seconds <= 5:
+        raise ValueError(
+            "failure_drain_timeout_seconds must be between 0 and 5."
+        )
     if generate_section is None:
         from core.llm import llm_write_report_section
 
@@ -281,7 +287,8 @@ def generate_report_sections(
                 word_count=(validation.word_count if validation is not None else None),
             )
             effective_repair = repair_section
-            if effective_repair is None:
+            uses_default_repair = effective_repair is None
+            if uses_default_repair:
                 from core.llm import llm_repair_report_section
 
                 effective_repair = llm_repair_report_section
@@ -291,7 +298,7 @@ def generate_report_sections(
                 attempt = repair_index + 2
                 repair_started_at = time.monotonic()
                 try:
-                    repaired_raw = effective_repair(
+                    repair_args = (
                         query,
                         plan,
                         section,
@@ -299,6 +306,13 @@ def generate_report_sections(
                         current_draft,
                         current_error_codes,
                     )
+                    if uses_default_repair:
+                        repaired_raw = effective_repair(
+                            *repair_args,
+                            attempt_number=attempt,
+                        )
+                    else:
+                        repaired_raw = effective_repair(*repair_args)
                 except ProviderExecutionError as exc:
                     _log_section_diagnostic(
                         event="provider_failed",
@@ -399,24 +413,66 @@ def generate_report_sections(
     pending_sections = [section for section in plan.sections if section.section_id not in completed]
     if pending_sections:
         worker_count = min(max_workers, len(pending_sections))
-        with ThreadPoolExecutor(
+        executor = ThreadPoolExecutor(
             max_workers=worker_count,
             thread_name_prefix="report-section",
-        ) as executor:
-            future_to_section = {executor.submit(generate_one, section): section for section in pending_sections}
-            try:
-                for future in as_completed(future_to_section):
+        )
+        future_to_section = {}
+        try:
+            for section in pending_sections:
+                captured_context = copy_context()
+                future = executor.submit(
+                    captured_context.run,
+                    generate_one,
+                    section,
+                )
+                future_to_section[future] = section
+            for future in as_completed(future_to_section):
+                draft = future.result()
+                completed[draft.section_id] = draft
+                if progress_callback is not None:
+                    progress_callback(
+                        len(completed),
+                        len(plan.sections),
+                        draft,
+                    )
+        except Exception as phase_error:
+            failed_in_future = any(
+                future.done()
+                and not future.cancelled()
+                and future.exception() is phase_error
+                for future in future_to_section
+            )
+            for future in future_to_section:
+                future.cancel()
+            drained, _ = wait(
+                future_to_section,
+                timeout=failure_drain_timeout_seconds,
+            )
+            if failed_in_future:
+                for future in drained:
+                    if future.cancelled() or future.exception() is not None:
+                        continue
                     draft = future.result()
+                    if draft.section_id in completed:
+                        continue
                     completed[draft.section_id] = draft
                     if progress_callback is not None:
-                        progress_callback(
-                            len(completed),
-                            len(plan.sections),
-                            draft,
-                        )
-            except Exception:
-                for future in future_to_section:
-                    future.cancel()
-                raise
+                        try:
+                            progress_callback(
+                                len(completed),
+                                len(plan.sections),
+                                draft,
+                            )
+                        except Exception:
+                            _LOGGER.warning(
+                                "Could not checkpoint a peer section during "
+                                "failure drain: section_id=%s",
+                                draft.section_id,
+                            )
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
     return [completed[section.section_id] for section in plan.sections]

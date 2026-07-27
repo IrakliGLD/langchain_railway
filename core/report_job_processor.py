@@ -38,6 +38,12 @@ from core.report_job_worker import (
     ReportJobFailure,
 )
 from utils.provider_attempts import ProviderExecutionError
+from utils.request_deadline import (
+    RequestDeadlineExceeded,
+    bind_request_execution_scope,
+    cap_request_deadline,
+    current_request_execution_scope,
+)
 
 _LOGGER = logging.getLogger("Enai.ReportProcessor")
 
@@ -53,6 +59,7 @@ _REPORT_FAILURE_RETRYABILITY = {
     "REPORT_ASSEMBLY_INVALID": False,
     "REPORT_CANCELLED": False,
     "REPORT_CHECKPOINT_INVALID": False,
+    "REPORT_DEADLINE_EXCEEDED": True,
     "REPORT_EVIDENCE_INVALID": False,
     "REPORT_EVIDENCE_UNAVAILABLE": False,
     "REPORT_LEASE_LOST": True,
@@ -106,10 +113,20 @@ class ReportJobProcessor:
         section_generator: SectionGenerator = generate_report_sections,
         assembler: Assembler = assemble_report,
         max_section_workers: int = 4,
+        job_timeout_seconds: int = 600,
+        section_failure_drain_timeout_seconds: float = 0.25,
     ) -> None:
         if not 1 <= max_section_workers <= 8:
             raise ValueError(
                 "max_section_workers must be between 1 and 8."
+            )
+        if not 1 <= job_timeout_seconds <= 3600:
+            raise ValueError(
+                "job_timeout_seconds must be between 1 and 3600."
+            )
+        if not 0 <= section_failure_drain_timeout_seconds <= 5:
+            raise ValueError(
+                "section_failure_drain_timeout_seconds must be between 0 and 5."
             )
         self._query_pipeline = query_pipeline
         self._evidence_builder = evidence_builder
@@ -119,6 +136,10 @@ class ReportJobProcessor:
         self._section_generator = section_generator
         self._assembler = assembler
         self._max_section_workers = max_section_workers
+        self._job_timeout_seconds = job_timeout_seconds
+        self._section_failure_drain_timeout_seconds = (
+            section_failure_drain_timeout_seconds
+        )
 
     @staticmethod
     def _validate_query_binding(
@@ -178,15 +199,56 @@ class ReportJobProcessor:
             from agent.pipeline import process_query
 
             pipeline = process_query
+        execution_scope = current_request_execution_scope()
+        request_deadline = (
+            execution_scope.deadline
+            if execution_scope is not None
+            else None
+        )
+        request_id = (
+            execution_scope.request_id
+            if execution_scope is not None
+            else lease.request_id
+        )
         return pipeline(
             lease.query,
             trace_id=str(lease.job_id),
             actor_id=str(lease.actor_user_id),
-            request_id=lease.request_id,
+            request_id=request_id,
+            request_deadline=request_deadline,
             answer_mode="report",
         )
 
     def __call__(
+        self,
+        lease: ReportJobLease,
+        control: ReportJobExecutionControl,
+    ) -> dict[str, Any]:
+        deadline = cap_request_deadline(
+            maximum_seconds=self._job_timeout_seconds,
+            source="report_job",
+        )
+        execution_request_id = (
+            f"{lease.request_id}:attempt:{lease.attempt_count}"
+        )
+        with bind_request_execution_scope(
+            deadline=deadline,
+            request_id=execution_request_id,
+            actor_id=str(lease.actor_user_id),
+        ):
+            try:
+                return self._run_bound_attempt(lease, control)
+            except RequestDeadlineExceeded as exc:
+                _LOGGER.warning(
+                    "Report deadline exceeded: job_id=%s job_attempt=%s "
+                    "stage=%s",
+                    lease.job_id,
+                    lease.attempt_count,
+                    _diagnostic_identifier(exc.stage),
+                )
+                raise _report_failure("REPORT_DEADLINE_EXCEEDED") from exc
+
+    def _run_bound_attempt(
         self,
         lease: ReportJobLease,
         control: ReportJobExecutionControl,
@@ -366,6 +428,9 @@ class ReportJobProcessor:
                     existing_drafts=completed_by_id,
                     progress_callback=persist_section,
                     max_workers=self._max_section_workers,
+                    failure_drain_timeout_seconds=(
+                        self._section_failure_drain_timeout_seconds
+                    ),
                 )
             except ReportSectionGenerationError as exc:
                 _LOGGER.warning(

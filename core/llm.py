@@ -449,7 +449,14 @@ def _wait_before_safe_fallback(stage: str) -> None:
     )
 
 
-def _fallback_to_openai(messages, primary_exc: Exception, *, llm_start: float, label: str):
+def _fallback_to_openai(
+    messages,
+    primary_exc: Exception,
+    *,
+    llm_start: float,
+    label: str,
+    attempt_stage: str | None = None,
+):
     """Use OpenAI after pre-send rejection OR a locally-enforced timeout.
 
     Incident 2026-07-17: gating on ``safe_to_retry`` (REJECTED only) meant a
@@ -460,7 +467,7 @@ def _fallback_to_openai(messages, primary_exc: Exception, *, llm_start: float, l
     no-replay policy is untouched. Genuinely ambiguous transport failures
     still never retry anywhere.
     """
-    stage = _attempt_stage(label)
+    stage = attempt_stage or _attempt_stage(label)
     if not isinstance(primary_exc, ProviderExecutionError) or not primary_exc.safe_to_fallback:
         metrics.log_error()
         raise primary_exc
@@ -484,21 +491,41 @@ def _fallback_to_openai(messages, primary_exc: Exception, *, llm_start: float, l
     return message
 
 
-def _invoke_with_openai_fallback(primary_factory, primary_model_name: str, messages, *, llm_start: float, label: str):
+def _invoke_with_openai_fallback(
+    primary_factory,
+    primary_model_name: str,
+    messages,
+    *,
+    llm_start: float,
+    label: str,
+    attempt_stage: str | None = None,
+):
     """Invoke once, falling back only when the first provider rejected delivery."""
-    stage = _attempt_stage(label)
+    stage = attempt_stage or _attempt_stage(label)
     provider = _provider_from_model_name(primary_model_name)
     try:
         llm = primary_factory()
     except Exception as factory_exc:
         primary_exc = _record_pre_send_failure(provider, stage, factory_exc)
         log.warning("%s failed before provider send: %s", label, type(factory_exc).__name__)
-        return _fallback_to_openai(messages, primary_exc, llm_start=llm_start, label=label)
+        return _fallback_to_openai(
+            messages,
+            primary_exc,
+            llm_start=llm_start,
+            label=label,
+            attempt_stage=stage,
+        )
     try:
         message = _invoke_at_stage(llm, messages, primary_model_name, stage)
     except Exception as primary_exc:
         log.warning("%s failed with primary model: %s", label, primary_exc)
-        return _fallback_to_openai(messages, primary_exc, llm_start=llm_start, label=label)
+        return _fallback_to_openai(
+            messages,
+            primary_exc,
+            llm_start=llm_start,
+            label=label,
+            attempt_stage=stage,
+        )
     _log_usage_for_message(message, model_name=primary_model_name)
     metrics.log_llm_call(time.time() - llm_start)
     return message
@@ -3225,6 +3252,7 @@ def _invoke_report_section_contract(
     system: str,
     prompt: str,
     label: str,
+    attempt_stage: str,
     use_cache: bool = True,
     cache_validator: Callable[[ReportSectionDraft], bool] | None = None,
     return_invalid_payload: bool = False,
@@ -3253,6 +3281,7 @@ def _invoke_report_section_contract(
             [("system", system), ("user", prompt)],
             llm_start=llm_start,
             label=label,
+            attempt_stage=attempt_stage,
         )
         payload = _extract_json_payload(message.content.strip())
         try:
@@ -3336,6 +3365,7 @@ def llm_write_report_section(
         system=system,
         prompt=prompt,
         label="Report section writer",
+        attempt_stage=f"report_section_writer_{section.section_id}",
         cache_validator=cacheable,
         return_invalid_payload=True,
     )
@@ -3348,9 +3378,13 @@ def llm_repair_report_section(
     manifest: ReportEvidenceManifest,
     draft: ReportSectionDraft | dict[str, object],
     error_codes: List[str],
+    *,
+    attempt_number: int = 2,
 ) -> ReportSectionDraft | dict:
     """Repair one rejected section without expanding its evidence or scope."""
 
+    if not 2 <= attempt_number <= 4:
+        raise ValueError("attempt_number must be between 2 and 4.")
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
     validation_rules = _report_section_validation_rules(section)
@@ -3413,6 +3447,10 @@ def llm_repair_report_section(
         system=system,
         prompt=prompt,
         label="Report section repair",
+        attempt_stage=(
+            f"report_section_repair_{section.section_id}"
+            f"_attempt_{attempt_number}"
+        ),
         use_cache=False,
         return_invalid_payload=True,
     )

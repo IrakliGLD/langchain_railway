@@ -105,6 +105,18 @@ REPORT_SECTION_MAX_WORKERS = _read_bounded_int_env(
     1,
     8,
 )
+REPORT_JOB_TIMEOUT_SECONDS = _read_bounded_int_env(
+    "ENAI_REPORT_JOB_TIMEOUT_SECONDS",
+    600,
+    60,
+    3600,
+)
+REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS = _read_bounded_int_env(
+    "ENAI_REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS",
+    250,
+    0,
+    5000,
+)
 
 
 # API Security
