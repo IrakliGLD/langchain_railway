@@ -32,7 +32,7 @@ def test_report_stages_receive_a_longer_floor_than_the_synchronous_path(monkeypa
         "report_section_writer_exec_summary",
         "report_section_repair_exec_summary_attempt_2",
     ):
-        assert llm._effective_provider_timeout_seconds("nvidia", report_stage) == 120.0
+        assert llm._effective_provider_timeout_seconds("nvidia", report_stage) == 240.0
 
 
 def test_synchronous_stages_keep_their_configured_timeout(monkeypatch):
@@ -54,3 +54,13 @@ def test_a_short_job_deadline_still_bounds_the_report_floor(monkeypatch):
         bounded = llm._effective_provider_timeout_seconds("nvidia", "report_planner")
 
     assert 0 < bounded <= 20.0
+
+
+def test_large_report_sections_get_more_than_two_minutes(monkeypatch):
+    """key_findings (453 words, 3 refs) exceeded a 120s ceiling on job acf48571."""
+
+    monkeypatch.setattr(llm, "_configured_provider_timeout_seconds", lambda _p: 45.0)
+
+    assert llm._effective_provider_timeout_seconds(
+        "nvidia", "report_section_writer_key_findings"
+    ) == 240.0

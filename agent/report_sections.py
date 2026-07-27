@@ -57,10 +57,20 @@ def count_section_words(text: str) -> int:
     return len(_WORD_PATTERN.findall(str(text or "")))
 
 
+# The upper tolerance carries the model's systematic overshoot: gpt-oss-20b
+# returned 136 and 141 words against a 109-word target and 159 against 118,
+# repeating the same length across every repair (jobs c7823cc9 / acf48571).
+# A +20% ceiling is simply unreachable for it, so the repair loop burned
+# provider calls it could never satisfy. The lower bound stays tight — a short
+# section is a content failure, an overlong one is a formatting one.
+_SECTION_WORD_FLOOR_RATIO = 0.9
+_SECTION_WORD_CEILING_RATIO = 1.35
+
+
 def _section_word_bounds(section: ReportSectionSpec) -> tuple[int, int]:
     return (
-        math.floor(section.target_words * 0.9),
-        math.ceil(section.target_words * 1.2),
+        math.floor(section.target_words * _SECTION_WORD_FLOOR_RATIO),
+        math.ceil(section.target_words * _SECTION_WORD_CEILING_RATIO),
     )
 
 
