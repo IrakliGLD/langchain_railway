@@ -263,6 +263,23 @@ def _is_temporal_claim(claim: _GroundingFact) -> bool:
     return _claim_is_year_reference(claim)
 
 
+def _temporal_evidence_facts(
+    facts: set[_GroundingFact] | frozenset[_GroundingFact],
+) -> set[_GroundingFact]:
+    """Keep only typed period facts.
+
+    A year-like integer is a temporal *claim*, but an evidence cell holding one
+    is still a magnitude — capacity of 2000 must never ground a reference to the
+    year 2000.
+    """
+
+    return {
+        fact
+        for fact in facts
+        if isinstance(fact, (_PeriodFact, _YearFact))
+    }
+
+
 def _grounding_claim_is_supported(
     claim: _GroundingFact,
     evidence_facts: set[_GroundingFact],
@@ -435,7 +452,7 @@ def _verified_derived_fact(
     claim: ReportDerivedClaim,
     paragraph_refs: set[str],
     item_by_ref: Mapping[str, ReportEvidenceItem],
-) -> _NumericFact | None:
+) -> tuple[_NumericFact, set[_GroundingFact]] | None:
     operands = [
         _resolve_operand(operand, paragraph_refs, item_by_ref)
         for operand in claim.operands
@@ -459,7 +476,20 @@ def _verified_derived_fact(
             return None
     except DecimalException:
         return None
-    return displayed
+    # A verified derivation may name the periods of the rows it spans — that is
+    # how a change between two months is normally written. Magnitudes from those
+    # rows still need their own coordinate-bound claim.
+    operand_period_facts: set[_GroundingFact] = set()
+    for operand in claim.operands:
+        item = item_by_ref.get(operand.evidence_ref)
+        if item is None:
+            continue
+        operand_period_facts.update(
+            _temporal_evidence_facts(
+                _table_row_grounding_facts(item, operand.row_index)
+            )
+        )
+    return displayed, operand_period_facts
 
 
 def _derived_claim_appears(
@@ -587,8 +617,10 @@ def validate_paragraph_grounding(
         if not matching_sentences:
             errors.append("DERIVED_CLAIM_NOT_USED")
             continue
+        displayed, operand_period_facts = derived_fact
         for index in matching_sentences:
-            sentence_facts[index].add(derived_fact)
+            sentence_facts[index].add(displayed)
+            sentence_facts[index].update(operand_period_facts)
 
     for sentence, supported_facts in zip(
         sentences,
@@ -597,7 +629,7 @@ def validate_paragraph_grounding(
     ):
         claims = _grounding_facts_from_text(sentence)
         if claims and all(_is_temporal_claim(claim) for claim in claims):
-            supported_facts.update(table_facts)
+            supported_facts.update(_temporal_evidence_facts(table_facts))
         if any(
             not _grounding_claim_is_supported(claim, supported_facts)
             for claim in claims

@@ -1519,3 +1519,88 @@ def test_temporal_escape_does_not_admit_a_magnitude_without_a_claim():
         _manifest(),
     )
     assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_derived_claim_may_name_the_periods_of_the_rows_it_spans():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price rose 8.333% between 2026-01 and 2026-02. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percent_change",
+            display_value="8.333%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_derived_claim_does_not_ground_magnitudes_from_its_operand_rows():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price rose 8.333% from a 120.0 GEL/MWh base. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percent_change",
+            display_value="8.333%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_year_like_evidence_magnitude_does_not_ground_a_year_reference():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest_payload = _manifest().model_dump(mode="json")
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "price", "capacity"]
+    table["rows"] = [
+        {"period": "2026-01", "price": 120.0, "capacity": 2000},
+        {"period": "2026-02", "price": 130.0, "capacity": 2000},
+    ]
+    table["unit_by_column"] = {"price": "GEL/MWh", "capacity": "MW"}
+    manifest = ReportEvidenceManifest.model_validate(manifest_payload)
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed fleet capacity reached 2000 overall. "
+            + _words(section.target_words - 6)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
