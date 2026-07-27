@@ -12,7 +12,10 @@ from typing import Any
 from pydantic import ValidationError
 
 from agent.report_assembly import ReportAssemblyError, assemble_report
-from agent.report_charts import build_report_charts
+from agent.report_charts import (
+    build_report_charts,
+    demote_unbuildable_required_charts,
+)
 from agent.report_evaluation import evaluate_report_plan
 from agent.report_evidence import (
     build_report_evidence_manifest,
@@ -310,6 +313,10 @@ class ReportJobProcessor:
                 )
                 validate_report_plan_semantics(plan, planning_context)
                 chart_decisions = self._chart_builder(plan, manifest)
+                plan, chart_decisions = demote_unbuildable_required_charts(
+                    plan,
+                    chart_decisions,
+                )
                 evaluation = self._evaluator(
                     plan,
                     manifest,

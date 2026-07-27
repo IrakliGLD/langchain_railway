@@ -10,6 +10,7 @@ from contracts.report import ReportPlan
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_evidence import ReportEvidenceManifest
 from contracts.report_result import (
+    ReportChartOmission,
     ReportCitation,
     ReportResult,
     ReportResultSection,
@@ -113,6 +114,16 @@ def assemble_report(
         for decision in chart_decisions
         if decision.status == "built" and decision.artifact is not None
     ]
+    chart_title_by_id = {chart.chart_id: chart.title for chart in plan.charts}
+    omitted_charts = [
+        ReportChartOmission(
+            chart_id=decision.chart_id,
+            title=chart_title_by_id[decision.chart_id],
+            reason_code=decision.reason_code or "REPORT_CHART_OMITTED",
+        )
+        for decision in chart_decisions
+        if decision.status != "built"
+    ]
     built_chart_ids = {chart.chart_id for chart in charts}
     result_sections = [
         section.model_copy(
@@ -152,6 +163,7 @@ def assemble_report(
         content_markdown="\n\n".join(markdown_parts),
         sections=result_sections,
         charts=charts,
+        omitted_charts=omitted_charts,
         citations=citations,
         word_count=total_words,
     )

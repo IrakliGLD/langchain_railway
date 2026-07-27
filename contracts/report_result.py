@@ -44,6 +44,14 @@ class ReportCitation(_StrictResultModel):
     provenance_refs: List[str] = Field(default_factory=list, max_length=32)
 
 
+class ReportChartOmission(_StrictResultModel):
+    """A planned chart the deterministic builder could not produce."""
+
+    chart_id: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    title: str = Field(min_length=1, max_length=160)
+    reason_code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
 class ReportResult(_StrictResultModel):
     contract_version: Literal["report-result-v1"]
     intent: ReportIntent = ReportIntent.GENERAL
@@ -54,6 +62,10 @@ class ReportResult(_StrictResultModel):
     content_markdown: str = Field(min_length=100, max_length=500_000)
     sections: List[ReportResultSection] = Field(min_length=5, max_length=8)
     charts: List[ReportChartArtifact] = Field(default_factory=list, max_length=3)
+    omitted_charts: List[ReportChartOmission] = Field(
+        default_factory=list,
+        max_length=3,
+    )
     citations: List[ReportCitation] = Field(min_length=1, max_length=32)
     word_count: int = Field(
         ge=STANDARD_REPORT_RESULT_MIN_WORDS,

@@ -149,3 +149,43 @@ def test_assembly_accepts_sum_of_individually_valid_section_minimums():
     )
 
     assert result.word_count == 808
+
+
+def test_assembly_discloses_omitted_charts_with_their_reason_code():
+    from contracts.report_charts import ReportChartBuildDecision
+
+    payload = _plan_payload()
+    payload["charts"][0]["required"] = False
+    plan = ReportPlan.model_validate(payload)
+    drafts = _drafts(plan)
+    decisions = [
+        ReportChartBuildDecision(
+            chart_id=chart.chart_id,
+            required=False,
+            status="omitted",
+            reason_code="REPORT_CHART_TIME_AXIS_REQUIRED",
+            artifact=None,
+        )
+        for chart in plan.charts
+    ]
+
+    result = assemble_report(plan, _manifest(), drafts, decisions)
+
+    assert [omission.chart_id for omission in result.omitted_charts] == [
+        chart.chart_id for chart in plan.charts
+    ]
+    assert result.omitted_charts[0].reason_code == "REPORT_CHART_TIME_AXIS_REQUIRED"
+    assert result.omitted_charts[0].title == "Observed electricity price"
+    assert result.charts == []
+
+
+def test_assembly_reports_no_omissions_when_every_chart_builds():
+    plan = ReportPlan.model_validate(_plan_payload())
+    result = assemble_report(
+        plan,
+        _manifest(),
+        _drafts(plan),
+        build_report_charts(plan, _manifest()),
+    )
+
+    assert result.omitted_charts == []

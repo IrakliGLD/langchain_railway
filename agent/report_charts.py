@@ -90,6 +90,39 @@ def chart_column_roles(item) -> dict[str, list[str]]:
     }
 
 
+def demote_unbuildable_required_charts(
+    plan: ReportPlan,
+    chart_decisions: list[ReportChartBuildDecision],
+) -> tuple[ReportPlan, list[ReportChartBuildDecision]]:
+    """Keep an unbuildable chart request visible without failing the report.
+
+    A chart marked required may be exactly what the request asked for, so it is
+    neither pruned nor allowed to kill the job: the request stays in the plan,
+    the omission stays in the decisions, and assembly discloses it. `required`
+    never affects buildability, so this needs no second build pass.
+    """
+
+    unbuildable = {
+        decision.chart_id
+        for decision in chart_decisions
+        if decision.required and decision.status != "built"
+    }
+    if not unbuildable:
+        return plan, chart_decisions
+
+    payload = plan.model_dump(mode="json")
+    for chart in payload["charts"]:
+        if chart["chart_id"] in unbuildable:
+            chart["required"] = False
+    demoted_decisions = [
+        decision.model_copy(update={"required": False})
+        if decision.chart_id in unbuildable
+        else decision
+        for decision in chart_decisions
+    ]
+    return ReportPlan.model_validate(payload), demoted_decisions
+
+
 def _omitted(chart, code: str) -> ReportChartBuildDecision:
     return ReportChartBuildDecision(
         chart_id=chart.chart_id,

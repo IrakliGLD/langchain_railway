@@ -129,3 +129,41 @@ def test_chart_column_roles_expose_the_axis_types_the_builder_uses():
     assert roles["temporal"] == ["period"]
     assert roles["numeric"] == ["price"]
     assert roles["categorical"] == []
+
+
+def test_demotion_clears_required_on_a_chart_that_cannot_build():
+    from agent.report_charts import demote_unbuildable_required_charts
+
+    payload = _plan_payload()
+    payload["charts"][0]["purpose"] = "relationship"
+    plan = ReportPlan.model_validate(payload)
+    decisions = build_report_charts(plan, _manifest())
+    assert [decision.status for decision in decisions] == ["omitted"]
+    assert [decision.required for decision in decisions] == [True]
+
+    demoted_plan, demoted_decisions = demote_unbuildable_required_charts(
+        plan,
+        decisions,
+    )
+
+    assert [chart.required for chart in demoted_plan.charts] == [False]
+    assert [decision.required for decision in demoted_decisions] == [False]
+    assert [decision.reason_code for decision in demoted_decisions] == [
+        "REPORT_CHART_EXPLICIT_AXES_REQUIRED"
+    ]
+
+
+def test_demotion_leaves_a_buildable_required_chart_untouched():
+    from agent.report_charts import demote_unbuildable_required_charts
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    decisions = build_report_charts(plan, _manifest())
+    assert [decision.status for decision in decisions] == ["built"]
+
+    demoted_plan, demoted_decisions = demote_unbuildable_required_charts(
+        plan,
+        decisions,
+    )
+
+    assert demoted_plan is plan
+    assert demoted_decisions is decisions

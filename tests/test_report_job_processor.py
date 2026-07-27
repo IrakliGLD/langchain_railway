@@ -538,3 +538,42 @@ def test_section_failure_retryability_distinguishes_validation_from_provider(
 
     assert exc_info.value.error_code == expected_code
     assert exc_info.value.retryable is expected_retryable
+
+
+def test_unbuildable_required_chart_is_demoted_instead_of_killing_the_job():
+    def planner_with_unbuildable_required_chart(_query, _manifest_value, **_kwargs):
+        payload = _plan_payload()
+        payload["charts"][0]["purpose"] = "relationship"
+        return ReportPlan.model_validate(payload)
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=planner_with_unbuildable_required_chart,
+        section_generator=lambda query, plan, manifest, **kwargs: (
+            generate_report_sections(
+                query,
+                plan,
+                manifest,
+                existing_drafts=kwargs["existing_drafts"],
+                generate_section=lambda _q, _p, section, _m: _draft(section),
+                progress_callback=kwargs["progress_callback"],
+                max_workers=kwargs["max_workers"],
+            )
+        ),
+        max_section_workers=5,
+    )
+
+    result = processor(_lease(), _Control())
+
+    assert result["charts"] == []
+    assert result["omitted_charts"] == [
+        {
+            "chart_id": "price_trend",
+            "title": "Observed electricity price",
+            "reason_code": "REPORT_CHART_EXPLICIT_AXES_REQUIRED",
+        }
+    ]
+    assert [section["chart_refs"] for section in result["sections"]] == [
+        [] for _ in result["sections"]
+    ]
