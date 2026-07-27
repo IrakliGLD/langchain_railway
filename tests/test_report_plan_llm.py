@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from types import SimpleNamespace
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -72,3 +73,30 @@ def test_report_planner_cache_hit_still_validates_the_strict_plan(monkeypatch):
     plan = llm.llm_plan_report("Explain the price trend.", _manifest())
 
     assert plan.evidence_manifest_id == _manifest().manifest_id
+
+
+def test_report_planner_normalizes_section_word_allocation_before_validation(
+    monkeypatch,
+):
+    payload = deepcopy(_plan_payload())
+    payload["sections"][-1]["target_words"] -= 7
+    captured = {}
+
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
+    monkeypatch.setattr(
+        llm,
+        "_cache_set",
+        lambda _key, value, _token: captured.update(value=value),
+    )
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: SimpleNamespace(content=json.dumps(payload)),
+    )
+
+    plan = llm.llm_plan_report("Explain the price trend.", _manifest())
+
+    assert sum(section.target_words for section in plan.sections) == 900
+    assert plan.target_words == 900
+    assert ReportPlan.model_validate_json(captured["value"]) == plan

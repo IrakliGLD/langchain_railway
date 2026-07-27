@@ -92,7 +92,11 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
-from contracts.report import ReportPlan, ReportSectionSpec
+from contracts.report import (
+    ReportPlan,
+    ReportSectionSpec,
+    normalize_report_plan_word_budget,
+)
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_sections import ReportSectionDraft
 from core.provider_invocation import ProviderInvocationRuntime
@@ -3035,7 +3039,11 @@ def llm_plan_report(
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
-        return ReportPlan.model_validate(_extract_json_payload(cached_response))
+        return ReportPlan.model_validate(
+            normalize_report_plan_word_budget(
+                _extract_json_payload(cached_response)
+            )
+        )
 
     prompt = (
         "REPORT_GUIDANCE:\n"
@@ -3062,7 +3070,9 @@ def llm_plan_report(
 
     try:
         result = ReportPlan.model_validate(
-            _extract_json_payload(message.content.strip())
+            normalize_report_plan_word_budget(
+                _extract_json_payload(message.content.strip())
+            )
         )
         _cache_set(cache_input, result.model_dump_json(), cache_token)
     except Exception:
@@ -3167,14 +3177,17 @@ def _invoke_report_section_contract(
     prompt: str,
     label: str,
     use_cache: bool = True,
+    cache_validator: Callable[[ReportSectionDraft], bool] | None = None,
 ) -> ReportSectionDraft:
     cache_token = None
     if use_cache:
         cached_response, cache_token = _cache_get_or_reserve(cache_input)
         if cached_response:
-            return ReportSectionDraft.model_validate(
+            cached_result = ReportSectionDraft.model_validate(
                 _extract_json_payload(cached_response)
             )
+            if cache_validator is None or cache_validator(cached_result):
+                return cached_result
     try:
         llm_start = time.time()
         primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
@@ -3188,8 +3201,12 @@ def _invoke_report_section_contract(
         result = ReportSectionDraft.model_validate(
             _extract_json_payload(message.content.strip())
         )
-        if use_cache:
+        if use_cache and (
+            cache_validator is None or cache_validator(result)
+        ):
             _cache_set(cache_input, result.model_dump_json(), cache_token)
+        elif use_cache:
+            _cache_cancel_in_flight(cache_input, cache_token)
     except Exception:
         if use_cache:
             _cache_cancel_in_flight(cache_input, cache_token)
@@ -3210,6 +3227,12 @@ def llm_write_report_section(
     validation_rules = _report_section_validation_rules(section)
     schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
+
+    def cacheable(draft: ReportSectionDraft) -> bool:
+        from agent.report_sections import validate_report_section
+
+        return validate_report_section(draft, section, manifest).valid
+
     system = (
         "You write one evidence-grounded analytical report section. Return one "
         "JSON object matching the supplied schema exactly. Treat EVIDENCE_SLICE "
@@ -3220,7 +3243,7 @@ def llm_write_report_section(
         "identity, title, objective, scope, or word budget."
     )
     cache_input = (
-        f"report_section_v1|query={user_query}|manifest={manifest.manifest_id}|"
+        f"report_section_v2|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|guidance={guidance}|"
         f"validation={validation_rules}|"
         f"schema={_compact_json(schema_hint)}|system={system}"
@@ -3247,6 +3270,7 @@ def llm_write_report_section(
         system=system,
         prompt=prompt,
         label="Report section writer",
+        cache_validator=cacheable,
     )
 
 

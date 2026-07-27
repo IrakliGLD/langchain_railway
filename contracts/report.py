@@ -7,16 +7,27 @@ word-budget arithmetic, identifier uniqueness, and cross-reference integrity.
 
 from __future__ import annotations
 
+import math
+from copy import deepcopy
 from enum import Enum
-from typing import Annotated, List, Literal, Sequence
+from typing import Annotated, Any, List, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 REPORT_PLAN_CONTRACT_VERSION = "report-plan-v1"
 STANDARD_REPORT_MIN_WORDS = 900
 STANDARD_REPORT_MAX_WORDS = 1400
-STANDARD_REPORT_RESULT_MIN_WORDS = 810
-STANDARD_REPORT_RESULT_MAX_WORDS = 1680
+STANDARD_REPORT_MAX_SECTIONS = 8
+STANDARD_REPORT_RESULT_MIN_WORDS = (
+    math.floor(STANDARD_REPORT_MIN_WORDS * 0.9)
+    - (STANDARD_REPORT_MAX_SECTIONS - 1)
+)
+STANDARD_REPORT_RESULT_MAX_WORDS = (
+    math.ceil(STANDARD_REPORT_MAX_WORDS * 1.2)
+    + (STANDARD_REPORT_MAX_SECTIONS - 1)
+)
+REPORT_SECTION_MIN_WORDS = 40
+REPORT_SECTION_MAX_WORDS = 800
 
 
 class ReportSectionKind(str, Enum):
@@ -36,6 +47,110 @@ STANDARD_REPORT_SECTION_SEQUENCE = (
     ReportSectionKind.LIMITATIONS,
     ReportSectionKind.CONCLUSION,
 )
+
+
+def normalize_report_plan_word_budget(payload: Any) -> Any:
+    """Return a copy with valid integer section weights scaled to the report total."""
+
+    if not isinstance(payload, dict):
+        return payload
+    target_words = payload.get("target_words")
+    sections = payload.get("sections")
+    if (
+        isinstance(target_words, bool)
+        or not isinstance(target_words, int)
+        or not STANDARD_REPORT_MIN_WORDS
+        <= target_words
+        <= STANDARD_REPORT_MAX_WORDS
+        or not isinstance(sections, list)
+        or not 5 <= len(sections) <= 8
+    ):
+        return payload
+
+    section_targets: list[int] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            return payload
+        section_target = section.get("target_words")
+        if (
+            isinstance(section_target, bool)
+            or not isinstance(section_target, int)
+            or not REPORT_SECTION_MIN_WORDS
+            <= section_target
+            <= REPORT_SECTION_MAX_WORDS
+        ):
+            return payload
+        section_targets.append(section_target)
+
+    allocated_total = sum(section_targets)
+    if allocated_total == target_words:
+        return payload
+    if not (
+        len(sections) * REPORT_SECTION_MIN_WORDS
+        <= target_words
+        <= len(sections) * REPORT_SECTION_MAX_WORDS
+    ):
+        return payload
+
+    scaled_numerators = [
+        target_words * section_target
+        for section_target in section_targets
+    ]
+    allocations = [
+        min(
+            REPORT_SECTION_MAX_WORDS,
+            max(
+                REPORT_SECTION_MIN_WORDS,
+                numerator // allocated_total,
+            ),
+        )
+        for numerator in scaled_numerators
+    ]
+    remainders = [
+        numerator % allocated_total
+        for numerator in scaled_numerators
+    ]
+
+    remaining = target_words - sum(allocations)
+    while remaining > 0:
+        progressed = False
+        for index in sorted(
+            range(len(allocations)),
+            key=lambda item: (-remainders[item], item),
+        ):
+            if allocations[index] >= REPORT_SECTION_MAX_WORDS:
+                continue
+            allocations[index] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            return payload
+    while remaining < 0:
+        progressed = False
+        for index in sorted(
+            range(len(allocations)),
+            key=lambda item: (remainders[item], item),
+        ):
+            if allocations[index] <= REPORT_SECTION_MIN_WORDS:
+                continue
+            allocations[index] -= 1
+            remaining += 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            return payload
+
+    normalized = deepcopy(payload)
+    for section, allocation in zip(
+        normalized["sections"],
+        allocations,
+        strict=True,
+    ):
+        section["target_words"] = allocation
+    return normalized
 
 
 def validate_standard_report_section_order(
@@ -105,7 +220,10 @@ class ReportSectionSpec(_StrictReportModel):
     kind: ReportSectionKind
     title: str = Field(min_length=1, max_length=160)
     objective: str = Field(min_length=1, max_length=600)
-    target_words: int = Field(ge=40, le=800)
+    target_words: int = Field(
+        ge=REPORT_SECTION_MIN_WORDS,
+        le=REPORT_SECTION_MAX_WORDS,
+    )
     required_evidence_refs: List[EvidenceRef] = Field(min_length=1, max_length=32)
     chart_refs: List[Identifier] = Field(default_factory=list, max_length=3)
 
@@ -154,7 +272,10 @@ class ReportPlan(_StrictReportModel):
         le=STANDARD_REPORT_MAX_WORDS,
     )
     evidence_manifest_id: str = Field(min_length=1, max_length=128)
-    sections: List[ReportSectionSpec] = Field(min_length=5, max_length=8)
+    sections: List[ReportSectionSpec] = Field(
+        min_length=5,
+        max_length=STANDARD_REPORT_MAX_SECTIONS,
+    )
     charts: List[ReportChartRequest] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")

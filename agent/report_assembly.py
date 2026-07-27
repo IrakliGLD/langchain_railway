@@ -69,11 +69,15 @@ def assemble_report(
             ]
         )
 
-    if not (
-        math.floor(plan.target_words * 0.9)
-        <= total_words
-        <= math.ceil(plan.target_words * 1.2)
-    ):
+    minimum_report_words = sum(
+        math.floor(section.target_words * 0.9)
+        for section in plan.sections
+    )
+    maximum_report_words = sum(
+        math.ceil(section.target_words * 1.2)
+        for section in plan.sections
+    )
+    if not minimum_report_words <= total_words <= maximum_report_words:
         raise ReportAssemblyError("Final report word count is outside the plan tolerance.")
 
     decision_by_id = {

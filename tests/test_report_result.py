@@ -67,7 +67,7 @@ def test_report_result_is_bounded_to_the_standard_report_tolerance():
     payload["sections"][0]["word_count"] -= 100
     payload["word_count"] -= 100
 
-    with pytest.raises(ValidationError, match="greater than or equal to 810"):
+    with pytest.raises(ValidationError, match="greater than or equal to 803"):
         ReportResult.model_validate(payload)
 
 

@@ -74,3 +74,35 @@ def test_assembly_rejects_missing_sections_and_required_chart_omissions():
             _drafts(invalid_chart_plan),
             build_report_charts(invalid_chart_plan, _manifest()),
         )
+
+
+def test_assembly_accepts_sum_of_individually_valid_section_minimums():
+    payload = deepcopy(_plan_payload())
+    target_words = [185, 185, 185, 185, 160]
+    for section_payload, target in zip(
+        payload["sections"],
+        target_words,
+        strict=True,
+    ):
+        section_payload["target_words"] = target
+    plan = ReportPlan.model_validate(payload)
+    drafts = []
+    for section in plan.sections:
+        minimum_words = int(section.target_words * 0.9)
+        drafts.append(
+            ReportSectionDraft.model_validate(
+                _draft(
+                    section,
+                    text=" ".join(["Evidence"] * minimum_words),
+                )
+            )
+        )
+
+    result = assemble_report(
+        plan,
+        _manifest(),
+        drafts,
+        build_report_charts(plan, _manifest()),
+    )
+
+    assert result.word_count == 808

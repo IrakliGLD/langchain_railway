@@ -173,3 +173,108 @@ def test_section_writer_cancels_cache_reservation_on_provider_failure(
 
     assert cancelled["token"] == "writer-token"
     assert section.section_id in cancelled["key"]
+
+
+def test_section_writer_does_not_cache_semantically_invalid_candidate(
+    monkeypatch,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[0]
+    cancelled = {}
+
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "writer-token"),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_set",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("invalid report sections must not be cached")
+        ),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_cancel_in_flight",
+        lambda key, token: cancelled.update(key=key, token=token),
+    )
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            content=json.dumps(
+                {
+                    **_draft(section),
+                    "paragraphs": [
+                        {
+                            "text": "This candidate is too short.",
+                            "evidence_refs": section.required_evidence_refs,
+                        }
+                    ],
+                }
+            )
+        ),
+    )
+
+    draft = llm.llm_write_report_section(
+        "Explain the price trend.",
+        plan,
+        section,
+        _manifest(),
+    )
+
+    assert draft.paragraphs[0].text == "This candidate is too short."
+    assert cancelled["token"] == "writer-token"
+
+
+def test_section_writer_bypasses_semantically_invalid_cache_entry(
+    monkeypatch,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[0]
+    invalid_cached = {
+        **_draft(section),
+        "paragraphs": [
+            {
+                "text": "Cached but too short.",
+                "evidence_refs": section.required_evidence_refs,
+            }
+        ],
+    }
+    provider_calls = []
+    cached = {}
+
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (json.dumps(invalid_cached), None),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_set",
+        lambda key, value, token: cached.update(
+            key=key,
+            value=value,
+            token=token,
+        ),
+    )
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+
+    def invoke(*_args, **_kwargs):
+        provider_calls.append(True)
+        return SimpleNamespace(content=json.dumps(_draft(section)))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    draft = llm.llm_write_report_section(
+        "Explain the price trend.",
+        plan,
+        section,
+        _manifest(),
+    )
+
+    assert provider_calls == [True]
+    assert draft.paragraphs[0].text != "Cached but too short."
+    assert cached["token"] is None

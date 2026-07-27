@@ -7,7 +7,11 @@ from collections.abc import Callable
 from typing import Any
 
 from agent.report_charts import build_report_charts
-from contracts.report import ReportPlan, ReportSectionKind
+from contracts.report import (
+    ReportPlan,
+    ReportSectionKind,
+    normalize_report_plan_word_budget,
+)
 from contracts.report_evidence import (
     ReportEvidenceKind,
     ReportEvidenceManifest,
@@ -150,7 +154,7 @@ def _repair_report_plan_evidence(
             if not limitation_set.intersection(refs):
                 refs.append(limitation_refs[0])
         elif not substantive_set.intersection(refs):
-            refs.extend(ref for ref in substantive_refs[:8] if ref not in refs)
+            refs.append(substantive_refs[0])
         section["required_evidence_refs"] = refs[:32]
 
     repaired_charts: list[dict[str, Any]] = []
@@ -230,7 +234,13 @@ def plan_report(
 
         invoke_model = llm_plan_report
     raw_plan = invoke_model(query, manifest)
-    plan = raw_plan if isinstance(raw_plan, ReportPlan) else ReportPlan.model_validate(raw_plan)
+    plan = (
+        raw_plan
+        if isinstance(raw_plan, ReportPlan)
+        else ReportPlan.model_validate(
+            normalize_report_plan_word_budget(raw_plan)
+        )
+    )
     requires_repair = False
     try:
         validate_report_plan_evidence(plan, manifest)
