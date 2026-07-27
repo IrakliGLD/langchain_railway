@@ -33,7 +33,10 @@ from agent.report_sections import (
 )
 from contracts.report import ReportPlan
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
-from contracts.report_generation import ReportGenerationCheckpoint
+from contracts.report_generation import (
+    ReportCheckpointTooLargeError,
+    ReportGenerationCheckpoint,
+)
 from contracts.report_jobs import ReportJobLease, ReportJobPhase
 from contracts.report_sections import ReportSectionDraft
 from core.report_job_worker import (
@@ -62,6 +65,7 @@ _REPORT_FAILURE_RETRYABILITY = {
     "REPORT_ASSEMBLY_INVALID": False,
     "REPORT_CANCELLED": False,
     "REPORT_CHECKPOINT_INVALID": False,
+    "REPORT_CHECKPOINT_TOO_LARGE": False,
     "REPORT_DEADLINE_EXCEEDED": True,
     "REPORT_EVIDENCE_INVALID": False,
     "REPORT_EVIDENCE_UNAVAILABLE": False,
@@ -162,6 +166,22 @@ class ReportJobProcessor:
             ],
         )
         return checkpoint.model_dump(mode="json")
+
+    @classmethod
+    def _safe_checkpoint_payload(
+        cls,
+        manifest: ReportEvidenceManifest,
+        plan: ReportPlan,
+        completed_by_id: dict[str, ReportSectionDraft],
+    ) -> dict[str, Any]:
+        """Build a checkpoint, separating "too big" from "structurally wrong"."""
+
+        try:
+            return cls._checkpoint_payload(manifest, plan, completed_by_id)
+        except ReportCheckpointTooLargeError as exc:
+            raise _report_failure("REPORT_CHECKPOINT_TOO_LARGE") from exc
+        except (ValidationError, ValueError) as exc:
+            raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
 
     @staticmethod
     def _heartbeat(
@@ -341,7 +361,7 @@ class ReportJobProcessor:
                 raise _report_failure("REPORT_PLAN_NOT_READY")
             completed_by_id: dict[str, ReportSectionDraft] = {}
             progress = max(progress, 25)
-            checkpoint_payload = self._checkpoint_payload(
+            checkpoint_payload = self._safe_checkpoint_payload(
                 manifest,
                 plan,
                 completed_by_id,
@@ -391,7 +411,7 @@ class ReportJobProcessor:
                 25 + math.floor(60 * len(completed_by_id) / total_sections),
             )
             if checkpoint is not None:
-                checkpoint_payload = self._checkpoint_payload(
+                checkpoint_payload = self._safe_checkpoint_payload(
                     manifest,
                     plan,
                     completed_by_id,
@@ -418,7 +438,7 @@ class ReportJobProcessor:
                     control,
                     phase=ReportJobPhase.GENERATING_SECTIONS,
                     progress_percent=progress,
-                    checkpoint=self._checkpoint_payload(
+                    checkpoint=self._safe_checkpoint_payload(
                         manifest,
                         plan,
                         completed_by_id,
@@ -469,7 +489,7 @@ class ReportJobProcessor:
             control,
             phase=ReportJobPhase.ASSEMBLING,
             progress_percent=progress,
-            checkpoint=self._checkpoint_payload(
+            checkpoint=self._safe_checkpoint_payload(
                 manifest,
                 plan,
                 {draft.section_id: draft for draft in drafts},

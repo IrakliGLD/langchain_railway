@@ -618,3 +618,41 @@ def test_resume_demotes_a_required_chart_left_by_an_older_checkpoint():
     assert [omission["chart_id"] for omission in result["omitted_charts"]] == [
         "price_trend"
     ]
+
+
+def test_oversized_checkpoint_is_reported_as_its_own_failure(monkeypatch):
+    from contracts.report_generation import ReportCheckpointTooLargeError
+
+    def _oversized(*_args, **_kwargs):
+        raise ReportCheckpointTooLargeError(
+            "Report generation checkpoint exceeds 1 MiB."
+        )
+
+    monkeypatch.setattr(
+        ReportJobProcessor,
+        "_checkpoint_payload",
+        staticmethod(_oversized),
+    )
+
+    with pytest.raises(ReportJobFailure) as excinfo:
+        _processor()(_lease(), _Control())
+
+    assert excinfo.value.error_code == "REPORT_CHECKPOINT_TOO_LARGE"
+    assert excinfo.value.retryable is False
+
+
+def test_invalid_checkpoint_identity_is_not_reported_as_oversized(monkeypatch):
+    def _identity_failure(*_args, **_kwargs):
+        raise ValueError("Report checkpoint plan and manifest identity must match.")
+
+    monkeypatch.setattr(
+        ReportJobProcessor,
+        "_checkpoint_payload",
+        staticmethod(_identity_failure),
+    )
+
+    with pytest.raises(ReportJobFailure) as excinfo:
+        _processor()(_lease(), _Control())
+
+    assert excinfo.value.error_code == "REPORT_CHECKPOINT_INVALID"
+    assert excinfo.value.retryable is False

@@ -13,6 +13,14 @@ from contracts.report_sections import ReportSectionDraft
 REPORT_GENERATION_CHECKPOINT_MAX_BYTES = 1_048_576
 
 
+class ReportCheckpointTooLargeError(ValueError):
+    """The checkpoint is well formed but exceeds the durable payload ceiling.
+
+    Distinct from the other checkpoint failures so callers can tell a payload
+    that is too big from one that is structurally wrong.
+    """
+
+
 class ReportGenerationCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -47,5 +55,7 @@ class ReportGenerationCheckpoint(BaseModel):
         if len(self.model_dump_json().encode("utf-8")) > (
             REPORT_GENERATION_CHECKPOINT_MAX_BYTES
         ):
-            raise ValueError("Report generation checkpoint exceeds 1 MiB.")
+            raise ReportCheckpointTooLargeError(
+                "Report generation checkpoint exceeds 1 MiB."
+            )
         return self
