@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -33,17 +34,94 @@ _RATIO_COLUMN_NAMES = {
 
 
 class ReportSectionGenerationError(RuntimeError):
-    def __init__(self, section_id: str, error_codes: list[str]) -> None:
+    def __init__(
+        self,
+        section_id: str,
+        error_codes: list[str],
+        *,
+        provider: str | None = None,
+        provider_stage: str | None = None,
+        provider_disposition: str | None = None,
+    ) -> None:
         super().__init__(
             f"Report section {section_id} failed validation: "
             + ", ".join(error_codes)
         )
         self.section_id = section_id
         self.error_codes = list(error_codes)
+        self.provider = provider
+        self.provider_stage = provider_stage
+        self.provider_disposition = provider_disposition
 
 
 def count_section_words(text: str) -> int:
     return len(_WORD_PATTERN.findall(str(text or "")))
+
+
+def _section_word_bounds(section: ReportSectionSpec) -> tuple[int, int]:
+    return (
+        math.floor(section.target_words * 0.9),
+        math.ceil(section.target_words * 1.2),
+    )
+
+
+def _diagnostic_identifier(value: str | None) -> str:
+    candidate = str(value or "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", candidate):
+        return candidate
+    return "unknown"
+
+
+def _diagnostic_error_codes(error_codes: list[str]) -> list[str]:
+    return [
+        code
+        for code in error_codes[:16]
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code)
+    ]
+
+
+def _log_section_diagnostic(
+    *,
+    event: str,
+    section: ReportSectionSpec,
+    attempt: int,
+    started_at: float,
+    error_codes: list[str],
+    word_count: int | None = None,
+    provider_error: ProviderExecutionError | None = None,
+    level: int = logging.INFO,
+) -> None:
+    minimum_words, maximum_words = _section_word_bounds(section)
+    payload: dict[str, Any] = {
+        "attempt": attempt,
+        "duration_ms": round(max(0.0, (time.monotonic() - started_at) * 1000), 2),
+        "error_codes": _diagnostic_error_codes(error_codes),
+        "event": event,
+        "maximum_words": maximum_words,
+        "minimum_words": minimum_words,
+        "required_evidence_ref_count": len(section.required_evidence_refs),
+        "section_id": section.section_id,
+        "target_words": section.target_words,
+        "word_count": word_count,
+    }
+    if provider_error is not None:
+        payload.update(
+            {
+                "provider": _diagnostic_identifier(provider_error.provider),
+                "provider_disposition": provider_error.disposition.value,
+                "provider_stage": _diagnostic_identifier(provider_error.stage),
+            }
+        )
+    _LOGGER.log(
+        level,
+        "REPORT_SECTION_DIAGNOSTIC %s",
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def _normalize_numeric_token(token: str) -> str:
@@ -105,8 +183,7 @@ def validate_report_section(
         errors.append("SECTION_TITLE_MISMATCH")
 
     word_count = count_section_words(draft.content_markdown)
-    minimum_words = math.floor(section.target_words * 0.9)
-    maximum_words = math.ceil(section.target_words * 1.2)
+    minimum_words, maximum_words = _section_word_bounds(section)
     if not minimum_words <= word_count <= maximum_words:
         errors.append("WORD_COUNT_OUT_OF_RANGE")
 
@@ -188,6 +265,7 @@ def generate_report_sections(
             completed[section.section_id] = existing
 
     def generate_one(section: ReportSectionSpec) -> ReportSectionDraft:
+        candidate_started_at = time.monotonic()
         try:
             raw_draft: ReportSectionDraft | dict[str, Any] = generate_section(
                 query,
@@ -196,9 +274,21 @@ def generate_report_sections(
                 manifest,
             )
         except ProviderExecutionError as exc:
+            _log_section_diagnostic(
+                event="provider_failed",
+                section=section,
+                attempt=1,
+                started_at=candidate_started_at,
+                error_codes=["SECTION_WRITE_PROVIDER_FAILED"],
+                provider_error=exc,
+                level=logging.WARNING,
+            )
             raise ReportSectionGenerationError(
                 section.section_id,
                 ["SECTION_WRITE_PROVIDER_FAILED"],
+                provider=exc.provider,
+                provider_stage=exc.stage,
+                provider_disposition=exc.disposition.value,
             ) from exc
         try:
             draft = (
@@ -214,18 +304,24 @@ def generate_report_sections(
             validation = None
 
         if error_codes:
-            _LOGGER.info(
-                "Report section candidate rejected: section_id=%s "
-                "error_codes=%s word_count=%s",
-                section.section_id,
-                ",".join(error_codes),
-                validation.word_count if validation is not None else "unknown",
+            _log_section_diagnostic(
+                event="candidate_rejected",
+                section=section,
+                attempt=1,
+                started_at=candidate_started_at,
+                error_codes=error_codes,
+                word_count=(
+                    validation.word_count
+                    if validation is not None
+                    else None
+                ),
             )
             effective_repair = repair_section
             if effective_repair is None:
                 from core.llm import llm_repair_report_section
 
                 effective_repair = llm_repair_report_section
+            repair_started_at = time.monotonic()
             try:
                 repaired_raw = effective_repair(
                     query,
@@ -236,9 +332,21 @@ def generate_report_sections(
                     error_codes,
                 )
             except ProviderExecutionError as exc:
+                _log_section_diagnostic(
+                    event="provider_failed",
+                    section=section,
+                    attempt=2,
+                    started_at=repair_started_at,
+                    error_codes=["SECTION_REPAIR_PROVIDER_FAILED"],
+                    provider_error=exc,
+                    level=logging.WARNING,
+                )
                 raise ReportSectionGenerationError(
                     section.section_id,
                     ["SECTION_REPAIR_PROVIDER_FAILED"],
+                    provider=exc.provider,
+                    provider_stage=exc.stage,
+                    provider_disposition=exc.disposition.value,
                 ) from exc
             try:
                 repaired = (
@@ -247,6 +355,14 @@ def generate_report_sections(
                     else ReportSectionDraft.model_validate(repaired_raw)
                 )
             except ValidationError as exc:
+                _log_section_diagnostic(
+                    event="repair_rejected",
+                    section=section,
+                    attempt=2,
+                    started_at=repair_started_at,
+                    error_codes=["SECTION_SCHEMA_INVALID"],
+                    level=logging.WARNING,
+                )
                 raise ReportSectionGenerationError(
                     section.section_id,
                     ["SECTION_SCHEMA_INVALID"],
@@ -257,18 +373,36 @@ def generate_report_sections(
                 manifest,
             )
             if not repaired_validation.valid:
-                _LOGGER.warning(
-                    "Report section repair validation failed: section_id=%s "
-                    "error_codes=%s word_count=%s",
-                    section.section_id,
-                    ",".join(repaired_validation.error_codes),
-                    repaired_validation.word_count,
+                _log_section_diagnostic(
+                    event="repair_rejected",
+                    section=section,
+                    attempt=2,
+                    started_at=repair_started_at,
+                    error_codes=repaired_validation.error_codes,
+                    word_count=repaired_validation.word_count,
+                    level=logging.WARNING,
                 )
                 raise ReportSectionGenerationError(
                     section.section_id,
                     repaired_validation.error_codes,
                 )
+            _log_section_diagnostic(
+                event="repair_validated",
+                section=section,
+                attempt=2,
+                started_at=repair_started_at,
+                error_codes=[],
+                word_count=repaired_validation.word_count,
+            )
             return repaired
+        _log_section_diagnostic(
+            event="candidate_validated",
+            section=section,
+            attempt=1,
+            started_at=candidate_started_at,
+            error_codes=[],
+            word_count=validation.word_count,
+        )
         return draft
 
     pending_sections = [

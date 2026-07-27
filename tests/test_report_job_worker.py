@@ -7,6 +7,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
+
 from contracts.report_jobs import ReportJobLease, ReportJobPhase
 from core.report_job_worker import (
     ReportJobFailure,
@@ -231,3 +233,116 @@ def test_run_until_stopped_uses_interruptible_wait():
     worker.run_until_stopped(lambda *_: {}, stop_event=stop_event)
 
     assert repository.calls == []
+
+
+class _RecoveringRepository(_Repository):
+    def __init__(self, operation: str, stop_event: threading.Event):
+        super().__init__(_lease(cancel_requested=operation == "cancel"))
+        self.operation = operation
+        self.stop_event = stop_event
+        self.lease_calls = 0
+
+    def lease_next(self, *, worker_id: str, lease_seconds: int):
+        self.lease_calls += 1
+        if self.lease_calls == 1 and self.operation == "lease":
+            raise RuntimeError("database secret must not be logged")
+        if self.lease_calls >= 2:
+            self.stop_event.set()
+            return None
+        return super().lease_next(
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
+
+    def complete(self, *, job_id, worker_id: str, result: dict) -> bool:
+        if self.operation == "complete":
+            raise RuntimeError("database secret must not be logged")
+        return super().complete(job_id=job_id, worker_id=worker_id, result=result)
+
+    def fail(
+        self,
+        *,
+        job_id,
+        worker_id: str,
+        error_code: str,
+        retryable: bool,
+        retry_delay_seconds: int,
+    ) -> bool:
+        if self.operation == "fail":
+            raise RuntimeError("database secret must not be logged")
+        return super().fail(
+            job_id=job_id,
+            worker_id=worker_id,
+            error_code=error_code,
+            retryable=retryable,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+
+    def acknowledge_cancellation(self, *, job_id, worker_id: str) -> bool:
+        if self.operation == "cancel":
+            raise RuntimeError("database secret must not be logged")
+        return super().acknowledge_cancellation(
+            job_id=job_id,
+            worker_id=worker_id,
+        )
+
+
+class _RecordingStopEvent:
+    def __init__(self, *, stop_after_waits: int):
+        self.stop_after_waits = stop_after_waits
+        self.waits: list[float] = []
+
+    def is_set(self) -> bool:
+        return len(self.waits) >= self.stop_after_waits
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        return self.is_set()
+
+
+class _FailingLeaseRepository(_Repository):
+    def __init__(self):
+        super().__init__(None)
+
+    def lease_next(self, *, worker_id: str, lease_seconds: int):
+        raise ConnectionError("database connection unavailable")
+
+
+@pytest.mark.parametrize("operation", ["lease", "complete", "fail", "cancel"])
+def test_run_until_stopped_recovers_from_repository_failures(
+    operation,
+    caplog,
+):
+    stop_event = threading.Event()
+    repository = _RecoveringRepository(operation, stop_event)
+    worker = _worker(repository)
+
+    def handler(*_):
+        if operation == "fail":
+            raise ReportJobFailure("REPORT_SECTION_INVALID", retryable=False)
+        return {"contract_version": "report-result-v1", "content": "Complete report."}
+
+    with caplog.at_level(logging.ERROR, logger="test.report_worker"):
+        worker.run_until_stopped(handler, stop_event=stop_event)
+
+    assert repository.lease_calls == 2
+    assert "Report worker loop recovered" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "database secret" not in caplog.text
+
+
+def test_run_until_stopped_backs_off_consecutive_supervisor_failures():
+    stop_event = _RecordingStopEvent(stop_after_waits=4)
+    repository = _FailingLeaseRepository()
+    worker = ReportJobWorker(
+        repository=repository,
+        worker_id="worker-1",
+        lease_seconds=120,
+        retry_delay_seconds=30,
+        poll_interval_seconds=0.5,
+        logger=logging.getLogger("test.report_worker"),
+    )
+
+    worker.run_until_stopped(lambda *_: {}, stop_event=stop_event)
+
+    assert stop_event.waits == [0.5, 1.0, 2.0, 4.0]

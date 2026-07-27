@@ -234,6 +234,10 @@ def test_planner_repairs_schema_valid_evidence_bindings_before_returning():
         for section in plan.sections
         if section.kind.value == "limitations"
     ).required_evidence_refs
+    assert all(
+        len(section.required_evidence_refs) == 1
+        for section in plan.sections
+    )
     assert plan.charts == []
     assert all(section.chart_refs == [] for section in plan.sections)
 

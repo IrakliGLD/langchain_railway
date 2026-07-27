@@ -116,7 +116,7 @@ class PostgresReportJobRepository:
                 "lease_seconds": lease_seconds,
             },
         )
-        return payload.get("updated") is not False
+        return payload.get("updated") is True
 
     def complete(
         self,

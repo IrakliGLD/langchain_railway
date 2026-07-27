@@ -16,9 +16,12 @@ The runtime `report-composer` skill and the `report-plan-v1` contract enforce:
 6. Limitations
 7. Conclusion
 
-A standard report plan contains 5–8 sections and 900–1,400 words. The published
-result permits only the validated 810–1,680-word generation tolerance. Section
-word budgets must sum to the report budget. Every section receives an explicit
+A standard report plan contains 5–8 sections and 900–1,400 words. The public
+result contract permits 803–1,687 words so rounding across as many as eight
+individually validated section tolerances cannot invalidate an otherwise valid
+report. Assembly still enforces the tighter sum of the exact per-section bounds
+for the current plan. Section word budgets are deterministically normalized to
+the report budget before strict validation. Every section receives an explicit
 evidence allow-list. The limitations section must cite typed limitation
 evidence. Reports may contain up to three deterministic charts built from
 tabular evidence; required charts must build successfully before assembly.

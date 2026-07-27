@@ -129,7 +129,7 @@ def test_repository_maps_every_worker_mutation_to_versioned_rpc():
     job_id = uuid4()
     repository, connection, guard_calls = _repository(
         [
-            {"ok": True},
+            {"ok": True, "updated": True},
             {"ok": True},
             {"ok": True},
             {"ok": True},
@@ -194,6 +194,19 @@ def test_repository_heartbeat_surfaces_cooperative_cancellation():
         worker_id="worker-1",
         phase=ReportJobPhase.ASSEMBLING,
         progress_percent=90,
+        checkpoint=None,
+        lease_seconds=120,
+    ) is False
+
+
+def test_repository_heartbeat_requires_explicit_update_acknowledgement():
+    repository, _, _ = _repository([{"ok": True}])
+
+    assert repository.heartbeat(
+        job_id=uuid4(),
+        worker_id="worker-1",
+        phase=ReportJobPhase.GENERATING_SECTIONS,
+        progress_percent=50,
         checkpoint=None,
         lease_seconds=120,
     ) is False

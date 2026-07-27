@@ -12,6 +12,7 @@ from contracts.report import (
     STANDARD_REPORT_SECTION_SEQUENCE,
     ReportPlan,
     ReportSectionKind,
+    normalize_report_plan_word_budget,
 )
 from skills.loader import get_report_guidance, validate_skills
 
@@ -116,6 +117,38 @@ def test_standard_report_plan_accepts_the_canonical_structure():
         ReportSectionKind.LIMITATIONS,
         ReportSectionKind.CONCLUSION,
     )
+
+
+@pytest.mark.parametrize(
+    ("target_words", "section_targets"),
+    [
+        (900, [40, 40, 40, 40, 800]),
+        (1400, [800, 40, 40, 40, 40, 40, 40, 40]),
+    ],
+)
+def test_word_budget_normalization_is_bounded_deterministic_and_non_mutating(
+    target_words,
+    section_targets,
+):
+    payload = {
+        "target_words": target_words,
+        "sections": [
+            {"target_words": section_target}
+            for section_target in section_targets
+        ],
+    }
+    original = deepcopy(payload)
+
+    normalized = normalize_report_plan_word_budget(payload)
+
+    assert payload == original
+    assert normalized == normalize_report_plan_word_budget(payload)
+    normalized_targets = [
+        section["target_words"]
+        for section in normalized["sections"]
+    ]
+    assert sum(normalized_targets) == target_words
+    assert all(40 <= target <= 800 for target in normalized_targets)
 
 
 def test_report_plan_schema_is_closed_at_every_level():

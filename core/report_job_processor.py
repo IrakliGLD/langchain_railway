@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -30,6 +32,9 @@ from core.report_job_worker import (
     ReportJobExecutionControl,
     ReportJobFailure,
 )
+from utils.provider_attempts import ProviderExecutionError
+
+_LOGGER = logging.getLogger("Enai.ReportProcessor")
 
 QueryPipeline = Callable[..., Any]
 EvidenceBuilder = Callable[[Any], Any]
@@ -38,6 +43,48 @@ Evaluator = Callable[[ReportPlan, ReportEvidenceManifest], Any]
 ChartBuilder = Callable[[ReportPlan, ReportEvidenceManifest], Any]
 SectionGenerator = Callable[..., list[ReportSectionDraft]]
 Assembler = Callable[..., Any]
+
+_REPORT_FAILURE_RETRYABILITY = {
+    "REPORT_ASSEMBLY_INVALID": False,
+    "REPORT_CANCELLED": False,
+    "REPORT_CHECKPOINT_INVALID": False,
+    "REPORT_EVIDENCE_INVALID": False,
+    "REPORT_EVIDENCE_UNAVAILABLE": False,
+    "REPORT_LEASE_LOST": True,
+    "REPORT_PLAN_INVALID": False,
+    "REPORT_PLAN_NOT_READY": False,
+    "REPORT_PLAN_PROVIDER_FAILED": True,
+    "REPORT_SECTION_INVALID": False,
+    "REPORT_SECTION_PROVIDER_FAILED": True,
+}
+_SECTION_PROVIDER_FAILURE_CODES = {
+    "SECTION_REPAIR_PROVIDER_FAILED",
+    "SECTION_WRITE_PROVIDER_FAILED",
+}
+
+
+def _diagnostic_identifier(value: str | None) -> str:
+    candidate = str(value or "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", candidate):
+        return candidate
+    return "unknown"
+
+
+def _diagnostic_error_codes(error_codes: list[str]) -> str:
+    safe_codes = [
+        code
+        for code in error_codes[:16]
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code)
+    ]
+    return ",".join(safe_codes) or "unknown"
+
+
+def _report_failure(error_code: str) -> ReportJobFailure:
+    try:
+        retryable = _REPORT_FAILURE_RETRYABILITY[error_code]
+    except KeyError as exc:
+        raise ValueError("Unknown report failure policy code.") from exc
+    return ReportJobFailure(error_code, retryable=retryable)
 
 
 class ReportJobProcessor:
@@ -75,10 +122,7 @@ class ReportJobProcessor:
     ) -> None:
         expected_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
         if manifest.query_digest != expected_digest:
-            raise ReportJobFailure(
-                "REPORT_CHECKPOINT_INVALID",
-                retryable=False,
-            )
+            raise _report_failure("REPORT_CHECKPOINT_INVALID")
 
     @staticmethod
     def _checkpoint_payload(
@@ -113,15 +157,15 @@ class ReportJobProcessor:
         ):
             return
         if control.cancellation_requested():
-            raise ReportJobFailure("REPORT_CANCELLED", retryable=False)
-        raise ReportJobFailure("REPORT_LEASE_LOST", retryable=True)
+            raise _report_failure("REPORT_CANCELLED")
+        raise _report_failure("REPORT_LEASE_LOST")
 
     @staticmethod
     def _raise_if_cancelled(
         control: ReportJobExecutionControl,
     ) -> None:
         if control.cancellation_requested():
-            raise ReportJobFailure("REPORT_CANCELLED", retryable=False)
+            raise _report_failure("REPORT_CANCELLED")
 
     def _run_query_pipeline(self, lease: ReportJobLease) -> Any:
         pipeline = self._query_pipeline
@@ -150,18 +194,12 @@ class ReportJobProcessor:
                     lease.checkpoint
                 )
             except (ValidationError, ValueError) as exc:
-                raise ReportJobFailure(
-                    "REPORT_CHECKPOINT_INVALID",
-                    retryable=False,
-                ) from exc
+                raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
             self._validate_query_binding(lease.query, checkpoint.manifest)
 
         if checkpoint is None:
             if lease.phase is not ReportJobPhase.PLANNING:
-                raise ReportJobFailure(
-                    "REPORT_CHECKPOINT_INVALID",
-                    retryable=False,
-                )
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
             progress = max(progress, 10)
             self._heartbeat(
                 control,
@@ -192,17 +230,11 @@ class ReportJobProcessor:
                         for item in manifest.items
                     )
                 ):
-                    raise ReportJobFailure(
-                        "REPORT_EVIDENCE_UNAVAILABLE",
-                        retryable=True,
-                    )
+                    raise _report_failure("REPORT_EVIDENCE_UNAVAILABLE")
             except ReportJobFailure:
                 raise
             except (ValidationError, ValueError) as exc:
-                raise ReportJobFailure(
-                    "REPORT_EVIDENCE_INVALID",
-                    retryable=False,
-                ) from exc
+                raise _report_failure("REPORT_EVIDENCE_INVALID") from exc
 
             self._raise_if_cancelled(control)
             try:
@@ -213,21 +245,23 @@ class ReportJobProcessor:
                     else ReportPlan.model_validate(raw_plan)
                 )
                 evaluation = self._evaluator(plan, manifest)
-            except ReportPlanEvidenceError as exc:
-                raise ReportJobFailure(
-                    "REPORT_PLAN_INVALID",
-                    retryable=False,
-                ) from exc
-            except (ValidationError, ValueError) as exc:
-                raise ReportJobFailure(
-                    "REPORT_PLAN_INVALID",
-                    retryable=True,
-                ) from exc
-            if not evaluation.ready_for_generation:
-                raise ReportJobFailure(
-                    "REPORT_PLAN_NOT_READY",
-                    retryable=False,
+            except ProviderExecutionError as exc:
+                _LOGGER.warning(
+                    "Report provider failure: job_id=%s job_attempt=%s "
+                    "provider=%s provider_stage=%s provider_disposition=%s",
+                    lease.job_id,
+                    lease.attempt_count,
+                    _diagnostic_identifier(exc.provider),
+                    _diagnostic_identifier(exc.stage),
+                    exc.disposition.value,
                 )
+                raise _report_failure("REPORT_PLAN_PROVIDER_FAILED") from exc
+            except ReportPlanEvidenceError as exc:
+                raise _report_failure("REPORT_PLAN_INVALID") from exc
+            except (ValidationError, ValueError) as exc:
+                raise _report_failure("REPORT_PLAN_INVALID") from exc
+            if not evaluation.ready_for_generation:
+                raise _report_failure("REPORT_PLAN_NOT_READY")
             completed_by_id: dict[str, ReportSectionDraft] = {}
             progress = max(progress, 25)
             checkpoint_payload = self._checkpoint_payload(
@@ -251,23 +285,14 @@ class ReportJobProcessor:
             try:
                 evaluation = self._evaluator(plan, manifest)
             except (ReportPlanEvidenceError, ValidationError, ValueError) as exc:
-                raise ReportJobFailure(
-                    "REPORT_CHECKPOINT_INVALID",
-                    retryable=False,
-                ) from exc
+                raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
             if not evaluation.ready_for_generation:
-                raise ReportJobFailure(
-                    "REPORT_CHECKPOINT_INVALID",
-                    retryable=False,
-                )
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
             if (
                 lease.phase is ReportJobPhase.ASSEMBLING
                 and len(completed_by_id) != len(plan.sections)
             ):
-                raise ReportJobFailure(
-                    "REPORT_CHECKPOINT_INVALID",
-                    retryable=False,
-                )
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
 
         self._raise_if_cancelled(control)
         chart_decisions = self._chart_builder(plan, manifest)
@@ -322,15 +347,28 @@ class ReportJobProcessor:
                     max_workers=self._max_section_workers,
                 )
             except ReportSectionGenerationError as exc:
-                raise ReportJobFailure(
-                    "REPORT_SECTION_INVALID",
-                    retryable=True,
-                ) from exc
+                _LOGGER.warning(
+                    "Report section phase failed: job_id=%s job_attempt=%s "
+                    "section_id=%s error_codes=%s provider=%s "
+                    "provider_stage=%s provider_disposition=%s",
+                    lease.job_id,
+                    lease.attempt_count,
+                    exc.section_id,
+                    _diagnostic_error_codes(exc.error_codes),
+                    _diagnostic_identifier(exc.provider),
+                    _diagnostic_identifier(exc.provider_stage),
+                    _diagnostic_identifier(exc.provider_disposition),
+                )
+                error_code = (
+                    "REPORT_SECTION_PROVIDER_FAILED"
+                    if _SECTION_PROVIDER_FAILURE_CODES.intersection(
+                        exc.error_codes
+                    )
+                    else "REPORT_SECTION_INVALID"
+                )
+                raise _report_failure(error_code) from exc
             except (ValidationError, ValueError) as exc:
-                raise ReportJobFailure(
-                    "REPORT_SECTION_INVALID",
-                    retryable=True,
-                ) from exc
+                raise _report_failure("REPORT_SECTION_INVALID") from exc
         else:
             drafts = [
                 completed_by_id[section.section_id]
@@ -357,8 +395,5 @@ class ReportJobProcessor:
                 chart_decisions,
             )
         except (ReportAssemblyError, ValidationError, ValueError) as exc:
-            raise ReportJobFailure(
-                "REPORT_ASSEMBLY_INVALID",
-                retryable=False,
-            ) from exc
+            raise _report_failure("REPORT_ASSEMBLY_INVALID") from exc
         return result.model_dump(mode="json")
