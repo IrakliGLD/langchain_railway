@@ -1664,3 +1664,56 @@ def test_dimensionless_claim_still_verifies_against_its_cell():
         _count_manifest(),
     )
     assert "DIRECT_CLAIM_INVALID" in validation.error_codes
+
+
+def test_compact_range_grounds_both_endpoints():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed prices moved within a 120.0-130.0 GEL/MWh band. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(),
+        _direct_claim(row_index=1, display_value="130.0"),
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_compact_range_still_rejects_an_unverified_endpoint():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed prices moved within a 120.0-999.0 GEL/MWh band. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_negative_value_is_not_read_as_a_range():
+    from agent.report_grounding import _grounding_facts_from_text
+
+    facts = _grounding_facts_from_text("The change was -5.2 overall.")
+
+    assert {str(fact.value) for fact in facts} == {"-5.2"}

@@ -26,6 +26,8 @@ _PERIOD_PATTERN = re.compile(
     r"(?P<segment>\d{1,2}|[Qq][1-4])"
     r"(?:[-/](?P<day>\d{1,2}))?(?![\w])"
 )
+_RANGE_SEPARATOR_PATTERN = re.compile(r"(?<=\d)\s*[-–—]\s*(?=[\d.])")
+_RANGE_TAIL_PATTERN = r"(?:\s*(?:to|[-–—])\s*[-+]?[\d.,]+%?)?"
 _RATIO_COLUMN_NAMES = {
     "balancing_share",
     "generation_share",
@@ -135,6 +137,9 @@ def _grounding_facts_from_text(
         return " "
 
     remaining_text = _PERIOD_PATTERN.sub(replace_period, str(text or ""))
+    # A hyphen between two digits separates a range; only a hyphen that does not
+    # follow a digit is a sign. Periods are already consumed above.
+    remaining_text = _RANGE_SEPARATOR_PATTERN.sub(" to ", remaining_text)
     facts.update(
         {
             fact
@@ -503,7 +508,7 @@ def _derived_claim_appears(
     else:
         unit_pattern = re.escape(claim.unit).replace(r"\ ", r"\s+")
         pattern = (
-            rf"(?<![\w.,]){display_pattern}(?![\d.,])"
+            rf"(?<![\w.,]){display_pattern}(?![\d.,]){_RANGE_TAIL_PATTERN}"
             rf"\s+{unit_pattern}(?!\w)"
         )
     return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
@@ -530,7 +535,7 @@ def _direct_claim_appears(
         unit_pattern = r"\s*(?:/|\bper\b)\s*".join(unit_parts)
         unit_pattern = unit_pattern.replace(r"\ ", r"\s+")
         pattern = (
-            rf"(?<![\w.,]){display_pattern}(?![\d.,])"
+            rf"(?<![\w.,]){display_pattern}(?![\d.,]){_RANGE_TAIL_PATTERN}"
             rf"\s+{unit_pattern}(?!\w)"
         )
     return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
