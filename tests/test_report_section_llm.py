@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from copy import deepcopy
@@ -545,3 +546,58 @@ def test_section_evidence_slice_discloses_observed_period_span():
     assert '"observed_period_span"' in packet
     assert '"first":"2026-01"' in packet
     assert '"last":"2026-02"' in packet
+
+
+def test_section_evidence_slice_shadows_the_grounding_scope_gap(caplog):
+    from contracts.report_evidence import ReportEvidenceManifest
+    from core.llm import _report_section_evidence_slice
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "price", "note"]
+    table["rows"] = [
+        {
+            "period": f"2026-{(index % 12) + 1:02d}",
+            "price": 100.0 + index,
+            "note": "observed settlement commentary " * 10,
+        }
+        for index in range(200)
+    ]
+    table["total_row_count"] = 200
+    manifest = ReportEvidenceManifest.model_validate(payload)
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        packet = json.loads(_report_section_evidence_slice(section, manifest))
+
+    shadow = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("REPORT_GROUNDING_SCOPE_SHADOW ")
+    ]
+    projected = next(
+        entry for entry in packet if entry["kind"] == "table"
+    )["included_row_count"]
+
+    assert len(shadow) == 1
+    assert shadow[0]["manifest_rows"] == 200
+    assert shadow[0]["projected_rows"] == projected
+    assert shadow[0]["section_id"] == section.section_id
+    assert projected < 200
+
+
+def test_section_evidence_slice_is_silent_when_every_row_is_projected(caplog):
+    from core.llm import _report_section_evidence_slice
+
+    plan = ReportPlan.model_validate(_plan_payload())
+
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        _report_section_evidence_slice(plan.sections[1], _manifest())
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.message.startswith("REPORT_GROUNDING_SCOPE_SHADOW ")
+    ]

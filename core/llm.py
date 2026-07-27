@@ -94,6 +94,7 @@ from contracts.question_analysis_catalogs import (
 )
 from agent.report_charts import chart_column_roles
 from agent.report_grounding import observed_period_span
+from agent.report_projection import projected_row_indices
 from contracts.report import (
     ReportIntent,
     ReportPlan,
@@ -118,7 +119,6 @@ from skills.loader import (
     get_skills_content_hash,
     load_reference,
 )
-from utils.coverage_sampling import coverage_priority_indices
 from utils.metrics import metrics
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
@@ -3287,30 +3287,35 @@ def _report_section_evidence_slice(
                     "rows": [],
                 }
             )
-            included_rows_by_index = {}
             sizing_payload = {
                 **projected,
                 "included_row_count": len(item.rows),
                 "prompt_projection_truncated": False,
             }
-            serialized_size = len(_compact_json(sizing_payload))
-            for row_index in coverage_priority_indices(len(item.rows)):
-                indexed_row = {
-                    "row_index": row_index,
-                    "values": item.rows[row_index],
-                }
-                serialized_row = _compact_json(indexed_row)
-                row_cost = len(serialized_row) + (
-                    1 if included_rows_by_index else 0
-                )
-                if serialized_size + row_cost > per_item_budget:
-                    continue
-                included_rows_by_index[row_index] = indexed_row
-                serialized_size += row_cost
+            row_budget = max(
+                0,
+                per_item_budget - len(_compact_json(sizing_payload)),
+            )
+            row_indices = projected_row_indices(item, budget_chars=row_budget)
             included_rows = [
-                included_rows_by_index[row_index]
-                for row_index in sorted(included_rows_by_index)
+                {"row_index": row_index, "values": item.rows[row_index]}
+                for row_index in row_indices
             ]
+            if len(included_rows) < len(item.rows):
+                # Shadow only: the grounding index still covers every manifest
+                # row, so a claim about a row the model never saw currently
+                # validates. Measure the gap before narrowing anything.
+                log.info(
+                    "REPORT_GROUNDING_SCOPE_SHADOW %s",
+                    _compact_json(
+                        {
+                            "evidence_ref": item.evidence_ref,
+                            "manifest_rows": len(item.rows),
+                            "projected_rows": len(included_rows),
+                            "section_id": section.section_id,
+                        }
+                    ),
+                )
             projected["rows"] = included_rows
             projected["included_row_count"] = len(included_rows)
             projected["prompt_projection_truncated"] = (
