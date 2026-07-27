@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -309,12 +310,14 @@ def test_schema_invalid_report_plan_is_not_retried_as_a_whole_job():
     assert exc_info.value.retryable is False
 
 
-def test_report_plan_provider_failure_remains_retryable():
+def test_report_plan_provider_failure_remains_retryable_and_is_diagnosable(
+    caplog,
+):
     lease = _lease()
 
     def unavailable_planner(*_args):
         raise ProviderExecutionError(
-            "provider timed out",
+            "provider secret must not be logged",
             provider="nvidia",
             stage="report_planner",
             disposition=ProviderDeliveryDisposition.TIMED_OUT,
@@ -326,11 +329,18 @@ def test_report_plan_provider_failure_remains_retryable():
         planner=unavailable_planner,
     )
 
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, _Control())
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportProcessor"):
+        with pytest.raises(ReportJobFailure) as exc_info:
+            processor(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
     assert exc_info.value.retryable is True
+    assert f"job_id={lease.job_id}" in caplog.text
+    assert f"job_attempt={lease.attempt_count}" in caplog.text
+    assert "provider=nvidia" in caplog.text
+    assert "provider_stage=report_planner" in caplog.text
+    assert "provider_disposition=timed_out" in caplog.text
+    assert "provider secret" not in caplog.text
 
 
 @pytest.mark.parametrize(

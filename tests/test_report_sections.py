@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections import Counter
@@ -226,41 +227,110 @@ def test_failed_repair_aborts_with_typed_section_error(caplog):
         section.section_id for section in plan.sections
     }
     assert "WORD_COUNT_OUT_OF_RANGE" in exc_info.value.error_codes
-    assert "section_id=" in caplog.text
+    assert '"section_id":' in caplog.text
     assert "WORD_COUNT_OUT_OF_RANGE" in caplog.text
     assert "This repaired section" not in caplog.text
 
 
-def test_provider_failure_during_repair_becomes_typed_section_error():
+def test_section_validation_diagnostics_are_structured_and_content_free(caplog):
+    plan = ReportPlan.model_validate(_plan_payload())
+    failed_section = plan.sections[0]
+    existing_drafts = {
+        section.section_id: ReportSectionDraft.model_validate(_draft(section))
+        for section in plan.sections[1:]
+    }
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportSections"):
+        with pytest.raises(ReportSectionGenerationError):
+            generate_report_sections(
+                "Sensitive request content.",
+                plan,
+                _manifest(),
+                existing_drafts=existing_drafts,
+                generate_section=lambda _q, _p, section, _m: {
+                    **_draft(section),
+                    "paragraphs": [
+                        {
+                            "text": "Sensitive candidate content.",
+                            "evidence_refs": section.required_evidence_refs,
+                        }
+                    ],
+                },
+                repair_section=lambda _q, _p, section, _m, _d, _e: {
+                    **_draft(section),
+                    "paragraphs": [
+                        {
+                            "text": "Sensitive repaired content.",
+                            "evidence_refs": section.required_evidence_refs,
+                        }
+                    ],
+                },
+                max_workers=1,
+            )
+
+    prefix = "REPORT_SECTION_DIAGNOSTIC "
+    diagnostics = [
+        json.loads(record.getMessage()[len(prefix):])
+        for record in caplog.records
+        if record.getMessage().startswith(prefix)
+    ]
+
+    assert [item["event"] for item in diagnostics] == [
+        "candidate_rejected",
+        "repair_rejected",
+    ]
+    assert [item["attempt"] for item in diagnostics] == [1, 2]
+    assert all(item["section_id"] == failed_section.section_id for item in diagnostics)
+    assert all(item["duration_ms"] >= 0 for item in diagnostics)
+    assert all(item["target_words"] == failed_section.target_words for item in diagnostics)
+    assert all(
+        item["minimum_words"] <= item["maximum_words"]
+        for item in diagnostics
+    )
+    assert "Sensitive request content" not in caplog.text
+    assert "Sensitive candidate content" not in caplog.text
+    assert "Sensitive repaired content" not in caplog.text
+
+
+def test_provider_failure_during_repair_becomes_typed_section_error(caplog):
     plan = ReportPlan.model_validate(_plan_payload())
 
     def repair(*_args):
         raise ProviderExecutionError(
-            "provider call failed",
+            "provider secret must not be logged",
             provider="nvidia",
             stage="report_section_repair",
             disposition=ProviderDeliveryDisposition.TIMED_OUT,
         )
 
-    with pytest.raises(ReportSectionGenerationError) as exc_info:
-        generate_report_sections(
-            "Explain the price trend.",
-            plan,
-            _manifest(),
-            generate_section=lambda _q, _p, section, _m: {
-                **_draft(section),
-                "paragraphs": [
-                    {
-                        "text": "This section remains much too short.",
-                        "evidence_refs": section.required_evidence_refs,
-                    }
-                ],
-            },
-            repair_section=repair,
-            max_workers=len(plan.sections),
-        )
+    with caplog.at_level(logging.INFO, logger="Enai.ReportSections"):
+        with pytest.raises(ReportSectionGenerationError) as exc_info:
+            generate_report_sections(
+                "Explain the price trend.",
+                plan,
+                _manifest(),
+                generate_section=lambda _q, _p, section, _m: {
+                    **_draft(section),
+                    "paragraphs": [
+                        {
+                            "text": "This section remains much too short.",
+                            "evidence_refs": section.required_evidence_refs,
+                        }
+                    ],
+                },
+                repair_section=repair,
+                max_workers=len(plan.sections),
+            )
 
     assert exc_info.value.error_codes == ["SECTION_REPAIR_PROVIDER_FAILED"]
+    assert exc_info.value.provider == "nvidia"
+    assert exc_info.value.provider_stage == "report_section_repair"
+    assert exc_info.value.provider_disposition == "timed_out"
+    assert '"event":"provider_failed"' in caplog.text
+    assert '"attempt":2' in caplog.text
+    assert '"provider":"nvidia"' in caplog.text
+    assert '"provider_disposition":"timed_out"' in caplog.text
+    assert "provider secret" not in caplog.text
 
 
 def test_valid_resume_drafts_are_not_regenerated_and_progress_is_checkpointable():

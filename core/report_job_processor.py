@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -32,6 +34,8 @@ from core.report_job_worker import (
 )
 from utils.provider_attempts import ProviderExecutionError
 
+_LOGGER = logging.getLogger("Enai.ReportProcessor")
+
 QueryPipeline = Callable[..., Any]
 EvidenceBuilder = Callable[[Any], Any]
 Planner = Callable[[str, ReportEvidenceManifest], Any]
@@ -57,6 +61,22 @@ _SECTION_PROVIDER_FAILURE_CODES = {
     "SECTION_REPAIR_PROVIDER_FAILED",
     "SECTION_WRITE_PROVIDER_FAILED",
 }
+
+
+def _diagnostic_identifier(value: str | None) -> str:
+    candidate = str(value or "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", candidate):
+        return candidate
+    return "unknown"
+
+
+def _diagnostic_error_codes(error_codes: list[str]) -> str:
+    safe_codes = [
+        code
+        for code in error_codes[:16]
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code)
+    ]
+    return ",".join(safe_codes) or "unknown"
 
 
 def _report_failure(error_code: str) -> ReportJobFailure:
@@ -226,6 +246,15 @@ class ReportJobProcessor:
                 )
                 evaluation = self._evaluator(plan, manifest)
             except ProviderExecutionError as exc:
+                _LOGGER.warning(
+                    "Report provider failure: job_id=%s job_attempt=%s "
+                    "provider=%s provider_stage=%s provider_disposition=%s",
+                    lease.job_id,
+                    lease.attempt_count,
+                    _diagnostic_identifier(exc.provider),
+                    _diagnostic_identifier(exc.stage),
+                    exc.disposition.value,
+                )
                 raise _report_failure("REPORT_PLAN_PROVIDER_FAILED") from exc
             except ReportPlanEvidenceError as exc:
                 raise _report_failure("REPORT_PLAN_INVALID") from exc
@@ -318,6 +347,18 @@ class ReportJobProcessor:
                     max_workers=self._max_section_workers,
                 )
             except ReportSectionGenerationError as exc:
+                _LOGGER.warning(
+                    "Report section phase failed: job_id=%s job_attempt=%s "
+                    "section_id=%s error_codes=%s provider=%s "
+                    "provider_stage=%s provider_disposition=%s",
+                    lease.job_id,
+                    lease.attempt_count,
+                    exc.section_id,
+                    _diagnostic_error_codes(exc.error_codes),
+                    _diagnostic_identifier(exc.provider),
+                    _diagnostic_identifier(exc.provider_stage),
+                    _diagnostic_identifier(exc.provider_disposition),
+                )
                 error_code = (
                     "REPORT_SECTION_PROVIDER_FAILED"
                     if _SECTION_PROVIDER_FAILURE_CODES.intersection(
