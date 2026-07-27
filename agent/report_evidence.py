@@ -173,6 +173,22 @@ def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
         if suffix_unit:
             units[column] = suffix_unit
             continue
+        # Dimensionless columns still need a declared unit: a claim on a column
+        # without one cannot be verified at all.
+        if normalized.endswith("_rank") or normalized == "rank":
+            units[column] = "rank"
+            continue
+        if normalized.endswith("_index") or normalized == "index":
+            units[column] = "index"
+            continue
+        if (
+            normalized.endswith("_count")
+            or normalized.startswith("count_")
+            or normalized.startswith("n_")
+            or normalized.endswith("_units")
+        ):
+            units[column] = "count"
+            continue
         canonical_unit = metric_value_unit(normalized)
         if canonical_unit != "value":
             units[column] = canonical_unit

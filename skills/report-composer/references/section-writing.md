@@ -18,6 +18,9 @@ packet, and verified chart descriptions.
 - Do not derive values from narrative evidence, missing rows, or columns without
   a declared unit. Do not include a `derived_claims` entry that is absent from
   the paragraph text.
+- Columns whose declared unit is `count`, `index`, or `rank` are dimensionless:
+  state the number with its own noun ("12 plants") and set the claim `unit` to
+  the declared dimensionless unit.
 - Write the exact `display_value` and canonical `unit` together in the paragraph
   text so the code-verified result is unambiguously tied to the prose.
 - Include units and periods with values.

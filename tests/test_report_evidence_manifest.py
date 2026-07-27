@@ -241,3 +241,16 @@ def test_conceptual_answer_exposes_curated_knowledge_to_report_manifest(
     )
     assert ctx.summary_domain_knowledge == curated_knowledge
     assert knowledge_item.content == curated_knowledge
+
+
+def test_count_like_columns_receive_a_dimensionless_unit():
+    from agent.report_evidence import _inferred_unit_by_column
+
+    units = _inferred_unit_by_column(
+        ["plant_count", "n_units", "unit_rank", "price_gel"]
+    )
+
+    assert units["plant_count"] == "count"
+    assert units["n_units"] == "count"
+    assert units["unit_rank"] == "rank"
+    assert units["price_gel"] == "GEL/MWh"

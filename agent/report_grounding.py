@@ -42,6 +42,7 @@ _PERCENTAGE_POINT_UNITS = {
     "percentage points",
     "pp",
 }
+_DIMENSIONLESS_UNITS = frozenset({"count", "index", "rank"})
 _ADDITIVE_UNITS = {
     "gel",
     "gwh",
@@ -515,6 +516,10 @@ def _direct_claim_appears(
     display_pattern = re.escape(claim.display_value)
     if claim.display_value.endswith("%"):
         pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
+    elif _normalize_unit(claim.unit) in _DIMENSIONLESS_UNITS:
+        # Nobody writes "12 count". A dimensionless claim carries its noun in
+        # the prose, so only the value is matched — the cell is still verified.
+        pattern = rf"(?<![\w.,]){display_pattern}(?![\d.,])(?!\w)"
     else:
         normalized_unit = _normalize_unit(claim.unit)
         unit_parts = [

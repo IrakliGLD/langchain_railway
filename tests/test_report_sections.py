@@ -1604,3 +1604,63 @@ def test_year_like_evidence_magnitude_does_not_ground_a_year_reference():
         manifest,
     )
     assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def _count_manifest():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest = _manifest().model_dump(mode="json")
+    table = manifest["items"][0]
+    table["columns"] = ["period", "price", "plant_count"]
+    table["rows"] = [
+        {"period": "2026-01", "price": 120.0, "plant_count": 12},
+        {"period": "2026-02", "price": 130.0, "plant_count": 12},
+    ]
+    table["unit_by_column"] = {"price": "GEL/MWh", "plant_count": "count"}
+    return ReportEvidenceManifest.model_validate(manifest)
+
+
+def test_dimensionless_claim_needs_no_unit_token_in_the_prose():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet comprised 12 reporting plants. "
+            + _words(section.target_words - 6)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(column="plant_count", display_value="12", unit="count")
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_dimensionless_claim_still_verifies_against_its_cell():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet comprised 40 reporting plants. "
+            + _words(section.target_words - 6)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(column="plant_count", display_value="40", unit="count")
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_manifest(),
+    )
+    assert "DIRECT_CLAIM_INVALID" in validation.error_codes
