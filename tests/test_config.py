@@ -71,7 +71,32 @@ def test_database_work_budget_reserves_control_capacity():
 
 def test_report_concurrency_and_deadline_controls_are_bounded():
     assert 1 <= REPORT_SECTION_MAX_WORKERS <= 8
-    assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3600
+    assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3570
+
+
+def _config_with_env(**overrides) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env.update(overrides)
+    return subprocess.run(
+        [sys.executable, "-c", "import config; print(config.REPORT_JOB_TIMEOUT_SECONDS)"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_report_job_timeout_ceiling_always_leaves_room_for_a_valid_lease():
+    """Every accepted timeout must admit a lease of timeout + 30 within 3600."""
+
+    accepted = _config_with_env(ENAI_REPORT_JOB_TIMEOUT_SECONDS="3570")
+    assert accepted.returncode == 0, accepted.stderr
+    assert int(accepted.stdout.strip()) + 30 <= 3600
+
+    rejected = _config_with_env(ENAI_REPORT_JOB_TIMEOUT_SECONDS="3571")
+    assert rejected.returncode != 0
+    assert "ENAI_REPORT_JOB_TIMEOUT_SECONDS" in rejected.stderr
 
 
 def test_database_pool_rejects_capacity_without_application_and_control_slots():
