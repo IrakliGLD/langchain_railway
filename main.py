@@ -370,9 +370,18 @@ def parse_answer_mode(value: Optional[str]) -> AnswerMode:
     if value is None:
         return AnswerMode.STANDARD
     try:
-        return AnswerMode(value)
+        mode = AnswerMode(value)
     except ValueError as exc:
         raise AskAPIError(400, "INVALID_ANSWER_MODE", "Invalid answer mode") from exc
+    # Report mode returns before Stage 4, so this synchronous path would answer
+    # with an empty summary. Reports exist only as durable jobs.
+    if mode is AnswerMode.REPORT:
+        raise AskAPIError(
+            400,
+            "REPORT_MODE_REQUIRES_JOB",
+            "Report answers are produced by the durable report job path",
+        )
+    return mode
 
 
 _ASK_ERROR_DEFAULTS: Dict[int, Tuple[str, str, bool]] = {

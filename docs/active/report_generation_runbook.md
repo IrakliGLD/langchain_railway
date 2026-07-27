@@ -48,6 +48,10 @@ section. Checkpoints are bound to the exact job query digest and capped at
 
 ## Separate worker service
 
+`/ask` accepts only `brief` and `standard`. A `report` answer-mode header is
+rejected with `400 REPORT_MODE_REQUIRES_JOB`; report answers exist only as
+durable jobs.
+
 The existing Railway web service remains:
 
 ```text
