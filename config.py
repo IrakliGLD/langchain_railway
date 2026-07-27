@@ -81,11 +81,16 @@ REPORT_WORKER_ENABLED = (
     in ("1", "true", "yes", "on")
 )
 REPORT_WORKER_DB_URL = _read_secret_env("ENAI_REPORT_WORKER_DB_URL")
+# The lease ceiling clears the job-timeout ceiling by the worker's safety
+# margin, so a valid lease exists for every accepted timeout. Widening this
+# bound rather than narrowing the timeout keeps the constraint off the shared
+# setting: config.py is imported by the web service too, and narrowing a
+# worker-only limit there can refuse a configuration it was already running.
 REPORT_WORKER_LEASE_SECONDS = _read_bounded_int_env(
     "ENAI_REPORT_WORKER_LEASE_SECONDS",
     900,
     30,
-    3600,
+    3630,
 )
 REPORT_WORKER_RETRY_DELAY_SECONDS = _read_bounded_int_env(
     "ENAI_REPORT_WORKER_RETRY_DELAY_SECONDS",
@@ -105,14 +110,14 @@ REPORT_SECTION_MAX_WORKERS = _read_bounded_int_env(
     1,
     8,
 )
-# Capped at 3570 rather than 3600 so that the worker's lease requirement
-# (lease >= timeout + 30) is satisfiable for every accepted value. The worker
-# still refuses to start on an unsafe pair rather than clamping it.
+# The lease/timeout relationship is enforced by the worker at startup, not by
+# this shared bound. Only the worker can act on it, and it still refuses an
+# unsafe pair rather than clamping an operator's configuration.
 REPORT_JOB_TIMEOUT_SECONDS = _read_bounded_int_env(
     "ENAI_REPORT_JOB_TIMEOUT_SECONDS",
     600,
     60,
-    3570,
+    3600,
 )
 
 
