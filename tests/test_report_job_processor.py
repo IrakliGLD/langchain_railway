@@ -9,7 +9,10 @@ from uuid import uuid4
 import pytest
 
 from agent.report_planner import ReportPlanEvidenceError
-from agent.report_sections import generate_report_sections
+from agent.report_sections import (
+    ReportSectionGenerationError,
+    generate_report_sections,
+)
 from contracts.report import ReportPlan
 from contracts.report_generation import ReportGenerationCheckpoint
 from contracts.report_jobs import ReportJobLease, ReportJobPhase
@@ -20,6 +23,10 @@ from core.report_job_worker import ReportJobFailure
 from models import QueryContext
 from tests.test_report_planner import _manifest, _plan_payload
 from tests.test_report_sections import _draft
+from utils.provider_attempts import (
+    ProviderDeliveryDisposition,
+    ProviderExecutionError,
+)
 
 
 def _lease(
@@ -181,7 +188,7 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     )
 
 
-def test_quantitative_report_without_table_evidence_is_retryable():
+def test_quantitative_report_without_table_evidence_is_not_retried():
     lease = _lease()
     control = _Control()
     context = QueryContext(
@@ -200,7 +207,7 @@ def test_quantitative_report_without_table_evidence_is_retryable():
         processor(lease, control)
 
     assert exc_info.value.error_code == "REPORT_EVIDENCE_UNAVAILABLE"
-    assert exc_info.value.retryable is True
+    assert exc_info.value.retryable is False
 
 
 def test_retry_resumes_valid_sections_without_repeating_pipeline_or_planner():
@@ -283,3 +290,87 @@ def test_irreparable_evidence_bound_plan_is_not_retried():
 
     assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
     assert exc_info.value.retryable is False
+
+
+def test_schema_invalid_report_plan_is_not_retried_as_a_whole_job():
+    lease = _lease()
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=lambda *_args: (_ for _ in ()).throw(
+            ValueError("The model returned an invalid plan.")
+        ),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
+    assert exc_info.value.retryable is False
+
+
+def test_report_plan_provider_failure_remains_retryable():
+    lease = _lease()
+
+    def unavailable_planner(*_args):
+        raise ProviderExecutionError(
+            "provider timed out",
+            provider="nvidia",
+            stage="report_planner",
+            disposition=ProviderDeliveryDisposition.TIMED_OUT,
+        )
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=unavailable_planner,
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("section_error_codes", "expected_code", "expected_retryable"),
+    [
+        (["UNGROUNDED_NUMERIC_CLAIM"], "REPORT_SECTION_INVALID", False),
+        (
+            ["SECTION_WRITE_PROVIDER_FAILED"],
+            "REPORT_SECTION_PROVIDER_FAILED",
+            True,
+        ),
+        (
+            ["SECTION_REPAIR_PROVIDER_FAILED"],
+            "REPORT_SECTION_PROVIDER_FAILED",
+            True,
+        ),
+    ],
+)
+def test_section_failure_retryability_distinguishes_validation_from_provider(
+    section_error_codes,
+    expected_code,
+    expected_retryable,
+):
+    lease = _lease()
+
+    def fail_sections(*_args, **_kwargs):
+        raise ReportSectionGenerationError(
+            "key_findings",
+            section_error_codes,
+        )
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=lambda *_args: ReportPlan.model_validate(_plan_payload()),
+        section_generator=fail_sections,
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, _Control())
+
+    assert exc_info.value.error_code == expected_code
+    assert exc_info.value.retryable is expected_retryable

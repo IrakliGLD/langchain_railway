@@ -151,19 +151,6 @@ class ReportJobWorker:
         )
         try:
             result = handler(lease, control)
-            if not isinstance(result, dict):
-                raise ReportJobFailure("REPORT_RESULT_INVALID", retryable=False)
-            if control.cancellation_requested():
-                self._repository.acknowledge_cancellation(
-                    job_id=lease.job_id,
-                    worker_id=self._worker_id,
-                )
-                return True
-            self._repository.complete(
-                job_id=lease.job_id,
-                worker_id=self._worker_id,
-                result=result,
-            )
         except ReportJobFailure as exc:
             self._logger.warning(
                 "Report job attempt failed: job_id=%s error_code=%s retryable=%s",
@@ -178,6 +165,7 @@ class ReportJobWorker:
                 retryable=exc.retryable,
                 retry_delay_seconds=self._retry_delay_seconds,
             )
+            return True
         except Exception as exc:
             self._logger.error(
                 "Unexpected report worker failure: job_id=%s exception_type=%s",
@@ -191,6 +179,28 @@ class ReportJobWorker:
                 retryable=True,
                 retry_delay_seconds=self._retry_delay_seconds,
             )
+            return True
+
+        if not isinstance(result, dict):
+            self._repository.fail(
+                job_id=lease.job_id,
+                worker_id=self._worker_id,
+                error_code="REPORT_RESULT_INVALID",
+                retryable=False,
+                retry_delay_seconds=self._retry_delay_seconds,
+            )
+            return True
+        if control.cancellation_requested():
+            self._repository.acknowledge_cancellation(
+                job_id=lease.job_id,
+                worker_id=self._worker_id,
+            )
+            return True
+        self._repository.complete(
+            job_id=lease.job_id,
+            worker_id=self._worker_id,
+            result=result,
+        )
         return True
 
     def run_until_stopped(
@@ -199,7 +209,26 @@ class ReportJobWorker:
         *,
         stop_event: threading.Event,
     ) -> None:
+        consecutive_failures = 0
         while not stop_event.is_set():
-            processed = self.run_once(handler)
+            try:
+                processed = self.run_once(handler)
+            except Exception as exc:
+                consecutive_failures += 1
+                retry_delay_seconds = min(
+                    60.0,
+                    self._poll_interval_seconds
+                    * (2 ** min(consecutive_failures - 1, 10)),
+                )
+                self._logger.error(
+                    "Report worker loop recovered: exception_type=%s "
+                    "consecutive_failures=%s retry_delay_seconds=%.2f",
+                    type(exc).__name__,
+                    consecutive_failures,
+                    retry_delay_seconds,
+                )
+                stop_event.wait(retry_delay_seconds)
+                continue
+            consecutive_failures = 0
             if not processed:
                 stop_event.wait(self._poll_interval_seconds)
