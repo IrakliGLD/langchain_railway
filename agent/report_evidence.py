@@ -18,6 +18,21 @@ from contracts.report_evidence import (
 )
 from models import QueryContext
 
+_QUANTITATIVE_REPORT_PATTERN = re.compile(
+    r"\b(?:"
+    r"prices?|pricing|tariffs?|generation|demand|consumption|"
+    r"imports?|exports?|capacity|quantit(?:y|ies|ative)|volumes?|"
+    r"market\s+shares?|trends?|historical"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def report_request_requires_table(query: str) -> bool:
+    """Return whether a report request explicitly asks for measurable evidence."""
+
+    return bool(_QUANTITATIVE_REPORT_PATTERN.search(str(query or "")))
+
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(
@@ -132,7 +147,6 @@ def build_report_evidence_manifest(
 
     items: list[ReportEvidenceItem] = []
     seen_table_material: set[str] = set()
-    truncation_notes: list[str] = []
 
     def add_narrative(
         *,
@@ -155,11 +169,6 @@ def build_report_evidence_manifest(
                 content=clipped,
             )
         )
-        if len(normalized_content) > len(clipped):
-            truncation_notes.append(
-                f"{title} contains {len(normalized_content)} characters; the report "
-                f"manifest includes the first {len(clipped)} characters."
-            )
 
     def add_table(
         *,
@@ -200,11 +209,6 @@ def build_report_evidence_manifest(
                 truncated=truncated,
             )
         )
-        if truncated:
-            truncation_notes.append(
-                f"{title} contains {total_rows} rows; the report manifest includes "
-                f"the first {len(normalized_rows)} rows."
-            )
 
     add_table(
         title="Primary tabular evidence",
@@ -255,16 +259,6 @@ def build_report_evidence_manifest(
                 ],
                 content=chunk.text_content,
             )
-
-    for note in truncation_notes:
-        items.append(
-            _make_item(
-                kind=ReportEvidenceKind.LIMITATION,
-                title="Manifest truncation",
-                source="system",
-                content=note,
-            )
-        )
 
     items.append(
         _make_item(

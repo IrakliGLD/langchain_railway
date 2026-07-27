@@ -3342,6 +3342,44 @@ def test_response_mode_target_model_no_analyzer_is_knowledge_primary():
     assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
 
 
+def test_report_price_request_stays_data_primary_when_analyzer_is_unavailable():
+    from types import SimpleNamespace
+
+    from agent.pipeline import _derive_response_mode
+    from models import ResponseMode
+
+    ctx = SimpleNamespace(
+        has_authoritative_question_analysis=False,
+        query=(
+            "Provide a report on market structure and prices, "
+            "including target-model implications."
+        ),
+        effective_query="",
+        is_conceptual=True,
+        answer_mode="report",
+    )
+
+    assert _derive_response_mode(ctx) == ResponseMode.DATA_PRIMARY
+
+
+def test_report_price_request_allows_router_fallback_after_conceptual_analysis():
+    from types import SimpleNamespace
+
+    from agent.pipeline import _should_attempt_authoritative_router_fallback
+    from models import ResponseMode
+
+    ctx = _mock_ctx_for_response_mode(
+        query_type="conceptual_definition",
+        preferred_path="knowledge",
+        is_conceptual=True,
+        query="Provide a report on market structure and prices.",
+    )
+    ctx.answer_mode = "report"
+    ctx.response_mode = ResponseMode.DATA_PRIMARY
+
+    assert _should_attempt_authoritative_router_fallback(ctx) is True
+
+
 def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):
     """Shadow analyzer must never influence routing — response_mode must use heuristic fallback."""
     from agent import pipeline
