@@ -92,6 +92,7 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
+from agent.report_grounding import observed_period_span
 from contracts.report import (
     ReportIntent,
     ReportPlan,
@@ -3204,6 +3205,7 @@ def _report_section_evidence_slice(
                 {
                     "columns": item.columns,
                     "unit_by_column": item.unit_by_column,
+                    "observed_period_span": observed_period_span(item),
                     "row_index_base": 0,
                     "total_row_count": item.total_row_count,
                     "manifest_rows_truncated": item.truncated,

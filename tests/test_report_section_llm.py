@@ -532,3 +532,16 @@ def test_section_writer_bypasses_semantically_invalid_cache_entry(
     assert provider_calls == [True]
     assert draft.paragraphs[0].text != "Cached but too short."
     assert cached["token"] is None
+
+
+def test_section_evidence_slice_discloses_observed_period_span():
+    from core.llm import _report_section_evidence_slice
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    packet = _report_section_evidence_slice(section, _manifest())
+
+    assert '"observed_period_span"' in packet
+    assert '"first":"2026-01"' in packet
+    assert '"last":"2026-02"' in packet

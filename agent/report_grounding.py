@@ -226,6 +226,24 @@ def build_evidence_grounding_index(
     }
 
 
+def observed_period_span(item: ReportEvidenceItem) -> dict[str, str] | None:
+    """Return the first and last period literal present in one evidence item."""
+
+    periods: set[str] = set()
+    for row in item.rows:
+        for value in row.values():
+            if not isinstance(value, str):
+                continue
+            for match in _PERIOD_PATTERN.finditer(value):
+                period_fact = _normalized_period_fact(match)
+                if period_fact is not None:
+                    periods.add(period_fact.value)
+    if not periods:
+        return None
+    ordered = sorted(periods)
+    return {"first": ordered[0], "last": ordered[-1]}
+
+
 def _claim_is_year_reference(claim: _NumericFact) -> bool:
     """Return whether a bare integer reads as a calendar year, not a quantity."""
 
