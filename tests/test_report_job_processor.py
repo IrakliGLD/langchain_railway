@@ -577,3 +577,44 @@ def test_unbuildable_required_chart_is_demoted_instead_of_killing_the_job():
     assert [section["chart_refs"] for section in result["sections"]] == [
         [] for _ in result["sections"]
     ]
+
+
+def test_resume_demotes_a_required_chart_left_by_an_older_checkpoint():
+    payload = _plan_payload()
+    payload["charts"][0]["purpose"] = "relationship"
+    plan = ReportPlan.model_validate(payload)
+    manifest = _manifest_for_query("Explain the price trend.")
+    checkpoint = ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v1",
+        manifest=manifest,
+        plan=plan,
+        completed_sections=[],
+    ).model_dump(mode="json")
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=lambda *_a, **_k: pytest.fail("resume must not re-plan"),
+        section_generator=lambda query, plan_value, manifest_value, **kwargs: (
+            generate_report_sections(
+                query,
+                plan_value,
+                manifest_value,
+                existing_drafts=kwargs["existing_drafts"],
+                generate_section=lambda _q, _p, section, _m: _draft(section),
+                progress_callback=kwargs["progress_callback"],
+                max_workers=kwargs["max_workers"],
+            )
+        ),
+        max_section_workers=5,
+    )
+
+    result = processor(
+        _lease(checkpoint=checkpoint, phase="generating_sections"),
+        _Control(),
+    )
+
+    assert result["charts"] == []
+    assert [omission["chart_id"] for omission in result["omitted_charts"]] == [
+        "price_trend"
+    ]

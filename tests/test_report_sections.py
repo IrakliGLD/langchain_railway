@@ -1717,3 +1717,73 @@ def test_negative_value_is_not_read_as_a_range():
     facts = _grounding_facts_from_text("The change was -5.2 overall.")
 
     assert {str(fact.value) for fact in facts} == {"-5.2"}
+
+
+def _count_derived_manifest():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest = _manifest().model_dump(mode="json")
+    table = manifest["items"][0]
+    table["columns"] = ["period", "plant_count"]
+    table["rows"] = [
+        {"period": "2026-01", "plant_count": 10},
+        {"period": "2026-02", "plant_count": 14},
+    ]
+    table["unit_by_column"] = {"plant_count": "count"}
+    return ReportEvidenceManifest.model_validate(manifest)
+
+
+def test_dimensionless_derived_claim_needs_no_unit_token_in_the_prose():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet grew by 4 reporting plants. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="difference",
+            display_value="4",
+            unit="count",
+            column="plant_count",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_derived_manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_dimensionless_derived_claim_is_still_recomputed():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet grew by 9 reporting plants. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="difference",
+            display_value="9",
+            unit="count",
+            column="plant_count",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_derived_manifest(),
+    )
+    assert "DERIVED_CLAIM_INVALID" in validation.error_codes

@@ -505,6 +505,10 @@ def _derived_claim_appears(
     display_pattern = re.escape(claim.display_value)
     if claim.display_value.endswith("%"):
         pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
+    elif _normalize_unit(claim.unit) in _DIMENSIONLESS_UNITS:
+        # Same rule as a dimensionless direct claim: the noun lives in the
+        # prose, so nobody writes "12 count".
+        pattern = rf"(?<![\w.,]){display_pattern}(?![\d.,])(?!\w)"
     else:
         unit_pattern = re.escape(claim.unit).replace(r"\ ", r"\s+")
         pattern = (

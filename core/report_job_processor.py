@@ -361,6 +361,12 @@ class ReportJobProcessor:
             }
             try:
                 chart_decisions = self._chart_builder(plan, manifest)
+                # A checkpoint written before chart demotion shipped still marks
+                # an unbuildable chart required; resuming must not kill it.
+                plan, chart_decisions = demote_unbuildable_required_charts(
+                    plan,
+                    chart_decisions,
+                )
                 evaluation = self._evaluator(
                     plan,
                     manifest,
