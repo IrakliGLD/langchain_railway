@@ -19,6 +19,23 @@ class ReportDerivedOperand(_StrictSectionModel):
     column: str = Field(min_length=1, max_length=128)
 
 
+class ReportDirectClaim(_StrictSectionModel):
+    evidence_ref: str = Field(
+        pattern=r"^evidence:table:[0-9a-f]{16}$",
+    )
+    row_index: int = Field(ge=0, le=199)
+    column: str = Field(min_length=1, max_length=128)
+    display_value: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=(
+            r"^[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)"
+            r"(?:[eE][-+]?\d+)?%?$"
+        ),
+    )
+    unit: str = Field(min_length=1, max_length=64)
+
+
 class ReportDerivedClaim(_StrictSectionModel):
     operation: Literal[
         "sum",
@@ -91,6 +108,10 @@ class ReportDerivedClaim(_StrictSectionModel):
 class ReportSectionParagraph(_StrictSectionModel):
     text: str = Field(min_length=20, max_length=6000)
     evidence_refs: List[str] = Field(min_length=1, max_length=32)
+    direct_claims: List[ReportDirectClaim] = Field(
+        default_factory=list,
+        max_length=32,
+    )
     derived_claims: List[ReportDerivedClaim] = Field(
         default_factory=list,
         max_length=16,
@@ -111,6 +132,26 @@ class ReportSectionParagraph(_StrictSectionModel):
         if any(line.lstrip().startswith("#") for line in text.splitlines()):
             raise ValueError("Section paragraphs cannot create Markdown headings.")
         return text
+
+    @field_validator("direct_claims")
+    @classmethod
+    def _validate_direct_claims(
+        cls,
+        claims: List[ReportDirectClaim],
+    ) -> List[ReportDirectClaim]:
+        identities = [
+            (
+                claim.evidence_ref,
+                claim.row_index,
+                claim.column,
+                claim.display_value,
+                claim.unit,
+            )
+            for claim in claims
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Paragraph direct_claims must be unique.")
+        return claims
 
     @field_validator("derived_claims")
     @classmethod

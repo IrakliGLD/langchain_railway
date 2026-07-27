@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from collections import Counter
+from concurrent.futures import CancelledError
 from copy import deepcopy
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -58,6 +59,99 @@ def _draft(section, *, text: str | None = None) -> dict:
     }
 
 
+def _direct_claim(
+    *,
+    row_index: int = 0,
+    column: str = "price",
+    display_value: str = "120.0",
+    unit: str = "GEL/MWh",
+) -> dict:
+    return {
+        "evidence_ref": "evidence:table:" + "1" * 16,
+        "row_index": row_index,
+        "column": column,
+        "display_value": display_value,
+        "unit": unit,
+    }
+
+
+def test_section_grounding_binds_direct_value_to_its_row_metric_and_unit():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    valid_payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    valid_payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+    valid = validate_report_section(
+        ReportSectionDraft.model_validate(valid_payload),
+        section,
+        _manifest(),
+    )
+    assert valid.valid is True
+
+    wrong_row_payload = deepcopy(valid_payload)
+    wrong_row_payload["paragraphs"][0]["text"] = (
+        "Observed price in 2026-01 was 130.0 GEL/MWh. "
+        + _words(section.target_words - 9)
+    )
+    wrong_row_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(row_index=1, display_value="130.0")
+    ]
+    wrong_row = validate_report_section(
+        ReportSectionDraft.model_validate(wrong_row_payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in wrong_row.error_codes
+
+    wrong_column_payload = deepcopy(valid_payload)
+    wrong_column_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(column="period")
+    ]
+    wrong_column = validate_report_section(
+        ReportSectionDraft.model_validate(wrong_column_payload),
+        section,
+        _manifest(),
+    )
+    assert "DIRECT_CLAIM_INVALID" in wrong_column.error_codes
+
+    wrong_unit_payload = deepcopy(valid_payload)
+    wrong_unit_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(unit="MW")
+    ]
+    wrong_unit = validate_report_section(
+        ReportSectionDraft.model_validate(wrong_unit_payload),
+        section,
+        _manifest(),
+    )
+    assert "DIRECT_CLAIM_INVALID" in wrong_unit.error_codes
+
+
+def test_section_grounding_requires_coordinates_for_direct_table_numbers():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price was 120.0 GEL/MWh. "
+            + _words(section.target_words - 7)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
 def test_section_validation_enforces_budget_refs_and_numeric_grounding():
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[2]
@@ -65,9 +159,9 @@ def test_section_validation_enforces_budget_refs_and_numeric_grounding():
         section.target_words - 7,
         prefix="Evidence",
     )
-    grounded = ReportSectionDraft.model_validate(
-        _draft(section, text=grounded_text)
-    )
+    grounded_payload = _draft(section, text=grounded_text)
+    grounded_payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+    grounded = ReportSectionDraft.model_validate(grounded_payload)
 
     valid = validate_report_section(grounded, section, _manifest())
 
@@ -167,6 +261,13 @@ def test_section_validation_accepts_percent_conversion_only_for_ratio_evidence(
     draft_payload["paragraphs"][0]["evidence_refs"] = (
         section.required_evidence_refs
     )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(
+            column=column,
+            display_value="14.38%",
+            unit="%",
+        )
+    ]
 
     validation = validate_report_section(
         ReportSectionDraft.model_validate(draft_payload),
@@ -203,15 +304,17 @@ def test_section_numeric_grounding_accepts_equivalent_display_values(
     ]
     manifest_payload["items"][0]["total_row_count"] = 1
     manifest = _manifest().model_validate(manifest_payload)
-    draft = ReportSectionDraft.model_validate(
-        _draft(
-            section,
-            text=(
-                f"Observed price was {claim} GEL per MWh. "
-                + _words(section.target_words - 8)
-            ),
-        )
+    draft_payload = _draft(
+        section,
+        text=(
+            f"Observed price was {claim} GEL per MWh. "
+            + _words(section.target_words - 8)
+        ),
     )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(display_value=claim, unit="GEL per MWh")
+    ]
+    draft = ReportSectionDraft.model_validate(draft_payload)
 
     validation = validate_report_section(draft, section, manifest)
 
@@ -269,15 +372,17 @@ def test_section_numeric_grounding_accepts_supported_scientific_notation():
     ]
     manifest_payload["items"][0]["total_row_count"] = 1
     manifest = _manifest().model_validate(manifest_payload)
-    draft = ReportSectionDraft.model_validate(
-        _draft(
-            section,
-            text=(
-                "Observed price was 1e3 GEL per MWh. "
-                + _words(section.target_words - 8)
-            ),
-        )
+    draft_payload = _draft(
+        section,
+        text=(
+            "Observed price was 1e3 GEL per MWh. "
+            + _words(section.target_words - 8)
+        ),
     )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(display_value="1e3", unit="GEL per MWh")
+    ]
+    draft = ReportSectionDraft.model_validate(draft_payload)
 
     validation = validate_report_section(draft, section, manifest)
 
@@ -298,15 +403,21 @@ def test_section_grounding_matches_periods_as_typed_facts(
 ):
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[1]
-    draft = ReportSectionDraft.model_validate(
-        _draft(
-            section,
-            text=(
-                f"Observed price in {period} was 130 GEL per MWh. "
-                + _words(section.target_words - 10)
-            ),
-        )
+    draft_payload = _draft(
+        section,
+        text=(
+            f"Observed price in {period} was 130 GEL per MWh. "
+            + _words(section.target_words - 10)
+        ),
     )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(
+            row_index=1,
+            display_value="130",
+            unit="GEL per MWh",
+        )
+    ]
+    draft = ReportSectionDraft.model_validate(draft_payload)
 
     validation = validate_report_section(draft, section, _manifest())
 
@@ -785,7 +896,7 @@ def test_parallel_sections_inherit_job_identity_and_deadline():
     )
 
 
-def test_section_failure_has_bounded_drain_and_does_not_wait_for_slow_peer():
+def test_section_failure_waits_for_inflight_peer_before_error_escapes():
     plan = ReportPlan.model_validate(_plan_payload())
     both_started = threading.Barrier(2)
     slow_started = threading.Event()
@@ -809,7 +920,6 @@ def test_section_failure_has_bounded_drain_and_does_not_wait_for_slow_peer():
                 _manifest(),
                 generate_section=generate,
                 max_workers=2,
-                failure_drain_timeout_seconds=0.01,
             )
         except BaseException as exc:  # captured for deterministic thread cleanup
             errors.append(exc)
@@ -820,7 +930,9 @@ def test_section_failure_has_bounded_drain_and_does_not_wait_for_slow_peer():
     controller.start()
     try:
         assert slow_started.wait(timeout=1)
-        assert finished.wait(timeout=0.25)
+        assert finished.wait(timeout=0.35) is False
+        release_slow_peer.set()
+        assert finished.wait(timeout=1)
     finally:
         release_slow_peer.set()
         controller.join(timeout=2)
@@ -830,7 +942,7 @@ def test_section_failure_has_bounded_drain_and_does_not_wait_for_slow_peer():
     assert str(errors[0]) == "first section failed"
 
 
-def test_failure_drain_checkpoints_peer_that_finishes_before_drain_timeout():
+def test_section_failure_checkpoints_peer_after_all_inflight_calls_settle():
     plan = ReportPlan.model_validate(_plan_payload())
     both_started = threading.Barrier(2)
     slow_started = threading.Event()
@@ -858,7 +970,6 @@ def test_failure_drain_checkpoints_peer_that_finishes_before_drain_timeout():
                     persisted.append(draft.section_id)
                 ),
                 max_workers=2,
-                failure_drain_timeout_seconds=0.5,
             )
         except BaseException as exc:
             errors.append(exc)
@@ -877,6 +988,27 @@ def test_failure_drain_checkpoints_peer_that_finishes_before_drain_timeout():
     assert len(errors) == 1
     assert str(errors[0]) == "first section failed"
     assert plan.sections[1].section_id in persisted
+
+
+def test_provider_cancelled_error_is_not_mistaken_for_internal_queue_cancellation():
+    plan = ReportPlan.model_validate(_plan_payload())
+    existing_drafts = {
+        section.section_id: ReportSectionDraft.model_validate(_draft(section))
+        for section in plan.sections[1:]
+    }
+
+    def generate(_query, _plan, _section, _manifest):
+        raise CancelledError("provider cancelled its request")
+
+    with pytest.raises(CancelledError, match="provider cancelled"):
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            existing_drafts=existing_drafts,
+            generate_section=generate,
+            max_workers=1,
+        )
 
 
 def test_only_invalid_sections_receive_one_repair_call():

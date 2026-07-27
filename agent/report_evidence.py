@@ -19,6 +19,11 @@ from contracts.report_evidence import (
     ReportEvidenceManifest,
 )
 from models import QueryContext
+from utils.coverage_sampling import coverage_priority_indices
+
+_QUERY_PERIOD_PATTERN = re.compile(
+    r"(?<!\w)\d{4}(?:[-/](?:[Qq][1-4]|\d{1,2})(?:[-/]\d{1,2})?)?(?!\w)"
+)
 
 
 def _canonical_json(value: Any) -> str:
@@ -67,11 +72,45 @@ def _normalize_table(
     *,
     max_rows: int,
     max_columns: int,
+    relevant_tokens: set[str],
 ) -> tuple[list[str], list[dict[str, Any]], int, bool]:
     normalized_columns = [str(column)[:128] for column in list(columns)[:max_columns]]
     materialized_rows = list(rows)
+    preferred_indices = [
+        index
+        for index, row in enumerate(materialized_rows)
+        if relevant_tokens
+        and any(
+            token in str(value).casefold().replace("/", "-")
+            for token in relevant_tokens
+            for value in (
+                row.values()
+                if isinstance(row, dict)
+                else row
+            )
+        )
+    ]
+    if len(preferred_indices) > max_rows and max_rows > 1:
+        preferred_indices = [
+            preferred_indices[
+                round(index * (len(preferred_indices) - 1) / (max_rows - 1))
+            ]
+            for index in range(max_rows)
+        ]
+    selected_indices = sorted(
+        index
+        for _, index in zip(
+            range(max_rows),
+            coverage_priority_indices(
+                len(materialized_rows),
+                preferred_indices=preferred_indices,
+            ),
+            strict=False,
+        )
+    )
     normalized_rows = []
-    for row in materialized_rows[:max_rows]:
+    for row_index in selected_indices:
+        row = materialized_rows[row_index]
         if isinstance(row, dict):
             normalized_rows.append(
                 {
@@ -184,6 +223,10 @@ def build_report_evidence_manifest(
 
     items: list[ReportEvidenceItem] = []
     seen_table_material: set[str] = set()
+    relevant_tokens = {
+        match.group(0).casefold().replace("/", "-")
+        for match in _QUERY_PERIOD_PATTERN.finditer(str(ctx.query or ""))
+    }
 
     def add_narrative(
         *,
@@ -220,6 +263,7 @@ def build_report_evidence_manifest(
             rows,
             max_rows=max_rows_per_table,
             max_columns=max_columns_per_table,
+            relevant_tokens=relevant_tokens,
         )
         if not normalized_columns or not normalized_rows:
             return

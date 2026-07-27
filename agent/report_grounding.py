@@ -12,6 +12,7 @@ from contracts.report_evidence import ReportEvidenceItem, ReportEvidenceKind
 from contracts.report_sections import (
     ReportDerivedClaim,
     ReportDerivedOperand,
+    ReportDirectClaim,
     ReportSectionParagraph,
 )
 
@@ -119,9 +120,6 @@ def _grounding_facts_from_text(
         if period_fact is None:
             return match.group(0)
         facts.add(period_fact)
-        year_fact = _parse_numeric_token(match.group("year"))
-        if year_fact is not None:
-            facts.add(year_fact)
         return " "
 
     remaining_text = _PERIOD_PATTERN.sub(replace_period, str(text or ""))
@@ -152,6 +150,7 @@ def _grounding_facts_from_value(
 
 def _normalize_unit(unit: str) -> str:
     normalized = " ".join(str(unit or "").strip().lower().split())
+    normalized = re.sub(r"\s+per\s+", "/", normalized)
     return normalized.replace(" / ", "/").replace("/ ", "/").replace(" /", "/")
 
 
@@ -169,26 +168,37 @@ def _evidence_grounding_facts(
     item: ReportEvidenceItem,
 ) -> set[_NumericFact | _PeriodFact]:
     facts = _grounding_facts_from_text(item.content)
-    for row in item.rows:
-        for column, value in row.items():
-            value_facts = _grounding_facts_from_value(value)
-            facts.update(value_facts)
-            if not _is_ratio_column(item, column):
+    for row_index in range(len(item.rows)):
+        facts.update(_table_row_grounding_facts(item, row_index))
+    return facts
+
+
+def _table_row_grounding_facts(
+    item: ReportEvidenceItem,
+    row_index: int,
+) -> set[_NumericFact | _PeriodFact]:
+    if item.kind is not ReportEvidenceKind.TABLE or row_index >= len(item.rows):
+        return set()
+    facts: set[_NumericFact | _PeriodFact] = set()
+    for column, value in item.rows[row_index].items():
+        value_facts = _grounding_facts_from_value(value)
+        facts.update(value_facts)
+        if not _is_ratio_column(item, column):
+            continue
+        for fact in value_facts:
+            if (
+                not isinstance(fact, _NumericFact)
+                or fact.is_percent
+                or abs(fact.value) > 1
+            ):
                 continue
-            for fact in value_facts:
-                if (
-                    not isinstance(fact, _NumericFact)
-                    or fact.is_percent
-                    or abs(fact.value) > 1
-                ):
-                    continue
-                facts.add(
-                    _NumericFact(
-                        value=fact.value * Decimal(100),
-                        is_percent=True,
-                        precision=max(0, fact.precision - 2),
-                    )
+            facts.add(
+                _NumericFact(
+                    value=fact.value * Decimal(100),
+                    is_percent=True,
+                    precision=max(0, fact.precision - 2),
                 )
+            )
     return facts
 
 
@@ -254,6 +264,65 @@ def _resolve_operand(
     if not unit:
         return None
     return _ResolvedOperand(value=value, unit=unit)
+
+
+def _verified_direct_fact(
+    claim: ReportDirectClaim,
+    paragraph_refs: set[str],
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> tuple[_NumericFact, set[_NumericFact | _PeriodFact]] | None:
+    if claim.evidence_ref not in paragraph_refs:
+        return None
+    item = item_by_ref.get(claim.evidence_ref)
+    if item is None or item.kind is not ReportEvidenceKind.TABLE:
+        return None
+    if claim.row_index >= len(item.rows) or claim.column not in item.columns:
+        return None
+
+    raw_facts = [
+        fact
+        for fact in _grounding_facts_from_value(
+            item.rows[claim.row_index].get(claim.column)
+        )
+        if isinstance(fact, _NumericFact)
+    ]
+    displayed = _parse_numeric_token(claim.display_value)
+    if len(raw_facts) != 1 or displayed is None:
+        return None
+
+    evidence_unit = _normalize_unit(item.unit_by_column.get(claim.column, ""))
+    claim_unit = _normalize_unit(claim.unit)
+    if not evidence_unit or not claim_unit:
+        return None
+
+    raw_fact = raw_facts[0]
+    if _is_ratio_column(item, claim.column) and displayed.is_percent:
+        expected_fact = _NumericFact(
+            value=raw_fact.value * Decimal(100),
+            is_percent=True,
+            precision=max(0, raw_fact.precision - 2),
+        )
+        if claim_unit != "%":
+            return None
+    elif evidence_unit == "%":
+        expected_fact = _NumericFact(
+            value=raw_fact.value,
+            is_percent=True,
+            precision=raw_fact.precision,
+        )
+        if claim_unit != "%":
+            return None
+    else:
+        expected_fact = raw_fact
+        if displayed.is_percent or claim_unit != evidence_unit:
+            return None
+
+    if not _grounding_claim_is_supported(displayed, {expected_fact}):
+        return None
+    return (
+        displayed,
+        _table_row_grounding_facts(item, claim.row_index),
+    )
 
 
 def _compute_derived_value(
@@ -347,6 +416,37 @@ def _derived_claim_appears(
     return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
 
 
+def _direct_claim_appears(
+    claim: ReportDirectClaim,
+    paragraph_text: str,
+) -> bool:
+    display_pattern = re.escape(claim.display_value)
+    if claim.display_value.endswith("%"):
+        pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
+    else:
+        normalized_unit = _normalize_unit(claim.unit)
+        unit_parts = [
+            re.escape(part)
+            for part in normalized_unit.split("/")
+            if part
+        ]
+        unit_pattern = r"\s*(?:/|\bper\b)\s*".join(unit_parts)
+        unit_pattern = unit_pattern.replace(r"\ ", r"\s+")
+        pattern = (
+            rf"(?<![\w.,]){display_pattern}(?![\d.,])"
+            rf"\s+{unit_pattern}(?!\w)"
+        )
+    return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
+
+
+def _paragraph_sentences(text: str) -> list[str]:
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if sentence.strip()
+    ]
+
+
 def validate_paragraph_grounding(
     paragraph: ReportSectionParagraph,
     item_by_ref: Mapping[str, ReportEvidenceItem],
@@ -367,10 +467,46 @@ def validate_paragraph_grounding(
             item_by_ref,
             paragraph_refs,
         )
-    evidence_facts = set().union(
-        *(grounding_index[ref] for ref in paragraph_refs if ref in grounding_index)
+    narrative_facts = set().union(
+        *(
+            grounding_index[ref]
+            for ref in paragraph_refs
+            if ref in grounding_index
+            and item_by_ref[ref].kind is not ReportEvidenceKind.TABLE
+        )
     )
-    paragraph_claims = _grounding_facts_from_text(paragraph.text)
+    table_facts = set().union(
+        *(
+            grounding_index[ref]
+            for ref in paragraph_refs
+            if ref in grounding_index
+            and item_by_ref[ref].kind is ReportEvidenceKind.TABLE
+        )
+    )
+    sentences = _paragraph_sentences(paragraph.text)
+    sentence_facts = [set(narrative_facts) for _ in sentences]
+
+    for claim in paragraph.direct_claims:
+        direct_fact = _verified_direct_fact(
+            claim,
+            paragraph_refs,
+            item_by_ref,
+        )
+        if direct_fact is None:
+            errors.append("DIRECT_CLAIM_INVALID")
+            continue
+        matching_sentences = [
+            index
+            for index, sentence in enumerate(sentences)
+            if _direct_claim_appears(claim, sentence)
+        ]
+        if not matching_sentences:
+            errors.append("DIRECT_CLAIM_NOT_USED")
+            continue
+        displayed, row_facts = direct_fact
+        for index in matching_sentences:
+            sentence_facts[index].add(displayed)
+            sentence_facts[index].update(row_facts)
 
     for claim in paragraph.derived_claims:
         derived_fact = _verified_derived_fact(
@@ -381,14 +517,29 @@ def validate_paragraph_grounding(
         if derived_fact is None:
             errors.append("DERIVED_CLAIM_INVALID")
             continue
-        if not _derived_claim_appears(claim, paragraph.text):
+        matching_sentences = [
+            index
+            for index, sentence in enumerate(sentences)
+            if _derived_claim_appears(claim, sentence)
+        ]
+        if not matching_sentences:
             errors.append("DERIVED_CLAIM_NOT_USED")
             continue
-        evidence_facts.add(derived_fact)
+        for index in matching_sentences:
+            sentence_facts[index].add(derived_fact)
 
-    if any(
-        not _grounding_claim_is_supported(claim, evidence_facts)
-        for claim in paragraph_claims
+    for sentence, supported_facts in zip(
+        sentences,
+        sentence_facts,
+        strict=True,
     ):
-        errors.append("UNGROUNDED_NUMERIC_CLAIM")
+        claims = _grounding_facts_from_text(sentence)
+        if claims and all(isinstance(claim, _PeriodFact) for claim in claims):
+            supported_facts.update(table_facts)
+        if any(
+            not _grounding_claim_is_supported(claim, supported_facts)
+            for claim in claims
+        ):
+            errors.append("UNGROUNDED_NUMERIC_CLAIM")
+            break
     return list(dict.fromkeys(errors))

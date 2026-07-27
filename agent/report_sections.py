@@ -8,8 +8,9 @@ import math
 import re
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
+from threading import Event
 from typing import Any
 
 from pydantic import ValidationError
@@ -46,6 +47,10 @@ class ReportSectionGenerationError(RuntimeError):
         self.provider = provider
         self.provider_stage = provider_stage
         self.provider_disposition = provider_disposition
+
+
+class _SectionPhaseCancelled(RuntimeError):
+    """Internal sentinel for queued work suppressed after a peer failure."""
 
 
 def count_section_words(text: str) -> int:
@@ -202,16 +207,11 @@ def generate_report_sections(
     progress_callback: ProgressCallback | None = None,
     max_workers: int = 4,
     max_repair_attempts: int = 2,
-    failure_drain_timeout_seconds: float = 0.25,
 ) -> list[ReportSectionDraft]:
     if not 1 <= max_workers <= 8:
         raise ValueError("max_workers must be between 1 and 8.")
     if not 1 <= max_repair_attempts <= 3:
         raise ValueError("max_repair_attempts must be between 1 and 3.")
-    if not 0 <= failure_drain_timeout_seconds <= 5:
-        raise ValueError(
-            "failure_drain_timeout_seconds must be between 0 and 5."
-        )
     if generate_section is None:
         from core.llm import llm_write_report_section
 
@@ -413,6 +413,17 @@ def generate_report_sections(
     pending_sections = [section for section in plan.sections if section.section_id not in completed]
     if pending_sections:
         worker_count = min(max_workers, len(pending_sections))
+        phase_failed = Event()
+
+        def run_one(section: ReportSectionSpec) -> ReportSectionDraft:
+            if phase_failed.is_set():
+                raise _SectionPhaseCancelled()
+            try:
+                return generate_one(section)
+            except BaseException:
+                phase_failed.set()
+                raise
+
         executor = ThreadPoolExecutor(
             max_workers=worker_count,
             thread_name_prefix="report-section",
@@ -423,12 +434,17 @@ def generate_report_sections(
                 captured_context = copy_context()
                 future = executor.submit(
                     captured_context.run,
-                    generate_one,
+                    run_one,
                     section,
                 )
                 future_to_section[future] = section
             for future in as_completed(future_to_section):
-                draft = future.result()
+                if future.cancelled():
+                    continue
+                try:
+                    draft = future.result()
+                except _SectionPhaseCancelled:
+                    continue
                 completed[draft.section_id] = draft
                 if progress_callback is not None:
                     progress_callback(
@@ -437,6 +453,7 @@ def generate_report_sections(
                         draft,
                     )
         except Exception as phase_error:
+            phase_failed.set()
             failed_in_future = any(
                 future.done()
                 and not future.cancelled()
@@ -445,12 +462,9 @@ def generate_report_sections(
             )
             for future in future_to_section:
                 future.cancel()
-            drained, _ = wait(
-                future_to_section,
-                timeout=failure_drain_timeout_seconds,
-            )
+            executor.shutdown(wait=True, cancel_futures=True)
             if failed_in_future:
-                for future in drained:
+                for future in future_to_section:
                     if future.cancelled() or future.exception() is not None:
                         continue
                     draft = future.result()
@@ -467,10 +481,9 @@ def generate_report_sections(
                         except Exception:
                             _LOGGER.warning(
                                 "Could not checkpoint a peer section during "
-                                "failure drain: section_id=%s",
+                                "failure settlement: section_id=%s",
                                 draft.section_id,
                             )
-            executor.shutdown(wait=False, cancel_futures=True)
             raise
         else:
             executor.shutdown(wait=True)

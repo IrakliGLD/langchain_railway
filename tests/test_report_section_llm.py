@@ -75,7 +75,9 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     assert "Use every required_evidence_refs value at least once" in user[1]
     assert '"row_index_base":0' in user[1]
     assert '"row_index":0' in user[1]
+    assert "direct_claims" in user[1]
     assert "derived_claims" in user[1]
+    assert "exact evidence_ref" in system[1]
     assert "code-verifiable derived claims" in system[1]
     assert section.section_id in captured["cache_key"]
     assert _manifest().manifest_id in captured["cache_key"]
@@ -170,6 +172,37 @@ def test_evidence_slice_does_not_reserialize_a_growing_table(monkeypatch):
     decoded = json.loads(packet)
     assert decoded[0]["rows"][0]["row_index"] == 0
     assert decoded[0]["included_row_count"] <= table["total_row_count"]
+
+
+def test_evidence_slice_preserves_table_boundaries_when_prompt_budget_truncates(
+    monkeypatch,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["rows"] = [
+        {
+            "period": f"period-{index:03d}-" + ("x" * 120),
+            "price": 100 + index,
+        }
+        for index in range(100)
+    ]
+    table["total_row_count"] = len(table["rows"])
+    table["truncated"] = False
+    manifest = _manifest().model_validate(manifest_payload)
+    monkeypatch.setattr(llm, "_REPORT_SECTION_EVIDENCE_BUDGET_CHARS", 1600)
+
+    decoded = json.loads(
+        llm._report_section_evidence_slice(section, manifest)
+    )
+    projected = decoded[0]
+    row_indexes = [row["row_index"] for row in projected["rows"]]
+
+    assert projected["prompt_projection_truncated"] is True
+    assert row_indexes[0] == 0
+    assert row_indexes[-1] == 99
+    assert row_indexes != list(range(len(row_indexes)))
 
 
 def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):
