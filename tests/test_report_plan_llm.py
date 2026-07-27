@@ -166,3 +166,52 @@ def test_report_planner_prompt_exposes_chart_column_roles(monkeypatch):
     assert '"temporal":["period"]' in user[1]
     assert '"numeric":["price"]' in user[1]
     assert '"price":120.0' not in user[1]
+
+
+def test_report_plan_repair_is_uncached_and_bounds_its_error_codes(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("plan repair must not read the response cache")
+        ),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_set",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("plan repair must not write the response cache")
+        ),
+    )
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+
+    def invoke(_factory, _model, messages, **kwargs):
+        captured["messages"] = messages
+        captured["attempt_stage"] = kwargs["attempt_stage"]
+        return SimpleNamespace(content=json.dumps(_plan_payload()))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    plan = llm.llm_repair_report_plan(
+        "Explain the price trend.",
+        _manifest(),
+        ReportPlanningContext(
+            contract_version="report-planning-context-v1",
+            intent=ReportIntent.GENERAL,
+            language_code="en",
+            request_objective="Explain the price trend.",
+            requires_table=True,
+            source="question_analysis",
+        ),
+        _plan_payload(),
+        ["PLAN_SCHEMA_INVALID", "drop me", "ALSO_FINE"],
+    )
+
+    assert isinstance(plan, ReportPlan)
+    assert captured["attempt_stage"] == "report_plan_repair"
+    _system, user = captured["messages"]
+    assert '["PLAN_SCHEMA_INVALID","ALSO_FINE"]' in user[1]
+    assert "drop me" not in user[1]
+    assert "untrusted" in _system[1].lower()
