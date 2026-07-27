@@ -28,6 +28,9 @@ _PERIOD_PATTERN = re.compile(
 )
 _RANGE_SEPARATOR_PATTERN = re.compile(r"(?<=\d)\s*[-–—]\s*(?=[\d.])")
 _RANGE_TAIL_PATTERN = r"(?:\s*(?:to|[-–—])\s*[-+]?[\d.,]+%?)?"
+_CLAIM_NUMBER_PATTERN = (
+    r"[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?"
+)
 _RATIO_COLUMN_NAMES = {
     "balancing_share",
     "generation_share",
@@ -502,47 +505,96 @@ def _derived_claim_appears(
     claim: ReportDerivedClaim,
     paragraph_text: str,
 ) -> bool:
-    display_pattern = re.escape(claim.display_value)
-    if claim.display_value.endswith("%"):
-        pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
-    elif _normalize_unit(claim.unit) in _DIMENSIONLESS_UNITS:
-        # Same rule as a dimensionless direct claim: the noun lives in the
-        # prose, so nobody writes "12 count".
-        pattern = rf"(?<![\w.,]){display_pattern}(?![\d.,])(?!\w)"
-    else:
-        unit_pattern = re.escape(claim.unit).replace(r"\ ", r"\s+")
-        pattern = (
-            rf"(?<![\w.,]){display_pattern}(?![\d.,]){_RANGE_TAIL_PATTERN}"
-            rf"\s+{unit_pattern}(?!\w)"
+    rendered, _unit_present = _rendered_claim_positions(
+        claim.display_value,
+        claim.unit,
+        paragraph_text,
+    )
+    return rendered
+
+
+def _numbers_agree(left: _NumericFact, right: _NumericFact) -> bool:
+    """Return whether two renderings denote the same value.
+
+    Grounding already accepts a finer evidence value as support for a coarser
+    claim. The prose check has to use the same rule: a report writing
+    "141.0 GEL/MWh" for a cell holding 140.9935 is rendering the claim it
+    declared, not asserting a different number.
+    """
+
+    if left.is_percent != right.is_percent:
+        return False
+    if left.value == right.value:
+        return True
+    coarse, fine = (
+        (left, right) if left.precision <= right.precision else (right, left)
+    )
+    quantum = Decimal(1).scaleb(-coarse.precision)
+    try:
+        return fine.value.quantize(quantum, rounding=ROUND_HALF_UP) == coarse.value
+    except DecimalException:
+        return False
+
+
+def _claim_unit_pattern(claim_unit: str) -> str:
+    normalized_unit = _normalize_unit(claim_unit)
+    unit_parts = [re.escape(part) for part in normalized_unit.split("/") if part]
+    unit_pattern = r"\s*(?:/|\bper\b)\s*".join(unit_parts)
+    return unit_pattern.replace(r"\ ", r"\s+")
+
+
+def _rendered_claim_positions(
+    display_value: str,
+    claim_unit: str,
+    paragraph_text: str,
+) -> tuple[bool, bool]:
+    """Return (value rendered beside its unit, unit rendered anywhere)."""
+
+    declared = _parse_numeric_token(display_value)
+    if declared is None:
+        return False, False
+
+    # Each candidate sits inside a lookahead so matches may overlap. A compact
+    # range like "120.0-130.0 GEL/MWh" is one consuming match, which would hide
+    # the second endpoint from every later claim.
+    if display_value.endswith("%"):
+        candidate_pattern = rf"(?<![\w.,])(?=({_CLAIM_NUMBER_PATTERN}%)(?!\w))"
+        unit_present = True
+    elif _normalize_unit(claim_unit) in _DIMENSIONLESS_UNITS:
+        # Nobody writes "12 count". A dimensionless claim carries its noun in
+        # the prose, so only the value is matched — the cell is still verified.
+        candidate_pattern = (
+            rf"(?<![\w.,])(?=({_CLAIM_NUMBER_PATTERN})(?![\d.,%])(?!\w))"
         )
-    return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
+        unit_present = True
+    else:
+        unit_pattern = _claim_unit_pattern(claim_unit)
+        candidate_pattern = (
+            rf"(?<![\w.,])(?=({_CLAIM_NUMBER_PATTERN})(?![\d.,])"
+            rf"{_RANGE_TAIL_PATTERN}\s+{unit_pattern}(?!\w))"
+        )
+        unit_present = (
+            re.search(rf"{unit_pattern}(?!\w)", paragraph_text, flags=re.IGNORECASE)
+            is not None
+        )
+
+    for match in re.finditer(candidate_pattern, paragraph_text, flags=re.IGNORECASE):
+        rendered = _parse_numeric_token(match.group(1))
+        if rendered is not None and _numbers_agree(declared, rendered):
+            return True, unit_present
+    return False, unit_present
 
 
 def _direct_claim_appears(
     claim: ReportDirectClaim,
     paragraph_text: str,
 ) -> bool:
-    display_pattern = re.escape(claim.display_value)
-    if claim.display_value.endswith("%"):
-        pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
-    elif _normalize_unit(claim.unit) in _DIMENSIONLESS_UNITS:
-        # Nobody writes "12 count". A dimensionless claim carries its noun in
-        # the prose, so only the value is matched — the cell is still verified.
-        pattern = rf"(?<![\w.,]){display_pattern}(?![\d.,])(?!\w)"
-    else:
-        normalized_unit = _normalize_unit(claim.unit)
-        unit_parts = [
-            re.escape(part)
-            for part in normalized_unit.split("/")
-            if part
-        ]
-        unit_pattern = r"\s*(?:/|\bper\b)\s*".join(unit_parts)
-        unit_pattern = unit_pattern.replace(r"\ ", r"\s+")
-        pattern = (
-            rf"(?<![\w.,]){display_pattern}(?![\d.,]){_RANGE_TAIL_PATTERN}"
-            rf"\s+{unit_pattern}(?!\w)"
-        )
-    return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
+    rendered, _unit_present = _rendered_claim_positions(
+        claim.display_value,
+        claim.unit,
+        paragraph_text,
+    )
+    return rendered
 
 
 def _paragraph_sentences(text: str) -> list[str]:
@@ -607,7 +659,17 @@ def validate_paragraph_grounding(
             if _direct_claim_appears(claim, sentence)
         ]
         if not matching_sentences:
+            # Split the failure so the section diagnostic says which half broke:
+            # a value the prose never rendered beside its unit, or a unit the
+            # prose never rendered at all. Both look identical otherwise, and
+            # that ambiguity cost several production iterations.
             errors.append("DIRECT_CLAIM_NOT_USED")
+            if not _rendered_claim_positions(
+                claim.display_value,
+                claim.unit,
+                paragraph.text,
+            )[1]:
+                errors.append("DIRECT_CLAIM_UNIT_NOT_RENDERED")
             continue
         displayed, row_facts = direct_fact
         for index in matching_sentences:

@@ -85,6 +85,24 @@ def _diagnostic_error_codes(error_codes: list[str]) -> list[str]:
     return [code for code in error_codes[:16] if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code)]
 
 
+def _draft_shape(draft: Any) -> dict[str, Any]:
+    """Summarize a candidate's structure without emitting any of its content."""
+
+    paragraphs = getattr(draft, "paragraphs", None)
+    if not isinstance(paragraphs, list):
+        return {"draft_shape": "unparsed"}
+    direct_claims = sum(len(p.direct_claims) for p in paragraphs)
+    derived_claims = sum(len(p.derived_claims) for p in paragraphs)
+    return {
+        "paragraph_count": len(paragraphs),
+        "direct_claim_count": direct_claims,
+        "derived_claim_count": derived_claims,
+        "cited_evidence_ref_count": len(
+            {ref for p in paragraphs for ref in p.evidence_refs}
+        ),
+    }
+
+
 def _log_section_diagnostic(
     *,
     event: str,
@@ -94,6 +112,7 @@ def _log_section_diagnostic(
     error_codes: list[str],
     word_count: int | None = None,
     provider_error: ProviderExecutionError | None = None,
+    draft: Any = None,
     level: int = logging.INFO,
 ) -> None:
     minimum_words, maximum_words = _section_word_bounds(section)
@@ -109,6 +128,11 @@ def _log_section_diagnostic(
         "target_words": section.target_words,
         "word_count": word_count,
     }
+    # Shape of what the model produced, so a rejection is diagnosable without
+    # a rerun. Counts and structure only — never claim values or prose, which
+    # carry customer data.
+    if draft is not None:
+        payload.update(_draft_shape(draft))
     if provider_error is not None:
         payload.update(
             {
@@ -295,6 +319,7 @@ def generate_report_sections(
                 started_at=candidate_started_at,
                 error_codes=error_codes,
                 word_count=(validation.word_count if validation is not None else None),
+                draft=draft,
             )
             effective_repair = repair_section
             uses_default_repair = effective_repair is None
@@ -393,6 +418,7 @@ def generate_report_sections(
                         started_at=repair_started_at,
                         error_codes=[],
                         word_count=repaired_validation.word_count,
+                        draft=repaired,
                     )
                     return repaired
                 current_draft = repaired
@@ -404,6 +430,7 @@ def generate_report_sections(
                     started_at=repair_started_at,
                     error_codes=current_error_codes,
                     word_count=repaired_validation.word_count,
+                    draft=repaired,
                     level=logging.WARNING,
                 )
             raise ReportSectionGenerationError(
@@ -417,6 +444,7 @@ def generate_report_sections(
             started_at=candidate_started_at,
             error_codes=[],
             word_count=validation.word_count,
+            draft=draft,
         )
         return draft
 

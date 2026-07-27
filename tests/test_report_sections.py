@@ -1803,3 +1803,78 @@ def test_section_word_tolerance_admits_observed_model_overshoot():
 
     assert minimum_words == 98
     assert maximum_words >= 141
+
+
+def test_direct_claim_may_be_rendered_at_readable_precision():
+    """Job 5f3688ce: claims verified against cells like 140.9935 but the prose
+    renders them rounded, and the matcher required a character-for-character
+    display_value. Grounding already treats those as the same number."""
+
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest_payload = _manifest().model_dump(mode="json")
+    manifest_payload["items"][0]["rows"] = [
+        {"period": "2026-01", "price": 140.9935},
+        {"period": "2026-02", "price": 130.0},
+    ]
+    manifest = ReportEvidenceManifest.model_validate(manifest_payload)
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 141.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(display_value="140.9935")
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+    assert validation.valid is True
+
+
+def test_a_rendered_number_that_disagrees_is_still_rejected():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 999.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "DIRECT_CLAIM_NOT_USED" in validation.error_codes
+
+
+def test_an_unrendered_unit_is_reported_separately_from_a_bad_value():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 overall. "
+            + _words(section.target_words - 8)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "DIRECT_CLAIM_UNIT_NOT_RENDERED" in validation.error_codes
