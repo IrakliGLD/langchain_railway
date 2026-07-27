@@ -319,9 +319,16 @@ def _verified_direct_fact(
 
     if not _grounding_claim_is_supported(displayed, {expected_fact}):
         return None
+    # A verified cell widens only the temporal identity of its row. Widening
+    # sibling magnitudes would let an undeclared number inherit this claim's
+    # grounding — including at the wrong unit scale.
     return (
         displayed,
-        _table_row_grounding_facts(item, claim.row_index),
+        {
+            fact
+            for fact in _table_row_grounding_facts(item, claim.row_index)
+            if not isinstance(fact, _NumericFact)
+        },
     )
 
 

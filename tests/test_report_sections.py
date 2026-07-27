@@ -1361,3 +1361,59 @@ def test_valid_resume_drafts_are_not_regenerated_and_progress_is_checkpointable(
         section.section_id for section in plan.sections
     ]
     assert progress[-1][:2] == (len(plan.sections), len(plan.sections))
+
+
+def _two_metric_manifest():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest = _manifest().model_dump(mode="json")
+    table = manifest["items"][0]
+    table["columns"] = ["period", "price", "generation"]
+    table["rows"] = [
+        {"period": "2026-01", "price": 120.0, "generation": 100.0},
+        {"period": "2026-02", "price": 130.0, "generation": 110.0},
+    ]
+    table["unit_by_column"] = {"price": "GEL/MWh", "generation": "GWh"}
+    return ReportEvidenceManifest.model_validate(manifest)
+
+
+def test_direct_claim_does_not_ground_other_numbers_in_its_row():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh while generation "
+            "reached 100.0 MW. " + _words(section.target_words - 15)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _two_metric_manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_direct_claim_still_grounds_its_own_row_period():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _two_metric_manifest(),
+    )
+    assert validation.valid is True
