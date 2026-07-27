@@ -76,6 +76,20 @@ def _infer_columns(columns: list[str], rows: list[dict[str, Any]]):
     return numeric, temporal, categorical
 
 
+def chart_column_roles(item) -> dict[str, list[str]]:
+    """Expose the builder's own axis typing so planning can respect it."""
+
+    numeric, temporal, categorical = _infer_columns(
+        list(item.columns),
+        list(item.rows),
+    )
+    return {
+        "numeric": numeric,
+        "temporal": temporal,
+        "categorical": categorical,
+    }
+
+
 def _omitted(chart, code: str) -> ReportChartBuildDecision:
     return ReportChartBuildDecision(
         chart_id=chart.chart_id,

@@ -117,3 +117,15 @@ def test_shadow_evaluation_fails_closed_without_throwing_on_unknown_chart_eviden
     assert invalid.evidence_reference_coverage < 1.0
     assert "PLAN_EVIDENCE_INVALID" in invalid.findings
     assert "REQUIRED_CHART_OMITTED" in invalid.findings
+
+
+def test_chart_column_roles_expose_the_axis_types_the_builder_uses():
+    from agent.report_charts import chart_column_roles
+
+    table = _manifest().items[0]
+
+    roles = chart_column_roles(table)
+
+    assert roles["temporal"] == ["period"]
+    assert roles["numeric"] == ["price"]
+    assert roles["categorical"] == []

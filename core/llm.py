@@ -92,6 +92,7 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
+from agent.report_charts import chart_column_roles
 from agent.report_grounding import observed_period_span
 from contracts.report import (
     ReportIntent,
@@ -3055,6 +3056,11 @@ def llm_plan_report(
             "title": item.title,
             "source": item.source,
             "columns": item.columns,
+            "column_roles": (
+                chart_column_roles(item)
+                if item.kind is ReportEvidenceKind.TABLE
+                else {}
+            ),
             "total_row_count": item.total_row_count,
             "truncated": item.truncated,
             "content_excerpt": (
