@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from collections.abc import Callable
@@ -23,6 +24,12 @@ _WORD_PATTERN = re.compile(r"\b[\w]+(?:[.,'-][\w]+)*\b", re.UNICODE)
 _NUMERIC_PATTERN = re.compile(
     r"(?<![\w])[-+]?\d[\d,]*(?:\.\d+)?%?(?![\w])"
 )
+_LOGGER = logging.getLogger("Enai.ReportSections")
+_RATIO_COLUMN_NAMES = {
+    "balancing_share",
+    "generation_share",
+    "import_dependency_ratio",
+}
 
 
 class ReportSectionGenerationError(RuntimeError):
@@ -50,10 +57,40 @@ def _evidence_numeric_tokens(item) -> set[str]:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return {
+    tokens = {
         _normalize_numeric_token(token)
         for token in _NUMERIC_PATTERN.findall(serialized)
     }
+    if not item.rows:
+        return tokens
+
+    for column in item.columns:
+        normalized_column = str(column).strip().lower()
+        normalized_unit = str(item.unit_by_column.get(column, "")).strip().lower()
+        is_storage_ratio = (
+            normalized_unit in {"ratio", "fraction"}
+            or normalized_column.startswith("share_")
+            or normalized_column in _RATIO_COLUMN_NAMES
+        )
+        if not is_storage_ratio:
+            continue
+        for row in item.rows:
+            value = row.get(column)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or abs(float(value)) > 1
+            ):
+                continue
+            percent_value = float(value) * 100
+            for precision in range(5):
+                rendered = f"{percent_value:.{precision}f}"
+                if "." in rendered:
+                    rendered = rendered.rstrip("0").rstrip(".")
+                tokens.add(_normalize_numeric_token(rendered))
+                tokens.add(_normalize_numeric_token(f"{rendered}%"))
+    return tokens
 
 
 def validate_report_section(
@@ -174,8 +211,16 @@ def generate_report_sections(
         except ValidationError:
             draft = raw_draft
             error_codes = ["SECTION_SCHEMA_INVALID"]
+            validation = None
 
         if error_codes:
+            _LOGGER.info(
+                "Report section candidate rejected: section_id=%s "
+                "error_codes=%s word_count=%s",
+                section.section_id,
+                ",".join(error_codes),
+                validation.word_count if validation is not None else "unknown",
+            )
             effective_repair = repair_section
             if effective_repair is None:
                 from core.llm import llm_repair_report_section
@@ -212,6 +257,13 @@ def generate_report_sections(
                 manifest,
             )
             if not repaired_validation.valid:
+                _LOGGER.warning(
+                    "Report section repair validation failed: section_id=%s "
+                    "error_codes=%s word_count=%s",
+                    section.section_id,
+                    ",".join(repaired_validation.error_codes),
+                    repaired_validation.word_count,
+                )
                 raise ReportSectionGenerationError(
                     section.section_id,
                     repaired_validation.error_codes,

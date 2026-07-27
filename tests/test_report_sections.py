@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import Counter
+from copy import deepcopy
 
 import pytest
 
@@ -80,6 +82,52 @@ def test_section_validation_enforces_budget_refs_and_numeric_grounding():
     assert "REQUIRED_EVIDENCE_NOT_USED" in wrong_ref.error_codes
 
 
+@pytest.mark.parametrize(
+    ("column", "unit", "expected_valid"),
+    [
+        ("share_import", "ratio", True),
+        ("generation_quantity", "MWh", False),
+    ],
+)
+def test_section_validation_accepts_percent_conversion_only_for_ratio_evidence(
+    column: str,
+    unit: str,
+    expected_valid: bool,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", column]
+    table["rows"] = [
+        {"period": "2026-01", column: 0.1438},
+        {"period": "2026-02", column: 0.1512},
+    ]
+    table["unit_by_column"] = {column: unit}
+    manifest = _manifest().model_validate(manifest_payload)
+    draft_payload = _draft(
+        section,
+        text=(
+            "The observed value was 14.38% in the supplied evidence. "
+            + _words(section.target_words)
+        ),
+    )
+    draft_payload["paragraphs"][0]["evidence_refs"] = (
+        section.required_evidence_refs
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(draft_payload),
+        section,
+        manifest,
+    )
+
+    assert validation.valid is expected_valid
+    assert (
+        "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+    ) is (not expected_valid)
+
+
 def test_sections_generate_in_parallel_and_return_in_plan_order():
     plan = ReportPlan.model_validate(_plan_payload())
     barrier = threading.Barrier(len(plan.sections))
@@ -144,39 +192,43 @@ def test_only_invalid_sections_receive_one_repair_call():
     assert all(count == 1 for count in generated.values())
 
 
-def test_failed_repair_aborts_with_typed_section_error():
+def test_failed_repair_aborts_with_typed_section_error(caplog):
     plan = ReportPlan.model_validate(_plan_payload())
 
-    with pytest.raises(ReportSectionGenerationError) as exc_info:
-        generate_report_sections(
-            "Explain the price trend.",
-            plan,
-            _manifest(),
-            generate_section=lambda _q, _p, section, _m: {
-                **_draft(section),
-                "paragraphs": [
-                    {
-                        "text": "This section remains much too short.",
-                        "evidence_refs": section.required_evidence_refs,
-                    }
-                ],
-            },
-            repair_section=lambda _q, _p, section, _m, _d, _e: {
-                **_draft(section),
-                "paragraphs": [
-                    {
-                        "text": "This repaired section is still much too short.",
-                        "evidence_refs": section.required_evidence_refs,
-                    }
-                ],
-            },
-            max_workers=len(plan.sections),
-        )
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportSections"):
+        with pytest.raises(ReportSectionGenerationError) as exc_info:
+            generate_report_sections(
+                "Explain the price trend.",
+                plan,
+                _manifest(),
+                generate_section=lambda _q, _p, section, _m: {
+                    **_draft(section),
+                    "paragraphs": [
+                        {
+                            "text": "This section remains much too short.",
+                            "evidence_refs": section.required_evidence_refs,
+                        }
+                    ],
+                },
+                repair_section=lambda _q, _p, section, _m, _d, _e: {
+                    **_draft(section),
+                    "paragraphs": [
+                        {
+                            "text": "This repaired section is still much too short.",
+                            "evidence_refs": section.required_evidence_refs,
+                        }
+                    ],
+                },
+                max_workers=len(plan.sections),
+            )
 
     assert exc_info.value.section_id in {
         section.section_id for section in plan.sections
     }
     assert "WORD_COUNT_OUT_OF_RANGE" in exc_info.value.error_codes
+    assert "section_id=" in caplog.text
+    assert "WORD_COUNT_OUT_OF_RANGE" in caplog.text
+    assert "This repaired section" not in caplog.text
 
 
 def test_provider_failure_during_repair_becomes_typed_section_error():

@@ -12,6 +12,11 @@ packet, and verified chart descriptions.
 - Do not introduce facts from model memory or independently retrieve evidence.
 - State material uncertainty or missing evidence directly.
 - Write headings and labels in the requested response language.
+- Use every evidence reference assigned in `required_evidence_refs` at least
+  once across the section paragraphs.
+- Keep the section inside the exact inclusive word-count range supplied by the
+  runtime validation rules.
 
-Return structured section content with claims, evidence references, chart
-references, and word count so code can validate it before assembly.
+Return only the structured section paragraphs and their evidence references
+defined by the supplied output schema. Code derives chart placement and word
+count separately before assembly.
