@@ -1311,7 +1311,9 @@ git commit -m "Repair one rejected report plan before failing the job"
 - Test: `tests/test_report_job_processor.py`
 
 **Interfaces:**
-- Produces: `REPORT_CHECKPOINT_TOO_LARGE` failure code, `retryable=False`; instance method `_safe_checkpoint_payload(manifest, plan, completed_by_id) -> dict[str, Any]`.
+- Produces: `ReportCheckpointTooLargeError(ValueError)` in `contracts/report_generation.py`; `REPORT_CHECKPOINT_TOO_LARGE` failure code, `retryable=False`; classmethod `_safe_checkpoint_payload(manifest, plan, completed_by_id) -> dict[str, Any]`.
+
+**Plan correction (found while stress-testing Phase 3):** `ReportGenerationCheckpoint._validate_checkpoint_identity` raises a bare `ValueError` for the size cap *and* for manifest-identity and section-membership failures (`contracts/report_generation.py:29-50`). Catching `ValueError` and labelling it `REPORT_CHECKPOINT_TOO_LARGE` would mislabel identity failures as size failures — the same misclassification this task exists to remove, just relocated. The size check must raise a dedicated `ReportCheckpointTooLargeError`, with everything else still mapping to `REPORT_CHECKPOINT_INVALID`.
 
 **Context:** `ReportGenerationCheckpoint` enforces the 1 MiB ceiling and `REPORT_EVIDENCE_MANIFEST_MAX_BYTES = 786_432` already bounds the manifest, so the fresh-job path is very unlikely to trip. The reachable case is completed sections pushing the checkpoint past 1 MiB inside `persist_section`, where the `ValueError` is caught as `REPORT_SECTION_INVALID` — a misleading code that sends operators looking at section content instead of payload size. This is a diagnosis fix, not a liveness fix.
 
@@ -1463,6 +1465,8 @@ git commit -m "Keep report timeout and lease bounds mutually satisfiable"
 
 **Interfaces:**
 - Produces: `projected_row_indices(item: ReportEvidenceItem, *, budget_chars: int) -> list[int]`.
+
+**Plan correction (found while stress-testing Phase 3):** the shadow log belongs in `_report_section_evidence_slice`, not `generate_report_sections`. The plan's version passed a flat `budget_chars=30_000`, but the real budget is `_REPORT_SECTION_EVIDENCE_BUDGET_CHARS // len(assigned_items)` minus the projected metadata — so the logged truncation counts would have been systematically wrong, and the entire point of a shadow is to measure the gap accurately. The slice builder is the only place that knows the real budget, and it needs no duplicated budget math.
 
 **Context:** section prompts contain a coverage-sampled subset of manifest rows, while `build_evidence_grounding_index` indexes every row. A number from a row the model never saw therefore validates. It remains grounded in authorised evidence, so this is a scope-alignment issue rather than a correctness hole — which is why it is P3 and why it ships behind a shadow-mode observation before it changes any outcome.
 
@@ -1784,3 +1788,69 @@ references, five test files.
 `ReportResult` gained `omitted_charts` with a default of `[]`, so
 `report-result-v1` stays readable both ways: older stored results validate
 without the field, and new ones carry it. No version bump needed.
+
+---
+
+## Phase 3 audit record
+
+Commits `012d80c`..`cdfaf45`. Targeted suite 2054 passed; security suite 24
+passed; redteam score 1.0.
+
+### Plan corrections found before implementing
+
+1. **Task 9 would have reproduced the bug it targets.**
+   `ReportGenerationCheckpoint._validate_checkpoint_identity` raises a bare
+   `ValueError` for the size cap *and* for manifest-identity and
+   section-membership failures. Catching `ValueError` and labelling it
+   `REPORT_CHECKPOINT_TOO_LARGE` would have relabelled identity failures as size
+   failures — the same misclassification, relocated. The size check now raises a
+   dedicated `ReportCheckpointTooLargeError`; everything else still maps to
+   `REPORT_CHECKPOINT_INVALID`.
+2. **Task 10's test would not have tested the wiring.** `_read_bounded_int_env`
+   fails closed rather than clamping, and the planned assertion
+   (`REPORT_JOB_TIMEOUT_SECONDS <= 3570`) only inspects the default of 600. The
+   test now imports `config` in a subprocess with the env set, asserting 3570 is
+   accepted and 3571 is refused.
+3. **Task 11's shadow would have logged wrong numbers.** The plan measured
+   truncation in `generate_report_sections` against a flat `budget_chars=30_000`,
+   but the real budget is `_REPORT_SECTION_EVIDENCE_BUDGET_CHARS //
+   len(assigned_items)` minus projected metadata. The shadow now lives in
+   `_report_section_evidence_slice`, the only place that knows the real budget,
+   and needs no duplicated budget math.
+
+### Verification worth recording
+
+- **`REPORT_CHECKPOINT_TOO_LARGE` is reachable, not theoretical.** The manifest
+  cap (786,432) leaves 262,144 bytes of checkpoint headroom, while eight section
+  drafts can reach 576,000. The user's assessment that the *fresh-job* path is
+  effectively unreachable holds; the accumulating `persist_section` path is the
+  live one, and that is what this now classifies correctly.
+- **The projection extraction is behaviour-preserving.** A/B against the
+  pre-refactor code on a 200-row table: identical selection (77 rows for
+  `scope_and_evidence`, 38 for `key_findings`). An earlier attempt at this
+  comparison was vacuous — the stash aborted on an untracked file, so both runs
+  used the new code, and a later attempt compared two empty files because the
+  probe was crashing on missing env. Both were re-run properly.
+
+### Audit finding after implementation
+
+**A table can project to zero rows.** When per-item metadata approaches the
+800-character floor on a wide table, `row_budget` falls below the cost of a
+single row and the section receives a table header with no data — it cannot form
+any coordinate-bound claim from that item, yet the condition was logged at the
+same level as ordinary truncation. Now logged at WARNING.
+
+Deliberately *not* fixed by forcing one row in: a single manifest row can be 24
+columns of 1,000 characters, so guaranteeing inclusion would blow the very
+prompt budget the projection exists to respect. The right response is a visible
+signal plus, if the shadow shows real volume, a narrower manifest column cap.
+
+### Scope
+
+`config.py`, `core/llm.py`, `core/report_job_processor.py`,
+`contracts/report_generation.py`, new `agent/report_projection.py`, the runbook,
+and four test files including new `tests/test_report_projection.py`.
+
+The grounding index is deliberately still built over every manifest row. Task 11
+ships as observation only; narrowing it would reject sections that pass today and
+waits on real `REPORT_GROUNDING_SCOPE_SHADOW` volume.
