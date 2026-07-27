@@ -474,21 +474,6 @@ def normalize_report_plan_semantics(
     normalized["language_code"] = planning_context.language_code
 
     sections = normalized.get("sections")
-    if isinstance(sections, list) and len(sections) >= 3:
-        semantic_kinds = {
-            kind.value
-            for kind in REPORT_INTENT_CORE_SECTION.values()
-        }
-        expected_core = REPORT_INTENT_CORE_SECTION[
-            planning_context.intent
-        ].value
-        for index, section in enumerate(sections):
-            if not isinstance(section, dict):
-                continue
-            if index == 2:
-                section["kind"] = expected_core
-            elif section.get("kind") in semantic_kinds:
-                section["kind"] = ReportSectionKind.ANALYSIS.value
 
     charts = normalized.get("charts")
     if isinstance(charts, list):

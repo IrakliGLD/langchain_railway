@@ -126,7 +126,9 @@ def test_report_planner_binds_intent_language_and_core_structure_from_context(
 
     def invoke(_factory, _model, messages, **_kwargs):
         captured["messages"] = messages
-        return SimpleNamespace(content=json.dumps(_plan_payload()))
+        payload = _plan_payload()
+        payload["sections"][2]["kind"] = "trend_analysis"
+        return SimpleNamespace(content=json.dumps(payload))
 
     monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
 

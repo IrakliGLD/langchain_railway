@@ -33,6 +33,8 @@ from core.report_job_repository import PostgresReportJobRepository
 from core.report_job_worker import ReportJobWorker
 
 log = logging.getLogger("Enai.ReportWorker")
+_REPORT_WORKER_LEASE_SAFETY_MARGIN_SECONDS = 30
+_REPORT_WORKER_SHUTDOWN_HANDOFF_WAIT_SECONDS = 10
 
 
 def _coerce_worker_db_url(url: str) -> str:
@@ -64,6 +66,15 @@ def build_report_worker_runtime() -> tuple[
         raise RuntimeError(
             "ENAI_REPORT_WORKER_DB_URL is required for the write-capable "
             "report worker service."
+        )
+    if (
+        REPORT_WORKER_LEASE_SECONDS
+        < REPORT_JOB_TIMEOUT_SECONDS
+        + _REPORT_WORKER_LEASE_SAFETY_MARGIN_SECONDS
+    ):
+        raise RuntimeError(
+            "ENAI_REPORT_WORKER_LEASE_SECONDS must be at least "
+            "ENAI_REPORT_JOB_TIMEOUT_SECONDS plus 30 seconds."
         )
 
     engine = create_engine(
@@ -110,6 +121,21 @@ def main() -> int:
     knowledge_module.load_knowledge()
     worker, processor, engine = build_report_worker_runtime()
     stop_event = threading.Event()
+    handoff_finished = threading.Event()
+
+    def handoff_active_job() -> None:
+        stop_event.wait()
+        try:
+            worker.handoff_active_job_for_shutdown()
+        finally:
+            handoff_finished.set()
+
+    handoff_thread = threading.Thread(
+        target=handoff_active_job,
+        name="report-worker-shutdown-handoff",
+        daemon=True,
+    )
+    handoff_thread.start()
 
     def request_stop(_signum, _frame) -> None:
         stop_event.set()
@@ -124,6 +150,11 @@ def main() -> int:
     try:
         worker.run_until_stopped(processor, stop_event=stop_event)
     finally:
+        stop_event.set()
+        if not handoff_finished.wait(
+            timeout=_REPORT_WORKER_SHUTDOWN_HANDOFF_WAIT_SECONDS
+        ):
+            log.error("Report worker shutdown handoff did not finish before timeout.")
         engine.dispose()
         log.info("Report worker stopped.")
     return 0

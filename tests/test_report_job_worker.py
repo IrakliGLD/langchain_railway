@@ -184,6 +184,51 @@ def test_worker_honours_cancellation_that_arrives_before_completion():
     ]
 
 
+def test_worker_hands_active_job_back_when_shutdown_arrives_during_handler():
+    lease = _lease()
+    repository = _Repository(lease)
+    worker = _worker(repository)
+    stop_event = threading.Event()
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    run_finished = threading.Event()
+
+    def handler(*_):
+        handler_started.set()
+        assert release_handler.wait(timeout=2)
+        return {
+            "contract_version": "report-result-v1",
+            "content": "This result belongs to the terminated attempt.",
+        }
+
+    def run():
+        worker.run_once(handler, stop_event=stop_event)
+        run_finished.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert handler_started.wait(timeout=2)
+
+    stop_event.set()
+    assert worker.handoff_active_job_for_shutdown() is True
+    assert repository.calls[-1] == (
+        "fail",
+        lease.job_id,
+        "worker-1",
+        "REPORT_WORKER_STOPPING",
+        True,
+        30,
+    )
+    assert worker.handoff_active_job_for_shutdown() is False
+
+    release_handler.set()
+    assert run_finished.wait(timeout=2)
+    thread.join(timeout=2)
+
+    assert [call[0] for call in repository.calls].count("fail") == 1
+    assert all(call[0] != "complete" for call in repository.calls)
+
+
 def test_worker_maps_and_logs_expected_failure_with_bounded_metadata(caplog):
     lease = _lease()
     repository = _Repository(lease)

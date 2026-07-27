@@ -126,8 +126,73 @@ class ReportJobWorker:
         self._retry_delay_seconds = retry_delay_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._logger = logger
+        self._active_lease_lock = threading.Lock()
+        self._active_lease: ReportJobLease | None = None
+        self._shutdown_handoff_in_progress = False
 
-    def run_once(self, handler: ReportJobHandler) -> bool:
+    @staticmethod
+    def _stop_requested(stop_event: threading.Event | None) -> bool:
+        return stop_event is not None and stop_event.is_set()
+
+    def _set_active_lease(self, lease: ReportJobLease) -> None:
+        with self._active_lease_lock:
+            self._active_lease = lease
+
+    def _clear_active_lease(self, lease: ReportJobLease) -> None:
+        with self._active_lease_lock:
+            if self._active_lease is lease:
+                self._active_lease = None
+
+    def handoff_active_job_for_shutdown(self) -> bool:
+        """Release the owned job for retry while an active handler winds down."""
+
+        with self._active_lease_lock:
+            lease = self._active_lease
+            if lease is None or self._shutdown_handoff_in_progress:
+                return False
+            self._shutdown_handoff_in_progress = True
+
+        handed_off = False
+        try:
+            handed_off = self._repository.fail(
+                job_id=lease.job_id,
+                worker_id=self._worker_id,
+                error_code="REPORT_WORKER_STOPPING",
+                retryable=True,
+                retry_delay_seconds=self._retry_delay_seconds,
+            )
+            if handed_off:
+                self._logger.info(
+                    "Report job handed off during worker shutdown: job_id=%s",
+                    lease.job_id,
+                )
+            else:
+                self._logger.error(
+                    "Report job shutdown handoff was not persisted: job_id=%s",
+                    lease.job_id,
+                )
+            return handed_off
+        except Exception as exc:
+            self._logger.error(
+                "Report job shutdown handoff failed: job_id=%s exception_type=%s",
+                lease.job_id,
+                type(exc).__name__,
+            )
+            return False
+        finally:
+            with self._active_lease_lock:
+                self._shutdown_handoff_in_progress = False
+                if handed_off and self._active_lease is lease:
+                    self._active_lease = None
+
+    def run_once(
+        self,
+        handler: ReportJobHandler,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        if self._stop_requested(stop_event):
+            return False
         lease = self._repository.lease_next(
             worker_id=self._worker_id,
             lease_seconds=self._lease_seconds,
@@ -137,71 +202,87 @@ class ReportJobWorker:
         if lease.lease_owner != self._worker_id:
             raise RuntimeError("Report repository returned a lease owned by another worker.")
 
-        if lease.cancel_requested:
-            self._repository.acknowledge_cancellation(
-                job_id=lease.job_id,
-                worker_id=self._worker_id,
-            )
-            return True
-
-        control = ReportJobExecutionControl(
-            repository=self._repository,
-            lease=lease,
-            lease_seconds=self._lease_seconds,
-        )
+        self._set_active_lease(lease)
         try:
-            result = handler(lease, control)
-        except ReportJobFailure as exc:
-            self._logger.warning(
-                "Report job attempt failed: job_id=%s error_code=%s retryable=%s",
-                lease.job_id,
-                exc.error_code,
-                exc.retryable,
-            )
-            self._repository.fail(
-                job_id=lease.job_id,
-                worker_id=self._worker_id,
-                error_code=exc.error_code,
-                retryable=exc.retryable,
-                retry_delay_seconds=self._retry_delay_seconds,
-            )
-            return True
-        except Exception as exc:
-            self._logger.error(
-                "Unexpected report worker failure: job_id=%s exception_type=%s",
-                lease.job_id,
-                type(exc).__name__,
-            )
-            self._repository.fail(
-                job_id=lease.job_id,
-                worker_id=self._worker_id,
-                error_code="REPORT_WORKER_UNEXPECTED",
-                retryable=True,
-                retry_delay_seconds=self._retry_delay_seconds,
-            )
-            return True
+            if lease.cancel_requested:
+                self._repository.acknowledge_cancellation(
+                    job_id=lease.job_id,
+                    worker_id=self._worker_id,
+                )
+                return True
+            if self._stop_requested(stop_event):
+                self.handoff_active_job_for_shutdown()
+                return True
 
-        if not isinstance(result, dict):
-            self._repository.fail(
+            control = ReportJobExecutionControl(
+                repository=self._repository,
+                lease=lease,
+                lease_seconds=self._lease_seconds,
+            )
+            try:
+                result = handler(lease, control)
+            except ReportJobFailure as exc:
+                if self._stop_requested(stop_event):
+                    self.handoff_active_job_for_shutdown()
+                    return True
+                self._logger.warning(
+                    "Report job attempt failed: job_id=%s error_code=%s retryable=%s",
+                    lease.job_id,
+                    exc.error_code,
+                    exc.retryable,
+                )
+                self._repository.fail(
+                    job_id=lease.job_id,
+                    worker_id=self._worker_id,
+                    error_code=exc.error_code,
+                    retryable=exc.retryable,
+                    retry_delay_seconds=self._retry_delay_seconds,
+                )
+                return True
+            except Exception as exc:
+                if self._stop_requested(stop_event):
+                    self.handoff_active_job_for_shutdown()
+                    return True
+                self._logger.error(
+                    "Unexpected report worker failure: job_id=%s exception_type=%s",
+                    lease.job_id,
+                    type(exc).__name__,
+                )
+                self._repository.fail(
+                    job_id=lease.job_id,
+                    worker_id=self._worker_id,
+                    error_code="REPORT_WORKER_UNEXPECTED",
+                    retryable=True,
+                    retry_delay_seconds=self._retry_delay_seconds,
+                )
+                return True
+
+            if self._stop_requested(stop_event):
+                self.handoff_active_job_for_shutdown()
+                return True
+            if not isinstance(result, dict):
+                self._repository.fail(
+                    job_id=lease.job_id,
+                    worker_id=self._worker_id,
+                    error_code="REPORT_RESULT_INVALID",
+                    retryable=False,
+                    retry_delay_seconds=self._retry_delay_seconds,
+                )
+                return True
+            if control.cancellation_requested():
+                self._repository.acknowledge_cancellation(
+                    job_id=lease.job_id,
+                    worker_id=self._worker_id,
+                )
+                return True
+            self._repository.complete(
                 job_id=lease.job_id,
                 worker_id=self._worker_id,
-                error_code="REPORT_RESULT_INVALID",
-                retryable=False,
-                retry_delay_seconds=self._retry_delay_seconds,
+                result=result,
             )
             return True
-        if control.cancellation_requested():
-            self._repository.acknowledge_cancellation(
-                job_id=lease.job_id,
-                worker_id=self._worker_id,
-            )
-            return True
-        self._repository.complete(
-            job_id=lease.job_id,
-            worker_id=self._worker_id,
-            result=result,
-        )
-        return True
+        finally:
+            self._clear_active_lease(lease)
 
     def run_until_stopped(
         self,
@@ -212,7 +293,10 @@ class ReportJobWorker:
         consecutive_failures = 0
         while not stop_event.is_set():
             try:
-                processed = self.run_once(handler)
+                processed = self.run_once(
+                    handler,
+                    stop_event=stop_event,
+                )
             except Exception as exc:
                 consecutive_failures += 1
                 retry_delay_seconds = min(
