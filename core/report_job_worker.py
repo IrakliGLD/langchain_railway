@@ -114,8 +114,10 @@ class ReportJobWorker:
     ) -> None:
         if not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", worker_id):
             raise ValueError("Invalid report worker_id.")
-        if not 30 <= lease_seconds <= 3600:
-            raise ValueError("Report lease_seconds must be between 30 and 3600.")
+        # Upper bound clears the maximum job timeout by the safety margin the
+        # worker entrypoint requires, so every accepted timeout has a valid lease.
+        if not 30 <= lease_seconds <= 3630:
+            raise ValueError("Report lease_seconds must be between 30 and 3630.")
         if not 1 <= retry_delay_seconds <= 3600:
             raise ValueError("Report retry_delay_seconds must be between 1 and 3600.")
         if not 0.01 <= poll_interval_seconds <= 60:

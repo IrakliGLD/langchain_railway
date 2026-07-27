@@ -86,11 +86,13 @@ ENAI_REPORT_SECTION_MAX_WORKERS=4
 ENAI_REPORT_JOB_TIMEOUT_SECONDS=600
 ```
 
-The lease must be at least 30 seconds longer than the end-to-end job timeout;
-the worker rejects unsafe timing combinations at startup rather than silently
-clamping an operator's configuration. Because the lease itself is capped at
-3,600 seconds, the job timeout is capped at 3,570 so that a valid lease exists
-for every accepted timeout. On SIGTERM or
+The lease must be at least 30 seconds longer than the end-to-end job timeout.
+Only the worker enforces this, and only at its own startup: it rejects an unsafe
+pair rather than silently clamping an operator's configuration. The web service
+reads the same settings but never evaluates the relationship, so a worker-only
+timing constraint can never block a web deploy. The lease accepts up to 3,630
+seconds — the maximum job timeout plus the margin — so a valid lease exists for
+every accepted timeout. On SIGTERM or
 SIGINT, the worker stops leasing new work and durably returns any active owned
 job to the retry queue before the process exits. Its last validated checkpoint
 is retained, so the next worker resumes completed work instead of restarting

@@ -71,14 +71,14 @@ def test_database_work_budget_reserves_control_capacity():
 
 def test_report_concurrency_and_deadline_controls_are_bounded():
     assert 1 <= REPORT_SECTION_MAX_WORKERS <= 8
-    assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3570
+    assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3600
 
 
 def _config_with_env(**overrides) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(overrides)
     return subprocess.run(
-        [sys.executable, "-c", "import config; print(config.REPORT_JOB_TIMEOUT_SECONDS)"],
+        [sys.executable, "-c", "import config; print(config.REPORT_JOB_TIMEOUT_SECONDS, config.REPORT_WORKER_LEASE_SECONDS)"],
         cwd=Path(__file__).resolve().parents[1],
         env=env,
         capture_output=True,
@@ -87,14 +87,25 @@ def _config_with_env(**overrides) -> subprocess.CompletedProcess:
     )
 
 
-def test_report_job_timeout_ceiling_always_leaves_room_for_a_valid_lease():
-    """Every accepted timeout must admit a lease of timeout + 30 within 3600."""
+def test_every_accepted_job_timeout_admits_a_valid_worker_lease():
+    """The lease ceiling must clear the timeout ceiling by the safety margin.
 
-    accepted = _config_with_env(ENAI_REPORT_JOB_TIMEOUT_SECONDS="3570")
+    Enforced by widening the lease bound rather than narrowing the shared
+    timeout bound: config.py is imported by both services, so narrowing a
+    worker-only limit there can refuse a configuration the web service was
+    already running with.
+    """
+
+    accepted = _config_with_env(
+        ENAI_REPORT_JOB_TIMEOUT_SECONDS="3600",
+        ENAI_REPORT_WORKER_LEASE_SECONDS="3630",
+    )
     assert accepted.returncode == 0, accepted.stderr
-    assert int(accepted.stdout.strip()) + 30 <= 3600
+    timeout, lease = (int(value) for value in accepted.stdout.split())
+    assert timeout == 3600
+    assert lease >= timeout + 30
 
-    rejected = _config_with_env(ENAI_REPORT_JOB_TIMEOUT_SECONDS="3571")
+    rejected = _config_with_env(ENAI_REPORT_JOB_TIMEOUT_SECONDS="3601")
     assert rejected.returncode != 0
     assert "ENAI_REPORT_JOB_TIMEOUT_SECONDS" in rejected.stderr
 
