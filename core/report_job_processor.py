@@ -44,7 +44,7 @@ _LOGGER = logging.getLogger("Enai.ReportProcessor")
 QueryPipeline = Callable[..., Any]
 EvidenceBuilder = Callable[[Any], Any]
 Planner = Callable[..., Any]
-Evaluator = Callable[[ReportPlan, ReportEvidenceManifest], Any]
+Evaluator = Callable[..., Any]
 ChartBuilder = Callable[[ReportPlan, ReportEvidenceManifest], Any]
 SectionGenerator = Callable[..., list[ReportSectionDraft]]
 Assembler = Callable[..., Any]
@@ -255,7 +255,12 @@ class ReportJobProcessor:
                     else ReportPlan.model_validate(raw_plan)
                 )
                 validate_report_plan_semantics(plan, planning_context)
-                evaluation = self._evaluator(plan, manifest)
+                chart_decisions = self._chart_builder(plan, manifest)
+                evaluation = self._evaluator(
+                    plan,
+                    manifest,
+                    chart_decisions=chart_decisions,
+                )
             except ProviderExecutionError as exc:
                 _LOGGER.warning(
                     "Report provider failure: job_id=%s job_attempt=%s "
@@ -294,7 +299,12 @@ class ReportJobProcessor:
                 for draft in checkpoint.completed_sections
             }
             try:
-                evaluation = self._evaluator(plan, manifest)
+                chart_decisions = self._chart_builder(plan, manifest)
+                evaluation = self._evaluator(
+                    plan,
+                    manifest,
+                    chart_decisions=chart_decisions,
+                )
             except (ReportPlanEvidenceError, ValidationError, ValueError) as exc:
                 raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
             if not evaluation.ready_for_generation:
@@ -306,7 +316,6 @@ class ReportJobProcessor:
                 raise _report_failure("REPORT_CHECKPOINT_INVALID")
 
         self._raise_if_cancelled(control)
-        chart_decisions = self._chart_builder(plan, manifest)
 
         total_sections = len(plan.sections)
         if len(completed_by_id) < total_sections:
@@ -314,17 +323,18 @@ class ReportJobProcessor:
                 progress,
                 25 + math.floor(60 * len(completed_by_id) / total_sections),
             )
-            checkpoint_payload = self._checkpoint_payload(
-                manifest,
-                plan,
-                completed_by_id,
-            )
-            self._heartbeat(
-                control,
-                phase=ReportJobPhase.GENERATING_SECTIONS,
-                progress_percent=progress,
-                checkpoint=checkpoint_payload,
-            )
+            if checkpoint is not None:
+                checkpoint_payload = self._checkpoint_payload(
+                    manifest,
+                    plan,
+                    completed_by_id,
+                )
+                self._heartbeat(
+                    control,
+                    phase=ReportJobPhase.GENERATING_SECTIONS,
+                    progress_percent=progress,
+                    checkpoint=checkpoint_payload,
+                )
 
             def persist_section(
                 completed: int,

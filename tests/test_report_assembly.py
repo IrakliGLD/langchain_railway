@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 
 import pytest
 
+from agent import report_grounding
 from agent.report_assembly import ReportAssemblyError, assemble_report
 from agent.report_charts import build_report_charts
 from contracts.report import ReportIntent, ReportPlan, ReportSectionKind
@@ -51,6 +53,30 @@ def test_assembly_preserves_validated_section_text_order_charts_and_citations():
     assert positions == sorted(positions)
     for draft in drafts:
         assert draft.paragraphs[0].text in result.content_markdown
+
+
+def test_assembly_reuses_grounding_facts_across_sections(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    manifest = _manifest()
+    original = report_grounding._evidence_grounding_facts
+    calls = Counter()
+
+    def counted(item):
+        calls[item.evidence_ref] += 1
+        return original(item)
+
+    monkeypatch.setattr(report_grounding, "_evidence_grounding_facts", counted)
+
+    assemble_report(
+        plan,
+        manifest,
+        _drafts(plan),
+        build_report_charts(plan, manifest),
+    )
+
+    assert calls == Counter(
+        {item.evidence_ref: 1 for item in manifest.items}
+    )
 
 
 def test_assembly_preserves_non_general_intent_structure_in_result():

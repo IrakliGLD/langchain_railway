@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+from agent.report_charts import build_report_charts
+from agent.report_evaluation import evaluate_report_plan
 from agent.report_planner import ReportPlanEvidenceError
 from agent.report_sections import (
     ReportSectionGenerationError,
@@ -101,6 +103,8 @@ def _processor(
     pipeline_calls: list | None = None,
     generated: list | None = None,
     planning_contexts: list | None = None,
+    evaluator=None,
+    chart_builder=None,
 ):
     calls = pipeline_calls if pipeline_calls is not None else []
     generated_ids = generated if generated is not None else []
@@ -131,12 +135,18 @@ def _processor(
         received_contexts.append(kwargs["planning_context"])
         return ReportPlan.model_validate(_plan_payload())
 
+    overrides = {}
+    if evaluator is not None:
+        overrides["evaluator"] = evaluator
+    if chart_builder is not None:
+        overrides["chart_builder"] = chart_builder
     return ReportJobProcessor(
         query_pipeline=pipeline,
         evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
         planner=planner,
         section_generator=sections,
         max_section_workers=5,
+        **overrides,
     )
 
 
@@ -205,6 +215,55 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
         earlier[1] <= later[1]
         for earlier, later in zip(control.heartbeats, control.heartbeats[1:])
     )
+    empty_generation_checkpoints = [
+        checkpoint
+        for phase, progress, checkpoint in control.heartbeats
+        if (
+            phase is ReportJobPhase.GENERATING_SECTIONS
+            and progress == 25
+            and checkpoint is not None
+            and checkpoint["completed_sections"] == []
+        )
+    ]
+    assert len(empty_generation_checkpoints) == 1
+
+
+def test_chart_decisions_are_built_once_and_shared_with_evaluation(
+    monkeypatch,
+):
+    chart_calls = []
+    monkeypatch.setattr(
+        "agent.report_evaluation.build_report_charts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "evaluation must reuse the processor's chart decisions"
+            )
+        ),
+    )
+
+    def chart_builder(plan, manifest):
+        chart_calls.append((plan.evidence_manifest_id, manifest.manifest_id))
+        return build_report_charts(plan, manifest)
+
+    def evaluator(plan, manifest, *, chart_decisions=None):
+        assert chart_decisions is not None
+        return evaluate_report_plan(
+            plan,
+            manifest,
+            chart_decisions=chart_decisions,
+        )
+
+    lease = _lease()
+    processor = _processor(
+        evaluator=evaluator,
+        chart_builder=chart_builder,
+    )
+
+    ReportResult.model_validate(processor(lease, _Control()))
+
+    assert chart_calls == [
+        (_manifest().manifest_id, _manifest().manifest_id),
+    ]
 
 
 def test_quantitative_report_without_table_evidence_is_not_retried():

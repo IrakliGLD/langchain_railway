@@ -3180,6 +3180,21 @@ def _process_query_impl(
                 + "\n".join(evidence_summary_parts)
             )
 
+    if ctx.answer_mode == AnswerMode.REPORT.value:
+        # Report jobs consume the immutable evidence manifest, not the ordinary
+        # chat summary/chart fields. Stop here so those discarded render passes
+        # do not spend another model call or repeat chart work.
+        if not ctx.terminal_outcome:
+            ctx.terminal_outcome = TerminalOutcome.DATA_ANSWER.value
+            metrics.log_terminal_outcome(TerminalOutcome.DATA_ANSWER.value)
+        _trace_stage(
+            "stage_4_report_evidence_ready",
+            time.time(),
+            evidence_only=True,
+        )
+        log.info("Stage 4 bypassed | report evidence ready")
+        return ctx
+
     # Stage 4: summarize
     t_stage = time.time()
     ctx = stages.run("stage_4_summarize_data", summarizer.summarize_data)

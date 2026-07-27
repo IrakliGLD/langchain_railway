@@ -11,6 +11,7 @@ from copy import deepcopy
 import pytest
 from pydantic import ValidationError
 
+from agent import report_grounding
 from agent.report_sections import (
     ReportSectionGenerationError,
     generate_report_sections,
@@ -82,6 +83,41 @@ def test_section_validation_enforces_budget_refs_and_numeric_grounding():
     )
     assert "EVIDENCE_REF_NOT_ALLOWED" in wrong_ref.error_codes
     assert "REQUIRED_EVIDENCE_NOT_USED" in wrong_ref.error_codes
+
+
+def test_section_validation_extracts_each_evidence_fact_set_once(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    payload = _draft(section)
+    payload["paragraphs"] = [
+        {
+            "text": _words(section.target_words // 2, prefix="First"),
+            "evidence_refs": section.required_evidence_refs,
+        },
+        {
+            "text": _words(section.target_words // 2, prefix="Second"),
+            "evidence_refs": section.required_evidence_refs,
+        },
+    ]
+    draft = ReportSectionDraft.model_validate(payload)
+    original = report_grounding._evidence_grounding_facts
+    calls = Counter()
+
+    def counted(item):
+        calls[item.evidence_ref] += 1
+        return original(item)
+
+    monkeypatch.setattr(report_grounding, "_evidence_grounding_facts", counted)
+
+    validation = validate_report_section(draft, section, _manifest())
+
+    assert validation.valid is True
+    assert calls == Counter(
+        {
+            evidence_ref: 1
+            for evidence_ref in section.required_evidence_refs
+        }
+    )
 
 
 @pytest.mark.parametrize(

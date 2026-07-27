@@ -13,7 +13,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agent.report_grounding import validate_paragraph_grounding
+from agent.report_grounding import (
+    build_evidence_grounding_index,
+    validate_paragraph_grounding,
+)
 from contracts.report import ReportPlan, ReportSectionSpec
 from contracts.report_evidence import ReportEvidenceManifest
 from contracts.report_sections import (
@@ -114,6 +117,8 @@ def validate_report_section(
     draft: ReportSectionDraft,
     section: ReportSectionSpec,
     manifest: ReportEvidenceManifest,
+    *,
+    evidence_facts_by_ref=None,
 ) -> ReportSectionValidation:
     errors: list[str] = []
     if draft.section_id != section.section_id:
@@ -128,6 +133,16 @@ def validate_report_section(
 
     item_by_ref = manifest.item_by_ref()
     allowed_refs = set(section.required_evidence_refs)
+    if evidence_facts_by_ref is None:
+        paragraph_refs = {
+            ref
+            for paragraph in draft.paragraphs
+            for ref in paragraph.evidence_refs
+        }
+        evidence_facts_by_ref = build_evidence_grounding_index(
+            item_by_ref,
+            allowed_refs & paragraph_refs,
+        )
     used_refs: set[str] = set()
     for paragraph in draft.paragraphs:
         paragraph_refs = set(paragraph.evidence_refs)
@@ -138,7 +153,13 @@ def validate_report_section(
         if any(ref not in item_by_ref for ref in paragraph_refs):
             errors.append("EVIDENCE_REF_NOT_FOUND")
             continue
-        errors.extend(validate_paragraph_grounding(paragraph, item_by_ref))
+        errors.extend(
+            validate_paragraph_grounding(
+                paragraph,
+                item_by_ref,
+                evidence_facts_by_ref=evidence_facts_by_ref,
+            )
+        )
 
     if not allowed_refs.issubset(used_refs):
         errors.append("REQUIRED_EVIDENCE_NOT_USED")
@@ -189,12 +210,22 @@ def generate_report_sections(
         from core.llm import llm_write_report_section
 
         generate_section = llm_write_report_section
+    item_by_ref = manifest.item_by_ref()
+    grounding_index = build_evidence_grounding_index(
+        item_by_ref,
+        set(item_by_ref),
+    )
     completed: dict[str, ReportSectionDraft] = {}
     for section in plan.sections:
         existing = (existing_drafts or {}).get(section.section_id)
         if existing is None:
             continue
-        validation = validate_report_section(existing, section, manifest)
+        validation = validate_report_section(
+            existing,
+            section,
+            manifest,
+            evidence_facts_by_ref=grounding_index,
+        )
         if validation.valid:
             completed[section.section_id] = existing
 
@@ -228,7 +259,12 @@ def generate_report_sections(
             draft = (
                 raw_draft if isinstance(raw_draft, ReportSectionDraft) else ReportSectionDraft.model_validate(raw_draft)
             )
-            validation = validate_report_section(draft, section, manifest)
+            validation = validate_report_section(
+                draft,
+                section,
+                manifest,
+                evidence_facts_by_ref=grounding_index,
+            )
             error_codes = validation.error_codes
         except ValidationError:
             draft = raw_draft
@@ -323,6 +359,7 @@ def generate_report_sections(
                     repaired,
                     section,
                     manifest,
+                    evidence_facts_by_ref=grounding_index,
                 )
                 if repaired_validation.valid:
                     _log_section_diagnostic(

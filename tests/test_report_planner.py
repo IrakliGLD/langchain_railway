@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import pytest
 
+from agent import report_planner
 from agent.report_planner import (
     ReportPlanEvidenceError,
     plan_report,
@@ -254,12 +255,14 @@ def test_planner_repairs_schema_valid_evidence_bindings_before_returning():
     assert all(section.chart_refs == [] for section in plan.sections)
 
 
-def test_planner_removes_required_chart_that_cannot_be_built():
+def test_planner_defers_chart_buildability_to_single_pass_evaluation(
+):
     def invalid_chart_model(*_):
         payload = deepcopy(_plan_payload())
         payload["charts"][0]["purpose"] = "relationship"
         return payload
 
+    assert not hasattr(report_planner, "build_report_charts")
     plan = plan_report(
         "Explain the price trend.",
         _manifest(),
@@ -267,5 +270,5 @@ def test_planner_removes_required_chart_that_cannot_be_built():
     )
 
     validate_report_plan_evidence(plan, _manifest())
-    assert plan.charts == []
-    assert all(section.chart_refs == [] for section in plan.sections)
+    assert [chart.chart_id for chart in plan.charts] == ["price_trend"]
+    assert plan.sections[2].chart_refs == ["price_trend"]

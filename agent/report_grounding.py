@@ -192,6 +192,19 @@ def _evidence_grounding_facts(
     return facts
 
 
+def build_evidence_grounding_index(
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+    evidence_refs: set[str],
+) -> dict[str, frozenset[_NumericFact | _PeriodFact]]:
+    """Extract each assigned evidence item's facts once for repeated validation."""
+
+    return {
+        ref: frozenset(_evidence_grounding_facts(item_by_ref[ref]))
+        for ref in evidence_refs
+        if ref in item_by_ref
+    }
+
+
 def _grounding_claim_is_supported(
     claim: _NumericFact | _PeriodFact,
     evidence_facts: set[_NumericFact | _PeriodFact],
@@ -337,17 +350,25 @@ def _derived_claim_appears(
 def validate_paragraph_grounding(
     paragraph: ReportSectionParagraph,
     item_by_ref: Mapping[str, ReportEvidenceItem],
+    *,
+    evidence_facts_by_ref: Mapping[
+        str,
+        frozenset[_NumericFact | _PeriodFact],
+    ]
+    | None = None,
 ) -> list[str]:
     """Validate direct and explicitly typed derived facts for one paragraph."""
 
     errors: list[str] = []
     paragraph_refs = set(paragraph.evidence_refs)
-    evidence_facts = set().union(
-        *(
-            _evidence_grounding_facts(item_by_ref[ref])
-            for ref in paragraph_refs
-            if ref in item_by_ref
+    grounding_index = evidence_facts_by_ref
+    if grounding_index is None:
+        grounding_index = build_evidence_grounding_index(
+            item_by_ref,
+            paragraph_refs,
         )
+    evidence_facts = set().union(
+        *(grounding_index[ref] for ref in paragraph_refs if ref in grounding_index)
     )
     paragraph_claims = _grounding_facts_from_text(paragraph.text)
 
