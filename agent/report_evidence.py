@@ -10,6 +10,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Iterable, Sequence
 
+from agent.metric_units import METRIC_UNITS
+from config_metrics.metric_units import metric_value_unit
 from contracts.report_evidence import (
     REPORT_EVIDENCE_MANIFEST_VERSION,
     ReportEvidenceItem,
@@ -101,6 +103,56 @@ def _normalize_table(
             )
     total = len(materialized_rows)
     return normalized_columns, normalized_rows, total, total > len(normalized_rows)
+
+
+def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
+    """Expose deterministic units already encoded by canonical column names."""
+
+    units: dict[str, str] = {}
+    for column in columns:
+        normalized = str(column or "").strip().lower()
+        if not normalized:
+            continue
+        registered = METRIC_UNITS.find_for_source_metric(normalized)
+        if registered is not None:
+            units[column] = registered.storage_unit
+            continue
+        if (
+            "price" in normalized
+            or normalized.startswith("p_")
+            or "tariff" in normalized
+        ) and ("_gel" in normalized or normalized.endswith("gel")):
+            units[column] = "GEL/MWh"
+            continue
+        if (
+            "price" in normalized
+            or normalized.startswith("p_")
+            or "tariff" in normalized
+        ) and ("_usd" in normalized or normalized.endswith("usd")):
+            units[column] = "USD/MWh"
+            continue
+        suffix_units = {
+            "_gwh": "GWh",
+            "_mwh": "MWh",
+            "_mw": "MW",
+            "_kw": "kW",
+            "_kwh": "kWh",
+        }
+        suffix_unit = next(
+            (
+                unit
+                for suffix, unit in suffix_units.items()
+                if normalized.endswith(suffix)
+            ),
+            "",
+        )
+        if suffix_unit:
+            units[column] = suffix_unit
+            continue
+        canonical_unit = metric_value_unit(normalized)
+        if canonical_unit != "value":
+            units[column] = canonical_unit
+    return units
 
 
 def _make_item(
@@ -205,6 +257,7 @@ def build_report_evidence_manifest(
                 provenance_refs=provenance_refs,
                 columns=normalized_columns,
                 rows=normalized_rows,
+                unit_by_column=_inferred_unit_by_column(normalized_columns),
                 total_row_count=total_rows,
                 truncated=truncated,
             )

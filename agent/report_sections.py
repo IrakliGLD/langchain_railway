@@ -9,12 +9,11 @@ import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from pydantic import ValidationError
 
+from agent.report_grounding import validate_paragraph_grounding
 from contracts.report import ReportPlan, ReportSectionSpec
 from contracts.report_evidence import ReportEvidenceManifest
 from contracts.report_sections import (
@@ -24,18 +23,7 @@ from contracts.report_sections import (
 from utils.provider_attempts import ProviderExecutionError
 
 _WORD_PATTERN = re.compile(r"\b[\w]+(?:[.,'-][\w]+)*\b", re.UNICODE)
-_NUMERIC_PATTERN = re.compile(r"(?<![\w])[-+]?\d[\d,]*(?:\.\d+)?%?(?![\w])")
-_PERIOD_PATTERN = re.compile(
-    r"(?<![\w])(?P<year>\d{4})[-/]"
-    r"(?P<segment>\d{1,2}|[Qq][1-4])"
-    r"(?:[-/](?P<day>\d{1,2}))?(?![\w])"
-)
 _LOGGER = logging.getLogger("Enai.ReportSections")
-_RATIO_COLUMN_NAMES = {
-    "balancing_share",
-    "generation_share",
-    "import_dependency_ratio",
-}
 
 
 class ReportSectionGenerationError(RuntimeError):
@@ -122,151 +110,6 @@ def _log_section_diagnostic(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _NumericFact:
-    value: Decimal
-    is_percent: bool
-    precision: int
-
-
-@dataclass(frozen=True, slots=True)
-class _PeriodFact:
-    value: str
-
-
-def _parse_numeric_token(token: str) -> _NumericFact | None:
-    raw = str(token).strip()
-    is_percent = raw.endswith("%")
-    numeric = raw.removesuffix("%").replace(",", "").lstrip("+")
-    try:
-        value = Decimal(numeric)
-    except InvalidOperation:
-        return None
-    if not value.is_finite():
-        return None
-    precision = len(numeric.rsplit(".", 1)[1]) if "." in numeric else 0
-    return _NumericFact(
-        value=value,
-        is_percent=is_percent,
-        precision=precision,
-    )
-
-
-def _normalized_period_fact(match: re.Match[str]) -> _PeriodFact | None:
-    year = match.group("year")
-    segment = match.group("segment")
-    day = match.group("day")
-    if segment.lower().startswith("q"):
-        if day is not None:
-            return None
-        return _PeriodFact(f"{year}-{segment.upper()}")
-    month_number = int(segment)
-    if not 1 <= month_number <= 12:
-        return None
-    normalized = f"{year}-{month_number:02d}"
-    if day is None:
-        return _PeriodFact(normalized)
-    day_number = int(day)
-    if not 1 <= day_number <= 31:
-        return None
-    return _PeriodFact(f"{normalized}-{day_number:02d}")
-
-
-def _grounding_facts_from_text(
-    text: str,
-) -> set[_NumericFact | _PeriodFact]:
-    facts: set[_NumericFact | _PeriodFact] = set()
-
-    def replace_period(match: re.Match[str]) -> str:
-        period_fact = _normalized_period_fact(match)
-        if period_fact is None:
-            return match.group(0)
-        facts.add(period_fact)
-        year_fact = _parse_numeric_token(match.group("year"))
-        if year_fact is not None:
-            facts.add(year_fact)
-        return " "
-
-    remaining_text = _PERIOD_PATTERN.sub(replace_period, str(text or ""))
-    facts.update(
-        {
-            fact
-            for token in _NUMERIC_PATTERN.findall(remaining_text)
-            if (fact := _parse_numeric_token(token)) is not None
-        }
-    )
-    return facts
-
-
-def _grounding_facts_from_value(
-    value: Any,
-) -> set[_NumericFact | _PeriodFact]:
-    if isinstance(value, bool) or value is None:
-        return set()
-    if isinstance(value, (int, float, Decimal)):
-        if isinstance(value, float) and not math.isfinite(value):
-            return set()
-        fact = _parse_numeric_token(str(value))
-        return {fact} if fact is not None else set()
-    if isinstance(value, str):
-        return _grounding_facts_from_text(value)
-    return set()
-
-
-def _is_ratio_column(item, column: str) -> bool:
-    normalized_column = str(column).strip().lower()
-    normalized_unit = str(item.unit_by_column.get(column, "")).strip().lower()
-    return (
-        normalized_unit in {"ratio", "fraction"}
-        or normalized_column.startswith("share_")
-        or normalized_column in _RATIO_COLUMN_NAMES
-    )
-
-
-def _evidence_grounding_facts(
-    item,
-) -> set[_NumericFact | _PeriodFact]:
-    facts = _grounding_facts_from_text(item.content)
-    for row in item.rows:
-        for column, value in row.items():
-            value_facts = _grounding_facts_from_value(value)
-            facts.update(value_facts)
-            if not _is_ratio_column(item, column):
-                continue
-            for fact in value_facts:
-                if not isinstance(fact, _NumericFact) or fact.is_percent or abs(fact.value) > 1:
-                    continue
-                facts.add(
-                    _NumericFact(
-                        value=fact.value * Decimal(100),
-                        is_percent=True,
-                        precision=max(0, fact.precision - 2),
-                    )
-                )
-    return facts
-
-
-def _grounding_claim_is_supported(
-    claim: _NumericFact | _PeriodFact,
-    evidence_facts: set[_NumericFact | _PeriodFact],
-) -> bool:
-    if isinstance(claim, _PeriodFact):
-        return claim in evidence_facts
-    quantum = Decimal(1).scaleb(-claim.precision)
-    for fact in evidence_facts:
-        if not isinstance(fact, _NumericFact):
-            continue
-        if fact.is_percent != claim.is_percent:
-            continue
-        if fact.value == claim.value:
-            return True
-        if fact.precision <= claim.precision:
-            continue
-        if fact.value.quantize(quantum, rounding=ROUND_HALF_UP) == claim.value:
-            return True
-    return False
-
-
 def validate_report_section(
     draft: ReportSectionDraft,
     section: ReportSectionSpec,
@@ -284,7 +127,6 @@ def validate_report_section(
         errors.append("WORD_COUNT_OUT_OF_RANGE")
 
     item_by_ref = manifest.item_by_ref()
-    grounding_facts_by_ref = {ref: _evidence_grounding_facts(item) for ref, item in item_by_ref.items()}
     allowed_refs = set(section.required_evidence_refs)
     used_refs: set[str] = set()
     for paragraph in draft.paragraphs:
@@ -296,10 +138,7 @@ def validate_report_section(
         if any(ref not in item_by_ref for ref in paragraph_refs):
             errors.append("EVIDENCE_REF_NOT_FOUND")
             continue
-        evidence_facts = set().union(*(grounding_facts_by_ref[ref] for ref in paragraph_refs))
-        paragraph_claims = _grounding_facts_from_text(paragraph.text)
-        if any(not _grounding_claim_is_supported(claim, evidence_facts) for claim in paragraph_claims):
-            errors.append("UNGROUNDED_NUMERIC_CLAIM")
+        errors.extend(validate_paragraph_grounding(paragraph, item_by_ref))
 
     if not allowed_refs.issubset(used_refs):
         errors.append("REQUIRED_EVIDENCE_NOT_USED")

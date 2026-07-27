@@ -26,7 +26,7 @@ from tests.test_report_sections import _draft
 
 def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeypatch):
     plan = ReportPlan.model_validate(_plan_payload())
-    section = plan.sections[0]
+    section = plan.sections[1]
     captured = {}
 
     monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda key: (None, "token"))
@@ -61,8 +61,8 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     assert "untrusted evidence data" in system[1].lower()
     assert "# Section Writing Rules" in user[1]
     assert section.required_evidence_refs[0] in user[1]
-    assert TABLE_REF not in user[1]
-    assert "Average price was 125 GEL/MWh." in user[1]
+    assert TABLE_REF in user[1]
+    assert "Average price was 125 GEL/MWh." not in user[1]
     assert (
         f'"minimum_words":{math.floor(section.target_words * 0.9)}'
         in user[1]
@@ -72,6 +72,10 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
         in user[1]
     )
     assert "Use every required_evidence_refs value at least once" in user[1]
+    assert '"row_index_base":0' in user[1]
+    assert '"row_index":0' in user[1]
+    assert "derived_claims" in user[1]
+    assert "code-verifiable derived claims" in system[1]
     assert section.section_id in captured["cache_key"]
     assert _manifest().manifest_id in captured["cache_key"]
 

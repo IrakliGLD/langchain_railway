@@ -62,10 +62,17 @@ def test_manifest_is_deterministic_bounded_and_carries_exact_verified_evidence()
     assert primary.columns == ["period", "price_gel_mwh", "note"]
     assert primary.rows[0]["price_gel_mwh"] == 120.5
     assert primary.rows[1]["price_gel_mwh"] is None
+    assert primary.unit_by_column["price_gel_mwh"] == "GEL/MWh"
     assert primary.provenance_refs == [
         "query:tool:abc123",
         "source:rows:def456",
     ]
+    supporting = next(
+        item
+        for item in first.items
+        if item.title == "Supporting evidence: correlation driver"
+    )
+    assert supporting.unit_by_column["hydro_gwh"] == "GWh"
 
     assert any(item.kind is ReportEvidenceKind.STATISTICS for item in first.items)
     assert any(item.kind is ReportEvidenceKind.KNOWLEDGE for item in first.items)
@@ -121,6 +128,18 @@ def test_manifest_normalizes_runtime_source_labels_and_dict_rows():
 
     assert primary.source == "sql_fallback_primary"
     assert primary.rows[0]["price_gel_mwh"] == 120.5
+
+
+def test_manifest_uses_registered_storage_units_for_raw_table_columns():
+    ctx = QueryContext(query="Report generation.")
+    ctx.provenance_cols = ["period", "quantity_tech"]
+    ctx.provenance_rows = [("2026-01", 120.5)]
+    ctx.provenance_source = "tool"
+
+    manifest = build_report_evidence_manifest(ctx)
+    primary = next(item for item in manifest.items if item.kind is ReportEvidenceKind.TABLE)
+
+    assert primary.unit_by_column == {"quantity_tech": "thousand MWh"}
 
 
 def test_evidence_item_shape_is_closed_and_kind_consistent():

@@ -41,6 +41,18 @@ def test_tariff_contract_does_not_convert_storage_values():
     assert tariff.canonical_unit == "GEL/MWh"
 
 
+def test_source_metric_lookup_prefers_the_registry_storage_contract():
+    generation = METRIC_UNITS.find_for_source_metric("quantity_tech")
+    price = METRIC_UNITS.find_for_source_metric("p_bal_gel")
+
+    assert generation is not None
+    assert generation.metric_id == "energy.quantity"
+    assert generation.storage_unit == "thousand MWh"
+    assert price is not None
+    assert price.metric_id == "price.gel"
+    assert METRIC_UNITS.find_for_source_metric("unregistered_metric") is None
+
+
 def test_registry_publishes_frontend_resolvable_source_metric_aliases():
     assert "p_bal_gel" in METRIC_UNITS.get("price.gel").source_metrics
     assert "quantity_*" in METRIC_UNITS.get("energy.quantity").source_metric_patterns

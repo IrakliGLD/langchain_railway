@@ -9,6 +9,7 @@ from collections import Counter
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
 from agent.report_sections import (
     ReportSectionGenerationError,
@@ -188,6 +189,51 @@ def test_section_numeric_grounding_does_not_treat_row_count_as_a_fact():
     assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
 
 
+@pytest.mark.parametrize("claim", ["1e3", ".5"])
+def test_section_numeric_grounding_does_not_allow_numeric_notation_bypasses(
+    claim,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    draft = ReportSectionDraft.model_validate(
+        _draft(
+            section,
+            text=(
+                f"Unsupported price was {claim} GEL per MWh. "
+                + _words(section.target_words - 8)
+            ),
+        )
+    )
+
+    validation = validate_report_section(draft, section, _manifest())
+
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_section_numeric_grounding_accepts_supported_scientific_notation():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    manifest_payload["items"][0]["rows"] = [
+        {"period": "2026-01", "price": 1000},
+    ]
+    manifest_payload["items"][0]["total_row_count"] = 1
+    manifest = _manifest().model_validate(manifest_payload)
+    draft = ReportSectionDraft.model_validate(
+        _draft(
+            section,
+            text=(
+                "Observed price was 1e3 GEL per MWh. "
+                + _words(section.target_words - 8)
+            ),
+        )
+    )
+
+    validation = validate_report_section(draft, section, manifest)
+
+    assert validation.valid is True
+
+
 @pytest.mark.parametrize(
     ("period", "expected_valid"),
     [
@@ -236,6 +282,379 @@ def test_section_grounding_rejects_untyped_derived_arithmetic():
     validation = validate_report_section(draft, section, _manifest())
 
     assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def _derived_claim(
+    *,
+    operation: str = "mean",
+    display_value: str = "125",
+    unit: str = "GEL/MWh",
+    row_indexes: tuple[int, ...] = (0, 1),
+    column: str = "price",
+) -> dict:
+    return {
+        "operation": operation,
+        "operands": [
+            {
+                "evidence_ref": "evidence:table:" + "1" * 16,
+                "row_index": row_index,
+                "column": column,
+            }
+            for row_index in row_indexes
+        ],
+        "display_value": display_value,
+        "unit": unit,
+    }
+
+
+def test_section_contract_accepts_bounded_typed_derived_claims():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified mean price was 125 GEL/MWh. "
+            + _words(section.target_words - 8)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [_derived_claim()]
+
+    draft = ReportSectionDraft.model_validate(payload)
+
+    claim = draft.paragraphs[0].derived_claims[0]
+    assert claim.operation == "mean"
+    assert claim.operands[1].row_index == 1
+    assert claim.display_value == "125"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda claim: claim["operands"].pop(),
+        lambda claim: claim["operands"].append(dict(claim["operands"][0])),
+        lambda claim: claim.__setitem__("display_value", "1e3"),
+        lambda claim: claim.__setitem__("display_value", "1,2,5"),
+        lambda claim: claim.__setitem__("unit", "%"),
+    ],
+)
+def test_section_contract_rejects_malformed_derived_claims(mutation):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(section)
+    claim = _derived_claim()
+    mutation(claim)
+    payload["paragraphs"][0]["derived_claims"] = [claim]
+
+    with pytest.raises(ValidationError):
+        ReportSectionDraft.model_validate(payload)
+
+
+def test_section_grounding_accepts_code_verified_mean_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified mean price was 125 GEL/MWh. "
+            + _words(section.target_words - 8)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [_derived_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert validation.valid is True
+    assert validation.error_codes == []
+
+
+def test_section_grounding_rejects_incorrect_or_unresolvable_derived_claims():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    for claim in (
+        _derived_claim(display_value="126"),
+        _derived_claim(row_indexes=(0, 99)),
+        _derived_claim(column="missing_column"),
+    ):
+        payload = _draft(
+            section,
+            text=(
+                f"The claimed derived price was {claim['display_value']} GEL/MWh. "
+                + _words(section.target_words - 8)
+            ),
+        )
+        payload["paragraphs"][0]["derived_claims"] = [claim]
+
+        validation = validate_report_section(
+            ReportSectionDraft.model_validate(payload),
+            section,
+            _manifest(),
+        )
+
+        assert "DERIVED_CLAIM_INVALID" in validation.error_codes
+        assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_section_grounding_rejects_unused_derived_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The evidence supports a code-verified average price observation. "
+            + _words(section.target_words - 8)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [_derived_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert "DERIVED_CLAIM_NOT_USED" in validation.error_codes
+
+
+def test_section_grounding_accepts_rounded_percent_change_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified price increase was 8.3%. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percent_change",
+            display_value="8.3%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert validation.valid is True
+    assert validation.error_codes == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "display_value", "unit"),
+    [
+        ("difference", "10", "GEL/MWh"),
+        ("ratio", "92.3%", "%"),
+    ],
+)
+def test_section_grounding_verifies_supported_derived_operations(
+    operation,
+    display_value,
+    unit,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            f"The code-verified result was {display_value} {unit}. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation=operation,
+            display_value=display_value,
+            unit=unit,
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert validation.valid is True
+
+
+def test_section_grounding_allows_sum_only_for_additive_units():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "generation_mwh"]
+    table["rows"] = [
+        {"period": "2026-01", "generation_mwh": 120},
+        {"period": "2026-02", "generation_mwh": 130},
+    ]
+    table["unit_by_column"] = {"generation_mwh": "MWh"}
+    manifest = _manifest().model_validate(manifest_payload)
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified generation total was 250 MWh. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="sum",
+            display_value="250",
+            unit="MWh",
+            column="generation_mwh",
+        )
+    ]
+
+    valid = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+
+    assert valid.valid is True
+
+    invalid_payload = _draft(
+        section,
+        text=(
+            "The claimed sum of prices was 250 GEL/MWh. "
+            + _words(section.target_words - 8)
+        ),
+    )
+    invalid_payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="sum",
+            display_value="250",
+            unit="GEL/MWh",
+        )
+    ]
+    invalid = validate_report_section(
+        ReportSectionDraft.model_validate(invalid_payload),
+        section,
+        _manifest(),
+    )
+
+    assert "DERIVED_CLAIM_INVALID" in invalid.error_codes
+
+
+def test_section_grounding_verifies_percentage_point_change_for_ratio_evidence():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "share_import"]
+    table["rows"] = [
+        {"period": "2026-01", "share_import": 0.14},
+        {"period": "2026-02", "share_import": 0.17},
+    ]
+    table["unit_by_column"] = {"share_import": "ratio"}
+    manifest = _manifest().model_validate(manifest_payload)
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified increase was 3 percentage points. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percentage_point_change",
+            display_value="3",
+            unit="percentage points",
+            column="share_import",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+
+    assert validation.valid is True
+
+
+def test_section_grounding_rejects_wrong_derived_unit_in_paragraph_text():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified mean was 125 MW. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [_derived_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert "DERIVED_CLAIM_NOT_USED" in validation.error_codes
+
+
+def test_section_grounding_rejects_division_by_zero_without_crashing():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    manifest_payload["items"][0]["rows"][1]["price"] = 0
+    manifest = _manifest().model_validate(manifest_payload)
+    payload = _draft(
+        section,
+        text=(
+            "The claimed code-verified ratio was 100%. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="ratio",
+            display_value="100%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+
+    assert "DERIVED_CLAIM_INVALID" in validation.error_codes
+
+
+def test_section_grounding_rejects_derived_operand_outside_paragraph_scope():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    payload = _draft(
+        section,
+        text=(
+            "The code-verified mean price was 125 GEL/MWh. "
+            + _words(section.target_words - 8)
+        ),
+    )
+    payload["paragraphs"][0]["evidence_refs"] = [
+        section.required_evidence_refs[1]
+    ]
+    payload["paragraphs"][0]["derived_claims"] = [_derived_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert "DERIVED_CLAIM_INVALID" in validation.error_codes
 
 
 def test_sections_generate_in_parallel_and_return_in_plan_order():

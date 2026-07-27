@@ -11,9 +11,90 @@ class _StrictSectionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class ReportDerivedOperand(_StrictSectionModel):
+    evidence_ref: str = Field(
+        pattern=r"^evidence:table:[0-9a-f]{16}$",
+    )
+    row_index: int = Field(ge=0, le=199)
+    column: str = Field(min_length=1, max_length=128)
+
+
+class ReportDerivedClaim(_StrictSectionModel):
+    operation: Literal[
+        "sum",
+        "mean",
+        "difference",
+        "percent_change",
+        "ratio",
+        "percentage_point_change",
+    ]
+    operands: List[ReportDerivedOperand] = Field(min_length=1, max_length=32)
+    display_value: str = Field(
+        min_length=1,
+        max_length=32,
+        pattern=r"^[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,6})?%?$",
+    )
+    unit: str = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_operation_shape(self) -> "ReportDerivedClaim":
+        coordinates = [
+            (operand.evidence_ref, operand.row_index, operand.column)
+            for operand in self.operands
+        ]
+        if len(coordinates) != len(set(coordinates)):
+            raise ValueError("Derived claim operands must be unique.")
+
+        if self.operation in {"sum", "mean"} and len(self.operands) < 2:
+            raise ValueError(
+                f"Derived claim operation {self.operation} requires at least two operands."
+            )
+        exact_two = {
+            "difference",
+            "percent_change",
+            "ratio",
+            "percentage_point_change",
+        }
+        if self.operation in exact_two and len(self.operands) != 2:
+            raise ValueError(
+                f"Derived claim operation {self.operation} requires exactly two operands."
+            )
+
+        displays_percent = self.display_value.endswith("%")
+        normalized_unit = " ".join(self.unit.lower().split())
+        if self.operation in {"percent_change", "ratio"}:
+            if not displays_percent or normalized_unit != "%":
+                raise ValueError(
+                    "Percent change and ratio claims require a percent display and unit."
+                )
+        elif self.operation == "percentage_point_change":
+            if displays_percent or normalized_unit not in {
+                "percentage point",
+                "percentage points",
+                "pp",
+            }:
+                raise ValueError(
+                    "Percentage-point claims require a percentage-points unit."
+                )
+        elif displays_percent or normalized_unit in {
+            "%",
+            "percentage point",
+            "percentage points",
+            "pp",
+        }:
+            raise ValueError(
+                "Absolute derived claims require a non-percentage display and unit."
+            )
+        return self
+
+
 class ReportSectionParagraph(_StrictSectionModel):
     text: str = Field(min_length=20, max_length=6000)
     evidence_refs: List[str] = Field(min_length=1, max_length=32)
+    derived_claims: List[ReportDerivedClaim] = Field(
+        default_factory=list,
+        max_length=16,
+    )
 
     @field_validator("evidence_refs")
     @classmethod
@@ -30,6 +111,32 @@ class ReportSectionParagraph(_StrictSectionModel):
         if any(line.lstrip().startswith("#") for line in text.splitlines()):
             raise ValueError("Section paragraphs cannot create Markdown headings.")
         return text
+
+    @field_validator("derived_claims")
+    @classmethod
+    def _validate_derived_claims(
+        cls,
+        claims: List[ReportDerivedClaim],
+    ) -> List[ReportDerivedClaim]:
+        identities = [
+            (
+                claim.operation,
+                tuple(
+                    (
+                        operand.evidence_ref,
+                        operand.row_index,
+                        operand.column,
+                    )
+                    for operand in claim.operands
+                ),
+                claim.display_value,
+                claim.unit,
+            )
+            for claim in claims
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Paragraph derived_claims must be unique.")
+        return claims
 
 
 class ReportSectionDraft(_StrictSectionModel):
