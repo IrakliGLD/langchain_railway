@@ -894,7 +894,6 @@ def test_ask_rejects_invalid_gateway_budget_before_pipeline(monkeypatch):
         (None, "standard"),
         ("brief", "brief"),
         ("standard", "standard"),
-        ("report", "report"),
     ],
 )
 def test_ask_normalizes_answer_mode_before_pipeline(
@@ -950,6 +949,34 @@ def test_ask_rejects_invalid_answer_mode_before_pipeline(monkeypatch):
         "message": "Invalid answer mode",
         "retryable": False,
         "request_id": "req-invalid-answer-mode",
+    }
+    _clear_rate_limit_buckets()
+
+
+def test_ask_rejects_report_answer_mode_before_pipeline(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "process_query",
+        lambda **_kwargs: pytest.fail("pipeline must not run for report answer mode"),
+    )
+    _clear_rate_limit_buckets()
+
+    response = TestClient(main_module.app).post(
+        "/ask",
+        json={"query": "Show balancing price trend in 2024."},
+        headers={
+            "X-App-Key": "test-gateway-key",
+            "X-Request-Id": "req-report-answer-mode",
+            "X-Enai-Answer-Mode": "report",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "REPORT_MODE_REQUIRES_JOB",
+        "message": "Report answers are produced by the durable report job path",
+        "retryable": False,
+        "request_id": "req-report-answer-mode",
     }
     _clear_rate_limit_buckets()
 

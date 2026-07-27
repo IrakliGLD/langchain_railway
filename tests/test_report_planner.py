@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
 from agent import report_planner
 from agent.report_planner import (
@@ -272,3 +273,68 @@ def test_planner_defers_chart_buildability_to_single_pass_evaluation(
     validate_report_plan_evidence(plan, _manifest())
     assert [chart.chart_id for chart in plan.charts] == ["price_trend"]
     assert plan.sections[2].chart_refs == ["price_trend"]
+
+
+def test_plan_report_repairs_one_invalid_plan_before_failing():
+    calls = {"plan": 0, "repair": 0}
+
+    def invalid_plan(*_args, **_kwargs):
+        calls["plan"] += 1
+        payload = deepcopy(_plan_payload())
+        payload["sections"][0]["kind"] = "conclusion"
+        return payload
+
+    def repair(*args, **_kwargs):
+        calls["repair"] += 1
+        calls["error_codes"] = args[-1]
+        return deepcopy(_plan_payload())
+
+    plan = plan_report(
+        "Explain the price trend.",
+        _manifest(),
+        invoke_model=invalid_plan,
+        repair_model=repair,
+    )
+
+    assert calls["plan"] == 1
+    assert calls["repair"] == 1
+    assert calls["error_codes"] == ["PLAN_SCHEMA_INVALID"]
+    assert plan.contract_version == "report-plan-v1"
+
+
+def test_plan_report_normalizes_language_instead_of_spending_a_repair():
+    """Code owns intent and language, so a mismatch is corrected, not repaired."""
+
+    def wrong_language(*_args, **_kwargs):
+        payload = deepcopy(_plan_payload())
+        payload["language_code"] = "ka"
+        payload["intent"] = "forecast"
+        return payload
+
+    def repair(*_args, **_kwargs):
+        raise AssertionError("normalized semantics must not reach the repair call")
+
+    plan = plan_report(
+        "Explain the price trend.",
+        _manifest(),
+        invoke_model=wrong_language,
+        repair_model=repair,
+    )
+
+    assert plan.language_code == "en"
+    assert plan.intent.value == "general"
+
+
+def test_plan_report_raises_when_the_repair_is_also_invalid():
+    def invalid_plan(*_args, **_kwargs):
+        payload = deepcopy(_plan_payload())
+        payload["sections"][0]["kind"] = "conclusion"
+        return payload
+
+    with pytest.raises(ValidationError):
+        plan_report(
+            "Explain the price trend.",
+            _manifest(),
+            invoke_model=invalid_plan,
+            repair_model=invalid_plan,
+        )

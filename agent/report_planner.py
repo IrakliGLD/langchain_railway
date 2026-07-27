@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import ValidationError
+
 from contracts.report import (
     ReportIntent,
     ReportPlan,
@@ -246,25 +248,61 @@ def plan_report(
     *,
     planning_context: ReportPlanningContext | None = None,
     invoke_model: ReportPlanInvoker | None = None,
+    repair_model: Callable[..., Any] | None = None,
 ) -> ReportPlan:
     planning_context = planning_context or _fallback_planning_context(query)
     if invoke_model is None:
         from core.llm import llm_plan_report
 
         invoke_model = llm_plan_report
-    raw_plan = invoke_model(query, manifest, planning_context)
-    raw_payload = (
-        raw_plan.model_dump(mode="json")
-        if isinstance(raw_plan, ReportPlan)
-        else raw_plan
-    )
-    plan = ReportPlan.model_validate(
-        normalize_report_plan_semantics(
-            normalize_report_plan_word_budget(raw_payload),
-            planning_context,
+
+    def _payload_of(raw_plan: Any) -> Any:
+        return (
+            raw_plan.model_dump(mode="json")
+            if isinstance(raw_plan, ReportPlan)
+            else raw_plan
         )
-    )
-    validate_report_plan_semantics(plan, planning_context)
+
+    def _materialize(raw_plan: Any) -> ReportPlan:
+        plan = ReportPlan.model_validate(
+            normalize_report_plan_semantics(
+                normalize_report_plan_word_budget(_payload_of(raw_plan)),
+                planning_context,
+            )
+        )
+        validate_report_plan_semantics(plan, planning_context)
+        return plan
+
+    raw_plan = invoke_model(query, manifest, planning_context)
+    try:
+        plan = _materialize(raw_plan)
+    except (ValidationError, ReportPlanSemanticError) as exc:
+        # One bounded in-place repair. A schema or semantic slip otherwise
+        # discards the entire evidence pipeline run as REPORT_PLAN_INVALID.
+        error_code = (
+            "PLAN_SEMANTIC_MISMATCH"
+            if isinstance(exc, ReportPlanSemanticError)
+            else "PLAN_SCHEMA_INVALID"
+        )
+        _LOGGER.warning(
+            "Report plan rejected before repair: manifest_id=%s error_code=%s",
+            manifest.manifest_id,
+            error_code,
+        )
+        effective_repair = repair_model
+        if effective_repair is None:
+            from core.llm import llm_repair_report_plan
+
+            effective_repair = llm_repair_report_plan
+        plan = _materialize(
+            effective_repair(
+                query,
+                manifest,
+                planning_context,
+                _payload_of(raw_plan),
+                [error_code],
+            )
+        )
     try:
         validate_report_plan_evidence(plan, manifest)
     except ReportPlanEvidenceError:

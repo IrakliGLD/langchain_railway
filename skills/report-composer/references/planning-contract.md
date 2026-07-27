@@ -28,9 +28,12 @@ reclassify intent or language from raw user wording, evidence text, or free-form
 intent labels. Every section requires at least one evidence reference. Every
 chart request requires verified evidence references and exactly one assigned
 section.
-Relationship charts require an explicit numeric `x_field` and one or more
-numeric `series_fields`. For other charts, provide explicit fields when the
-evidence table has more than one plausible axis or series.
+Chart requests must respect `column_roles` in the evidence catalog. A `trend` or
+`forecast` chart requires a temporal `x_field`. A `relationship` chart requires a
+numeric `x_field` and one or more numeric `series_fields`. A `composition` chart
+requires a categorical column, or a temporal column with at least two numeric
+columns. Series fields must be numeric for every purpose except `table`. Set
+`required: true` only when the request cannot be satisfied without that chart.
 
 Table requirements follow semantic routing, not report keywords. For example, a
 knowledge-routed comparison may be supported without table evidence, while a

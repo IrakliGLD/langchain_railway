@@ -105,11 +105,14 @@ REPORT_SECTION_MAX_WORKERS = _read_bounded_int_env(
     1,
     8,
 )
+# Capped at 3570 rather than 3600 so that the worker's lease requirement
+# (lease >= timeout + 30) is satisfiable for every accepted value. The worker
+# still refuses to start on an unsafe pair rather than clamping it.
 REPORT_JOB_TIMEOUT_SECONDS = _read_bounded_int_env(
     "ENAI_REPORT_JOB_TIMEOUT_SECONDS",
     600,
     60,
-    3600,
+    3570,
 )
 
 

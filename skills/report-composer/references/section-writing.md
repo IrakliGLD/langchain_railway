@@ -18,9 +18,15 @@ packet, and verified chart descriptions.
 - Do not derive values from narrative evidence, missing rows, or columns without
   a declared unit. Do not include a `derived_claims` entry that is absent from
   the paragraph text.
+- Columns whose declared unit is `count`, `index`, or `rank` are dimensionless:
+  state the number with its own noun ("12 plants") and set the claim `unit` to
+  the declared dimensionless unit.
 - Write the exact `display_value` and canonical `unit` together in the paragraph
   text so the code-verified result is unambiguously tied to the prose.
 - Include units and periods with values.
+- Describe period coverage only as the span shown in `observed_period_span`.
+  Do not assert a full calendar year, quarter, or month unless every
+  constituent period appears in the evidence packet.
 - Distinguish observation from explanation. Prefer “observed”, “associated
   with”, “consistent with”, or “likely pressure” unless causal evidence exists.
 - Do not repeat the executive summary or another section's full argument.

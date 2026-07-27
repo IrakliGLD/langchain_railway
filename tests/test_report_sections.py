@@ -1361,3 +1361,429 @@ def test_valid_resume_drafts_are_not_regenerated_and_progress_is_checkpointable(
         section.section_id for section in plan.sections
     ]
     assert progress[-1][:2] == (len(plan.sections), len(plan.sections))
+
+
+def _two_metric_manifest():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest = _manifest().model_dump(mode="json")
+    table = manifest["items"][0]
+    table["columns"] = ["period", "price", "generation"]
+    table["rows"] = [
+        {"period": "2026-01", "price": 120.0, "generation": 100.0},
+        {"period": "2026-02", "price": 130.0, "generation": 110.0},
+    ]
+    table["unit_by_column"] = {"price": "GEL/MWh", "generation": "GWh"}
+    return ReportEvidenceManifest.model_validate(manifest)
+
+
+def test_direct_claim_does_not_ground_other_numbers_in_its_row():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh while generation "
+            "reached 100.0 MW. " + _words(section.target_words - 15)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _two_metric_manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_direct_claim_still_grounds_its_own_row_period():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _two_metric_manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_prose_year_is_grounded_by_a_table_period_in_the_same_year():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "During 2026 the observed price was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_prose_year_absent_from_evidence_is_still_rejected():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "During 2019 the observed price was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_sentence_naming_only_periods_may_cite_the_table_without_a_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed coverage runs from 2026-01 to 2026-02 inclusive. "
+            + _words(section.target_words - 8)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_sentence_naming_only_a_bare_year_may_cite_the_table_without_a_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed coverage runs across the 2026 reporting year. "
+            + _words(section.target_words - 8)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_temporal_escape_does_not_admit_a_magnitude_without_a_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed coverage runs across 2026 at 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_derived_claim_may_name_the_periods_of_the_rows_it_spans():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price rose 8.333% between 2026-01 and 2026-02. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percent_change",
+            display_value="8.333%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_derived_claim_does_not_ground_magnitudes_from_its_operand_rows():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed price rose 8.333% from a 120.0 GEL/MWh base. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percent_change",
+            display_value="8.333%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_year_like_evidence_magnitude_does_not_ground_a_year_reference():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest_payload = _manifest().model_dump(mode="json")
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "price", "capacity"]
+    table["rows"] = [
+        {"period": "2026-01", "price": 120.0, "capacity": 2000},
+        {"period": "2026-02", "price": 130.0, "capacity": 2000},
+    ]
+    table["unit_by_column"] = {"price": "GEL/MWh", "capacity": "MW"}
+    manifest = ReportEvidenceManifest.model_validate(manifest_payload)
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed fleet capacity reached 2000 overall. "
+            + _words(section.target_words - 6)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def _count_manifest():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest = _manifest().model_dump(mode="json")
+    table = manifest["items"][0]
+    table["columns"] = ["period", "price", "plant_count"]
+    table["rows"] = [
+        {"period": "2026-01", "price": 120.0, "plant_count": 12},
+        {"period": "2026-02", "price": 130.0, "plant_count": 12},
+    ]
+    table["unit_by_column"] = {"price": "GEL/MWh", "plant_count": "count"}
+    return ReportEvidenceManifest.model_validate(manifest)
+
+
+def test_dimensionless_claim_needs_no_unit_token_in_the_prose():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet comprised 12 reporting plants. "
+            + _words(section.target_words - 6)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(column="plant_count", display_value="12", unit="count")
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_dimensionless_claim_still_verifies_against_its_cell():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet comprised 40 reporting plants. "
+            + _words(section.target_words - 6)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(column="plant_count", display_value="40", unit="count")
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_manifest(),
+    )
+    assert "DIRECT_CLAIM_INVALID" in validation.error_codes
+
+
+def test_compact_range_grounds_both_endpoints():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed prices moved within a 120.0-130.0 GEL/MWh band. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(),
+        _direct_claim(row_index=1, display_value="130.0"),
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_compact_range_still_rejects_an_unverified_endpoint():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed prices moved within a 120.0-999.0 GEL/MWh band. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_negative_value_is_not_read_as_a_range():
+    from agent.report_grounding import _grounding_facts_from_text
+
+    facts = _grounding_facts_from_text("The change was -5.2 overall.")
+
+    assert {str(fact.value) for fact in facts} == {"-5.2"}
+
+
+def _count_derived_manifest():
+    from contracts.report_evidence import ReportEvidenceManifest
+
+    manifest = _manifest().model_dump(mode="json")
+    table = manifest["items"][0]
+    table["columns"] = ["period", "plant_count"]
+    table["rows"] = [
+        {"period": "2026-01", "plant_count": 10},
+        {"period": "2026-02", "plant_count": 14},
+    ]
+    table["unit_by_column"] = {"plant_count": "count"}
+    return ReportEvidenceManifest.model_validate(manifest)
+
+
+def test_dimensionless_derived_claim_needs_no_unit_token_in_the_prose():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet grew by 4 reporting plants. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="difference",
+            display_value="4",
+            unit="count",
+            column="plant_count",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_derived_manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_dimensionless_derived_claim_is_still_recomputed():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet grew by 9 reporting plants. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="difference",
+            display_value="9",
+            unit="count",
+            column="plant_count",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _count_derived_manifest(),
+    )
+    assert "DERIVED_CLAIM_INVALID" in validation.error_codes

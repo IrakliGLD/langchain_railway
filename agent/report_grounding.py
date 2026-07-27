@@ -26,6 +26,8 @@ _PERIOD_PATTERN = re.compile(
     r"(?P<segment>\d{1,2}|[Qq][1-4])"
     r"(?:[-/](?P<day>\d{1,2}))?(?![\w])"
 )
+_RANGE_SEPARATOR_PATTERN = re.compile(r"(?<=\d)\s*[-–—]\s*(?=[\d.])")
+_RANGE_TAIL_PATTERN = r"(?:\s*(?:to|[-–—])\s*[-+]?[\d.,]+%?)?"
 _RATIO_COLUMN_NAMES = {
     "balancing_share",
     "generation_share",
@@ -42,6 +44,7 @@ _PERCENTAGE_POINT_UNITS = {
     "percentage points",
     "pp",
 }
+_DIMENSIONLESS_UNITS = frozenset({"count", "index", "rank"})
 _ADDITIVE_UNITS = {
     "gel",
     "gwh",
@@ -67,9 +70,19 @@ class _PeriodFact:
 
 
 @dataclass(frozen=True, slots=True)
+class _YearFact:
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedOperand:
     value: Decimal
     unit: str
+
+
+_GroundingFact = _NumericFact | _PeriodFact | _YearFact
+_MINIMUM_GROUNDED_YEAR = 1900
+_MAXIMUM_GROUNDED_YEAR = 2100
 
 
 def _parse_numeric_token(token: str) -> _NumericFact | None:
@@ -112,17 +125,21 @@ def _normalized_period_fact(match: re.Match[str]) -> _PeriodFact | None:
 
 def _grounding_facts_from_text(
     text: str,
-) -> set[_NumericFact | _PeriodFact]:
-    facts: set[_NumericFact | _PeriodFact] = set()
+) -> set[_GroundingFact]:
+    facts: set[_GroundingFact] = set()
 
     def replace_period(match: re.Match[str]) -> str:
         period_fact = _normalized_period_fact(match)
         if period_fact is None:
             return match.group(0)
         facts.add(period_fact)
+        facts.add(_YearFact(int(match.group("year"))))
         return " "
 
     remaining_text = _PERIOD_PATTERN.sub(replace_period, str(text or ""))
+    # A hyphen between two digits separates a range; only a hyphen that does not
+    # follow a digit is a sign. Periods are already consumed above.
+    remaining_text = _RANGE_SEPARATOR_PATTERN.sub(" to ", remaining_text)
     facts.update(
         {
             fact
@@ -135,7 +152,7 @@ def _grounding_facts_from_text(
 
 def _grounding_facts_from_value(
     value: Any,
-) -> set[_NumericFact | _PeriodFact]:
+) -> set[_GroundingFact]:
     if isinstance(value, bool) or value is None:
         return set()
     if isinstance(value, (int, float, Decimal)):
@@ -166,7 +183,7 @@ def _is_ratio_column(item: ReportEvidenceItem, column: str) -> bool:
 
 def _evidence_grounding_facts(
     item: ReportEvidenceItem,
-) -> set[_NumericFact | _PeriodFact]:
+) -> set[_GroundingFact]:
     facts = _grounding_facts_from_text(item.content)
     for row_index in range(len(item.rows)):
         facts.update(_table_row_grounding_facts(item, row_index))
@@ -176,10 +193,10 @@ def _evidence_grounding_facts(
 def _table_row_grounding_facts(
     item: ReportEvidenceItem,
     row_index: int,
-) -> set[_NumericFact | _PeriodFact]:
+) -> set[_GroundingFact]:
     if item.kind is not ReportEvidenceKind.TABLE or row_index >= len(item.rows):
         return set()
-    facts: set[_NumericFact | _PeriodFact] = set()
+    facts: set[_GroundingFact] = set()
     for column, value in item.rows[row_index].items():
         value_facts = _grounding_facts_from_value(value)
         facts.update(value_facts)
@@ -205,7 +222,7 @@ def _table_row_grounding_facts(
 def build_evidence_grounding_index(
     item_by_ref: Mapping[str, ReportEvidenceItem],
     evidence_refs: set[str],
-) -> dict[str, frozenset[_NumericFact | _PeriodFact]]:
+) -> dict[str, frozenset[_GroundingFact]]:
     """Extract each assigned evidence item's facts once for repeated validation."""
 
     return {
@@ -215,10 +232,66 @@ def build_evidence_grounding_index(
     }
 
 
+def observed_period_span(item: ReportEvidenceItem) -> dict[str, str] | None:
+    """Return the first and last period literal present in one evidence item."""
+
+    periods: set[str] = set()
+    for row in item.rows:
+        for value in row.values():
+            if not isinstance(value, str):
+                continue
+            for match in _PERIOD_PATTERN.finditer(value):
+                period_fact = _normalized_period_fact(match)
+                if period_fact is not None:
+                    periods.add(period_fact.value)
+    if not periods:
+        return None
+    ordered = sorted(periods)
+    return {"first": ordered[0], "last": ordered[-1]}
+
+
+def _claim_is_year_reference(claim: _NumericFact) -> bool:
+    """Return whether a bare integer reads as a calendar year, not a quantity."""
+
+    return (
+        not claim.is_percent
+        and claim.precision == 0
+        and claim.value == claim.value.to_integral_value()
+        and _MINIMUM_GROUNDED_YEAR <= int(claim.value) <= _MAXIMUM_GROUNDED_YEAR
+    )
+
+
+def _is_temporal_claim(claim: _GroundingFact) -> bool:
+    """Return whether a claim names a period rather than asserting a magnitude."""
+
+    if isinstance(claim, (_PeriodFact, _YearFact)):
+        return True
+    return _claim_is_year_reference(claim)
+
+
+def _temporal_evidence_facts(
+    facts: set[_GroundingFact] | frozenset[_GroundingFact],
+) -> set[_GroundingFact]:
+    """Keep only typed period facts.
+
+    A year-like integer is a temporal *claim*, but an evidence cell holding one
+    is still a magnitude — capacity of 2000 must never ground a reference to the
+    year 2000.
+    """
+
+    return {
+        fact
+        for fact in facts
+        if isinstance(fact, (_PeriodFact, _YearFact))
+    }
+
+
 def _grounding_claim_is_supported(
-    claim: _NumericFact | _PeriodFact,
-    evidence_facts: set[_NumericFact | _PeriodFact],
+    claim: _GroundingFact,
+    evidence_facts: set[_GroundingFact],
 ) -> bool:
+    if isinstance(claim, _YearFact):
+        return claim in evidence_facts
     if isinstance(claim, _PeriodFact):
         return claim in evidence_facts
     quantum = Decimal(1).scaleb(-claim.precision)
@@ -236,7 +309,12 @@ def _grounding_claim_is_supported(
                 return True
         except DecimalException:
             continue
-    return False
+    # Last resort: prose names a period as a bare year ("during 2026") while the
+    # evidence carries it only inside a finer period literal ("2026-01").
+    return (
+        _claim_is_year_reference(claim)
+        and _YearFact(int(claim.value)) in evidence_facts
+    )
 
 
 def _resolve_operand(
@@ -270,7 +348,7 @@ def _verified_direct_fact(
     claim: ReportDirectClaim,
     paragraph_refs: set[str],
     item_by_ref: Mapping[str, ReportEvidenceItem],
-) -> tuple[_NumericFact, set[_NumericFact | _PeriodFact]] | None:
+) -> tuple[_NumericFact, set[_GroundingFact]] | None:
     if claim.evidence_ref not in paragraph_refs:
         return None
     item = item_by_ref.get(claim.evidence_ref)
@@ -319,9 +397,16 @@ def _verified_direct_fact(
 
     if not _grounding_claim_is_supported(displayed, {expected_fact}):
         return None
+    # A verified cell widens only the temporal identity of its row. Widening
+    # sibling magnitudes would let an undeclared number inherit this claim's
+    # grounding — including at the wrong unit scale.
     return (
         displayed,
-        _table_row_grounding_facts(item, claim.row_index),
+        {
+            fact
+            for fact in _table_row_grounding_facts(item, claim.row_index)
+            if not isinstance(fact, _NumericFact)
+        },
     )
 
 
@@ -373,7 +458,7 @@ def _verified_derived_fact(
     claim: ReportDerivedClaim,
     paragraph_refs: set[str],
     item_by_ref: Mapping[str, ReportEvidenceItem],
-) -> _NumericFact | None:
+) -> tuple[_NumericFact, set[_GroundingFact]] | None:
     operands = [
         _resolve_operand(operand, paragraph_refs, item_by_ref)
         for operand in claim.operands
@@ -397,7 +482,20 @@ def _verified_derived_fact(
             return None
     except DecimalException:
         return None
-    return displayed
+    # A verified derivation may name the periods of the rows it spans — that is
+    # how a change between two months is normally written. Magnitudes from those
+    # rows still need their own coordinate-bound claim.
+    operand_period_facts: set[_GroundingFact] = set()
+    for operand in claim.operands:
+        item = item_by_ref.get(operand.evidence_ref)
+        if item is None:
+            continue
+        operand_period_facts.update(
+            _temporal_evidence_facts(
+                _table_row_grounding_facts(item, operand.row_index)
+            )
+        )
+    return displayed, operand_period_facts
 
 
 def _derived_claim_appears(
@@ -407,10 +505,14 @@ def _derived_claim_appears(
     display_pattern = re.escape(claim.display_value)
     if claim.display_value.endswith("%"):
         pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
+    elif _normalize_unit(claim.unit) in _DIMENSIONLESS_UNITS:
+        # Same rule as a dimensionless direct claim: the noun lives in the
+        # prose, so nobody writes "12 count".
+        pattern = rf"(?<![\w.,]){display_pattern}(?![\d.,])(?!\w)"
     else:
         unit_pattern = re.escape(claim.unit).replace(r"\ ", r"\s+")
         pattern = (
-            rf"(?<![\w.,]){display_pattern}(?![\d.,])"
+            rf"(?<![\w.,]){display_pattern}(?![\d.,]){_RANGE_TAIL_PATTERN}"
             rf"\s+{unit_pattern}(?!\w)"
         )
     return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
@@ -423,6 +525,10 @@ def _direct_claim_appears(
     display_pattern = re.escape(claim.display_value)
     if claim.display_value.endswith("%"):
         pattern = rf"(?<![\w.,]){display_pattern}(?!\w)"
+    elif _normalize_unit(claim.unit) in _DIMENSIONLESS_UNITS:
+        # Nobody writes "12 count". A dimensionless claim carries its noun in
+        # the prose, so only the value is matched — the cell is still verified.
+        pattern = rf"(?<![\w.,]){display_pattern}(?![\d.,])(?!\w)"
     else:
         normalized_unit = _normalize_unit(claim.unit)
         unit_parts = [
@@ -433,7 +539,7 @@ def _direct_claim_appears(
         unit_pattern = r"\s*(?:/|\bper\b)\s*".join(unit_parts)
         unit_pattern = unit_pattern.replace(r"\ ", r"\s+")
         pattern = (
-            rf"(?<![\w.,]){display_pattern}(?![\d.,])"
+            rf"(?<![\w.,]){display_pattern}(?![\d.,]){_RANGE_TAIL_PATTERN}"
             rf"\s+{unit_pattern}(?!\w)"
         )
     return re.search(pattern, paragraph_text, flags=re.IGNORECASE) is not None
@@ -453,7 +559,7 @@ def validate_paragraph_grounding(
     *,
     evidence_facts_by_ref: Mapping[
         str,
-        frozenset[_NumericFact | _PeriodFact],
+        frozenset[_GroundingFact],
     ]
     | None = None,
 ) -> list[str]:
@@ -525,8 +631,10 @@ def validate_paragraph_grounding(
         if not matching_sentences:
             errors.append("DERIVED_CLAIM_NOT_USED")
             continue
+        displayed, operand_period_facts = derived_fact
         for index in matching_sentences:
-            sentence_facts[index].add(derived_fact)
+            sentence_facts[index].add(displayed)
+            sentence_facts[index].update(operand_period_facts)
 
     for sentence, supported_facts in zip(
         sentences,
@@ -534,8 +642,8 @@ def validate_paragraph_grounding(
         strict=True,
     ):
         claims = _grounding_facts_from_text(sentence)
-        if claims and all(isinstance(claim, _PeriodFact) for claim in claims):
-            supported_facts.update(table_facts)
+        if claims and all(_is_temporal_claim(claim) for claim in claims):
+            supported_facts.update(_temporal_evidence_facts(table_facts))
         if any(
             not _grounding_claim_is_supported(claim, supported_facts)
             for claim in claims

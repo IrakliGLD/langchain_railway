@@ -48,6 +48,10 @@ section. Checkpoints are bound to the exact job query digest and capped at
 
 ## Separate worker service
 
+`/ask` accepts only `brief` and `standard`. A `report` answer-mode header is
+rejected with `400 REPORT_MODE_REQUIRES_JOB`; report answers exist only as
+durable jobs.
+
 The existing Railway web service remains:
 
 ```text
@@ -83,7 +87,10 @@ ENAI_REPORT_JOB_TIMEOUT_SECONDS=600
 ```
 
 The lease must be at least 30 seconds longer than the end-to-end job timeout;
-the worker rejects unsafe timing combinations at startup. On SIGTERM or
+the worker rejects unsafe timing combinations at startup rather than silently
+clamping an operator's configuration. Because the lease itself is capped at
+3,600 seconds, the job timeout is capped at 3,570 so that a valid lease exists
+for every accepted timeout. On SIGTERM or
 SIGINT, the worker stops leasing new work and durably returns any active owned
 job to the retry queue before the process exits. Its last validated checkpoint
 is retained, so the next worker resumes completed work instead of restarting
