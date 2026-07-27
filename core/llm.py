@@ -20,7 +20,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date as _date
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 from dateutil.relativedelta import relativedelta
 
