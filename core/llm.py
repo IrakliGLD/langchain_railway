@@ -13,6 +13,7 @@ Handles:
 import hashlib
 import json
 import logging
+import math
 import random
 import re
 import time
@@ -3073,6 +3074,25 @@ def llm_plan_report(
 _REPORT_SECTION_EVIDENCE_BUDGET_CHARS = 30_000
 
 
+def _report_section_validation_rules(section: ReportSectionSpec) -> str:
+    minimum_words = math.floor(section.target_words * 0.9)
+    maximum_words = math.ceil(section.target_words * 1.2)
+    bounds = _compact_json(
+        {
+            "target_words": section.target_words,
+            "minimum_words": minimum_words,
+            "maximum_words": maximum_words,
+        }
+    )
+    return (
+        f"{bounds}\n"
+        "Use every required_evidence_refs value at least once across the "
+        "section paragraphs. Each paragraph may use only those assigned "
+        "references. Keep the computed section word count within the stated "
+        "inclusive range."
+    )
+
+
 def _report_section_evidence_slice(
     section: ReportSectionSpec,
     manifest: ReportEvidenceManifest,
@@ -3187,6 +3207,7 @@ def llm_write_report_section(
 
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
+    validation_rules = _report_section_validation_rules(section)
     schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
     system = (
@@ -3201,6 +3222,7 @@ def llm_write_report_section(
     cache_input = (
         f"report_section_v1|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|guidance={guidance}|"
+        f"validation={validation_rules}|"
         f"schema={_compact_json(schema_hint)}|system={system}"
     )
     prompt = (
@@ -3210,6 +3232,8 @@ def llm_write_report_section(
         f"{_compact_json({'title': plan.title, 'objective': plan.objective, 'language_code': plan.language_code})}\n\n"
         "ASSIGNED_SECTION:\n"
         f"{section_json}\n\n"
+        "SECTION_VALIDATION_RULES:\n"
+        f"{validation_rules}\n\n"
         "USER_REPORT_REQUEST:\n"
         f"{user_query}\n\n"
         "EVIDENCE_SLICE:\n"
@@ -3238,6 +3262,7 @@ def llm_repair_report_section(
 
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
+    validation_rules = _report_section_validation_rules(section)
     schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
     draft_json = draft.model_dump_json()
@@ -3260,6 +3285,7 @@ def llm_repair_report_section(
         f"report_section_repair_v1|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|errors={errors_json}|"
         f"candidate={draft_json}|guidance={guidance}|"
+        f"validation={validation_rules}|"
         f"schema={_compact_json(schema_hint)}|system={system}"
     )
     prompt = (
@@ -3269,6 +3295,8 @@ def llm_repair_report_section(
         f"{_compact_json({'title': plan.title, 'objective': plan.objective, 'language_code': plan.language_code})}\n\n"
         "ASSIGNED_SECTION:\n"
         f"{section_json}\n\n"
+        "SECTION_VALIDATION_RULES:\n"
+        f"{validation_rules}\n\n"
         "USER_REPORT_REQUEST:\n"
         f"{user_query}\n\n"
         "EVIDENCE_SLICE:\n"

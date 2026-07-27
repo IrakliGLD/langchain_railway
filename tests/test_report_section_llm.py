@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from types import SimpleNamespace
 
@@ -61,6 +62,15 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     assert section.required_evidence_refs[0] in user[1]
     assert TABLE_REF not in user[1]
     assert "Average price was 125 GEL/MWh." in user[1]
+    assert (
+        f'"minimum_words":{math.floor(section.target_words * 0.9)}'
+        in user[1]
+    )
+    assert (
+        f'"maximum_words":{math.ceil(section.target_words * 1.2)}'
+        in user[1]
+    )
+    assert "Use every required_evidence_refs value at least once" in user[1]
     assert section.section_id in captured["cache_key"]
     assert _manifest().manifest_id in captured["cache_key"]
 
@@ -117,6 +127,14 @@ def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):
     assert captured["label"] == "Report section repair"
     assert "WORD_COUNT_OUT_OF_RANGE" in captured["messages"][1][1]
     assert candidate.paragraphs[0].text in captured["messages"][1][1]
+    assert (
+        f'"minimum_words":{math.floor(section.target_words * 0.9)}'
+        in captured["messages"][1][1]
+    )
+    assert (
+        "Use every required_evidence_refs value at least once"
+        in captured["messages"][1][1]
+    )
 
 
 def test_section_writer_cancels_cache_reservation_on_provider_failure(
