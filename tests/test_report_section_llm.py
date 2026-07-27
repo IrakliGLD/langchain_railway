@@ -20,6 +20,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import core.llm as llm
 from agent.report_sections import generate_report_sections
+from core.llm import _report_section_evidence_slice
 from contracts.report import ReportPlan
 from contracts.report_sections import ReportSectionDraft
 from tests.test_report_planner import TABLE_REF, _manifest, _plan_payload
@@ -601,3 +602,32 @@ def test_section_evidence_slice_is_silent_when_every_row_is_projected(caplog):
         for record in caplog.records
         if record.message.startswith("REPORT_GROUNDING_SCOPE_SHADOW ")
     ]
+
+
+def test_section_evidence_slice_warns_when_a_table_projects_to_no_rows(
+    monkeypatch,
+    caplog,
+):
+    from core import llm as llm_module
+
+    monkeypatch.setattr(
+        llm_module,
+        "projected_row_indices",
+        lambda _item, **_kwargs: [],
+    )
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        _report_section_evidence_slice(section, _manifest())
+
+    shadow = [
+        record
+        for record in caplog.records
+        if record.message.startswith("REPORT_GROUNDING_SCOPE_SHADOW ")
+    ]
+
+    assert len(shadow) == 1
+    assert shadow[0].levelno == logging.WARNING
+    assert json.loads(shadow[0].message.split(" ", 1)[1])["projected_rows"] == 0

@@ -3305,7 +3305,13 @@ def _report_section_evidence_slice(
                 # Shadow only: the grounding index still covers every manifest
                 # row, so a claim about a row the model never saw currently
                 # validates. Measure the gap before narrowing anything.
-                log.info(
+                #
+                # Zero projected rows is a different problem from ordinary
+                # truncation: the section is handed a table header with no data
+                # and cannot make any coordinate-bound claim from it. Raise the
+                # level so it is not lost among routine truncation.
+                log.log(
+                    logging.WARNING if not included_rows else logging.INFO,
                     "REPORT_GROUNDING_SCOPE_SHADOW %s",
                     _compact_json(
                         {
