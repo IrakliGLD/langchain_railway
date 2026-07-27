@@ -10,8 +10,11 @@ from pydantic import ValidationError
 from contracts.report import (
     REPORT_PLAN_CONTRACT_VERSION,
     STANDARD_REPORT_SECTION_SEQUENCE,
+    ReportIntent,
     ReportPlan,
+    ReportPlanningContext,
     ReportSectionKind,
+    normalize_report_plan_semantics,
     normalize_report_plan_word_budget,
 )
 from skills.loader import get_report_guidance, validate_skills
@@ -273,3 +276,105 @@ def test_report_contract_rejects_duplicate_evidence_references(target):
 
     with pytest.raises(ValidationError, match="unique evidence references"):
         ReportPlan.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("intent", "core_kind"),
+    [
+        ("trend", "trend_analysis"),
+        ("comparison", "comparative_analysis"),
+        ("composition", "composition_analysis"),
+        ("driver_analysis", "driver_analysis"),
+        ("forecast", "forecast_outlook"),
+        ("scenario", "scenario_analysis"),
+        ("knowledge", "context_and_framework"),
+    ],
+)
+def test_report_plan_accepts_the_required_core_section_for_each_intent(
+    intent,
+    core_kind,
+):
+    payload = _valid_plan_payload()
+    payload["intent"] = intent
+    payload["sections"][2]["kind"] = core_kind
+    payload["charts"] = []
+    for section in payload["sections"]:
+        section["chart_refs"] = []
+
+    plan = ReportPlan.model_validate(payload)
+
+    assert plan.intent is ReportIntent(intent)
+    assert plan.sections[2].kind is ReportSectionKind(core_kind)
+
+
+def test_report_plan_rejects_a_core_section_from_the_wrong_intent_profile():
+    payload = _valid_plan_payload()
+    payload["intent"] = "forecast"
+    payload["sections"][2]["kind"] = "trend_analysis"
+
+    with pytest.raises(ValidationError, match="forecast_outlook"):
+        ReportPlan.model_validate(payload)
+
+
+def test_report_plan_rejects_chart_purpose_outside_the_intent_profile():
+    payload = _valid_plan_payload()
+    payload["intent"] = "knowledge"
+    payload["sections"][2]["kind"] = "context_and_framework"
+    payload["charts"][0]["purpose"] = "trend"
+
+    with pytest.raises(ValidationError, match="chart purpose"):
+        ReportPlan.model_validate(payload)
+
+
+def test_semantic_normalization_drops_only_known_incompatible_chart_purposes():
+    payload = _valid_plan_payload()
+    context = ReportPlanningContext(
+        contract_version="report-planning-context-v1",
+        intent=ReportIntent.KNOWLEDGE,
+        language_code="en",
+        request_objective="Explain the applicable market framework.",
+        requires_table=False,
+        source="question_analysis",
+    )
+
+    normalized = normalize_report_plan_semantics(payload, context)
+    plan = ReportPlan.model_validate(normalized)
+
+    assert plan.intent is ReportIntent.KNOWLEDGE
+    assert plan.sections[2].kind is ReportSectionKind.CONTEXT_AND_FRAMEWORK
+    assert plan.charts == []
+    assert all(not section.chart_refs for section in plan.sections)
+
+
+@pytest.mark.parametrize(
+    "malformed_chart",
+    [
+        {
+            "chart_id": "chart_price_trend",
+            "section_id": "key_findings",
+            "purpose": "invented_purpose",
+            "title": "Monthly balancing price trend",
+            "evidence_refs": ["dataset:market_prices"],
+            "required": True,
+        },
+        "not-a-chart-object",
+    ],
+)
+def test_semantic_normalization_preserves_malformed_charts_for_validation(
+    malformed_chart,
+):
+    payload = _valid_plan_payload()
+    payload["charts"] = [malformed_chart]
+    context = ReportPlanningContext(
+        contract_version="report-planning-context-v1",
+        intent=ReportIntent.KNOWLEDGE,
+        language_code="en",
+        request_objective="Explain the applicable market framework.",
+        requires_table=False,
+        source="question_analysis",
+    )
+
+    normalized = normalize_report_plan_semantics(payload, context)
+
+    with pytest.raises(ValidationError):
+        ReportPlan.model_validate(normalized)

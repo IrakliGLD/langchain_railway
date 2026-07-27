@@ -134,6 +134,7 @@ def assemble_report(
     ]
     return ReportResult(
         contract_version="report-result-v1",
+        intent=plan.intent,
         title=plan.title,
         objective=plan.objective,
         language_code=plan.language_code,

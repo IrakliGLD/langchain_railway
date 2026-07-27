@@ -20,21 +20,6 @@ from contracts.report_evidence import (
 )
 from models import QueryContext
 
-_QUANTITATIVE_REPORT_PATTERN = re.compile(
-    r"\b(?:"
-    r"prices?|pricing|tariffs?|generation|demand|consumption|"
-    r"imports?|exports?|capacity|quantit(?:y|ies|ative)|volumes?|"
-    r"market\s+shares?|trends?|historical"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def report_request_requires_table(query: str) -> bool:
-    """Return whether a report request explicitly asks for measurable evidence."""
-
-    return bool(_QUANTITATIVE_REPORT_PATTERN.search(str(query or "")))
-
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(

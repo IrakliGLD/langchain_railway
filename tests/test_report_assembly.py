@@ -8,7 +8,7 @@ import pytest
 
 from agent.report_assembly import ReportAssemblyError, assemble_report
 from agent.report_charts import build_report_charts
-from contracts.report import ReportPlan
+from contracts.report import ReportIntent, ReportPlan, ReportSectionKind
 from contracts.report_sections import ReportSectionDraft
 from tests.test_report_planner import _manifest, _plan_payload
 from tests.test_report_sections import _draft
@@ -51,6 +51,23 @@ def test_assembly_preserves_validated_section_text_order_charts_and_citations():
     assert positions == sorted(positions)
     for draft in drafts:
         assert draft.paragraphs[0].text in result.content_markdown
+
+
+def test_assembly_preserves_non_general_intent_structure_in_result():
+    payload = deepcopy(_plan_payload())
+    payload["intent"] = "trend"
+    payload["sections"][2]["kind"] = "trend_analysis"
+    plan = ReportPlan.model_validate(payload)
+
+    result = assemble_report(
+        plan,
+        _manifest(),
+        _drafts(plan),
+        build_report_charts(plan, _manifest()),
+    )
+
+    assert result.intent is ReportIntent.TREND
+    assert result.sections[2].kind is ReportSectionKind.TREND_ANALYSIS
 
 
 def test_assembly_rejects_missing_sections_and_required_chart_omissions():

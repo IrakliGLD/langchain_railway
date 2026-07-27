@@ -188,8 +188,14 @@ def test_plan_requires_substantive_evidence_outside_the_limitations_section():
 def test_planner_validates_model_output_before_returning_it():
     calls = []
 
-    def model(query, manifest):
-        calls.append((query, manifest.manifest_id))
+    def model(query, manifest, planning_context):
+        calls.append(
+            (
+                query,
+                manifest.manifest_id,
+                planning_context.intent.value,
+            )
+        )
         return deepcopy(_plan_payload())
 
     plan = plan_report(
@@ -200,7 +206,13 @@ def test_planner_validates_model_output_before_returning_it():
 
     assert plan.title == "Electricity price trend report"
     assert [chart.chart_id for chart in plan.charts] == ["price_trend"]
-    assert calls == [("Explain the price trend.", _manifest().manifest_id)]
+    assert calls == [
+        (
+            "Explain the price trend.",
+            _manifest().manifest_id,
+            "general",
+        )
+    ]
 
 
 def test_planner_repairs_schema_valid_evidence_bindings_before_returning():

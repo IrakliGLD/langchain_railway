@@ -34,10 +34,40 @@ class ReportSectionKind(str, Enum):
     EXECUTIVE_SUMMARY = "executive_summary"
     SCOPE_AND_EVIDENCE = "scope_and_evidence"
     KEY_FINDINGS = "key_findings"
+    TREND_ANALYSIS = "trend_analysis"
+    COMPARATIVE_ANALYSIS = "comparative_analysis"
+    COMPOSITION_ANALYSIS = "composition_analysis"
+    DRIVER_ANALYSIS = "driver_analysis"
+    FORECAST_OUTLOOK = "forecast_outlook"
+    SCENARIO_ANALYSIS = "scenario_analysis"
+    CONTEXT_AND_FRAMEWORK = "context_and_framework"
     ANALYSIS = "analysis"
     IMPLICATIONS = "implications"
     LIMITATIONS = "limitations"
     CONCLUSION = "conclusion"
+
+
+class ReportIntent(str, Enum):
+    GENERAL = "general"
+    TREND = "trend"
+    COMPARISON = "comparison"
+    COMPOSITION = "composition"
+    DRIVER_ANALYSIS = "driver_analysis"
+    FORECAST = "forecast"
+    SCENARIO = "scenario"
+    KNOWLEDGE = "knowledge"
+
+
+REPORT_INTENT_CORE_SECTION = {
+    ReportIntent.GENERAL: ReportSectionKind.KEY_FINDINGS,
+    ReportIntent.TREND: ReportSectionKind.TREND_ANALYSIS,
+    ReportIntent.COMPARISON: ReportSectionKind.COMPARATIVE_ANALYSIS,
+    ReportIntent.COMPOSITION: ReportSectionKind.COMPOSITION_ANALYSIS,
+    ReportIntent.DRIVER_ANALYSIS: ReportSectionKind.DRIVER_ANALYSIS,
+    ReportIntent.FORECAST: ReportSectionKind.FORECAST_OUTLOOK,
+    ReportIntent.SCENARIO: ReportSectionKind.SCENARIO_ANALYSIS,
+    ReportIntent.KNOWLEDGE: ReportSectionKind.CONTEXT_AND_FRAMEWORK,
+}
 
 
 STANDARD_REPORT_SECTION_SEQUENCE = (
@@ -155,31 +185,41 @@ def normalize_report_plan_word_budget(payload: Any) -> Any:
 
 def validate_standard_report_section_order(
     kinds: Sequence[ReportSectionKind],
+    intent: ReportIntent = ReportIntent.GENERAL,
 ) -> None:
-    """Validate the canonical standard-report section structure."""
+    """Validate the deterministic section profile for one report intent."""
 
+    core_kind = REPORT_INTENT_CORE_SECTION[intent]
+    required_sequence = (
+        ReportSectionKind.EXECUTIVE_SUMMARY,
+        ReportSectionKind.SCOPE_AND_EVIDENCE,
+        core_kind,
+        ReportSectionKind.LIMITATIONS,
+        ReportSectionKind.CONCLUSION,
+    )
     missing = [
         kind.value
-        for kind in STANDARD_REPORT_SECTION_SEQUENCE
+        for kind in required_sequence
         if kinds.count(kind) != 1
     ]
     if missing:
         raise ValueError(
-            "Report must contain each of the required standard sections "
+            f"Report intent {intent.value} must contain each of its required "
+            "standard sections "
             f"exactly once: {', '.join(missing)}."
         )
 
     if not (
         kinds[0] == ReportSectionKind.EXECUTIVE_SUMMARY
         and kinds[1] == ReportSectionKind.SCOPE_AND_EVIDENCE
-        and kinds[2] == ReportSectionKind.KEY_FINDINGS
+        and kinds[2] == core_kind
         and kinds[-2] == ReportSectionKind.LIMITATIONS
         and kinds[-1] == ReportSectionKind.CONCLUSION
     ):
         raise ValueError(
-            "Report violates the standard section order: executive summary, "
-            "scope and evidence, key findings, optional analysis/implications, "
-            "limitations, conclusion."
+            f"Report intent {intent.value} violates the standard section order: executive "
+            f"summary, scope and evidence, {core_kind.value}, optional "
+            "analysis/implications, limitations, conclusion."
         )
 
     middle_kinds = kinds[3:-2]
@@ -207,12 +247,72 @@ class ReportChartPurpose(str, Enum):
     TABLE = "table"
 
 
+REPORT_INTENT_ALLOWED_CHART_PURPOSES = {
+    ReportIntent.GENERAL: frozenset(ReportChartPurpose),
+    ReportIntent.TREND: frozenset(
+        {
+            ReportChartPurpose.TREND,
+            ReportChartPurpose.COMPARISON,
+            ReportChartPurpose.TABLE,
+        }
+    ),
+    ReportIntent.COMPARISON: frozenset(
+        {
+            ReportChartPurpose.COMPARISON,
+            ReportChartPurpose.TREND,
+            ReportChartPurpose.TABLE,
+        }
+    ),
+    ReportIntent.COMPOSITION: frozenset(
+        {
+            ReportChartPurpose.COMPOSITION,
+            ReportChartPurpose.COMPARISON,
+            ReportChartPurpose.TREND,
+            ReportChartPurpose.TABLE,
+        }
+    ),
+    ReportIntent.DRIVER_ANALYSIS: frozenset(
+        {
+            ReportChartPurpose.RELATIONSHIP,
+            ReportChartPurpose.TREND,
+            ReportChartPurpose.COMPARISON,
+            ReportChartPurpose.TABLE,
+        }
+    ),
+    ReportIntent.FORECAST: frozenset(
+        {
+            ReportChartPurpose.FORECAST,
+            ReportChartPurpose.TREND,
+            ReportChartPurpose.TABLE,
+        }
+    ),
+    ReportIntent.SCENARIO: frozenset(
+        {
+            ReportChartPurpose.COMPARISON,
+            ReportChartPurpose.FORECAST,
+            ReportChartPurpose.TREND,
+            ReportChartPurpose.TABLE,
+        }
+    ),
+    ReportIntent.KNOWLEDGE: frozenset({ReportChartPurpose.TABLE}),
+}
+
+
 Identifier = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")]
 EvidenceRef = Annotated[str, Field(min_length=1, max_length=256)]
 
 
 class _StrictReportModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class ReportPlanningContext(_StrictReportModel):
+    contract_version: Literal["report-planning-context-v1"]
+    intent: ReportIntent
+    language_code: str = Field(pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
+    request_objective: str = Field(min_length=1, max_length=2000)
+    requires_table: bool
+    source: Literal["question_analysis", "pipeline_fallback"]
 
 
 class ReportSectionSpec(_StrictReportModel):
@@ -264,6 +364,7 @@ class ReportChartRequest(_StrictReportModel):
 
 class ReportPlan(_StrictReportModel):
     contract_version: Literal["report-plan-v1"]
+    intent: ReportIntent = ReportIntent.GENERAL
     title: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=1000)
     language_code: str = Field(pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
@@ -289,7 +390,7 @@ class ReportPlan(_StrictReportModel):
             raise ValueError("Report charts must use a unique chart_id.")
 
         kinds = [section.kind for section in self.sections]
-        validate_standard_report_section_order(kinds)
+        validate_standard_report_section_order(kinds, self.intent)
 
         allocated_words = sum(section.target_words for section in self.sections)
         if allocated_words != self.target_words:
@@ -314,6 +415,14 @@ class ReportPlan(_StrictReportModel):
                 )
 
         for chart in self.charts:
+            if (
+                chart.purpose
+                not in REPORT_INTENT_ALLOWED_CHART_PURPOSES[self.intent]
+            ):
+                raise ValueError(
+                    f"Report intent {self.intent.value} does not allow chart "
+                    f"purpose {chart.purpose.value}."
+                )
             if chart.section_id not in known_section_ids:
                 raise ValueError(
                     f"Chart {chart.chart_id} targets unknown section_id {chart.section_id}."
@@ -336,3 +445,88 @@ class ReportPlan(_StrictReportModel):
                 )
 
         return self
+
+
+def required_report_section_sequence(
+    intent: ReportIntent,
+) -> tuple[ReportSectionKind, ...]:
+    """Return the section kinds required by an intent profile."""
+
+    return (
+        ReportSectionKind.EXECUTIVE_SUMMARY,
+        ReportSectionKind.SCOPE_AND_EVIDENCE,
+        REPORT_INTENT_CORE_SECTION[intent],
+        ReportSectionKind.LIMITATIONS,
+        ReportSectionKind.CONCLUSION,
+    )
+
+
+def normalize_report_plan_semantics(
+    payload: Any,
+    planning_context: ReportPlanningContext,
+) -> Any:
+    """Bind model output to code-owned intent, language, and profile rules."""
+
+    if not isinstance(payload, dict):
+        return payload
+    normalized = deepcopy(payload)
+    normalized["intent"] = planning_context.intent.value
+    normalized["language_code"] = planning_context.language_code
+
+    sections = normalized.get("sections")
+    if isinstance(sections, list) and len(sections) >= 3:
+        semantic_kinds = {
+            kind.value
+            for kind in REPORT_INTENT_CORE_SECTION.values()
+        }
+        expected_core = REPORT_INTENT_CORE_SECTION[
+            planning_context.intent
+        ].value
+        for index, section in enumerate(sections):
+            if not isinstance(section, dict):
+                continue
+            if index == 2:
+                section["kind"] = expected_core
+            elif section.get("kind") in semantic_kinds:
+                section["kind"] = ReportSectionKind.ANALYSIS.value
+
+    charts = normalized.get("charts")
+    if isinstance(charts, list):
+        allowed_purposes = {
+            purpose.value
+            for purpose in REPORT_INTENT_ALLOWED_CHART_PURPOSES[
+                planning_context.intent
+            ]
+        }
+        known_purposes = {
+            purpose.value
+            for purpose in ReportChartPurpose
+        }
+        retained_charts = [
+            chart
+            for chart in charts
+            if (
+                not isinstance(chart, dict)
+                or chart.get("purpose") not in known_purposes
+                or chart.get("purpose") in allowed_purposes
+            )
+        ]
+        retained_chart_ids = {
+            chart.get("chart_id")
+            for chart in retained_charts
+            if isinstance(chart, dict)
+        }
+        normalized["charts"] = retained_charts
+        if isinstance(sections, list):
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                chart_refs = section.get("chart_refs")
+                if isinstance(chart_refs, list):
+                    section["chart_refs"] = [
+                        chart_ref
+                        for chart_ref in chart_refs
+                        if chart_ref in retained_chart_ids
+                    ]
+
+    return normalize_report_plan_word_budget(normalized)

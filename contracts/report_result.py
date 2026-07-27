@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from contracts.report import (
     STANDARD_REPORT_RESULT_MAX_WORDS,
     STANDARD_REPORT_RESULT_MIN_WORDS,
+    ReportIntent,
     ReportSectionKind,
     validate_standard_report_section_order,
 )
@@ -45,6 +46,7 @@ class ReportCitation(_StrictResultModel):
 
 class ReportResult(_StrictResultModel):
     contract_version: Literal["report-result-v1"]
+    intent: ReportIntent = ReportIntent.GENERAL
     title: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=1000)
     language_code: str = Field(pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
@@ -70,7 +72,8 @@ class ReportResult(_StrictResultModel):
         if len(citation_refs) != len(set(citation_refs)):
             raise ValueError("Report result citation refs must be unique.")
         validate_standard_report_section_order(
-            [section.kind for section in self.sections]
+            [section.kind for section in self.sections],
+            self.intent,
         )
 
         known_section_ids = set(section_ids)
