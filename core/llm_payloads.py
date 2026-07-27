@@ -378,6 +378,23 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
         # advisory field does not discard the whole routing contract.
         classification.pop("entity_candidates", None)
         classification.pop("metric_candidates", None)
+        # The analyzer intermittently emits the analysis-requirement flags
+        # inside classification, where extra=forbid rejects the whole
+        # QuestionAnalysis and drops routing to heuristics (2026-07-27 trace
+        # c7823cc9). Relocate rather than drop: these flags drive driver,
+        # trend and correlation enrichment, and for report jobs they also
+        # decide the report intent.
+        for requirement_flag in (
+            "needs_driver_analysis",
+            "needs_trend_context",
+            "needs_correlation_context",
+        ):
+            if requirement_flag not in classification:
+                continue
+            misplaced_value = classification.pop(requirement_flag)
+            requirements = payload.setdefault("analysis_requirements", {})
+            if isinstance(requirements, dict) and requirement_flag not in requirements:
+                requirements[requirement_flag] = bool(misplaced_value)
 
     routing = payload.get("routing")
     if isinstance(routing, dict):

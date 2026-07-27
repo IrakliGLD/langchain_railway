@@ -35,6 +35,12 @@ requires a categorical column, or a temporal column with at least two numeric
 columns. Series fields must be numeric for every purpose except `table`. Set
 `required: true` only when the request cannot be satisfied without that chart.
 
+Assign the statistics evidence item to any section that will state an average,
+total, growth rate, or other aggregate. Aggregates are precomputed there and
+cannot be re-derived from table rows: a derived claim needs one operand per row
+and is capped at 32 operands, so a section holding only table evidence cannot
+state an aggregate over a longer series at all.
+
 Table requirements follow semantic routing, not report keywords. For example, a
 knowledge-routed comparison may be supported without table evidence, while a
 data-routed comparison requires it.
