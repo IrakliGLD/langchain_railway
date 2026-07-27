@@ -129,6 +129,115 @@ def test_section_validation_accepts_percent_conversion_only_for_ratio_evidence(
     ) is (not expected_valid)
 
 
+@pytest.mark.parametrize(
+    ("evidence_value", "claim", "expected_valid"),
+    [
+        (120.0, "120", True),
+        (120, "120.00", True),
+        (1234.56, "1,234.6", True),
+        (1234.56, "1,235", True),
+        (1234.56, "1,236", False),
+    ],
+)
+def test_section_numeric_grounding_accepts_equivalent_display_values(
+    evidence_value,
+    claim,
+    expected_valid,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    manifest_payload["items"][0]["rows"] = [
+        {"period": "2026-01", "price": evidence_value},
+    ]
+    manifest_payload["items"][0]["total_row_count"] = 1
+    manifest = _manifest().model_validate(manifest_payload)
+    draft = ReportSectionDraft.model_validate(
+        _draft(
+            section,
+            text=(
+                f"Observed price was {claim} GEL per MWh. "
+                + _words(section.target_words - 8)
+            ),
+        )
+    )
+
+    validation = validate_report_section(draft, section, manifest)
+
+    assert validation.valid is expected_valid
+    assert (
+        "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+    ) is (not expected_valid)
+
+
+def test_section_numeric_grounding_does_not_treat_row_count_as_a_fact():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    draft = ReportSectionDraft.model_validate(
+        _draft(
+            section,
+            text=(
+                "Observed price was 2 GEL per MWh. "
+                + _words(section.target_words - 8)
+            ),
+        )
+    )
+
+    validation = validate_report_section(draft, section, _manifest())
+
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+@pytest.mark.parametrize(
+    ("period", "expected_valid"),
+    [
+        ("2026-02", True),
+        ("2026-2", True),
+        ("2026-03", False),
+    ],
+)
+def test_section_grounding_matches_periods_as_typed_facts(
+    period,
+    expected_valid,
+):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    draft = ReportSectionDraft.model_validate(
+        _draft(
+            section,
+            text=(
+                f"Observed price in {period} was 130 GEL per MWh. "
+                + _words(section.target_words - 10)
+            ),
+        )
+    )
+
+    validation = validate_report_section(draft, section, _manifest())
+
+    assert validation.valid is expected_valid
+    assert (
+        "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+    ) is (not expected_valid)
+
+
+def test_section_grounding_rejects_untyped_derived_arithmetic():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    draft = ReportSectionDraft.model_validate(
+        _draft(
+            section,
+            text=(
+                "The derived average price was 125 GEL per MWh. "
+                + _words(section.target_words - 9)
+            ),
+        )
+    )
+
+    validation = validate_report_section(draft, section, _manifest())
+
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
 def test_sections_generate_in_parallel_and_return_in_plan_order():
     plan = ReportPlan.model_validate(_plan_payload())
     barrier = threading.Barrier(len(plan.sections))
@@ -191,6 +300,118 @@ def test_only_invalid_sections_receive_one_repair_call():
     assert len(drafts) == len(plan.sections)
     assert repaired == Counter({"key_findings": 1})
     assert all(count == 1 for count in generated.values())
+
+
+def test_invalid_section_can_converge_on_second_local_repair():
+    plan = ReportPlan.model_validate(_plan_payload())
+    failed_section = plan.sections[0]
+    existing_drafts = {
+        section.section_id: ReportSectionDraft.model_validate(_draft(section))
+        for section in plan.sections[1:]
+    }
+    repair_calls = []
+
+    def repair(_query, _plan, section, _manifest, _draft_value, error_codes):
+        repair_calls.append((section.section_id, list(error_codes)))
+        if len(repair_calls) == 1:
+            return {
+                **_draft(section),
+                "paragraphs": [
+                    {
+                        "text": (
+                            "Unsupported value was 999. "
+                            + _words(section.target_words - 4)
+                        ),
+                        "evidence_refs": section.required_evidence_refs,
+                    }
+                ],
+            }
+        return _draft(section)
+
+    drafts = generate_report_sections(
+        "Explain the price trend.",
+        plan,
+        _manifest(),
+        existing_drafts=existing_drafts,
+        generate_section=lambda _q, _p, section, _m: {
+            **_draft(section),
+            "paragraphs": [
+                {
+                    "text": "Candidate remains too short.",
+                    "evidence_refs": section.required_evidence_refs,
+                }
+            ],
+        },
+        repair_section=repair,
+        max_repair_attempts=2,
+        max_workers=1,
+    )
+
+    assert [call[0] for call in repair_calls] == [
+        failed_section.section_id,
+        failed_section.section_id,
+    ]
+    assert "WORD_COUNT_OUT_OF_RANGE" in repair_calls[0][1]
+    assert repair_calls[1][1] == ["UNGROUNDED_NUMERIC_CLAIM"]
+    assert drafts[0].section_id == failed_section.section_id
+
+
+def test_invalid_section_stops_at_local_repair_bound():
+    plan = ReportPlan.model_validate(_plan_payload())
+    failed_section = plan.sections[0]
+    existing_drafts = {
+        section.section_id: ReportSectionDraft.model_validate(_draft(section))
+        for section in plan.sections[1:]
+    }
+    repair_calls = []
+
+    def invalid_repair(_query, _plan, section, _manifest, _draft_value, _errors):
+        repair_calls.append(section.section_id)
+        return {
+            **_draft(section),
+            "paragraphs": [
+                {
+                    "text": "Repair remains too short.",
+                    "evidence_refs": section.required_evidence_refs,
+                }
+            ],
+        }
+
+    with pytest.raises(ReportSectionGenerationError):
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            existing_drafts=existing_drafts,
+            generate_section=lambda _q, _p, section, _m: {
+                **_draft(section),
+                "paragraphs": [
+                    {
+                        "text": "Candidate remains too short.",
+                        "evidence_refs": section.required_evidence_refs,
+                    }
+                ],
+            },
+            repair_section=invalid_repair,
+            max_repair_attempts=2,
+            max_workers=1,
+        )
+
+    assert repair_calls == [
+        failed_section.section_id,
+        failed_section.section_id,
+    ]
+
+
+@pytest.mark.parametrize("max_repair_attempts", [0, 4])
+def test_local_section_repair_bound_is_validated(max_repair_attempts):
+    with pytest.raises(ValueError, match="max_repair_attempts"):
+        generate_report_sections(
+            "Explain the price trend.",
+            ReportPlan.model_validate(_plan_payload()),
+            _manifest(),
+            max_repair_attempts=max_repair_attempts,
+        )
 
 
 def test_failed_repair_aborts_with_typed_section_error(caplog):
@@ -278,8 +499,9 @@ def test_section_validation_diagnostics_are_structured_and_content_free(caplog):
     assert [item["event"] for item in diagnostics] == [
         "candidate_rejected",
         "repair_rejected",
+        "repair_rejected",
     ]
-    assert [item["attempt"] for item in diagnostics] == [1, 2]
+    assert [item["attempt"] for item in diagnostics] == [1, 2, 3]
     assert all(item["section_id"] == failed_section.section_id for item in diagnostics)
     assert all(item["duration_ms"] >= 0 for item in diagnostics)
     assert all(item["target_words"] == failed_section.target_words for item in diagnostics)
@@ -331,6 +553,47 @@ def test_provider_failure_during_repair_becomes_typed_section_error(caplog):
     assert '"provider":"nvidia"' in caplog.text
     assert '"provider_disposition":"timed_out"' in caplog.text
     assert "provider secret" not in caplog.text
+
+
+def test_provider_failure_is_not_replayed_by_local_section_retries():
+    plan = ReportPlan.model_validate(_plan_payload())
+    existing_drafts = {
+        section.section_id: ReportSectionDraft.model_validate(_draft(section))
+        for section in plan.sections[1:]
+    }
+    repair_calls = []
+
+    def repair(*_args):
+        repair_calls.append(True)
+        raise ProviderExecutionError(
+            "ambiguous provider failure",
+            provider="nvidia",
+            stage="report_section_repair",
+            disposition=ProviderDeliveryDisposition.AMBIGUOUS,
+        )
+
+    with pytest.raises(ReportSectionGenerationError) as exc_info:
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            existing_drafts=existing_drafts,
+            generate_section=lambda _q, _p, section, _m: {
+                **_draft(section),
+                "paragraphs": [
+                    {
+                        "text": "Candidate remains too short.",
+                        "evidence_refs": section.required_evidence_refs,
+                    }
+                ],
+            },
+            repair_section=repair,
+            max_repair_attempts=3,
+            max_workers=1,
+        )
+
+    assert repair_calls == [True]
+    assert exc_info.value.error_codes == ["SECTION_REPAIR_PROVIDER_FAILED"]
 
 
 def test_valid_resume_drafts_are_not_regenerated_and_progress_is_checkpointable():
