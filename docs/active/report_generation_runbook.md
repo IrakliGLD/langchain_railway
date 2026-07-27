@@ -34,9 +34,10 @@ and exact citation coverage for both section and chart evidence.
 2. Verified evidence is frozen into a bounded, query-bound manifest.
 3. One planning call creates the standard structure and evidence assignments.
 4. Section calls run in parallel. Each section sees only its assigned evidence.
-5. An invalid section receives at most one evidence-scoped repair call.
+5. An invalid section receives at most two evidence-scoped repair calls.
 6. Code validates identities, word budgets, evidence references, and numeric
-   grounding.
+   grounding. Equivalent formatting and conventional display rounding are
+   accepted; arbitrary derived arithmetic is not.
 7. Code builds charts and assembles sections in plan order. There is no final
    LLM rewrite that could remove citations or alter validated claims.
 

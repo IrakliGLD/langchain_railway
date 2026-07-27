@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -110,6 +111,37 @@ class MetricUnitRegistry:
                 f"Cannot compare {left_metric_id} ({self.get(left_metric_id).dimension}) "
                 f"with {right_metric_id} ({self.get(right_metric_id).dimension})"
             )
+
+    def find_for_source_metric(
+        self,
+        source_metric: str,
+    ) -> MetricUnitDefinition | None:
+        """Resolve a raw table column to one unambiguous unit definition."""
+
+        normalized = str(source_metric or "").strip().lower()
+        if not normalized:
+            return None
+        exact = [
+            definition
+            for definition in self._definitions.values()
+            if normalized in {
+                candidate.lower()
+                for candidate in definition.source_metrics
+            }
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        if exact:
+            return None
+        patterned = [
+            definition
+            for definition in self._definitions.values()
+            if any(
+                fnmatchcase(normalized, pattern.lower())
+                for pattern in definition.source_metric_patterns
+            )
+        ]
+        return patterned[0] if len(patterned) == 1 else None
 
     def as_public_contract(self) -> dict[str, Any]:
         return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
