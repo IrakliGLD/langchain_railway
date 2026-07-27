@@ -181,6 +181,28 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     )
 
 
+def test_quantitative_report_without_table_evidence_is_retryable():
+    lease = _lease()
+    control = _Control()
+    context = QueryContext(
+        query=lease.query,
+        summary_domain_knowledge="Prices are formed under the applicable market rules.",
+        answer_mode="report",
+    )
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: context,
+        planner=lambda *_args, **_kwargs: pytest.fail(
+            "planner must not publish a quantitative report without table evidence"
+        ),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, control)
+
+    assert exc_info.value.error_code == "REPORT_EVIDENCE_UNAVAILABLE"
+    assert exc_info.value.retryable is True
+
+
 def test_retry_resumes_valid_sections_without_repeating_pipeline_or_planner():
     plan = ReportPlan.model_validate(_plan_payload())
     resumed = ReportSectionDraft.model_validate(_draft(plan.sections[0]))

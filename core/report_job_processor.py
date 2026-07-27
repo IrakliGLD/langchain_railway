@@ -12,14 +12,17 @@ from pydantic import ValidationError
 from agent.report_assembly import ReportAssemblyError, assemble_report
 from agent.report_charts import build_report_charts
 from agent.report_evaluation import evaluate_report_plan
-from agent.report_evidence import build_report_evidence_manifest
+from agent.report_evidence import (
+    build_report_evidence_manifest,
+    report_request_requires_table,
+)
 from agent.report_planner import ReportPlanEvidenceError, plan_report
 from agent.report_sections import (
     ReportSectionGenerationError,
     generate_report_sections,
 )
 from contracts.report import ReportPlan
-from contracts.report_evidence import ReportEvidenceManifest
+from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_generation import ReportGenerationCheckpoint
 from contracts.report_jobs import ReportJobLease, ReportJobPhase
 from contracts.report_sections import ReportSectionDraft
@@ -181,6 +184,17 @@ class ReportJobProcessor:
                 if manifest.query_digest != expected_digest:
                     raise ValueError(
                         "Fresh report evidence does not match the job query."
+                    )
+                if (
+                    report_request_requires_table(lease.query)
+                    and not any(
+                        item.kind is ReportEvidenceKind.TABLE
+                        for item in manifest.items
+                    )
+                ):
+                    raise ReportJobFailure(
+                        "REPORT_EVIDENCE_UNAVAILABLE",
+                        retryable=True,
                     )
             except ReportJobFailure:
                 raise

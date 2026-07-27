@@ -56,6 +56,7 @@ from agent.provenance import (
     tool_invocation_hash,
 )
 from agent.render_fitness import df_date_span, period_bounds_from_hint
+from agent.report_evidence import report_request_requires_table
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.scenario_contract import (
     extract_scenario_requests,
@@ -282,14 +283,21 @@ def _should_attempt_authoritative_router_fallback(ctx: QueryContext) -> bool:
     if ctx.response_mode != ResponseMode.DATA_PRIMARY:
         return False
 
+    query_text = " ".join(
+        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+    )
+    if (
+        getattr(ctx, "answer_mode", AnswerMode.STANDARD.value)
+        == AnswerMode.REPORT.value
+        and report_request_requires_table(query_text)
+    ):
+        return True
+
     qa = ctx.question_analysis
     if qa.classification.query_type.value != "conceptual_definition":
         return False
 
-    query_text = " ".join(
-        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
-    ).lower()
-    return any(token in query_text for token in _TECHNICAL_CONCEPT_TOKENS)
+    return any(token in query_text.lower() for token in _TECHNICAL_CONCEPT_TOKENS)
 
 
 # Clarification/evidence helpers decide whether later stages can answer safely.
@@ -305,12 +313,19 @@ def _derive_response_mode(ctx: QueryContext) -> str:
     - When no analyzer is available, fall back to is_conceptual_question()
       which was already computed in prepare_context().
     """
+    query_text = " ".join(
+        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
+    )
+    if (
+        getattr(ctx, "answer_mode", AnswerMode.STANDARD.value)
+        == AnswerMode.REPORT.value
+        and report_request_requires_table(query_text)
+    ):
+        return ResponseMode.DATA_PRIMARY
+
     if ctx.has_authoritative_question_analysis:
         qa_type = ctx.question_analysis.classification.query_type.value
         qa_path = ctx.question_analysis.routing.preferred_path.value
-        query_text = " ".join(
-            part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
-        )
         query_lower = query_text.lower()
         if (
             qa_type in _ALWAYS_DATA_TYPES
@@ -358,9 +373,6 @@ def _derive_response_mode(ctx: QueryContext) -> str:
         if qa_path == "knowledge":
             return ResponseMode.KNOWLEDGE_PRIMARY
         return ResponseMode.DATA_PRIMARY
-    query_text = " ".join(
-        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
-    )
     if _is_target_model_knowledge_query(query_text):
         return ResponseMode.KNOWLEDGE_PRIMARY
     # No analyzer — use the heuristic already computed in prepare_context()
