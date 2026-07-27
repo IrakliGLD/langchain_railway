@@ -39,16 +39,24 @@ class ProviderInvocationRuntime:
         self._log_circuit_open = log_circuit_open
 
     @staticmethod
-    def _invoke_kwargs(provider: str, timeout_seconds: float) -> dict[str, float | int]:
+    def _invoke_kwargs(
+        provider: str,
+        timeout_seconds: float,
+        sampling_temperature: float | None = None,
+    ) -> dict[str, float | int]:
         if provider == "gemini":
             # langchain-google-genai accepts timeout in seconds and converts it
             # to the google-genai HTTP millisecond value internally. The wrapper
             # also counts the first attempt, so one attempt disables SDK retries.
-            return {
+            kwargs: dict[str, float | int] = {
                 "timeout": max(0.001, float(timeout_seconds)),
                 "max_retries": 1,
             }
-        return {"timeout": timeout_seconds}
+        else:
+            kwargs = {"timeout": timeout_seconds}
+        if sampling_temperature is not None:
+            kwargs["temperature"] = float(sampling_temperature)
+        return kwargs
 
     @staticmethod
     def _accepts_invoke_kwargs(invoke: Callable[..., Any]) -> bool:
@@ -70,6 +78,7 @@ class ProviderInvocationRuntime:
         stage: str,
         timeout_seconds: float,
         breaker: CircuitBreaker,
+        sampling_temperature: float | None = None,
     ) -> Any:
         allowed, reason = breaker.allow_request()
         if not allowed:
@@ -83,7 +92,7 @@ class ProviderInvocationRuntime:
 
         token = self._claim_attempt(provider, stage)
         try:
-            kwargs = self._invoke_kwargs(provider, timeout_seconds)
+            kwargs = self._invoke_kwargs(provider, timeout_seconds, sampling_temperature)
             message = (
                 llm.invoke(messages, **kwargs) if self._accepts_invoke_kwargs(llm.invoke) else llm.invoke(messages)
             )

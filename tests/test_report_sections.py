@@ -1787,3 +1787,19 @@ def test_dimensionless_derived_claim_is_still_recomputed():
         _count_derived_manifest(),
     )
     assert "DERIVED_CLAIM_INVALID" in validation.error_codes
+
+
+def test_section_word_tolerance_admits_observed_model_overshoot():
+    """gpt-oss-20b overshot a 109-word target at 136 and 141 words repeatedly,
+    and a 118-word target at 159 (jobs c7823cc9 / acf48571). A +20% ceiling is
+    unreachable for it; the lower bound stays tight."""
+
+    from agent.report_sections import _section_word_bounds
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1].model_copy(update={"target_words": 109})
+
+    minimum_words, maximum_words = _section_word_bounds(section)
+
+    assert minimum_words == 98
+    assert maximum_words >= 141

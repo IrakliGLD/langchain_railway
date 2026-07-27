@@ -245,10 +245,14 @@ def _configured_provider_timeout_seconds(provider: str) -> float:
 # synchronous path. The /ask timeout is tuned for a user waiting and is the
 # wrong budget here: on job c7823cc9 (2026-07-27) repairs completed at 43s
 # against a 45s ceiling, so four of five timed out and the job died with every
-# section still unwritten. The request deadline below still bounds this down as
-# the job budget is consumed, so the floor cannot overrun the job.
+# section still unwritten. Raised to 240s after job acf48571, where a 453-word
+# key_findings section and one repair both ran past a 120s ceiling while
+# 109-word sections finished in 19-59s: the budget has to cover the largest
+# planned section, not the average one. The request deadline below still
+# bounds this down as the job budget is consumed, so the floor cannot
+# overrun the job, and a short section that finishes early costs nothing.
 _REPORT_STAGE_PREFIX = "report_"
-_REPORT_STAGE_MINIMUM_TIMEOUT_SECONDS = 120.0
+_REPORT_STAGE_MINIMUM_TIMEOUT_SECONDS = 240.0
 
 
 def _effective_provider_timeout_seconds(provider: str, stage: str) -> float:
@@ -269,7 +273,14 @@ def _effective_provider_timeout_seconds(provider: str, stage: str) -> float:
 _LLM_ATTEMPT_STAGE: ContextVar[str] = ContextVar("enai_llm_attempt_stage", default="llm")
 
 
-def _invoke_with_resilience(llm, messages, model_name: str, *, attempt_stage: str | None = None):
+def _invoke_with_resilience(
+    llm,
+    messages,
+    model_name: str,
+    *,
+    attempt_stage: str | None = None,
+    sampling_temperature: float | None = None,
+):
     attempt_stage = attempt_stage or _LLM_ATTEMPT_STAGE.get()
     provider = _provider_from_model_name(model_name)
     timeout_seconds = _effective_provider_timeout_seconds(provider, attempt_stage)
@@ -281,14 +292,31 @@ def _invoke_with_resilience(llm, messages, model_name: str, *, attempt_stage: st
         stage=attempt_stage,
         timeout_seconds=timeout_seconds,
         breaker=breaker,
+        sampling_temperature=sampling_temperature,
     )
 
 
-def _invoke_at_stage(llm, messages, model_name: str, stage: str):
+def _invoke_at_stage(
+    llm,
+    messages,
+    model_name: str,
+    stage: str,
+    *,
+    sampling_temperature: float | None = None,
+):
     """Preserve the historical three-argument monkeypatch surface."""
     token = _LLM_ATTEMPT_STAGE.set(stage)
     try:
-        return _invoke_with_resilience(llm, messages, model_name)
+        # Keep the historical three-argument call when no resampling is asked
+        # for: tests monkeypatch _invoke_with_resilience with that signature.
+        if sampling_temperature is None:
+            return _invoke_with_resilience(llm, messages, model_name)
+        return _invoke_with_resilience(
+            llm,
+            messages,
+            model_name,
+            sampling_temperature=sampling_temperature,
+        )
     finally:
         _LLM_ATTEMPT_STAGE.reset(token)
 
@@ -516,6 +544,7 @@ def _invoke_with_openai_fallback(
     llm_start: float,
     label: str,
     attempt_stage: str | None = None,
+    sampling_temperature: float | None = None,
 ):
     """Invoke once, falling back only when the first provider rejected delivery."""
     stage = attempt_stage or _attempt_stage(label)
@@ -533,7 +562,17 @@ def _invoke_with_openai_fallback(
             attempt_stage=stage,
         )
     try:
-        message = _invoke_at_stage(llm, messages, primary_model_name, stage)
+        message = (
+            _invoke_at_stage(llm, messages, primary_model_name, stage)
+            if sampling_temperature is None
+            else _invoke_at_stage(
+                llm,
+                messages,
+                primary_model_name,
+                stage,
+                sampling_temperature=sampling_temperature,
+            )
+        )
     except Exception as primary_exc:
         log.warning("%s failed with primary model: %s", label, primary_exc)
         return _fallback_to_openai(
@@ -3226,6 +3265,25 @@ def llm_repair_report_plan(
 
 
 _REPORT_SECTION_EVIDENCE_BUDGET_CHARS = 30_000
+# A repair at temperature 0 re-emits the draft it was asked to fix: on job
+# acf48571 scope_and_evidence returned exactly 136 words as the candidate and
+# again on both repairs, failing the same four checks each time. Resampling is
+# what makes a retry a retry; the step widens with each attempt so the second
+# repair explores further than the first.
+_REPAIR_BASE_SAMPLING_TEMPERATURE = 0.2
+_REPAIR_SAMPLING_TEMPERATURE_STEP = 0.2
+_REPAIR_MAXIMUM_SAMPLING_TEMPERATURE = 0.8
+
+
+def _repair_sampling_temperature(attempt_number: int) -> float:
+    """Return an escalating temperature so each repair explores new wording."""
+
+    repair_index = max(0, int(attempt_number) - 2)
+    return min(
+        _REPAIR_MAXIMUM_SAMPLING_TEMPERATURE,
+        _REPAIR_BASE_SAMPLING_TEMPERATURE
+        + repair_index * _REPAIR_SAMPLING_TEMPERATURE_STEP,
+    )
 
 
 def _report_section_validation_rules(section: ReportSectionSpec) -> str:
@@ -3363,6 +3421,7 @@ def _invoke_report_section_contract(
     prompt: str,
     label: str,
     attempt_stage: str,
+    sampling_temperature: float | None = None,
     use_cache: bool = True,
     cache_validator: Callable[[ReportSectionDraft], bool] | None = None,
     return_invalid_payload: bool = False,
@@ -3392,6 +3451,14 @@ def _invoke_report_section_contract(
             llm_start=llm_start,
             label=label,
             attempt_stage=attempt_stage,
+            # Only the resampling repair path varies temperature. Passing the
+            # keyword unconditionally would change the call surface for every
+            # other stage for no behavioural reason.
+            **(
+                {"sampling_temperature": sampling_temperature}
+                if sampling_temperature is not None
+                else {}
+            ),
         )
         payload = _extract_json_payload(message.content.strip())
         try:
@@ -3567,6 +3634,7 @@ def llm_repair_report_section(
             f"report_section_repair_{section.section_id}"
             f"_attempt_{attempt_number}"
         ),
+        sampling_temperature=_repair_sampling_temperature(attempt_number),
         use_cache=False,
         return_invalid_payload=True,
     )

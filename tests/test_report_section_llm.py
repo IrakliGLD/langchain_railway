@@ -631,3 +631,70 @@ def test_section_evidence_slice_warns_when_a_table_projects_to_no_rows(
     assert len(shadow) == 1
     assert shadow[0].levelno == logging.WARNING
     assert json.loads(shadow[0].message.split(" ", 1)[1])["projected_rows"] == 0
+
+
+def test_section_repair_resamples_instead_of_regenerating_the_same_draft(monkeypatch):
+    """Job acf48571: scope_and_evidence returned exactly 136 words on the
+    candidate and on both repairs. At temperature 0 a repair re-emits the same
+    text, so the extra provider calls cannot converge."""
+
+    from tests.test_report_planner import _manifest, _plan_payload
+
+    captured = []
+
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+
+    def invoke(_factory, _model, _messages, **kwargs):
+        captured.append(kwargs.get("sampling_temperature"))
+        return SimpleNamespace(
+            content=json.dumps(_draft(ReportPlan.model_validate(_plan_payload()).sections[1]))
+        )
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    draft = ReportSectionDraft.model_validate(_draft(section))
+
+    for attempt_number in (2, 3):
+        llm.llm_repair_report_section(
+            "Explain the price trend.",
+            plan,
+            section,
+            _manifest(),
+            draft,
+            ["WORD_COUNT_OUT_OF_RANGE"],
+            attempt_number=attempt_number,
+        )
+
+    assert all(temperature is not None for temperature in captured)
+    assert captured[0] > 0.0
+    assert captured[1] > captured[0]
+
+
+def test_section_writer_keeps_deterministic_sampling(monkeypatch):
+    from tests.test_report_planner import _manifest, _plan_payload
+
+    captured = []
+
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _k: (None, "token"))
+    monkeypatch.setattr(llm, "_cache_set", lambda *_a, **_k: None)
+
+    def invoke(_factory, _model, _messages, **kwargs):
+        captured.append(kwargs.get("sampling_temperature"))
+        return SimpleNamespace(
+            content=json.dumps(_draft(ReportPlan.model_validate(_plan_payload()).sections[1]))
+        )
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    llm.llm_write_report_section(
+        "Explain the price trend.",
+        plan,
+        plan.sections[1],
+        _manifest(),
+    )
+
+    assert captured == [None]
