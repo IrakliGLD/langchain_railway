@@ -8,8 +8,11 @@ from typing import Any
 
 from agent.report_charts import build_report_charts
 from contracts.report import (
+    ReportIntent,
     ReportPlan,
+    ReportPlanningContext,
     ReportSectionKind,
+    normalize_report_plan_semantics,
     normalize_report_plan_word_budget,
 )
 from contracts.report_evidence import (
@@ -22,6 +25,35 @@ _LOGGER = logging.getLogger("Enai.ReportPlanner")
 
 class ReportPlanEvidenceError(ValueError):
     """The plan references evidence outside its immutable manifest."""
+
+
+class ReportPlanSemanticError(ValueError):
+    """The plan conflicts with the authoritative report-planning context."""
+
+
+def _fallback_planning_context(query: str) -> ReportPlanningContext:
+    return ReportPlanningContext(
+        contract_version="report-planning-context-v1",
+        intent=ReportIntent.GENERAL,
+        language_code="en",
+        request_objective=str(query or "").strip(),
+        requires_table=True,
+        source="pipeline_fallback",
+    )
+
+
+def validate_report_plan_semantics(
+    plan: ReportPlan,
+    planning_context: ReportPlanningContext,
+) -> None:
+    if plan.intent is not planning_context.intent:
+        raise ReportPlanSemanticError(
+            "Report plan intent does not match its planning context."
+        )
+    if plan.language_code != planning_context.language_code:
+        raise ReportPlanSemanticError(
+            "Report plan language does not match its planning context."
+        )
 
 
 def validate_report_plan_evidence(
@@ -220,27 +252,37 @@ def _repair_report_plan_evidence(
     return repaired
 
 
-ReportPlanInvoker = Callable[[str, ReportEvidenceManifest], Any]
+ReportPlanInvoker = Callable[
+    [str, ReportEvidenceManifest, ReportPlanningContext],
+    Any,
+]
 
 
 def plan_report(
     query: str,
     manifest: ReportEvidenceManifest,
     *,
+    planning_context: ReportPlanningContext | None = None,
     invoke_model: ReportPlanInvoker | None = None,
 ) -> ReportPlan:
+    planning_context = planning_context or _fallback_planning_context(query)
     if invoke_model is None:
         from core.llm import llm_plan_report
 
         invoke_model = llm_plan_report
-    raw_plan = invoke_model(query, manifest)
-    plan = (
-        raw_plan
+    raw_plan = invoke_model(query, manifest, planning_context)
+    raw_payload = (
+        raw_plan.model_dump(mode="json")
         if isinstance(raw_plan, ReportPlan)
-        else ReportPlan.model_validate(
-            normalize_report_plan_word_budget(raw_plan)
+        else raw_plan
+    )
+    plan = ReportPlan.model_validate(
+        normalize_report_plan_semantics(
+            normalize_report_plan_word_budget(raw_payload),
+            planning_context,
         )
     )
+    validate_report_plan_semantics(plan, planning_context)
     requires_repair = False
     try:
         validate_report_plan_evidence(plan, manifest)

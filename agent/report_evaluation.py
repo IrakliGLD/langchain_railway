@@ -7,7 +7,7 @@ from agent.report_planner import (
     ReportPlanEvidenceError,
     validate_report_plan_evidence,
 )
-from contracts.report import STANDARD_REPORT_SECTION_SEQUENCE, ReportPlan
+from contracts.report import ReportPlan, required_report_section_sequence
 from contracts.report_evaluation import ReportPlanEvaluation
 from contracts.report_evidence import ReportEvidenceManifest
 
@@ -39,9 +39,10 @@ def evaluate_report_plan(
         findings.append("PLAN_EVIDENCE_INVALID")
 
     present_kinds = {section.kind for section in plan.sections}
+    required_sections = required_report_section_sequence(plan.intent)
     required_section_coverage = (
-        sum(kind in present_kinds for kind in STANDARD_REPORT_SECTION_SEQUENCE)
-        / len(STANDARD_REPORT_SECTION_SEQUENCE)
+        sum(kind in present_kinds for kind in required_sections)
+        / len(required_sections)
     )
     if required_section_coverage < 1.0:
         findings.append("REQUIRED_SECTION_MISSING")

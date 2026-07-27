@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from agent import summarizer
 from agent.report_evidence import (
     build_report_evidence_manifest,
-    report_request_requires_table,
 )
 from contracts.report_evidence import (
     REPORT_EVIDENCE_MANIFEST_VERSION,
@@ -95,25 +94,6 @@ def test_manifest_keeps_table_truncation_metadata_without_exposing_packaging_det
     assert [item.title for item in limitations] == ["Evidence boundary"]
     assert all("characters" not in item.content for item in limitations)
     assert all("manifest includes" not in item.content for item in limitations)
-
-
-@pytest.mark.parametrize(
-    ("query", "expected"),
-    [
-        (
-            "Provide a report on market structure and prices, "
-            "including target-model implications.",
-            True,
-        ),
-        ("Write a report on electricity generation in Georgia.", True),
-        ("Explain the legal registration procedure in a report.", False),
-    ],
-)
-def test_report_request_requires_table_detects_measurable_scope(
-    query: str,
-    expected: bool,
-):
-    assert report_request_requires_table(query) is expected
 
 
 def test_manifest_normalizes_runtime_source_labels_and_dict_rows():

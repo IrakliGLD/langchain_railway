@@ -96,9 +96,19 @@ def _manifest_for_query(query: str):
     return type(_manifest()).model_validate(payload)
 
 
-def _processor(*, pipeline_calls: list | None = None, generated: list | None = None):
+def _processor(
+    *,
+    pipeline_calls: list | None = None,
+    generated: list | None = None,
+    planning_contexts: list | None = None,
+):
     calls = pipeline_calls if pipeline_calls is not None else []
     generated_ids = generated if generated is not None else []
+    received_contexts = (
+        planning_contexts
+        if planning_contexts is not None
+        else []
+    )
 
     def pipeline(query, **kwargs):
         calls.append((query, kwargs))
@@ -117,12 +127,14 @@ def _processor(*, pipeline_calls: list | None = None, generated: list | None = N
             max_workers=kwargs["max_workers"],
         )
 
+    def planner(_query, _manifest_value, **kwargs):
+        received_contexts.append(kwargs["planning_context"])
+        return ReportPlan.model_validate(_plan_payload())
+
     return ReportJobProcessor(
         query_pipeline=pipeline,
         evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda _query, _manifest_value: ReportPlan.model_validate(
-            _plan_payload()
-        ),
+        planner=planner,
         section_generator=sections,
         max_section_workers=5,
     )
@@ -154,12 +166,14 @@ def test_checkpoint_contract_binds_manifest_plan_and_completed_sections():
 def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     pipeline_calls: list = []
     generated: list = []
+    planning_contexts: list = []
     lease = _lease()
     control = _Control()
 
     raw_result = _processor(
         pipeline_calls=pipeline_calls,
         generated=generated,
+        planning_contexts=planning_contexts,
     )(lease, control)
     result = ReportResult.model_validate(raw_result)
 
@@ -181,6 +195,10 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
             },
         )
     ]
+    assert len(planning_contexts) == 1
+    assert planning_contexts[0].intent.value == "general"
+    assert planning_contexts[0].language_code == "en"
+    assert planning_contexts[0].requires_table is True
     assert control.heartbeats[0][:2] == (ReportJobPhase.PLANNING, 10)
     assert control.heartbeats[-1][:2] == (ReportJobPhase.ASSEMBLING, 90)
     assert all(
@@ -277,7 +295,7 @@ def test_irreparable_evidence_bound_plan_is_not_retried():
     def pipeline(query, **_kwargs):
         return _pipeline_context(query)
 
-    def invalid_planner(*_args):
+    def invalid_planner(*_args, **_kwargs):
         raise ReportPlanEvidenceError("Bounded planner validation failed.")
 
     processor = ReportJobProcessor(
@@ -298,8 +316,27 @@ def test_schema_invalid_report_plan_is_not_retried_as_a_whole_job():
     processor = ReportJobProcessor(
         query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
         evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_args: (_ for _ in ()).throw(
+        planner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             ValueError("The model returned an invalid plan.")
+        ),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
+    assert exc_info.value.retryable is False
+
+
+def test_report_plan_cannot_override_processor_planning_semantics():
+    lease = _lease()
+    mismatched_payload = _plan_payload()
+    mismatched_payload["language_code"] = "ka"
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=lambda *_args, **_kwargs: ReportPlan.model_validate(
+            mismatched_payload
         ),
     )
 
@@ -315,7 +352,7 @@ def test_report_plan_provider_failure_remains_retryable_and_is_diagnosable(
 ):
     lease = _lease()
 
-    def unavailable_planner(*_args):
+    def unavailable_planner(*_args, **_kwargs):
         raise ProviderExecutionError(
             "provider secret must not be logged",
             provider="nvidia",
@@ -375,7 +412,7 @@ def test_section_failure_retryability_distinguishes_validation_from_provider(
     processor = ReportJobProcessor(
         query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
         evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_args: ReportPlan.model_validate(_plan_payload()),
+        planner=lambda *_args, **_kwargs: ReportPlan.model_validate(_plan_payload()),
         section_generator=fail_sections,
     )
 

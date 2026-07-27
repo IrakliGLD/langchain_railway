@@ -3342,7 +3342,7 @@ def test_response_mode_target_model_no_analyzer_is_knowledge_primary():
     assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
 
 
-def test_report_price_request_stays_data_primary_when_analyzer_is_unavailable():
+def test_report_request_without_analyzer_uses_language_neutral_pipeline_fallback():
     from types import SimpleNamespace
 
     from agent.pipeline import _derive_response_mode
@@ -3359,10 +3359,10 @@ def test_report_price_request_stays_data_primary_when_analyzer_is_unavailable():
         answer_mode="report",
     )
 
-    assert _derive_response_mode(ctx) == ResponseMode.DATA_PRIMARY
+    assert _derive_response_mode(ctx) == ResponseMode.KNOWLEDGE_PRIMARY
 
 
-def test_report_price_request_allows_router_fallback_after_conceptual_analysis():
+def test_report_request_does_not_override_authoritative_conceptual_analysis():
     from types import SimpleNamespace
 
     from agent.pipeline import _should_attempt_authoritative_router_fallback
@@ -3377,7 +3377,7 @@ def test_report_price_request_allows_router_fallback_after_conceptual_analysis()
     ctx.answer_mode = "report"
     ctx.response_mode = ResponseMode.DATA_PRIMARY
 
-    assert _should_attempt_authoritative_router_fallback(ctx) is True
+    assert _should_attempt_authoritative_router_fallback(ctx) is False
 
 
 def test_shadow_analyzer_does_not_change_response_mode(monkeypatch):

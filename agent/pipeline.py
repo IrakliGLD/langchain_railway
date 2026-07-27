@@ -56,7 +56,7 @@ from agent.provenance import (
     tool_invocation_hash,
 )
 from agent.render_fitness import df_date_span, period_bounds_from_hint
-from agent.report_evidence import report_request_requires_table
+from agent.report_intent import report_context_requires_table
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.scenario_contract import (
     extract_scenario_requests,
@@ -283,16 +283,21 @@ def _should_attempt_authoritative_router_fallback(ctx: QueryContext) -> bool:
     if ctx.response_mode != ResponseMode.DATA_PRIMARY:
         return False
 
-    query_text = " ".join(
-        part for part in (str(ctx.query or ""), str(ctx.effective_query or "")) if part
-    )
     if (
         getattr(ctx, "answer_mode", AnswerMode.STANDARD.value)
         == AnswerMode.REPORT.value
-        and report_request_requires_table(query_text)
+        and report_context_requires_table(ctx)
     ):
         return True
 
+    query_text = " ".join(
+        part
+        for part in (
+            str(ctx.query or ""),
+            str(ctx.effective_query or ""),
+        )
+        if part
+    )
     qa = ctx.question_analysis
     if qa.classification.query_type.value != "conceptual_definition":
         return False
@@ -319,7 +324,7 @@ def _derive_response_mode(ctx: QueryContext) -> str:
     if (
         getattr(ctx, "answer_mode", AnswerMode.STANDARD.value)
         == AnswerMode.REPORT.value
-        and report_request_requires_table(query_text)
+        and report_context_requires_table(ctx)
     ):
         return ResponseMode.DATA_PRIMARY
 

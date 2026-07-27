@@ -16,9 +16,14 @@ from agent.report_charts import build_report_charts
 from agent.report_evaluation import evaluate_report_plan
 from agent.report_evidence import (
     build_report_evidence_manifest,
-    report_request_requires_table,
 )
-from agent.report_planner import ReportPlanEvidenceError, plan_report
+from agent.report_intent import build_report_planning_context
+from agent.report_planner import (
+    ReportPlanEvidenceError,
+    ReportPlanSemanticError,
+    plan_report,
+    validate_report_plan_semantics,
+)
 from agent.report_sections import (
     ReportSectionGenerationError,
     generate_report_sections,
@@ -38,7 +43,7 @@ _LOGGER = logging.getLogger("Enai.ReportProcessor")
 
 QueryPipeline = Callable[..., Any]
 EvidenceBuilder = Callable[[Any], Any]
-Planner = Callable[[str, ReportEvidenceManifest], Any]
+Planner = Callable[..., Any]
 Evaluator = Callable[[ReportPlan, ReportEvidenceManifest], Any]
 ChartBuilder = Callable[[ReportPlan, ReportEvidenceManifest], Any]
 SectionGenerator = Callable[..., list[ReportSectionDraft]]
@@ -210,6 +215,7 @@ class ReportJobProcessor:
             self._raise_if_cancelled(control)
             try:
                 context = self._run_query_pipeline(lease)
+                planning_context = build_report_planning_context(context)
                 manifest_raw = self._evidence_builder(context)
                 manifest = (
                     manifest_raw
@@ -224,7 +230,7 @@ class ReportJobProcessor:
                         "Fresh report evidence does not match the job query."
                     )
                 if (
-                    report_request_requires_table(lease.query)
+                    planning_context.requires_table
                     and not any(
                         item.kind is ReportEvidenceKind.TABLE
                         for item in manifest.items
@@ -238,12 +244,17 @@ class ReportJobProcessor:
 
             self._raise_if_cancelled(control)
             try:
-                raw_plan = self._planner(lease.query, manifest)
+                raw_plan = self._planner(
+                    lease.query,
+                    manifest,
+                    planning_context=planning_context,
+                )
                 plan = (
                     raw_plan
                     if isinstance(raw_plan, ReportPlan)
                     else ReportPlan.model_validate(raw_plan)
                 )
+                validate_report_plan_semantics(plan, planning_context)
                 evaluation = self._evaluator(plan, manifest)
             except ProviderExecutionError as exc:
                 _LOGGER.warning(
@@ -256,7 +267,7 @@ class ReportJobProcessor:
                     exc.disposition.value,
                 )
                 raise _report_failure("REPORT_PLAN_PROVIDER_FAILED") from exc
-            except ReportPlanEvidenceError as exc:
+            except (ReportPlanEvidenceError, ReportPlanSemanticError) as exc:
                 raise _report_failure("REPORT_PLAN_INVALID") from exc
             except (ValidationError, ValueError) as exc:
                 raise _report_failure("REPORT_PLAN_INVALID") from exc
