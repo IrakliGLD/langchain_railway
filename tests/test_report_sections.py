@@ -1417,3 +1417,105 @@ def test_direct_claim_still_grounds_its_own_row_period():
         _two_metric_manifest(),
     )
     assert validation.valid is True
+
+
+def test_prose_year_is_grounded_by_a_table_period_in_the_same_year():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "During 2026 the observed price was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_prose_year_absent_from_evidence_is_still_rejected():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "During 2019 the observed price was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+
+def test_sentence_naming_only_periods_may_cite_the_table_without_a_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed coverage runs from 2026-01 to 2026-02 inclusive. "
+            + _words(section.target_words - 8)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_sentence_naming_only_a_bare_year_may_cite_the_table_without_a_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed coverage runs across the 2026 reporting year. "
+            + _words(section.target_words - 8)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert validation.valid is True
+
+
+def test_temporal_escape_does_not_admit_a_magnitude_without_a_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+
+    payload = _draft(
+        section,
+        text=(
+            "Observed coverage runs across 2026 at 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes

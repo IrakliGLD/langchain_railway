@@ -67,9 +67,19 @@ class _PeriodFact:
 
 
 @dataclass(frozen=True, slots=True)
+class _YearFact:
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedOperand:
     value: Decimal
     unit: str
+
+
+_GroundingFact = _NumericFact | _PeriodFact | _YearFact
+_MINIMUM_GROUNDED_YEAR = 1900
+_MAXIMUM_GROUNDED_YEAR = 2100
 
 
 def _parse_numeric_token(token: str) -> _NumericFact | None:
@@ -112,14 +122,15 @@ def _normalized_period_fact(match: re.Match[str]) -> _PeriodFact | None:
 
 def _grounding_facts_from_text(
     text: str,
-) -> set[_NumericFact | _PeriodFact]:
-    facts: set[_NumericFact | _PeriodFact] = set()
+) -> set[_GroundingFact]:
+    facts: set[_GroundingFact] = set()
 
     def replace_period(match: re.Match[str]) -> str:
         period_fact = _normalized_period_fact(match)
         if period_fact is None:
             return match.group(0)
         facts.add(period_fact)
+        facts.add(_YearFact(int(match.group("year"))))
         return " "
 
     remaining_text = _PERIOD_PATTERN.sub(replace_period, str(text or ""))
@@ -135,7 +146,7 @@ def _grounding_facts_from_text(
 
 def _grounding_facts_from_value(
     value: Any,
-) -> set[_NumericFact | _PeriodFact]:
+) -> set[_GroundingFact]:
     if isinstance(value, bool) or value is None:
         return set()
     if isinstance(value, (int, float, Decimal)):
@@ -166,7 +177,7 @@ def _is_ratio_column(item: ReportEvidenceItem, column: str) -> bool:
 
 def _evidence_grounding_facts(
     item: ReportEvidenceItem,
-) -> set[_NumericFact | _PeriodFact]:
+) -> set[_GroundingFact]:
     facts = _grounding_facts_from_text(item.content)
     for row_index in range(len(item.rows)):
         facts.update(_table_row_grounding_facts(item, row_index))
@@ -176,10 +187,10 @@ def _evidence_grounding_facts(
 def _table_row_grounding_facts(
     item: ReportEvidenceItem,
     row_index: int,
-) -> set[_NumericFact | _PeriodFact]:
+) -> set[_GroundingFact]:
     if item.kind is not ReportEvidenceKind.TABLE or row_index >= len(item.rows):
         return set()
-    facts: set[_NumericFact | _PeriodFact] = set()
+    facts: set[_GroundingFact] = set()
     for column, value in item.rows[row_index].items():
         value_facts = _grounding_facts_from_value(value)
         facts.update(value_facts)
@@ -205,7 +216,7 @@ def _table_row_grounding_facts(
 def build_evidence_grounding_index(
     item_by_ref: Mapping[str, ReportEvidenceItem],
     evidence_refs: set[str],
-) -> dict[str, frozenset[_NumericFact | _PeriodFact]]:
+) -> dict[str, frozenset[_GroundingFact]]:
     """Extract each assigned evidence item's facts once for repeated validation."""
 
     return {
@@ -215,10 +226,31 @@ def build_evidence_grounding_index(
     }
 
 
+def _claim_is_year_reference(claim: _NumericFact) -> bool:
+    """Return whether a bare integer reads as a calendar year, not a quantity."""
+
+    return (
+        not claim.is_percent
+        and claim.precision == 0
+        and claim.value == claim.value.to_integral_value()
+        and _MINIMUM_GROUNDED_YEAR <= int(claim.value) <= _MAXIMUM_GROUNDED_YEAR
+    )
+
+
+def _is_temporal_claim(claim: _GroundingFact) -> bool:
+    """Return whether a claim names a period rather than asserting a magnitude."""
+
+    if isinstance(claim, (_PeriodFact, _YearFact)):
+        return True
+    return _claim_is_year_reference(claim)
+
+
 def _grounding_claim_is_supported(
-    claim: _NumericFact | _PeriodFact,
-    evidence_facts: set[_NumericFact | _PeriodFact],
+    claim: _GroundingFact,
+    evidence_facts: set[_GroundingFact],
 ) -> bool:
+    if isinstance(claim, _YearFact):
+        return claim in evidence_facts
     if isinstance(claim, _PeriodFact):
         return claim in evidence_facts
     quantum = Decimal(1).scaleb(-claim.precision)
@@ -236,7 +268,12 @@ def _grounding_claim_is_supported(
                 return True
         except DecimalException:
             continue
-    return False
+    # Last resort: prose names a period as a bare year ("during 2026") while the
+    # evidence carries it only inside a finer period literal ("2026-01").
+    return (
+        _claim_is_year_reference(claim)
+        and _YearFact(int(claim.value)) in evidence_facts
+    )
 
 
 def _resolve_operand(
@@ -270,7 +307,7 @@ def _verified_direct_fact(
     claim: ReportDirectClaim,
     paragraph_refs: set[str],
     item_by_ref: Mapping[str, ReportEvidenceItem],
-) -> tuple[_NumericFact, set[_NumericFact | _PeriodFact]] | None:
+) -> tuple[_NumericFact, set[_GroundingFact]] | None:
     if claim.evidence_ref not in paragraph_refs:
         return None
     item = item_by_ref.get(claim.evidence_ref)
@@ -460,7 +497,7 @@ def validate_paragraph_grounding(
     *,
     evidence_facts_by_ref: Mapping[
         str,
-        frozenset[_NumericFact | _PeriodFact],
+        frozenset[_GroundingFact],
     ]
     | None = None,
 ) -> list[str]:
@@ -541,7 +578,7 @@ def validate_paragraph_grounding(
         strict=True,
     ):
         claims = _grounding_facts_from_text(sentence)
-        if claims and all(isinstance(claim, _PeriodFact) for claim in claims):
+        if claims and all(_is_temporal_claim(claim) for claim in claims):
             supported_facts.update(table_facts)
         if any(
             not _grounding_claim_is_supported(claim, supported_facts)
