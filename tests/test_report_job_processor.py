@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import pytest
 
@@ -29,6 +37,10 @@ from tests.test_report_sections import _draft
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
     ProviderExecutionError,
+)
+from utils.request_deadline import (
+    RequestDeadlineExceeded,
+    current_request_execution_scope,
 )
 
 
@@ -105,6 +117,8 @@ def _processor(
     planning_contexts: list | None = None,
     evaluator=None,
     chart_builder=None,
+    execution_scopes: list | None = None,
+    job_timeout_seconds: int | None = None,
 ):
     calls = pipeline_calls if pipeline_calls is not None else []
     generated_ids = generated if generated is not None else []
@@ -116,6 +130,8 @@ def _processor(
 
     def pipeline(query, **kwargs):
         calls.append((query, kwargs))
+        if execution_scopes is not None:
+            execution_scopes.append(current_request_execution_scope())
         return _pipeline_context(query)
 
     def sections(query, plan, manifest, **kwargs):
@@ -140,6 +156,8 @@ def _processor(
         overrides["evaluator"] = evaluator
     if chart_builder is not None:
         overrides["chart_builder"] = chart_builder
+    if job_timeout_seconds is not None:
+        overrides["job_timeout_seconds"] = job_timeout_seconds
     return ReportJobProcessor(
         query_pipeline=pipeline,
         evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
@@ -194,17 +212,16 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     assert set(generated) == {
         section["section_id"] for section in _plan_payload()["sections"]
     }
-    assert pipeline_calls == [
-        (
-            lease.query,
-            {
-                "trace_id": str(lease.job_id),
-                "actor_id": str(lease.actor_user_id),
-                "request_id": lease.request_id,
-                "answer_mode": "report",
-            },
-        )
-    ]
+    assert len(pipeline_calls) == 1
+    pipeline_query, pipeline_kwargs = pipeline_calls[0]
+    assert pipeline_query == lease.query
+    assert pipeline_kwargs["trace_id"] == str(lease.job_id)
+    assert pipeline_kwargs["actor_id"] == str(lease.actor_user_id)
+    assert pipeline_kwargs["request_id"] == (
+        f"{lease.request_id}:attempt:{lease.attempt_count}"
+    )
+    assert pipeline_kwargs["request_deadline"].source == "report_job"
+    assert pipeline_kwargs["answer_mode"] == "report"
     assert len(planning_contexts) == 1
     assert planning_contexts[0].intent.value == "general"
     assert planning_contexts[0].language_code == "en"
@@ -226,6 +243,47 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
         )
     ]
     assert len(empty_generation_checkpoints) == 1
+
+
+def test_report_attempt_binds_identity_and_deadline_for_deep_calls():
+    lease = _lease()
+    scopes = []
+    pipeline_calls = []
+
+    result = _processor(
+        pipeline_calls=pipeline_calls,
+        execution_scopes=scopes,
+        job_timeout_seconds=120,
+    )(lease, _Control())
+
+    ReportResult.model_validate(result)
+    assert len(scopes) == 1
+    scope = scopes[0]
+    assert scope is not None
+    assert scope.request_id == (
+        f"{lease.request_id}:attempt:{lease.attempt_count}"
+    )
+    assert scope.actor_binding
+    assert scope.deadline is not None
+    assert scope.deadline.source == "report_job"
+    assert 0 < scope.deadline.remaining_seconds() <= 120
+    assert pipeline_calls[0][1]["request_deadline"] is scope.deadline
+    assert pipeline_calls[0][1]["request_id"] == scope.request_id
+
+
+def test_report_deadline_exhaustion_has_a_typed_retry_policy():
+    lease = _lease()
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RequestDeadlineExceeded("report_pipeline")
+        ),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, _Control())
+
+    assert exc_info.value.error_code == "REPORT_DEADLINE_EXCEEDED"
+    assert exc_info.value.retryable is True
 
 
 def test_chart_decisions_are_built_once_and_shared_with_evaluation(

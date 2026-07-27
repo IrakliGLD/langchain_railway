@@ -25,6 +25,9 @@ from config import (  # noqa: E402
     HTTP_SERVER_PORT,
     HTTP_SERVER_WORKERS,
     MAX_REQUEST_BODY_BYTES,
+    REPORT_JOB_TIMEOUT_SECONDS,
+    REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS,
+    REPORT_SECTION_MAX_WORKERS,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
     SESSION_HISTORY_MAX_ITEM_CHARS,
@@ -65,6 +68,12 @@ def test_database_work_budget_reserves_control_capacity():
     assert DB_APPLICATION_CONCURRENCY >= 1
     assert DB_APPLICATION_CONCURRENCY + DB_CONTROL_RESERVED_SLOTS == DB_MAX_CONCURRENCY
     assert DB_SECONDARY_WORKERS <= DB_APPLICATION_CONCURRENCY
+
+
+def test_report_concurrency_deadline_and_drain_controls_are_bounded():
+    assert 1 <= REPORT_SECTION_MAX_WORKERS <= 8
+    assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3600
+    assert 0 <= REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS <= 5000
 
 
 def test_database_pool_rejects_capacity_without_application_and_control_slots():

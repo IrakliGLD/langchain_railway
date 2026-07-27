@@ -81,6 +81,63 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     assert _manifest().manifest_id in captured["cache_key"]
 
 
+def test_section_provider_attempt_stages_are_unique_per_section(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    attempt_stages = []
+
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+
+    def invoke(_factory, _model, _messages, **kwargs):
+        attempt_stages.append(kwargs["attempt_stage"])
+        section = plan.sections[len(attempt_stages) - 1]
+        return SimpleNamespace(content=json.dumps(_draft(section)))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    for section in plan.sections[:2]:
+        llm.llm_write_report_section(
+            "Explain the price trend.",
+            plan,
+            section,
+            _manifest(),
+        )
+
+    assert attempt_stages == [
+        f"report_section_writer_{section.section_id}"
+        for section in plan.sections[:2]
+    ]
+
+
+def test_section_repair_attempt_stage_includes_local_attempt_number(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[0]
+    captured = {}
+
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *a, **k: object())
+
+    def invoke(_factory, _model, _messages, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(content=json.dumps(_draft(section)))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    llm.llm_repair_report_section(
+        "Explain the price trend.",
+        plan,
+        section,
+        _manifest(),
+        _draft(section),
+        ["WORD_COUNT_OUT_OF_RANGE"],
+        attempt_number=2,
+    )
+
+    assert captured["attempt_stage"] == (
+        f"report_section_repair_{section.section_id}_attempt_2"
+    )
+
+
 def test_evidence_slice_does_not_reserialize_a_growing_table(monkeypatch):
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[1]

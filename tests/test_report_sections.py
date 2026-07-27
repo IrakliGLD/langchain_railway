@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import time
 from collections import Counter
 from copy import deepcopy
+
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import pytest
 from pydantic import ValidationError
@@ -23,6 +32,11 @@ from tests.test_report_planner import _manifest, _plan_payload
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
     ProviderExecutionError,
+)
+from utils.request_deadline import (
+    RequestDeadline,
+    bind_request_execution_scope,
+    current_request_execution_scope,
 )
 
 
@@ -724,6 +738,145 @@ def test_sections_generate_in_parallel_and_return_in_plan_order():
     assert [draft.section_id for draft in drafts] == [
         section.section_id for section in plan.sections
     ]
+
+
+def test_parallel_sections_inherit_job_identity_and_deadline():
+    plan = ReportPlan.model_validate(_plan_payload())
+    observed = {}
+    lock = threading.Lock()
+    deadline = RequestDeadline.from_budget_ms(
+        budget_ms=30_000,
+        source="report_test",
+    )
+
+    def generate(_query, _plan, section, _manifest):
+        scope = current_request_execution_scope()
+        with lock:
+            observed[section.section_id] = scope
+        return _draft(section)
+
+    with bind_request_execution_scope(
+        deadline=deadline,
+        request_id="report:req-context",
+        actor_id="actor-context",
+    ):
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            generate_section=generate,
+            max_workers=len(plan.sections),
+        )
+
+    assert set(observed) == {
+        section.section_id for section in plan.sections
+    }
+    assert all(scope is not None for scope in observed.values())
+    assert {
+        scope.request_id for scope in observed.values() if scope is not None
+    } == {"report:req-context"}
+    assert {
+        scope.deadline for scope in observed.values() if scope is not None
+    } == {deadline}
+    assert all(
+        scope.actor_binding
+        for scope in observed.values()
+        if scope is not None
+    )
+
+
+def test_section_failure_has_bounded_drain_and_does_not_wait_for_slow_peer():
+    plan = ReportPlan.model_validate(_plan_payload())
+    both_started = threading.Barrier(2)
+    slow_started = threading.Event()
+    release_slow_peer = threading.Event()
+    finished = threading.Event()
+    errors = []
+
+    def generate(_query, _plan, section, _manifest):
+        both_started.wait(timeout=2)
+        if section.section_id == plan.sections[0].section_id:
+            raise RuntimeError("first section failed")
+        slow_started.set()
+        release_slow_peer.wait(timeout=2)
+        return _draft(section)
+
+    def run():
+        try:
+            generate_report_sections(
+                "Explain the price trend.",
+                plan,
+                _manifest(),
+                generate_section=generate,
+                max_workers=2,
+                failure_drain_timeout_seconds=0.01,
+            )
+        except BaseException as exc:  # captured for deterministic thread cleanup
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    controller = threading.Thread(target=run)
+    controller.start()
+    try:
+        assert slow_started.wait(timeout=1)
+        assert finished.wait(timeout=0.25)
+    finally:
+        release_slow_peer.set()
+        controller.join(timeout=2)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert str(errors[0]) == "first section failed"
+
+
+def test_failure_drain_checkpoints_peer_that_finishes_before_drain_timeout():
+    plan = ReportPlan.model_validate(_plan_payload())
+    both_started = threading.Barrier(2)
+    slow_started = threading.Event()
+    release_peer = threading.Event()
+    persisted = []
+    errors = []
+
+    def generate(_query, _plan, section, _manifest):
+        both_started.wait(timeout=2)
+        if section.section_id == plan.sections[0].section_id:
+            slow_started.wait(timeout=1)
+            raise RuntimeError("first section failed")
+        slow_started.set()
+        release_peer.wait(timeout=2)
+        return _draft(section)
+
+    def run():
+        try:
+            generate_report_sections(
+                "Explain the price trend.",
+                plan,
+                _manifest(),
+                generate_section=generate,
+                progress_callback=lambda _done, _total, draft: (
+                    persisted.append(draft.section_id)
+                ),
+                max_workers=2,
+                failure_drain_timeout_seconds=0.5,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    controller = threading.Thread(target=run)
+    controller.start()
+    try:
+        assert slow_started.wait(timeout=1)
+        time.sleep(0.05)
+        release_peer.set()
+        controller.join(timeout=1)
+    finally:
+        release_peer.set()
+        controller.join(timeout=2)
+
+    assert len(errors) == 1
+    assert str(errors[0]) == "first section failed"
+    assert plan.sections[1].section_id in persisted
 
 
 def test_only_invalid_sections_receive_one_repair_call():

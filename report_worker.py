@@ -19,6 +19,8 @@ from config import (
     DB_CONNECT_TIMEOUT_SECONDS,
     DB_POOL_TIMEOUT_SECONDS,
     DB_STATEMENT_TIMEOUT_MS,
+    REPORT_JOB_TIMEOUT_SECONDS,
+    REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS,
     REPORT_SECTION_MAX_WORKERS,
     REPORT_WORKER_DB_URL,
     REPORT_WORKER_ENABLED,
@@ -85,6 +87,10 @@ def build_report_worker_runtime() -> tuple[
     )
     processor = ReportJobProcessor(
         max_section_workers=REPORT_SECTION_MAX_WORKERS,
+        job_timeout_seconds=REPORT_JOB_TIMEOUT_SECONDS,
+        section_failure_drain_timeout_seconds=(
+            REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS / 1000
+        ),
     )
     worker = ReportJobWorker(
         repository=repository,
@@ -114,7 +120,13 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
-    log.info("Report worker started.")
+    log.info(
+        "Report worker started. section_workers=%s job_timeout_seconds=%s "
+        "section_failure_drain_timeout_ms=%s",
+        REPORT_SECTION_MAX_WORKERS,
+        REPORT_JOB_TIMEOUT_SECONDS,
+        REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS,
+    )
     try:
         worker.run_until_stopped(processor, stop_event=stop_event)
     finally:
