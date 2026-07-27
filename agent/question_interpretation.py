@@ -764,13 +764,6 @@ def _apply_balancing_month_explanation_guardrail(
     if not _is_month_specific_balancing_price_explanation(raw_query):
         return qa, False
 
-    already_supported = (
-        qa.classification.query_type == QueryType.DATA_EXPLANATION
-        and qa.routing.preferred_path == PreferredPath.TOOL
-    )
-    if already_supported:
-        return qa, False
-
     start_date, end_date = _extract_explicit_month_period(raw_query)
     if not start_date or not end_date:
         start_date, end_date = extract_date_range(raw_query)

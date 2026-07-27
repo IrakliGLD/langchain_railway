@@ -170,6 +170,63 @@ def _analytical_payload() -> QuestionAnalysis:
     )
 
 
+def test_month_explanation_guardrail_completes_an_already_supported_contract():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["routing"].update(
+        {
+            "preferred_path": "tool",
+            "needs_sql": False,
+            "needs_knowledge": False,
+            "prefer_tool": True,
+        }
+    )
+    payload["analysis_requirements"]["derived_metrics"] = []
+    analysis = QuestionAnalysis.model_validate(payload)
+
+    finalized = finalize_question_contract(
+        analysis,
+        raw_query=analysis.raw_query,
+        conversation_history=[],
+    )
+    price_tool = next(
+        tool
+        for tool in finalized.contract.tooling.candidate_tools
+        if tool.name.value == "get_prices"
+    )
+    composition_tool = next(
+        tool
+        for tool in finalized.contract.tooling.candidate_tools
+        if tool.name.value == "get_balancing_composition"
+    )
+    price_params = planner.resolve_tool_params(
+        finalized.contract,
+        "get_prices",
+        analysis.raw_query,
+        hint=price_tool.params_hint,
+    )
+    composition_params = planner.resolve_tool_params(
+        finalized.contract,
+        "get_balancing_composition",
+        analysis.raw_query,
+        hint=composition_tool.params_hint,
+    )
+
+    assert finalized.applied_guardrails == ("balancing_month_explanation",)
+    assert {
+        metric.metric_name.value
+        for metric in finalized.contract.analysis_requirements.derived_metrics
+    } >= {
+        "mom_absolute_change",
+        "mom_percent_change",
+        "yoy_absolute_change",
+        "yoy_percent_change",
+    }
+    assert price_params["start_date"] == "2016-11-01"
+    assert price_params["end_date"] == "2021-11-30"
+    assert composition_params["start_date"] == "2016-11-01"
+    assert composition_params["end_date"] == "2021-11-30"
+
+
 def _conceptual_payload() -> QuestionAnalysis:
     return QuestionAnalysis.model_validate(
         {
