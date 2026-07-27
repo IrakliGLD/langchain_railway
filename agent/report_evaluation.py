@@ -8,6 +8,7 @@ from agent.report_planner import (
     validate_report_plan_evidence,
 )
 from contracts.report import ReportPlan, required_report_section_sequence
+from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_evaluation import ReportPlanEvaluation
 from contracts.report_evidence import ReportEvidenceManifest
 
@@ -15,6 +16,8 @@ from contracts.report_evidence import ReportEvidenceManifest
 def evaluate_report_plan(
     plan: ReportPlan,
     manifest: ReportEvidenceManifest,
+    *,
+    chart_decisions: list[ReportChartBuildDecision] | None = None,
 ) -> ReportPlanEvaluation:
     findings: list[str] = []
     known_refs = set(manifest.item_by_ref())
@@ -47,7 +50,8 @@ def evaluate_report_plan(
     if required_section_coverage < 1.0:
         findings.append("REQUIRED_SECTION_MISSING")
 
-    chart_decisions = build_report_charts(plan, manifest)
+    if chart_decisions is None:
+        chart_decisions = build_report_charts(plan, manifest)
     required_charts = [decision for decision in chart_decisions if decision.required]
     required_chart_build_rate = (
         sum(decision.status == "built" for decision in required_charts)

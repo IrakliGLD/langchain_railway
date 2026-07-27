@@ -6,7 +6,6 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from agent.report_charts import build_report_charts
 from contracts.report import (
     ReportIntent,
     ReportPlan,
@@ -231,23 +230,6 @@ def _repair_report_plan_evidence(
         ]
 
     repaired = ReportPlan.model_validate(payload)
-    omitted_chart_ids = {
-        decision.chart_id
-        for decision in build_report_charts(repaired, manifest)
-        if decision.status == "omitted"
-    }
-    if omitted_chart_ids:
-        payload["charts"] = [
-            chart
-            for chart in payload["charts"]
-            if chart["chart_id"] not in omitted_chart_ids
-        ]
-        for section in payload["sections"]:
-            section["chart_refs"] = [
-                chart_ref for chart_ref in section["chart_refs"] if chart_ref not in omitted_chart_ids
-            ]
-        repaired = ReportPlan.model_validate(payload)
-
     validate_report_plan_evidence(repaired, manifest)
     return repaired
 
@@ -283,20 +265,12 @@ def plan_report(
         )
     )
     validate_report_plan_semantics(plan, planning_context)
-    requires_repair = False
     try:
         validate_report_plan_evidence(plan, manifest)
     except ReportPlanEvidenceError:
-        requires_repair = True
-    else:
-        requires_repair = any(
-            decision.status == "omitted"
-            for decision in build_report_charts(plan, manifest)
-        )
-    if requires_repair:
         plan = _repair_report_plan_evidence(plan, manifest)
         _LOGGER.warning(
-            "Stabilized report plan evidence/chart bindings: manifest_id=%s",
+            "Stabilized report plan evidence bindings: manifest_id=%s",
             manifest.manifest_id,
         )
     return plan

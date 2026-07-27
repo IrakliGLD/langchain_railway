@@ -81,3 +81,53 @@ def test_pipeline_records_stage_timings(monkeypatch):
     assert out.stage_timings_ms["stage_2_sql_execute"] >= 0.0
     assert out.stage_timings_ms["stage_4_summarize_data"] >= 0.0
     assert out.stage_timings_ms["stage_5_chart_build"] >= 0.0
+
+
+def test_report_pipeline_stops_after_evidence_without_rendering_chat_answer(
+    monkeypatch,
+):
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+    monkeypatch.setattr(pipeline.planner, "prepare_context", lambda ctx: ctx)
+
+    def _planner(ctx):
+        ctx.is_conceptual = False
+        ctx.skip_sql = False
+        return ctx
+
+    def _sql(ctx):
+        df, cols, rows = _minimal_df()
+        ctx.df = df
+        ctx.cols = cols
+        ctx.rows = rows
+        return ctx
+
+    monkeypatch.setattr(pipeline.planner, "generate_plan", _planner)
+    monkeypatch.setattr(pipeline.sql_executor, "validate_and_execute", _sql)
+    monkeypatch.setattr(pipeline.analyzer, "enrich", lambda ctx: ctx)
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "summarize_data",
+        lambda _ctx: (_ for _ in ()).throw(
+            AssertionError("report evidence must not render a discarded chat answer")
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.chart_pipeline,
+        "build_chart",
+        lambda _ctx: (_ for _ in ()).throw(
+            AssertionError("report evidence must not build a discarded chat chart")
+        ),
+    )
+
+    out = pipeline.process_query(
+        "Show balancing price trend",
+        trace_id="trace-report",
+        session_id="session-report",
+        answer_mode="report",
+    )
+
+    assert out.terminal_outcome == "data_answer"
+    assert "stage_4_summarize_data" not in out.stage_timings_ms
+    assert "stage_5_chart_build" not in out.stage_timings_ms

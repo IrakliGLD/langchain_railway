@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,40 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     assert "code-verifiable derived claims" in system[1]
     assert section.section_id in captured["cache_key"]
     assert _manifest().manifest_id in captured["cache_key"]
+
+
+def test_evidence_slice_does_not_reserialize_a_growing_table(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["rows"] = [
+        {"period": f"2026-{index:03d}", "price": 100 + index}
+        for index in range(150)
+    ]
+    table["total_row_count"] = len(table["rows"])
+    manifest = _manifest().model_validate(manifest_payload)
+    original = llm._compact_json
+    growing_row_counts = []
+
+    def observed(value):
+        if (
+            isinstance(value, dict)
+            and isinstance(value.get("rows"), list)
+            and value["rows"]
+        ):
+            growing_row_counts.append(len(value["rows"]))
+        return original(value)
+
+    monkeypatch.setattr(llm, "_compact_json", observed)
+
+    packet = llm._report_section_evidence_slice(section, manifest)
+
+    assert len(packet) <= llm._REPORT_SECTION_EVIDENCE_BUDGET_CHARS
+    assert growing_row_counts == []
+    decoded = json.loads(packet)
+    assert decoded[0]["rows"][0]["row_index"] == 0
+    assert decoded[0]["included_row_count"] <= table["total_row_count"]
 
 
 def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):

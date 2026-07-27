@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from agent.report_grounding import build_evidence_grounding_index
 from agent.report_sections import validate_report_section
 from contracts.report import ReportPlan
 from contracts.report_charts import ReportChartBuildDecision
@@ -35,9 +36,19 @@ def assemble_report(
     used_refs: list[str] = []
     markdown_parts = [f"# {plan.title}"]
     total_words = 0
+    item_by_ref = manifest.item_by_ref()
+    grounding_index = build_evidence_grounding_index(
+        item_by_ref,
+        set(item_by_ref),
+    )
     for section in plan.sections:
         draft = draft_by_id[section.section_id]
-        validation = validate_report_section(draft, section, manifest)
+        validation = validate_report_section(
+            draft,
+            section,
+            manifest,
+            evidence_facts_by_ref=grounding_index,
+        )
         if not validation.valid:
             raise ReportAssemblyError(
                 f"Report section {section.section_id} is no longer valid."
@@ -116,7 +127,6 @@ def assemble_report(
         for section in result_sections
     ]
 
-    item_by_ref = manifest.item_by_ref()
     chart_refs = [
         ref
         for chart in charts

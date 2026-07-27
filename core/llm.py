@@ -3148,9 +3148,13 @@ def _report_section_evidence_slice(
     if not assigned_items:
         return "[]"
 
+    packet_overhead = 2 + max(0, len(assigned_items) - 1)
     per_item_budget = max(
         800,
-        _REPORT_SECTION_EVIDENCE_BUDGET_CHARS // len(assigned_items),
+        (
+            _REPORT_SECTION_EVIDENCE_BUDGET_CHARS - packet_overhead
+        )
+        // len(assigned_items),
     )
     allowed_refs = set(section.required_evidence_refs)
     packet = []
@@ -3176,18 +3180,25 @@ def _report_section_evidence_slice(
                 }
             )
             included_rows = []
+            sizing_payload = {
+                **projected,
+                "included_row_count": len(item.rows),
+                "prompt_projection_truncated": False,
+            }
+            serialized_size = len(_compact_json(sizing_payload))
             for row_index, row in enumerate(item.rows):
                 indexed_row = {
                     "row_index": row_index,
                     "values": row,
                 }
-                candidate = {
-                    **projected,
-                    "rows": [*included_rows, indexed_row],
-                }
-                if len(_compact_json(candidate)) > per_item_budget:
+                serialized_row = _compact_json(indexed_row)
+                row_cost = len(serialized_row) + (
+                    1 if included_rows else 0
+                )
+                if serialized_size + row_cost > per_item_budget:
                     break
                 included_rows.append(indexed_row)
+                serialized_size += row_cost
             projected["rows"] = included_rows
             projected["included_row_count"] = len(included_rows)
             projected["prompt_projection_truncated"] = (
