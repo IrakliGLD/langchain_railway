@@ -328,6 +328,7 @@ def test_report_plan_rejects_chart_purpose_outside_the_intent_profile():
 
 def test_semantic_normalization_drops_only_known_incompatible_chart_purposes():
     payload = _valid_plan_payload()
+    payload["sections"][2]["kind"] = "context_and_framework"
     context = ReportPlanningContext(
         contract_version="report-planning-context-v1",
         intent=ReportIntent.KNOWLEDGE,
@@ -344,6 +345,58 @@ def test_semantic_normalization_drops_only_known_incompatible_chart_purposes():
     assert plan.sections[2].kind is ReportSectionKind.CONTEXT_AND_FRAMEWORK
     assert plan.charts == []
     assert all(not section.chart_refs for section in plan.sections)
+
+
+def test_semantic_normalization_rejects_incompatible_core_section_meaning():
+    payload = _valid_plan_payload()
+    payload["sections"][2].update(
+        {
+            "kind": "forecast_outlook",
+            "title": "Forecast outlook",
+            "objective": "Project future prices beyond the observed evidence period.",
+        }
+    )
+    context = ReportPlanningContext(
+        contract_version="report-planning-context-v1",
+        intent=ReportIntent.TREND,
+        language_code="en",
+        request_objective="Analyze the observed electricity-price trend.",
+        requires_table=True,
+        source="question_analysis",
+    )
+
+    normalized = normalize_report_plan_semantics(payload, context)
+
+    assert normalized["sections"][2]["kind"] == "forecast_outlook"
+    assert normalized["sections"][2]["title"] == "Forecast outlook"
+    assert "Project future prices" in normalized["sections"][2]["objective"]
+    with pytest.raises(ValidationError, match="trend_analysis"):
+        ReportPlan.model_validate(normalized)
+
+
+def test_semantic_normalization_rejects_a_second_stale_core_section():
+    payload = _valid_plan_payload()
+    payload["sections"][3].update(
+        {
+            "kind": "forecast_outlook",
+            "title": "Additional forecast",
+            "objective": "Extend the evidence into a future projection.",
+        }
+    )
+    context = ReportPlanningContext(
+        contract_version="report-planning-context-v1",
+        intent=ReportIntent.GENERAL,
+        language_code="en",
+        request_objective="Summarize the observed electricity market evidence.",
+        requires_table=True,
+        source="question_analysis",
+    )
+
+    normalized = normalize_report_plan_semantics(payload, context)
+
+    assert normalized["sections"][3]["kind"] == "forecast_outlook"
+    with pytest.raises(ValidationError, match="standard section"):
+        ReportPlan.model_validate(normalized)
 
 
 @pytest.mark.parametrize(

@@ -79,7 +79,15 @@ ENAI_REPORT_WORKER_LEASE_SECONDS=900
 ENAI_REPORT_WORKER_RETRY_DELAY_SECONDS=30
 ENAI_REPORT_WORKER_POLL_INTERVAL_MS=2000
 ENAI_REPORT_SECTION_MAX_WORKERS=4
+ENAI_REPORT_JOB_TIMEOUT_SECONDS=600
 ```
+
+The lease must be at least 30 seconds longer than the end-to-end job timeout;
+the worker rejects unsafe timing combinations at startup. On SIGTERM or
+SIGINT, the worker stops leasing new work and durably returns any active owned
+job to the retry queue before the process exits. Its last validated checkpoint
+is retained, so the next worker resumes completed work instead of restarting
+the full report.
 
 The worker is disabled by default and is never started by `main.py`. Apply the
 report-job database patch before enabling job creation or the worker.

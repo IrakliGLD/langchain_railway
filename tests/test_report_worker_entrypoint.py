@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import signal
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +40,23 @@ def test_worker_requires_its_own_write_capable_database_url(monkeypatch):
         report_worker.build_report_worker_runtime()
 
 
+def test_worker_rejects_a_job_deadline_that_can_outlive_its_lease(monkeypatch):
+    monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", True)
+    monkeypatch.setattr(
+        report_worker,
+        "REPORT_WORKER_DB_URL",
+        "postgresql://writer:secret@localhost/enai",
+    )
+    monkeypatch.setattr(report_worker, "REPORT_WORKER_LEASE_SECONDS", 600)
+    monkeypatch.setattr(report_worker, "REPORT_JOB_TIMEOUT_SECONDS", 600)
+
+    with pytest.raises(
+        RuntimeError,
+        match="ENAI_REPORT_WORKER_LEASE_SECONDS",
+    ):
+        report_worker.build_report_worker_runtime()
+
+
 def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch):
     captured = {}
     engine = SimpleNamespace(dispose=lambda: None)
@@ -51,6 +70,8 @@ def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch)
         "REPORT_WORKER_DB_URL",
         "postgresql://writer:secret@localhost/enai",
     )
+    monkeypatch.setattr(report_worker, "REPORT_WORKER_LEASE_SECONDS", 630)
+    monkeypatch.setattr(report_worker, "REPORT_JOB_TIMEOUT_SECONDS", 600)
     monkeypatch.setattr(
         report_worker,
         "create_engine",
@@ -94,6 +115,7 @@ def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch)
     assert captured["processor_kwargs"]["job_timeout_seconds"] == (
         report_worker.REPORT_JOB_TIMEOUT_SECONDS
     )
+    assert captured["worker_kwargs"]["lease_seconds"] == 630
 
 
 def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch):
@@ -102,7 +124,8 @@ def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch
     worker = SimpleNamespace(
         run_until_stopped=lambda _processor, *, stop_event: events.append(
             "polled"
-        )
+        ),
+        handoff_active_job_for_shutdown=lambda: events.append("handed_off"),
     )
 
     monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", True)
@@ -119,4 +142,44 @@ def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch
     monkeypatch.setattr(report_worker.signal, "signal", lambda *_args: None)
 
     assert report_worker.main() == 0
-    assert events == ["knowledge_loaded", "polled", "disposed"]
+    assert events == [
+        "knowledge_loaded",
+        "polled",
+        "handed_off",
+        "disposed",
+    ]
+
+
+def test_sigterm_triggers_active_job_handoff_before_worker_exit(monkeypatch):
+    events = []
+    handlers = {}
+    handoff_finished = threading.Event()
+    engine = SimpleNamespace(dispose=lambda: events.append("disposed"))
+
+    class Worker:
+        def run_until_stopped(self, _processor, *, stop_event):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            assert stop_event.is_set()
+            assert handoff_finished.wait(timeout=2)
+            events.append("polled")
+
+        def handoff_active_job_for_shutdown(self):
+            events.append("handed_off")
+            handoff_finished.set()
+            return True
+
+    monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", True)
+    monkeypatch.setattr(knowledge_module, "load_knowledge", lambda: None)
+    monkeypatch.setattr(
+        report_worker,
+        "build_report_worker_runtime",
+        lambda: (Worker(), object(), engine),
+    )
+    monkeypatch.setattr(
+        report_worker.signal,
+        "signal",
+        lambda signum, handler: handlers.__setitem__(signum, handler),
+    )
+
+    assert report_worker.main() == 0
+    assert events == ["handed_off", "polled", "disposed"]
