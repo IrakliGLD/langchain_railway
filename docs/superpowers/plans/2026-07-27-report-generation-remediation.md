@@ -632,12 +632,15 @@ git commit -m "Expose chart axis roles to the report planner"
 ### Task 5: Demote unbuildable required charts with disclosure instead of killing the job
 
 **Files:**
-- Modify: `contracts/report_result.py` (add `ReportChartOmission`, `omitted_charts`), `agent/report_planner.py` (`plan_report`), `agent/report_assembly.py` (`assemble_report`)
-- Test: `tests/test_report_planner.py`, `tests/test_report_assembly.py`
+- Modify: `contracts/report_result.py` (add `ReportChartOmission`, `omitted_charts`), `agent/report_charts.py` (add `demote_unbuildable_required_charts`), `core/report_job_processor.py` (`_run_bound_attempt`), `agent/report_assembly.py` (`assemble_report`)
+- Test: `tests/test_report_charts.py`, `tests/test_report_job_processor.py`, `tests/test_report_assembly.py`
 
 **Interfaces:**
-- Consumes: `build_report_charts` from `agent/report_charts.py`.
-- Produces: `ReportChartOmission(chart_id: str, title: str, reason_code: str)`; `ReportResult.omitted_charts: List[ReportChartOmission]` defaulting to `[]`.
+- Consumes: the `chart_decisions` the processor already builds.
+- Produces: `demote_unbuildable_required_charts(plan, chart_decisions) -> tuple[ReportPlan, list[ReportChartBuildDecision]]`; `ReportChartOmission(chart_id: str, title: str, reason_code: str)`; `ReportResult.omitted_charts: List[ReportChartOmission]` defaulting to `[]`.
+- **No dependency on Task 8, and Task 8 no longer depends on this task.** The original ordering constraint is void.
+
+**Plan correction (found while stress-testing Phase 2):** the plan put demotion inside `plan_report`, which would have re-imported `build_report_charts` into the planner. `tests/test_report_planner.py:265` asserts `not hasattr(report_planner, "build_report_charts")` — that assertion deliberately locks in the single-pass chart evaluation introduced by commit `87622e5`, and the plan would have silently reversed it. `ReportChartBuildDecision.required` is copied from `chart.required` and never affects buildability (`agent/report_charts.py:82,118`), so demotion can happen *after* the single build by patching both the plan flag and the decision flag — no rebuild, no second authority, and the planner stays chart-free.
 
 **Context:** an unbuildable chart marked `required: true` reaches `evaluate_report_plan`, sets `REQUIRED_CHART_OMITTED`, and produces a non-retryable `REPORT_PLAN_NOT_READY` — the whole job dies after the full pipeline run. Silent pruning is the wrong answer because the user may have asked for that chart. Demotion keeps the chart request in the plan, lets the builder omit it, and surfaces the omission with its reason code on the result so the caller can see what was dropped and why.
 
@@ -1720,3 +1723,64 @@ quantity in that range being satisfied by a genuine period fact — for example
 `"2000 MWh"` where the evidence covers 2000-01. Prose of that shape is rare and
 the unit token is not consulted at fact level; revisit only if telemetry shows
 it.
+
+---
+
+## Phase 2 audit record
+
+Commits `46792ef`..`8614594`. Targeted suite 2043 passed; security suite 24
+passed; redteam score 1.0.
+
+### Plan correction found before implementing
+
+**Task 5's demotion could not live in `plan_report`.**
+`tests/test_report_planner.py:265` asserts `not hasattr(report_planner,
+"build_report_charts")` — that assertion deliberately locks in the single-pass
+chart evaluation from commit `87622e5`, and the written plan would have silently
+reversed it by re-importing the builder into the planner. Since
+`ReportChartBuildDecision.required` is copied from `chart.required` and never
+affects buildability, demotion instead happens *after* the single build, in the
+processor, patching the plan flag and the decision flag together. One build, one
+authority, planner unchanged. This also voided the Task 5 → Task 8 ordering
+constraint.
+
+### Audit findings after implementation (targeted suite was already green)
+
+1. **Demotion covered only the fresh-plan path.** A job checkpointed before this
+   change still carried a required unbuildable chart, so resuming it hit
+   `REQUIRED_CHART_OMITTED` and died as a non-retryable
+   `REPORT_CHECKPOINT_INVALID`. Reachable for anything queued across the deploy —
+   exactly the durability the job queue exists to provide. The resume path now
+   demotes too; regression test added and confirmed to fail without the fix.
+2. **The dimensionless relaxation reached only half the matcher pair.** Task 6
+   fixed `_direct_claim_appears` but not `_derived_claim_appears`, so a `mean` or
+   `difference` over a count column computed correctly and then failed the prose
+   match for want of a `"12 count"` token. Both matchers now share the rule.
+
+### Deliberate non-fix
+
+`sum` over a `count` column stays blocked by `_ADDITIVE_UNITS`. It looks like an
+inconsistency next to `mean` and `difference`, but counts across periods are not
+additive — 10 plants in January plus 14 in February is not 24 plants. Leaving the
+block is the correct answer, not an oversight.
+
+### A note on the Task 8 test that was wrong
+
+The plan specified a test asserting `PLAN_SEMANTIC_MISMATCH` reaches the repair
+call. It cannot: `normalize_report_plan_semantics` force-sets both `intent` and
+`language_code`, so `validate_report_plan_semantics` is unreachable after
+normalization. The test was replaced with one that locks in the real invariant —
+a wrong language or intent is *normalized*, never repaired, and never spends the
+repair call. The `ReportPlanSemanticError` branch is kept in the `except` tuple
+as defence in depth should normalization ever be loosened.
+
+### Scope
+
+`agent/report_charts.py`, `agent/report_grounding.py`, `agent/report_evidence.py`,
+`agent/report_assembly.py`, `agent/report_planner.py`, `core/llm.py`,
+`core/report_job_processor.py`, `contracts/report_result.py`, two skill
+references, five test files.
+
+`ReportResult` gained `omitted_charts` with a default of `[]`, so
+`report-result-v1` stays readable both ways: older stored results validate
+without the field, and new ones carry it. No version bump needed.
