@@ -114,7 +114,6 @@ class ReportJobProcessor:
         assembler: Assembler = assemble_report,
         max_section_workers: int = 4,
         job_timeout_seconds: int = 600,
-        section_failure_drain_timeout_seconds: float = 0.25,
     ) -> None:
         if not 1 <= max_section_workers <= 8:
             raise ValueError(
@@ -123,10 +122,6 @@ class ReportJobProcessor:
         if not 1 <= job_timeout_seconds <= 3600:
             raise ValueError(
                 "job_timeout_seconds must be between 1 and 3600."
-            )
-        if not 0 <= section_failure_drain_timeout_seconds <= 5:
-            raise ValueError(
-                "section_failure_drain_timeout_seconds must be between 0 and 5."
             )
         self._query_pipeline = query_pipeline
         self._evidence_builder = evidence_builder
@@ -137,9 +132,6 @@ class ReportJobProcessor:
         self._assembler = assembler
         self._max_section_workers = max_section_workers
         self._job_timeout_seconds = job_timeout_seconds
-        self._section_failure_drain_timeout_seconds = (
-            section_failure_drain_timeout_seconds
-        )
 
     @staticmethod
     def _validate_query_binding(
@@ -428,9 +420,6 @@ class ReportJobProcessor:
                     existing_drafts=completed_by_id,
                     progress_callback=persist_section,
                     max_workers=self._max_section_workers,
-                    failure_drain_timeout_seconds=(
-                        self._section_failure_drain_timeout_seconds
-                    ),
                 )
             except ReportSectionGenerationError as exc:
                 _LOGGER.warning(

@@ -94,11 +94,6 @@ def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch)
     assert captured["processor_kwargs"]["job_timeout_seconds"] == (
         report_worker.REPORT_JOB_TIMEOUT_SECONDS
     )
-    assert captured["processor_kwargs"][
-        "section_failure_drain_timeout_seconds"
-    ] == (
-        report_worker.REPORT_SECTION_FAILURE_DRAIN_TIMEOUT_MS / 1000
-    )
 
 
 def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch):

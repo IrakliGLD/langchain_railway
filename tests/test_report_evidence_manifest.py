@@ -88,12 +88,41 @@ def test_manifest_keeps_table_truncation_metadata_without_exposing_packaging_det
     assert table.total_row_count == 150
     assert len(table.rows) == 20
     assert table.truncated is True
+    assert table.rows[0]["period"] == "2026-000"
+    assert table.rows[-1]["period"] == "2026-149"
+    assert [row["period"] for row in table.rows] != [
+        f"2026-{index:03d}" for index in range(20)
+    ]
     limitations = [
         item for item in manifest.items if item.kind is ReportEvidenceKind.LIMITATION
     ]
     assert [item.title for item in limitations] == ["Evidence boundary"]
     assert all("characters" not in item.content for item in limitations)
     assert all("manifest includes" not in item.content for item in limitations)
+
+
+def test_manifest_prioritizes_periods_explicitly_requested_by_the_user():
+    ctx = _context()
+    ctx.query = "Explain the electricity price in 2020-07."
+    ctx.provenance_rows = [
+        (
+            "2020-07" if index == 73 else f"period-{index:03d}",
+            float(index),
+            "row",
+        )
+        for index in range(150)
+    ]
+
+    manifest = build_report_evidence_manifest(ctx, max_rows_per_table=10)
+    table = next(
+        item
+        for item in manifest.items
+        if item.title == "Primary tabular evidence"
+    )
+
+    assert "2020-07" in {row["period"] for row in table.rows}
+    assert table.rows[0]["period"] == "period-000"
+    assert table.rows[-1]["period"] == "period-149"
 
 
 def test_manifest_normalizes_runtime_source_labels_and_dict_rows():
