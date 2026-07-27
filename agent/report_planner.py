@@ -236,6 +236,66 @@ def _repair_report_plan_evidence(
     return repaired
 
 
+_AGGREGATE_CITING_SECTION_KINDS = frozenset(
+    {
+        ReportSectionKind.EXECUTIVE_SUMMARY,
+        ReportSectionKind.CONCLUSION,
+    }
+)
+
+
+def _ensure_summary_sections_cite_statistics(
+    plan: ReportPlan,
+    manifest: ReportEvidenceManifest,
+) -> ReportPlan:
+    """Give summary sections the evidence their aggregates actually live in.
+
+    Column aggregates and seasonal statistics are projected into the statistics
+    item, never into table rows. A section holding only table evidence
+    therefore cannot state an average at all: expressing one as a derived claim
+    needs an operand per row, and the contract caps operands at 32. On the
+    2026-07-27 trace c7823cc9 the executive summary was assigned one table ref
+    over a 138-row price series, so every attempt failed DERIVED_CLAIM_INVALID
+    until the job exhausted its retries.
+    """
+
+    item_by_ref = manifest.item_by_ref()
+    statistics_refs = [
+        item.evidence_ref
+        for item in manifest.items
+        if item.kind is ReportEvidenceKind.STATISTICS
+    ]
+    if not statistics_refs:
+        return plan
+
+    payload = plan.model_dump(mode="json")
+    granted = False
+    for section in payload["sections"]:
+        if ReportSectionKind(section["kind"]) not in _AGGREGATE_CITING_SECTION_KINDS:
+            continue
+        refs = section["required_evidence_refs"]
+        if any(
+            ref in item_by_ref
+            and item_by_ref[ref].kind is ReportEvidenceKind.STATISTICS
+            for ref in refs
+        ):
+            continue
+        if len(refs) >= 32:
+            continue
+        refs.append(statistics_refs[0])
+        granted = True
+
+    if not granted:
+        return plan
+    repaired = ReportPlan.model_validate(payload)
+    validate_report_plan_evidence(repaired, manifest)
+    _LOGGER.info(
+        "Granted statistics evidence to report summary sections: manifest_id=%s",
+        manifest.manifest_id,
+    )
+    return repaired
+
+
 ReportPlanInvoker = Callable[
     [str, ReportEvidenceManifest, ReportPlanningContext],
     Any,
@@ -311,4 +371,4 @@ def plan_report(
             "Stabilized report plan evidence bindings: manifest_id=%s",
             manifest.manifest_id,
         )
-    return plan
+    return _ensure_summary_sections_cite_statistics(plan, manifest)

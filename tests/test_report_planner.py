@@ -248,9 +248,19 @@ def test_planner_repairs_schema_valid_evidence_bindings_before_returning():
         for section in plan.sections
         if section.kind.value == "limitations"
     ).required_evidence_refs
+    # Repair grants exactly one substantive ref per section — never the bulk
+    # add that made sections unwritable. Summary sections carry a second ref
+    # only because their aggregates live in the statistics item.
+    summary_kinds = {"executive_summary", "conclusion"}
     assert all(
-        len(section.required_evidence_refs) == 1
+        len(section.required_evidence_refs)
+        == (2 if section.kind.value in summary_kinds else 1)
         for section in plan.sections
+    )
+    assert all(
+        STATS_REF in section.required_evidence_refs
+        for section in plan.sections
+        if section.kind.value in summary_kinds
     )
     assert plan.charts == []
     assert all(section.chart_refs == [] for section in plan.sections)
@@ -338,3 +348,63 @@ def test_plan_report_raises_when_the_repair_is_also_invalid():
             invoke_model=invalid_plan,
             repair_model=invalid_plan,
         )
+
+
+def test_summary_sections_receive_statistics_evidence_for_their_aggregates():
+    """Aggregates live in the statistics item, and a mean over a long table
+    cannot be expressed within the 32-operand derived-claim limit."""
+
+    def table_only_model(*_args, **_kwargs):
+        payload = deepcopy(_plan_payload())
+        for section in payload["sections"]:
+            if section["kind"] in {"executive_summary", "conclusion"}:
+                section["required_evidence_refs"] = [TABLE_REF]
+        return payload
+
+    plan = plan_report(
+        "Explain the price trend.",
+        _manifest(),
+        invoke_model=table_only_model,
+    )
+
+    by_kind = {section.kind.value: section for section in plan.sections}
+    assert STATS_REF in by_kind["executive_summary"].required_evidence_refs
+    assert STATS_REF in by_kind["conclusion"].required_evidence_refs
+    assert TABLE_REF in by_kind["executive_summary"].required_evidence_refs
+
+
+def test_summary_sections_are_not_given_a_second_statistics_reference():
+    plan = plan_report(
+        "Explain the price trend.",
+        _manifest(),
+        invoke_model=lambda *_a, **_k: deepcopy(_plan_payload()),
+    )
+
+    executive_summary = plan.sections[0]
+    assert executive_summary.required_evidence_refs.count(STATS_REF) == 1
+
+
+def test_summary_sections_are_untouched_when_no_statistics_evidence_exists():
+    manifest_payload = _manifest().model_dump(mode="json")
+    manifest_payload["items"] = [
+        item
+        for item in manifest_payload["items"]
+        if item["kind"] != "statistics"
+    ]
+    manifest = ReportEvidenceManifest.model_validate(manifest_payload)
+
+    def table_only_model(*_args, **_kwargs):
+        payload = deepcopy(_plan_payload())
+        payload["evidence_manifest_id"] = manifest.manifest_id
+        for section in payload["sections"]:
+            if section["kind"] != "limitations":
+                section["required_evidence_refs"] = [TABLE_REF]
+        return payload
+
+    plan = plan_report(
+        "Explain the price trend.",
+        manifest,
+        invoke_model=table_only_model,
+    )
+
+    assert plan.sections[0].required_evidence_refs == [TABLE_REF]

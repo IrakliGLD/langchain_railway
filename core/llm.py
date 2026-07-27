@@ -239,8 +239,22 @@ def _configured_provider_timeout_seconds(provider: str) -> float:
     return float(configured or 120.0)
 
 
+# Report generation runs in the durable worker under a multi-minute job budget
+# with nobody waiting on a response, and its repair prompts carry the rejected
+# draft on top of the full evidence packet — far more work per call than the
+# synchronous path. The /ask timeout is tuned for a user waiting and is the
+# wrong budget here: on job c7823cc9 (2026-07-27) repairs completed at 43s
+# against a 45s ceiling, so four of five timed out and the job died with every
+# section still unwritten. The request deadline below still bounds this down as
+# the job budget is consumed, so the floor cannot overrun the job.
+_REPORT_STAGE_PREFIX = "report_"
+_REPORT_STAGE_MINIMUM_TIMEOUT_SECONDS = 120.0
+
+
 def _effective_provider_timeout_seconds(provider: str, stage: str) -> float:
     configured = _configured_provider_timeout_seconds(provider)
+    if str(stage or "").startswith(_REPORT_STAGE_PREFIX):
+        configured = max(configured, _REPORT_STAGE_MINIMUM_TIMEOUT_SECONDS)
     scope = current_request_execution_scope()
     if scope is None or scope.deadline is None:
         return configured
