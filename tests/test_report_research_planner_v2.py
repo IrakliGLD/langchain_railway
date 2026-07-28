@@ -113,6 +113,41 @@ def test_research_planner_binds_identity_language_and_uses_one_model_call():
     assert plan.language_code == "en"
 
 
+def test_research_planner_bounds_excess_exhibits_without_another_model_call():
+    calls = []
+    raw_payload = _bound_plan_payload()
+    raw_payload["tracks"][0]["expected_exhibits"].extend(
+        ["comparison", "relationship"]
+    )
+    raw_payload["tracks"] = [
+        raw_payload["tracks"][0],
+        raw_payload["tracks"][2],
+        raw_payload["tracks"][1],
+    ]
+
+    def invoke_model(*_args, **_kwargs):
+        calls.append("called")
+        return raw_payload
+
+    plan = plan_report_research(
+        _COMPOUND_QUERY,
+        max_tracks=4,
+        invoke_model=invoke_model,
+    )
+
+    assert calls == ["called"]
+    assert sum(
+        len(track.expected_exhibits) for track in plan.tracks
+    ) == 4
+    assert plan.tracks[0].expected_exhibits == [
+        "trend",
+        "comparison",
+        "relationship",
+    ]
+    assert plan.tracks[1].expected_exhibits == []
+    assert plan.tracks[2].expected_exhibits == ["composition"]
+
+
 def test_research_planner_converts_invoker_schema_errors_to_safe_findings():
     payload = _bound_plan_payload()
     payload["tracks"][0]["collector_ids"] = ["private-invalid-collector"]

@@ -172,6 +172,77 @@ def _assessment(
     )
 
 
+def _enforce_exhibit_budget(
+    plan: ReportResearchPlan,
+    requirements: set[ReportResearchRequirement],
+) -> ReportResearchPlan:
+    exhibit_count = sum(
+        len(track.expected_exhibits) for track in plan.tracks
+    )
+    if exhibit_count <= REPORT_MAX_EXHIBITS:
+        return plan
+
+    required_exhibits = (
+        (
+            ReportResearchRequirement.PRICES,
+            ReportCollectorId.PRICES,
+            ReportChartPurpose.TREND,
+        ),
+        (
+            ReportResearchRequirement.ENERGY_SECURITY,
+            ReportCollectorId.GENERATION_MIX,
+            ReportChartPurpose.COMPOSITION,
+        ),
+    )
+    essential: set[tuple[int, int]] = set()
+    for requirement, collector, purpose in required_exhibits:
+        if requirement not in requirements:
+            continue
+        for track_index, track in enumerate(plan.tracks):
+            if (
+                track.required
+                and collector in track.collector_ids
+                and purpose in track.expected_exhibits
+            ):
+                essential.add(
+                    (
+                        track_index,
+                        track.expected_exhibits.index(purpose),
+                    )
+                )
+                break
+
+    candidates = [
+        (track_index, exhibit_index)
+        for track_index, track in enumerate(plan.tracks)
+        for exhibit_index, _purpose in enumerate(track.expected_exhibits)
+    ]
+    candidates.sort(
+        key=lambda candidate: (
+            candidate in essential,
+            any(
+                collector is not ReportCollectorId.VECTOR_KNOWLEDGE
+                for collector in plan.tracks[candidate[0]].collector_ids
+            ),
+            plan.tracks[candidate[0]].required,
+            -candidate[0],
+            -candidate[1],
+        ),
+        reverse=True,
+    )
+    retained = set(candidates[:REPORT_MAX_EXHIBITS])
+    payload = plan.model_dump(mode="json")
+    for track_index, track in enumerate(payload["tracks"]):
+        track["expected_exhibits"] = [
+            purpose
+            for exhibit_index, purpose in enumerate(
+                track["expected_exhibits"]
+            )
+            if (track_index, exhibit_index) in retained
+        ]
+    return ReportResearchPlan.model_validate(payload)
+
+
 def validate_report_research_plan(
     query: str,
     plan: ReportResearchPlan,
@@ -309,6 +380,10 @@ def plan_report_research(
             schema_error_codes=_schema_error_codes(exc),
         ) from exc
 
+    plan = _enforce_exhibit_budget(
+        plan,
+        _recognized_requirements(query),
+    )
     assessment = validate_report_research_plan(
         query,
         plan,
