@@ -11,6 +11,7 @@ this block must never be able to fail a response, and test fakes exercise
 from __future__ import annotations
 
 _PATH_BY_SUMMARY_SOURCE = {
+    "brief_knowledge": "conceptual",
     "generic_renderer": "deterministic_render",
     "deterministic_share_summary": "specialized_formatter",
     "deterministic_regulated_tariff_list_direct": "specialized_formatter",
