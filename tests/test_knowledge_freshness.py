@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from knowledge import get_knowledge_for_topics, infer_topic_matches, load_knowledge
+from knowledge import (
+    get_brief_knowledge_for_query,
+    get_knowledge_for_topics,
+    infer_topic_matches,
+    load_knowledge,
+)
 
 LIBERALIZATION_STATUS_QUERY = (
     "What is the situation with power plant liberalization? "
@@ -12,6 +17,33 @@ def test_liberalization_status_query_selects_market_structure_and_tariffs():
     assert {"market_structure", "tariffs"} <= infer_topic_matches(
         LIBERALIZATION_STATUS_QUERY
     )
+
+
+def test_brief_knowledge_budgets_each_matched_markdown_file():
+    load_knowledge()
+
+    knowledge = get_brief_knowledge_for_query(
+        LIBERALIZATION_STATUS_QUERY,
+        max_chars=1200,
+    )
+
+    assert len(knowledge) <= 1200
+    assert "SOURCE_FILE: market_structure.md" in knowledge
+    assert "SOURCE_FILE: tariffs.md" in knowledge
+    assert "SOURCE_FILE: sql_examples.md" not in knowledge
+
+
+def test_unmatched_brief_query_falls_back_to_general_definitions_only():
+    load_knowledge()
+
+    knowledge = get_brief_knowledge_for_query(
+        "Describe this framework.",
+        max_chars=1200,
+    )
+
+    assert "SOURCE_FILE: general_definitions.md" in knowledge
+    assert "SOURCE_FILE: balancing_price.md" not in knowledge
+    assert "SOURCE_FILE: sql_examples.md" not in knowledge
 
 
 def test_liberalization_knowledge_qualifies_planned_dates_as_unverified():

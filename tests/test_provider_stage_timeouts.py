@@ -42,6 +42,14 @@ def test_synchronous_stages_keep_their_configured_timeout(monkeypatch):
         assert llm._effective_provider_timeout_seconds("nvidia", interactive_stage) == 45.0
 
 
+def test_dedicated_report_profile_uses_its_configured_timeout(monkeypatch):
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai")
+    monkeypatch.setattr(llm, "REPORT_TIMEOUT_SECONDS", 300)
+    monkeypatch.setattr(llm, "_configured_provider_timeout_seconds", lambda _p: 45.0)
+
+    assert llm._effective_provider_timeout_seconds("openai", "report_planner") == 300.0
+
+
 def test_a_short_job_deadline_still_bounds_the_report_floor(monkeypatch):
     monkeypatch.setattr(llm, "_configured_provider_timeout_seconds", lambda _p: 45.0)
 

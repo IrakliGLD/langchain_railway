@@ -68,6 +68,37 @@ def test_report_planner_prompt_uses_structure_skill_and_evidence_catalog(monkeyp
     assert captured["cache_token"] == "token"
 
 
+def test_report_planner_uses_dedicated_model_and_disables_fallback(monkeypatch):
+    captured = {}
+    report_client = object()
+
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-terra", raising=False)
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+
+    def get_stage(*_args, **kwargs):
+        captured["stage_kwargs"] = kwargs
+        return report_client
+
+    monkeypatch.setattr(llm, "get_llm_for_stage", get_stage)
+
+    def invoke(factory, model_name, _messages, **kwargs):
+        captured["client"] = factory()
+        captured["model_name"] = model_name
+        captured["invoke_kwargs"] = kwargs
+        return SimpleNamespace(content=json.dumps(_plan_payload()))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    llm.llm_plan_report("Explain the price trend.", _manifest())
+
+    assert captured["client"] is report_client
+    assert captured["model_name"] == "gpt-5.6-terra"
+    assert captured["stage_kwargs"]["report_profile"] is True
+    assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
+
+
 def test_report_planner_cache_hit_still_validates_the_strict_plan(monkeypatch):
     monkeypatch.setattr(
         llm,

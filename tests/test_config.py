@@ -95,6 +95,135 @@ def test_report_section_concurrency_defaults_to_one_eight_section_wave():
     assert result.stdout.strip() == "8"
 
 
+def _nvidia_token_limits_with_env(**overrides) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env.update(overrides)
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import config; "
+                "print(config.NVIDIA_CONFIGURED_MAX_TOKENS, config.NVIDIA_MAX_TOKENS)"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_nvidia_hosted_gpt_oss_20b_output_limit_is_capped_to_provider_contract():
+    result = _nvidia_token_limits_with_env(
+        NVIDIA_MODEL="openai/gpt-oss-20b",
+        NVIDIA_BASE_URL="https://integrate.api.nvidia.com/v1",
+        NVIDIA_MAX_TOKENS="16000",
+    )
+
+    assert result.returncode == 0, result.stderr
+    configured, effective = (int(value) for value in result.stdout.split())
+    assert configured == 16000
+    assert effective == 4096
+
+
+def test_custom_nvidia_compatible_endpoint_keeps_its_configured_output_limit():
+    result = _nvidia_token_limits_with_env(
+        NVIDIA_MODEL="openai/gpt-oss-20b",
+        NVIDIA_BASE_URL="https://nim.internal.example/v1",
+        NVIDIA_MAX_TOKENS="16000",
+    )
+
+    assert result.returncode == 0, result.stderr
+    configured, effective = (int(value) for value in result.stdout.split())
+    assert configured == 16000
+    assert effective == 16000
+
+
+def _report_profile_with_env(**overrides) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    for name in (
+        "REPORT_MODEL_TYPE",
+        "REPORT_MODEL",
+        "REPORT_MAX_OUTPUT_TOKENS",
+        "REPORT_TIMEOUT_SECONDS",
+        "REPORT_REASONING_EFFORT",
+        "ENABLE_OPENAI_FALLBACK",
+    ):
+        env.pop(name, None)
+    env.update(overrides)
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import config; "
+                "print(config.REPORT_MODEL_TYPE, config.REPORT_MODEL, "
+                "config.REPORT_MAX_OUTPUT_TOKENS, config.REPORT_TIMEOUT_SECONDS, "
+                "config.REPORT_REASONING_EFFORT, config.ENABLE_OPENAI_FALLBACK)"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_report_profile_is_disabled_and_openai_fallback_is_off_by_default():
+    result = _report_profile_with_env()
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["None", "None", "8192", "240", "None", "False"]
+
+
+def test_report_profile_reads_dedicated_openai_worker_settings():
+    result = _report_profile_with_env(
+        MODEL_TYPE="nvidia",
+        NVIDIA_API_KEY="test-nvidia-key",
+        OPENAI_API_KEY="test-openai-key",
+        REPORT_MODEL_TYPE="openai",
+        REPORT_MODEL="gpt-5.6-terra",
+        REPORT_MAX_OUTPUT_TOKENS="8192",
+        REPORT_TIMEOUT_SECONDS="300",
+        REPORT_REASONING_EFFORT="medium",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [
+        "openai",
+        "gpt-5.6-terra",
+        "8192",
+        "300",
+        "medium",
+        "False",
+    ]
+
+
+def test_report_openai_profile_requires_openai_key_even_when_primary_is_nvidia():
+    result = _report_profile_with_env(
+        MODEL_TYPE="nvidia",
+        NVIDIA_API_KEY="test-nvidia-key",
+        OPENAI_API_KEY="",
+        REPORT_MODEL_TYPE="openai",
+        REPORT_MODEL="gpt-5.6-terra",
+    )
+
+    assert result.returncode != 0
+    assert "REPORT_MODEL_TYPE=openai but OPENAI_API_KEY is missing" in result.stderr
+
+
+def test_report_model_without_report_provider_fails_closed():
+    result = _report_profile_with_env(
+        REPORT_MODEL="gpt-5.6-terra",
+    )
+
+    assert result.returncode != 0
+    assert "REPORT_MODEL requires REPORT_MODEL_TYPE" in result.stderr
+
+
 def _config_with_env(**overrides) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(overrides)

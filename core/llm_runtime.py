@@ -34,6 +34,11 @@ from config import (
     OPENAI_MODEL,
     OPENAI_TIMEOUT_SECONDS,
     PROVIDER_MINIMUM_START_BUDGET_MS,
+    REPORT_MAX_OUTPUT_TOKENS,
+    REPORT_MODEL,
+    REPORT_MODEL_TYPE,
+    REPORT_REASONING_EFFORT,
+    REPORT_TIMEOUT_SECONDS,
     REQUEST_CLEANUP_ALLOWANCE_MS,
 )
 
@@ -311,6 +316,7 @@ class LLMResponseCache:
 _gemini_llm = None
 _openai_llm = None
 _nvidia_llm = None
+_report_llm = None
 
 
 def get_gemini() -> ChatGoogleGenerativeAI:
@@ -406,3 +412,84 @@ def get_nvidia() -> ChatOpenAI:
             client_kwargs["max_retries"],
         )
     return _nvidia_llm
+
+
+def get_report():
+    """Return the dedicated durable-report client selected by REPORT_*.
+
+    The report profile is constructed only inside the report worker path.
+    Configuration validation normally catches incomplete profiles at startup;
+    the local checks here keep the factory safe when called directly in tests
+    or utility processes.
+    """
+    global _report_llm
+    if not REPORT_MODEL_TYPE or not REPORT_MODEL:
+        raise RuntimeError(
+            "Dedicated report provider requires REPORT_MODEL_TYPE and REPORT_MODEL"
+        )
+    if _report_llm is not None:
+        return _report_llm
+
+    common_output = {
+        "max_output_tokens": REPORT_MAX_OUTPUT_TOKENS,
+        "timeout": REPORT_TIMEOUT_SECONDS,
+    }
+    if REPORT_MODEL_TYPE == "gemini":
+        if not GOOGLE_API_KEY:
+            raise RuntimeError(
+                "REPORT_MODEL_TYPE=gemini but GOOGLE_API_KEY is missing"
+            )
+        client_kwargs = {
+            "model": REPORT_MODEL,
+            "google_api_key": GOOGLE_API_KEY,
+            "convert_system_message_to_human": True,
+            **common_output,
+            "max_retries": 1,
+        }
+        if REPORT_REASONING_EFFORT:
+            client_kwargs["thinking_level"] = REPORT_REASONING_EFFORT
+        _report_llm = ChatGoogleGenerativeAI(**client_kwargs)
+    elif REPORT_MODEL_TYPE in {"openai", "nvidia"}:
+        api_key = (
+            OPENAI_API_KEY
+            if REPORT_MODEL_TYPE == "openai"
+            else NVIDIA_API_KEY
+        )
+        if not api_key:
+            key_name = (
+                "OPENAI_API_KEY"
+                if REPORT_MODEL_TYPE == "openai"
+                else "NVIDIA_API_KEY"
+            )
+            raise RuntimeError(
+                f"REPORT_MODEL_TYPE={REPORT_MODEL_TYPE} but {key_name} is missing"
+            )
+        client_kwargs = {
+            "model": REPORT_MODEL,
+            "openai_api_key": api_key,
+            "max_tokens": REPORT_MAX_OUTPUT_TOKENS,
+            "request_timeout": REPORT_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+        if REPORT_MODEL_TYPE == "openai":
+            client_kwargs["use_responses_api"] = True
+        else:
+            client_kwargs["base_url"] = NVIDIA_BASE_URL
+        if REPORT_REASONING_EFFORT:
+            client_kwargs["reasoning_effort"] = REPORT_REASONING_EFFORT
+        _report_llm = ChatOpenAI(**client_kwargs)
+    else:
+        raise RuntimeError(
+            "Invalid REPORT_MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+        )
+
+    log.info(
+        "Report LLM instance cached: provider=%s model=%s "
+        "max_output_tokens=%s timeout=%ss reasoning_effort=%s",
+        REPORT_MODEL_TYPE,
+        REPORT_MODEL,
+        REPORT_MAX_OUTPUT_TOKENS,
+        REPORT_TIMEOUT_SECONDS,
+        REPORT_REASONING_EFFORT or "provider_default",
+    )
+    return _report_llm

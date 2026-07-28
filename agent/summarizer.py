@@ -11,6 +11,7 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
+from knowledge import get_brief_knowledge_for_query
 
 from agent.analyzer import _extract_forecast_horizon
 from agent.answer_mode_policy import apply_answer_mode_policy
@@ -681,14 +682,18 @@ def answer_transient_failure(
 
 
 def answer_brief_knowledge(ctx: QueryContext) -> QueryContext:
-    """Produce the knowledge-only Brief response with exactly one model stage."""
+    """Produce a curated-knowledge Brief response with one model stage."""
     ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
-    ctx.summary_domain_knowledge = ""
+    ctx.summary_domain_knowledge = get_brief_knowledge_for_query(
+        ctx.effective_query,
+        max_chars=12000,
+    )
     try:
         ctx.summary = llm_answer_brief_knowledge(
             ctx.effective_query,
             lang_instruction=ctx.lang_instruction,
             conversation_history=ctx.conversation_history,
+            domain_knowledge=ctx.summary_domain_knowledge,
         )
     except ProviderExecutionError as exc:
         return answer_transient_failure(ctx, exc)
@@ -708,7 +713,11 @@ def answer_brief_knowledge(ctx: QueryContext) -> QueryContext:
 
     ctx.summary_source = "brief_knowledge"
     ctx.summary_claims = []
-    ctx.summary_citations = []
+    ctx.summary_citations = (
+        ["domain_knowledge"]
+        if (ctx.summary_domain_knowledge or "").strip()
+        else []
+    )
     ctx.summary_confidence = 0.6
     ctx.summary_claim_provenance = []
     ctx.summary_provenance_coverage = 0.0

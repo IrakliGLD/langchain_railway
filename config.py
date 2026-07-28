@@ -7,6 +7,7 @@ from the monolithic main.py for better organization.
 import os
 import re
 from textwrap import dedent
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -200,11 +201,28 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # for cost attribution automatically. Restart required (env read at import).
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-# Output-token cap and sampling temperature for the NVIDIA client. max_tokens
-# matters for reasoning models (gpt-oss-120b, glm-5.2) whose hidden reasoning
-# counts against the output budget — raise NVIDIA_MAX_TOKENS (e.g. 16384) if
-# answers get truncated.
-NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
+# Output-token cap and sampling temperature for the NVIDIA client. The original
+# operator value remains available for telemetry, while known NVIDIA-hosted
+# model limits are enforced before the request is sent. Custom compatible
+# endpoints retain their configured value because their contracts may differ.
+NVIDIA_CONFIGURED_MAX_TOKENS = max(
+    1,
+    int(os.getenv("NVIDIA_MAX_TOKENS", "4096")),
+)
+_NVIDIA_HOSTED_OUTPUT_LIMITS = {
+    "openai/gpt-oss-20b": 4096,
+}
+_nvidia_host = (urlparse(NVIDIA_BASE_URL).hostname or "").lower()
+_nvidia_hosted_limit = (
+    _NVIDIA_HOSTED_OUTPUT_LIMITS.get(NVIDIA_MODEL.strip().lower())
+    if _nvidia_host == "integrate.api.nvidia.com"
+    else None
+)
+NVIDIA_MAX_TOKENS = (
+    min(NVIDIA_CONFIGURED_MAX_TOKENS, _nvidia_hosted_limit)
+    if _nvidia_hosted_limit is not None
+    else NVIDIA_CONFIGURED_MAX_TOKENS
+)
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 # Wall-clock bound per NVIDIA call, in seconds. Defaults to 90; explicitly set
 # to 0 only when an unbounded call is intentionally required. A slow shared-endpoint model (the
@@ -238,6 +256,37 @@ GEMINI_TIMEOUT_SECONDS: float | None = (
 _raw_openai_timeout = os.getenv("OPENAI_TIMEOUT_SECONDS", "120").strip()
 OPENAI_TIMEOUT_SECONDS: float | None = (
     float(_raw_openai_timeout) if _raw_openai_timeout and float(_raw_openai_timeout) > 0 else None
+)
+
+# Dedicated durable-report provider profile. Keep it disabled when
+# REPORT_MODEL_TYPE is absent so existing deployments retain their current
+# MODEL_TYPE + stage-override behavior. When enabled, validation below requires
+# an exact model and the selected provider's API key.
+REPORT_MODEL_TYPE = (
+    os.getenv("REPORT_MODEL_TYPE", "").strip().lower() or None
+)
+REPORT_MODEL = os.getenv("REPORT_MODEL", "").strip() or None
+REPORT_MAX_OUTPUT_TOKENS = _read_bounded_int_env(
+    "REPORT_MAX_OUTPUT_TOKENS",
+    8192,
+    minimum=256,
+    maximum=131072,
+)
+REPORT_TIMEOUT_SECONDS = _read_bounded_int_env(
+    "REPORT_TIMEOUT_SECONDS",
+    240,
+    minimum=30,
+    maximum=3600,
+)
+REPORT_REASONING_EFFORT = (
+    os.getenv("REPORT_REASONING_EFFORT", "").strip().lower() or None
+)
+
+# Merely configuring OPENAI_API_KEY must not turn OpenAI into an implicit
+# fallback for Gemini or NVIDIA. Fallback is opt-in and disabled by default.
+ENABLE_OPENAI_FALLBACK = (
+    os.getenv("ENABLE_OPENAI_FALLBACK", "false").strip().lower()
+    in ("1", "true", "yes", "on")
 )
 
 # Per-stage model overrides.  When set, the named pipeline stage uses this
@@ -530,6 +579,9 @@ def validate_runtime_settings(
     evidence_finalization_mode: str = "shadow",
     plan_validation_mode: str = "warn",
     openai_api_key: str | None = None,
+    report_model_type: str | None = None,
+    report_model: str | None = None,
+    report_reasoning_effort: str | None = None,
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -592,6 +644,48 @@ def validate_runtime_settings(
     # credential at startup like the other two.
     if model_type == "openai" and not openai_api_key:
         raise RuntimeError("MODEL_TYPE=openai but OPENAI_API_KEY is missing")
+    if report_model and not report_model_type:
+        raise RuntimeError("REPORT_MODEL requires REPORT_MODEL_TYPE")
+    if report_model_type:
+        if report_model_type not in valid_model_types:
+            raise RuntimeError(
+                "Invalid REPORT_MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+            )
+        if not report_model:
+            raise RuntimeError(
+                "REPORT_MODEL_TYPE requires REPORT_MODEL"
+            )
+        report_key = {
+            "gemini": google_api_key,
+            "openai": openai_api_key,
+            "nvidia": nvidia_api_key,
+        }[report_model_type]
+        if not report_key:
+            key_name = {
+                "gemini": "GOOGLE_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "nvidia": "NVIDIA_API_KEY",
+            }[report_model_type]
+            raise RuntimeError(
+                f"REPORT_MODEL_TYPE={report_model_type} but {key_name} is missing"
+            )
+    valid_reasoning_efforts = {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+    if (
+        report_reasoning_effort
+        and report_reasoning_effort not in valid_reasoning_efforts
+    ):
+        raise RuntimeError(
+            "Invalid REPORT_REASONING_EFFORT. Expected one of: "
+            "none, minimal, low, medium, high, xhigh, max"
+        )
     normalized_release_sha = normalize_release_sha(release_sha)
     if deployment_env in {"staging", "production"} and not normalized_release_sha:
         raise RuntimeError("ENAI_RELEASE_SHA is required in staging and production")
@@ -615,6 +709,9 @@ validate_runtime_settings(
     evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
     plan_validation_mode=PLAN_VALIDATION_MODE,
     openai_api_key=OPENAI_API_KEY,
+    report_model_type=REPORT_MODEL_TYPE,
+    report_model=REPORT_MODEL,
+    report_reasoning_effort=REPORT_REASONING_EFFORT,
 )
 
 # ===================================================================

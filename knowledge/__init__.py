@@ -348,22 +348,116 @@ def get_knowledge_json(user_query: str = "", use_cache: bool = True) -> str:
     return json.dumps(relevant, indent=2, ensure_ascii=False)
 
 
-def infer_topic_matches(user_query: str = "") -> Set[str]:
-    """Infer relevant knowledge file stems directly from query text."""
-
+def _direct_topic_matches(user_query: str = "") -> Set[str]:
+    """Return only keyword-matched file stems, without a fallback."""
     query_lower = str(user_query or "").lower()
     matched_files: set[str] = set()
 
     for keyword, file_stems in TOPIC_MAP.items():
         if keyword in query_lower:
             matched_files.update(file_stems)
+    return matched_files
+
+
+def infer_topic_matches(user_query: str = "") -> Set[str]:
+    """Infer relevant knowledge file stems directly from query text."""
+
+    matched_files = _direct_topic_matches(user_query)
 
     if matched_files:
         return matched_files
 
+    query_lower = str(user_query or "").lower()
     definition_patterns = ["what is", "what are", "define", "explain"]
     is_conceptual = any(pattern in query_lower for pattern in definition_patterns)
     return {"general_definitions"} if is_conceptual else {"balancing_price", "sql_examples"}
+
+
+def _truncate_brief_source(content: str, budget: int) -> str:
+    if len(content) <= budget:
+        return content
+    marker = "\n...[truncated]"
+    if budget <= len(marker):
+        return marker[:budget]
+    return content[: budget - len(marker)] + marker
+
+
+def _allocate_brief_source_budgets(
+    sources: List[tuple[str, str]],
+    total_budget: int,
+) -> Dict[str, int]:
+    """Split a prompt budget fairly, redistributing unused short-file space."""
+    remaining = list(sources)
+    remaining_budget = max(0, total_budget)
+    allocations: Dict[str, int] = {}
+    while remaining:
+        share, remainder = divmod(remaining_budget, len(remaining))
+        fitting = [
+            (stem, content)
+            for stem, content in remaining
+            if len(content) <= share
+        ]
+        if not fitting:
+            for index, (stem, _content) in enumerate(remaining):
+                allocations[stem] = share + (1 if index < remainder else 0)
+            break
+        fitting_names = {stem for stem, _content in fitting}
+        for stem, content in fitting:
+            allocations[stem] = len(content)
+            remaining_budget -= len(content)
+        remaining = [
+            (stem, content)
+            for stem, content in remaining
+            if stem not in fitting_names
+        ]
+    return allocations
+
+
+def get_brief_knowledge_for_query(
+    user_query: str,
+    *,
+    max_chars: int = 12000,
+) -> str:
+    """Return fairly bounded local Markdown context for the cheap Brief path.
+
+    Brief uses direct topic-map matches only, removes SQL examples, and falls
+    back to general definitions when no curated topic matches. Standard and
+    Report retain their existing broader knowledge-selection behavior.
+    """
+    matched_files = _direct_topic_matches(user_query)
+    matched_files.discard("sql_examples")
+    if not matched_files:
+        matched_files = {"general_definitions"}
+
+    sources = [
+        (stem, _KNOWLEDGE[stem])
+        for stem in sorted(matched_files)
+        if stem in _KNOWLEDGE
+    ]
+    if not sources:
+        return ""
+
+    char_budget = max(256, int(max_chars))
+    separator = "\n\n---\n\n"
+    prefixes = {
+        stem: f"SOURCE_FILE: {stem}.md\n"
+        for stem, _content in sources
+    }
+    fixed_chars = sum(len(prefixes[stem]) for stem, _content in sources)
+    fixed_chars += len(separator) * (len(sources) - 1)
+    content_budget = max(0, char_budget - fixed_chars)
+    allocations = _allocate_brief_source_budgets(sources, content_budget)
+    sections = [
+        prefixes[stem] + _truncate_brief_source(content, allocations.get(stem, 0))
+        for stem, content in sources
+    ]
+    result = separator.join(sections)
+    log.info(
+        "Brief knowledge selected: files=%s context_chars=%d",
+        ",".join(stem for stem, _content in sources),
+        len(result),
+    )
+    return result
 
 
 def get_knowledge_json_with_topics(
