@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from contracts.report import ReportChartPurpose, ReportPlan
+from contracts.report import ReportChartPurpose, ReportChartRequest, ReportPlan
 from contracts.report_charts import (
     ReportChartArtifact,
     ReportChartBuildDecision,
@@ -13,6 +13,7 @@ from contracts.report_charts import (
     ReportChartType,
 )
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
+from contracts.report_research import ReportEvidencePacket
 
 _TIME_COLUMN_NAMES = {
     "date",
@@ -169,12 +170,12 @@ def _built(
     )
 
 
-def build_report_charts(
-    plan: ReportPlan,
+def build_report_chart_requests(
+    chart_requests: list[ReportChartRequest],
     manifest: ReportEvidenceManifest,
 ) -> list[ReportChartBuildDecision]:
     decisions: list[ReportChartBuildDecision] = []
-    for chart in plan.charts:
+    for chart in chart_requests:
         table = _table_rows_for_chart(chart, manifest)
         if table is None:
             decisions.append(_omitted(chart, "REPORT_CHART_INCOMPATIBLE_EVIDENCE"))
@@ -270,11 +271,24 @@ def build_report_charts(
                         _omitted(chart, "REPORT_CHART_CATEGORY_REQUIRED")
                     )
                     continue
+                composition_rows = rows
+                if temporal:
+                    time_column = temporal[0]
+                    latest_period = max(
+                        str(row.get(time_column))
+                        for row in rows
+                        if row.get(time_column) is not None
+                    )
+                    composition_rows = [
+                        row
+                        for row in rows
+                        if str(row.get(time_column)) == latest_period
+                    ]
                 decisions.append(
                     _built(
                         chart,
                         chart_type=ReportChartType.PIE,
-                        data=rows,
+                        data=composition_rows,
                         x_axis=x_axis,
                         series=(chart.series_fields or [numeric[0]])[:8],
                         units=units,
@@ -343,3 +357,40 @@ def build_report_charts(
             continue
         decisions.append(_omitted(chart, "REPORT_CHART_CATEGORY_REQUIRED"))
     return decisions
+
+
+def build_report_charts(
+    plan: ReportPlan,
+    manifest: ReportEvidenceManifest,
+) -> list[ReportChartBuildDecision]:
+    return build_report_chart_requests(list(plan.charts), manifest)
+
+
+def build_report_research_exhibits(
+    packets: list[ReportEvidencePacket],
+    manifest: ReportEvidenceManifest,
+) -> list[ReportChartBuildDecision]:
+    """Materialize packet candidates directly from their verified tables."""
+
+    requests: list[ReportChartRequest] = []
+    seen_chart_ids: set[str] = set()
+    for packet in packets:
+        for candidate in packet.chart_candidates:
+            if candidate.chart_id in seen_chart_ids:
+                raise ValueError(
+                    "Research exhibit chart IDs must be globally unique."
+                )
+            seen_chart_ids.add(candidate.chart_id)
+            requests.append(
+                ReportChartRequest(
+                    chart_id=candidate.chart_id,
+                    section_id=packet.track_id,
+                    purpose=candidate.purpose,
+                    title=candidate.title,
+                    evidence_refs=candidate.evidence_refs,
+                    x_field=candidate.x_field,
+                    series_fields=candidate.series_fields,
+                    required=candidate.required,
+                )
+            )
+    return build_report_chart_requests(requests, manifest)

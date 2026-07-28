@@ -53,6 +53,44 @@ def test_request_telemetry_tracks_llm_tokens_and_cost():
     assert snapshot["models"]["gpt-4o-mini"]["calls"] == 2
 
 
+def test_request_telemetry_breaks_report_usage_out_by_stage_and_finish_reason():
+    m = Metrics()
+    m.start_request_telemetry("report-job-1")
+    m.log_llm_usage(
+        model_name="gpt-5.6-luna",
+        prompt_tokens=500,
+        completion_tokens=100,
+        total_tokens=600,
+        estimated_cost_usd=0.01,
+        attempt_stage="report_research_planner",
+        provider="openai",
+        finish_reason="completed",
+    )
+    m.log_llm_usage(
+        model_name="gpt-5.6-luna",
+        prompt_tokens=800,
+        completion_tokens=300,
+        total_tokens=1100,
+        estimated_cost_usd=0.02,
+        attempt_stage="report_document_writer",
+        provider="openai",
+        finish_reason="completed",
+    )
+
+    snapshot = m.finalize_request_telemetry()
+
+    assert snapshot["stages"]["report_research_planner"] == {
+        "calls": 1,
+        "prompt_tokens": 500,
+        "completion_tokens": 100,
+        "total_tokens": 600,
+        "models": {"gpt-5.6-luna": 1},
+        "providers": {"openai": 1},
+        "finish_reasons": {"completed": 1},
+    }
+    assert snapshot["stages"]["report_document_writer"]["calls"] == 1
+
+
 def test_cost_estimation_uses_actual_model_provider(monkeypatch):
     from core import llm
 
@@ -87,7 +125,12 @@ def test_llm_response_log_exposes_content_free_completion_diagnostics(
             "finish_reason": "length",
         }
 
-    monkeypatch.setattr(llm.metrics, "log_llm_usage", lambda **_kwargs: None)
+    captured = {}
+    monkeypatch.setattr(
+        llm.metrics,
+        "log_llm_usage",
+        lambda **kwargs: captured.update(kwargs),
+    )
     caplog.set_level("INFO", logger="Enai")
 
     llm._log_usage_for_message(
@@ -113,6 +156,9 @@ def test_llm_response_log_exposes_content_free_completion_diagnostics(
     assert "effective_output_token_limit=4096" in record
     assert "provider_reported_output_token_limit=unreported" in record
     assert _Message.content not in record
+    assert captured["attempt_stage"] == "report_section_writer_key_findings"
+    assert captured["provider"] == "nvidia"
+    assert captured["finish_reason"] == "length"
 
 
 def test_report_response_log_uses_the_dedicated_output_limit(caplog, monkeypatch):

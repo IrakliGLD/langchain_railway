@@ -224,6 +224,98 @@ def _make_item(
     return ReportEvidenceItem.model_validate(body)
 
 
+def make_report_table_evidence_item(
+    *,
+    query: str,
+    title: str,
+    source: str,
+    columns: Sequence[Any],
+    rows: Iterable[Iterable[Any]],
+    provenance_refs: list[str] | None = None,
+    max_rows: int = 100,
+    max_columns: int = 24,
+) -> ReportEvidenceItem | None:
+    """Create one bounded deterministic table item for report evidence."""
+
+    relevant_tokens = {
+        match.group(0).casefold().replace("/", "-")
+        for match in _QUERY_PERIOD_PATTERN.finditer(str(query or ""))
+    }
+    normalized_columns, normalized_rows, total_rows, truncated = (
+        _normalize_table(
+            columns,
+            rows,
+            max_rows=max_rows,
+            max_columns=max_columns,
+            relevant_tokens=relevant_tokens,
+        )
+    )
+    if not normalized_columns or not normalized_rows:
+        return None
+    return _make_item(
+        kind=ReportEvidenceKind.TABLE,
+        title=title,
+        source=source,
+        provenance_refs=provenance_refs,
+        columns=normalized_columns,
+        rows=normalized_rows,
+        unit_by_column=_inferred_unit_by_column(normalized_columns),
+        total_row_count=total_rows,
+        truncated=truncated,
+    )
+
+
+def make_report_narrative_evidence_item(
+    *,
+    kind: ReportEvidenceKind,
+    title: str,
+    source: str,
+    content: str,
+    provenance_refs: list[str] | None = None,
+) -> ReportEvidenceItem:
+    """Create one bounded narrative evidence item."""
+
+    return _make_item(
+        kind=kind,
+        title=title,
+        source=source,
+        provenance_refs=provenance_refs,
+        content=str(content or "").strip()[:6000],
+    )
+
+
+def build_report_manifest_from_items(
+    query: str,
+    items: Sequence[ReportEvidenceItem],
+) -> ReportEvidenceManifest:
+    """Bind a de-duplicated evidence sequence to one deterministic manifest."""
+
+    unique_items: list[ReportEvidenceItem] = []
+    seen_refs: set[str] = set()
+    for item in items:
+        if item.evidence_ref in seen_refs:
+            continue
+        seen_refs.add(item.evidence_ref)
+        unique_items.append(item)
+        if len(unique_items) == 32:
+            break
+    if not unique_items:
+        raise ValueError("A report evidence manifest requires evidence items.")
+    query_digest = hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
+    manifest_material = {
+        "contract_version": REPORT_EVIDENCE_MANIFEST_VERSION,
+        "query_digest": query_digest,
+        "items": [item.model_dump(mode="json") for item in unique_items],
+    }
+    manifest_id = f"manifest:{_digest(manifest_material, length=32)}"
+    return ReportEvidenceManifest.model_validate(
+        {
+            **manifest_material,
+            "manifest_id": manifest_id,
+        }
+    )
+
+
 def build_report_evidence_manifest(
     ctx: QueryContext,
     *,

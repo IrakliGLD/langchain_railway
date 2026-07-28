@@ -115,6 +115,18 @@ def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch)
     assert captured["processor_kwargs"]["job_timeout_seconds"] == (
         report_worker.REPORT_JOB_TIMEOUT_SECONDS
     )
+    assert captured["processor_kwargs"]["pipeline_v2_mode"] == (
+        report_worker.REPORT_PIPELINE_V2_MODE
+    )
+    assert captured["processor_kwargs"]["max_generative_calls"] == (
+        report_worker.REPORT_MAX_GENERATIVE_CALLS
+    )
+    assert captured["processor_kwargs"]["max_research_tracks"] == (
+        report_worker.REPORT_RESEARCH_MAX_TRACKS
+    )
+    assert captured["processor_kwargs"]["max_research_workers"] == (
+        report_worker.REPORT_RESEARCH_MAX_WORKERS
+    )
     assert captured["worker_kwargs"]["lease_seconds"] == 630
 
 

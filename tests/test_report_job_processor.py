@@ -34,12 +34,21 @@ from contracts.report_generation import (
     ReportGenerationCheckpoint,
 )
 from contracts.report_jobs import ReportJobLease, ReportJobPhase
-from contracts.report_result import ReportResult
+from contracts.report_result import ReportResult, ReportResultV2
 from contracts.report_sections import ReportSectionDraft
+from core import report_job_processor
 from core.report_job_processor import ReportJobProcessor
 from core.report_job_worker import ReportJobFailure
 from models import QueryContext
+from tests.test_report_document_pipeline_v2 import (
+    _QUERY as _V2_QUERY,
+)
+from tests.test_report_document_pipeline_v2 import (
+    _document_components,
+    _valid_document_draft,
+)
 from tests.test_report_planner import _manifest, _plan_payload
+from tests.test_report_research_contract import _research_plan_payload
 from tests.test_report_sections import _draft
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
@@ -56,6 +65,7 @@ def _lease(
     checkpoint: dict | None = None,
     phase: str = "planning",
     progress_percent: int = 5,
+    query: str = "Explain the price trend.",
 ) -> ReportJobLease:
     return ReportJobLease.model_validate(
         {
@@ -63,7 +73,7 @@ def _lease(
             "job_id": str(uuid4()),
             "request_id": "report:req-processor",
             "actor_user_id": str(uuid4()),
-            "query": "Explain the price trend.",
+            "query": query,
             "attempt_count": 1,
             "max_attempts": 3,
             "lease_owner": "worker-processor",
@@ -128,6 +138,14 @@ def _processor(
     chart_builder=None,
     execution_scopes: list | None = None,
     job_timeout_seconds: int | None = None,
+    research_planner=None,
+    research_executor=None,
+    manifest_consolidator=None,
+    research_exhibit_builder=None,
+    evidence_gate_evaluator=None,
+    pipeline_v2_mode: str = "disabled",
+    max_research_tracks: int = 4,
+    max_research_workers: int = 3,
 ):
     calls = pipeline_calls if pipeline_calls is not None else []
     generated_ids = generated if generated is not None else []
@@ -168,12 +186,25 @@ def _processor(
         overrides["chart_builder"] = chart_builder
     if job_timeout_seconds is not None:
         overrides["job_timeout_seconds"] = job_timeout_seconds
+    if research_planner is not None:
+        overrides["research_planner"] = research_planner
+    if research_executor is not None:
+        overrides["research_executor"] = research_executor
+    if manifest_consolidator is not None:
+        overrides["manifest_consolidator"] = manifest_consolidator
+    if research_exhibit_builder is not None:
+        overrides["research_exhibit_builder"] = research_exhibit_builder
+    if evidence_gate_evaluator is not None:
+        overrides["evidence_gate_evaluator"] = evidence_gate_evaluator
     return ReportJobProcessor(
         query_pipeline=pipeline,
         evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
         planner=planner,
         section_generator=sections,
         max_section_workers=5,
+        pipeline_v2_mode=pipeline_v2_mode,
+        max_research_tracks=max_research_tracks,
+        max_research_workers=max_research_workers,
         **overrides,
     )
 
@@ -199,6 +230,24 @@ def test_checkpoint_contract_binds_manifest_plan_and_completed_sections():
     payload["completed_sections"][0]["section_id"] = "unknown_section"
     with pytest.raises(ValueError, match="not present in the report plan"):
         ReportGenerationCheckpoint.model_validate(payload)
+
+
+def test_legacy_processor_rejects_pre_manifest_v3_checkpoint_cleanly():
+    checkpoint = ReportGenerationCheckpoint.model_validate(
+        {
+            "contract_version": "report-generation-checkpoint-v3",
+            "checkpoint_stage": "research_plan_ready",
+            "manifest": None,
+            "research_plan": _research_plan_payload(),
+        }
+    )
+    lease = _lease(checkpoint=checkpoint.model_dump(mode="json"))
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        _processor()(lease, _Control())
+
+    assert exc_info.value.error_code == "REPORT_CHECKPOINT_INVALID"
+    assert exc_info.value.retryable is False
 
 
 def test_checkpoint_payload_is_serialized_once_before_repository_boundary():
@@ -343,6 +392,471 @@ def test_report_attempt_binds_identity_and_deadline_for_deep_calls():
     assert 0 < scope.deadline.remaining_seconds() <= 120
     assert pipeline_calls[0][1]["request_deadline"] is scope.deadline
     assert pipeline_calls[0][1]["request_id"] == scope.request_id
+
+
+class _AttemptMetrics:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.started = []
+        self.finalized = 0
+
+    def start_request_telemetry(self, trace_id):
+        self.started.append(trace_id)
+
+    def finalize_request_telemetry(self):
+        self.finalized += 1
+        return self.snapshot
+
+
+def test_report_attempt_logs_stage_aware_budget_telemetry(
+    caplog,
+    monkeypatch,
+):
+    lease = _lease()
+    metrics = _AttemptMetrics(
+        {
+            "trace_id": str(lease.job_id),
+            "llm_calls": 2,
+            "prompt_tokens": 1300,
+            "completion_tokens": 400,
+            "total_tokens": 1700,
+            "estimated_cost_usd": 0.03,
+            "models": {"gpt-5.6-luna": {"calls": 2}},
+            "stages": {
+                "report_research_planner": {"calls": 1},
+                "report_document_writer": {"calls": 1},
+            },
+        }
+    )
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="shadow",
+        max_generative_calls=3,
+    )
+    monkeypatch.setattr(report_job_processor, "metrics", metrics)
+    monkeypatch.setattr(
+        processor,
+        "_run_bound_attempt",
+        lambda _lease, _control: {"ok": True},
+    )
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+
+    assert processor(lease, _Control()) == {"ok": True}
+
+    assert metrics.started == [str(lease.job_id)]
+    assert metrics.finalized == 1
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_JOB_ATTEMPT_TELEMETRY ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["outcome"] == "completed"
+    assert payload["pipeline_v2_mode"] == "shadow"
+    assert payload["llm_calls"] == 2
+    assert payload["generative_call_budget"] == 3
+    assert payload["over_generative_call_budget"] is False
+    assert set(payload["stages"]) == {
+        "report_research_planner",
+        "report_document_writer",
+    }
+
+
+def test_shadow_research_planner_runs_before_legacy_pipeline_without_cutover(
+    caplog,
+):
+    lease = _lease()
+    pipeline_calls = []
+    research_calls = []
+    execution_calls = []
+    consolidation_calls = []
+    gate_calls = []
+
+    def research_planner(query: str, *, max_tracks: int):
+        assert pipeline_calls == []
+        research_calls.append((query, max_tracks))
+        return _research_plan_payload(
+            query_digest=hashlib.sha256(query.encode("utf-8")).hexdigest()
+        )
+
+    def research_executor(query, plan, *, max_workers):
+        execution_calls.append((query, len(plan.tracks), max_workers))
+        return []
+
+    def manifest_consolidator(query, packets):
+        consolidation_calls.append((query, packets))
+        return _manifest_for_query(query)
+
+    def exhibit_builder(packets, manifest):
+        assert packets == []
+        assert manifest.query_digest == hashlib.sha256(
+            lease.query.encode("utf-8")
+        ).hexdigest()
+        return []
+
+    def gate_evaluator(plan, packets, *, chart_decisions):
+        gate_calls.append((len(plan.tracks), packets, chart_decisions))
+        return {
+            "contract_version": "report-evidence-gate-v1",
+            "query_digest": plan.query_digest,
+            "status": "ready",
+            "tracks": [
+                {
+                    "track_id": track.track_id,
+                    "required": track.required,
+                    "status": "complete",
+                    "evidence_item_count": 1,
+                    "numeric_observation_count": 0,
+                    "chart_candidate_count": 0,
+                    "finding_codes": [],
+                }
+                for track in plan.tracks
+            ],
+            "finding_codes": [],
+        }
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    result = _processor(
+        pipeline_calls=pipeline_calls,
+        research_planner=research_planner,
+        research_executor=research_executor,
+        manifest_consolidator=manifest_consolidator,
+        research_exhibit_builder=exhibit_builder,
+        evidence_gate_evaluator=gate_evaluator,
+        pipeline_v2_mode="shadow",
+        max_research_tracks=4,
+        max_research_workers=3,
+    )(lease, _Control())
+
+    assert result["contract_version"] == "report-result-v1"
+    assert research_calls == [(lease.query, 4)]
+    assert execution_calls == [(lease.query, 3, 3)]
+    assert consolidation_calls == [(lease.query, [])]
+    assert gate_calls == [(3, [], [])]
+    assert len(pipeline_calls) == 1
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_RESEARCH_PLAN_SHADOW ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["outcome"] == "valid"
+    assert payload["track_count"] == 3
+    assert payload["packet_count"] == 0
+    assert payload["evidence_item_count"] == len(_manifest().items)
+    assert payload["coverage_status"] == "ready"
+    assert payload["built_chart_count"] == 0
+    assert "query" not in payload
+
+
+def test_shadow_research_failure_is_content_free_and_does_not_fail_legacy(
+    caplog,
+):
+    lease = _lease()
+
+    def unavailable_planner(*_args, **_kwargs):
+        raise RuntimeError("private-query-fragment")
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    result = _processor(
+        research_planner=unavailable_planner,
+        pipeline_v2_mode="shadow",
+    )(lease, _Control())
+
+    assert result["contract_version"] == "report-result-v1"
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_RESEARCH_PLAN_SHADOW ")
+    )
+    assert '"outcome":"failed"' in record
+    assert "private-query-fragment" not in record
+
+
+def test_disabled_pipeline_does_not_invoke_research_planner():
+    def unexpected_planner(*_args, **_kwargs):
+        raise AssertionError("disabled mode must not run v2 planning")
+
+    result = _processor(
+        research_planner=unexpected_planner,
+        pipeline_v2_mode="disabled",
+    )(_lease(), _Control())
+
+    assert result["contract_version"] == "report-result-v1"
+
+
+def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    calls = []
+
+    def record(name, value):
+        calls.append(name)
+        return value
+
+    def document_generator(*_args, **kwargs):
+        calls.append("document_generator")
+        assert kwargs["allow_repair"] is True
+        return draft
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
+            "enabled v2 must not invoke the legacy query analyzer"
+        ),
+        planner=lambda *_args, **_kwargs: pytest.fail(
+            "enabled v2 must not invoke the legacy report planner"
+        ),
+        section_generator=lambda *_args, **_kwargs: pytest.fail(
+            "enabled v2 must not invoke per-section generation"
+        ),
+        pipeline_v2_mode="enabled",
+        research_planner=lambda *_args, **_kwargs: record(
+            "research_planner",
+            research_plan,
+        ),
+        research_executor=lambda *_args, **_kwargs: record(
+            "research_executor",
+            packets,
+        ),
+        manifest_consolidator=lambda *_args, **_kwargs: record(
+            "manifest_consolidator",
+            manifest,
+        ),
+        research_exhibit_builder=lambda *_args, **_kwargs: record(
+            "research_exhibit_builder",
+            decisions,
+        ),
+        evidence_gate_evaluator=lambda *_args, **_kwargs: record(
+            "evidence_gate_evaluator",
+            gate,
+        ),
+        document_planner=lambda *_args, **_kwargs: record(
+            "document_planner",
+            document_plan,
+        ),
+        document_generator=document_generator,
+    )
+    control = _Control()
+
+    result = ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), control)
+    )
+
+    assert result.contract_version == "report-result-v2"
+    assert calls == [
+        "research_planner",
+        "research_executor",
+        "manifest_consolidator",
+        "research_exhibit_builder",
+        "evidence_gate_evaluator",
+        "document_planner",
+        "document_generator",
+    ]
+    checkpoints = [
+        heartbeat[2]
+        for heartbeat in control.heartbeats
+        if heartbeat[2] is not None
+    ]
+    assert [
+        checkpoint["checkpoint_stage"] for checkpoint in checkpoints
+    ] == [
+        "research_plan_ready",
+        "document_plan_ready",
+        "draft_ready",
+    ]
+    assert all(
+        checkpoint["contract_version"]
+        == "report-generation-checkpoint-v3"
+        for checkpoint in checkpoints
+    )
+
+
+def test_enabled_v2_resumes_document_plan_without_research_calls():
+    (
+        research_plan,
+        _,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    checkpoint = ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v3",
+        checkpoint_stage="document_plan_ready",
+        research_plan=research_plan,
+        manifest=manifest,
+        document_plan=document_plan,
+    )
+    generator_calls = []
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="enabled",
+        research_planner=lambda *_args, **_kwargs: pytest.fail(
+            "resume must not re-plan research"
+        ),
+        research_executor=lambda *_args, **_kwargs: pytest.fail(
+            "resume must not repeat evidence collection"
+        ),
+        document_planner=lambda *_args, **_kwargs: pytest.fail(
+            "resume must not repeat document planning"
+        ),
+        document_generator=lambda *_args, **kwargs: (
+            generator_calls.append(kwargs["allow_repair"]) or draft
+        ),
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(
+            _lease(
+                query=_V2_QUERY,
+                checkpoint=checkpoint.model_dump(mode="json"),
+                phase="generating_sections",
+                progress_percent=55,
+            ),
+            _Control(),
+        )
+    )
+
+    assert result.contract_version == "report-result-v2"
+    assert generator_calls == [True]
+
+
+def test_enabled_v2_resumes_validated_draft_without_another_model_call():
+    (
+        research_plan,
+        _,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    checkpoint = ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v3",
+        checkpoint_stage="draft_ready",
+        research_plan=research_plan,
+        manifest=manifest,
+        document_plan=document_plan,
+        document_draft=draft,
+    )
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="enabled",
+        research_planner=lambda *_args, **_kwargs: pytest.fail(
+            "draft resume must not invoke a model"
+        ),
+        document_generator=lambda *_args, **_kwargs: pytest.fail(
+            "draft resume must not invoke a model"
+        ),
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(
+            _lease(
+                query=_V2_QUERY,
+                checkpoint=checkpoint.model_dump(mode="json"),
+                phase="assembling",
+                progress_percent=90,
+            ),
+            _Control(),
+        )
+    )
+
+    assert result.contract_version == "report-result-v2"
+
+
+def test_enabled_v2_two_call_budget_disables_document_repair():
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    repair_flags = []
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="enabled",
+        max_generative_calls=2,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **kwargs: (
+            repair_flags.append(kwargs["allow_repair"]) or draft
+        ),
+    )
+
+    ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), _Control())
+    )
+
+    assert repair_flags == [False]
+
+
+def test_enabled_v2_document_plan_validation_failure_is_typed_as_plan_invalid():
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        _,
+    ) = _document_components()
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="enabled",
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: (
+            _ for _ in ()
+        ).throw(ValueError("The document plan is invalid.")),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(_lease(query=_V2_QUERY), _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
+    assert exc_info.value.retryable is False
+
+
+def test_report_attempt_finalizes_telemetry_when_execution_fails(monkeypatch):
+    lease = _lease()
+    metrics = _AttemptMetrics(
+        {
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 0,
+            "total_tokens": 10,
+            "estimated_cost_usd": 0.0,
+            "models": {},
+            "stages": {},
+        }
+    )
+    processor = ReportJobProcessor()
+    monkeypatch.setattr(report_job_processor, "metrics", metrics)
+    monkeypatch.setattr(
+        processor,
+        "_run_bound_attempt",
+        lambda _lease, _control: (_ for _ in ()).throw(
+            ValueError("synthetic failure")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="synthetic failure"):
+        processor(lease, _Control())
+
+    assert metrics.finalized == 1
 
 
 def test_report_deadline_exhaustion_has_a_typed_retry_policy():

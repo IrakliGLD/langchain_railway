@@ -133,6 +133,42 @@ def test_section_grounding_binds_direct_value_to_its_row_metric_and_unit():
     assert "DIRECT_CLAIM_INVALID" in wrong_unit.error_codes
 
 
+def test_verified_numeric_unit_notation_is_not_an_independent_claim():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "share"]
+    table["rows"] = [
+        {"period": "2026-01", "share": 0.8},
+        {"period": "2026-02", "share": 0.7},
+    ]
+    table["unit_by_column"] = {"share": "share (0-1)"}
+    manifest = _manifest().model_validate(manifest_payload)
+    payload = _draft(
+        section,
+        text=(
+            "Observed share in 2026-01 was 0.8 share (0-1). "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(
+            column="share",
+            display_value="0.8",
+            unit="share (0-1)",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        manifest,
+    )
+
+    assert validation.valid is True
+
+
 def test_section_grounding_requires_coordinates_for_direct_table_numbers():
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[1]
