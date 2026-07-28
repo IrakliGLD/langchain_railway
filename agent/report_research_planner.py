@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -71,9 +72,58 @@ _SCENARIO_SIGNALS = (
 class ReportResearchPlanError(ValueError):
     """The one-call research plan failed schema or semantic validation."""
 
-    def __init__(self, assessment: ReportResearchPlanAssessment) -> None:
+    def __init__(
+        self,
+        assessment: ReportResearchPlanAssessment,
+        *,
+        schema_error_codes: tuple[str, ...] = (),
+    ) -> None:
         self.assessment = assessment
+        self.schema_error_codes = schema_error_codes
         super().__init__(",".join(assessment.finding_codes))
+
+
+def _schema_error_codes(error: Exception) -> tuple[str, ...]:
+    if not isinstance(error, ValidationError):
+        return (
+            "PLAN_TYPE_INVALID"
+            if isinstance(error, TypeError)
+            else "PLAN_PARSE_INVALID",
+        )
+
+    codes: list[str] = []
+    for finding in error.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    )[:16]:
+        location = finding.get("loc") or ("root",)
+        location_parts = [
+            "ITEM"
+            if isinstance(part, int)
+            else re.sub(
+                r"[^A-Z0-9]+",
+                "_",
+                str(part).upper(),
+            ).strip("_")
+            or "FIELD"
+            for part in location
+        ]
+        error_type = re.sub(
+            r"[^A-Z0-9]+",
+            "_",
+            str(finding.get("type") or "INVALID").upper(),
+        ).strip("_")
+        code = re.sub(
+            r"_+",
+            "_",
+            "_".join(
+                ["SCHEMA", *location_parts, error_type or "INVALID"]
+            ),
+        )[:64].rstrip("_")
+        if code and code not in codes:
+            codes.append(code)
+    return tuple(codes) or ("PLAN_SCHEMA_INVALID",)
 
 
 def _contains_any(query: str, signals: tuple[str, ...]) -> bool:
@@ -230,23 +280,23 @@ def plan_report_research(
 
         invoke_model = llm_plan_report_research
 
-    raw_plan = invoke_model(
-        query,
-        language_code=language_code,
-        max_tracks=max_tracks,
-    )
-    payload = (
-        raw_plan.model_dump(mode="json")
-        if isinstance(raw_plan, ReportResearchPlan)
-        else dict(raw_plan)
-        if isinstance(raw_plan, dict)
-        else raw_plan
-    )
-    if isinstance(payload, dict):
-        payload["contract_version"] = "report-research-plan-v1"
-        payload["query_digest"] = query_digest
-        payload["language_code"] = language_code
     try:
+        raw_plan = invoke_model(
+            query,
+            language_code=language_code,
+            max_tracks=max_tracks,
+        )
+        payload = (
+            raw_plan.model_dump(mode="json")
+            if isinstance(raw_plan, ReportResearchPlan)
+            else dict(raw_plan)
+            if isinstance(raw_plan, dict)
+            else raw_plan
+        )
+        if isinstance(payload, dict):
+            payload["contract_version"] = "report-research-plan-v1"
+            payload["query_digest"] = query_digest
+            payload["language_code"] = language_code
         plan = ReportResearchPlan.model_validate(payload)
     except (ValidationError, TypeError, ValueError) as exc:
         assessment = _assessment(
@@ -254,7 +304,10 @@ def plan_report_research(
             _recognized_requirements(query),
             {"PLAN_SCHEMA_INVALID"},
         )
-        raise ReportResearchPlanError(assessment) from exc
+        raise ReportResearchPlanError(
+            assessment,
+            schema_error_codes=_schema_error_codes(exc),
+        ) from exc
 
     assessment = validate_report_research_plan(
         query,

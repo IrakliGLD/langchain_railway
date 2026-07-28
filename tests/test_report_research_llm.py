@@ -74,6 +74,62 @@ def test_report_research_planner_uses_report_model_without_fallback(monkeypatch)
     )
 
 
+def test_openai_report_research_planner_uses_strict_structured_output(
+    monkeypatch,
+):
+    captured = {}
+    structured_client = object()
+
+    class _ReportClient:
+        def with_structured_output(self, schema, **kwargs):
+            captured["structured_schema"] = schema
+            captured["structured_kwargs"] = kwargs
+            return structured_client
+
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-luna", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "cache-token"),
+    )
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+    monkeypatch.setattr(
+        llm,
+        "get_llm_for_stage",
+        lambda *_args, **_kwargs: _ReportClient(),
+    )
+
+    def invoke(factory, _model, _messages, **_kwargs):
+        captured["client"] = factory()
+        return {
+            "raw": SimpleNamespace(
+                content=json.dumps(_response_payload())
+            ),
+            "parsed": ReportResearchPlan.model_validate(
+                _response_payload()
+            ),
+            "parsing_error": None,
+        }
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    plan = llm.llm_plan_report_research(
+        _QUERY,
+        language_code="en",
+        max_tracks=4,
+    )
+
+    assert isinstance(plan, ReportResearchPlan)
+    assert captured["client"] is structured_client
+    assert captured["structured_schema"] is ReportResearchPlan
+    assert captured["structured_kwargs"] == {
+        "method": "json_schema",
+        "include_raw": True,
+        "strict": True,
+    }
+
+
 def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
     monkeypatch,
 ):
