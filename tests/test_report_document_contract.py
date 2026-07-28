@@ -10,12 +10,15 @@ from pydantic import ValidationError
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentPlan,
+    ReportDocumentSectionSpec,
 )
 from contracts.report_generation import ReportGenerationCheckpoint
 from contracts.report_research import (
     ReportEvidencePacket,
     ReportResearchPlan,
+    ReportResearchTrack,
 )
+from contracts.report_result import ReportResult, ReportResultV2
 from tests.test_report_planner import _manifest
 from tests.test_report_research_contract import (
     _complete_packet_payload,
@@ -178,6 +181,37 @@ def _document_draft_payload() -> dict:
             _TABLE_REF,
         ),
     }
+
+
+def test_report_contracts_publish_a_four_exhibit_limit():
+    assert (
+        ReportResearchTrack.model_json_schema()["properties"][
+            "expected_exhibits"
+        ]["maxItems"]
+        == 4
+    )
+    assert (
+        ReportEvidencePacket.model_json_schema()["properties"][
+            "chart_candidates"
+        ]["maxItems"]
+        == 4
+    )
+    assert (
+        ReportDocumentSectionSpec.model_json_schema()["properties"][
+            "chart_refs"
+        ]["maxItems"]
+        == 4
+    )
+    assert (
+        ReportDocumentPlan.model_json_schema()["properties"]["charts"][
+            "maxItems"
+        ]
+        == 4
+    )
+    for result_model in (ReportResult, ReportResultV2):
+        schema = result_model.model_json_schema()["properties"]
+        assert schema["charts"]["maxItems"] == 4
+        assert schema["omitted_charts"]["maxItems"] == 4
 
 
 def test_document_plan_supports_track_driven_structure_without_single_intent():

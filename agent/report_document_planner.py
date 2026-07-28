@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 
-from contracts.report import ReportChartRequest
+from contracts.report import REPORT_MAX_EXHIBITS, ReportChartRequest
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
     ReportDocumentPlan,
@@ -202,8 +202,10 @@ def build_report_document_plan(
             )
         )
         chart_ids_by_section[section_id].append(candidate.chart_id)
-    if len(charts) > 3:
-        raise ValueError("Document plan cannot contain more than three charts.")
+    if len(charts) > REPORT_MAX_EXHIBITS:
+        raise ValueError(
+            "Document plan exceeds the configured exhibit limit."
+        )
 
     analysis_sections: list[ReportDocumentSectionSpec] = []
     all_analysis_refs: list[str] = []

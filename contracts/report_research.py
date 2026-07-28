@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-from contracts.report import ReportChartPurpose
+from contracts.report import REPORT_MAX_EXHIBITS, ReportChartPurpose
 from contracts.report_evidence import (
     ReportEvidenceItem,
     ReportEvidenceKind,
@@ -169,7 +169,7 @@ class ReportResearchTrack(_StrictResearchModel):
     )
     expected_exhibits: List[ReportChartPurpose] = Field(
         default_factory=list,
-        max_length=3,
+        max_length=REPORT_MAX_EXHIBITS,
     )
 
     @field_validator(
@@ -432,7 +432,7 @@ class ReportEvidencePacket(_StrictResearchModel):
     gaps: List[str] = Field(default_factory=list, max_length=12)
     chart_candidates: List[ReportChartCandidate] = Field(
         default_factory=list,
-        max_length=3,
+        max_length=REPORT_MAX_EXHIBITS,
     )
 
     @field_validator("gaps")

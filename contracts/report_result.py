@@ -7,6 +7,7 @@ from typing import List, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from contracts.report import (
+    REPORT_MAX_EXHIBITS,
     STANDARD_REPORT_RESULT_MAX_WORDS,
     STANDARD_REPORT_RESULT_MIN_WORDS,
     ReportIntent,
@@ -27,7 +28,10 @@ class ReportResultSection(_StrictResultModel):
     title: str = Field(min_length=1, max_length=160)
     content_markdown: str = Field(min_length=20, max_length=50_000)
     evidence_refs: List[str] = Field(min_length=1, max_length=32)
-    chart_refs: List[str] = Field(default_factory=list, max_length=3)
+    chart_refs: List[str] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
     word_count: int = Field(ge=1, le=5000)
 
     @field_validator("evidence_refs", "chart_refs")
@@ -62,10 +66,13 @@ class ReportResult(_StrictResultModel):
     evidence_manifest_id: str = Field(pattern=r"^manifest:[0-9a-f]{32}$")
     content_markdown: str = Field(min_length=100, max_length=500_000)
     sections: List[ReportResultSection] = Field(min_length=5, max_length=8)
-    charts: List[ReportChartArtifact] = Field(default_factory=list, max_length=3)
+    charts: List[ReportChartArtifact] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
     omitted_charts: List[ReportChartOmission] = Field(
         default_factory=list,
-        max_length=3,
+        max_length=REPORT_MAX_EXHIBITS,
     )
     citations: List[ReportCitation] = Field(min_length=1, max_length=32)
     word_count: int = Field(
@@ -146,7 +153,10 @@ class ReportResultV2Section(_StrictResultModel):
     title: str = Field(min_length=1, max_length=160)
     content_markdown: str = Field(min_length=20, max_length=50_000)
     evidence_refs: List[str] = Field(min_length=1, max_length=32)
-    chart_refs: List[str] = Field(default_factory=list, max_length=3)
+    chart_refs: List[str] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
     word_count: int = Field(ge=1, le=5000)
 
     @field_validator("evidence_refs", "chart_refs")
@@ -172,10 +182,13 @@ class ReportResultV2(_StrictResultModel):
     coverage_status: Literal["ready", "ready_with_gaps"]
     content_markdown: str = Field(min_length=100, max_length=500_000)
     sections: List[ReportResultV2Section] = Field(min_length=3, max_length=8)
-    charts: List[ReportChartArtifact] = Field(default_factory=list, max_length=3)
+    charts: List[ReportChartArtifact] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
     omitted_charts: List[ReportChartOmission] = Field(
         default_factory=list,
-        max_length=3,
+        max_length=REPORT_MAX_EXHIBITS,
     )
     citations: List[ReportCitation] = Field(min_length=1, max_length=32)
     word_count: int = Field(

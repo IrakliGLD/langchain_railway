@@ -8,6 +8,7 @@ from typing import Annotated, Dict, List, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from contracts.report import (
+    REPORT_MAX_EXHIBITS,
     REPORT_SECTION_MAX_WORDS,
     REPORT_SECTION_MIN_WORDS,
     STANDARD_REPORT_MAX_SECTIONS,
@@ -52,7 +53,10 @@ class ReportDocumentSectionSpec(_StrictDocumentModel):
         min_length=1,
         max_length=32,
     )
-    chart_refs: List[Identifier] = Field(default_factory=list, max_length=3)
+    chart_refs: List[Identifier] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
 
     @field_validator(
         "track_ids",
@@ -85,7 +89,10 @@ class ReportDocumentPlan(_StrictDocumentModel):
         min_length=3,
         max_length=STANDARD_REPORT_MAX_SECTIONS,
     )
-    charts: List[ReportChartRequest] = Field(default_factory=list, max_length=3)
+    charts: List[ReportChartRequest] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
 
     @field_validator(
         "required_track_ids",

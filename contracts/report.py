@@ -18,6 +18,7 @@ REPORT_PLAN_CONTRACT_VERSION = "report-plan-v1"
 STANDARD_REPORT_MIN_WORDS = 900
 STANDARD_REPORT_MAX_WORDS = 1400
 STANDARD_REPORT_MAX_SECTIONS = 8
+REPORT_MAX_EXHIBITS = 4
 REPORT_SECTION_WORD_FLOOR_RATIO = 0.9
 REPORT_SECTION_PROMPT_WORD_CEILING_RATIO = 1.2
 REPORT_SECTION_VALIDATION_WORD_CEILING_RATIO = 1.35
@@ -368,7 +369,10 @@ class ReportSectionSpec(_StrictReportModel):
         le=REPORT_SECTION_MAX_WORDS,
     )
     required_evidence_refs: List[EvidenceRef] = Field(min_length=1, max_length=32)
-    chart_refs: List[Identifier] = Field(default_factory=list, max_length=3)
+    chart_refs: List[Identifier] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
 
     @field_validator("required_evidence_refs")
     @classmethod
@@ -420,7 +424,10 @@ class ReportPlan(_StrictReportModel):
         min_length=5,
         max_length=STANDARD_REPORT_MAX_SECTIONS,
     )
-    charts: List[ReportChartRequest] = Field(default_factory=list, max_length=3)
+    charts: List[ReportChartRequest] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
 
     @model_validator(mode="after")
     def _validate_standard_structure(self) -> "ReportPlan":

@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from contracts.report import ReportChartPurpose
+from contracts.report import REPORT_MAX_EXHIBITS, ReportChartPurpose
 from contracts.report_research import (
     ReportCollectorId,
     ReportResearchPlan,
@@ -141,7 +141,10 @@ def validate_report_research_plan(
         findings.add("LANGUAGE_MISMATCH")
     if len(plan.tracks) > max_tracks:
         findings.add("TRACK_LIMIT_EXCEEDED")
-    if sum(len(track.expected_exhibits) for track in plan.tracks) > 3:
+    if (
+        sum(len(track.expected_exhibits) for track in plan.tracks)
+        > REPORT_MAX_EXHIBITS
+    ):
         findings.add("EXHIBIT_LIMIT_EXCEEDED")
 
     required_tracks = [track for track in plan.tracks if track.required]
