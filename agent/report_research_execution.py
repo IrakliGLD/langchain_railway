@@ -20,7 +20,7 @@ from agent.tools.composition_tools import get_balancing_composition
 from agent.tools.generation_tools import get_generation_mix
 from agent.tools.price_tools import get_prices
 from agent.tools.tariff_tools import get_tariffs
-from contracts.report import ReportChartPurpose
+from contracts.report import REPORT_MAX_EXHIBITS, ReportChartPurpose
 from contracts.report_evidence import (
     ReportEvidenceItem,
     ReportEvidenceKind,
@@ -510,7 +510,7 @@ def _chart_candidates(
     ]
     candidates: list[ReportChartCandidate] = []
     gaps: list[str] = []
-    for purpose in purposes[:3]:
+    for purpose in purposes[:REPORT_MAX_EXHIBITS]:
         built = None
         for item in tables:
             numeric_fields = [

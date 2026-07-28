@@ -44,6 +44,36 @@ def test_research_plan_validator_accepts_compound_required_coverage():
     }
 
 
+def test_research_plan_validator_accepts_four_total_exhibits():
+    payload = _bound_plan_payload()
+    payload["tracks"][0]["expected_exhibits"].append("comparison")
+
+    assessment = validate_report_research_plan(
+        _COMPOUND_QUERY,
+        ReportResearchPlan.model_validate(payload),
+        max_tracks=4,
+    )
+
+    assert assessment.valid is True
+    assert "EXHIBIT_LIMIT_EXCEEDED" not in assessment.finding_codes
+
+
+def test_research_plan_validator_rejects_five_total_exhibits():
+    payload = _bound_plan_payload()
+    payload["tracks"][0]["expected_exhibits"].extend(
+        ["comparison", "relationship"]
+    )
+
+    assessment = validate_report_research_plan(
+        _COMPOUND_QUERY,
+        ReportResearchPlan.model_validate(payload),
+        max_tracks=4,
+    )
+
+    assert assessment.valid is False
+    assert "EXHIBIT_LIMIT_EXCEEDED" in assessment.finding_codes
+
+
 def test_research_plan_validator_rejects_missing_collectors_and_exhibits():
     payload = _bound_plan_payload()
     payload["tracks"][0]["collector_ids"] = ["tariffs"]

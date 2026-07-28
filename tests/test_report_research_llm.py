@@ -109,4 +109,5 @@ def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
     assert "generation_mix" in user[1]
     assert "vector_knowledge" in user[1]
     assert "MAX_RESEARCH_TRACKS:\n4" in user[1]
+    assert "MAX_TOTAL_EXHIBITS:\n4" in user[1]
     assert len(user[1]) < 30_000
