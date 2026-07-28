@@ -159,6 +159,38 @@ def test_section_writer_uses_dedicated_model_and_disables_fallback(monkeypatch):
     assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
 
 
+def test_section_writer_accepts_openai_responses_content_blocks(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[0]
+
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            content=[
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "text",
+                    "text": json.dumps(_draft(section)),
+                    "annotations": [],
+                },
+            ]
+        ),
+    )
+
+    draft = llm.llm_write_report_section(
+        "Explain the price trend.",
+        plan,
+        section,
+        _manifest(),
+    )
+
+    assert isinstance(draft, ReportSectionDraft)
+
+
 def test_section_repair_attempt_stage_includes_local_attempt_number(monkeypatch):
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[0]

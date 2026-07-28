@@ -149,6 +149,43 @@ def test_report_response_log_uses_the_dedicated_output_limit(caplog, monkeypatch
     assert "effective_output_token_limit=8192" in record
 
 
+def test_responses_api_status_is_reported_as_completion_diagnostic(
+    caplog,
+    monkeypatch,
+):
+    from core import llm
+
+    class _Message:
+        content = [{"type": "text", "text": "not logged"}]
+        usage_metadata = {
+            "input_tokens": 100,
+            "output_tokens": 8192,
+            "total_tokens": 8292,
+        }
+        response_metadata = {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+
+    monkeypatch.setattr(llm.metrics, "log_llm_usage", lambda **_kwargs: None)
+    caplog.set_level("INFO", logger="Enai")
+
+    llm._log_usage_for_message(
+        _Message(),
+        model_name="gpt-5.6-luna",
+        attempt_stage="report_planner",
+    )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("llm_response_telemetry ")
+    )
+    assert "finish_reason=incomplete:max_output_tokens" in record
+    assert "completion_tokens=8192" in record
+    assert "not logged" not in record
+
+
 def test_analyzer_cross_check_events_are_tracked():
     """A5: cross-check outcomes are counted and exposed in get_stats."""
     m = Metrics()

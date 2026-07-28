@@ -58,7 +58,7 @@ from core.llm import (
     llm_generate_plan_and_sql,
     make_gemini,
 )
-from models import QueryContext
+from models import AnswerMode, QueryContext
 from utils.forecasting import (
     extract_excluded_years,
     extract_forecast_horizon_years,
@@ -644,8 +644,16 @@ def _merge_non_semantic_plan_fields(
 
 def prepare_context(ctx: QueryContext) -> QueryContext:
     """Stage 0: Fast context preparation before any heavy LLM call."""
-    ctx.mode = detect_analysis_mode(ctx.query)
-    log.info(f"Selected mode: {ctx.mode}")
+    ctx.mode = (
+        "analyst"
+        if ctx.answer_mode == AnswerMode.REPORT.value
+        else detect_analysis_mode(ctx.query)
+    )
+    log.info(
+        "Analysis depth selected: %s | answer_mode=%s",
+        ctx.mode,
+        ctx.answer_mode,
+    )
 
     ctx.lang_code = detect_language(ctx.query)
     ctx.lang_instruction = get_language_instruction(ctx.lang_code)
@@ -690,15 +698,18 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
 
     try:
         # Run the structured analyzer once, then patch obvious misroutes with deterministic guardrails.
-        analyzed = llm_analyze_question(
-            user_query=ctx.query,
-            conversation_history=ctx.conversation_history,
-            previous_contract=(
+        analyzer_kwargs = {
+            "user_query": ctx.query,
+            "conversation_history": ctx.conversation_history,
+            "previous_contract": (
                 ctx.previous_contract_snapshot if ENABLE_CONTRACT_CONTINUITY else ""
             ),
             # Set only by the flag-gated re-analysis in pipeline.py; "" otherwise.
-            evidence_anomaly_note=getattr(ctx, "evidence_anomaly", "") or "",
-        )
+            "evidence_anomaly_note": getattr(ctx, "evidence_anomaly", "") or "",
+        }
+        if ctx.answer_mode == AnswerMode.REPORT.value:
+            analyzer_kwargs["report_profile"] = True
+        analyzed = llm_analyze_question(**analyzer_kwargs)
         finalized = finalize_question_contract(
             analyzed,
             raw_query=ctx.query,

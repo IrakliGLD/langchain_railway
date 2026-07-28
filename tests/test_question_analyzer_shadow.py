@@ -2,6 +2,7 @@
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy
@@ -132,6 +133,108 @@ def test_llm_analyze_question_returns_validated_contract(monkeypatch):
     assert isinstance(model, QuestionAnalysis)
     assert model.classification.intent == "market_participant_definition"
     assert model.routing.preferred_path.value == "knowledge"
+
+
+def test_report_question_analyzer_uses_dedicated_profile_and_content_blocks(
+    monkeypatch,
+):
+    captured = {}
+    report_client = object()
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "REPORT_MODEL_TYPE", "openai")
+    monkeypatch.setattr(llm_core, "REPORT_MODEL", "gpt-5.6-luna")
+
+    def get_stage(*_args, **kwargs):
+        captured["stage_kwargs"] = kwargs
+        return report_client
+
+    def invoke(factory, model_name, _messages, **kwargs):
+        captured["client"] = factory()
+        captured["model_name"] = model_name
+        captured["invoke_kwargs"] = kwargs
+        return SimpleNamespace(
+            content=[
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "text",
+                    "text": json.dumps(_valid_payload()),
+                    "annotations": [],
+                },
+            ]
+        )
+
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", get_stage)
+    monkeypatch.setattr(llm_core, "_invoke_with_openai_fallback", invoke)
+
+    result = llm_core.llm_analyze_question(
+        "what is genex?",
+        report_profile=True,
+    )
+
+    assert isinstance(result, QuestionAnalysis)
+    assert captured["client"] is report_client
+    assert captured["model_name"] == "gpt-5.6-luna"
+    assert captured["stage_kwargs"]["report_profile"] is True
+    assert captured["invoke_kwargs"]["attempt_stage"] == (
+        "report_question_analyzer"
+    )
+    assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
+
+
+def test_planner_passes_report_profile_only_for_authoritative_report_mode(
+    monkeypatch,
+):
+    captured = []
+
+    def analyze(**kwargs):
+        captured.append(kwargs)
+        return QuestionAnalysis.model_validate(_valid_payload())
+
+    monkeypatch.setattr(planner, "llm_analyze_question", analyze)
+
+    planner.analyze_question(
+        QueryContext(query="what is genex?", answer_mode="report"),
+        source="llm_active",
+    )
+    planner.analyze_question(
+        QueryContext(query="what is genex?", answer_mode="standard"),
+        source="llm_active",
+    )
+
+    assert captured[0]["report_profile"] is True
+    assert "report_profile" not in captured[1]
+
+
+def test_prepare_context_logs_analysis_depth_separately_from_answer_mode(
+    caplog,
+):
+    caplog.set_level("INFO", logger="Enai")
+
+    planner.prepare_context(
+        QueryContext(
+            query="Analyze the balancing-price trend.",
+            answer_mode="report",
+        )
+    )
+
+    assert (
+        "Analysis depth selected: analyst | answer_mode=report"
+        in caplog.messages
+    )
+
+
+def test_prepare_context_locks_report_to_analyst_without_changing_standard():
+    report = planner.prepare_context(
+        QueryContext(query="What is GENEX?", answer_mode="report")
+    )
+    standard = planner.prepare_context(
+        QueryContext(query="What is GENEX?", answer_mode="standard")
+    )
+
+    assert report.answer_mode == "report"
+    assert report.mode == "analyst"
+    assert standard.answer_mode == "standard"
+    assert standard.mode == "light"
 
 
 def test_planner_shadow_records_analysis(monkeypatch):

@@ -25,6 +25,22 @@ def test_resolved_provider_rejects_unknown_value():
         vector_embeddings._resolved_provider("anthropic")
 
 
+def test_google_sdk_uses_auth_key_header_without_oauth_bearer(monkeypatch):
+    from google import genai
+
+    monkeypatch.delenv("GOOGLE_GENAI_USE_VERTEXAI", raising=False)
+    monkeypatch.delenv("GOOGLE_GENAI_USE_ENTERPRISE", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    client = genai.Client(api_key="AQ.test-auth-key")
+    try:
+        headers = client._api_client._http_options.headers
+        assert headers["x-goog-api-key"] == "AQ.test-auth-key"
+        assert "Authorization" not in headers
+    finally:
+        client.close()
+
+
 def test_get_embedding_provider_selects_openai(monkeypatch):
     captured = {}
 
