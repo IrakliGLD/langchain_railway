@@ -72,6 +72,28 @@ def test_get_primary_llm_dispatches_to_active_provider(monkeypatch):
     assert llm.get_primary_llm() is sentinel["gemini"]
 
 
+def test_report_stage_accessor_uses_dedicated_profile_without_changing_primary(
+    monkeypatch,
+):
+    primary = object()
+    report = object()
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-terra", raising=False)
+    monkeypatch.setattr(llm, "make_report", lambda: report, raising=False)
+    monkeypatch.setattr(llm, "get_primary_llm", lambda: primary)
+
+    assert llm.get_report_model_name("gemini-stage-model") == "gpt-5.6-terra"
+    assert (
+        llm.get_llm_for_stage(
+            "gemini-stage-model",
+            report_profile=True,
+            max_retries=1,
+        )
+        is report
+    )
+    assert llm.get_llm_for_stage() is primary
+
+
 def test_nvidia_factory_builds_chatopenai_with_base_url(monkeypatch):
     # Make the test robust to suite import order: config may have been imported
     # by an earlier test file before NVIDIA_API_KEY was set, so pin the key on
@@ -97,10 +119,117 @@ def test_nvidia_factory_requires_key(monkeypatch):
         llm_runtime.get_nvidia()
 
 
+def test_report_openai_factory_uses_dedicated_worker_profile(monkeypatch):
+    captured = {}
+
+    class _FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_runtime, "ChatOpenAI", _FakeChatOpenAI)
+    monkeypatch.setattr(llm_runtime, "REPORT_MODEL_TYPE", "openai")
+    monkeypatch.setattr(llm_runtime, "REPORT_MODEL", "gpt-5.6-terra")
+    monkeypatch.setattr(llm_runtime, "REPORT_MAX_OUTPUT_TOKENS", 8192)
+    monkeypatch.setattr(llm_runtime, "REPORT_TIMEOUT_SECONDS", 300)
+    monkeypatch.setattr(llm_runtime, "REPORT_REASONING_EFFORT", "medium")
+    monkeypatch.setattr(llm_runtime, "OPENAI_API_KEY", "report-openai-key")
+    monkeypatch.setattr(llm_runtime, "_report_llm", None, raising=False)
+
+    client = llm_runtime.get_report()
+
+    assert isinstance(client, _FakeChatOpenAI)
+    assert captured == {
+        "model": "gpt-5.6-terra",
+        "openai_api_key": "report-openai-key",
+        "max_tokens": 8192,
+        "request_timeout": 300,
+        "max_retries": 0,
+        "use_responses_api": True,
+        "reasoning_effort": "medium",
+    }
+
+
+def test_report_gemini_factory_uses_same_report_contract(monkeypatch):
+    captured = {}
+
+    class _FakeGemini:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        llm_runtime,
+        "ChatGoogleGenerativeAI",
+        _FakeGemini,
+    )
+    monkeypatch.setattr(llm_runtime, "REPORT_MODEL_TYPE", "gemini")
+    monkeypatch.setattr(llm_runtime, "REPORT_MODEL", "gemini-3.6-flash")
+    monkeypatch.setattr(llm_runtime, "REPORT_MAX_OUTPUT_TOKENS", 8192)
+    monkeypatch.setattr(llm_runtime, "REPORT_TIMEOUT_SECONDS", 300)
+    monkeypatch.setattr(llm_runtime, "REPORT_REASONING_EFFORT", "high")
+    monkeypatch.setattr(llm_runtime, "GOOGLE_API_KEY", "report-google-key")
+    monkeypatch.setattr(llm_runtime, "_report_llm", None, raising=False)
+
+    client = llm_runtime.get_report()
+
+    assert isinstance(client, _FakeGemini)
+    assert captured == {
+        "model": "gemini-3.6-flash",
+        "google_api_key": "report-google-key",
+        "convert_system_message_to_human": True,
+        "max_output_tokens": 8192,
+        "timeout": 300,
+        "max_retries": 1,
+        "thinking_level": "high",
+    }
+
+
+def test_report_nvidia_factory_keeps_nvidia_endpoint_and_key(monkeypatch):
+    captured = {}
+
+    class _FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_runtime, "ChatOpenAI", _FakeChatOpenAI)
+    monkeypatch.setattr(llm_runtime, "REPORT_MODEL_TYPE", "nvidia")
+    monkeypatch.setattr(
+        llm_runtime,
+        "REPORT_MODEL",
+        "nvidia/nemotron-3-super-120b-a12b",
+    )
+    monkeypatch.setattr(llm_runtime, "REPORT_MAX_OUTPUT_TOKENS", 8192)
+    monkeypatch.setattr(llm_runtime, "REPORT_TIMEOUT_SECONDS", 300)
+    monkeypatch.setattr(llm_runtime, "REPORT_REASONING_EFFORT", None)
+    monkeypatch.setattr(llm_runtime, "NVIDIA_API_KEY", "report-nvidia-key")
+    monkeypatch.setattr(
+        llm_runtime,
+        "NVIDIA_BASE_URL",
+        "https://integrate.api.nvidia.com/v1",
+    )
+    monkeypatch.setattr(llm_runtime, "_report_llm", None, raising=False)
+
+    client = llm_runtime.get_report()
+
+    assert isinstance(client, _FakeChatOpenAI)
+    assert captured == {
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "openai_api_key": "report-nvidia-key",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "max_tokens": 8192,
+        "request_timeout": 300,
+        "max_retries": 0,
+    }
+
+
 def test_should_fallback_to_openai_semantics(monkeypatch):
-    # Non-OpenAI primary + OpenAI key configured -> fallback allowed.
+    # Merely adding an OpenAI key never enables fallback.
     monkeypatch.setattr(llm, "MODEL_TYPE", "nvidia")
     monkeypatch.setattr(llm, "OPENAI_API_KEY", "k")
+    monkeypatch.setattr(llm, "ENABLE_OPENAI_FALLBACK", False)
+    assert llm._should_fallback_to_openai() is False
+
+    # An explicit deployment opt-in permits a non-OpenAI primary to fall back.
+    monkeypatch.setattr(llm, "ENABLE_OPENAI_FALLBACK", True)
     assert llm._should_fallback_to_openai() is True
     # Non-OpenAI primary + no OpenAI key -> no keyless fallback crash.
     monkeypatch.setattr(llm, "OPENAI_API_KEY", None)

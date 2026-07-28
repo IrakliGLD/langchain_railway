@@ -258,6 +258,37 @@ OPENAI_TIMEOUT_SECONDS: float | None = (
     float(_raw_openai_timeout) if _raw_openai_timeout and float(_raw_openai_timeout) > 0 else None
 )
 
+# Dedicated durable-report provider profile. Keep it disabled when
+# REPORT_MODEL_TYPE is absent so existing deployments retain their current
+# MODEL_TYPE + stage-override behavior. When enabled, validation below requires
+# an exact model and the selected provider's API key.
+REPORT_MODEL_TYPE = (
+    os.getenv("REPORT_MODEL_TYPE", "").strip().lower() or None
+)
+REPORT_MODEL = os.getenv("REPORT_MODEL", "").strip() or None
+REPORT_MAX_OUTPUT_TOKENS = _read_bounded_int_env(
+    "REPORT_MAX_OUTPUT_TOKENS",
+    8192,
+    minimum=256,
+    maximum=131072,
+)
+REPORT_TIMEOUT_SECONDS = _read_bounded_int_env(
+    "REPORT_TIMEOUT_SECONDS",
+    240,
+    minimum=30,
+    maximum=3600,
+)
+REPORT_REASONING_EFFORT = (
+    os.getenv("REPORT_REASONING_EFFORT", "").strip().lower() or None
+)
+
+# Merely configuring OPENAI_API_KEY must not turn OpenAI into an implicit
+# fallback for Gemini or NVIDIA. Fallback is opt-in and disabled by default.
+ENABLE_OPENAI_FALLBACK = (
+    os.getenv("ENABLE_OPENAI_FALLBACK", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
 # Per-stage model overrides.  When set, the named pipeline stage uses this
 # model instead of the global GEMINI_MODEL / OPENAI_MODEL.  Leave unset (or
 # empty) to inherit the global default.  Only Gemini model names are supported
@@ -548,6 +579,9 @@ def validate_runtime_settings(
     evidence_finalization_mode: str = "shadow",
     plan_validation_mode: str = "warn",
     openai_api_key: str | None = None,
+    report_model_type: str | None = None,
+    report_model: str | None = None,
+    report_reasoning_effort: str | None = None,
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -610,6 +644,48 @@ def validate_runtime_settings(
     # credential at startup like the other two.
     if model_type == "openai" and not openai_api_key:
         raise RuntimeError("MODEL_TYPE=openai but OPENAI_API_KEY is missing")
+    if report_model and not report_model_type:
+        raise RuntimeError("REPORT_MODEL requires REPORT_MODEL_TYPE")
+    if report_model_type:
+        if report_model_type not in valid_model_types:
+            raise RuntimeError(
+                "Invalid REPORT_MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+            )
+        if not report_model:
+            raise RuntimeError(
+                "REPORT_MODEL_TYPE requires REPORT_MODEL"
+            )
+        report_key = {
+            "gemini": google_api_key,
+            "openai": openai_api_key,
+            "nvidia": nvidia_api_key,
+        }[report_model_type]
+        if not report_key:
+            key_name = {
+                "gemini": "GOOGLE_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "nvidia": "NVIDIA_API_KEY",
+            }[report_model_type]
+            raise RuntimeError(
+                f"REPORT_MODEL_TYPE={report_model_type} but {key_name} is missing"
+            )
+    valid_reasoning_efforts = {
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+    if (
+        report_reasoning_effort
+        and report_reasoning_effort not in valid_reasoning_efforts
+    ):
+        raise RuntimeError(
+            "Invalid REPORT_REASONING_EFFORT. Expected one of: "
+            "none, minimal, low, medium, high, xhigh, max"
+        )
     normalized_release_sha = normalize_release_sha(release_sha)
     if deployment_env in {"staging", "production"} and not normalized_release_sha:
         raise RuntimeError("ENAI_RELEASE_SHA is required in staging and production")
@@ -633,6 +709,9 @@ validate_runtime_settings(
     evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
     plan_validation_mode=PLAN_VALIDATION_MODE,
     openai_api_key=OPENAI_API_KEY,
+    report_model_type=REPORT_MODEL_TYPE,
+    report_model=REPORT_MODEL,
+    report_reasoning_effort=REPORT_REASONING_EFFORT,
 )
 
 # ===================================================================

@@ -121,6 +121,44 @@ def test_section_provider_attempt_stages_are_unique_per_section(monkeypatch):
     ]
 
 
+def test_section_writer_uses_dedicated_model_and_disables_fallback(monkeypatch):
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[0]
+    captured = {}
+    report_client = object()
+
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-terra", raising=False)
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+
+    def get_stage(*_args, **kwargs):
+        captured["stage_kwargs"] = kwargs
+        return report_client
+
+    monkeypatch.setattr(llm, "get_llm_for_stage", get_stage)
+
+    def invoke(factory, model_name, _messages, **kwargs):
+        captured["client"] = factory()
+        captured["model_name"] = model_name
+        captured["invoke_kwargs"] = kwargs
+        return SimpleNamespace(content=json.dumps(_draft(section)))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    llm.llm_write_report_section(
+        "Explain the price trend.",
+        plan,
+        section,
+        _manifest(),
+    )
+
+    assert captured["client"] is report_client
+    assert captured["model_name"] == "gpt-5.6-terra"
+    assert captured["stage_kwargs"]["report_profile"] is True
+    assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
+
+
 def test_section_repair_attempt_stage_includes_local_attempt_number(monkeypatch):
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[0]

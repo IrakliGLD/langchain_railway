@@ -115,6 +115,40 @@ def test_llm_response_log_exposes_content_free_completion_diagnostics(
     assert _Message.content not in record
 
 
+def test_report_response_log_uses_the_dedicated_output_limit(caplog, monkeypatch):
+    from core import llm
+
+    class _Message:
+        content = "not logged"
+        usage_metadata = {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 125,
+        }
+        response_metadata = {"finish_reason": "stop"}
+
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai")
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-terra")
+    monkeypatch.setattr(llm, "REPORT_MAX_OUTPUT_TOKENS", 8192)
+    monkeypatch.setattr(llm.metrics, "log_llm_usage", lambda **_kwargs: None)
+    caplog.set_level("INFO", logger="Enai")
+
+    llm._log_usage_for_message(
+        _Message(),
+        model_name="gpt-5.6-terra",
+        attempt_stage="report_section_writer_key_findings",
+    )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("llm_response_telemetry ")
+    )
+    assert "provider=openai" in record
+    assert "configured_output_token_limit=8192" in record
+    assert "effective_output_token_limit=8192" in record
+
+
 def test_analyzer_cross_check_events_are_tracked():
     """A5: cross-check outcomes are counted and exposed in get_stats."""
     m = Metrics()

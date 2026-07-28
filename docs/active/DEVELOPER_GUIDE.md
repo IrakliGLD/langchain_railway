@@ -111,6 +111,31 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=...       # structured-summarizer-only overri
 
 See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) §3.2 / §3.9. Summarizer prompts routinely hit 90–110k chars in deep mode because `DOMAIN_KNOWLEDGE` + `EXTERNAL_SOURCE_PASSAGES` expand; analyzer prompts do not. Raising `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` independently is the right knob for that.
 
+## Dedicated Report Model
+
+Set the dedicated profile on the `enai-report-worker` Railway service. The web
+service does not need these values. The worker still needs the normal
+`MODEL_TYPE` provider key for evidence preparation, plus the selected Report
+provider key for report planning and section generation.
+
+```bash
+REPORT_MODEL_TYPE=openai
+REPORT_MODEL=gpt-5.6-terra
+REPORT_MAX_OUTPUT_TOKENS=8192
+REPORT_TIMEOUT_SECONDS=240
+REPORT_REASONING_EFFORT=medium
+OPENAI_API_KEY=...
+```
+
+Supported `REPORT_MODEL_TYPE` values are `openai`, `gemini`, and `nvidia`.
+Use `OPENAI_API_KEY`, `GOOGLE_API_KEY`, or `NVIDIA_API_KEY` respectively.
+When `REPORT_MODEL_TYPE` is absent, Report inherits the existing primary/stage
+model behavior. Report calls never use the implicit OpenAI fallback.
+
+`ENABLE_OPENAI_FALLBACK` defaults to `false` globally. Leave it unset to keep
+Standard and other primary-provider calls from falling back merely because an
+OpenAI key is configured for Report.
+
 ## Manual Endpoint Validation
 
 ```bash
