@@ -120,6 +120,30 @@ REPORT_JOB_TIMEOUT_SECONDS = _read_bounded_int_env(
     60,
     3600,
 )
+# Report research-track redesign rollout. Phase 0 only exposes and validates
+# the contract; disabled remains behaviorally identical to the legacy worker.
+REPORT_PIPELINE_V2_MODE = (
+    os.getenv("REPORT_PIPELINE_V2_MODE", "disabled").strip().lower()
+    or "disabled"
+)
+REPORT_MAX_GENERATIVE_CALLS = _read_bounded_int_env(
+    "REPORT_MAX_GENERATIVE_CALLS",
+    3,
+    2,
+    6,
+)
+REPORT_RESEARCH_MAX_TRACKS = _read_bounded_int_env(
+    "REPORT_RESEARCH_MAX_TRACKS",
+    4,
+    1,
+    8,
+)
+REPORT_RESEARCH_MAX_WORKERS = _read_bounded_int_env(
+    "REPORT_RESEARCH_MAX_WORKERS",
+    3,
+    1,
+    8,
+)
 
 
 # API Security
@@ -582,6 +606,10 @@ def validate_runtime_settings(
     report_model_type: str | None = None,
     report_model: str | None = None,
     report_reasoning_effort: str | None = None,
+    report_pipeline_v2_mode: str = "disabled",
+    report_max_generative_calls: int = 3,
+    report_research_max_tracks: int = 4,
+    report_research_max_workers: int = 3,
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -597,6 +625,24 @@ def validate_runtime_settings(
     if plan_validation_mode not in {"warn", "enforce"}:
         raise RuntimeError(
             "Invalid ENAI_PLAN_VALIDATION_MODE. Expected one of: warn, enforce"
+        )
+    if report_pipeline_v2_mode not in {"disabled", "shadow", "enabled"}:
+        raise RuntimeError(
+            "Invalid REPORT_PIPELINE_V2_MODE. Expected one of: "
+            "disabled, shadow, enabled"
+        )
+    if not 2 <= report_max_generative_calls <= 6:
+        raise RuntimeError(
+            "REPORT_MAX_GENERATIVE_CALLS must be between 2 and 6"
+        )
+    if not 1 <= report_research_max_tracks <= 8:
+        raise RuntimeError(
+            "REPORT_RESEARCH_MAX_TRACKS must be between 1 and 8"
+        )
+    if not 1 <= report_research_max_workers <= report_research_max_tracks:
+        raise RuntimeError(
+            "REPORT_RESEARCH_MAX_WORKERS must be between 1 and "
+            "REPORT_RESEARCH_MAX_TRACKS"
         )
     if deployment_env not in valid_deployment_envs:
         raise RuntimeError(
@@ -712,6 +758,10 @@ validate_runtime_settings(
     report_model_type=REPORT_MODEL_TYPE,
     report_model=REPORT_MODEL,
     report_reasoning_effort=REPORT_REASONING_EFFORT,
+    report_pipeline_v2_mode=REPORT_PIPELINE_V2_MODE,
+    report_max_generative_calls=REPORT_MAX_GENERATIVE_CALLS,
+    report_research_max_tracks=REPORT_RESEARCH_MAX_TRACKS,
+    report_research_max_workers=REPORT_RESEARCH_MAX_WORKERS,
 )
 
 # ===================================================================

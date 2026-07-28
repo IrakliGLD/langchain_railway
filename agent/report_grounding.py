@@ -672,9 +672,16 @@ def validate_paragraph_grounding(
                 errors.append("DIRECT_CLAIM_UNIT_NOT_RENDERED")
             continue
         displayed, row_facts = direct_fact
+        unit_facts = _grounding_facts_from_text(claim.unit)
         for index in matching_sentences:
             sentence_facts[index].add(displayed)
             sentence_facts[index].update(row_facts)
+            # Some verified unit labels carry numeric notation as part of the
+            # unit itself (for example ``share (0-1)``). Those literals are
+            # metadata from the verified table column, not independent prose
+            # claims, so ground them only in the sentence that renders the
+            # corresponding direct claim.
+            sentence_facts[index].update(unit_facts)
 
     for claim in paragraph.derived_claims:
         derived_fact = _verified_derived_fact(

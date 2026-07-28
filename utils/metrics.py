@@ -226,6 +226,7 @@ class Metrics:
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
                 "models": {},
+                "stages": {},
             }
         )
 
@@ -237,9 +238,27 @@ class Metrics:
         completion_tokens: int,
         total_tokens: int,
         estimated_cost_usd: float,
+        attempt_stage: str = "",
+        provider: str = "",
+        finish_reason: str = "",
     ):
         """Track aggregate and per-request LLM token/cost usage."""
         model_key = (model_name or "unknown").strip()
+        stage_key = re.sub(
+            r"[^A-Za-z0-9._:-]",
+            "_",
+            str(attempt_stage or "unknown").strip(),
+        )[:128] or "unknown"
+        provider_key = re.sub(
+            r"[^A-Za-z0-9._:-]",
+            "_",
+            str(provider or "unknown").strip().lower(),
+        )[:64] or "unknown"
+        finish_key = re.sub(
+            r"[^A-Za-z0-9._:-]",
+            "_",
+            str(finish_reason or "unreported").strip().lower(),
+        )[:128] or "unreported"
         prompt_tokens = max(0, int(prompt_tokens or 0))
         completion_tokens = max(0, int(completion_tokens or 0))
         total_tokens = max(0, int(total_tokens or 0))
@@ -291,6 +310,31 @@ class Metrics:
             req_bucket["completion_tokens"] += completion_tokens
             req_bucket["total_tokens"] += total_tokens
             req_bucket["estimated_cost_usd"] += cost
+            stage_bucket = current.setdefault("stages", {}).setdefault(
+                stage_key,
+                {
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "models": {},
+                    "providers": {},
+                    "finish_reasons": {},
+                },
+            )
+            stage_bucket["calls"] += 1
+            stage_bucket["prompt_tokens"] += prompt_tokens
+            stage_bucket["completion_tokens"] += completion_tokens
+            stage_bucket["total_tokens"] += total_tokens
+            stage_bucket["models"][model_key] = (
+                stage_bucket["models"].get(model_key, 0) + 1
+            )
+            stage_bucket["providers"][provider_key] = (
+                stage_bucket["providers"].get(provider_key, 0) + 1
+            )
+            stage_bucket["finish_reasons"][finish_key] = (
+                stage_bucket["finish_reasons"].get(finish_key, 0) + 1
+            )
             _request_usage_var.set(current)
 
     def get_current_request_telemetry(self) -> Dict[str, Any]:
@@ -305,7 +349,24 @@ class Metrics:
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
                 "models": {},
+                "stages": {},
             }
+        stages = {
+            stage: {
+                "calls": int(bucket.get("calls", 0)),
+                "prompt_tokens": int(bucket.get("prompt_tokens", 0)),
+                "completion_tokens": int(
+                    bucket.get("completion_tokens", 0)
+                ),
+                "total_tokens": int(bucket.get("total_tokens", 0)),
+                "models": dict(bucket.get("models", {})),
+                "providers": dict(bucket.get("providers", {})),
+                "finish_reasons": dict(
+                    bucket.get("finish_reasons", {})
+                ),
+            }
+            for stage, bucket in current.get("stages", {}).items()
+        }
         return {
             "trace_id": current.get("trace_id", ""),
             "llm_calls": int(current.get("llm_calls", 0)),
@@ -314,6 +375,7 @@ class Metrics:
             "total_tokens": int(current.get("total_tokens", 0)),
             "estimated_cost_usd": float(current.get("estimated_cost_usd", 0.0)),
             "models": dict(current.get("models", {})),
+            "stages": stages,
         }
 
     def finalize_request_telemetry(self) -> Dict[str, Any]:

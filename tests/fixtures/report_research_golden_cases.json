@@ -1,0 +1,114 @@
+{
+  "contract_version": "report-golden-cases-v1",
+  "cases": [
+    {
+      "id": "prices_security_market_model",
+      "profile": "compound",
+      "query": "Assess current market model and prices. What is the deregulation stage and how will the new market model impact the market and energy security?",
+      "language_code": "en",
+      "expected_required_topics": [
+        "price_dynamics",
+        "energy_security",
+        "market_model"
+      ],
+      "expected_collectors": [
+        "prices",
+        "generation_mix",
+        "vector_knowledge"
+      ],
+      "minimum_numeric_observations": 4,
+      "minimum_chart_count": 2
+    },
+    {
+      "id": "balancing_price_trend",
+      "profile": "quantitative",
+      "query": "Analyze monthly balancing electricity prices during 2025.",
+      "language_code": "en",
+      "expected_required_topics": [
+        "price_dynamics"
+      ],
+      "expected_collectors": [
+        "prices"
+      ],
+      "minimum_numeric_observations": 3,
+      "minimum_chart_count": 1
+    },
+    {
+      "id": "market_legislation_status",
+      "profile": "knowledge",
+      "query": "Explain the legal stage of electricity market deregulation and the planned target market model.",
+      "language_code": "en",
+      "expected_required_topics": [
+        "market_model",
+        "legislation"
+      ],
+      "expected_collectors": [
+        "vector_knowledge"
+      ],
+      "minimum_numeric_observations": 0,
+      "minimum_chart_count": 0
+    },
+    {
+      "id": "price_and_rules",
+      "profile": "mixed",
+      "query": "Compare recent electricity prices with the market rules that could affect them.",
+      "language_code": "en",
+      "expected_required_topics": [
+        "price_dynamics",
+        "market_model"
+      ],
+      "expected_collectors": [
+        "prices",
+        "vector_knowledge"
+      ],
+      "minimum_numeric_observations": 3,
+      "minimum_chart_count": 1
+    },
+    {
+      "id": "noisy_price_security",
+      "profile": "noisy",
+      "query": "asses prce chnges and enrgy securty for georgia 2024-2025",
+      "language_code": "en",
+      "expected_required_topics": [
+        "price_dynamics",
+        "energy_security"
+      ],
+      "expected_collectors": [
+        "prices",
+        "generation_mix"
+      ],
+      "minimum_numeric_observations": 4,
+      "minimum_chart_count": 2
+    },
+    {
+      "id": "georgian_energy_security",
+      "profile": "multilingual",
+      "query": "შეაფასე საქართველოს ელექტროენერგიის ფასები და ენერგეტიკული უსაფრთხოება 2025 წელს.",
+      "language_code": "ka",
+      "expected_required_topics": [
+        "price_dynamics",
+        "energy_security"
+      ],
+      "expected_collectors": [
+        "prices",
+        "generation_mix"
+      ],
+      "minimum_numeric_observations": 4,
+      "minimum_chart_count": 2
+    },
+    {
+      "id": "ambiguous_market_assessment",
+      "profile": "ambiguous",
+      "query": "Assess the electricity market.",
+      "language_code": "en",
+      "expected_required_topics": [
+        "market_overview"
+      ],
+      "expected_collectors": [
+        "vector_knowledge"
+      ],
+      "minimum_numeric_observations": 0,
+      "minimum_chart_count": 0
+    }
+  ]
+}

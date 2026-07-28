@@ -20,6 +20,10 @@ from config import (
     DB_POOL_TIMEOUT_SECONDS,
     DB_STATEMENT_TIMEOUT_MS,
     REPORT_JOB_TIMEOUT_SECONDS,
+    REPORT_MAX_GENERATIVE_CALLS,
+    REPORT_PIPELINE_V2_MODE,
+    REPORT_RESEARCH_MAX_TRACKS,
+    REPORT_RESEARCH_MAX_WORKERS,
     REPORT_SECTION_MAX_WORKERS,
     REPORT_WORKER_DB_URL,
     REPORT_WORKER_ENABLED,
@@ -98,6 +102,10 @@ def build_report_worker_runtime() -> tuple[
     processor = ReportJobProcessor(
         max_section_workers=REPORT_SECTION_MAX_WORKERS,
         job_timeout_seconds=REPORT_JOB_TIMEOUT_SECONDS,
+        pipeline_v2_mode=REPORT_PIPELINE_V2_MODE,
+        max_generative_calls=REPORT_MAX_GENERATIVE_CALLS,
+        max_research_tracks=REPORT_RESEARCH_MAX_TRACKS,
+        max_research_workers=REPORT_RESEARCH_MAX_WORKERS,
     )
     worker = ReportJobWorker(
         repository=repository,
@@ -143,9 +151,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     log.info(
-        "Report worker started. section_workers=%s job_timeout_seconds=%s",
+        "Report worker started. section_workers=%s job_timeout_seconds=%s "
+        "pipeline_v2_mode=%s generative_call_budget=%s "
+        "research_max_tracks=%s research_max_workers=%s",
         REPORT_SECTION_MAX_WORKERS,
         REPORT_JOB_TIMEOUT_SECONDS,
+        REPORT_PIPELINE_V2_MODE,
+        REPORT_MAX_GENERATIVE_CALLS,
+        REPORT_RESEARCH_MAX_TRACKS,
+        REPORT_RESEARCH_MAX_WORKERS,
     )
     try:
         worker.run_until_stopped(processor, stop_event=stop_event)

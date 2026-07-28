@@ -26,6 +26,9 @@ from config import (  # noqa: E402
     HTTP_SERVER_WORKERS,
     MAX_REQUEST_BODY_BYTES,
     REPORT_JOB_TIMEOUT_SECONDS,
+    REPORT_MAX_GENERATIVE_CALLS,
+    REPORT_RESEARCH_MAX_TRACKS,
+    REPORT_RESEARCH_MAX_WORKERS,
     REPORT_SECTION_MAX_WORKERS,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
@@ -72,6 +75,71 @@ def test_database_work_budget_reserves_control_capacity():
 def test_report_concurrency_and_deadline_controls_are_bounded():
     assert 1 <= REPORT_SECTION_MAX_WORKERS <= 8
     assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3600
+    assert 2 <= REPORT_MAX_GENERATIVE_CALLS <= 6
+    assert 1 <= REPORT_RESEARCH_MAX_TRACKS <= 8
+    assert 1 <= REPORT_RESEARCH_MAX_WORKERS <= REPORT_RESEARCH_MAX_TRACKS
+
+
+def _report_pipeline_v2_with_env(**overrides) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    for name in (
+        "REPORT_PIPELINE_V2_MODE",
+        "REPORT_MAX_GENERATIVE_CALLS",
+        "REPORT_RESEARCH_MAX_TRACKS",
+        "REPORT_RESEARCH_MAX_WORKERS",
+    ):
+        env.pop(name, None)
+    env.update(overrides)
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import config; "
+                "print(config.REPORT_PIPELINE_V2_MODE, "
+                "config.REPORT_MAX_GENERATIVE_CALLS, "
+                "config.REPORT_RESEARCH_MAX_TRACKS, "
+                "config.REPORT_RESEARCH_MAX_WORKERS)"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_report_pipeline_v2_defaults_are_disabled_and_bounded():
+    result = _report_pipeline_v2_with_env()
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["disabled", "3", "4", "3"]
+
+
+@pytest.mark.parametrize("mode", ["disabled", "shadow", "enabled"])
+def test_report_pipeline_v2_accepts_only_declared_rollout_modes(mode):
+    result = _report_pipeline_v2_with_env(REPORT_PIPELINE_V2_MODE=mode)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[0] == mode
+
+
+def test_report_pipeline_v2_rejects_unknown_rollout_mode():
+    result = _report_pipeline_v2_with_env(REPORT_PIPELINE_V2_MODE="maybe")
+
+    assert result.returncode != 0
+    assert "REPORT_PIPELINE_V2_MODE" in result.stderr
+
+
+def test_report_pipeline_v2_rejects_worker_count_above_track_count():
+    result = _report_pipeline_v2_with_env(
+        REPORT_RESEARCH_MAX_TRACKS="2",
+        REPORT_RESEARCH_MAX_WORKERS="3",
+    )
+
+    assert result.returncode != 0
+    assert "REPORT_RESEARCH_MAX_WORKERS" in result.stderr
 
 
 def test_report_section_concurrency_defaults_to_one_eight_section_wave():

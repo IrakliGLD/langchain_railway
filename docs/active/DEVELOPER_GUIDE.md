@@ -115,9 +115,10 @@ See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) ยง3.2 / ย
 
 Set the dedicated profile on the `enai-report-worker` Railway service. The web
 service does not need these values. Report mode is authoritative once selected
-by the client: its question/evidence analyzer, report planner, plan repair,
-section writer, and section repair calls all use this profile. Report analysis
-depth is fixed to `analyst`; it is not reclassified from the question text.
+by the client. In the adaptive v2 pipeline, the research planner and
+whole-document writer/repair calls use this profile; the legacy question
+analyzer and per-section writers are not invoked. Report mode is not
+reclassified from the question text.
 
 The worker still needs the normal provider settings for non-LLM evidence
 operations. In particular, vector embeddings keep their separately configured
@@ -129,6 +130,10 @@ REPORT_MODEL=gpt-5.6-terra
 REPORT_MAX_OUTPUT_TOKENS=8192
 REPORT_TIMEOUT_SECONDS=240
 REPORT_REASONING_EFFORT=medium
+REPORT_PIPELINE_V2_MODE=shadow
+REPORT_MAX_GENERATIVE_CALLS=3
+REPORT_RESEARCH_MAX_TRACKS=4
+REPORT_RESEARCH_MAX_WORKERS=3
 OPENAI_API_KEY=...
 ```
 
@@ -140,6 +145,15 @@ model behavior. Report calls never use the implicit OpenAI fallback.
 `ENABLE_OPENAI_FALLBACK` defaults to `false` globally. Leave it unset to keep
 Standard and other primary-provider calls from falling back merely because an
 OpenAI key is configured for Report.
+
+`REPORT_PIPELINE_V2_MODE` defaults to `disabled`. Use `shadow` first: it runs
+the research planner, deterministic collectors, evidence gate, exhibits, and
+document planner for content-free comparison telemetry, but still publishes
+the legacy result. After validating coverage and cost, apply the
+`2026-07-28_report_result_v2.sql` database patch, deploy the `report-jobs` Edge
+function and frontend, and then set the worker to `enabled`. Enabled mode uses
+at most one research-planner call, one whole-document writer call, and one
+targeted repair call. Set `REPORT_MAX_GENERATIVE_CALLS=2` to disable repair.
 
 ## Manual Endpoint Validation
 
