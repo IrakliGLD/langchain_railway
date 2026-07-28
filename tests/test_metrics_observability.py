@@ -70,6 +70,51 @@ def test_cost_estimation_uses_actual_model_provider(monkeypatch):
     assert abs(gemini_cost - 7.0) < 1e-9
 
 
+def test_llm_response_log_exposes_content_free_completion_diagnostics(
+    caplog,
+    monkeypatch,
+):
+    from core import llm
+
+    class _Message:
+        content = "sensitive answer text must never be logged"
+        usage_metadata = {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+        }
+        response_metadata = {
+            "finish_reason": "length",
+        }
+
+    monkeypatch.setattr(llm.metrics, "log_llm_usage", lambda **_kwargs: None)
+    caplog.set_level("INFO", logger="Enai")
+
+    llm._log_usage_for_message(
+        _Message(),
+        model_name="openai/gpt-oss-20b",
+        attempt_stage="report_section_writer_key_findings",
+        configured_output_token_limit=16000,
+        effective_output_token_limit=4096,
+    )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("llm_response_telemetry ")
+    )
+    assert "provider=nvidia" in record
+    assert "stage=report_section_writer_key_findings" in record
+    assert "prompt_tokens=120" in record
+    assert "completion_tokens=30" in record
+    assert "total_tokens=150" in record
+    assert "finish_reason=length" in record
+    assert "configured_output_token_limit=16000" in record
+    assert "effective_output_token_limit=4096" in record
+    assert "provider_reported_output_token_limit=unreported" in record
+    assert _Message.content not in record
+
+
 def test_analyzer_cross_check_events_are_tracked():
     """A5: cross-check outcomes are counted and exposed in get_stats."""
     m = Metrics()

@@ -319,10 +319,31 @@ def test_brief_pipeline_uses_one_knowledge_call_and_skips_every_heavy_stage(
 
 
 def test_brief_knowledge_answer_sets_conceptual_terminal_contract(monkeypatch) -> None:
+    captured = {}
+    curated_knowledge = (
+        "# Balancing market\n"
+        "A balancing market settles deviations between scheduled and actual delivery."
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "get_brief_knowledge_for_query",
+        lambda query, max_chars=12000: (
+            captured.update(
+                knowledge_query=query,
+                knowledge_max_chars=max_chars,
+            )
+            or curated_knowledge
+        ),
+    )
+
+    def _answer(*_args, **kwargs):
+        captured["llm_domain_knowledge"] = kwargs["domain_knowledge"]
+        return "A balancing market settles real-time deviations."
+
     monkeypatch.setattr(
         summarizer,
         "llm_answer_brief_knowledge",
-        lambda *_args, **_kwargs: "A balancing market settles real-time deviations.",
+        _answer,
         raising=False,
     )
     ctx = QueryContext(
@@ -336,10 +357,14 @@ def test_brief_knowledge_answer_sets_conceptual_terminal_contract(monkeypatch) -
 
     assert result.summary == "A balancing market settles real-time deviations."
     assert result.summary_source == "brief_knowledge"
-    assert result.summary_citations == []
+    assert result.summary_domain_knowledge == curated_knowledge
+    assert result.summary_citations == ["domain_knowledge"]
     assert result.summary_provenance_gate_reason == "not_applicable_brief_knowledge"
     assert result.terminal_outcome == "conceptual_answer"
     assert count_words(result.summary) <= BRIEF_MAX_WORDS
+    assert captured["knowledge_query"] == "What is a balancing market?"
+    assert captured["knowledge_max_chars"] == 12000
+    assert captured["llm_domain_knowledge"] == curated_knowledge
 
 
 def test_brief_model_call_is_single_compact_unstructured_invocation(monkeypatch) -> None:
@@ -384,6 +409,10 @@ def test_brief_model_call_is_single_compact_unstructured_invocation(monkeypatch)
         "Why did the balancing price change in July 2025?",
         lang_instruction="Respond in English.",
         conversation_history=[{"role": "user", "content": "Earlier question"}],
+        domain_knowledge=(
+            "# Balancing price\n"
+            "Balancing prices may reflect the settlement design described here."
+        ),
     )
 
     assert answer == "Use Standard mode for an evidence-based July 2025 analysis."
@@ -394,6 +423,10 @@ def test_brief_model_call_is_single_compact_unstructured_invocation(monkeypatch)
     assert len(messages) == 2
     assert "UNTRUSTED_DATA_PREVIEW" not in messages[1][1]
     assert "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES" not in messages[1][1]
+    assert "UNTRUSTED_CURATED_KNOWLEDGE" in messages[1][1]
+    assert "# Balancing price" in messages[1][1]
+    assert "only the provided curated knowledge" in messages[0][1]
+    assert "pre-trained general knowledge" not in messages[0][1]
     assert "at most 120 words" in messages[0][1]
 
 

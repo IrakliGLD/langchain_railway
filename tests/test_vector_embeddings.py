@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import types
 
@@ -55,7 +56,7 @@ def test_get_embedding_provider_selects_openai(monkeypatch):
     assert captured["dimensions"] == 1536
 
 
-def test_get_embedding_provider_selects_gemini(monkeypatch):
+def test_get_embedding_provider_selects_gemini(monkeypatch, caplog):
     captured = {}
 
     class FakeClient:
@@ -78,7 +79,8 @@ def test_get_embedding_provider_selects_gemini(monkeypatch):
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", '"test-google-key"')
+    caplog.set_level("INFO", logger="Enai")
     google_module = types.ModuleType("google")
     genai_module = types.ModuleType("google.genai")
     genai_module.Client = FakeClient
@@ -102,6 +104,17 @@ def test_get_embedding_provider_selects_gemini(monkeypatch):
     assert captured["model"] == "gemini-embedding-001"
     assert captured["api_key"] == "test-google-key"
     assert captured["output_dimensionality"] == 768
+    expected_fingerprint = hashlib.sha256(
+        b"test-google-key"
+    ).hexdigest()[:12]
+    init_log = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("embedding_provider_initialized ")
+    )
+    assert "provider=gemini" in init_log
+    assert f"credential_fingerprint={expected_fingerprint}" in init_log
+    assert "test-google-key" not in init_log
 
 
 def test_gemini_provider_validates_embedding_dimensions(monkeypatch):
@@ -231,6 +244,27 @@ def test_get_embedding_provider_caches_instance_per_config(monkeypatch):
         assert fourth is not third
     finally:
         vector_embeddings.reset_embedding_provider_cache()
+
+
+def test_embedding_provider_cache_rotates_when_credential_changes(monkeypatch):
+    class FakeEmbeddings:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENAI_API_KEY", "first-key")
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_openai",
+        types.SimpleNamespace(OpenAIEmbeddings=FakeEmbeddings),
+    )
+
+    first = vector_embeddings.get_embedding_provider()
+    monkeypatch.setenv("OPENAI_API_KEY", "second-key")
+    second = vector_embeddings.get_embedding_provider()
+
+    assert second is not first
 
 
 def test_query_embedding_cache_identity_includes_all_vector_compatibility_fields(monkeypatch):

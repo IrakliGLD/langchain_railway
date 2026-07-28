@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import threading
 from typing import Any, Callable, List, Literal, Protocol
@@ -15,6 +17,46 @@ from utils.provider_attempts import (
     wrap_provider_failure,
 )
 from utils.request_deadline import current_request_execution_scope
+
+log = logging.getLogger("Enai")
+
+
+def _read_api_key(name: str) -> str:
+    """Read an API key while tolerating quotes copied into deployment envs."""
+    value = os.getenv(name, "").strip()
+    if (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in {"'", '"'}
+    ):
+        value = value[1:-1].strip()
+    return value
+
+
+def _credential_fingerprint(value: str) -> str:
+    """Return a safe identifier for comparing configured credentials."""
+    if not value:
+        return "missing"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_provider_identity(
+    *,
+    provider: str,
+    model: str,
+    dimension: int,
+    credential_source: str,
+    credential: str,
+) -> None:
+    log.info(
+        "embedding_provider_initialized provider=%s model=%s dimension=%d "
+        "credential_source=%s credential_fingerprint=%s",
+        provider,
+        model,
+        dimension,
+        credential_source,
+        _credential_fingerprint(credential),
+    )
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -118,7 +160,7 @@ class OpenAIEmbeddingProvider:
     """OpenAI-backed embedding provider for 1536-dimensional vectors."""
 
     def __init__(self, model: str | None = None) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        api_key = _read_api_key("OPENAI_API_KEY")
         resolved_model = (model or os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small")).strip()
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for vector embeddings")
@@ -145,6 +187,13 @@ class OpenAIEmbeddingProvider:
                     "Configured embedding dimension enforcement is not supported by the installed langchain_openai version"
                 ) from exc
             raise
+        _log_provider_identity(
+            provider=self._provider_name,
+            model=self._model,
+            dimension=self._expected_dimension,
+            credential_source="OPENAI_API_KEY",
+            credential=api_key,
+        )
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         timeout = _embedding_timeout_seconds("openai", "document_embedding")
@@ -177,7 +226,7 @@ class GeminiEmbeddingProvider:
     """Gemini-backed embedding provider using the available Google SDK."""
 
     def __init__(self, model: str | None = None) -> None:
-        api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+        api_key = _read_api_key("GOOGLE_API_KEY")
         resolved_model = (model or os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")).strip()
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY is required for Gemini vector embeddings")
@@ -214,6 +263,13 @@ class GeminiEmbeddingProvider:
             self._client = genai.Client(api_key=api_key)
         self._config = types.EmbedContentConfig(
             output_dimensionality=self._expected_dimension,
+        )
+        _log_provider_identity(
+            provider=self._provider_name,
+            model=self._model,
+            dimension=self._expected_dimension,
+            credential_source="GOOGLE_API_KEY",
+            credential=api_key,
         )
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -286,12 +342,17 @@ class GeminiEmbeddingProvider:
 # Provider construction builds an SDK client (and its HTTP session) — reuse it
 # across requests instead of rebuilding per retrieval. Keyed by the env values
 # that determine construction, so a config change never serves a stale client.
-_PROVIDER_CACHE: dict[tuple[str, str, str, str, str, str], EmbeddingProvider] = {}
+_PROVIDER_CACHE: dict[tuple[str, ...], EmbeddingProvider] = {}
 _PROVIDER_CACHE_LOCK = threading.Lock()
 
 
-def _provider_cache_key(resolved_provider: str) -> tuple[str, str, str, str, str, str]:
+def _provider_cache_key(resolved_provider: str) -> tuple[str, ...]:
     default_model = "gemini-embedding-001" if resolved_provider == "gemini" else "text-embedding-3-small"
+    credential_name = (
+        "GOOGLE_API_KEY"
+        if resolved_provider == "gemini"
+        else "OPENAI_API_KEY"
+    )
     return (
         resolved_provider,
         os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", default_model).strip() or default_model,
@@ -299,6 +360,7 @@ def _provider_cache_key(resolved_provider: str) -> tuple[str, str, str, str, str
         os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1",
         os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1",
         str(_batch_size()),
+        _credential_fingerprint(_read_api_key(credential_name)),
     )
 
 

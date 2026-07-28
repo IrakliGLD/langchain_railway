@@ -95,6 +95,52 @@ def test_report_section_concurrency_defaults_to_one_eight_section_wave():
     assert result.stdout.strip() == "8"
 
 
+def _nvidia_token_limits_with_env(**overrides) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env.update(overrides)
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import config; "
+                "print(config.NVIDIA_CONFIGURED_MAX_TOKENS, config.NVIDIA_MAX_TOKENS)"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_nvidia_hosted_gpt_oss_20b_output_limit_is_capped_to_provider_contract():
+    result = _nvidia_token_limits_with_env(
+        NVIDIA_MODEL="openai/gpt-oss-20b",
+        NVIDIA_BASE_URL="https://integrate.api.nvidia.com/v1",
+        NVIDIA_MAX_TOKENS="16000",
+    )
+
+    assert result.returncode == 0, result.stderr
+    configured, effective = (int(value) for value in result.stdout.split())
+    assert configured == 16000
+    assert effective == 4096
+
+
+def test_custom_nvidia_compatible_endpoint_keeps_its_configured_output_limit():
+    result = _nvidia_token_limits_with_env(
+        NVIDIA_MODEL="openai/gpt-oss-20b",
+        NVIDIA_BASE_URL="https://nim.internal.example/v1",
+        NVIDIA_MAX_TOKENS="16000",
+    )
+
+    assert result.returncode == 0, result.stderr
+    configured, effective = (int(value) for value in result.stdout.split())
+    assert configured == 16000
+    assert effective == 16000
+
+
 def _config_with_env(**overrides) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(overrides)

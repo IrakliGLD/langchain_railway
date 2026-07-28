@@ -7,6 +7,7 @@ from the monolithic main.py for better organization.
 import os
 import re
 from textwrap import dedent
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -200,11 +201,28 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # for cost attribution automatically. Restart required (env read at import).
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-# Output-token cap and sampling temperature for the NVIDIA client. max_tokens
-# matters for reasoning models (gpt-oss-120b, glm-5.2) whose hidden reasoning
-# counts against the output budget — raise NVIDIA_MAX_TOKENS (e.g. 16384) if
-# answers get truncated.
-NVIDIA_MAX_TOKENS = max(1, int(os.getenv("NVIDIA_MAX_TOKENS", "4096")))
+# Output-token cap and sampling temperature for the NVIDIA client. The original
+# operator value remains available for telemetry, while known NVIDIA-hosted
+# model limits are enforced before the request is sent. Custom compatible
+# endpoints retain their configured value because their contracts may differ.
+NVIDIA_CONFIGURED_MAX_TOKENS = max(
+    1,
+    int(os.getenv("NVIDIA_MAX_TOKENS", "4096")),
+)
+_NVIDIA_HOSTED_OUTPUT_LIMITS = {
+    "openai/gpt-oss-20b": 4096,
+}
+_nvidia_host = (urlparse(NVIDIA_BASE_URL).hostname or "").lower()
+_nvidia_hosted_limit = (
+    _NVIDIA_HOSTED_OUTPUT_LIMITS.get(NVIDIA_MODEL.strip().lower())
+    if _nvidia_host == "integrate.api.nvidia.com"
+    else None
+)
+NVIDIA_MAX_TOKENS = (
+    min(NVIDIA_CONFIGURED_MAX_TOKENS, _nvidia_hosted_limit)
+    if _nvidia_hosted_limit is not None
+    else NVIDIA_CONFIGURED_MAX_TOKENS
+)
 NVIDIA_TEMPERATURE = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
 # Wall-clock bound per NVIDIA call, in seconds. Defaults to 90; explicitly set
 # to 0 only when an unbounded call is intentionally required. A slow shared-endpoint model (the
