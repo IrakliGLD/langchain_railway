@@ -67,6 +67,7 @@ from core.llm import (
     classify_query_type,
     get_query_focus,
     get_relevant_domain_knowledge,
+    llm_answer_brief_knowledge,
     llm_summarize,
     llm_summarize_structured,
 )
@@ -77,7 +78,7 @@ from utils.language import (
     get_transient_failure_message,
 )
 from utils.metrics import metrics
-from utils.provider_attempts import ProviderExecutionError
+from utils.provider_attempts import ProviderDeliveryDisposition, ProviderExecutionError
 from utils.residual_price import RESIDUAL_DIRECT_INTENTS, resolve_import_share_filter
 from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
@@ -676,6 +677,47 @@ def answer_transient_failure(
         failure.disposition.value,
         deadline_remaining_ms,
     )
+    return ctx
+
+
+def answer_brief_knowledge(ctx: QueryContext) -> QueryContext:
+    """Produce the knowledge-only Brief response with exactly one model stage."""
+    ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
+    ctx.summary_domain_knowledge = ""
+    try:
+        ctx.summary = llm_answer_brief_knowledge(
+            ctx.effective_query,
+            lang_instruction=ctx.lang_instruction,
+            conversation_history=ctx.conversation_history,
+        )
+    except ProviderExecutionError as exc:
+        return answer_transient_failure(ctx, exc)
+    except Exception as exc:
+        log.warning(
+            "Brief knowledge answer failed before a usable response (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
+        failure = ProviderExecutionError(
+            "brief knowledge answer failed",
+            provider="local",
+            stage="brief_knowledge",
+            disposition=ProviderDeliveryDisposition.PERMANENT_FAILURE,
+        )
+        return answer_transient_failure(ctx, failure)
+
+    ctx.summary_source = "brief_knowledge"
+    ctx.summary_claims = []
+    ctx.summary_citations = []
+    ctx.summary_confidence = 0.6
+    ctx.summary_claim_provenance = []
+    ctx.summary_provenance_coverage = 0.0
+    ctx.summary_provenance_gate_passed = True
+    ctx.summary_provenance_gate_reason = "not_applicable_brief_knowledge"
+    ctx.terminal_outcome = TerminalOutcome.CONCEPTUAL_ANSWER.value
+    ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
+    apply_answer_mode_policy(ctx)
+    metrics.log_terminal_outcome(TerminalOutcome.CONCEPTUAL_ANSWER.value)
     return ctx
 
 

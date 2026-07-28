@@ -2972,6 +2972,45 @@ def _process_query_impl(
     ctx = stages.run("stage_0_prepare_context", planner.prepare_context)
     _trace_stage("stage_0_prepare_context", t_stage, conceptual=ctx.is_conceptual, lang=ctx.lang_code)
 
+    # Brief is a separate knowledge-only product contract. It deliberately
+    # exits before question analysis, vector/domain retrieval, typed tools,
+    # SQL, analytical enrichment, structured summarization, and charting.
+    if ctx.answer_mode == AnswerMode.BRIEF.value:
+        ctx.mode = "light"
+        ctx.is_conceptual = True
+        ctx.response_mode = ResponseMode.KNOWLEDGE_PRIMARY.value
+        ctx.resolution_policy = ResolutionPolicy.ANSWER.value
+        ctx.vector_retrieval_tier = VectorRetrievalTier.SKIP.value
+        ctx.skip_sql = True
+        ctx.skip_sql_reason = "brief_knowledge_only"
+        ctx.used_tool = False
+        ctx.agent_outcome = "conceptual_exit"
+        ctx.charts = []
+        t_stage = time.time()
+        ctx = stages.run(
+            "stage_0_1_brief_knowledge",
+            summarizer.answer_brief_knowledge,
+        )
+        _trace_stage(
+            "stage_0_1_brief_knowledge",
+            t_stage,
+            route="brief_knowledge_only",
+            analyzer_calls=0,
+            vector_calls=0,
+            tool_calls=0,
+            analytical_stages=0,
+            chart_calls=0,
+            model_call_limit=1,
+            outcome=ctx.terminal_outcome,
+        )
+        log.info(
+            "Brief route complete: route=knowledge_only analyzer_calls=0 "
+            "vector_calls=0 tool_calls=0 analytical_stages=0 chart_calls=0 "
+            "model_call_limit=1 outcome=%s",
+            ctx.terminal_outcome or "unknown",
+        )
+        return ctx
+
     # Stage 0.2: structured question analysis
     if ENABLE_QUESTION_ANALYZER_SHADOW or ENABLE_QUESTION_ANALYZER_HINTS:
         t_stage = time.time()
