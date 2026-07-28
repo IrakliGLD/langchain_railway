@@ -26,7 +26,9 @@ The 2026-07-08 design-gap series closed the review's "the pipeline is a monologu
 ```text
 HTTP /ask
   → Stage 0       prepare_context
+                  (Report answer mode locks analysis depth to analyst)
   → Stage 0.2     question analyzer (LLM) → full answer contract
+                  (Report uses the dedicated REPORT_* model profile)
                   answer_kind cross-check (with legal-list exception)
   → Stage 0.3     vector knowledge retrieval (three-tier FULL/LIGHT/SKIP)
                   response_mode + resolution_policy derivation (inline)
@@ -68,9 +70,11 @@ HTTP /ask
 │
 ├─ Stage 0: prepare_context
 │   → detect language, select light/analyst mode, init context
+│   → Report answer mode is authoritative and locks depth to analyst
 │   → cheap, no LLM
 │
 ├─ Stage 0.2: question analyzer (THE LLM call — firm contract)
+│   │ Report uses REPORT_*; Standard keeps normal stage/provider selection
 │   │ Single point where the question is interpreted. Every field
 │   │ downstream stages need is emitted here.
 │   │

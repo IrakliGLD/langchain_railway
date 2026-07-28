@@ -246,6 +246,19 @@ def _response_diagnostics(message) -> tuple[str, int | None]:
         return "unreported", None
 
     finish_reason = metadata.get("finish_reason") or metadata.get("stop_reason")
+    if not finish_reason:
+        response_status = metadata.get("status")
+        incomplete_details = metadata.get("incomplete_details")
+        incomplete_reason = (
+            incomplete_details.get("reason")
+            if isinstance(incomplete_details, dict)
+            else None
+        )
+        finish_reason = (
+            f"{response_status}:{incomplete_reason}"
+            if response_status == "incomplete" and incomplete_reason
+            else response_status
+        )
     provider_reported_limit = None
     usage = metadata.get("token_usage") or metadata.get("usage")
     candidates = [metadata, usage] if isinstance(usage, dict) else [metadata]
@@ -266,6 +279,33 @@ def _response_diagnostics(message) -> tuple[str, int | None]:
         if provider_reported_limit is not None:
             break
     return _content_free_log_value(finish_reason), provider_reported_limit
+
+
+def _message_text(message: Any) -> str:
+    """Extract text from either legacy string or provider content-block output."""
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") not in {"text", "output_text"}:
+                continue
+            block_text = block.get("text")
+            if isinstance(block_text, str):
+                text_parts.append(block_text)
+        text = "".join(text_parts)
+    else:
+        raise ValueError("LLM response did not contain text content")
+    normalized = text.strip()
+    if not normalized:
+        raise ValueError("LLM response did not contain text content")
+    return normalized
 
 
 def _log_usage_for_message(
@@ -3228,6 +3268,7 @@ def llm_analyze_question(
     conversation_history: Optional[list] = None,
     previous_contract: str = "",
     evidence_anomaly_note: str = "",
+    report_profile: bool = False,
 ) -> QuestionAnalysis:
     """Normalize and classify a raw user question into the question-analysis contract.
 
@@ -3247,6 +3288,17 @@ def llm_analyze_question(
     # cache daily (so date resolution never staleness across midnight) and
     # invalidates cached analyses whenever the system prompt itself changes.
     system = _analyzer_system_message()
+    report_model_name = (
+        get_report_model_name(ROUTER_MODEL)
+        if report_profile
+        else ""
+    )
+    report_cache_identity = (
+        f"|profile=report:{REPORT_MODEL_TYPE or _active_provider_key()}:"
+        f"{report_model_name}"
+        if report_profile
+        else ""
+    )
     cache_input = (
         f"question_analysis_v7|pm={PIPELINE_MODE}|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
@@ -3257,6 +3309,7 @@ def llm_analyze_question(
         f"prev={previous_contract}|"
         f"anom={evidence_anomaly_note}|"
         f"sys={system}"
+        f"{report_cache_identity}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
@@ -3295,15 +3348,39 @@ def llm_analyze_question(
             router_thinking_budget = 512
         else:
             router_thinking_budget = min(router_thinking_budget, 512)
-    primary_model_name = ROUTER_MODEL or get_primary_model_name()
+    primary_model_name = (
+        report_model_name
+        if report_profile
+        else ROUTER_MODEL or get_primary_model_name()
+    )
+    analyzer_label = (
+        "Report question analyzer"
+        if report_profile
+        else "Question analyzer"
+    )
+    if evidence_anomaly_note:
+        analyzer_label += " reanalysis"
     message = _invoke_with_openai_fallback(
-        lambda: get_llm_for_stage(ROUTER_MODEL, thinking_budget=router_thinking_budget, max_retries=1),
+        lambda: get_llm_for_stage(
+            ROUTER_MODEL,
+            thinking_budget=router_thinking_budget,
+            max_retries=1,
+            report_profile=report_profile,
+        ),
         primary_model_name,
         [("system", system), ("user", prompt)],
         llm_start=llm_start,
-        label=("Question analyzer reanalysis" if evidence_anomaly_note else "Question analyzer"),
+        label=analyzer_label,
+        **(
+            {
+                "attempt_stage": "report_question_analyzer",
+                "allow_openai_fallback": False,
+            }
+            if report_profile
+            else {}
+        ),
     )
-    raw_output = message.content.strip()
+    raw_output = _message_text(message)
 
     try:
         payload = _sanitize_question_analysis_payload(_extract_json_payload(raw_output))
@@ -3426,7 +3503,7 @@ def llm_plan_report(
         result = ReportPlan.model_validate(
             normalize_report_plan_semantics(
                 normalize_report_plan_word_budget(
-                    _extract_json_payload(message.content.strip())
+                    _extract_json_payload(_message_text(message))
                 ),
                 planning_context,
             )
@@ -3504,7 +3581,7 @@ def llm_repair_report_plan(
     return ReportPlan.model_validate(
         normalize_report_plan_semantics(
             normalize_report_plan_word_budget(
-                _extract_json_payload(message.content.strip())
+                _extract_json_payload(_message_text(message))
             ),
             planning_context,
         )
@@ -3731,7 +3808,7 @@ def _invoke_report_section_contract(
                 else {}
             ),
         )
-        payload = _extract_json_payload(message.content.strip())
+        payload = _extract_json_payload(_message_text(message))
         try:
             result = ReportSectionDraft.model_validate(payload)
         except ValidationError:

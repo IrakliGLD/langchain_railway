@@ -7,6 +7,8 @@ import os
 from copy import deepcopy
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -97,6 +99,44 @@ def test_report_planner_uses_dedicated_model_and_disables_fallback(monkeypatch):
     assert captured["model_name"] == "gpt-5.6-terra"
     assert captured["stage_kwargs"]["report_profile"] is True
     assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
+
+
+def test_report_planner_accepts_openai_responses_content_blocks(monkeypatch):
+    monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            content=[
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "text",
+                    "text": json.dumps(_plan_payload()),
+                    "annotations": [],
+                },
+            ]
+        ),
+    )
+
+    plan = llm.llm_plan_report("Explain the price trend.", _manifest())
+
+    assert isinstance(plan, ReportPlan)
+
+
+def test_report_response_text_rejects_refusal_only_content():
+    with pytest.raises(ValueError, match="text content"):
+        llm._message_text(
+            SimpleNamespace(
+                content=[
+                    {
+                        "type": "refusal",
+                        "refusal": "Request refused.",
+                    }
+                ]
+            )
+        )
 
 
 def test_report_planner_cache_hit_still_validates_the_strict_plan(monkeypatch):
@@ -228,7 +268,16 @@ def test_report_plan_repair_is_uncached_and_bounds_its_error_codes(monkeypatch):
     def invoke(_factory, _model, messages, **kwargs):
         captured["messages"] = messages
         captured["attempt_stage"] = kwargs["attempt_stage"]
-        return SimpleNamespace(content=json.dumps(_plan_payload()))
+        return SimpleNamespace(
+            content=[
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "text",
+                    "text": json.dumps(_plan_payload()),
+                    "annotations": [],
+                },
+            ]
+        )
 
     monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
 

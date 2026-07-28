@@ -114,9 +114,14 @@ See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) ยง3.2 / ย
 ## Dedicated Report Model
 
 Set the dedicated profile on the `enai-report-worker` Railway service. The web
-service does not need these values. The worker still needs the normal
-`MODEL_TYPE` provider key for evidence preparation, plus the selected Report
-provider key for report planning and section generation.
+service does not need these values. Report mode is authoritative once selected
+by the client: its question/evidence analyzer, report planner, plan repair,
+section writer, and section repair calls all use this profile. Report analysis
+depth is fixed to `analyst`; it is not reclassified from the question text.
+
+The worker still needs the normal provider settings for non-LLM evidence
+operations. In particular, vector embeddings keep their separately configured
+provider and do not use `REPORT_*`.
 
 ```bash
 REPORT_MODEL_TYPE=openai
