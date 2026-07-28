@@ -71,8 +71,13 @@ from core.llm import (
     llm_summarize_structured,
 )
 from models import GroundingPolicy, QueryContext, ResolutionPolicy, TerminalOutcome
-from utils.language import get_evidence_unavailable_message, get_grounding_fallback_message
+from utils.language import (
+    get_evidence_unavailable_message,
+    get_grounding_fallback_message,
+    get_transient_failure_message,
+)
 from utils.metrics import metrics
+from utils.provider_attempts import ProviderExecutionError
 from utils.residual_price import RESIDUAL_DIRECT_INTENTS, resolve_import_share_filter
 from utils.share_thresholds import normalize_share_threshold
 from utils.trace_logging import trace_detail
@@ -638,6 +643,42 @@ def answer_evidence_unavailable(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def answer_transient_failure(
+    ctx: QueryContext,
+    failure: ProviderExecutionError,
+) -> QueryContext:
+    """Return a durable-safe terminal response without replaying provider work."""
+    ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
+    ctx.summary_domain_knowledge = ""
+    ctx.summary = get_transient_failure_message(getattr(ctx, "lang_code", "") or "en")
+    ctx.summary_source = "transient_failure"
+    ctx.summary_claims = []
+    ctx.summary_citations = []
+    ctx.summary_confidence = 0.0
+    ctx.summary_claim_provenance = []
+    ctx.summary_provenance_coverage = 0.0
+    ctx.summary_provenance_gate_passed = True
+    ctx.summary_provenance_gate_reason = "not_applicable_transient_failure"
+    ctx.terminal_outcome = TerminalOutcome.TRANSIENT_FAILURE.value
+    metrics.log_terminal_outcome(TerminalOutcome.TRANSIENT_FAILURE.value)
+    deadline = getattr(ctx, "request_deadline", None)
+    deadline_remaining_ms = (
+        deadline.remaining_ms()
+        if deadline is not None and callable(getattr(deadline, "remaining_ms", None))
+        else -1
+    )
+    log.warning(
+        "Provider fallback decision: decision=skip_legacy_provider_call "
+        "terminal_outcome=transient_failure provider=%s stage=%s disposition=%s "
+        "deadline_remaining_ms=%s",
+        failure.provider,
+        failure.stage,
+        failure.disposition.value,
+        deadline_remaining_ms,
+    )
+    return ctx
+
+
 def answer_conceptual(ctx: QueryContext) -> QueryContext:
     """Generate an answer for conceptual/definitional questions (no SQL).
 
@@ -861,12 +902,12 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             confidence=float(envelope.confidence),
             summary_source="structured_conceptual_summary",
         )
+    except ProviderExecutionError as exc:
+        answer_transient_failure(ctx, exc)
     except Exception as exc:
-        # Same repair as the structured data path (incident 2026-07-17): the
-        # former `except RuntimeError: raise` breaker sentinel also re-raised
-        # F8's ProviderExecutionError here, turning conceptual answers into
-        # 500s. All provider failures degrade to the legacy conceptual
-        # fallback; a true provider-tier outage re-raises from the call below.
+        # Retain the legacy text path only for local structured-response
+        # validation/parsing failures. Provider execution failures are handled
+        # above and must never trigger a second provider invocation.
         metrics.log_summary_schema_failure()
         log.warning(
             "Structured conceptual summarization failed (%s): %s",
@@ -1983,16 +2024,12 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 debug=True,
                 summary_envelope=envelope,
             )
+        except ProviderExecutionError as e:
+            answer_transient_failure(ctx, e)
         except Exception as e:
-            # Incident 2026-07-17: this block previously kept an
-            # `except RuntimeError: raise` clause as the breaker-open sentinel.
-            # F8's ProviderExecutionError subclasses RuntimeError, so every
-            # provider failure (including ambiguous delivery) re-raised and
-            # turned /ask into a 500 instead of degrading. Breaker-open now
-            # surfaces as ProviderExecutionError(REJECTED) with its own
-            # core-level OpenAI fallback; if the provider tier is truly down,
-            # the legacy call below re-raises immediately from its own breaker
-            # check — so provider failures of every disposition degrade here.
+            # Retain the legacy text path only for local structured-response
+            # validation/parsing failures. Provider execution failures are
+            # handled above and must never trigger a second provider call.
             metrics.log_summary_schema_failure()
             log.warning(
                 "Structured summarization failed (%s): %s",

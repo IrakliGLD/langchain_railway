@@ -130,6 +130,25 @@ class TestSkippedSqlRouting:
         assert out.terminal_outcome == TerminalOutcome.CONCEPTUAL_ANSWER.value
 
 
+class TestEarlyConceptualTerminalOutcome:
+    def test_preserves_transient_failure_from_summarizer(self, monkeypatch):
+        ctx = QueryContext(query="Explain the market.")
+        ctx.response_mode = ResponseMode.KNOWLEDGE_PRIMARY.value
+
+        def _transient_failure(current):
+            current.summary = "Please try again after a short wait."
+            current.summary_source = "transient_failure"
+            current.terminal_outcome = TerminalOutcome.TRANSIENT_FAILURE.value
+            return current
+
+        monkeypatch.setattr(pipeline.summarizer, "answer_conceptual", _transient_failure)
+
+        result = pipeline._early_answer_conceptual(ctx)
+
+        assert result.terminal is True
+        assert result.ctx.terminal_outcome == TerminalOutcome.TRANSIENT_FAILURE.value
+
+
 class TestConfigDefault:
     def test_honest_terminal_outcomes_default_off(self):
         import config

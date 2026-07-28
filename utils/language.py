@@ -121,3 +121,22 @@ def get_evidence_unavailable_message(lang_code: str) -> str:
         ),
     }
     return messages.get(lang_code, messages["en"])
+
+
+def get_transient_failure_message(lang_code: str) -> str:
+    """Localized, content-free response for a temporary provider failure."""
+    messages = {
+        "ka": (
+            "მოთხოვნის დამუშავება დროებით ვერ დასრულდა. "
+            "გთხოვთ, ცოტა ხანში ხელახლა სცადოთ."
+        ),
+        "ru": (
+            "Обработку запроса временно не удалось завершить. "
+            "Повторите попытку немного позже."
+        ),
+        "en": (
+            "The request could not be completed because the service is "
+            "temporarily unavailable. Please try again after a short wait."
+        ),
+    }
+    return messages.get(lang_code, messages["en"])

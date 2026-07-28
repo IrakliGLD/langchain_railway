@@ -2726,8 +2726,9 @@ def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
         return StageResult(ctx, terminal=False)
     t_stage = time.time()
     ctx = summarizer.answer_conceptual(ctx)
-    ctx.terminal_outcome = TerminalOutcome.CONCEPTUAL_ANSWER.value
-    metrics.log_terminal_outcome(TerminalOutcome.CONCEPTUAL_ANSWER.value)
+    if not ctx.terminal_outcome:
+        ctx.terminal_outcome = TerminalOutcome.CONCEPTUAL_ANSWER.value
+        metrics.log_terminal_outcome(TerminalOutcome.CONCEPTUAL_ANSWER.value)
     _emit_trace_stage(ctx, "stage_4_conceptual_summary", t_stage)
     return StageResult(ctx, terminal=True)
 

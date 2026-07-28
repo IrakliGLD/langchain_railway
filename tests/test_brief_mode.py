@@ -90,21 +90,25 @@ def test_brief_policy_preserves_complete_regulatory_enumeration() -> None:
     assert ctx.summary == answer
 
 
-def test_brief_guidance_is_a_runtime_answer_composer_reference() -> None:
+def test_brief_guidance_reference_remains_available_for_non_semantic_consumers() -> None:
     guidance = get_answer_length_guidance("brief")
     assert "BRIEF MODE" in guidance
     assert str(BRIEF_MAX_WORDS) in guidance
     assert get_answer_length_guidance("standard") == ""
 
 
-def test_structured_summarizer_injects_brief_guidance(monkeypatch) -> None:
-    captured = {}
+def test_structured_summarizer_shares_mode_neutral_prompt_and_cache(monkeypatch) -> None:
+    captured_prompts = []
+    captured_keys = []
+    values = {}
 
     class _DummyCache:
-        def get(self, _key):
-            return None
+        def get(self, key):
+            captured_keys.append(key)
+            return values.get(key)
 
-        def set(self, _key, _value):
+        def set(self, key, value):
+            values[key] = value
             return None
 
     class _DummyMessage:
@@ -117,7 +121,7 @@ def test_structured_summarizer_injects_brief_guidance(monkeypatch) -> None:
     monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
 
     def _capture_invoke(_llm, messages, _model_name):
-        captured["prompt"] = messages[1][1]
+        captured_prompts.append(messages[1][1])
         return _DummyMessage()
 
     monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
@@ -128,9 +132,65 @@ def test_structured_summarizer_injects_brief_guidance(monkeypatch) -> None:
         stats_hint="The value increased.",
         answer_mode="brief",
     )
+    llm_core.llm_summarize_structured(
+        user_query="Explain the balancing price trend.",
+        data_preview="date,value\n2024-01-01,10",
+        stats_hint="The value increased.",
+        answer_mode="standard",
+    )
 
-    assert "BRIEF MODE" in captured["prompt"]
-    assert f"Hard maximum: {BRIEF_MAX_WORDS} words" in captured["prompt"]
+    assert len(captured_prompts) == 1
+    assert "BRIEF MODE" not in captured_prompts[0]
+    assert f"Hard maximum: {BRIEF_MAX_WORDS} words" not in captured_prompts[0]
+    assert len(captured_keys) == 2
+    assert captured_keys[0] == captured_keys[1]
+    assert "|am=" not in captured_keys[0]
+
+
+def test_structured_summarizer_logs_content_free_mode_and_cache_status(
+    monkeypatch, caplog
+) -> None:
+    values = {}
+
+    class _DummyCache:
+        def get(self, key):
+            return values.get(key)
+
+        def set(self, key, value):
+            values[key] = value
+            return None
+
+    class _DummyMessage:
+        content = '{"answer":"ok","claims":[],"citations":[],"confidence":0.9}'
+        response_metadata = {}
+
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_args, **_kwargs: _DummyMessage(),
+    )
+    caplog.set_level("INFO", logger="Enai")
+
+    for answer_mode in ("brief", "standard"):
+        llm_core.llm_summarize_structured(
+            user_query="PRIVATE QUESTION MUST NOT APPEAR",
+            data_preview="date,value\n2024-01-01,10",
+            stats_hint="The value increased.",
+            answer_mode=answer_mode,
+        )
+
+    events = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Structured summary cache lookup:")
+    ]
+    assert any("answer_mode=brief" in event and "cache_status=miss" in event for event in events)
+    assert any("answer_mode=standard" in event and "cache_status=hit" in event for event in events)
+    assert all("PRIVATE QUESTION MUST NOT APPEAR" not in event for event in events)
 
 
 def test_standard_summarizer_cache_key_has_no_answer_mode_suffix(monkeypatch) -> None:

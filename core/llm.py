@@ -110,7 +110,6 @@ from core.provider_invocation import ProviderInvocationRuntime
 from knowledge.sql_example_selector import get_relevant_examples
 from skills.loader import (
     _extract_section,
-    get_answer_length_guidance,
     get_answer_template,
     get_balancing_template,
     get_focus_guidance,
@@ -3726,20 +3725,30 @@ def llm_summarize_structured(
         else "none"
     )
     skill_hash = get_skills_content_hash() if ENABLE_SKILL_PROMPTS_SUMMARIZER else "off"
-    answer_mode_cache_suffix = (
-        f"|am={answer_mode}"
-        if answer_mode not in {"", "standard"}
-        else ""
-    )
     cache_input = (
         f"summary_structured_v10|pm={PIPELINE_MODE}|{user_query}|{effective_data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|eak={effective_answer_kind_key}|"
         f"vk={vk_doc_types}|sh={skill_hash}|"
         f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}"
-        f"{answer_mode_cache_suffix}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
+    request_scope = current_request_execution_scope()
+    deadline_remaining_ms = (
+        request_scope.deadline.remaining_ms()
+        if request_scope is not None and request_scope.deadline is not None
+        else -1
+    )
+    normalized_answer_mode = (
+        answer_mode if answer_mode in {"brief", "standard", "report"} else "standard"
+    )
+    log.info(
+        "Structured summary cache lookup: answer_mode=%s cache_status=%s "
+        "deadline_remaining_ms=%s",
+        normalized_answer_mode,
+        "hit" if cached_response else "miss",
+        deadline_remaining_ms,
+    )
     if cached_response:
         payload = _extract_json_payload(cached_response)
         return SummaryEnvelope.model_validate(payload)
@@ -4026,10 +4035,6 @@ def llm_summarize_structured(
         formatting_rules = load_reference("answer-composer", "formatting-rules.md")
         if formatting_rules:
             guidance_parts.append(formatting_rules)
-        answer_length_guidance = get_answer_length_guidance(answer_mode)
-        if answer_length_guidance:
-            guidance_parts.append(answer_length_guidance)
-
         skill_guidance = "\n\n".join(guidance_parts)
         log.info(
             "📝 Structured summarizer enriched: query_type=%s, focus=%s, guidance=%d chars",
@@ -4065,10 +4070,6 @@ def llm_summarize_structured(
                 "- Do not answer as a single-period narrative when month-over-month or year-over-year evidence is provided.\n"
                 "- Use only comparison values grounded in UNTRUSTED_STATISTICS or UNTRUSTED_DATA_PREVIEW.\n"
             )
-        answer_length_guidance = get_answer_length_guidance(answer_mode)
-        if answer_length_guidance:
-            skill_guidance += f"\n{answer_length_guidance}\n"
-
     schema_hint = {
         "answer": "string",
         "claims": ["string"],

@@ -18,6 +18,7 @@ _PATH_BY_SUMMARY_SOURCE = {
     "structured_conceptual_summary": "conceptual",
     "legacy_conceptual_text_fallback": "conceptual",
     "clarification_request": "clarify",
+    "transient_failure": "transient_failure",
     "structured_summary_grounding_fallback": "guardrail_fallback",
     "citation_gate_fallback": "guardrail_fallback",
     # Partial-but-grounded: the gate rejected the full answer and shipped only
