@@ -20,9 +20,9 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import core.llm as llm
 from agent.report_sections import generate_report_sections
-from core.llm import _report_section_evidence_slice
 from contracts.report import ReportPlan
 from contracts.report_sections import ReportSectionDraft
+from core.llm import _report_section_evidence_slice
 from tests.test_report_planner import TABLE_REF, _manifest, _plan_payload
 from tests.test_report_sections import _draft
 
@@ -33,6 +33,13 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     captured = {}
 
     monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda key: (None, "token"))
+    monkeypatch.setattr(
+        ReportSectionDraft,
+        "model_json_schema",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("report section schema must be precomputed")
+        ),
+    )
     monkeypatch.setattr(
         llm,
         "_cache_set",
@@ -586,6 +593,15 @@ def test_section_evidence_slice_shadows_the_grounding_scope_gap(caplog):
     assert shadow[0]["manifest_rows"] == 200
     assert shadow[0]["projected_rows"] == projected
     assert shadow[0]["section_id"] == section.section_id
+    assert shadow[0]["section_kind"] == section.kind.value
+    assert shadow[0]["target_words"] == section.target_words
+    assert shadow[0]["evidence_budget_chars"] == 30_000
+    assert shadow[0]["assigned_item_count"] == len(
+        section.required_evidence_refs
+    )
+    assert shadow[0]["per_item_budget_chars"] > 0
+    assert shadow[0]["projected_item_chars"] > 0
+    assert 0 <= shadow[0]["projection_ratio"] < 1
     assert projected < 200
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -849,6 +850,36 @@ def test_sections_generate_in_parallel_and_return_in_plan_order():
     assert [draft.section_id for draft in drafts] == [
         section.section_id for section in plan.sections
     ]
+
+
+def test_section_concurrency_logs_effective_worker_wave(caplog):
+    plan = ReportPlan.model_validate(_plan_payload())
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportSections"):
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            generate_section=lambda _query, _plan, section, _manifest: (
+                _draft(section)
+            ),
+            max_workers=2,
+        )
+
+    diagnostic = next(
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("REPORT_SECTION_CONCURRENCY ")
+    )
+
+    assert diagnostic == {
+        "configured_workers": 2,
+        "effective_workers": 2,
+        "pending_sections": len(plan.sections),
+        "planned_waves": math.ceil(len(plan.sections) / 2),
+        "resumed_sections": 0,
+        "total_sections": len(plan.sections),
+    }
 
 
 def test_parallel_sections_inherit_job_identity_and_deadline():
@@ -1803,6 +1834,74 @@ def test_section_word_tolerance_admits_observed_model_overshoot():
 
     assert minimum_words == 98
     assert maximum_words >= 141
+
+
+def test_aggregate_word_budget_repairs_largest_overrun_before_return():
+    plan = ReportPlan.model_validate(_plan_payload())
+    manifest = _manifest()
+    repaired = []
+
+    def generate(_query, _plan, section, _manifest_value):
+        return _draft(
+            section,
+            text=_words(math.ceil(section.target_words * 1.25)),
+        )
+
+    def repair(
+        _query,
+        _plan,
+        section,
+        _manifest_value,
+        _draft_value,
+        error_codes,
+    ):
+        repaired.append((section.section_id, error_codes))
+        return _draft(section)
+
+    drafts = generate_report_sections(
+        "Explain the price trend.",
+        plan,
+        manifest,
+        generate_section=generate,
+        repair_section=repair,
+        max_workers=len(plan.sections),
+    )
+
+    assert repaired == [
+        ("key_findings", ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"])
+    ]
+    assert sum(
+        validate_report_section(draft, section, manifest).word_count
+        for section, draft in zip(plan.sections, drafts, strict=True)
+    ) <= sum(math.ceil(section.target_words * 1.2) for section in plan.sections)
+
+
+def test_aggregate_word_budget_fails_when_repairs_do_not_reduce_total():
+    plan = ReportPlan.model_validate(_plan_payload())
+
+    def oversized(section):
+        return _draft(
+            section,
+            text=_words(math.ceil(section.target_words * 1.25)),
+        )
+
+    with pytest.raises(ReportSectionGenerationError) as exc_info:
+        generate_report_sections(
+            "Explain the price trend.",
+            plan,
+            _manifest(),
+            generate_section=lambda _q, _p, section, _m: oversized(section),
+            repair_section=(
+                lambda _q, _p, section, _m, _draft_value, _errors: (
+                    oversized(section)
+                )
+            ),
+            max_workers=len(plan.sections),
+        )
+
+    assert exc_info.value.error_codes == [
+        "AGGREGATE_WORD_COUNT_OUT_OF_RANGE"
+    ]
 
 
 def test_direct_claim_may_be_rendered_at_readable_precision():

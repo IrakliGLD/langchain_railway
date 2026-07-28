@@ -19,7 +19,12 @@ from agent.report_grounding import (
     build_evidence_grounding_index,
     validate_paragraph_grounding,
 )
-from contracts.report import ReportPlan, ReportSectionSpec
+from contracts.report import (
+    ReportPlan,
+    ReportSectionSpec,
+    report_aggregate_word_bounds,
+    report_section_validation_word_bounds,
+)
 from contracts.report_evidence import ReportEvidenceManifest
 from contracts.report_sections import (
     ReportSectionDraft,
@@ -57,20 +62,16 @@ def count_section_words(text: str) -> int:
     return len(_WORD_PATTERN.findall(str(text or "")))
 
 
-# The upper tolerance carries the model's systematic overshoot: gpt-oss-20b
+# The hard validation tolerance carries the model's systematic overshoot:
+# gpt-oss-20b
 # returned 136 and 141 words against a 109-word target and 159 against 118,
 # repeating the same length across every repair (jobs c7823cc9 / acf48571).
 # A +20% ceiling is simply unreachable for it, so the repair loop burned
 # provider calls it could never satisfy. The lower bound stays tight — a short
 # section is a content failure, an overlong one is a formatting one.
-_SECTION_WORD_FLOOR_RATIO = 0.9
-_SECTION_WORD_CEILING_RATIO = 1.35
-
-
 def _section_word_bounds(section: ReportSectionSpec) -> tuple[int, int]:
-    return (
-        math.floor(section.target_words * _SECTION_WORD_FLOOR_RATIO),
-        math.ceil(section.target_words * _SECTION_WORD_CEILING_RATIO),
+    return report_section_validation_word_bounds(
+        section.target_words
     )
 
 
@@ -241,20 +242,28 @@ def generate_report_sections(
     progress_callback: ProgressCallback | None = None,
     max_workers: int = 4,
     max_repair_attempts: int = 2,
+    grounding_index: dict[str, Any] | None = None,
 ) -> list[ReportSectionDraft]:
     if not 1 <= max_workers <= 8:
         raise ValueError("max_workers must be between 1 and 8.")
     if not 1 <= max_repair_attempts <= 3:
         raise ValueError("max_repair_attempts must be between 1 and 3.")
-    if generate_section is None:
+    uses_default_generator = generate_section is None
+    if uses_default_generator:
         from core.llm import llm_write_report_section
 
         generate_section = llm_write_report_section
     item_by_ref = manifest.item_by_ref()
-    grounding_index = build_evidence_grounding_index(
-        item_by_ref,
-        set(item_by_ref),
-    )
+    if grounding_index is None:
+        assigned_refs = {
+            ref
+            for section in plan.sections
+            for ref in section.required_evidence_refs
+        }
+        grounding_index = build_evidence_grounding_index(
+            item_by_ref,
+            assigned_refs,
+        )
     completed: dict[str, ReportSectionDraft] = {}
     for section in plan.sections:
         existing = (existing_drafts or {}).get(section.section_id)
@@ -272,11 +281,14 @@ def generate_report_sections(
     def generate_one(section: ReportSectionSpec) -> ReportSectionDraft:
         candidate_started_at = time.monotonic()
         try:
-            raw_draft: ReportSectionDraft | dict[str, Any] = generate_section(
-                query,
-                plan,
-                section,
-                manifest,
+            generator_args = (query, plan, section, manifest)
+            raw_draft: ReportSectionDraft | dict[str, Any] = (
+                generate_section(
+                    *generator_args,
+                    evidence_facts_by_ref=grounding_index,
+                )
+                if uses_default_generator
+                else generate_section(*generator_args)
             )
         except ProviderExecutionError as exc:
             _log_section_diagnostic(
@@ -451,6 +463,24 @@ def generate_report_sections(
     pending_sections = [section for section in plan.sections if section.section_id not in completed]
     if pending_sections:
         worker_count = min(max_workers, len(pending_sections))
+        _LOGGER.info(
+            "REPORT_SECTION_CONCURRENCY %s",
+            json.dumps(
+                {
+                    "configured_workers": max_workers,
+                    "effective_workers": worker_count,
+                    "pending_sections": len(pending_sections),
+                    "planned_waves": math.ceil(
+                        len(pending_sections) / worker_count
+                    ),
+                    "resumed_sections": len(completed),
+                    "total_sections": len(plan.sections),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
         phase_failed = Event()
 
         def run_one(section: ReportSectionSpec) -> ReportSectionDraft:
@@ -525,5 +555,128 @@ def generate_report_sections(
             raise
         else:
             executor.shutdown(wait=True)
+
+    _, maximum_report_words = report_aggregate_word_bounds(
+        [section.target_words for section in plan.sections]
+    )
+    word_count_by_id = {
+        section.section_id: count_section_words(
+            completed[section.section_id].content_markdown
+        )
+        for section in plan.sections
+    }
+    total_words = sum(word_count_by_id.values())
+    if total_words > maximum_report_words:
+        effective_repair = repair_section
+        uses_default_repair = effective_repair is None
+        if uses_default_repair:
+            from core.llm import llm_repair_report_section
+
+            effective_repair = llm_repair_report_section
+        candidates = sorted(
+            plan.sections,
+            key=lambda section: (
+                word_count_by_id[section.section_id] - section.target_words,
+                section.target_words,
+            ),
+            reverse=True,
+        )
+        for section in candidates:
+            if total_words <= maximum_report_words:
+                break
+            current_word_count = word_count_by_id[section.section_id]
+            if current_word_count <= section.target_words:
+                continue
+            repair_started_at = time.monotonic()
+            try:
+                repair_args = (
+                    query,
+                    plan,
+                    section,
+                    manifest,
+                    completed[section.section_id],
+                    ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"],
+                )
+                if uses_default_repair:
+                    repaired_raw = effective_repair(
+                        *repair_args,
+                        attempt_number=4,
+                    )
+                else:
+                    repaired_raw = effective_repair(*repair_args)
+            except ProviderExecutionError as exc:
+                _log_section_diagnostic(
+                    event="provider_failed",
+                    section=section,
+                    attempt=4,
+                    started_at=repair_started_at,
+                    error_codes=["SECTION_REPAIR_PROVIDER_FAILED"],
+                    provider_error=exc,
+                    level=logging.WARNING,
+                )
+                raise ReportSectionGenerationError(
+                    section.section_id,
+                    ["SECTION_REPAIR_PROVIDER_FAILED"],
+                    provider=exc.provider,
+                    provider_stage=exc.stage,
+                    provider_disposition=exc.disposition.value,
+                ) from exc
+            try:
+                repaired = (
+                    repaired_raw
+                    if isinstance(repaired_raw, ReportSectionDraft)
+                    else ReportSectionDraft.model_validate(repaired_raw)
+                )
+            except ValidationError:
+                continue
+            repaired_validation = validate_report_section(
+                repaired,
+                section,
+                manifest,
+                evidence_facts_by_ref=grounding_index,
+            )
+            if (
+                not repaired_validation.valid
+                or repaired_validation.word_count >= current_word_count
+            ):
+                _log_section_diagnostic(
+                    event="aggregate_repair_rejected",
+                    section=section,
+                    attempt=4,
+                    started_at=repair_started_at,
+                    error_codes=(
+                        repaired_validation.error_codes
+                        or ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"]
+                    ),
+                    word_count=repaired_validation.word_count,
+                    draft=repaired,
+                    level=logging.WARNING,
+                )
+                continue
+            completed[section.section_id] = repaired
+            word_count_by_id[section.section_id] = (
+                repaired_validation.word_count
+            )
+            total_words += repaired_validation.word_count - current_word_count
+            if progress_callback is not None:
+                progress_callback(
+                    len(completed),
+                    len(plan.sections),
+                    repaired,
+                )
+            _log_section_diagnostic(
+                event="aggregate_repair_validated",
+                section=section,
+                attempt=4,
+                started_at=repair_started_at,
+                error_codes=[],
+                word_count=repaired_validation.word_count,
+                draft=repaired,
+            )
+        if total_words > maximum_report_words:
+            raise ReportSectionGenerationError(
+                candidates[0].section_id,
+                ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"],
+            )
 
     return [completed[section.section_id] for section in plan.sections]

@@ -106,7 +106,7 @@ REPORT_WORKER_POLL_INTERVAL_MS = _read_bounded_int_env(
 )
 REPORT_SECTION_MAX_WORKERS = _read_bounded_int_env(
     "ENAI_REPORT_SECTION_MAX_WORKERS",
-    4,
+    8,
     1,
     8,
 )

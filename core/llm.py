@@ -32,6 +32,9 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 import knowledge as knowledge_module
+from agent.report_charts import chart_column_roles
+from agent.report_grounding import observed_period_span
+from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
     ENABLE_SKILL_PROMPTS_PLANNER,
@@ -92,9 +95,6 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
-from agent.report_charts import chart_column_roles
-from agent.report_grounding import observed_period_span
-from agent.report_projection import projected_row_indices
 from contracts.report import (
     ReportIntent,
     ReportPlan,
@@ -102,6 +102,7 @@ from contracts.report import (
     ReportSectionSpec,
     normalize_report_plan_semantics,
     normalize_report_plan_word_budget,
+    report_section_prompt_word_bounds,
 )
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_sections import ReportSectionDraft
@@ -1964,6 +1965,10 @@ _CHART_POLICY_JSON = _compact_json(QUESTION_ANALYSIS_CHART_POLICY)
 _FILTER_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_FILTER_GUIDE)
 _QUERY_TYPE_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_QUERY_TYPE_GUIDE)
 _ANSWER_KIND_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_ANSWER_KIND_GUIDE)
+_REPORT_PLAN_SCHEMA_JSON = _compact_json(ReportPlan.model_json_schema())
+_REPORT_SECTION_SCHEMA_JSON = _compact_json(
+    ReportSectionDraft.model_json_schema()
+)
 
 
 # ---------------------------------------------------------------------------
@@ -3096,7 +3101,6 @@ def llm_plan_report(
         source="pipeline_fallback",
     )
 
-    schema_hint = ReportPlan.model_json_schema()
     guidance = (
         get_report_guidance("structure")
         + "\n\n"
@@ -3140,7 +3144,7 @@ def llm_plan_report(
     cache_input = (
         f"report_plan_v1|query={user_query}|manifest={manifest.manifest_id}|"
         f"context={planning_context_json}|catalog={catalog_json}|"
-        f"guidance={guidance}|schema={_compact_json(schema_hint)}|"
+        f"guidance={guidance}|schema={_REPORT_PLAN_SCHEMA_JSON}|"
         f"system={system}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
@@ -3166,7 +3170,7 @@ def llm_plan_report(
         "EVIDENCE_CATALOG:\n"
         f"{catalog_json}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_PLAN_SCHEMA_JSON}\n\n"
         "Return JSON only."
     )
     llm_start = time.time()
@@ -3209,7 +3213,6 @@ def llm_repair_report_plan(
         + "\n\n"
         + get_report_guidance("planning")
     )
-    schema_hint = ReportPlan.model_json_schema()
     planning_context_json = planning_context.model_dump_json()
     safe_error_codes = [
         code
@@ -3239,7 +3242,7 @@ def llm_repair_report_plan(
         "REJECTED_PLAN:\n"
         f"{_compact_json(rejected_payload)}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_PLAN_SCHEMA_JSON}\n\n"
         "Return replacement JSON only."
     )
     llm_start = time.time()
@@ -3287,8 +3290,9 @@ def _repair_sampling_temperature(attempt_number: int) -> float:
 
 
 def _report_section_validation_rules(section: ReportSectionSpec) -> str:
-    minimum_words = math.floor(section.target_words * 0.9)
-    maximum_words = math.ceil(section.target_words * 1.2)
+    minimum_words, maximum_words = report_section_prompt_word_bounds(
+        section.target_words
+    )
     bounds = _compact_json(
         {
             "target_words": section.target_words,
@@ -3373,6 +3377,15 @@ def _report_section_evidence_slice(
                 {"row_index": row_index, "values": item.rows[row_index]}
                 for row_index in row_indices
             ]
+            projected.update(
+                {
+                    "rows": included_rows,
+                    "included_row_count": len(included_rows),
+                    "prompt_projection_truncated": (
+                        len(included_rows) < len(item.rows)
+                    ),
+                }
+            )
             if len(included_rows) < len(item.rows):
                 # Shadow only: the grounding index still covers every manifest
                 # row, so a claim about a row the model never saw currently
@@ -3387,18 +3400,27 @@ def _report_section_evidence_slice(
                     "REPORT_GROUNDING_SCOPE_SHADOW %s",
                     _compact_json(
                         {
+                            "assigned_item_count": len(assigned_items),
                             "evidence_ref": item.evidence_ref,
+                            "evidence_budget_chars": (
+                                _REPORT_SECTION_EVIDENCE_BUDGET_CHARS
+                            ),
                             "manifest_rows": len(item.rows),
+                            "per_item_budget_chars": per_item_budget,
+                            "projected_item_chars": len(
+                                _compact_json(projected)
+                            ),
                             "projected_rows": len(included_rows),
+                            "projection_ratio": round(
+                                len(included_rows) / len(item.rows),
+                                4,
+                            ),
                             "section_id": section.section_id,
+                            "section_kind": section.kind.value,
+                            "target_words": section.target_words,
                         }
                     ),
                 )
-            projected["rows"] = included_rows
-            projected["included_row_count"] = len(included_rows)
-            projected["prompt_projection_truncated"] = (
-                len(included_rows) < len(item.rows)
-            )
         else:
             metadata_size = len(_compact_json(projected))
             content_budget = max(256, per_item_budget - metadata_size - 100)
@@ -3487,19 +3509,25 @@ def llm_write_report_section(
     plan: ReportPlan,
     section: ReportSectionSpec,
     manifest: ReportEvidenceManifest,
+    *,
+    evidence_facts_by_ref=None,
 ) -> ReportSectionDraft | dict:
     """Write one section from only its explicitly assigned evidence packet."""
 
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
     validation_rules = _report_section_validation_rules(section)
-    schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
 
     def cacheable(draft: ReportSectionDraft) -> bool:
         from agent.report_sections import validate_report_section
 
-        return validate_report_section(draft, section, manifest).valid
+        return validate_report_section(
+            draft,
+            section,
+            manifest,
+            evidence_facts_by_ref=evidence_facts_by_ref,
+        ).valid
 
     system = (
         "You write one evidence-grounded analytical report section. Return one "
@@ -3522,7 +3550,7 @@ def llm_write_report_section(
         f"report_section_v2|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|guidance={guidance}|"
         f"validation={validation_rules}|"
-        f"schema={_compact_json(schema_hint)}|system={system}"
+        f"schema={_REPORT_SECTION_SCHEMA_JSON}|system={system}"
     )
     prompt = (
         "REPORT_SECTION_GUIDANCE:\n"
@@ -3538,7 +3566,7 @@ def llm_write_report_section(
         "EVIDENCE_SLICE:\n"
         f"{evidence_slice}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_SECTION_SCHEMA_JSON}\n\n"
         "Return JSON only."
     )
     return _invoke_report_section_contract(
@@ -3569,7 +3597,6 @@ def llm_repair_report_section(
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
     validation_rules = _report_section_validation_rules(section)
-    schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
     draft_json = (
         draft.model_dump_json()
@@ -3602,7 +3629,7 @@ def llm_repair_report_section(
         f"section={section_json}|evidence={evidence_slice}|errors={errors_json}|"
         f"candidate={draft_json}|guidance={guidance}|"
         f"validation={validation_rules}|"
-        f"schema={_compact_json(schema_hint)}|system={system}"
+        f"schema={_REPORT_SECTION_SCHEMA_JSON}|system={system}"
     )
     prompt = (
         "REPORT_SECTION_GUIDANCE:\n"
@@ -3622,7 +3649,7 @@ def llm_repair_report_section(
         "REJECTED_CANDIDATE:\n"
         f"{draft_json}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_SECTION_SCHEMA_JSON}\n\n"
         "Return replacement JSON only."
     )
     return _invoke_report_section_contract(

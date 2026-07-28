@@ -93,7 +93,7 @@ class PostgresReportJobRepository:
         worker_id: str,
         phase: ReportJobPhase,
         progress_percent: int,
-        checkpoint: dict[str, Any] | None,
+        checkpoint: dict[str, Any] | str | None,
         lease_seconds: int,
     ) -> bool:
         payload = self._call(
@@ -109,9 +109,13 @@ class PostgresReportJobRepository:
                 "phase": phase.value,
                 "progress_percent": progress_percent,
                 "checkpoint": (
-                    json.dumps(checkpoint, separators=(",", ":"))
-                    if checkpoint is not None
-                    else None
+                    checkpoint
+                    if isinstance(checkpoint, str)
+                    else (
+                        json.dumps(checkpoint, separators=(",", ":"))
+                        if checkpoint is not None
+                        else None
+                    )
                 ),
                 "lease_seconds": lease_seconds,
             },

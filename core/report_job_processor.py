@@ -20,6 +20,7 @@ from agent.report_evaluation import evaluate_report_plan
 from agent.report_evidence import (
     build_report_evidence_manifest,
 )
+from agent.report_grounding import build_evidence_grounding_index
 from agent.report_intent import build_report_planning_context
 from agent.report_planner import (
     ReportPlanEvidenceError,
@@ -31,9 +32,10 @@ from agent.report_sections import (
     ReportSectionGenerationError,
     generate_report_sections,
 )
-from contracts.report import ReportPlan
+from contracts.report import ReportPlan, ReportPlanningContext
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_generation import (
+    REPORT_GENERATION_CHECKPOINT_MAX_BYTES,
     ReportCheckpointTooLargeError,
     ReportGenerationCheckpoint,
 )
@@ -80,6 +82,7 @@ _SECTION_PROVIDER_FAILURE_CODES = {
     "SECTION_REPAIR_PROVIDER_FAILED",
     "SECTION_WRITE_PROVIDER_FAILED",
 }
+_PROJECTED_SECTION_CHECKPOINT_BYTES = 80_000
 
 
 def _diagnostic_identifier(value: str | None) -> str:
@@ -154,18 +157,47 @@ class ReportJobProcessor:
         manifest: ReportEvidenceManifest,
         plan: ReportPlan,
         completed_by_id: dict[str, ReportSectionDraft],
-    ) -> dict[str, Any]:
-        checkpoint = ReportGenerationCheckpoint(
-            contract_version="report-generation-checkpoint-v1",
-            manifest=manifest,
-            plan=plan,
-            completed_sections=[
+        *,
+        planning_context: ReportPlanningContext | None = None,
+    ) -> str:
+        checkpoint_fields: dict[str, Any] = {
+            "contract_version": (
+                "report-generation-checkpoint-v2"
+                if planning_context is not None
+                else "report-generation-checkpoint-v1"
+            ),
+            "manifest": manifest,
+            "plan": plan,
+            "completed_sections": [
                 completed_by_id[section.section_id]
                 for section in plan.sections
                 if section.section_id in completed_by_id
             ],
+        }
+        if planning_context is not None:
+            checkpoint_fields.update(
+                {
+                    "checkpoint_stage": "plan_ready",
+                    "planning_context": planning_context,
+                }
+            )
+        checkpoint = ReportGenerationCheckpoint(**checkpoint_fields)
+        return checkpoint.durable_json()
+
+    @staticmethod
+    def _evidence_checkpoint_payload(
+        manifest: ReportEvidenceManifest,
+        planning_context: ReportPlanningContext,
+    ) -> str:
+        checkpoint = ReportGenerationCheckpoint(
+            contract_version="report-generation-checkpoint-v2",
+            checkpoint_stage="evidence_ready",
+            manifest=manifest,
+            planning_context=planning_context,
+            plan=None,
+            completed_sections=[],
         )
-        return checkpoint.model_dump(mode="json")
+        return checkpoint.durable_json()
 
     @classmethod
     def _safe_checkpoint_payload(
@@ -173,15 +205,59 @@ class ReportJobProcessor:
         manifest: ReportEvidenceManifest,
         plan: ReportPlan,
         completed_by_id: dict[str, ReportSectionDraft],
-    ) -> dict[str, Any]:
+        *,
+        planning_context: ReportPlanningContext | None = None,
+    ) -> str:
         """Build a checkpoint, separating "too big" from "structurally wrong"."""
 
         try:
-            return cls._checkpoint_payload(manifest, plan, completed_by_id)
+            return cls._checkpoint_payload(
+                manifest,
+                plan,
+                completed_by_id,
+                planning_context=planning_context,
+            )
         except ReportCheckpointTooLargeError as exc:
             raise _report_failure("REPORT_CHECKPOINT_TOO_LARGE") from exc
         except (ValidationError, ValueError) as exc:
             raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
+
+    @classmethod
+    def _safe_evidence_checkpoint_payload(
+        cls,
+        manifest: ReportEvidenceManifest,
+        planning_context: ReportPlanningContext,
+    ) -> str:
+        try:
+            return cls._evidence_checkpoint_payload(
+                manifest,
+                planning_context,
+            )
+        except ReportCheckpointTooLargeError as exc:
+            raise _report_failure("REPORT_CHECKPOINT_TOO_LARGE") from exc
+        except (ValidationError, ValueError) as exc:
+            raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
+
+    @staticmethod
+    def _projected_final_checkpoint_size_bytes(
+        manifest: ReportEvidenceManifest,
+        plan: ReportPlan,
+        completed_by_id: dict[str, ReportSectionDraft],
+        *,
+        planning_context: ReportPlanningContext | None,
+    ) -> int:
+        current_payload = ReportJobProcessor._checkpoint_payload(
+            manifest,
+            plan,
+            completed_by_id,
+            planning_context=planning_context,
+        )
+        current_bytes = len(current_payload.encode("utf-8"))
+        remaining_sections = len(plan.sections) - len(completed_by_id)
+        return (
+            current_bytes
+            + remaining_sections * _PROJECTED_SECTION_CHECKPOINT_BYTES
+        )
 
     @staticmethod
     def _heartbeat(
@@ -189,7 +265,7 @@ class ReportJobProcessor:
         *,
         phase: ReportJobPhase,
         progress_percent: int,
-        checkpoint: dict[str, Any] | None,
+        checkpoint: dict[str, Any] | str | None,
     ) -> None:
         if control.heartbeat(
             phase=phase,
@@ -270,6 +346,8 @@ class ReportJobProcessor:
     ) -> dict[str, Any]:
         progress = lease.progress_percent
         checkpoint: ReportGenerationCheckpoint | None = None
+        manifest: ReportEvidenceManifest | None = None
+        planning_context: ReportPlanningContext | None = None
         if lease.checkpoint is not None:
             try:
                 checkpoint = ReportGenerationCheckpoint.model_validate(
@@ -278,6 +356,13 @@ class ReportJobProcessor:
             except (ValidationError, ValueError) as exc:
                 raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
             self._validate_query_binding(lease.query, checkpoint.manifest)
+            manifest = checkpoint.manifest
+            planning_context = checkpoint.planning_context
+            if (
+                checkpoint.plan is None
+                and lease.phase is not ReportJobPhase.PLANNING
+            ):
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
 
         if checkpoint is None:
             if lease.phase is not ReportJobPhase.PLANNING:
@@ -319,6 +404,36 @@ class ReportJobProcessor:
             except (ValidationError, ValueError) as exc:
                 raise _report_failure("REPORT_EVIDENCE_INVALID") from exc
 
+            progress = max(progress, 20)
+            self._heartbeat(
+                control,
+                phase=ReportJobPhase.PLANNING,
+                progress_percent=progress,
+                checkpoint=self._safe_evidence_checkpoint_payload(
+                    manifest,
+                    planning_context,
+                ),
+            )
+
+        if manifest is None:
+            raise _report_failure("REPORT_CHECKPOINT_INVALID")
+        if checkpoint is not None and checkpoint.plan is None:
+            if planning_context is None:
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
+            if (
+                planning_context.requires_table
+                and not any(
+                    item.kind is ReportEvidenceKind.TABLE
+                    for item in manifest.items
+                )
+            ):
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
+
+        checkpointed_by_id: dict[str, ReportSectionDraft] = {}
+        checkpoint_plan_is_current = False
+        if checkpoint is None or checkpoint.plan is None:
+            if planning_context is None:
+                raise _report_failure("REPORT_CHECKPOINT_INVALID")
             self._raise_if_cancelled(control)
             try:
                 raw_plan = self._planner(
@@ -365,6 +480,7 @@ class ReportJobProcessor:
                 manifest,
                 plan,
                 completed_by_id,
+                planning_context=planning_context,
             )
             self._heartbeat(
                 control,
@@ -372,14 +488,21 @@ class ReportJobProcessor:
                 progress_percent=progress,
                 checkpoint=checkpoint_payload,
             )
+            checkpoint_plan_is_current = True
+            checkpoint = None
         else:
-            manifest = checkpoint.manifest
-            plan = checkpoint.plan
+            checkpoint_plan = checkpoint.plan
+            plan = checkpoint_plan
             completed_by_id = {
                 draft.section_id: draft
                 for draft in checkpoint.completed_sections
             }
             try:
+                if planning_context is not None:
+                    validate_report_plan_semantics(
+                        plan,
+                        planning_context,
+                    )
                 chart_decisions = self._chart_builder(plan, manifest)
                 # A checkpoint written before chart demotion shipped still marks
                 # an unbuildable chart required; resuming must not kill it.
@@ -401,7 +524,42 @@ class ReportJobProcessor:
                 and len(completed_by_id) != len(plan.sections)
             ):
                 raise _report_failure("REPORT_CHECKPOINT_INVALID")
+            checkpointed_by_id = dict(completed_by_id)
+            checkpoint_plan_is_current = plan == checkpoint_plan
 
+        projected_checkpoint_bytes = (
+            self._projected_final_checkpoint_size_bytes(
+                manifest,
+                plan,
+                completed_by_id,
+                planning_context=planning_context,
+            )
+        )
+        if (
+            projected_checkpoint_bytes
+            > REPORT_GENERATION_CHECKPOINT_MAX_BYTES
+        ):
+            _LOGGER.warning(
+                "Projected report checkpoint exceeds the durable limit: "
+                "job_id=%s job_attempt=%s projected_bytes=%s "
+                "completed_sections=%s total_sections=%s",
+                lease.job_id,
+                lease.attempt_count,
+                projected_checkpoint_bytes,
+                len(completed_by_id),
+                len(plan.sections),
+            )
+            raise _report_failure("REPORT_CHECKPOINT_TOO_LARGE")
+
+        item_by_ref = manifest.item_by_ref()
+        grounding_index = build_evidence_grounding_index(
+            item_by_ref,
+            {
+                ref
+                for section in plan.sections
+                for ref in section.required_evidence_refs
+            },
+        )
         self._raise_if_cancelled(control)
 
         total_sections = len(plan.sections)
@@ -411,10 +569,15 @@ class ReportJobProcessor:
                 25 + math.floor(60 * len(completed_by_id) / total_sections),
             )
             if checkpoint is not None:
-                checkpoint_payload = self._safe_checkpoint_payload(
-                    manifest,
-                    plan,
-                    completed_by_id,
+                checkpoint_payload = (
+                    None
+                    if checkpoint_plan_is_current
+                    else self._safe_checkpoint_payload(
+                        manifest,
+                        plan,
+                        completed_by_id,
+                        planning_context=planning_context,
+                    )
                 )
                 self._heartbeat(
                     control,
@@ -422,13 +585,14 @@ class ReportJobProcessor:
                     progress_percent=progress,
                     checkpoint=checkpoint_payload,
                 )
+                checkpoint_plan_is_current = True
 
             def persist_section(
                 completed: int,
                 total: int,
                 draft: ReportSectionDraft,
             ) -> None:
-                nonlocal progress
+                nonlocal checkpointed_by_id, progress
                 completed_by_id[draft.section_id] = draft
                 progress = max(
                     progress,
@@ -442,8 +606,10 @@ class ReportJobProcessor:
                         manifest,
                         plan,
                         completed_by_id,
+                        planning_context=planning_context,
                     ),
                 )
+                checkpointed_by_id = dict(completed_by_id)
 
             try:
                 drafts = self._section_generator(
@@ -453,6 +619,7 @@ class ReportJobProcessor:
                     existing_drafts=completed_by_id,
                     progress_callback=persist_section,
                     max_workers=self._max_section_workers,
+                    grounding_index=grounding_index,
                 )
             except ReportSectionGenerationError as exc:
                 _LOGGER.warning(
@@ -485,15 +652,28 @@ class ReportJobProcessor:
 
         self._raise_if_cancelled(control)
         progress = max(progress, 90)
+        draft_by_id = {
+            draft.section_id: draft
+            for draft in drafts
+        }
+        assembly_checkpoint = (
+            None
+            if (
+                checkpoint_plan_is_current
+                and draft_by_id == checkpointed_by_id
+            )
+            else self._safe_checkpoint_payload(
+                manifest,
+                plan,
+                draft_by_id,
+                planning_context=planning_context,
+            )
+        )
         self._heartbeat(
             control,
             phase=ReportJobPhase.ASSEMBLING,
             progress_percent=progress,
-            checkpoint=self._safe_checkpoint_payload(
-                manifest,
-                plan,
-                {draft.section_id: draft for draft in drafts},
-            ),
+            checkpoint=assembly_checkpoint,
         )
         try:
             result = self._assembler(
@@ -501,6 +681,7 @@ class ReportJobProcessor:
                 manifest,
                 drafts,
                 chart_decisions,
+                grounding_index=grounding_index,
             )
         except (ReportAssemblyError, ValidationError, ValueError) as exc:
             raise _report_failure("REPORT_ASSEMBLY_INVALID") from exc
