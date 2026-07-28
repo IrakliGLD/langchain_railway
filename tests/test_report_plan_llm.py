@@ -29,6 +29,13 @@ def test_report_planner_prompt_uses_structure_skill_and_evidence_catalog(monkeyp
 
     monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda key: (None, "token"))
     monkeypatch.setattr(
+        ReportPlan,
+        "model_json_schema",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("report plan schema must be precomputed")
+        ),
+    )
+    monkeypatch.setattr(
         llm,
         "_cache_set",
         lambda key, value, token: captured.update(

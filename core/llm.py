@@ -32,6 +32,9 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 import knowledge as knowledge_module
+from agent.report_charts import chart_column_roles
+from agent.report_grounding import observed_period_span
+from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
     ENABLE_SKILL_PROMPTS_PLANNER,
@@ -92,9 +95,6 @@ from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
-from agent.report_charts import chart_column_roles
-from agent.report_grounding import observed_period_span
-from agent.report_projection import projected_row_indices
 from contracts.report import (
     ReportIntent,
     ReportPlan,
@@ -102,6 +102,7 @@ from contracts.report import (
     ReportSectionSpec,
     normalize_report_plan_semantics,
     normalize_report_plan_word_budget,
+    report_section_prompt_word_bounds,
 )
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_sections import ReportSectionDraft
@@ -109,7 +110,6 @@ from core.provider_invocation import ProviderInvocationRuntime
 from knowledge.sql_example_selector import get_relevant_examples
 from skills.loader import (
     _extract_section,
-    get_answer_length_guidance,
     get_answer_template,
     get_balancing_template,
     get_focus_guidance,
@@ -1964,6 +1964,10 @@ _CHART_POLICY_JSON = _compact_json(QUESTION_ANALYSIS_CHART_POLICY)
 _FILTER_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_FILTER_GUIDE)
 _QUERY_TYPE_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_QUERY_TYPE_GUIDE)
 _ANSWER_KIND_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_ANSWER_KIND_GUIDE)
+_REPORT_PLAN_SCHEMA_JSON = _compact_json(ReportPlan.model_json_schema())
+_REPORT_SECTION_SCHEMA_JSON = _compact_json(
+    ReportSectionDraft.model_json_schema()
+)
 
 
 # ---------------------------------------------------------------------------
@@ -3096,7 +3100,6 @@ def llm_plan_report(
         source="pipeline_fallback",
     )
 
-    schema_hint = ReportPlan.model_json_schema()
     guidance = (
         get_report_guidance("structure")
         + "\n\n"
@@ -3140,7 +3143,7 @@ def llm_plan_report(
     cache_input = (
         f"report_plan_v1|query={user_query}|manifest={manifest.manifest_id}|"
         f"context={planning_context_json}|catalog={catalog_json}|"
-        f"guidance={guidance}|schema={_compact_json(schema_hint)}|"
+        f"guidance={guidance}|schema={_REPORT_PLAN_SCHEMA_JSON}|"
         f"system={system}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
@@ -3166,7 +3169,7 @@ def llm_plan_report(
         "EVIDENCE_CATALOG:\n"
         f"{catalog_json}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_PLAN_SCHEMA_JSON}\n\n"
         "Return JSON only."
     )
     llm_start = time.time()
@@ -3209,7 +3212,6 @@ def llm_repair_report_plan(
         + "\n\n"
         + get_report_guidance("planning")
     )
-    schema_hint = ReportPlan.model_json_schema()
     planning_context_json = planning_context.model_dump_json()
     safe_error_codes = [
         code
@@ -3239,7 +3241,7 @@ def llm_repair_report_plan(
         "REJECTED_PLAN:\n"
         f"{_compact_json(rejected_payload)}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_PLAN_SCHEMA_JSON}\n\n"
         "Return replacement JSON only."
     )
     llm_start = time.time()
@@ -3287,8 +3289,9 @@ def _repair_sampling_temperature(attempt_number: int) -> float:
 
 
 def _report_section_validation_rules(section: ReportSectionSpec) -> str:
-    minimum_words = math.floor(section.target_words * 0.9)
-    maximum_words = math.ceil(section.target_words * 1.2)
+    minimum_words, maximum_words = report_section_prompt_word_bounds(
+        section.target_words
+    )
     bounds = _compact_json(
         {
             "target_words": section.target_words,
@@ -3373,6 +3376,15 @@ def _report_section_evidence_slice(
                 {"row_index": row_index, "values": item.rows[row_index]}
                 for row_index in row_indices
             ]
+            projected.update(
+                {
+                    "rows": included_rows,
+                    "included_row_count": len(included_rows),
+                    "prompt_projection_truncated": (
+                        len(included_rows) < len(item.rows)
+                    ),
+                }
+            )
             if len(included_rows) < len(item.rows):
                 # Shadow only: the grounding index still covers every manifest
                 # row, so a claim about a row the model never saw currently
@@ -3387,18 +3399,27 @@ def _report_section_evidence_slice(
                     "REPORT_GROUNDING_SCOPE_SHADOW %s",
                     _compact_json(
                         {
+                            "assigned_item_count": len(assigned_items),
                             "evidence_ref": item.evidence_ref,
+                            "evidence_budget_chars": (
+                                _REPORT_SECTION_EVIDENCE_BUDGET_CHARS
+                            ),
                             "manifest_rows": len(item.rows),
+                            "per_item_budget_chars": per_item_budget,
+                            "projected_item_chars": len(
+                                _compact_json(projected)
+                            ),
                             "projected_rows": len(included_rows),
+                            "projection_ratio": round(
+                                len(included_rows) / len(item.rows),
+                                4,
+                            ),
                             "section_id": section.section_id,
+                            "section_kind": section.kind.value,
+                            "target_words": section.target_words,
                         }
                     ),
                 )
-            projected["rows"] = included_rows
-            projected["included_row_count"] = len(included_rows)
-            projected["prompt_projection_truncated"] = (
-                len(included_rows) < len(item.rows)
-            )
         else:
             metadata_size = len(_compact_json(projected))
             content_budget = max(256, per_item_budget - metadata_size - 100)
@@ -3487,19 +3508,25 @@ def llm_write_report_section(
     plan: ReportPlan,
     section: ReportSectionSpec,
     manifest: ReportEvidenceManifest,
+    *,
+    evidence_facts_by_ref=None,
 ) -> ReportSectionDraft | dict:
     """Write one section from only its explicitly assigned evidence packet."""
 
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
     validation_rules = _report_section_validation_rules(section)
-    schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
 
     def cacheable(draft: ReportSectionDraft) -> bool:
         from agent.report_sections import validate_report_section
 
-        return validate_report_section(draft, section, manifest).valid
+        return validate_report_section(
+            draft,
+            section,
+            manifest,
+            evidence_facts_by_ref=evidence_facts_by_ref,
+        ).valid
 
     system = (
         "You write one evidence-grounded analytical report section. Return one "
@@ -3522,7 +3549,7 @@ def llm_write_report_section(
         f"report_section_v2|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|guidance={guidance}|"
         f"validation={validation_rules}|"
-        f"schema={_compact_json(schema_hint)}|system={system}"
+        f"schema={_REPORT_SECTION_SCHEMA_JSON}|system={system}"
     )
     prompt = (
         "REPORT_SECTION_GUIDANCE:\n"
@@ -3538,7 +3565,7 @@ def llm_write_report_section(
         "EVIDENCE_SLICE:\n"
         f"{evidence_slice}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_SECTION_SCHEMA_JSON}\n\n"
         "Return JSON only."
     )
     return _invoke_report_section_contract(
@@ -3569,7 +3596,6 @@ def llm_repair_report_section(
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
     validation_rules = _report_section_validation_rules(section)
-    schema_hint = ReportSectionDraft.model_json_schema()
     section_json = _compact_json(section.model_dump(mode="json"))
     draft_json = (
         draft.model_dump_json()
@@ -3602,7 +3628,7 @@ def llm_repair_report_section(
         f"section={section_json}|evidence={evidence_slice}|errors={errors_json}|"
         f"candidate={draft_json}|guidance={guidance}|"
         f"validation={validation_rules}|"
-        f"schema={_compact_json(schema_hint)}|system={system}"
+        f"schema={_REPORT_SECTION_SCHEMA_JSON}|system={system}"
     )
     prompt = (
         "REPORT_SECTION_GUIDANCE:\n"
@@ -3622,7 +3648,7 @@ def llm_repair_report_section(
         "REJECTED_CANDIDATE:\n"
         f"{draft_json}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
-        f"{_compact_json(schema_hint)}\n\n"
+        f"{_REPORT_SECTION_SCHEMA_JSON}\n\n"
         "Return replacement JSON only."
     )
     return _invoke_report_section_contract(
@@ -3699,20 +3725,30 @@ def llm_summarize_structured(
         else "none"
     )
     skill_hash = get_skills_content_hash() if ENABLE_SKILL_PROMPTS_SUMMARIZER else "off"
-    answer_mode_cache_suffix = (
-        f"|am={answer_mode}"
-        if answer_mode not in {"", "standard"}
-        else ""
-    )
     cache_input = (
         f"summary_structured_v10|pm={PIPELINE_MODE}|{user_query}|{effective_data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|eak={effective_answer_kind_key}|"
         f"vk={vk_doc_types}|sh={skill_hash}|"
         f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}"
-        f"{answer_mode_cache_suffix}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
+    request_scope = current_request_execution_scope()
+    deadline_remaining_ms = (
+        request_scope.deadline.remaining_ms()
+        if request_scope is not None and request_scope.deadline is not None
+        else -1
+    )
+    normalized_answer_mode = (
+        answer_mode if answer_mode in {"brief", "standard", "report"} else "standard"
+    )
+    log.info(
+        "Structured summary cache lookup: answer_mode=%s cache_status=%s "
+        "deadline_remaining_ms=%s",
+        normalized_answer_mode,
+        "hit" if cached_response else "miss",
+        deadline_remaining_ms,
+    )
     if cached_response:
         payload = _extract_json_payload(cached_response)
         return SummaryEnvelope.model_validate(payload)
@@ -3999,10 +4035,6 @@ def llm_summarize_structured(
         formatting_rules = load_reference("answer-composer", "formatting-rules.md")
         if formatting_rules:
             guidance_parts.append(formatting_rules)
-        answer_length_guidance = get_answer_length_guidance(answer_mode)
-        if answer_length_guidance:
-            guidance_parts.append(answer_length_guidance)
-
         skill_guidance = "\n\n".join(guidance_parts)
         log.info(
             "📝 Structured summarizer enriched: query_type=%s, focus=%s, guidance=%d chars",
@@ -4038,10 +4070,6 @@ def llm_summarize_structured(
                 "- Do not answer as a single-period narrative when month-over-month or year-over-year evidence is provided.\n"
                 "- Use only comparison values grounded in UNTRUSTED_STATISTICS or UNTRUSTED_DATA_PREVIEW.\n"
             )
-        answer_length_guidance = get_answer_length_guidance(answer_mode)
-        if answer_length_guidance:
-            skill_guidance += f"\n{answer_length_guidance}\n"
-
     schema_hint = {
         "answer": "string",
         "claims": ["string"],

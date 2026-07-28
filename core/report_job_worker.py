@@ -24,7 +24,7 @@ class ReportJobRepository(Protocol):
         worker_id: str,
         phase: ReportJobPhase,
         progress_percent: int,
-        checkpoint: dict[str, Any] | None,
+        checkpoint: dict[str, Any] | str | None,
         lease_seconds: int,
     ) -> bool: ...
 
@@ -75,7 +75,7 @@ class ReportJobExecutionControl:
         *,
         phase: ReportJobPhase,
         progress_percent: int,
-        checkpoint: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | str | None = None,
     ) -> bool:
         return self._repository.heartbeat(
             job_id=self._lease.job_id,

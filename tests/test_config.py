@@ -74,6 +74,27 @@ def test_report_concurrency_and_deadline_controls_are_bounded():
     assert 60 <= REPORT_JOB_TIMEOUT_SECONDS <= 3600
 
 
+def test_report_section_concurrency_defaults_to_one_eight_section_wave():
+    env = os.environ.copy()
+    env.pop("ENAI_REPORT_SECTION_MAX_WORKERS", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import config; print(config.REPORT_SECTION_MAX_WORKERS)",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "8"
+
+
 def _config_with_env(**overrides) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(overrides)

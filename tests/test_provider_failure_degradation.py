@@ -21,7 +21,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import pytest
 
 from agent import summarizer
-from models import QueryContext
+from models import QueryContext, TerminalOutcome
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
     ProviderExecutionError,
@@ -61,8 +61,37 @@ def _data_ctx() -> QueryContext:
 
 
 class TestStructuredDataPathDegrades:
-    def test_ambiguous_provider_failure_uses_legacy_fallback(self, monkeypatch):
+    def test_ambiguous_provider_failure_returns_transient_outcome_without_second_call(
+        self, monkeypatch
+    ):
         monkeypatch.setattr(summarizer, "llm_summarize_structured", _ambiguous_failure)
+        legacy_calls = []
+        monkeypatch.setattr(summarizer, "llm_summarize", lambda *a, **k: legacy_calls.append(1))
+
+        out = summarizer.summarize_data(_data_ctx())
+
+        assert out.summary_source == "transient_failure"
+        assert out.terminal_outcome == TerminalOutcome.TRANSIENT_FAILURE.value
+        assert out.summary_claims == []
+        assert "try again" in out.summary.lower()
+        assert legacy_calls == []
+
+    def test_rejected_provider_failure_also_avoids_same_provider_replay(self, monkeypatch):
+        monkeypatch.setattr(summarizer, "llm_summarize_structured", _rejected_failure)
+        legacy_calls = []
+        monkeypatch.setattr(summarizer, "llm_summarize", lambda *a, **k: legacy_calls.append(1))
+
+        out = summarizer.summarize_data(_data_ctx())
+
+        assert out.summary_source == "transient_failure"
+        assert out.terminal_outcome == TerminalOutcome.TRANSIENT_FAILURE.value
+        assert legacy_calls == []
+
+    def test_non_provider_structured_failure_keeps_legacy_parser_fallback(self, monkeypatch):
+        def _schema_failure(*_args, **_kwargs):
+            raise ValueError("malformed structured response")
+
+        monkeypatch.setattr(summarizer, "llm_summarize_structured", _schema_failure)
         monkeypatch.setattr(
             summarizer, "llm_summarize", lambda *a, **k: "The observed value was 10.",
         )
@@ -71,27 +100,6 @@ class TestStructuredDataPathDegrades:
 
         assert out.summary_source == "legacy_text_fallback"
         assert "10" in out.summary
-
-    def test_rejected_provider_failure_also_degrades(self, monkeypatch):
-        # Breaker-open reaching the summarizer means core-level OpenAI fallback
-        # was unavailable; the legacy path still owns the degradation attempt.
-        monkeypatch.setattr(summarizer, "llm_summarize_structured", _rejected_failure)
-        monkeypatch.setattr(
-            summarizer, "llm_summarize", lambda *a, **k: "The observed value was 10.",
-        )
-
-        out = summarizer.summarize_data(_data_ctx())
-
-        assert out.summary_source == "legacy_text_fallback"
-
-    def test_total_provider_outage_still_propagates(self, monkeypatch):
-        # When the legacy fallback's own call fails too (provider tier down),
-        # the error propagates — no infinite retry, no silent empty answer.
-        monkeypatch.setattr(summarizer, "llm_summarize_structured", _rejected_failure)
-        monkeypatch.setattr(summarizer, "llm_summarize", _rejected_failure)
-
-        with pytest.raises(ProviderExecutionError):
-            summarizer.summarize_data(_data_ctx())
 
 
 class TestTimeoutClassification:
@@ -142,27 +150,26 @@ class TestTimeoutClassification:
 
 
 class TestConceptualPathDegrades:
-    def test_ambiguous_provider_failure_uses_legacy_conceptual_fallback(self, monkeypatch):
+    def test_ambiguous_provider_failure_returns_transient_outcome_without_second_call(
+        self, monkeypatch
+    ):
         monkeypatch.setattr(
             summarizer, "llm_summarize_structured_conceptual", _ambiguous_failure,
             raising=False,
         )
         # The conceptual path may use the same structured entry point; patch both.
         monkeypatch.setattr(summarizer, "llm_summarize_structured", _ambiguous_failure)
-        monkeypatch.setattr(
-            summarizer, "llm_summarize", lambda *a, **k: "A market definition.",
-        )
+        legacy_calls = []
+        monkeypatch.setattr(summarizer, "llm_summarize", lambda *a, **k: legacy_calls.append(1))
 
         ctx = QueryContext(query="What is the balancing market?")
         ctx.is_conceptual = True
 
         out = summarizer.answer_conceptual(ctx)
 
-        assert out.summary
-        assert out.summary_source in (
-            "legacy_conceptual_text_fallback",
-            "conceptual_summary",  # pre-structured path if knowledge empty
-        )
+        assert out.summary_source == "transient_failure"
+        assert out.terminal_outcome == TerminalOutcome.TRANSIENT_FAILURE.value
+        assert legacy_calls == []
 
 
 if __name__ == "__main__":

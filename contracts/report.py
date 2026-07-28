@@ -18,16 +18,59 @@ REPORT_PLAN_CONTRACT_VERSION = "report-plan-v1"
 STANDARD_REPORT_MIN_WORDS = 900
 STANDARD_REPORT_MAX_WORDS = 1400
 STANDARD_REPORT_MAX_SECTIONS = 8
+REPORT_SECTION_WORD_FLOOR_RATIO = 0.9
+REPORT_SECTION_PROMPT_WORD_CEILING_RATIO = 1.2
+REPORT_SECTION_VALIDATION_WORD_CEILING_RATIO = 1.35
+REPORT_AGGREGATE_WORD_CEILING_RATIO = 1.2
 STANDARD_REPORT_RESULT_MIN_WORDS = (
-    math.floor(STANDARD_REPORT_MIN_WORDS * 0.9)
+    math.floor(
+        STANDARD_REPORT_MIN_WORDS * REPORT_SECTION_WORD_FLOOR_RATIO
+    )
     - (STANDARD_REPORT_MAX_SECTIONS - 1)
 )
 STANDARD_REPORT_RESULT_MAX_WORDS = (
-    math.ceil(STANDARD_REPORT_MAX_WORDS * 1.2)
+    math.ceil(
+        STANDARD_REPORT_MAX_WORDS * REPORT_AGGREGATE_WORD_CEILING_RATIO
+    )
     + (STANDARD_REPORT_MAX_SECTIONS - 1)
 )
 REPORT_SECTION_MIN_WORDS = 40
 REPORT_SECTION_MAX_WORDS = 800
+
+
+def report_section_prompt_word_bounds(target_words: int) -> tuple[int, int]:
+    return (
+        math.floor(target_words * REPORT_SECTION_WORD_FLOOR_RATIO),
+        math.ceil(
+            target_words * REPORT_SECTION_PROMPT_WORD_CEILING_RATIO
+        ),
+    )
+
+
+def report_section_validation_word_bounds(
+    target_words: int,
+) -> tuple[int, int]:
+    return (
+        math.floor(target_words * REPORT_SECTION_WORD_FLOOR_RATIO),
+        math.ceil(
+            target_words * REPORT_SECTION_VALIDATION_WORD_CEILING_RATIO
+        ),
+    )
+
+
+def report_aggregate_word_bounds(
+    section_targets: Sequence[int],
+) -> tuple[int, int]:
+    return (
+        sum(
+            math.floor(target * REPORT_SECTION_WORD_FLOOR_RATIO)
+            for target in section_targets
+        ),
+        sum(
+            math.ceil(target * REPORT_AGGREGATE_WORD_CEILING_RATIO)
+            for target in section_targets
+        ),
+    )
 
 
 class ReportSectionKind(str, Enum):

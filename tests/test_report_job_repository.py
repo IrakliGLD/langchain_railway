@@ -199,6 +199,24 @@ def test_repository_heartbeat_surfaces_cooperative_cancellation():
     ) is False
 
 
+def test_repository_heartbeat_forwards_pre_serialized_checkpoint_once():
+    repository, connection, _ = _repository(
+        [{"ok": True, "updated": True}]
+    )
+    checkpoint = '{"contract_version":"report-generation-checkpoint-v2"}'
+
+    assert repository.heartbeat(
+        job_id=uuid4(),
+        worker_id="worker-1",
+        phase=ReportJobPhase.GENERATING_SECTIONS,
+        progress_percent=25,
+        checkpoint=checkpoint,
+        lease_seconds=120,
+    )
+
+    assert connection.calls[0][1]["checkpoint"] == checkpoint
+
+
 def test_repository_heartbeat_requires_explicit_update_acknowledgement():
     repository, _, _ = _repository([{"ok": True}])
 

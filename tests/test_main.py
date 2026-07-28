@@ -898,6 +898,7 @@ def test_ask_rejects_invalid_gateway_budget_before_pipeline(monkeypatch):
 )
 def test_ask_normalizes_answer_mode_before_pipeline(
     monkeypatch,
+    caplog,
     answer_mode_header,
     expected_mode,
 ):
@@ -913,6 +914,7 @@ def test_ask_normalizes_answer_mode_before_pipeline(
     headers = {"X-App-Key": "test-gateway-key"}
     if answer_mode_header is not None:
         headers["X-Enai-Answer-Mode"] = answer_mode_header
+    caplog.set_level("INFO", logger="Enai")
 
     response = TestClient(main_module.app).post(
         "/ask",
@@ -922,6 +924,13 @@ def test_ask_normalizes_answer_mode_before_pipeline(
 
     assert response.status_code == 200, response.text
     assert captured["pipeline"]["answer_mode"] == expected_mode
+    policy_events = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Ask request policy:")
+    ]
+    assert any(f"answer_mode={expected_mode}" in event for event in policy_events)
+    assert all("Show balancing price trend" not in event for event in policy_events)
     _clear_rate_limit_buckets()
 
 

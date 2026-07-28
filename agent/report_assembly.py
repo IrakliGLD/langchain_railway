@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import math
+from typing import Any
 
 from agent.report_grounding import build_evidence_grounding_index
 from agent.report_sections import validate_report_section
-from contracts.report import ReportPlan
+from contracts.report import ReportPlan, report_aggregate_word_bounds
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_evidence import ReportEvidenceManifest
 from contracts.report_result import (
@@ -27,6 +27,8 @@ def assemble_report(
     manifest: ReportEvidenceManifest,
     drafts: list[ReportSectionDraft],
     chart_decisions: list[ReportChartBuildDecision],
+    *,
+    grounding_index: dict[str, Any] | None = None,
 ) -> ReportResult:
     draft_by_id = {draft.section_id: draft for draft in drafts}
     expected_ids = [section.section_id for section in plan.sections]
@@ -38,10 +40,16 @@ def assemble_report(
     markdown_parts = [f"# {plan.title}"]
     total_words = 0
     item_by_ref = manifest.item_by_ref()
-    grounding_index = build_evidence_grounding_index(
-        item_by_ref,
-        set(item_by_ref),
-    )
+    if grounding_index is None:
+        assigned_refs = {
+            ref
+            for section in plan.sections
+            for ref in section.required_evidence_refs
+        }
+        grounding_index = build_evidence_grounding_index(
+            item_by_ref,
+            assigned_refs,
+        )
     for section in plan.sections:
         draft = draft_by_id[section.section_id]
         validation = validate_report_section(
@@ -81,13 +89,8 @@ def assemble_report(
             ]
         )
 
-    minimum_report_words = sum(
-        math.floor(section.target_words * 0.9)
-        for section in plan.sections
-    )
-    maximum_report_words = sum(
-        math.ceil(section.target_words * 1.2)
-        for section in plan.sections
+    minimum_report_words, maximum_report_words = report_aggregate_word_bounds(
+        [section.target_words for section in plan.sections]
     )
     if not minimum_report_words <= total_words <= maximum_report_words:
         raise ReportAssemblyError("Final report word count is outside the plan tolerance.")

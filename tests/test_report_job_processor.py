@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -17,15 +19,20 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import pytest
 
+from agent import report_grounding
 from agent.report_charts import build_report_charts
 from agent.report_evaluation import evaluate_report_plan
+from agent.report_intent import build_report_planning_context
 from agent.report_planner import ReportPlanEvidenceError
 from agent.report_sections import (
     ReportSectionGenerationError,
     generate_report_sections,
 )
 from contracts.report import ReportPlan
-from contracts.report_generation import ReportGenerationCheckpoint
+from contracts.report_generation import (
+    REPORT_GENERATION_CHECKPOINT_MAX_BYTES,
+    ReportGenerationCheckpoint,
+)
 from contracts.report_jobs import ReportJobLease, ReportJobPhase
 from contracts.report_result import ReportResult
 from contracts.report_sections import ReportSectionDraft
@@ -81,6 +88,8 @@ class _Control:
         progress_percent: int,
         checkpoint: dict | None = None,
     ) -> bool:
+        if isinstance(checkpoint, str):
+            checkpoint = json.loads(checkpoint)
         self.heartbeats.append((phase, progress_percent, checkpoint))
         return not self.cancelled
 
@@ -145,6 +154,7 @@ def _processor(
             ),
             progress_callback=kwargs["progress_callback"],
             max_workers=kwargs["max_workers"],
+            grounding_index=kwargs.get("grounding_index"),
         )
 
     def planner(_query, _manifest_value, **kwargs):
@@ -191,6 +201,69 @@ def test_checkpoint_contract_binds_manifest_plan_and_completed_sections():
         ReportGenerationCheckpoint.model_validate(payload)
 
 
+def test_checkpoint_payload_is_serialized_once_before_repository_boundary():
+    plan = ReportPlan.model_validate(_plan_payload())
+    planning_context = build_report_planning_context(
+        _pipeline_context("Explain the price trend.")
+    )
+
+    payload = ReportJobProcessor._checkpoint_payload(
+        _manifest(),
+        plan,
+        {},
+        planning_context=planning_context,
+    )
+
+    assert isinstance(payload, str)
+    checkpoint = ReportGenerationCheckpoint.model_validate(
+        json.loads(payload)
+    )
+    assert checkpoint.checkpoint_stage == "plan_ready"
+
+
+def test_checkpoint_v2_expresses_only_valid_evidence_and_plan_stages():
+    manifest = _manifest()
+    planning_context = build_report_planning_context(
+        _pipeline_context("Explain the price trend.")
+    )
+    evidence_ready = ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v2",
+        checkpoint_stage="evidence_ready",
+        manifest=manifest,
+        planning_context=planning_context,
+        plan=None,
+        completed_sections=[],
+    )
+
+    assert evidence_ready.plan is None
+    assert evidence_ready.planning_context == planning_context
+
+    invalid = evidence_ready.model_dump(mode="json")
+    invalid["completed_sections"] = [
+        _draft(ReportPlan.model_validate(_plan_payload()).sections[0])
+    ]
+    with pytest.raises(ValueError, match="evidence_ready"):
+        ReportGenerationCheckpoint.model_validate(invalid)
+
+    invalid = evidence_ready.model_dump(mode="json")
+    invalid["checkpoint_stage"] = "plan_ready"
+    with pytest.raises(ValueError, match="plan_ready"):
+        ReportGenerationCheckpoint.model_validate(invalid)
+
+    invalid_context = planning_context.model_copy(
+        update={"language_code": "ka"}
+    )
+    with pytest.raises(ValueError, match="planning context"):
+        ReportGenerationCheckpoint(
+            contract_version="report-generation-checkpoint-v2",
+            checkpoint_stage="plan_ready",
+            manifest=manifest,
+            planning_context=invalid_context,
+            plan=ReportPlan.model_validate(_plan_payload()),
+            completed_sections=[],
+        )
+
+
 def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     pipeline_calls: list = []
     generated: list = []
@@ -228,6 +301,7 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     assert planning_contexts[0].requires_table is True
     assert control.heartbeats[0][:2] == (ReportJobPhase.PLANNING, 10)
     assert control.heartbeats[-1][:2] == (ReportJobPhase.ASSEMBLING, 90)
+    assert control.heartbeats[-1][2] is None
     assert all(
         earlier[1] <= later[1]
         for earlier, later in zip(control.heartbeats, control.heartbeats[1:])
@@ -383,6 +457,30 @@ def test_retry_resumes_valid_sections_without_repeating_pipeline_or_planner():
     assert pipeline_calls == []
     assert resumed.section_id not in generated
     assert control.heartbeats[0][1] >= lease.progress_percent
+    assert control.heartbeats[0][2] is None
+
+
+def test_processor_reuses_one_grounding_index_for_generation_and_assembly(
+    monkeypatch,
+):
+    calls = Counter()
+    original = report_grounding._evidence_grounding_facts
+
+    def counted(item):
+        calls[item.evidence_ref] += 1
+        return original(item)
+
+    monkeypatch.setattr(
+        report_grounding,
+        "_evidence_grounding_facts",
+        counted,
+    )
+
+    _processor()(_lease(), _Control())
+
+    assert calls == Counter(
+        {item.evidence_ref: 1 for item in _manifest().items}
+    )
 
 
 def test_checkpoint_for_a_different_query_fails_closed():
@@ -497,6 +595,69 @@ def test_report_plan_provider_failure_remains_retryable_and_is_diagnosable(
     assert "provider secret" not in caplog.text
 
 
+def test_planner_failure_persists_evidence_ready_checkpoint_for_retry():
+    lease = _lease()
+    control = _Control()
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
+        planner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ProviderExecutionError(
+                "provider unavailable",
+                provider="nvidia",
+                stage="report_planner",
+                disposition=ProviderDeliveryDisposition.TIMED_OUT,
+            )
+        ),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(lease, control)
+
+    assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
+    checkpoint = control.heartbeats[-1][2]
+    assert checkpoint is not None
+    assert checkpoint["contract_version"] == (
+        "report-generation-checkpoint-v2"
+    )
+    assert checkpoint["checkpoint_stage"] == "evidence_ready"
+    assert checkpoint["plan"] is None
+
+
+def test_evidence_ready_retry_resumes_planning_without_pipeline():
+    query = "Explain the price trend."
+    planning_context = build_report_planning_context(
+        _pipeline_context(query)
+    )
+    checkpoint = ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v2",
+        checkpoint_stage="evidence_ready",
+        manifest=_manifest_for_query(query),
+        planning_context=planning_context,
+        plan=None,
+        completed_sections=[],
+    )
+    pipeline_calls = []
+    received_contexts = []
+
+    result = _processor(
+        pipeline_calls=pipeline_calls,
+        planning_contexts=received_contexts,
+    )(
+        _lease(
+            checkpoint=checkpoint.model_dump(mode="json"),
+            phase="planning",
+            progress_percent=20,
+        ),
+        _Control(),
+    )
+
+    ReportResult.model_validate(result)
+    assert pipeline_calls == []
+    assert received_contexts == [planning_context]
+
+
 @pytest.mark.parametrize(
     ("section_error_codes", "expected_code", "expected_retryable"),
     [
@@ -609,12 +770,14 @@ def test_resume_demotes_a_required_chart_left_by_an_older_checkpoint():
         max_section_workers=5,
     )
 
+    control = _Control()
     result = processor(
         _lease(checkpoint=checkpoint, phase="generating_sections"),
-        _Control(),
+        control,
     )
 
     assert result["charts"] == []
+    assert control.heartbeats[0][2] is not None
     assert [omission["chart_id"] for omission in result["omitted_charts"]] == [
         "price_trend"
     ]
@@ -639,6 +802,28 @@ def test_oversized_checkpoint_is_reported_as_its_own_failure(monkeypatch):
 
     assert excinfo.value.error_code == "REPORT_CHECKPOINT_TOO_LARGE"
     assert excinfo.value.retryable is False
+
+
+def test_projected_checkpoint_overflow_fails_before_section_calls(
+    monkeypatch,
+):
+    generated = []
+    monkeypatch.setattr(
+        ReportJobProcessor,
+        "_projected_final_checkpoint_size_bytes",
+        staticmethod(
+            lambda *_args, **_kwargs: (
+                REPORT_GENERATION_CHECKPOINT_MAX_BYTES + 1
+            )
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(ReportJobFailure) as excinfo:
+        _processor(generated=generated)(_lease(), _Control())
+
+    assert excinfo.value.error_code == "REPORT_CHECKPOINT_TOO_LARGE"
+    assert generated == []
 
 
 def test_invalid_checkpoint_identity_is_not_reported_as_oversized(monkeypatch):

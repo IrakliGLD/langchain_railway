@@ -82,9 +82,27 @@ Optional bounded settings:
 ENAI_REPORT_WORKER_LEASE_SECONDS=900
 ENAI_REPORT_WORKER_RETRY_DELAY_SECONDS=30
 ENAI_REPORT_WORKER_POLL_INTERVAL_MS=2000
-ENAI_REPORT_SECTION_MAX_WORKERS=4
+ENAI_REPORT_SECTION_MAX_WORKERS=8
 ENAI_REPORT_JOB_TIMEOUT_SECONDS=600
 ```
+
+Eight section workers is the code default so a maximum-size plan can run in
+one provider-I/O wave. Treat that as a staged concurrency rollout, not an
+instruction to skip capacity validation: pin an existing production worker to
+`4`, canary `6`, and then move to `8` after provider throttling, circuit-breaker
+opens, section provider failures, repair rates, and end-to-end latency remain
+within the recorded baseline. `REPORT_SECTION_CONCURRENCY` records the
+configured/effective worker counts and planned wave count without report
+content, so each step can be compared directly. Revert the environment value
+to the last stable setting if those signals regress.
+
+`REPORT_GROUNDING_SCOPE_SHADOW` remains observation-only. Truncated table
+events now include section kind and target words, the total and per-item
+character budgets, assigned-item count, projected item size, and row projection
+ratio. Use a representative production sample of those fields together with
+the correlated section validation/repair outcome before proposing
+section-sized evidence budgets. Do not lower the live 30,000-character budget
+from local estimates alone.
 
 The lease must be at least 30 seconds longer than the end-to-end job timeout.
 Only the worker enforces this, and only at its own startup: it rejects an unsafe

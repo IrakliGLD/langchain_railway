@@ -1304,6 +1304,13 @@ def ask_post(
     response.headers["X-Enai-Request-Budget-Ms"] = str(request_deadline.budget_ms)
     response.headers["X-Enai-Deadline-Remaining-Ms"] = str(request_deadline.remaining_ms())
     response.headers["X-Enai-Retry-Owner"] = request_deadline.retry_owner
+    log.info(
+        "Ask request policy: answer_mode=%s budget_ms=%s remaining_ms=%s retry_owner=%s",
+        answer_mode.value,
+        request_deadline.budget_ms,
+        request_deadline.remaining_ms(),
+        request_deadline.retry_owner,
+    )
 
     if caller.auth_mode == "gateway":
         if not _check_gateway_rate_limit(request, caller):
