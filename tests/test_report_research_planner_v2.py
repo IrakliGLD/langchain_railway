@@ -113,6 +113,30 @@ def test_research_planner_binds_identity_language_and_uses_one_model_call():
     assert plan.language_code == "en"
 
 
+def test_research_planner_converts_invoker_schema_errors_to_safe_findings():
+    payload = _bound_plan_payload()
+    payload["tracks"][0]["collector_ids"] = ["private-invalid-collector"]
+
+    def invoke_model(*_args, **_kwargs):
+        return ReportResearchPlan.model_validate(payload)
+
+    with pytest.raises(ReportResearchPlanError) as exc_info:
+        plan_report_research(
+            _COMPOUND_QUERY,
+            max_tracks=4,
+            invoke_model=invoke_model,
+        )
+
+    assert exc_info.value.assessment.finding_codes == [
+        "PLAN_SCHEMA_INVALID"
+    ]
+    assert (
+        "SCHEMA_TRACKS_ITEM_COLLECTOR_IDS_ITEM_ENUM"
+        in exc_info.value.schema_error_codes
+    )
+    assert "private-invalid-collector" not in str(exc_info.value)
+
+
 def test_research_planner_does_not_spend_a_second_call_on_invalid_plan():
     calls = []
     raw_payload = _bound_plan_payload()

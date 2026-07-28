@@ -161,6 +161,52 @@ def test_llm_response_log_exposes_content_free_completion_diagnostics(
     assert captured["finish_reason"] == "length"
 
 
+def test_structured_output_telemetry_uses_the_raw_response(
+    caplog,
+    monkeypatch,
+):
+    from core import llm
+
+    class _RawMessage:
+        content = "structured response content must never be logged"
+        usage_metadata = {
+            "input_tokens": 91,
+            "output_tokens": 22,
+            "total_tokens": 113,
+        }
+        response_metadata = {"finish_reason": "completed"}
+
+    captured = {}
+    monkeypatch.setattr(
+        llm.metrics,
+        "log_llm_usage",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    caplog.set_level("INFO", logger="Enai")
+
+    llm._log_usage_for_message(
+        {
+            "raw": _RawMessage(),
+            "parsed": {"safe": "not logged"},
+            "parsing_error": None,
+        },
+        model_name="gpt-5.6-luna",
+        attempt_stage="report_research_planner",
+    )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("llm_response_telemetry ")
+    )
+    assert "prompt_tokens=91" in record
+    assert "completion_tokens=22" in record
+    assert "total_tokens=113" in record
+    assert "finish_reason=completed" in record
+    assert _RawMessage.content not in record
+    assert captured["total_tokens"] == 113
+
+
 def test_report_response_log_uses_the_dedicated_output_limit(caplog, monkeypatch):
     from core import llm
 

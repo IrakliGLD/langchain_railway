@@ -24,6 +24,7 @@ from agent.report_charts import build_report_charts
 from agent.report_evaluation import evaluate_report_plan
 from agent.report_intent import build_report_planning_context
 from agent.report_planner import ReportPlanEvidenceError
+from agent.report_research_planner import plan_report_research
 from agent.report_sections import (
     ReportSectionGenerationError,
     generate_report_sections,
@@ -800,6 +801,47 @@ def test_enabled_v2_two_call_budget_disables_document_repair():
     )
 
     assert repair_flags == [False]
+
+
+def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
+    private_value = "private-invalid-collector"
+
+    def invalid_planner(query, *, max_tracks):
+        payload = _research_plan_payload(
+            query_digest=hashlib.sha256(
+                query.encode("utf-8")
+            ).hexdigest()
+        )
+        payload["tracks"][0]["collector_ids"] = [private_value]
+
+        def invalid_invoker(*_args, **_kwargs):
+            from contracts.report_research import ReportResearchPlan
+
+            return ReportResearchPlan.model_validate(payload)
+
+        return plan_report_research(
+            query,
+            max_tracks=max_tracks,
+            invoke_model=invalid_invoker,
+        )
+
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="enabled",
+        research_planner=invalid_planner,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportProcessor"):
+        with pytest.raises(ReportJobFailure) as exc_info:
+            processor(_lease(query=_V2_QUERY), _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
+    assert "finding_codes=PLAN_SCHEMA_INVALID" in caplog.text
+    assert (
+        "schema_error_codes="
+        "SCHEMA_TRACKS_ITEM_COLLECTOR_IDS_ITEM_ENUM"
+        in caplog.text
+    )
+    assert private_value not in caplog.text
 
 
 def test_enabled_v2_document_plan_validation_failure_is_typed_as_plan_invalid():

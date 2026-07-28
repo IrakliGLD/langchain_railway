@@ -838,11 +838,15 @@ class ReportJobProcessor:
             except ReportResearchPlanError as exc:
                 _LOGGER.warning(
                     "Report v2 research plan rejected: job_id=%s "
-                    "job_attempt=%s finding_codes=%s",
+                    "job_attempt=%s finding_codes=%s "
+                    "schema_error_codes=%s",
                     lease.job_id,
                     lease.attempt_count,
                     _diagnostic_error_codes(
                         list(exc.assessment.finding_codes)
+                    ),
+                    _diagnostic_error_codes(
+                        list(exc.schema_error_codes)
                     ),
                 )
                 raise _report_failure("REPORT_PLAN_INVALID") from exc
