@@ -138,9 +138,23 @@ def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
         normalized = str(column or "").strip().lower()
         if not normalized:
             continue
+        # A percent-scaled share must be resolved before the registry, whose
+        # ``share_*`` pattern would label it "ratio" (0-1). The aggregation
+        # examples emit ROUND(x / y * 100, 2) AS share_percent, so that label
+        # would make every correct percentage claim fail verification.
+        if normalized.endswith("_percent") or normalized.endswith("_pct"):
+            units[column] = "%"
+            continue
         registered = METRIC_UNITS.find_for_source_metric(normalized)
         if registered is not None:
             units[column] = registered.storage_unit
+            continue
+        # sql_executor emits a bare "share" for its 0-1 share expression. Both
+        # the registry pattern (share_*) and metric_value_unit's
+        # startswith("share_") need a suffix, so the bare name resolved to
+        # nothing and no claim on it could be verified.
+        if normalized == "share":
+            units[column] = "ratio"
             continue
         if (
             "price" in normalized
@@ -187,6 +201,8 @@ def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
             or normalized.startswith("count_")
             or normalized.startswith("n_")
             or normalized.endswith("_units")
+            # COUNT(*) AS number_of_months in the aggregation examples.
+            or normalized.startswith("number_of_")
         ):
             units[column] = "count"
             continue

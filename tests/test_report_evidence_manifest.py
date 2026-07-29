@@ -254,3 +254,26 @@ def test_count_like_columns_receive_a_dimensionless_unit():
     assert units["n_units"] == "count"
     assert units["unit_rank"] == "rank"
     assert units["price_gel"] == "GEL/MWh"
+
+
+def test_emitted_share_columns_carry_the_unit_they_actually_hold():
+    """The two share aliases the SQL layer emits hold different scales.
+
+    ``share`` is the 0-1 ratio from sql_executor's share expression;
+    ``share_percent`` is ROUND(x / y * 100, 2) from the aggregation examples.
+    A claim on a column with no unit, or with the wrong scale, cannot be
+    verified at all -- which is how report job 1779c440 failed.
+    """
+
+    from agent.report_evidence import _inferred_unit_by_column
+
+    units = _inferred_unit_by_column(
+        ["period", "segment", "share", "share_percent", "number_of_months"]
+    )
+
+    assert units["share"] == "ratio"
+    assert units["share_percent"] == "%"
+    assert units["number_of_months"] == "count"
+    # Label columns stay unit-less: they carry no magnitude to claim.
+    assert "segment" not in units
+    assert "period" not in units

@@ -347,6 +347,54 @@ def test_section_validation_accepts_percent_conversion_only_for_ratio_evidence(
     ) is (not expected_valid)
 
 
+def test_declared_percent_unit_overrides_the_share_column_name_heuristic():
+    """A ``share_*`` column already scaled to percent must not be re-scaled.
+
+    The aggregation examples emit ROUND(x / y * 100, 2) AS share_percent, so
+    the cell holds 62.0 and its declared unit is "%". Treating the column as a
+    0-1 ratio on the strength of its name multiplies it to 6200%, and the only
+    correct claim a writer can make is rejected.
+    """
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "share_percent"]
+    table["rows"] = [
+        {"period": "2026-01", "share_percent": 62.0},
+        {"period": "2026-02", "share_percent": 55.0},
+    ]
+    table["unit_by_column"] = {"share_percent": "%"}
+    manifest = _manifest().model_validate(manifest_payload)
+    draft_payload = _draft(
+        section,
+        text=(
+            "Hydro held a 62.0% share of generation. "
+            + _words(section.target_words)
+        ),
+    )
+    draft_payload["paragraphs"][0]["evidence_refs"] = (
+        section.required_evidence_refs
+    )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(
+            column="share_percent",
+            display_value="62.0%",
+            unit="%",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(draft_payload),
+        section,
+        manifest,
+    )
+
+    assert validation.error_codes == []
+    assert validation.valid is True
+
+
 @pytest.mark.parametrize(
     ("evidence_value", "claim", "expected_valid"),
     [
