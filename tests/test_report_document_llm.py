@@ -39,9 +39,22 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
     ) = _document_components()
     expected = _valid_document_draft(document_plan, manifest)
     captured = {}
-    report_client = object()
+    structured_client = object()
+
+    class _ReportClient:
+        def with_structured_output(self, schema, **kwargs):
+            captured["structured_schema"] = schema
+            captured["structured_kwargs"] = kwargs
+            return structured_client
+
     monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
     monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-luna", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "REPORT_STRUCTURED_OUTPUT_METHOD",
+        "json_schema",
+        raising=False,
+    )
     monkeypatch.setattr(
         llm,
         "_cache_get_or_reserve",
@@ -59,7 +72,7 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
 
     def get_stage(*_args, **kwargs):
         captured["stage_kwargs"] = kwargs
-        return report_client
+        return _ReportClient()
 
     monkeypatch.setattr(llm, "get_llm_for_stage", get_stage)
 
@@ -68,7 +81,19 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
         captured["model_name"] = model_name
         captured["messages"] = messages
         captured["invoke_kwargs"] = kwargs
-        return SimpleNamespace(content=expected.model_dump_json())
+        parsed = expected.model_dump(mode="json")
+        for field in (
+            "contract_version",
+            "query_digest",
+            "evidence_manifest_id",
+            "coverage_status",
+        ):
+            parsed.pop(field)
+        return {
+            "raw": SimpleNamespace(content=json.dumps(parsed)),
+            "parsed": parsed,
+            "parsing_error": None,
+        }
 
     monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
     monkeypatch.setattr(
@@ -88,7 +113,7 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
     )
 
     assert result == expected
-    assert captured["client"] is report_client
+    assert captured["client"] is structured_client
     assert captured["model_name"] == "gpt-5.6-luna"
     assert captured["stage_kwargs"]["report_profile"] is True
     assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
@@ -101,11 +126,46 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
     assert "do not classify" in system[1].lower()
     assert "body first" in system[1].lower()
     assert "executive summary last" in system[1].lower()
+    assert (
+        "all evidence and claim lists must contain unique values"
+        in system[1].lower()
+    )
+    assert (
+        "sum and mean require at least two unique operands"
+        in system[1].lower()
+    )
+    assert "require exactly two unique operands" in system[1].lower()
     assert "NUMERIC_OBSERVATIONS" in user[1]
     assert '"row_index":0' in user[1]
     assert "prompt_projection_truncated" in user[1]
     assert len(user[1]) <= llm._REPORT_DOCUMENT_PROMPT_BUDGET_CHARS
     assert captured["cache_token"] == "document-cache"
+    assert captured["structured_kwargs"] == {
+        "method": "json_schema",
+        "include_raw": True,
+        "strict": True,
+    }
+    assert {
+        "contract_version",
+        "query_digest",
+        "evidence_manifest_id",
+        "coverage_status",
+    }.isdisjoint(captured["structured_schema"]["properties"])
+
+    def assert_strict_objects(node):
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                assert node.get("additionalProperties") is False
+                assert set(node.get("required", [])) == set(properties)
+            assert "default" not in node
+            for child in node.values():
+                assert_strict_objects(child)
+        elif isinstance(node, list):
+            for child in node:
+                assert_strict_objects(child)
+
+    assert_strict_objects(captured["structured_schema"])
 
 
 def test_document_repair_receives_only_rejected_sections_and_no_fallback(
@@ -140,16 +200,37 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         sections=[replacement],
     )
     captured = {}
+    structured_client = object()
+
+    class _ReportClient:
+        def with_structured_output(self, schema, **kwargs):
+            captured["structured_schema"] = schema
+            captured["structured_kwargs"] = kwargs
+            return structured_client
+
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-luna", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "REPORT_STRUCTURED_OUTPUT_METHOD",
+        "json_schema",
+        raising=False,
+    )
     monkeypatch.setattr(
         llm,
         "get_llm_for_stage",
-        lambda *_args, **_kwargs: object(),
+        lambda *_args, **_kwargs: _ReportClient(),
     )
 
     def invoke(_factory, _model_name, messages, **kwargs):
+        captured["client"] = _factory()
         captured["messages"] = messages
         captured["invoke_kwargs"] = kwargs
-        return SimpleNamespace(content=expected.model_dump_json())
+        return {
+            "raw": SimpleNamespace(content=expected.model_dump_json()),
+            "parsed": expected.model_dump(mode="json"),
+            "parsing_error": None,
+        }
 
     monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
 
@@ -170,6 +251,12 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         captured["invoke_kwargs"]["attempt_stage"]
         == "report_document_repair"
     )
+    assert captured["structured_kwargs"] == {
+        "method": "json_schema",
+        "include_raw": True,
+        "strict": True,
+    }
+    assert isinstance(captured["structured_schema"], dict)
     system, user = captured["messages"]
     assert "only the rejected sections" in system[1].lower()
     assert '"section_id":"prices"' in user[1]
