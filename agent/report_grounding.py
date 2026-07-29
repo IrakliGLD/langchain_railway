@@ -47,7 +47,12 @@ _PERCENTAGE_POINT_UNITS = {
     "percentage points",
     "pp",
 }
-_DIMENSIONLESS_UNITS = frozenset({"count", "index", "rank"})
+# Units that name a scale rather than a physical quantity. Nobody writes "12
+# count" or "0.62 ratio", so the prose carries the noun and only the value is
+# matched; the claim's coordinate is still verified against the cell.
+_DIMENSIONLESS_UNITS = frozenset(
+    {"count", "index", "rank"} | _RATIO_UNITS
+)
 _ADDITIVE_UNITS = {
     "gel",
     "gwh",
@@ -572,8 +577,13 @@ def _rendered_claim_positions(
     elif _normalize_unit(claim_unit) in _DIMENSIONLESS_UNITS:
         # Nobody writes "12 count". A dimensionless claim carries its noun in
         # the prose, so only the value is matched — the cell is still verified.
+        # The tail guard must reject a longer number ("0.6" inside "0.62",
+        # "1" inside "1,234") without rejecting the full stop that ends a
+        # sentence, which is why it tests for a digit after the separator
+        # rather than for the separator alone.
         candidate_pattern = (
-            rf"(?<![\w.,])(?=({_CLAIM_NUMBER_PATTERN})(?![\d.,%])(?!\w))"
+            rf"(?<![\w.,])(?=({_CLAIM_NUMBER_PATTERN})"
+            rf"(?!\d)(?![.,]\d)(?!%)(?!\w))"
         )
         unit_present = True
     else:
