@@ -10,7 +10,6 @@ from contracts.report import ReportPlan, ReportPlanningContext
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentPlan,
-    ReportDocumentSectionRole,
 )
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_research import ReportEvidencePacket, ReportResearchPlan
@@ -330,64 +329,17 @@ class ReportGenerationCheckpoint(BaseModel):
                 "Checkpoint v3 document draft must match its plan, query, "
                 "and manifest."
             )
-        plan_section_ids = {
+        plan_section_ids = [
             section.section_id for section in self.document_plan.sections
-        }
-        draft_section_ids = {
+        ]
+        draft_section_ids = [
             section.section_id
             for section in self.document_draft.generation_order_sections()
-        }
+        ]
         if draft_section_ids != plan_section_ids:
             raise ValueError(
-                "Checkpoint v3 document draft sections must match the "
-                "document plan."
-            )
-
-        expected_analytical_ids = {
-            section.section_id
-            for section in self.document_plan.sections
-            if section.role is ReportDocumentSectionRole.ANALYSIS
-        }
-        actual_analytical_ids = {
-            section.section_id
-            for section in self.document_draft.analytical_sections
-        }
-
-        def _planned_section_id(
-            role: ReportDocumentSectionRole,
-        ) -> str | None:
-            return next(
-                (
-                    section.section_id
-                    for section in self.document_plan.sections
-                    if section.role is role
-                ),
-                None,
-            )
-
-        if (
-            actual_analytical_ids != expected_analytical_ids
-            or self.document_draft.executive_summary.section_id
-            != _planned_section_id(
-                ReportDocumentSectionRole.EXECUTIVE_SUMMARY
-            )
-            or self.document_draft.limitations_section.section_id
-            != _planned_section_id(ReportDocumentSectionRole.LIMITATIONS)
-            or (
-                self.document_draft.implications_section.section_id
-                if self.document_draft.implications_section is not None
-                else None
-            )
-            != _planned_section_id(ReportDocumentSectionRole.IMPLICATIONS)
-            or (
-                self.document_draft.conclusion_section.section_id
-                if self.document_draft.conclusion_section is not None
-                else None
-            )
-            != _planned_section_id(ReportDocumentSectionRole.CONCLUSION)
-        ):
-            raise ValueError(
-                "Checkpoint v3 document draft must match document-plan roles."
+                "Checkpoint v3 document draft sections must match "
+                "document-plan order."
             )
 
         draft_by_id = {

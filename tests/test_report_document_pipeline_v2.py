@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
@@ -19,7 +20,12 @@ from agent.report_document_generation import (
     generate_report_document,
     validate_report_document,
 )
-from agent.report_document_planner import build_report_document_plan
+from agent.report_document_planner import (
+    allocate_report_word_targets,
+    assess_report_evidence_capacity,
+    build_report_document_plan,
+    classify_report_document_profile,
+)
 from agent.report_evidence_gate import evaluate_report_evidence
 from agent.report_research_execution import (
     consolidate_report_evidence_packets,
@@ -29,7 +35,9 @@ from contracts.report import report_section_validation_word_bounds
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
     ReportDocumentDraft,
+    ReportDocumentProfile,
     ReportDocumentRepair,
+    ReportEvidenceCapacity,
 )
 from contracts.report_evidence import ReportEvidenceKind
 from contracts.report_sections import ReportSectionDraft
@@ -69,6 +77,104 @@ def _document_components():
     )
 
 
+def test_evidence_capacity_profiles_follow_golden_architecture_cases():
+    cases = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures"
+            / "report_architecture_cases.json"
+        ).read_text(encoding="utf-8")
+    )["cases"]
+
+    for case in cases:
+        assert classify_report_document_profile(
+            usable_track_count=case["usable_tracks"],
+            usable_exhibit_count=case["usable_exhibits"],
+            validated_finding_count=case["validated_findings"],
+        ).value == case["expected_profile"]
+
+
+def test_document_plan_profile_uses_collected_evidence_not_planned_exhibits():
+    research_plan, packets, manifest, decisions, gate = _ready_components()
+    capacity = assess_report_evidence_capacity(
+        packets,
+        gate,
+        decisions,
+    )
+    plan = build_report_document_plan(
+        _QUERY,
+        research_plan,
+        packets,
+        manifest,
+        gate,
+        decisions,
+    )
+
+    assert capacity.usable_track_count == 3
+    assert capacity.usable_exhibit_count == 2
+    assert capacity.profile is ReportDocumentProfile.FULL
+    assert plan.profile is capacity.profile
+    assert plan.evidence_capacity == capacity
+
+
+def test_word_targets_scale_with_evidence_capacity_without_padding():
+    compact = allocate_report_word_targets(
+        ReportEvidenceCapacity(
+            profile="compact",
+            usable_track_count=1,
+            complete_track_count=1,
+            partial_track_count=0,
+            unavailable_track_count=0,
+            usable_exhibit_count=1,
+            validated_finding_count=2,
+        ),
+        analysis_count=1,
+        include_implications=False,
+    )
+    focused = allocate_report_word_targets(
+        ReportEvidenceCapacity(
+            profile="focused",
+            usable_track_count=2,
+            complete_track_count=2,
+            partial_track_count=0,
+            unavailable_track_count=0,
+            usable_exhibit_count=2,
+            validated_finding_count=5,
+        ),
+        analysis_count=2,
+        include_implications=True,
+    )
+    full = allocate_report_word_targets(
+        ReportEvidenceCapacity(
+            profile="full",
+            usable_track_count=4,
+            complete_track_count=3,
+            partial_track_count=1,
+            unavailable_track_count=0,
+            usable_exhibit_count=4,
+            validated_finding_count=10,
+        ),
+        analysis_count=4,
+        include_implications=True,
+    )
+
+    assert 300 <= compact[0] < focused[0] < full[0] <= 1300
+    for (
+        target_words,
+        analysis_words,
+        implication_words,
+        limitation_words,
+    ) in (
+        compact,
+        focused,
+        full,
+    ):
+        assert target_words == (
+            sum(analysis_words) + implication_words + limitation_words
+        )
+        assert all(words >= 40 for words in analysis_words)
+
+
 def _draft_section(
     section,
     manifest,
@@ -78,8 +184,9 @@ def _draft_section(
 ):
     item_by_ref = manifest.item_by_ref()
     word_target = section.target_words
+    section_token = f"{section.section_id[:4]}evidence"
     text_words = [
-        f"{section.section_id}evidence"
+        section_token
         for _ in range(word_target)
     ]
     direct_claims = []
@@ -137,48 +244,16 @@ def _draft_section(
 
 
 def _valid_document_draft(document_plan, manifest) -> ReportDocumentDraft:
-    by_role = {
-        role: [
-            section
-            for section in document_plan.sections
-            if section.role.value == role
-        ]
-        for role in {
-            "executive_summary",
-            "analysis",
-            "implications",
-            "limitations",
-            "conclusion",
-        }
-    }
     return ReportDocumentDraft.model_validate(
         {
             "contract_version": "report-document-draft-v1",
             "query_digest": document_plan.query_digest,
             "evidence_manifest_id": document_plan.evidence_manifest_id,
             "coverage_status": document_plan.coverage_status,
-            "analytical_sections": [
+            "sections": [
                 _draft_section(section, manifest)
-                for section in by_role["analysis"]
+                for section in document_plan.sections
             ],
-            "implications_section": (
-                _draft_section(by_role["implications"][0], manifest)
-                if by_role["implications"]
-                else None
-            ),
-            "limitations_section": _draft_section(
-                by_role["limitations"][0],
-                manifest,
-            ),
-            "conclusion_section": (
-                _draft_section(by_role["conclusion"][0], manifest)
-                if by_role["conclusion"]
-                else None
-            ),
-            "executive_summary": _draft_section(
-                by_role["executive_summary"][0],
-                manifest,
-            ),
         }
     )
 
@@ -205,7 +280,6 @@ def test_document_plan_is_deterministic_track_driven_and_nonrepetitive():
 
     assert first == second
     assert [section.role.value for section in first.sections] == [
-        "executive_summary",
         "analysis",
         "analysis",
         "analysis",
@@ -312,10 +386,10 @@ def test_whole_document_validation_catches_repetition_and_missing_numbers():
         f"{chr(97 + ((index // 26) % 26))}"
         for index in range(220)
     )
-    payload["analytical_sections"][0]["paragraphs"][0]["text"] = repeated
-    payload["analytical_sections"][0]["paragraphs"][0]["direct_claims"] = []
-    payload["analytical_sections"][1]["paragraphs"][0]["text"] = repeated
-    payload["analytical_sections"][1]["paragraphs"][0]["direct_claims"] = []
+    payload["sections"][0]["paragraphs"][0]["text"] = repeated
+    payload["sections"][0]["paragraphs"][0]["direct_claims"] = []
+    payload["sections"][1]["paragraphs"][0]["text"] = repeated
+    payload["sections"][1]["paragraphs"][0]["direct_claims"] = []
     invalid_draft = ReportDocumentDraft.model_validate(payload)
 
     invalid = validate_report_document(
@@ -330,7 +404,7 @@ def test_whole_document_validation_catches_repetition_and_missing_numbers():
     assert "NUMERIC_FINDING_MISSING" in invalid.section_errors["prices"]
 
 
-def test_document_word_count_errors_are_directional():
+def test_document_word_count_deviations_are_directional_warnings():
     research_plan, _, manifest, _, _, document_plan = _document_components()
     valid_draft = _valid_document_draft(document_plan, manifest)
     spec_by_id = {
@@ -338,29 +412,15 @@ def test_document_word_count_errors_are_directional():
     }
 
     def section_payloads(payload):
-        return [
-            *payload["analytical_sections"],
-            *(
-                [payload["implications_section"]]
-                if payload["implications_section"] is not None
-                else []
-            ),
-            payload["limitations_section"],
-            *(
-                [payload["conclusion_section"]]
-                if payload["conclusion_section"] is not None
-                else []
-            ),
-            payload["executive_summary"],
-        ]
+        return payload["sections"]
 
     payload = valid_draft.model_dump(mode="json")
     for section_payload in section_payloads(payload):
-        minimum_words, _ = report_section_validation_word_bounds(
-            spec_by_id[section_payload["section_id"]].target_words
-        )
+        section_spec = spec_by_id[section_payload["section_id"]]
+        desired_words = max(40, int(section_spec.target_words * 0.4))
+        current_words = section_payload["paragraphs"][0]["text"].split()
         section_payload["paragraphs"][0]["text"] = " ".join(
-            "shortword" for _ in range(minimum_words - 1)
+            current_words[:desired_words]
         )
     short_validation = validate_report_document(
         ReportDocumentDraft.model_validate(payload),
@@ -370,12 +430,15 @@ def test_document_word_count_errors_are_directional():
     )
 
     payload = valid_draft.model_dump(mode="json")
-    for section_payload in section_payloads(payload):
+    for section_index, section_payload in enumerate(section_payloads(payload)):
         _, maximum_words = report_section_validation_word_bounds(
             spec_by_id[section_payload["section_id"]].target_words
         )
-        section_payload["paragraphs"][0]["text"] = " ".join(
-            "longword" for _ in range(maximum_words + 1)
+        paragraph = section_payload["paragraphs"][0]
+        current_words = count_section_words(paragraph["text"])
+        paragraph["text"] += " " + " ".join(
+            f"longword{section_index}"
+            for _ in range(maximum_words + 1 - current_words)
         )
     long_validation = validate_report_document(
         ReportDocumentDraft.model_validate(payload),
@@ -384,17 +447,19 @@ def test_document_word_count_errors_are_directional():
         research_plan,
     )
 
-    assert "WORD_COUNT_TOO_SHORT" in short_validation.section_errors[
+    assert short_validation.valid is True
+    assert "WORD_COUNT_TOO_SHORT" in short_validation.section_warnings[
         "prices"
     ]
     assert (
         "DOCUMENT_WORD_COUNT_TOO_SHORT"
-        in short_validation.document_errors
+        in short_validation.document_warnings
     )
-    assert "WORD_COUNT_TOO_LONG" in long_validation.section_errors["prices"]
+    assert long_validation.valid is True
+    assert "WORD_COUNT_TOO_LONG" in long_validation.section_warnings["prices"]
     assert (
         "DOCUMENT_WORD_COUNT_TOO_LONG"
-        in long_validation.document_errors
+        in long_validation.document_warnings
     )
 
 
@@ -407,7 +472,7 @@ def test_numeric_analysis_requires_two_findings_when_two_cells_are_available():
         if section.section_id == "prices"
     )
     payload = valid_draft.model_dump(mode="json")
-    payload["analytical_sections"][0] = _draft_section(
+    payload["sections"][0] = _draft_section(
         price_spec,
         manifest,
         max_numeric_claims=1,
@@ -423,6 +488,164 @@ def test_numeric_analysis_requires_two_findings_when_two_cells_are_available():
     assert "NUMERIC_FINDING_MISSING" in validation.section_errors["prices"]
 
 
+def test_full_document_generation_writes_analysis_before_synthesis():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value == "analysis"
+    ]
+    synthesis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value != "analysis"
+    ]
+    calls = []
+
+    def write_analysis(*_args, section_ids):
+        calls.append(("analysis", list(section_ids)))
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[section_id] for section_id in section_ids],
+        )
+
+    def write_synthesis(*_args, analysis_sections, section_ids):
+        calls.append(
+            (
+                "synthesis",
+                [section.section_id for section in analysis_sections],
+                list(section_ids),
+            )
+        )
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[section_id] for section_id in section_ids],
+        )
+
+    generated = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+    )
+
+    assert generated == valid_draft
+    assert calls == [
+        ("analysis", analysis_ids),
+        ("synthesis", analysis_ids, synthesis_ids),
+    ]
+
+
+def test_compact_document_generation_uses_one_document_writer():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    compact_plan = document_plan.model_copy(
+        update={"profile": ReportDocumentProfile.COMPACT}
+    )
+    valid_draft = _valid_document_draft(compact_plan, manifest)
+    calls = []
+
+    generated = generate_report_document(
+        _QUERY,
+        compact_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_document=lambda *_args: calls.append("document") or valid_draft,
+        write_analysis_sections=lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("compact report must not split analysis")
+            )
+        ),
+        write_synthesis_sections=lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("compact report must not split synthesis")
+            )
+        ),
+    )
+
+    assert generated == valid_draft
+    assert calls == ["document"]
+
+
+def test_invalid_analysis_batch_stops_before_synthesis():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value == "analysis"
+    ]
+    invalid_analysis = section_by_id[analysis_ids[0]].model_copy(
+        update={"title": "Wrong title"}
+    )
+
+    def write_analysis(*_args, section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                invalid_analysis
+                if section_id == invalid_analysis.section_id
+                else section_by_id[section_id]
+                for section_id in section_ids
+            ],
+        )
+
+    try:
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=write_analysis,
+            write_synthesis_sections=lambda *_args, **_kwargs: (
+                (_ for _ in ()).throw(
+                    AssertionError(
+                        "synthesis must not consume invalid analysis"
+                    )
+                )
+            ),
+            allow_repair=False,
+        )
+    except ReportDocumentGenerationError as exc:
+        assert exc.validation.section_errors[
+            invalid_analysis.section_id
+        ] == ["SECTION_TITLE_MISMATCH"]
+    else:
+        raise AssertionError("invalid analysis batch was accepted")
+
+
 def test_document_generation_normalizes_plan_owned_section_roles(caplog):
     (
         research_plan,
@@ -435,21 +658,17 @@ def test_document_generation_normalizes_plan_owned_section_roles(caplog):
     valid_draft = _valid_document_draft(document_plan, manifest)
     misplaced_payloads = []
 
-    summary_swap = valid_draft.model_dump(mode="json")
-    summary_swap["executive_summary"], summary_swap[
-        "limitations_section"
-    ] = (
-        summary_swap["limitations_section"],
-        summary_swap["executive_summary"],
+    limitations_swap = valid_draft.model_dump(mode="json")
+    limitations_swap["sections"][0], limitations_swap["sections"][-1] = (
+        limitations_swap["sections"][-1],
+        limitations_swap["sections"][0],
     )
-    misplaced_payloads.append(summary_swap)
+    misplaced_payloads.append(limitations_swap)
 
     analysis_swap = valid_draft.model_dump(mode="json")
-    analysis_swap["analytical_sections"][0], analysis_swap[
-        "implications_section"
-    ] = (
-        analysis_swap["implications_section"],
-        analysis_swap["analytical_sections"][0],
+    analysis_swap["sections"][0], analysis_swap["sections"][3] = (
+        analysis_swap["sections"][3],
+        analysis_swap["sections"][0],
     )
     misplaced_payloads.append(analysis_swap)
 
@@ -509,7 +728,7 @@ def test_document_set_mismatch_repairs_the_complete_planned_set():
     ) = _document_components()
     valid_draft = _valid_document_draft(document_plan, manifest)
     payload = valid_draft.model_dump(mode="json")
-    payload["analytical_sections"][0]["section_id"] = (
+    payload["sections"][0]["section_id"] = (
         "unexpected_section"
     )
     mismatched_draft = ReportDocumentDraft.model_validate(payload)
@@ -566,8 +785,8 @@ def test_document_generation_repairs_only_invalid_sections_once():
         for index in range(220)
     )
     for index in (0, 1):
-        payload["analytical_sections"][index]["paragraphs"][0]["text"] = repeated
-        payload["analytical_sections"][index]["paragraphs"][0][
+        payload["sections"][index]["paragraphs"][0]["text"] = repeated
+        payload["sections"][index]["paragraphs"][0][
             "direct_claims"
         ] = []
     invalid_draft = ReportDocumentDraft.model_validate(payload)
@@ -628,7 +847,7 @@ def test_document_generation_repairs_only_invalid_sections_once():
     ).valid
 
 
-def test_document_overflow_repairs_only_the_section_above_its_hard_limit():
+def test_document_length_warning_does_not_trigger_repair():
     (
         research_plan,
         packets,
@@ -638,219 +857,46 @@ def test_document_overflow_repairs_only_the_section_above_its_hard_limit():
         document_plan,
     ) = _document_components()
     valid_draft = _valid_document_draft(document_plan, manifest)
-    payload = valid_draft.model_dump(mode="json")
-    spec_by_id = {
-        section.section_id: section for section in document_plan.sections
-    }
-    section_payloads = [
-        *payload["analytical_sections"],
-        payload["implications_section"],
-        payload["limitations_section"],
-        payload["executive_summary"],
-    ]
-    for section_index, section_payload in enumerate(section_payloads):
-        section_id = section_payload["section_id"]
-        _, maximum_words = report_section_validation_word_bounds(
-            spec_by_id[section_id].target_words
-        )
-        current_words = count_section_words(
-            section_payload["paragraphs"][0]["text"]
-        )
-        desired_words = maximum_words + (section_id == "prices")
-        section_payload["paragraphs"][0]["text"] += " " + " ".join(
-            f"f{section_index}"
-            for _ in range(desired_words - current_words)
-        )
-    invalid_draft = ReportDocumentDraft.model_validate(payload)
-    validation = validate_report_document(
-        invalid_draft,
-        document_plan,
-        manifest,
-        research_plan,
+    price_spec = next(
+        section
+        for section in document_plan.sections
+        if section.section_id == "prices"
     )
-    repair_calls = []
-
-    def repair_sections(
-        _query,
-        _plan,
-        _research_plan,
-        _manifest,
-        _packets,
-        _rejected,
-        _validation,
-        *,
-        section_ids,
-    ):
-        repair_calls.append(list(section_ids))
-        return ReportDocumentRepair(
-            contract_version="report-document-repair-v1",
-            sections=[valid_draft.analytical_sections[0]],
-        )
-
-    repaired = generate_report_document(
+    _, maximum_words = report_section_validation_word_bounds(
+        price_spec.target_words
+    )
+    payload = valid_draft.model_dump(mode="json")
+    price_paragraph = payload["sections"][0]["paragraphs"][0]
+    price_words = count_section_words(price_paragraph["text"])
+    price_paragraph["text"] += " " + " ".join(
+        "overflow"
+        for _ in range(maximum_words + 1 - price_words)
+    )
+    long_draft = ReportDocumentDraft.model_validate(payload)
+    generated = generate_report_document(
         _QUERY,
         document_plan,
         research_plan,
         manifest,
         packets,
-        write_document=lambda *_args: invalid_draft,
-        repair_sections=repair_sections,
-    )
-
-    assert validation.document_errors == [
-        "DOCUMENT_WORD_COUNT_TOO_LONG"
-    ]
-    assert set(validation.section_errors) == {"prices"}
-    assert repair_calls == [["prices"]]
-    assert validate_report_document(
-        repaired,
-        document_plan,
-        manifest,
-        research_plan,
-    ).valid
-
-
-def test_document_rejects_a_word_repair_that_moves_the_wrong_direction(
-    caplog,
-):
-    (
-        research_plan,
-        packets,
-        manifest,
-        _,
-        _,
-        document_plan,
-    ) = _document_components()
-    valid_draft = _valid_document_draft(document_plan, manifest)
-    price_spec = next(
-        section
-        for section in document_plan.sections
-        if section.section_id == "prices"
-    )
-    _, maximum_words = report_section_validation_word_bounds(
-        price_spec.target_words
-    )
-
-    invalid_payload = valid_draft.model_dump(mode="json")
-    invalid_paragraph = invalid_payload["analytical_sections"][0][
-        "paragraphs"
-    ][0]
-    invalid_word_count = count_section_words(invalid_paragraph["text"])
-    invalid_paragraph["text"] += " " + " ".join(
-        "overflow"
-        for _ in range(maximum_words + 1 - invalid_word_count)
-    )
-    invalid_draft = ReportDocumentDraft.model_validate(invalid_payload)
-    initial_validation = validate_report_document(
-        invalid_draft,
-        document_plan,
-        manifest,
-        research_plan,
-    )
-
-    worse_payload = valid_draft.analytical_sections[0].model_dump(mode="json")
-    worse_paragraph = worse_payload["paragraphs"][0]
-    worse_word_count = count_section_words(worse_paragraph["text"])
-    worse_paragraph["text"] += " " + " ".join(
-        "overflow"
-        for _ in range(maximum_words + 2 - worse_word_count)
-    )
-    worse_section = ReportSectionDraft.model_validate(worse_payload)
-
-    with caplog.at_level(logging.INFO, logger="Enai.ReportDocument"):
-        try:
-            generate_report_document(
-                _QUERY,
-                document_plan,
-                research_plan,
-                manifest,
-                packets,
-                write_document=lambda *_args: invalid_draft,
-                repair_sections=lambda *_args, **_kwargs: (
-                    ReportDocumentRepair(
-                        contract_version="report-document-repair-v1",
-                        sections=[worse_section],
-                    )
-                ),
+        write_document=lambda *_args: long_draft,
+        repair_sections=lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("word-count warnings must not trigger repair")
             )
-        except ReportDocumentGenerationError as exc:
-            assert exc.validation.word_count == initial_validation.word_count
-        else:
-            raise AssertionError("a length-increasing repair was accepted")
+        ),
+    )
 
-    assert '"event":"repair_direction_rejected"' in caplog.text
-
-
-def test_document_repair_diagnostics_include_safe_counts_and_bounds(caplog):
-    (
-        research_plan,
-        packets,
-        manifest,
-        _,
-        _,
+    validation = validate_report_document(
+        generated,
         document_plan,
-    ) = _document_components()
-    valid_draft = _valid_document_draft(document_plan, manifest)
-    price_spec = next(
-        section
-        for section in document_plan.sections
-        if section.section_id == "prices"
+        manifest,
+        research_plan,
     )
-    _, maximum_words = report_section_validation_word_bounds(
-        price_spec.target_words
-    )
-    payload = valid_draft.model_dump(mode="json")
-    price_paragraph = payload["analytical_sections"][0]["paragraphs"][0]
-    price_words = count_section_words(price_paragraph["text"])
-    price_paragraph["text"] += " " + " ".join(
-        "sensitiveoverflow"
-        for _ in range(maximum_words + 1 - price_words)
-    )
-    invalid_draft = ReportDocumentDraft.model_validate(payload)
-
-    with caplog.at_level(
-        logging.INFO,
-        logger="Enai.ReportDocument",
-    ):
-        generate_report_document(
-            _QUERY,
-            document_plan,
-            research_plan,
-            manifest,
-            packets,
-            write_document=lambda *_args: invalid_draft,
-            repair_sections=lambda *_args, **_kwargs: ReportDocumentRepair(
-                contract_version="report-document-repair-v1",
-                sections=[valid_draft.analytical_sections[0]],
-            ),
-        )
-
-    diagnostics = [
-        json.loads(record.message.split(" ", 1)[1])
-        for record in caplog.records
-        if record.message.startswith("REPORT_DOCUMENT_DIAGNOSTIC ")
+    assert validation.valid is True
+    assert validation.section_warnings["prices"] == [
+        "WORD_COUNT_TOO_LONG"
     ]
-    requested = next(
-        item
-        for item in diagnostics
-        if item["event"] == "repair_requested"
-    )
-    validated = next(
-        item
-        for item in diagnostics
-        if item["event"] == "repair_validated"
-    )
-    assert requested["word_count"] > 0
-    assert requested["minimum_words"] < requested["maximum_words"]
-    assert requested["failing_section_ids"] == ["prices"]
-    assert requested["repair_section_ids"] == ["prices"]
-    assert requested["section_word_counts"]["prices"] == maximum_words + 1
-    assert requested["section_bounds"]["prices"]["maximum_words"] == (
-        maximum_words
-    )
-    assert validated["word_count"] < requested["word_count"]
-    assert validated["section_word_deltas"]["prices"] < 0
-    assert "sensitiveoverflow" not in caplog.text
 
 
 def test_document_generation_repairs_a_schema_invalid_draft_once():
@@ -864,7 +910,7 @@ def test_document_generation_repairs_a_schema_invalid_draft_once():
     ) = _document_components()
     valid_draft = _valid_document_draft(document_plan, manifest)
     invalid_payload = valid_draft.model_dump(mode="json")
-    invalid_payload.pop("analytical_sections")
+    invalid_payload.pop("sections")
     repair_calls = []
 
     def repair_sections(
@@ -916,18 +962,18 @@ def test_document_generation_fails_after_one_invalid_repair():
     ) = _document_components()
     valid_draft = _valid_document_draft(document_plan, manifest)
     payload = valid_draft.model_dump(mode="json")
-    payload["analytical_sections"][0]["paragraphs"][0]["direct_claims"] = []
-    payload["analytical_sections"][0]["paragraphs"][0]["text"] = " ".join(
-        "nonnumericword" for _ in range(300)
-    )
+    payload["sections"][0]["paragraphs"][0]["direct_claims"] = []
     invalid_draft = ReportDocumentDraft.model_validate(payload)
+    invalid_replacement = valid_draft.sections[0].model_copy(
+        update={"title": "Wrong repaired title"}
+    )
     calls = []
 
     def invalid_repair(*_args, section_ids, **_kwargs):
         calls.append(list(section_ids))
         return ReportDocumentRepair(
             contract_version="report-document-repair-v1",
-            sections=[invalid_draft.analytical_sections[0]],
+            sections=[invalid_replacement],
         )
 
     try:
@@ -940,8 +986,13 @@ def test_document_generation_fails_after_one_invalid_repair():
             write_document=lambda *_args: invalid_draft,
             repair_sections=invalid_repair,
         )
-    except ReportDocumentGenerationError:
-        pass
+    except ReportDocumentGenerationError as exc:
+        assert exc.validation.section_errors["prices"] == [
+            "SECTION_TITLE_MISMATCH"
+        ]
+        assert "NUMERIC_FINDING_MISSING" not in exc.validation.section_errors[
+            "prices"
+        ]
     else:
         raise AssertionError("invalid targeted repair was accepted")
 
@@ -962,7 +1013,7 @@ def test_document_generation_respects_a_two_call_budget_without_repair():
         manifest,
     ).model_copy(
         update={
-            "analytical_sections": [
+            "sections": [
                 section.model_copy(
                     update={
                         "paragraphs": [
@@ -978,7 +1029,7 @@ def test_document_generation_respects_a_two_call_budget_without_repair():
                 for section in _valid_document_draft(
                     document_plan,
                     manifest,
-                ).analytical_sections
+                ).sections
             ]
         }
     )

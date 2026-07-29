@@ -181,7 +181,7 @@ class ReportResultV2(_StrictResultModel):
     evidence_manifest_id: str = Field(pattern=r"^manifest:[0-9a-f]{32}$")
     coverage_status: Literal["ready", "ready_with_gaps"]
     content_markdown: str = Field(min_length=100, max_length=500_000)
-    sections: List[ReportResultV2Section] = Field(min_length=3, max_length=8)
+    sections: List[ReportResultV2Section] = Field(min_length=2, max_length=8)
     charts: List[ReportChartArtifact] = Field(
         default_factory=list,
         max_length=REPORT_MAX_EXHIBITS,
@@ -191,10 +191,7 @@ class ReportResultV2(_StrictResultModel):
         max_length=REPORT_MAX_EXHIBITS,
     )
     citations: List[ReportCitation] = Field(min_length=1, max_length=32)
-    word_count: int = Field(
-        ge=STANDARD_REPORT_RESULT_MIN_WORDS,
-        le=STANDARD_REPORT_RESULT_MAX_WORDS,
-    )
+    word_count: int = Field(ge=1, le=STANDARD_REPORT_RESULT_MAX_WORDS)
 
     @model_validator(mode="after")
     def _validate_v2_result(self) -> "ReportResultV2":
@@ -202,13 +199,6 @@ class ReportResultV2(_StrictResultModel):
         if len(section_ids) != len(set(section_ids)):
             raise ValueError("Report result section IDs must be unique.")
         roles = [section.kind for section in self.sections]
-        if (
-            roles[0] is not ReportDocumentSectionRole.EXECUTIVE_SUMMARY
-            or roles.count(ReportDocumentSectionRole.EXECUTIVE_SUMMARY) != 1
-        ):
-            raise ValueError(
-                "An adaptive report requires one executive summary first."
-            )
         if roles.count(ReportDocumentSectionRole.ANALYSIS) < 1:
             raise ValueError(
                 "An adaptive report requires at least one analysis section."
@@ -222,27 +212,14 @@ class ReportResultV2(_StrictResultModel):
             raise ValueError(
                 "An adaptive report requires exactly one limitations section."
             )
-        if roles.count(ReportDocumentSectionRole.CONCLUSION) > 1:
-            raise ValueError(
-                "An adaptive report may contain at most one conclusion."
-            )
-        conclusion_present = ReportDocumentSectionRole.CONCLUSION in roles
         limitations_index = roles.index(
             ReportDocumentSectionRole.LIMITATIONS
         )
-        if limitations_index != (
-            len(roles) - 2 if conclusion_present else len(roles) - 1
-        ):
+        if limitations_index != len(roles) - 1:
             raise ValueError(
-                "Adaptive report limitations must follow the analysis."
+                "Adaptive report limitations must be last."
             )
-        if conclusion_present and (
-            roles[-1] is not ReportDocumentSectionRole.CONCLUSION
-        ):
-            raise ValueError(
-                "An adaptive report conclusion must be last."
-            )
-        body_roles = roles[1:limitations_index]
+        body_roles = roles[:limitations_index]
         if ReportDocumentSectionRole.IMPLICATIONS in body_roles:
             implications_index = body_roles.index(
                 ReportDocumentSectionRole.IMPLICATIONS

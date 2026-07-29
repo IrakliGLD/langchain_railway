@@ -13,7 +13,6 @@ from contracts.report import (
     REPORT_SECTION_MIN_WORDS,
     STANDARD_REPORT_MAX_SECTIONS,
     STANDARD_REPORT_MAX_WORDS,
-    STANDARD_REPORT_MIN_WORDS,
     ReportChartRequest,
 )
 from contracts.report_research import FindingCode, ReportCoverageStatus
@@ -24,11 +23,15 @@ EvidenceRef = Annotated[str, Field(min_length=1, max_length=256)]
 
 
 class ReportDocumentSectionRole(str, Enum):
-    EXECUTIVE_SUMMARY = "executive_summary"
     ANALYSIS = "analysis"
     IMPLICATIONS = "implications"
     LIMITATIONS = "limitations"
-    CONCLUSION = "conclusion"
+
+
+class ReportDocumentProfile(str, Enum):
+    COMPACT = "compact"
+    FOCUSED = "focused"
+    FULL = "full"
 
 
 class _StrictDocumentModel(BaseModel):
@@ -37,6 +40,32 @@ class _StrictDocumentModel(BaseModel):
         str_strip_whitespace=True,
         allow_inf_nan=False,
     )
+
+
+class ReportEvidenceCapacity(_StrictDocumentModel):
+    profile: ReportDocumentProfile
+    usable_track_count: int = Field(ge=0, le=8)
+    complete_track_count: int = Field(ge=0, le=8)
+    partial_track_count: int = Field(ge=0, le=8)
+    unavailable_track_count: int = Field(ge=0, le=8)
+    usable_exhibit_count: int = Field(ge=0, le=REPORT_MAX_EXHIBITS)
+    validated_finding_count: int = Field(ge=0, le=256)
+
+    @model_validator(mode="after")
+    def _validate_track_counts(self) -> "ReportEvidenceCapacity":
+        if self.usable_track_count != (
+            self.complete_track_count + self.partial_track_count
+        ):
+            raise ValueError(
+                "Usable evidence tracks must equal complete plus partial "
+                "tracks."
+            )
+        if (
+            self.usable_track_count + self.unavailable_track_count
+            > 8
+        ):
+            raise ValueError("Evidence capacity track counts exceed eight.")
+        return self
 
 
 class ReportDocumentSectionSpec(_StrictDocumentModel):
@@ -76,8 +105,10 @@ class ReportDocumentPlan(_StrictDocumentModel):
     title: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=1000)
     language_code: str = Field(pattern=r"^[a-z]{2,3}(?:-[A-Z]{2})?$")
+    profile: ReportDocumentProfile
+    evidence_capacity: ReportEvidenceCapacity
     target_words: int = Field(
-        ge=STANDARD_REPORT_MIN_WORDS,
+        ge=REPORT_SECTION_MIN_WORDS * 2,
         le=STANDARD_REPORT_MAX_WORDS,
     )
     evidence_manifest_id: str = Field(pattern=r"^manifest:[0-9a-f]{32}$")
@@ -86,7 +117,7 @@ class ReportDocumentPlan(_StrictDocumentModel):
     completed_track_ids: List[Identifier] = Field(min_length=1, max_length=8)
     gap_track_ids: List[Identifier] = Field(default_factory=list, max_length=8)
     sections: List[ReportDocumentSectionSpec] = Field(
-        min_length=3,
+        min_length=2,
         max_length=STANDARD_REPORT_MAX_SECTIONS,
     )
     charts: List[ReportChartRequest] = Field(
@@ -107,17 +138,20 @@ class ReportDocumentPlan(_StrictDocumentModel):
 
     @model_validator(mode="after")
     def _validate_document_plan(self) -> "ReportDocumentPlan":
+        if self.evidence_capacity.profile is not self.profile:
+            raise ValueError(
+                "Document profile must match its evidence capacity."
+            )
+        if self.evidence_capacity.usable_track_count != len(
+            self.completed_track_ids
+        ):
+            raise ValueError(
+                "Document evidence capacity must match completed tracks."
+            )
         section_ids = [section.section_id for section in self.sections]
         if len(section_ids) != len(set(section_ids)):
             raise ValueError("Document plan section IDs must be unique.")
         roles = [section.role for section in self.sections]
-        if (
-            roles[0] is not ReportDocumentSectionRole.EXECUTIVE_SUMMARY
-            or roles.count(ReportDocumentSectionRole.EXECUTIVE_SUMMARY) != 1
-        ):
-            raise ValueError(
-                "A document plan requires one executive summary first."
-            )
         if roles.count(ReportDocumentSectionRole.ANALYSIS) < 1:
             raise ValueError(
                 "A document plan requires at least one analysis section."
@@ -130,28 +164,13 @@ class ReportDocumentPlan(_StrictDocumentModel):
             raise ValueError(
                 "A document plan requires exactly one limitations section."
             )
-        if roles.count(ReportDocumentSectionRole.CONCLUSION) > 1:
-            raise ValueError(
-                "A document plan may contain at most one conclusion."
-            )
         limitations_index = roles.index(
             ReportDocumentSectionRole.LIMITATIONS
         )
-        conclusion_present = (
-            ReportDocumentSectionRole.CONCLUSION in roles
-        )
-        expected_limitations_index = (
-            len(roles) - 2 if conclusion_present else len(roles) - 1
-        )
-        if limitations_index != expected_limitations_index:
+        if limitations_index != len(roles) - 1:
             raise ValueError(
-                "The limitations section must follow analysis and "
-                "implications."
+                "The limitations section must be last."
             )
-        if conclusion_present and (
-            roles[-1] is not ReportDocumentSectionRole.CONCLUSION
-        ):
-            raise ValueError("The optional conclusion must be last.")
         if ReportDocumentSectionRole.IMPLICATIONS in roles:
             implications_index = roles.index(
                 ReportDocumentSectionRole.IMPLICATIONS
@@ -249,14 +268,10 @@ class ReportDocumentDraft(_StrictDocumentModel):
     query_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_manifest_id: str = Field(pattern=r"^manifest:[0-9a-f]{32}$")
     coverage_status: Literal["ready", "ready_with_gaps"]
-    analytical_sections: List[ReportSectionDraft] = Field(
-        min_length=1,
-        max_length=5,
+    sections: List[ReportSectionDraft] = Field(
+        min_length=2,
+        max_length=STANDARD_REPORT_MAX_SECTIONS,
     )
-    implications_section: ReportSectionDraft | None = None
-    limitations_section: ReportSectionDraft
-    conclusion_section: ReportSectionDraft | None = None
-    executive_summary: ReportSectionDraft
 
     @model_validator(mode="after")
     def _validate_section_identity(self) -> "ReportDocumentDraft":
@@ -271,22 +286,14 @@ class ReportDocumentDraft(_StrictDocumentModel):
         return self
 
     def generation_order_sections(self) -> List[ReportSectionDraft]:
-        """Return body-first generation order with the summary last."""
+        """Return the deterministic plan-owned section order."""
 
-        sections = list(self.analytical_sections)
-        if self.implications_section is not None:
-            sections.append(self.implications_section)
-        sections.append(self.limitations_section)
-        if self.conclusion_section is not None:
-            sections.append(self.conclusion_section)
-        sections.append(self.executive_summary)
-        return sections
+        return list(self.sections)
 
     def display_order_sections(self) -> List[ReportSectionDraft]:
-        """Return user-facing order with the summary first."""
+        """Return the deterministic plan-owned section order."""
 
-        generated = self.generation_order_sections()
-        return [self.executive_summary, *generated[:-1]]
+        return list(self.sections)
 
 
 class ReportDocumentRepair(_StrictDocumentModel):
@@ -312,33 +319,44 @@ class ReportDocumentValidation(_StrictDocumentModel):
         default_factory=list,
         max_length=16,
     )
+    section_warnings: Dict[Identifier, List[FindingCode]] = Field(
+        default_factory=dict,
+        max_length=8,
+    )
+    document_warnings: List[FindingCode] = Field(
+        default_factory=list,
+        max_length=16,
+    )
     word_count: int = Field(ge=0, le=5000)
 
-    @field_validator("section_errors")
+    @field_validator("section_errors", "section_warnings")
     @classmethod
-    def _validate_section_errors(
+    def _validate_section_findings(
         cls,
-        section_errors: Dict[str, List[str]],
+        section_findings: Dict[str, List[str]],
     ) -> Dict[str, List[str]]:
-        for errors in section_errors.values():
-            if not errors or len(errors) > 16:
+        for findings in section_findings.values():
+            if not findings or len(findings) > 16:
                 raise ValueError(
-                    "Document validation section errors must be bounded."
+                    "Document validation section findings must be bounded."
                 )
-            if len(errors) != len(set(errors)):
+            if len(findings) != len(set(findings)):
                 raise ValueError(
-                    "Document validation section errors must be unique."
+                    "Document validation section findings must be unique."
                 )
-        return section_errors
+        return section_findings
 
-    @field_validator("document_errors")
+    @field_validator("document_errors", "document_warnings")
     @classmethod
-    def _validate_document_errors(cls, errors: List[str]) -> List[str]:
-        if len(errors) != len(set(errors)):
+    def _validate_document_findings(
+        cls,
+        findings: List[str],
+    ) -> List[str]:
+        if len(findings) != len(set(findings)):
             raise ValueError(
-                "Document validation errors must be unique."
+                "Document validation findings must be unique."
             )
-        return errors
+        return findings
 
     @model_validator(mode="after")
     def _validate_result(self) -> "ReportDocumentValidation":

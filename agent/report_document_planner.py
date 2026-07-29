@@ -9,8 +9,10 @@ from contracts.report import REPORT_MAX_EXHIBITS, ReportChartRequest
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
     ReportDocumentPlan,
+    ReportDocumentProfile,
     ReportDocumentSectionRole,
     ReportDocumentSectionSpec,
+    ReportEvidenceCapacity,
 )
 from contracts.report_evidence import (
     ReportEvidenceKind,
@@ -26,17 +28,14 @@ from contracts.report_research import (
 
 _ROLE_LABELS = {
     "en": {
-        "summary": "Executive summary",
         "implications": "Cross-cutting implications",
         "limitations": "Method and limitations",
     },
     "ka": {
-        "summary": "აღმასრულებელი შეჯამება",
         "implications": "საკითხთაშორისი შედეგები",
         "limitations": "მეთოდი და შეზღუდვები",
     },
     "ru": {
-        "summary": "Краткое резюме",
         "implications": "Межтематические выводы",
         "limitations": "Метод и ограничения",
     },
@@ -56,18 +55,117 @@ def _analysis_groups(track_ids: list[str]) -> list[list[str]]:
     ]
 
 
-def _word_allocations(
-    analysis_count: int,
+def classify_report_document_profile(
     *,
+    usable_track_count: int,
+    usable_exhibit_count: int,
+    validated_finding_count: int,
+) -> ReportDocumentProfile:
+    """Choose document breadth from evidence that actually exists."""
+
+    breadth = max(usable_track_count, usable_exhibit_count)
+    if breadth >= 3:
+        return ReportDocumentProfile.FULL
+    if breadth >= 2 or validated_finding_count >= 5:
+        return ReportDocumentProfile.FOCUSED
+    return ReportDocumentProfile.COMPACT
+
+
+def assess_report_evidence_capacity(
+    packets: Sequence[ReportEvidencePacket],
+    gate: ReportEvidenceGate,
+    chart_decisions: Sequence[ReportChartBuildDecision],
+) -> ReportEvidenceCapacity:
+    """Summarize usable tracks, findings, and built exhibits."""
+
+    packet_by_id = {packet.track_id: packet for packet in packets}
+    if len(packet_by_id) != len(packets):
+        raise ValueError("Evidence-capacity packets must be unique.")
+    decision_ids = [decision.chart_id for decision in chart_decisions]
+    if len(decision_ids) != len(set(decision_ids)):
+        raise ValueError("Evidence-capacity chart decisions must be unique.")
+
+    complete_track_count = sum(
+        track.status is ReportTrackStatus.COMPLETE for track in gate.tracks
+    )
+    partial_track_count = sum(
+        track.status is ReportTrackStatus.PARTIAL for track in gate.tracks
+    )
+    unavailable_track_count = (
+        len(gate.tracks) - complete_track_count - partial_track_count
+    )
+    usable_track_ids = {
+        track.track_id
+        for track in gate.tracks
+        if track.status
+        in {ReportTrackStatus.COMPLETE, ReportTrackStatus.PARTIAL}
+    }
+    validated_finding_count = sum(
+        len(packet_by_id[track_id].observations)
+        for track_id in usable_track_ids
+        if track_id in packet_by_id
+    )
+    usable_exhibit_count = sum(
+        decision.status == "built" for decision in chart_decisions
+    )
+    usable_track_count = complete_track_count + partial_track_count
+    profile = classify_report_document_profile(
+        usable_track_count=usable_track_count,
+        usable_exhibit_count=usable_exhibit_count,
+        validated_finding_count=validated_finding_count,
+    )
+    return ReportEvidenceCapacity(
+        profile=profile,
+        usable_track_count=usable_track_count,
+        complete_track_count=complete_track_count,
+        partial_track_count=partial_track_count,
+        unavailable_track_count=unavailable_track_count,
+        usable_exhibit_count=usable_exhibit_count,
+        validated_finding_count=validated_finding_count,
+    )
+
+
+def allocate_report_word_targets(
+    evidence_capacity: ReportEvidenceCapacity,
+    *,
+    analysis_count: int,
     include_implications: bool,
-) -> tuple[int, int, list[int], int]:
-    target_words = min(1400, max(900, 850 + 100 * analysis_count))
-    summary_words = min(160, 120 + 10 * analysis_count)
-    limitation_words = 100
-    implication_words = 140 if include_implications else 0
+) -> tuple[int, list[int], int, int]:
+    """Allocate prose targets from evidence breadth, not report-mode padding."""
+
+    profile = evidence_capacity.profile
+    if profile is ReportDocumentProfile.COMPACT:
+        raw_target = (
+            300
+            + 30 * evidence_capacity.usable_track_count
+            + 25 * evidence_capacity.usable_exhibit_count
+            + 10 * min(evidence_capacity.validated_finding_count, 6)
+        )
+        target_words = min(500, max(300, raw_target))
+        implication_words = 0
+        limitation_words = 60
+    elif profile is ReportDocumentProfile.FOCUSED:
+        raw_target = (
+            420
+            + 60 * evidence_capacity.usable_track_count
+            + 40 * evidence_capacity.usable_exhibit_count
+            + 10 * min(evidence_capacity.validated_finding_count, 8)
+        )
+        target_words = min(800, max(450, raw_target))
+        implication_words = 100 if include_implications else 0
+        limitation_words = 70
+    else:
+        raw_target = (
+            620
+            + 90 * evidence_capacity.usable_track_count
+            + 55 * evidence_capacity.usable_exhibit_count
+            + 12 * min(evidence_capacity.validated_finding_count, 12)
+        )
+        target_words = min(1300, max(750, raw_target))
+        implication_words = 130 if include_implications else 0
+        limitation_words = 90
     analysis_total = (
         target_words
-        - summary_words
         - limitation_words
         - implication_words
     )
@@ -78,8 +176,8 @@ def _word_allocations(
     ]
     return (
         target_words,
-        summary_words,
         analysis_words,
+        implication_words,
         limitation_words,
     )
 
@@ -133,17 +231,22 @@ def build_report_document_plan(
         )
     ]
     groups = _analysis_groups(completed_track_ids)
+    evidence_capacity = assess_report_evidence_capacity(
+        packets,
+        gate,
+        chart_decisions,
+    )
     include_implications = len(completed_track_ids) >= 2
     (
         target_words,
-        summary_words,
         analysis_words,
+        implication_words,
         limitation_words,
-    ) = _word_allocations(
-        len(groups),
+    ) = allocate_report_word_targets(
+        evidence_capacity,
+        analysis_count=len(groups),
         include_implications=include_implications,
     )
-    implication_words = 140 if include_implications else 0
     labels = _labels(research_plan.language_code)
     manifest_refs = set(manifest.item_by_ref())
 
@@ -255,23 +358,7 @@ def build_report_document_plan(
     ]
     if not limitation_refs:
         raise ValueError("Document plan requires limitation evidence.")
-    summary = ReportDocumentSectionSpec(
-        section_id="executive_summary",
-        role=ReportDocumentSectionRole.EXECUTIVE_SUMMARY,
-        title=labels["summary"],
-        objective=(
-            "Summarize the strongest cross-track findings after drafting "
-            "the analytical body."
-        ),
-        target_words=summary_words,
-        track_ids=completed_track_ids,
-        required_evidence_refs=all_analysis_refs,
-        chart_refs=[],
-    )
-    sections: list[ReportDocumentSectionSpec] = [
-        summary,
-        *analysis_sections,
-    ]
+    sections: list[ReportDocumentSectionSpec] = list(analysis_sections)
     if include_implications:
         sections.append(
             ReportDocumentSectionSpec(
@@ -311,6 +398,8 @@ def build_report_document_plan(
         title=research_plan.objective[:200],
         objective=research_plan.objective[:1000],
         language_code=research_plan.language_code,
+        profile=evidence_capacity.profile,
+        evidence_capacity=evidence_capacity,
         target_words=target_words,
         evidence_manifest_id=manifest.manifest_id,
         coverage_status=gate.status.value,

@@ -603,7 +603,7 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
 
     def document_generator(*_args, **kwargs):
         calls.append("document_generator")
-        assert kwargs["allow_repair"] is True
+        assert kwargs["allow_repair"] is False
         return draft
 
     processor = ReportJobProcessor(
@@ -803,6 +803,33 @@ def test_enabled_v2_two_call_budget_disables_document_repair():
     assert repair_flags == [False]
 
 
+def test_document_repair_budget_depends_on_document_profile():
+    assert (
+        report_job_processor._report_document_allows_repair(
+            profile="compact",
+            generative_calls_used=1,
+            maximum_calls=3,
+        )
+        is True
+    )
+    assert (
+        report_job_processor._report_document_allows_repair(
+            profile="focused",
+            generative_calls_used=1,
+            maximum_calls=3,
+        )
+        is False
+    )
+    assert (
+        report_job_processor._report_document_allows_repair(
+            profile="full",
+            generative_calls_used=1,
+            maximum_calls=4,
+        )
+        is True
+    )
+
+
 def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
     private_value = "private-invalid-collector"
 
@@ -835,6 +862,7 @@ def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
             processor(_lease(query=_V2_QUERY), _Control())
 
     assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
+    assert exc_info.value.retryable is True
     assert "finding_codes=PLAN_SCHEMA_INVALID" in caplog.text
     assert (
         "schema_error_codes="
