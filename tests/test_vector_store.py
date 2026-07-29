@@ -144,6 +144,7 @@ def test_search_chunks_pushes_filters_into_sql(monkeypatch):
         ),
         top_k=2,
         candidate_k=6,
+        embedding_identity="embedding-v1:test",
     )
 
     sql = captured["sql"].lower()
@@ -152,6 +153,11 @@ def test_search_chunks_pushes_filters_into_sql(monkeypatch):
     assert "c.language in" in sql
     assert "d.document_type in" in sql
     assert "d.issuer in" in sql
+    assert "vector_embedding_identity" in sql
+    assert (
+        captured["params"]["embedding_identity"]
+        == "embedding-v1:test"
+    )
     assert results[0].document_issuer == "GNERC"
 
 
@@ -819,6 +825,47 @@ def test_parse_outgoing_refs_handles_none_string_and_malformed():
     assert refs[0].number == "IV"
 
 
+def test_document_upsert_preserves_vector_identity_metadata(monkeypatch):
+    captured = {}
+
+    class _ScalarResult:
+        def scalar_one(self):
+            return "11111111-1111-1111-1111-111111111111"
+
+    class _CapturingConnection(_FakeConnection):
+        def execute(self, sql, params):
+            captured["sql"] = str(sql)
+            captured["params"] = dict(params)
+            return _ScalarResult()
+
+    class _CapturingEngine(_FakeEngine):
+        def begin(self):
+            return _CapturingConnection(
+                rows=self._rows,
+                captured=self._captured,
+            )
+
+    monkeypatch.setattr(
+        vector_store,
+        "ENGINE",
+        _CapturingEngine(rows=[], captured={}),
+    )
+    store = vector_store.KnowledgeVectorStore()
+
+    store.upsert_document(
+        vector_store.DocumentRegistration(
+            source_key="rules",
+            title="Rules",
+            metadata={"country": "georgia"},
+        )
+    )
+
+    sql = captured["sql"]
+    assert "vector_embedding_identity" in sql
+    assert "vector_embedding_profile" in sql
+    assert "documents.metadata" in sql
+
+
 def test_replace_document_chunks_emits_new_columns_in_insert(monkeypatch):
     """The INSERT path must wire the new Phase B.1 columns through with the
     structural defaults filled in. Capturing the SQL statement and one set
@@ -860,6 +907,8 @@ def test_replace_document_chunks_emits_new_columns_in_insert(monkeypatch):
         source_key="src",
         chunks=[chunk],
         embeddings=[[0.0] * 1536],
+        embedding_identity="embedding-v1:test",
+        embedding_profile="retrieval_document_query_v1",
     )
 
     assert "article_number" in captured["sql"]
@@ -870,6 +919,59 @@ def test_replace_document_chunks_emits_new_columns_in_insert(monkeypatch):
     assert captured["params"]["section_kind"] == "article"
     # outgoing_refs serialised as a JSON string (cast(:outgoing_refs as jsonb)).
     assert captured["params"]["outgoing_refs"] == "[]"
+
+
+def test_replace_document_chunks_marks_embedding_identity_atomically(
+    monkeypatch,
+):
+    statements = []
+
+    class _CapturingConnection(_FakeConnection):
+        def execute(self, sql, params):
+            statements.append((str(sql), dict(params)))
+            return _FakeMappingResult([])
+
+    class _CapturingEngine(_FakeEngine):
+        def begin(self):
+            return _CapturingConnection(
+                rows=self._rows,
+                captured=self._captured,
+            )
+
+    monkeypatch.setattr(
+        vector_store,
+        "ENGINE",
+        _CapturingEngine(rows=[], captured={}),
+    )
+    monkeypatch.setattr(
+        vector_store,
+        "_phase_b1_columns_present",
+        True,
+    )
+    store = vector_store.KnowledgeVectorStore()
+
+    store.replace_document_chunks(
+        document_id="11111111-1111-1111-1111-111111111111",
+        source_key="src",
+        chunks=[
+            vector_store.ChunkIngestRecord(
+                chunk_index=0,
+                text_content="Article body.",
+            )
+        ],
+        embeddings=[[0.0] * 1536],
+        embedding_identity="embedding-v1:test",
+        embedding_profile="retrieval_document_query_v1",
+    )
+
+    identity_sql, identity_params = statements[-1]
+    assert "update knowledge.documents" in identity_sql.lower()
+    assert "vector_embedding_identity" in identity_sql
+    assert identity_params == {
+        "document_id": "11111111-1111-1111-1111-111111111111",
+        "embedding_identity": "embedding-v1:test",
+        "embedding_profile": "retrieval_document_query_v1",
+    }
 
 
 def test_select_omits_phase_b1_columns_when_migration_not_applied(monkeypatch):

@@ -21,8 +21,15 @@ The schema is created by `schemas/knowledge_vector.sql`. Required Postgres exten
 | `VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER` | `openai` | `gemini` |
 | `VECTOR_KNOWLEDGE_EMBEDDING_MODEL` | `text-embedding-3-small` | `gemini-embedding-001` |
 | `VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION` | `1536` | `1536` |
+| `VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE` | `legacy` | `legacy` until the task-typed re-index procedure below |
 
 The dimension must match the SQL `vector(...)` column width. Switching providers without matching dimensions corrupts ingestion.
+
+`VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE=retrieval_document_query_v1`
+is supported only with `gemini-embedding-001`. It generates corpus vectors
+with `RETRIEVAL_DOCUMENT` (including the document title) and query vectors
+with `RETRIEVAL_QUERY`. The default remains `legacy`, so deploying code alone
+does not change the live vector space.
 
 ## Runtime Flags
 
@@ -134,10 +141,11 @@ $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
 ```powershell
 # Gemini (alternative)
 $env:SUPABASE_DB_URL = "postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:5432/postgres"
-$env:GOOGLE_API_KEY = "..."
+$env:GEMINI_EMBEDDING_API_KEY = "..."
 $env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
 $env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
 $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE = "legacy"
 ```
 
 `SUPABASE_DB_URL` must point to the same Postgres database where `knowledge_vector.sql` has been applied.
@@ -152,6 +160,54 @@ produce vectors in different latent spaces. Before re-ingesting:
 2. If you change provider, truncate `knowledge.document_chunks` and
    re-ingest everything. Mixed providers in the same table are a silent
    correctness bug.
+
+### Task-typed Gemini re-index
+
+Task-typed and legacy vectors are different index identities and must never be
+mixed in one search. Runtime queries filter on the atomic
+`vector_embedding_identity` marker stored in each document's metadata; rows
+created before this feature are treated as `legacy`.
+
+Use this cutover sequence:
+
+1. Deploy the code with `VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE=legacy`.
+   Verify `/readyz` reports `task_profile=legacy`.
+2. Temporarily disable vector retrieval or place the service in a maintenance
+   window. Re-indexing replaces one document at a time, so the corpus is
+   intentionally incomplete until the batch finishes.
+3. Set the local ingestion environment to:
+
+   ```powershell
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE = "retrieval_document_query_v1"
+   $env:VECTOR_KNOWLEDGE_CORPUS_VERSION = "gemini-retrieval-v1"
+   ```
+
+4. Run `python ingest_all_documents.py`. Do not flip the deployed query
+   profile if any document fails.
+5. Verify every active document has the same non-legacy identity:
+
+   ```sql
+   select
+     metadata ->> 'vector_embedding_profile' as profile,
+     metadata ->> 'vector_embedding_identity' as identity,
+     count(*)
+   from knowledge.documents
+   where is_active = true
+   group by 1, 2;
+   ```
+
+   Expected: exactly one row, profile
+   `retrieval_document_query_v1`, with the active-document count.
+6. Set the deployed service's task profile and corpus version to the same
+   values used for ingestion, redeploy, and verify `/readyz` reports both the
+   expected task profile and the same `index_identity` shown by a local
+   capability probe under the ingestion environment.
+7. Re-enable retrieval and run known-answer canaries. Rollback requires
+   re-ingesting the complete corpus under `legacy`; changing only the query
+   profile cannot make task-typed document vectors legacy-compatible.
 
 ### 3. Write the registration script
 

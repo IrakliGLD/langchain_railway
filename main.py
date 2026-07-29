@@ -234,12 +234,15 @@ def _refresh_embedding_capability_status() -> None:
     log_method = log.info if status.available else log.warning
     log_method(
         "embedding_capability available=%s provider=%s model=%s "
-        "dimension=%s api_mode=%s failure_disposition=%s failure_reason=%s",
+        "dimension=%s api_mode=%s task_profile=%s "
+        "index_identity=%s failure_disposition=%s failure_reason=%s",
         status.available,
         status.provider,
         status.model,
         status.dimension,
         status.api_mode,
+        status.task_profile,
+        status.index_identity,
         status.failure_disposition or "none",
         status.failure_reason or "none",
     )

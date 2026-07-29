@@ -54,10 +54,24 @@ class VectorKnowledgeIngestor:
                 "document_type": normalized_document.document_type,
             },
         )
-        embeddings = self.embedding_provider.embed_documents([chunk.text_content for chunk in chunks])
+        from knowledge.vector_embeddings import (
+            embedding_index_identity,
+            embedding_task_profile,
+        )
+
+        embeddings = self.embedding_provider.embed_documents(
+            [chunk.text_content for chunk in chunks],
+            title=normalized_document.title,
+        )
         return self.store.replace_document_chunks(
             document_id=document_id,
             source_key=normalized_document.source_key,
             chunks=chunks,
             embeddings=embeddings,
+            embedding_identity=embedding_index_identity(
+                self.embedding_provider
+            ),
+            embedding_profile=embedding_task_profile(
+                self.embedding_provider
+            ),
         )

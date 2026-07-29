@@ -43,6 +43,8 @@ class EmbeddingCapabilityStatus:
     model: str
     dimension: int
     api_mode: str
+    task_profile: str = "legacy"
+    index_identity: str = "legacy"
     failure_disposition: str | None = None
     failure_reason: str | None = None
 
@@ -53,6 +55,8 @@ class EmbeddingCapabilityStatus:
             "model": self.model,
             "dimension": self.dimension,
             "api_mode": self.api_mode,
+            "task_profile": self.task_profile,
+            "index_identity": self.index_identity,
             "failure_disposition": self.failure_disposition,
             "failure_reason": self.failure_reason,
         }
@@ -129,7 +133,7 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def _configured_capability_identity() -> tuple[str, str, int, str]:
+def _configured_capability_identity() -> tuple[str, str, int, str, str]:
     provider = (
         os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower()
         or "openai"
@@ -158,16 +162,26 @@ def _configured_capability_identity() -> tuple[str, str, int, str]:
         model,
         _int_env("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", 1536),
         api_mode,
+        (
+            os.getenv(
+                "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE",
+                "legacy",
+            ).strip().lower()
+            or "legacy"
+        ),
     )
 
 
-def _provider_identity(provider: object) -> tuple[str, str, int, str]:
+def _provider_identity(
+    provider: object,
+) -> tuple[str, str, int, str, str]:
     configured = _configured_capability_identity()
     return (
         str(getattr(provider, "_provider_name", configured[0])),
         str(getattr(provider, "_model", configured[1])),
         int(getattr(provider, "_expected_dimension", configured[2])),
         str(getattr(provider, "_api_mode", configured[3])),
+        str(getattr(provider, "_task_profile", configured[4])),
     )
 
 
@@ -200,9 +214,18 @@ def probe_embedding_capability(
         )
         with bind_request_execution_scope_snapshot(deadline=deadline):
             provider = provider_factory()
-            provider_name, model, dimension, api_mode = _provider_identity(
-                provider
+            (
+                provider_name,
+                model,
+                dimension,
+                api_mode,
+                task_profile,
+            ) = _provider_identity(provider)
+            from knowledge.vector_embeddings import (
+                embedding_index_identity,
             )
+
+            index_identity = embedding_index_identity(provider)
             embedding = provider.embed_query(  # type: ignore[attr-defined]
                 EMBEDDING_CAPABILITY_PROBE_TEXT
             )
@@ -217,20 +240,36 @@ def probe_embedding_capability(
             model=model,
             dimension=dimension,
             api_mode=api_mode,
+            task_profile=task_profile,
+            index_identity=index_identity,
         )
     except Exception as error:
-        provider_name, model, dimension, api_mode = (
+        provider_name, model, dimension, api_mode, task_profile = (
             _provider_identity(provider)
             if provider is not None
             else _configured_capability_identity()
         )
         disposition = classify_provider_failure(error)
+        if provider is not None:
+            from knowledge.vector_embeddings import (
+                embedding_index_identity,
+            )
+
+            index_identity = embedding_index_identity(provider)
+        else:
+            index_identity = (
+                "legacy"
+                if task_profile == "legacy"
+                else "unknown"
+            )
         return EmbeddingCapabilityStatus(
             available=False,
             provider=provider_name,
             model=model,
             dimension=dimension,
             api_mode=api_mode,
+            task_profile=task_profile,
+            index_identity=index_identity,
             failure_disposition=disposition.value,
             failure_reason=extract_failure_reason(error) or type(error).__name__,
         )

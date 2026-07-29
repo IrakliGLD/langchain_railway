@@ -430,7 +430,7 @@ _LIGHT_TIER_TOP_K = 2
 # Keyed by provider class + model so a config change never serves stale
 # vectors. Applied only to factory-built providers — explicitly injected
 # providers (tests, ingestion) always embed directly. Size <= 0 disables.
-_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, int, str, str, str], list[float]]" = OrderedDict()
+_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, int, str, str, str, str], list[float]]" = OrderedDict()
 _QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
 
 
@@ -526,6 +526,11 @@ def retrieve_vector_knowledge(
         else:
             failure_stage = VectorRetrievalFailureStage.query_embedding
             query_embedding = embedding_provider.embed_query(query_text)
+        from knowledge.vector_embeddings import embedding_index_identity
+
+        current_embedding_identity = embedding_index_identity(
+            embedding_provider
+        )
         failure_stage = VectorRetrievalFailureStage.vector_search
         chunks = store.search_chunks(
             query_embedding=query_embedding,
@@ -533,6 +538,7 @@ def retrieve_vector_knowledge(
             top_k=top_k,
             candidate_k=candidate_k,
             min_similarity=min_similarity,
+            embedding_identity=current_embedding_identity,
         )
         if not chunks and filters.languages:
             relaxed_filters = filters.model_copy(update={"languages": []})
@@ -542,6 +548,7 @@ def retrieve_vector_knowledge(
                 top_k=top_k,
                 candidate_k=candidate_k,
                 min_similarity=min_similarity,
+                embedding_identity=current_embedding_identity,
             )
             filters = relaxed_filters
         if not chunks and filters.preferred_topics:
@@ -556,6 +563,7 @@ def retrieve_vector_knowledge(
                 top_k=top_k,
                 candidate_k=candidate_k,
                 min_similarity=min_similarity,
+                embedding_identity=current_embedding_identity,
             )
             filters = relaxed_filters
         # Sparse-corpus similarity relaxation: only at FULL tier. LIGHT skips
@@ -573,6 +581,7 @@ def retrieve_vector_knowledge(
                     top_k=top_k,
                     candidate_k=candidate_k,
                     min_similarity=relaxed_similarity,
+                    embedding_identity=current_embedding_identity,
                 )
         bundle = VectorKnowledgeBundle(
             query=query_text,

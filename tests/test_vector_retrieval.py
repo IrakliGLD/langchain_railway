@@ -195,6 +195,33 @@ def test_retrieve_vector_knowledge_returns_bundle():
     )
 
 
+def test_retrieve_vector_knowledge_filters_by_embedding_index_identity():
+    captured = {}
+
+    class ProfiledEmbeddingProvider(FakeEmbeddingProvider):
+        _provider_name = "gemini"
+        _model = "gemini-embedding-001"
+        _expected_dimension = 3
+        _normalization_version = "v1"
+        _corpus_version = "corpus-v2"
+        _task_profile = "retrieval_document_query_v1"
+
+    class CaptureStore(FakeStore):
+        def search_chunks(self, **kwargs):
+            captured.update(kwargs)
+            return super().search_chunks(**kwargs)
+
+    retrieve_vector_knowledge(
+        "Why did balancing electricity price change?",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        question_analysis=_analysis(),
+        store=CaptureStore(),
+        embedding_provider=ProfiledEmbeddingProvider(),
+    )
+
+    assert captured["embedding_identity"] != "legacy"
+
+
 def test_format_vector_knowledge_for_prompt_includes_source_headers():
     bundle = retrieve_vector_knowledge(
         "Why did balancing electricity price change?",

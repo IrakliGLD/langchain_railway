@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from knowledge import embedding_service
+from knowledge.vector_embeddings import embedding_index_identity
 from utils.request_deadline import current_request_execution_scope
 
 
@@ -60,6 +61,7 @@ def test_capability_probe_performs_one_embedding_call_and_returns_safe_status():
         _model="gemini-embedding-001",
         _expected_dimension=3,
         _api_mode="developer",
+        _task_profile="retrieval_document_query_v1",
         calls=0,
     )
 
@@ -82,6 +84,8 @@ def test_capability_probe_performs_one_embedding_call_and_returns_safe_status():
         "model": "gemini-embedding-001",
         "dimension": 3,
         "api_mode": "developer",
+        "task_profile": "retrieval_document_query_v1",
+        "index_identity": embedding_index_identity(provider),
         "failure_disposition": None,
         "failure_reason": None,
     }

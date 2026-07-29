@@ -112,7 +112,12 @@ def _execute_embedding_call(provider: str, stage: str, call: Callable[[], Any]) 
 class EmbeddingProvider(Protocol):
     """Minimal embedding interface used by ingestion and retrieval."""
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]: ...
+    def embed_documents(
+        self,
+        texts: List[str],
+        *,
+        title: str | None = None,
+    ) -> List[List[float]]: ...
 
     def embed_query(self, text: str) -> List[float]: ...
 
@@ -140,6 +145,45 @@ def _resolved_provider(value: str | None = None) -> Literal["openai", "gemini"]:
     if raw in {"openai", ""}:
         return "openai"
     raise RuntimeError("Unsupported VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER. Expected 'openai' or 'gemini'.")
+
+
+_LEGACY_TASK_PROFILE = "legacy"
+_GEMINI_RETRIEVAL_TASK_PROFILE = "retrieval_document_query_v1"
+_SUPPORTED_TASK_PROFILES = frozenset(
+    {_LEGACY_TASK_PROFILE, _GEMINI_RETRIEVAL_TASK_PROFILE}
+)
+
+
+def _resolved_task_profile(
+    *,
+    provider: str,
+    model: str,
+    value: str | None = None,
+) -> str:
+    raw = (
+        value
+        or os.getenv(
+            "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE",
+            _LEGACY_TASK_PROFILE,
+        )
+    ).strip().lower() or _LEGACY_TASK_PROFILE
+    if raw not in _SUPPORTED_TASK_PROFILES:
+        raise RuntimeError(
+            "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE must be "
+            "'legacy' or 'retrieval_document_query_v1'"
+        )
+    if raw == _GEMINI_RETRIEVAL_TASK_PROFILE:
+        if provider != "gemini":
+            raise RuntimeError(
+                "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE="
+                "retrieval_document_query_v1 requires Gemini"
+            )
+        if model.removeprefix("models/") != "gemini-embedding-001":
+            raise RuntimeError(
+                "retrieval_document_query_v1 requires "
+                "gemini-embedding-001"
+            )
+    return raw
 
 
 def _validate_embedding_dimensions(
@@ -170,6 +214,10 @@ class OpenAIEmbeddingProvider:
         self._expected_dimension = _expected_dimension()
         self._provider_name = "openai"
         self._model = resolved_model
+        self._task_profile = _resolved_task_profile(
+            provider=self._provider_name,
+            model=self._model,
+        )
         self._normalization_version = os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1"
         self._corpus_version = os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1"
         client_kwargs = {
@@ -196,7 +244,13 @@ class OpenAIEmbeddingProvider:
             credential=api_key,
         )
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    def embed_documents(
+        self,
+        texts: List[str],
+        *,
+        title: str | None = None,
+    ) -> List[List[float]]:
+        del title
         timeout = _embedding_timeout_seconds("openai", "document_embedding")
         embeddings = _execute_embedding_call(
             "openai",
@@ -236,6 +290,10 @@ class GeminiEmbeddingProvider:
         self._provider_name = "gemini"
         self._model = resolved_model
         self._api_mode = backend.api_mode.value
+        self._task_profile = _resolved_task_profile(
+            provider=self._provider_name,
+            model=self._model,
+        )
         self._normalization_version = os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1"
         self._corpus_version = os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1"
         # google-genai is a hard production dependency (the legacy
@@ -274,7 +332,37 @@ class GeminiEmbeddingProvider:
             credential=api_key,
         )
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+    def _request_config(
+        self,
+        *,
+        task_type: str | None,
+        title: str | None,
+        timeout: float,
+    ):
+        updates: dict[str, object] = {}
+        if self._task_profile == _GEMINI_RETRIEVAL_TASK_PROFILE:
+            updates["task_type"] = task_type
+            updates["title"] = title
+        if hasattr(self._types, "HttpOptions") and hasattr(
+            self._types,
+            "HttpRetryOptions",
+        ):
+            updates["http_options"] = self._types.HttpOptions(
+                timeout=max(1, int(timeout * 1000)),
+                retry_options=self._types.HttpRetryOptions(attempts=1),
+            )
+        return (
+            self._config.model_copy(update=updates)
+            if updates
+            else self._config
+        )
+
+    def embed_documents(
+        self,
+        texts: List[str],
+        *,
+        title: str | None = None,
+    ) -> List[List[float]]:
         if not texts:
             return []
         timeout = _embedding_timeout_seconds("gemini", "document_embedding")
@@ -282,16 +370,11 @@ class GeminiEmbeddingProvider:
         def _call() -> List[List[float]]:
             embeddings: List[List[float]] = []
             items = list(texts)
-            config = self._config
-            if hasattr(self._types, "HttpOptions") and hasattr(self._types, "HttpRetryOptions"):
-                config = self._config.model_copy(
-                    update={
-                        "http_options": self._types.HttpOptions(
-                            timeout=max(1, int(timeout * 1000)),
-                            retry_options=self._types.HttpRetryOptions(attempts=1),
-                        )
-                    }
-                )
+            config = self._request_config(
+                task_type="RETRIEVAL_DOCUMENT",
+                title=(title or "").strip() or None,
+                timeout=timeout,
+            )
             for start in range(0, len(items), self._batch_size):
                 batch = items[start : start + self._batch_size]
                 result = self._client.models.embed_content(
@@ -313,16 +396,11 @@ class GeminiEmbeddingProvider:
         timeout = _embedding_timeout_seconds("gemini", "query_embedding")
 
         def _call() -> List[float]:
-            config = self._config
-            if hasattr(self._types, "HttpOptions") and hasattr(self._types, "HttpRetryOptions"):
-                config = self._config.model_copy(
-                    update={
-                        "http_options": self._types.HttpOptions(
-                            timeout=max(1, int(timeout * 1000)),
-                            retry_options=self._types.HttpRetryOptions(attempts=1),
-                        )
-                    }
-                )
+            config = self._request_config(
+                task_type="RETRIEVAL_QUERY",
+                title=None,
+                timeout=timeout,
+            )
             result = self._client.models.embed_content(
                 model=self._model,
                 contents=text,
@@ -350,6 +428,13 @@ _PROVIDER_CACHE_LOCK = threading.Lock()
 
 def _provider_cache_key(resolved_provider: str) -> tuple[str, ...]:
     default_model = "gemini-embedding-001" if resolved_provider == "gemini" else "text-embedding-3-small"
+    resolved_model = (
+        os.getenv(
+            "VECTOR_KNOWLEDGE_EMBEDDING_MODEL",
+            default_model,
+        ).strip()
+        or default_model
+    )
     if resolved_provider == "gemini":
         backend = resolve_gemini_embedding_backend()
         credential = backend.api_key
@@ -361,7 +446,7 @@ def _provider_cache_key(resolved_provider: str) -> tuple[str, ...]:
         api_mode = "public"
     return (
         resolved_provider,
-        os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", default_model).strip() or default_model,
+        resolved_model,
         str(_expected_dimension()),
         os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1",
         os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1",
@@ -369,10 +454,16 @@ def _provider_cache_key(resolved_provider: str) -> tuple[str, ...]:
         api_mode,
         credential_source,
         _credential_fingerprint(credential),
+        _resolved_task_profile(
+            provider=resolved_provider,
+            model=resolved_model,
+        ),
     )
 
 
-def embedding_cache_identity(provider: EmbeddingProvider) -> tuple[str, str, int, str, str]:
+def embedding_cache_identity(
+    provider: EmbeddingProvider,
+) -> tuple[str, str, int, str, str, str]:
     """Return every configuration dimension that makes vectors compatible."""
     return (
         str(getattr(provider, "_provider_name", type(provider).__name__)),
@@ -380,6 +471,33 @@ def embedding_cache_identity(provider: EmbeddingProvider) -> tuple[str, str, int
         int(getattr(provider, "_expected_dimension", _expected_dimension())),
         str(getattr(provider, "_normalization_version", "v1")),
         str(getattr(provider, "_corpus_version", "v1")),
+        str(
+            getattr(
+                provider,
+                "_task_profile",
+                _LEGACY_TASK_PROFILE,
+            )
+        ),
+    )
+
+
+def embedding_index_identity(provider: EmbeddingProvider) -> str:
+    """Return the stored/query vector-space identity for compatibility filtering."""
+
+    identity = embedding_cache_identity(provider)
+    if identity[-1] == _LEGACY_TASK_PROFILE:
+        return _LEGACY_TASK_PROFILE
+    digest = hashlib.sha256(
+        "\x1f".join(str(value) for value in identity).encode("utf-8")
+    ).hexdigest()[:14]
+    return f"embedding-v1:{digest}"
+
+
+def embedding_task_profile(provider: EmbeddingProvider) -> str:
+    """Return the task profile used to generate this provider's vectors."""
+
+    return str(
+        getattr(provider, "_task_profile", _LEGACY_TASK_PROFILE)
     )
 
 

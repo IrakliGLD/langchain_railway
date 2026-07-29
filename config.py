@@ -579,6 +579,13 @@ VECTOR_KNOWLEDGE_EMBEDDING_CAPABILITY_PROBE_ENABLED = (
 )
 VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = max(1, int(os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "1536")))
 VECTOR_KNOWLEDGE_EMBEDDING_MODEL = os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
+VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE = (
+    os.getenv(
+        "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE",
+        "legacy",
+    ).strip().lower()
+    or "legacy"
+)
 VECTOR_KNOWLEDGE_SCHEMA = os.getenv("VECTOR_KNOWLEDGE_SCHEMA", "knowledge").strip() or "knowledge"
 VECTOR_KNOWLEDGE_STORAGE_BUCKET = os.getenv("VECTOR_KNOWLEDGE_STORAGE_BUCKET", "knowledge-documents").strip() or "knowledge-documents"
 VECTOR_KNOWLEDGE_MIN_SIMILARITY = min(1.0, max(0.0, float(os.getenv("VECTOR_KNOWLEDGE_MIN_SIMILARITY", "0.2"))))
@@ -645,6 +652,8 @@ def validate_runtime_settings(
     report_research_max_tracks: int = 4,
     report_research_max_workers: int = 3,
     vector_embedding_provider: str = "openai",
+    vector_embedding_model: str = "text-embedding-3-small",
+    vector_embedding_task_profile: str = "legacy",
     gemini_embedding_api_key: str | None = None,
     allow_legacy_google_embedding_key: bool = False,
     vector_embedding_api_mode: str = "developer",
@@ -749,6 +758,29 @@ def validate_runtime_settings(
                 "GEMINI_EMBEDDING_API_KEY; set "
                 "ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY=true only during migration"
             )
+    normalized_task_profile = vector_embedding_task_profile.strip().lower()
+    if normalized_task_profile not in {
+        "legacy",
+        "retrieval_document_query_v1",
+    }:
+        raise RuntimeError(
+            "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE must be "
+            "'legacy' or 'retrieval_document_query_v1'"
+        )
+    if normalized_task_profile == "retrieval_document_query_v1":
+        if normalized_embedding_provider != "gemini":
+            raise RuntimeError(
+                "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE="
+                "retrieval_document_query_v1 requires Gemini"
+            )
+        if (
+            vector_embedding_model.strip().removeprefix("models/")
+            != "gemini-embedding-001"
+        ):
+            raise RuntimeError(
+                "retrieval_document_query_v1 requires "
+                "gemini-embedding-001"
+            )
     if report_model and not report_model_type:
         raise RuntimeError("REPORT_MODEL requires REPORT_MODEL_TYPE")
     if report_model_type:
@@ -822,6 +854,10 @@ validate_runtime_settings(
     report_research_max_tracks=REPORT_RESEARCH_MAX_TRACKS,
     report_research_max_workers=REPORT_RESEARCH_MAX_WORKERS,
     vector_embedding_provider=VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER,
+    vector_embedding_model=VECTOR_KNOWLEDGE_EMBEDDING_MODEL,
+    vector_embedding_task_profile=(
+        VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE
+    ),
     gemini_embedding_api_key=GEMINI_EMBEDDING_API_KEY,
     allow_legacy_google_embedding_key=ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY,
     vector_embedding_api_mode=VECTOR_KNOWLEDGE_EMBEDDING_API_MODE,

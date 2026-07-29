@@ -647,7 +647,14 @@ class KnowledgeVectorStore:
                 is_active = excluded.is_active,
                 abolished = excluded.abolished,
                 supersedes_document_id = excluded.supersedes_document_id,
-                metadata = excluded.metadata,
+                metadata = excluded.metadata || jsonb_strip_nulls(
+                    jsonb_build_object(
+                        'vector_embedding_identity',
+                        documents.metadata -> 'vector_embedding_identity',
+                        'vector_embedding_profile',
+                        documents.metadata -> 'vector_embedding_profile'
+                    )
+                ),
                 updated_at = now()
             returning id::text
             """
@@ -667,6 +674,8 @@ class KnowledgeVectorStore:
         source_key: str,
         chunks: List[ChunkIngestRecord],
         embeddings: List[List[float]],
+        embedding_identity: str = "legacy",
+        embedding_profile: str = "legacy",
     ) -> IngestionResult:
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings length mismatch")
@@ -738,6 +747,31 @@ class KnowledgeVectorStore:
                 params.setdefault("parent_chapter", "")
                 params.setdefault("section_kind", "")
                 conn.execute(insert_sql, params)
+            conn.execute(
+                text(
+                    f"""
+                    update {self.schema}.documents
+                    set metadata = jsonb_set(
+                        jsonb_set(
+                            coalesce(metadata, '{{}}'::jsonb),
+                            '{{vector_embedding_identity}}',
+                            to_jsonb(cast(:embedding_identity as text)),
+                            true
+                        ),
+                        '{{vector_embedding_profile}}',
+                        to_jsonb(cast(:embedding_profile as text)),
+                        true
+                    ),
+                    updated_at = now()
+                    where id = :document_id
+                    """
+                ),
+                {
+                    "document_id": document_id,
+                    "embedding_identity": embedding_identity,
+                    "embedding_profile": embedding_profile,
+                },
+            )
         return IngestionResult(
             document_id=document_id,
             chunk_count=len(chunks),
@@ -753,12 +787,23 @@ class KnowledgeVectorStore:
         top_k: int = 4,
         candidate_k: int = 12,
         min_similarity: float = VECTOR_KNOWLEDGE_MIN_SIMILARITY,
+        embedding_identity: str = "legacy",
     ) -> List[VectorChunkRecord]:
         filters = filters or VectorRetrievalFilters()
         _validate_embedding_length(query_embedding, label="query_embedding")
         embedding_literal = _vector_literal(query_embedding)
-        clauses = ["d.is_active = true"]
-        params = {"embedding": embedding_literal, "candidate_k": max(candidate_k, top_k)}
+        clauses = [
+            "d.is_active = true",
+            (
+                "coalesce(d.metadata ->> 'vector_embedding_identity', "
+                "'legacy') = :embedding_identity"
+            ),
+        ]
+        params = {
+            "embedding": embedding_literal,
+            "candidate_k": max(candidate_k, top_k),
+            "embedding_identity": embedding_identity,
+        }
         bind_params = []
 
         languages = [language for language in filters.languages if str(language or "").strip()]

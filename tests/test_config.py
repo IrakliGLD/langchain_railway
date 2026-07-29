@@ -748,3 +748,47 @@ def test_gemini_vector_provider_rejects_non_developer_api_mode():
             gemini_embedding_api_key="embedding-key",
             vector_embedding_api_mode="vertex",
         )
+
+
+def test_embedding_task_profile_rejects_unsupported_provider_or_model():
+    common = {
+        "supabase_db_url": "postgresql://user:pass@localhost/db",
+        "gateway_shared_secret": "gateway",
+        "session_signing_secret": "session",
+        "evaluate_admin_secret": "evaluate",
+        "auth_mode": "gateway_only",
+        "deployment_env": "test",
+        "supabase_jwt_secret": None,
+        "enable_evaluate_endpoint": False,
+        "allow_evaluate_endpoint": False,
+        "model_type": "openai",
+        "openai_api_key": "test-openai-key",
+        "google_api_key": None,
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE",
+    ):
+        validate_runtime_settings(
+            **common,
+            vector_embedding_provider="openai",
+            vector_embedding_model="text-embedding-3-small",
+            vector_embedding_task_profile=(
+                "retrieval_document_query_v1"
+            ),
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="gemini-embedding-001",
+    ):
+        validate_runtime_settings(
+            **common,
+            vector_embedding_provider="gemini",
+            vector_embedding_model="gemini-embedding-2-preview",
+            vector_embedding_task_profile=(
+                "retrieval_document_query_v1"
+            ),
+            gemini_embedding_api_key="embedding-key",
+        )

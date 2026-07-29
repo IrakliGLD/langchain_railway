@@ -217,6 +217,111 @@ def test_gemini_provider_batches_document_embeddings(monkeypatch):
     assert captured_batches == [100, 100, 5]
 
 
+def test_gemini_retrieval_profile_uses_asymmetric_task_types_and_title(
+    monkeypatch,
+):
+    captured = []
+
+    class FakeClient:
+        def __init__(self, *, api_key, vertexai):
+            self.models = self
+
+        def embed_content(self, *, model, contents, config):
+            captured.append(
+                {
+                    "contents": contents,
+                    "task_type": config.task_type,
+                    "title": config.title,
+                }
+            )
+            count = 1 if isinstance(contents, str) else len(contents)
+            return types.SimpleNamespace(
+                embeddings=[
+                    types.SimpleNamespace(values=[0.2] * 768)
+                    for _ in range(count)
+                ]
+            )
+
+    class FakeEmbedContentConfig:
+        def __init__(
+            self,
+            *,
+            output_dimensionality,
+            task_type=None,
+            title=None,
+        ):
+            self.output_dimensionality = output_dimensionality
+            self.task_type = task_type
+            self.title = title
+
+        def model_copy(self, *, update):
+            return FakeEmbedContentConfig(
+                output_dimensionality=self.output_dimensionality,
+                task_type=update.get("task_type", self.task_type),
+                title=update.get("title", self.title),
+            )
+
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "gemini")
+    monkeypatch.setenv(
+        "VECTOR_KNOWLEDGE_EMBEDDING_MODEL",
+        "gemini-embedding-001",
+    )
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
+    monkeypatch.setenv(
+        "VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE",
+        "retrieval_document_query_v1",
+    )
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", "test-google-key")
+    google_module = types.ModuleType("google")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeClient
+    genai_module.types = types.SimpleNamespace(
+        EmbedContentConfig=FakeEmbedContentConfig
+    )
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    provider = vector_embeddings.GeminiEmbeddingProvider()
+    provider.embed_documents(
+        ["Article 1", "Article 2"],
+        title="Electricity Market Rules",
+    )
+    provider.embed_query("Who can trade?")
+
+    assert captured == [
+        {
+            "contents": ["Article 1", "Article 2"],
+            "task_type": "RETRIEVAL_DOCUMENT",
+            "title": "Electricity Market Rules",
+        },
+        {
+            "contents": "Who can trade?",
+            "task_type": "RETRIEVAL_QUERY",
+            "title": None,
+        },
+    ]
+
+
+def test_embedding_index_identity_changes_with_task_profile():
+    class FakeProvider:
+        _provider_name = "gemini"
+        _model = "gemini-embedding-001"
+        _expected_dimension = 1536
+        _normalization_version = "v1"
+        _corpus_version = "v2"
+        _task_profile = "legacy"
+
+    provider = FakeProvider()
+    legacy_identity = vector_embeddings.embedding_index_identity(provider)
+    provider._task_profile = "retrieval_document_query_v1"
+    typed_identity = vector_embeddings.embedding_index_identity(provider)
+
+    assert legacy_identity == "legacy"
+    assert typed_identity != legacy_identity
+    assert len(typed_identity) == 27
+
+
 def test_gemini_provider_requires_google_genai(monkeypatch):
     # The legacy google-generativeai fallback was removed (F10 B6 F1.1);
     # google-genai is a hard production dependency and its absence must fail
@@ -352,8 +457,10 @@ def test_query_embedding_cache_identity_includes_all_vector_compatibility_fields
         _embed_query_cached(provider, "same query")
         provider._corpus_version = "corpus-v2"
         _embed_query_cached(provider, "same query")
+        provider._task_profile = "retrieval_document_query_v1"
+        _embed_query_cached(provider, "same query")
         provider._provider_name = "gemini"
         _embed_query_cached(provider, "same query")
-        assert provider.calls == 6
+        assert provider.calls == 7
     finally:
         reset_query_embedding_cache()
