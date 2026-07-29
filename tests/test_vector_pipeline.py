@@ -38,10 +38,17 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 from agent import pipeline  # noqa: E402
 from contracts.vector_knowledge import (  # noqa: E402
+    HybridRetrievalDiagnostics,
+    HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
     VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
+    VectorRetrievalOutcome,
+    VectorRetrievalTier,
 )
 
 
@@ -88,7 +95,10 @@ def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
     bundle = VectorKnowledgeBundle(
         query="How can electricity be exported?",
         retrieval_mode=VectorKnowledgeMode.active,
-        strategy=RetrievalStrategy.hybrid,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        strategy_version=(
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        ),
         top_k=4,
         chunk_count=2,
         chunks=[
@@ -139,3 +149,179 @@ def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
         "[2] Electricity (Capacity) Market Rules | section: Part II > Registration",
     ]
     assert captured["packed_truncated"] is False
+    assert captured["strategy_version"] == "dense_cosine_rerank_v2"
+
+
+def test_pipeline_traces_typed_retrieval_failure_without_raw_error(monkeypatch):
+    events = []
+    bundle = VectorKnowledgeBundle(
+        query="What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        top_k=4,
+        outcome=VectorRetrievalOutcome.unavailable,
+        failure=VectorRetrievalFailure(
+            stage=VectorRetrievalFailureStage.query_embedding,
+            reason="401/API_KEY_INVALID",
+        ),
+        error="query_embedding:401/API_KEY_INVALID",
+    )
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(
+        pipeline.planner,
+        "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_vector_knowledge",
+        lambda *args, **kwargs: bundle,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "trace_detail",
+        lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "Fallback answer") or ctx,
+    )
+
+    out = pipeline.process_query(
+        "what is genex?",
+        trace_id="trace-vk-failure",
+        session_id="session-vk-failure",
+    )
+
+    vector_event = next(
+        kwargs
+        for args, kwargs in events
+        if "stage_0_3_vector_knowledge" in args
+    )
+    assert vector_event["outcome"] == "unavailable"
+    assert vector_event["failure_stage"] == "query_embedding"
+    assert vector_event["failure_reason"] == "401/API_KEY_INVALID"
+    assert "error" not in vector_event
+    assert out.vector_knowledge_error == "query_embedding:401/API_KEY_INVALID"
+
+
+def test_pipeline_traces_hybrid_shadow_disagreement(monkeypatch):
+    events = []
+    dense = VectorChunkRecord(
+        id="chunk-dense",
+        document_id="doc-dense",
+        document_title="Dense Rules",
+        source_key="dense-rules",
+        section_title="Dense section",
+        text_content="Dense evidence.",
+        similarity_score=0.80,
+    )
+    fused = VectorChunkRecord(
+        id="chunk-lexical",
+        document_id="doc-lexical",
+        document_title="Lexical Rules",
+        source_key="lexical-rules",
+        section_title="Exact phrase",
+        text_content="Lexical evidence.",
+    )
+    bundle = VectorKnowledgeBundle(
+        query="What is the exact phrase?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        strategy_version=(
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        ),
+        top_k=1,
+        chunk_count=1,
+        chunks=[dense],
+        outcome=VectorRetrievalOutcome.matches,
+        hybrid_diagnostics=HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.shadow,
+            dense_chunk_ids=[dense.id],
+            lexical_chunk_ids=[fused.id],
+            fused_chunks=[fused],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(
+        pipeline.planner,
+        "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_vector_knowledge",
+        lambda *args, **kwargs: bundle,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "trace_detail",
+        lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "Conceptual answer") or ctx,
+    )
+
+    pipeline.process_query(
+        "what is the exact phrase?",
+        trace_id="trace-hybrid-shadow",
+        session_id="session-hybrid-shadow",
+    )
+
+    hybrid_event = next(
+        kwargs
+        for args, kwargs in events
+        if "stage_0_3_vector_knowledge_hybrid" in args
+    )
+    assert hybrid_event["hybrid_mode"] == "shadow"
+    assert hybrid_event["applied_strategy_version"] == (
+        "dense_cosine_rerank_v2"
+    )
+    assert hybrid_event["fused_strategy_version"] == (
+        "postgres_fts_rrf_v1"
+    )
+    assert hybrid_event["cutover_applied"] is False
+    assert hybrid_event["dense_chunk_ids"] == ["chunk-dense"]
+    assert hybrid_event["lexical_chunk_ids"] == ["chunk-lexical"]
+    assert hybrid_event["fused_chunk_ids"] == ["chunk-lexical"]
+    assert hybrid_event["dense_lexical_overlap_count"] == 0
+    assert hybrid_event["dense_fused_overlap_count"] == 0
+    assert hybrid_event["fused_sections"] == [
+        "Lexical Rules | Exact phrase",
+    ]
+    assert hybrid_event["lexical_failure_stage"] == ""
+    assert hybrid_event["lexical_failure_reason"] == ""
+
+
+def test_pipeline_marks_disabled_or_skipped_retrieval_as_not_run(monkeypatch):
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_HINTS", False)
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_vector_knowledge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled retrieval must not be called")
+        ),
+    )
+    ctx = pipeline.QueryContext(query="Deterministic data query")
+
+    pipeline._run_vector_knowledge_stage(
+        ctx,
+        VectorRetrievalTier.SKIP,
+        "Deterministic data query",
+    )
+
+    assert (
+        ctx.vector_knowledge_outcome
+        is VectorRetrievalOutcome.not_run
+    )
+    assert ctx.vector_knowledge_error == ""

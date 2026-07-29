@@ -82,6 +82,36 @@ create index if not exists idx_knowledge_chunks_embedding
     on knowledge.document_chunks
     using hnsw (embedding vector_cosine_ops);
 
+-- Phase 5: language-neutral sparse arm for true hybrid retrieval. The runtime
+-- query uses this exact weighted expression with the explicit ``simple``
+-- configuration so PostgreSQL can use the GIN index consistently.
+create index if not exists idx_knowledge_chunks_lexical_search
+    on knowledge.document_chunks using gin ((
+        setweight(
+            to_tsvector(
+                'pg_catalog.simple',
+                coalesce(section_title, '')
+            ),
+            'A'
+        )
+        ||
+        setweight(
+            to_tsvector(
+                'pg_catalog.simple',
+                coalesce(section_path, '')
+            ),
+            'B'
+        )
+        ||
+        setweight(
+            to_tsvector(
+                'pg_catalog.simple',
+                coalesce(text_content, '')
+            ),
+            'D'
+        )
+    ));
+
 -- Phase B.1 of the cross-reference rollout: structural columns derived from
 -- chunk headings (``### მუხლი 14``, ``## თავი IV``) plus outbound-reference
 -- storage so retrieval can do one-hop expansion (``Article 30 cites Article

@@ -17,6 +17,7 @@ from contracts.report_evidence import (
     ReportEvidenceItem,
     ReportEvidenceKind,
     ReportEvidenceManifest,
+    ReportKnowledgeEvidenceRole,
 )
 from models import QueryContext
 from utils.coverage_sampling import coverage_priority_indices
@@ -200,6 +201,7 @@ def _make_item(
     kind: ReportEvidenceKind,
     title: str,
     source: str,
+    knowledge_role: ReportKnowledgeEvidenceRole | None = None,
     provenance_refs: list[str] | None = None,
     columns: list[str] | None = None,
     rows: list[dict[str, Any]] | None = None,
@@ -220,6 +222,8 @@ def _make_item(
         "total_row_count": total_row_count,
         "truncated": truncated,
     }
+    if knowledge_role is not None:
+        body["knowledge_role"] = knowledge_role.value
     body["evidence_ref"] = f"evidence:{kind.value}:{_digest(body)}"
     return ReportEvidenceItem.model_validate(body)
 
@@ -272,6 +276,7 @@ def make_report_narrative_evidence_item(
     source: str,
     content: str,
     provenance_refs: list[str] | None = None,
+    knowledge_role: ReportKnowledgeEvidenceRole | None = None,
 ) -> ReportEvidenceItem:
     """Create one bounded narrative evidence item."""
 
@@ -279,6 +284,7 @@ def make_report_narrative_evidence_item(
         kind=kind,
         title=title,
         source=source,
+        knowledge_role=knowledge_role,
         provenance_refs=provenance_refs,
         content=str(content or "").strip()[:6000],
     )

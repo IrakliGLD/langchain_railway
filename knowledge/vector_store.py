@@ -91,6 +91,34 @@ VECTOR_DOCUMENT_DOMAIN_PENALTY = _env_float(
     0.20,
 )
 
+# Deterministic metadata signals may reorder semantically eligible candidates,
+# but must not operate on the same additive scale as cosine similarity.
+# The historical market-concept signal tops out at 0.32, so saturating there
+# preserves that rerank behavior while capping the final lexical effect at 30%.
+_LEXICAL_BOOST_FOR_MAX_RANKING_BONUS = 0.32
+_MAX_LEXICAL_RANKING_BONUS = 0.30
+
+# Independent sparse-retrieval document. The explicit ``simple`` text-search
+# configuration lowercases tokens without applying an English-only stemmer.
+_LEXICAL_SEARCH_VECTOR_SQL = """
+(
+    setweight(
+        to_tsvector('pg_catalog.simple', coalesce(c.section_title, '')),
+        'A'
+    )
+    ||
+    setweight(
+        to_tsvector('pg_catalog.simple', coalesce(c.section_path, '')),
+        'B'
+    )
+    ||
+    setweight(
+        to_tsvector('pg_catalog.simple', coalesce(c.text_content, '')),
+        'D'
+    )
+)
+"""
+
 # Document-title / source-key markers that strongly indicate a chunk
 # is from the RETAIL electricity-market segment (consumers,
 # micro-generators, net metering, retail tariff schemes) rather than
@@ -319,6 +347,88 @@ def _row_to_chunk_record(
     )
 
 
+def _search_filter_parts(
+    filters: VectorRetrievalFilters,
+    *,
+    embedding_identity: str,
+) -> tuple[list[str], dict[str, object], list]:
+    """Build the hard SQL filters shared by dense and lexical retrieval."""
+
+    clauses = [
+        "d.is_active = true",
+        (
+            "coalesce(d.metadata ->> 'vector_embedding_identity', "
+            "'legacy') = :embedding_identity"
+        ),
+    ]
+    params: dict[str, object] = {
+        "embedding_identity": embedding_identity,
+    }
+    bind_params = []
+    languages = [
+        language
+        for language in filters.languages
+        if str(language or "").strip()
+    ]
+    document_types = [
+        doc_type
+        for doc_type in filters.document_types
+        if str(doc_type or "").strip()
+    ]
+    issuers = [
+        issuer
+        for issuer in filters.issuers
+        if str(issuer or "").strip()
+    ]
+    if languages:
+        clauses.append("c.language in :languages")
+        params["languages"] = languages
+        bind_params.append(bindparam("languages", expanding=True))
+    if document_types:
+        clauses.append("d.document_type in :document_types")
+        params["document_types"] = document_types
+        bind_params.append(bindparam("document_types", expanding=True))
+    if issuers:
+        clauses.append("d.issuer in :issuers")
+        params["issuers"] = issuers
+        bind_params.append(bindparam("issuers", expanding=True))
+    return clauses, params, bind_params
+
+
+def _search_select_list(*, score_expression: str) -> str:
+    """Return the shared document/chunk projection for search queries."""
+
+    phase_b1_cols = (
+        ",\n                ".join(f"c.{col}" for col in _PHASE_B1_COLUMNS)
+        if _check_phase_b1_columns_present()
+        else ""
+    )
+    phase_b1_select = (
+        f"\n                {phase_b1_cols},"
+        if phase_b1_cols
+        else ""
+    )
+    return f"""
+        c.id::text as id,
+        c.document_id::text as document_id,
+        d.title as document_title,
+        d.document_type as document_type,
+        d.issuer as document_issuer,
+        d.source_key as source_key,
+        c.chunk_index,
+        c.section_title,
+        c.section_path,{phase_b1_select}
+        c.page_start,
+        c.page_end,
+        c.text_content,
+        c.token_count,
+        c.language,
+        c.topics,
+        c.metadata,
+        {score_expression}
+    """
+
+
 def _topic_overlap_boost(
     candidate: VectorChunkRecord,
     preferred_topics: list[str],
@@ -468,48 +578,71 @@ def _candidate_retrieval_score(
     *,
     filters: VectorRetrievalFilters,
 ) -> float:
+    """Return a bounded deterministic rerank score for an eligible vector.
+
+    ``search_chunks`` applies its minimum to raw cosine similarity first.
+    Topic, domain, and lexical signals are then expressed as multipliers so
+    they can reorder those survivors without sharing cosine's additive scale.
+    """
     base_score = float(candidate.similarity_score or 0.0)
     topic_boost = _topic_overlap_boost(candidate, filters.preferred_topics)
     topic_penalty = _topic_mismatch_penalty(candidate, filters.preferred_topics)
     domain_penalty = _document_domain_mismatch_penalty(
         candidate, filters.preferred_topics
     )
+    lexical_ranking_bonus = 0.0
 
-    if not filters.boost_terms:
-        return base_score + topic_boost + topic_penalty + domain_penalty
+    if filters.boost_terms:
+        title_text = _normalize_match_text(candidate.document_title)
+        source_text = _normalize_match_text(candidate.source_key)
+        section_text = _normalize_match_text(
+            f"{candidate.section_title} {candidate.section_path}"
+        )
+        topic_text = _normalize_match_text(" ".join(candidate.topics))
+        metadata_text = _normalize_match_text(
+            json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True)
+        )
+        body_text = _normalize_match_text(candidate.text_content[:1200])
 
-    title_text = _normalize_match_text(candidate.document_title)
-    source_text = _normalize_match_text(candidate.source_key)
-    section_text = _normalize_match_text(f"{candidate.section_title} {candidate.section_path}")
-    topic_text = _normalize_match_text(" ".join(candidate.topics))
-    metadata_text = _normalize_match_text(json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True))
-    body_text = _normalize_match_text(candidate.text_content[:1200])
+        lexical_boost = _market_concept_reference_boost(
+            filters=filters,
+            title_text=title_text,
+            source_text=source_text,
+            section_text=section_text,
+            metadata_text=metadata_text,
+            body_text=body_text,
+        )
+        for term in filters.boost_terms:
+            normalized_term = _normalize_match_text(term)
+            if not normalized_term:
+                continue
+            if normalized_term in title_text:
+                lexical_boost += 0.24
+            if normalized_term in source_text:
+                lexical_boost += 0.18
+            if normalized_term in section_text:
+                lexical_boost += 0.20
+            if normalized_term in topic_text:
+                lexical_boost += 0.16
+            if normalized_term in metadata_text:
+                lexical_boost += 0.08
+            if normalized_term in body_text:
+                lexical_boost += 0.04
+        lexical_ranking_bonus = (
+            min(lexical_boost, _LEXICAL_BOOST_FOR_MAX_RANKING_BONUS)
+            / _LEXICAL_BOOST_FOR_MAX_RANKING_BONUS
+            * _MAX_LEXICAL_RANKING_BONUS
+        )
 
-    boost = _market_concept_reference_boost(
-        filters=filters,
-        title_text=title_text,
-        source_text=source_text,
-        section_text=section_text,
-        metadata_text=metadata_text,
-        body_text=body_text,
+    ranking_multiplier = max(
+        0.0,
+        1.0
+        + topic_boost
+        + topic_penalty
+        + domain_penalty
+        + lexical_ranking_bonus,
     )
-    for term in filters.boost_terms:
-        normalized_term = _normalize_match_text(term)
-        if not normalized_term:
-            continue
-        if normalized_term in title_text:
-            boost += 0.24
-        if normalized_term in source_text:
-            boost += 0.18
-        if normalized_term in section_text:
-            boost += 0.20
-        if normalized_term in topic_text:
-            boost += 0.16
-        if normalized_term in metadata_text:
-            boost += 0.08
-        if normalized_term in body_text:
-            boost += 0.04
-    return base_score + topic_boost + topic_penalty + domain_penalty + min(boost, 0.85)
+    return base_score * ranking_multiplier
 
 
 def _section_key(candidate: VectorChunkRecord) -> str:
@@ -521,25 +654,20 @@ def _section_key(candidate: VectorChunkRecord) -> str:
     return f"{candidate.document_id}:chunk_{candidate.chunk_index}"
 
 
-def _apply_document_diversity(
+def apply_document_diversity(
     candidates: List[VectorChunkRecord],
     *,
     top_k: int,
-    filters: VectorRetrievalFilters,
+    candidate_scores: dict[str, float],
 ) -> List[VectorChunkRecord]:
     if len(candidates) < top_k or top_k <= 1:
         return candidates[:top_k]
 
     max_per_document = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT)
     max_per_section = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION)
-    candidate_scores = {
-        candidate.id: _candidate_retrieval_score(candidate, filters=filters)
-        for candidate in candidates
-    }
     best_score = max(candidate_scores.values())
-    diversity_floor = max(
-        VECTOR_KNOWLEDGE_MIN_SIMILARITY,
-        best_score - max(0.0, VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE),
+    diversity_floor = (
+        best_score - max(0.0, VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE)
     )
 
     competitive: List[VectorChunkRecord] = [
@@ -647,7 +775,14 @@ class KnowledgeVectorStore:
                 is_active = excluded.is_active,
                 abolished = excluded.abolished,
                 supersedes_document_id = excluded.supersedes_document_id,
-                metadata = excluded.metadata,
+                metadata = excluded.metadata || jsonb_strip_nulls(
+                    jsonb_build_object(
+                        'vector_embedding_identity',
+                        documents.metadata -> 'vector_embedding_identity',
+                        'vector_embedding_profile',
+                        documents.metadata -> 'vector_embedding_profile'
+                    )
+                ),
                 updated_at = now()
             returning id::text
             """
@@ -667,6 +802,8 @@ class KnowledgeVectorStore:
         source_key: str,
         chunks: List[ChunkIngestRecord],
         embeddings: List[List[float]],
+        embedding_identity: str = "legacy",
+        embedding_profile: str = "legacy",
     ) -> IngestionResult:
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings length mismatch")
@@ -738,6 +875,31 @@ class KnowledgeVectorStore:
                 params.setdefault("parent_chapter", "")
                 params.setdefault("section_kind", "")
                 conn.execute(insert_sql, params)
+            conn.execute(
+                text(
+                    f"""
+                    update {self.schema}.documents
+                    set metadata = jsonb_set(
+                        jsonb_set(
+                            coalesce(metadata, '{{}}'::jsonb),
+                            '{{vector_embedding_identity}}',
+                            to_jsonb(cast(:embedding_identity as text)),
+                            true
+                        ),
+                        '{{vector_embedding_profile}}',
+                        to_jsonb(cast(:embedding_profile as text)),
+                        true
+                    ),
+                    updated_at = now()
+                    where id = :document_id
+                    """
+                ),
+                {
+                    "document_id": document_id,
+                    "embedding_identity": embedding_identity,
+                    "embedding_profile": embedding_profile,
+                },
+            )
         return IngestionResult(
             document_id=document_id,
             chunk_count=len(chunks),
@@ -753,62 +915,35 @@ class KnowledgeVectorStore:
         top_k: int = 4,
         candidate_k: int = 12,
         min_similarity: float = VECTOR_KNOWLEDGE_MIN_SIMILARITY,
+        embedding_identity: str = "legacy",
     ) -> List[VectorChunkRecord]:
         filters = filters or VectorRetrievalFilters()
         _validate_embedding_length(query_embedding, label="query_embedding")
         embedding_literal = _vector_literal(query_embedding)
-        clauses = ["d.is_active = true"]
-        params = {"embedding": embedding_literal, "candidate_k": max(candidate_k, top_k)}
-        bind_params = []
-
-        languages = [language for language in filters.languages if str(language or "").strip()]
-        document_types = [doc_type for doc_type in filters.document_types if str(doc_type or "").strip()]
-        issuers = [issuer for issuer in filters.issuers if str(issuer or "").strip()]
+        clauses, params, bind_params = _search_filter_parts(
+            filters,
+            embedding_identity=embedding_identity,
+        )
+        params.update({
+            "embedding": embedding_literal,
+            "candidate_k": max(candidate_k, top_k),
+        })
 
         # preferred_topics are used as a soft scoring boost in
         # _candidate_retrieval_score(), NOT as a hard SQL filter.
         # This allows semantically similar chunks from all documents
         # to enter the candidate pool, with topic-matching chunks
         # ranked higher during Python-side reranking.
-        if languages:
-            clauses.append("c.language in :languages")
-            params["languages"] = languages
-            bind_params.append(bindparam("languages", expanding=True))
-        if document_types:
-            clauses.append("d.document_type in :document_types")
-            params["document_types"] = document_types
-            bind_params.append(bindparam("document_types", expanding=True))
-        if issuers:
-            clauses.append("d.issuer in :issuers")
-            params["issuers"] = issuers
-            bind_params.append(bindparam("issuers", expanding=True))
-
-        phase_b1_cols = (
-            ",\n                ".join(f"c.{col}" for col in _PHASE_B1_COLUMNS)
-            if _check_phase_b1_columns_present()
-            else ""
+        select_list = _search_select_list(
+            score_expression=(
+                "(1 - (c.embedding <=> cast(:embedding as vector))) "
+                "as similarity_score"
+            )
         )
-        phase_b1_select = (f"\n                {phase_b1_cols}," if phase_b1_cols else "")
         sql = text(
             f"""
             select
-                c.id::text as id,
-                c.document_id::text as document_id,
-                d.title as document_title,
-                d.document_type as document_type,
-                d.issuer as document_issuer,
-                d.source_key as source_key,
-                c.chunk_index,
-                c.section_title,
-                c.section_path,{phase_b1_select}
-                c.page_start,
-                c.page_end,
-                c.text_content,
-                c.token_count,
-                c.language,
-                c.topics,
-                c.metadata,
-                (1 - (c.embedding <=> cast(:embedding as vector))) as similarity_score
+                {select_list}
             from {self.schema}.document_chunks c
             join {self.schema}.documents d on d.id = c.document_id
             where {" and ".join(clauses)}
@@ -823,33 +958,105 @@ class KnowledgeVectorStore:
         ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
-        # Use a relaxed floor for the candidate pool so that chunks with
-        # low raw similarity but high topic/keyword boost can still enter
-        # the reranking stage.  The real min_similarity gate is applied
-        # *after* _candidate_retrieval_score() below.
-        _floor_delta = _env_float("VECTOR_KNOWLEDGE_CANDIDATE_FLOOR_DELTA", 0.10)
-        candidate_floor = max(0.0, float(min_similarity) - _floor_delta)
-        candidates: List[VectorChunkRecord] = []
+        # Eligibility is based only on raw cosine similarity. Deterministic
+        # topic and lexical signals may reorder survivors, but cannot
+        # manufacture semantic relevance for a weak vector match.
+        similarity_floor = float(min_similarity)
+        scored_candidates: list[tuple[float, VectorChunkRecord]] = []
         for row in rows:
             score = float(row.get("similarity_score") or 0.0)
-            if score < candidate_floor:
+            if score < similarity_floor:
                 continue
-            candidates.append(_row_to_chunk_record(row, similarity_score=score))
-        candidates.sort(
-            key=lambda candidate: (
-                _candidate_retrieval_score(candidate, filters=filters),
-                float(candidate.similarity_score or 0.0),
-                -int(candidate.chunk_index or 0),
+            candidate = _row_to_chunk_record(row, similarity_score=score)
+            scored_candidates.append(
+                (
+                    _candidate_retrieval_score(candidate, filters=filters),
+                    candidate,
+                )
+            )
+        scored_candidates.sort(
+            key=lambda item: (
+                item[0],
+                float(item[1].similarity_score or 0.0),
+                -int(item[1].chunk_index or 0),
             ),
             reverse=True,
         )
-        # Apply the real min_similarity threshold on the *boosted* score so
-        # that topic/keyword boosts can rescue weak-but-relevant matches.
-        candidates = [
-            c for c in candidates
-            if _candidate_retrieval_score(c, filters=filters) >= float(min_similarity)
+        candidates = [candidate for _, candidate in scored_candidates]
+        candidate_scores = {
+            candidate.id: ranking_score
+            for ranking_score, candidate in scored_candidates
+        }
+        return apply_document_diversity(
+            candidates,
+            top_k=top_k,
+            candidate_scores=candidate_scores,
+        )
+
+    def search_lexical_chunks(
+        self,
+        *,
+        query_text: str,
+        filters: VectorRetrievalFilters | None = None,
+        candidate_k: int = 12,
+        embedding_identity: str = "legacy",
+    ) -> List[VectorChunkRecord]:
+        """Return an independently ranked PostgreSQL full-text candidate arm."""
+
+        normalized_query = str(query_text or "").strip()
+        if not normalized_query:
+            return []
+        filters = filters or VectorRetrievalFilters()
+        clauses, params, bind_params = _search_filter_parts(
+            filters,
+            embedding_identity=embedding_identity,
+        )
+        params.update({
+            "lexical_query": normalized_query,
+            "candidate_k": max(1, int(candidate_k)),
+        })
+        select_list = _search_select_list(
+            score_expression=(
+                "ts_rank_cd("
+                f"{_LEXICAL_SEARCH_VECTOR_SQL}, "
+                "lexical_query.query, 32"
+                ") as lexical_score"
+            )
+        )
+        clauses.append(
+            f"lexical_query.query @@ {_LEXICAL_SEARCH_VECTOR_SQL}"
+        )
+        sql = text(
+            f"""
+            with lexical_query as (
+                select websearch_to_tsquery(
+                    'pg_catalog.simple',
+                    :lexical_query
+                ) as query
+            )
+            select
+                {select_list}
+            from {self.schema}.document_chunks c
+            join {self.schema}.documents d on d.id = c.document_id
+            cross join lexical_query
+            where {" and ".join(clauses)}
+            order by lexical_score desc, c.id asc
+            limit :candidate_k
+            """
+        )
+        if bind_params:
+            sql = sql.bindparams(*bind_params)
+        with database_connection(
+            _resolve_engine(),
+            operation="lexical_search",
+            begin=True,
+            read_only=True,
+        ) as conn:
+            rows = conn.execute(sql, params).mappings().all()
+        return [
+            _row_to_chunk_record(row, similarity_score=None)
+            for row in rows
         ]
-        return _apply_document_diversity(candidates, top_k=top_k, filters=filters)
 
     def fetch_chunks_by_index(
         self,

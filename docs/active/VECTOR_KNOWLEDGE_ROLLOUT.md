@@ -21,8 +21,15 @@ The schema is created by `schemas/knowledge_vector.sql`. Required Postgres exten
 | `VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER` | `openai` | `gemini` |
 | `VECTOR_KNOWLEDGE_EMBEDDING_MODEL` | `text-embedding-3-small` | `gemini-embedding-001` |
 | `VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION` | `1536` | `1536` |
+| `VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE` | `legacy` | `legacy` until the task-typed re-index procedure below |
 
 The dimension must match the SQL `vector(...)` column width. Switching providers without matching dimensions corrupts ingestion.
+
+`VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE=retrieval_document_query_v1`
+is supported only with `gemini-embedding-001`. It generates corpus vectors
+with `RETRIEVAL_DOCUMENT` (including the document title) and query vectors
+with `RETRIEVAL_QUERY`. The default remains `legacy`, so deploying code alone
+does not change the live vector space.
 
 ## Runtime Flags
 
@@ -33,7 +40,108 @@ Other env vars relevant to retrieval:
 
 - `VECTOR_KNOWLEDGE_TOP_K=6` — top-K at retrieval tier FULL.
 - `VECTOR_KNOWLEDGE_MAX_CHARS=9000` — packing cap on the prompt section.
-- `VECTOR_KNOWLEDGE_MIN_SIMILARITY=0.2` — base similarity threshold.
+- `VECTOR_KNOWLEDGE_MIN_SIMILARITY=0.2` — minimum raw cosine similarity.
+  Topic and lexical signals only rerank candidates that pass this gate.
+
+### True hybrid retrieval (Phase 5)
+
+`VECTOR_HYBRID_RETRIEVAL_MODE` controls an independent PostgreSQL
+full-text-search arm:
+
+- `off` (default) — dense retrieval only; no lexical database query.
+- `shadow` — run the lexical arm and reciprocal-rank fusion, emit
+  `stage_0_3_vector_knowledge_hybrid`, but keep the dense chunks and prompt
+  unchanged.
+- `on` — use the fused chunks as the primary retrieval result.
+- Unknown values fail closed to `off`.
+
+The lexical arm uses PostgreSQL `websearch_to_tsquery` with the explicit
+language-neutral `simple` configuration. Section title, section path, and body
+are weighted and indexed by `idx_knowledge_chunks_lexical_search`. Fusion is
+deterministic, deduplicates by chunk ID, preserves the dense record when both
+arms find the same chunk, and reapplies the existing document/section diversity
+policy. `VECTOR_HYBRID_RRF_K` controls the reciprocal-rank constant (default
+`60`, minimum `1`).
+
+Hybrid retrieval adds one database query in `shadow` or `on`. It does not add
+an embedding or LLM call. A lexical-query failure is traced and falls back to
+the dense result; it does not mark otherwise successful retrieval unavailable.
+
+#### Safe rollout path
+
+1. Apply `schemas/knowledge_vector.sql` so the idempotent GIN expression index
+   exists. No document re-ingestion is required.
+2. Deploy with `VECTOR_HYBRID_RETRIEVAL_MODE=off` and verify dense canaries are
+   unchanged.
+3. Enable `shadow`. Review `dense_chunk_ids`, `lexical_chunk_ids`,
+   `fused_chunk_ids`, overlap counts, fused sections, lexical failures, and
+   Stage 0.3 latency on known-answer canaries and representative production
+   queries.
+4. Review disagreement cases manually. Cut over only when known-answer
+   retrieval is non-regressing, fused-only evidence is relevant, lexical
+   failures are absent or understood, and latency remains within the service
+   SLO.
+5. Set the mode to `on`. Continue monitoring the same event; rollback is the
+   single env change back to `off`.
+
+### Hybrid and report-evidence cutover (Phase 6)
+
+Every runtime bundle now carries an explicit implementation version alongside
+its strategy:
+
+- `not_run_v1` — retrieval deliberately skipped.
+- `dense_cosine_rerank_v2` — raw-cosine eligibility followed by the bounded
+  deterministic reranker.
+- `postgres_fts_rrf_v1` — PostgreSQL `simple` FTS fused with dense ranks by
+  reciprocal-rank fusion.
+
+Stage `0.3` traces emit `strategy_version`. Hybrid comparison traces emit both
+the applied version and the would-be fused version, so shadow observations
+remain attributable if ranking changes later. Bundles serialized before this
+contract remain readable as `legacy_unspecified`; current runtime retrieval
+never emits that value.
+
+Report evidence preserves retrieval roles:
+
+- Direct top-K hits are `primary`.
+- Same-document chunks resolved through an explicit article reference become
+  `supporting_reference` only when
+  `VECTOR_REFERENCE_EXPANSION_MODE=on`.
+- Adjacent chunks remain `provenance_context`: they can provide conversational
+  prompt continuity when adjacency is `on`, but are not emitted as standalone
+  report evidence because proximity alone does not establish relevance.
+
+Primary report evidence is capped at six chunks and always precedes up to four
+supporting references. Duplicate chunk IDs are removed. Reference `shadow`
+continues to leave report evidence unchanged.
+
+Phase 6 supplies the reversible `on` path; it does not bypass the Phase 5
+observation gate. Production cutover still requires reviewed disagreement
+cases and acceptable known-answer and latency metrics. Rollback remains
+`VECTOR_HYBRID_RETRIEVAL_MODE=off`, with the dense implementation retained.
+
+### Cleanup and deferred upgrades (Phase 7)
+
+The temporary embedding-credential transition is complete.
+`GEMINI_EMBEDDING_API_KEY` is now the only accepted Gemini embedding
+credential. `GOOGLE_API_KEY` remains a generative-model credential and is never
+read by the embedding backend. The former
+`ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY` escape hatch has been removed from
+configuration validation and runtime resolution.
+
+The following assets are deliberately retained:
+
+- `document_chunks.embedding`, because the pragmatic task-profile rollout did
+  not introduce a side-by-side embedding table.
+- `dense_cosine_rerank_v2`, because it is the Phase 5/6 rollback strategy and
+  the lexical arm falls back to it on failure.
+- The pinned `google-genai` version, because a dependency upgrade changes a
+  separate failure surface and requires its own canary deployment.
+
+No learned or generative reranker is added. Revisit a non-generative reranker
+only if reviewed golden-set results show `postgres_fts_rrf_v1` has plateaued.
+Removing dense rollback or the in-row embedding requires a separate migration
+after the production observation and rollback windows have expired.
 
 ### Adjacency expansion (Phase A of the cross-reference rollout)
 
@@ -134,10 +242,11 @@ $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
 ```powershell
 # Gemini (alternative)
 $env:SUPABASE_DB_URL = "postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:5432/postgres"
-$env:GOOGLE_API_KEY = "..."
+$env:GEMINI_EMBEDDING_API_KEY = "..."
 $env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
 $env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
 $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+$env:VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE = "legacy"
 ```
 
 `SUPABASE_DB_URL` must point to the same Postgres database where `knowledge_vector.sql` has been applied.
@@ -152,6 +261,54 @@ produce vectors in different latent spaces. Before re-ingesting:
 2. If you change provider, truncate `knowledge.document_chunks` and
    re-ingest everything. Mixed providers in the same table are a silent
    correctness bug.
+
+### Task-typed Gemini re-index
+
+Task-typed and legacy vectors are different index identities and must never be
+mixed in one search. Runtime queries filter on the atomic
+`vector_embedding_identity` marker stored in each document's metadata; rows
+created before this feature are treated as `legacy`.
+
+Use this cutover sequence:
+
+1. Deploy the code with `VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE=legacy`.
+   Verify `/readyz` reports `task_profile=legacy`.
+2. Temporarily disable vector retrieval or place the service in a maintenance
+   window. Re-indexing replaces one document at a time, so the corpus is
+   intentionally incomplete until the batch finishes.
+3. Set the local ingestion environment to:
+
+   ```powershell
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = "gemini"
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_MODEL = "gemini-embedding-001"
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = "1536"
+   $env:VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE = "retrieval_document_query_v1"
+   $env:VECTOR_KNOWLEDGE_CORPUS_VERSION = "gemini-retrieval-v1"
+   ```
+
+4. Run `python ingest_all_documents.py`. Do not flip the deployed query
+   profile if any document fails.
+5. Verify every active document has the same non-legacy identity:
+
+   ```sql
+   select
+     metadata ->> 'vector_embedding_profile' as profile,
+     metadata ->> 'vector_embedding_identity' as identity,
+     count(*)
+   from knowledge.documents
+   where is_active = true
+   group by 1, 2;
+   ```
+
+   Expected: exactly one row, profile
+   `retrieval_document_query_v1`, with the active-document count.
+6. Set the deployed service's task profile and corpus version to the same
+   values used for ingestion, redeploy, and verify `/readyz` reports both the
+   expected task profile and the same `index_identity` shown by a local
+   capability probe under the ingestion environment.
+7. Re-enable retrieval and run known-answer canaries. Rollback requires
+   re-ingesting the complete corpus under `legacy`; changing only the query
+   profile cannot make task-typed document vectors legacy-compatible.
 
 ### 3. Write the registration script
 
@@ -249,7 +406,9 @@ Send a query that should hit the new document and inspect the `stage_0_3_vector_
 - Curated markdown knowledge in `knowledge/*.md` remains the canonical explanation layer; vector chunks are additive external-source passages.
 - Prompt usage is bounded by `VECTOR_KNOWLEDGE_MAX_CHARS` (default 9000).
 - Retrieval failures degrade safely to non-vector behaviour — the pipeline does not abort the request.
-- No cross-encoder reranker today; retrieval quality depends on chunking + embeddings + topic/keyword boosts. See the architecture doc §5.x for the open improvement items.
+- No cross-encoder reranker today; retrieval quality depends on chunking +
+  embeddings + bounded topic/keyword reranking. See the architecture doc §5.x
+  for the open improvement items.
 
 ## Appendix: Batch Re-ingest All Documents
 

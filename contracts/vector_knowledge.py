@@ -16,12 +16,80 @@ class VectorKnowledgeMode(str, Enum):
     active = "active"
 
 
+class HybridRetrievalMode(str, Enum):
+    """Whether fused dense + lexical results are observed or selected."""
+
+    off = "off"
+    shadow = "shadow"
+    on = "on"
+
+
 class RetrievalStrategy(str, Enum):
-    """High-level retrieval mode for knowledge assembly."""
+    """How candidate chunks were selected and ranked.
+
+    The original values remain accepted for serialized/backward-compatible
+    bundles. Runtime vector retrieval emits the specific values below rather
+    than claiming ``hybrid`` retrieval when no independent sparse index was
+    queried.
+    """
 
     curated_only = "curated_only"
     vector_only = "vector_only"
     hybrid = "hybrid"
+    not_run = "not_run"
+    dense_with_deterministic_rerank = "dense_with_deterministic_rerank"
+
+
+class RetrievalStrategyVersion(str, Enum):
+    """Versioned implementation identity for retrieval telemetry."""
+
+    legacy_unspecified = "legacy_unspecified"
+    not_run_v1 = "not_run_v1"
+    dense_cosine_rerank_v2 = "dense_cosine_rerank_v2"
+    postgres_fts_rrf_v1 = "postgres_fts_rrf_v1"
+
+
+_EXPECTED_STRATEGY_VERSION = {
+    RetrievalStrategy.not_run: RetrievalStrategyVersion.not_run_v1,
+    RetrievalStrategy.dense_with_deterministic_rerank: (
+        RetrievalStrategyVersion.dense_cosine_rerank_v2
+    ),
+    RetrievalStrategy.hybrid: (
+        RetrievalStrategyVersion.postgres_fts_rrf_v1
+    ),
+}
+
+
+class VectorRetrievalOutcome(str, Enum):
+    """Terminal state of one vector-retrieval attempt."""
+
+    not_run = "not_run"
+    matches = "matches"
+    no_matches = "no_matches"
+    unavailable = "unavailable"
+
+
+class VectorRetrievalFailureStage(str, Enum):
+    """The operation that made vector retrieval unavailable."""
+
+    store_initialization = "store_initialization"
+    provider_initialization = "provider_initialization"
+    query_embedding = "query_embedding"
+    vector_search = "vector_search"
+    lexical_search = "lexical_search"
+
+
+class VectorRetrievalFailure(BaseModel):
+    """Privacy-safe diagnostic for an unavailable retrieval attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: VectorRetrievalFailureStage
+    reason: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_/-]+$",
+    )
 
 
 class VectorRetrievalTier(str, Enum):
@@ -32,9 +100,9 @@ class VectorRetrievalTier(str, Enum):
 
     * ``FULL`` — default top-K + full candidate pool. For knowledge and
       explanation answers that consume the retrieved passages directly.
-    * ``LIGHT`` — ``top_k=2``, reduced candidate pool, no re-rank.  Enough
-      context for narrative data answers that only sprinkle in background
-      definitions.
+    * ``LIGHT`` — ``top_k=2`` and a reduced candidate pool, with the same
+      deterministic metadata/text re-ranking. Enough context for narrative
+      data answers that only sprinkle in background definitions.
     * ``SKIP`` — do not call the vector store at all.  Deterministic data
       paths bypass the LLM summarizer, and clarify paths have no data to
       ground.
@@ -173,6 +241,74 @@ class VectorChunkRecord(BaseModel):
         return text
 
 
+class HybridRetrievalDiagnostics(BaseModel):
+    """Comparison payload for the optional dense + lexical retrieval arm."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: HybridRetrievalMode
+    fused_strategy_version: RetrievalStrategyVersion = (
+        RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
+    dense_chunk_ids: List[str] = Field(default_factory=list)
+    lexical_chunk_ids: List[str] = Field(default_factory=list)
+    fused_chunks: List[VectorChunkRecord] = Field(default_factory=list)
+    cutover_applied: bool = False
+    lexical_failure: Optional[VectorRetrievalFailure] = None
+
+    @model_validator(mode="after")
+    def _validate_cutover(self) -> "HybridRetrievalDiagnostics":
+        if (
+            self.fused_strategy_version
+            is not RetrievalStrategyVersion.postgres_fts_rrf_v1
+        ):
+            raise ValueError(
+                "hybrid diagnostics require "
+                "fused_strategy_version=postgres_fts_rrf_v1"
+            )
+        if self.mode is HybridRetrievalMode.off:
+            raise ValueError(
+                "off mode must omit hybrid diagnostics"
+            )
+        if self.cutover_applied and self.mode is not HybridRetrievalMode.on:
+            raise ValueError("hybrid cutover requires mode=on")
+        if (
+            self.mode is HybridRetrievalMode.on
+            and self.lexical_failure is None
+            and not self.cutover_applied
+        ):
+            raise ValueError(
+                "successful on mode requires hybrid cutover"
+            )
+        if self.lexical_failure is not None:
+            if (
+                self.lexical_failure.stage
+                is not VectorRetrievalFailureStage.lexical_search
+            ):
+                raise ValueError(
+                    "hybrid lexical failure requires stage=lexical_search"
+                )
+            if self.cutover_applied:
+                raise ValueError(
+                    "failed lexical retrieval cannot apply hybrid cutover"
+                )
+            if self.lexical_chunk_ids or self.fused_chunks:
+                raise ValueError(
+                    "failed lexical retrieval cannot carry lexical candidates"
+                )
+        for label, chunk_ids in (
+            ("dense_chunk_ids", self.dense_chunk_ids),
+            ("lexical_chunk_ids", self.lexical_chunk_ids),
+            (
+                "fused_chunk_ids",
+                [chunk.id for chunk in self.fused_chunks],
+            ),
+        ):
+            if len(chunk_ids) != len(set(chunk_ids)):
+                raise ValueError(f"{label} must be unique")
+        return self
+
+
 class VectorRetrievalFilters(BaseModel):
     """Optional filters for vector-backed document retrieval."""
 
@@ -194,10 +330,19 @@ class VectorKnowledgeBundle(BaseModel):
     query: str
     retrieval_mode: VectorKnowledgeMode
     strategy: RetrievalStrategy
+    # Serialized bundles from before Phase 6 omit this field. They remain
+    # readable but are reported honestly as unversioned legacy results.
+    strategy_version: RetrievalStrategyVersion = (
+        RetrievalStrategyVersion.legacy_unspecified
+    )
     top_k: int = 0
     chunk_count: int = 0
     chunks: List[VectorChunkRecord] = Field(default_factory=list)
     filters: VectorRetrievalFilters = Field(default_factory=VectorRetrievalFilters)
+    outcome: VectorRetrievalOutcome = VectorRetrievalOutcome.not_run
+    failure: Optional[VectorRetrievalFailure] = None
+    # Compatibility field for callers that still use a truthy string. New
+    # retrieval code only writes a content-free ``stage:reason`` code.
     error: str = ""
     # Phase A.2 of the cross-reference plan: chunks fetched via adjacency
     # expansion (preceding/following section by ``chunk_index`` within the
@@ -209,6 +354,94 @@ class VectorKnowledgeBundle(BaseModel):
     # ``VECTOR_REFERENCE_EXPANSION_MODE != "off"``.  Pack consumers ignore
     # this field until B.4 cutover.
     reference_chunks: List[VectorChunkRecord] = Field(default_factory=list)
+    # Phase 5: independent full-text results and fused ranking. In shadow mode
+    # this carries the would-be fused chunks without changing ``chunks``.
+    hybrid_diagnostics: Optional[HybridRetrievalDiagnostics] = None
+
+    @model_validator(mode="after")
+    def _normalize_and_validate_outcome(self) -> "VectorKnowledgeBundle":
+        if "strategy_version" in self.model_fields_set:
+            expected_strategy_version = _EXPECTED_STRATEGY_VERSION.get(
+                self.strategy
+            )
+            if expected_strategy_version is None:
+                if (
+                    self.strategy_version
+                    is not RetrievalStrategyVersion.legacy_unspecified
+                ):
+                    raise ValueError(
+                        "legacy retrieval strategies require "
+                        "strategy_version=legacy_unspecified"
+                    )
+            elif self.strategy_version is not expected_strategy_version:
+                raise ValueError(
+                    f"strategy={self.strategy.value} requires "
+                    f"strategy_version={expected_strategy_version.value}"
+                )
+        # Old serialized bundles pre-date ``outcome``. Derive their state so
+        # they remain readable while typed callers migrate.
+        if "outcome" not in self.model_fields_set:
+            if self.failure is not None or self.error:
+                self.outcome = VectorRetrievalOutcome.unavailable
+            elif self.chunks:
+                self.outcome = VectorRetrievalOutcome.matches
+            elif self.top_k == 0:
+                self.outcome = VectorRetrievalOutcome.not_run
+            else:
+                self.outcome = VectorRetrievalOutcome.no_matches
+
+        has_failure = self.failure is not None or bool(self.error)
+        if has_failure and self.outcome is not VectorRetrievalOutcome.unavailable:
+            raise ValueError("retrieval failures require outcome=unavailable")
+        if self.outcome is VectorRetrievalOutcome.unavailable:
+            if self.chunks:
+                raise ValueError("unavailable retrieval cannot carry matched chunks")
+            if not has_failure:
+                raise ValueError("unavailable retrieval requires failure details")
+        elif self.failure is not None:
+            raise ValueError("failure details require outcome=unavailable")
+        if self.outcome is VectorRetrievalOutcome.matches and not self.chunks:
+            raise ValueError("matches outcome requires at least one chunk")
+        if (
+            self.outcome
+            in {VectorRetrievalOutcome.no_matches, VectorRetrievalOutcome.not_run}
+            and self.chunks
+        ):
+            raise ValueError(f"{self.outcome.value} outcome cannot carry chunks")
+        if (
+            self.outcome is VectorRetrievalOutcome.not_run
+            and self.top_k != 0
+        ):
+            raise ValueError("not_run outcome requires top_k=0")
+        diagnostics = self.hybrid_diagnostics
+        if diagnostics is not None:
+            chunk_ids = [chunk.id for chunk in self.chunks]
+            if diagnostics.cutover_applied:
+                if self.strategy is not RetrievalStrategy.hybrid:
+                    raise ValueError(
+                        "hybrid cutover requires strategy=hybrid"
+                    )
+                if chunk_ids != [
+                    chunk.id for chunk in diagnostics.fused_chunks
+                ]:
+                    raise ValueError(
+                        "hybrid cutover chunks must match fused chunks"
+                    )
+            elif chunk_ids != diagnostics.dense_chunk_ids:
+                raise ValueError(
+                    "non-cutover hybrid diagnostics must preserve dense chunks"
+                )
+            elif self.strategy is RetrievalStrategy.hybrid:
+                raise ValueError(
+                    "strategy=hybrid requires applied cutover"
+                )
+        return self
+
+    @property
+    def unavailable(self) -> bool:
+        """Whether retrieval failed rather than finding zero evidence."""
+
+        return self.outcome is VectorRetrievalOutcome.unavailable
 
 
 # Registration and ingestion payloads define the write-side contract for new sources.

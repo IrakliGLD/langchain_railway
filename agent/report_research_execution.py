@@ -25,6 +25,7 @@ from contracts.report_evidence import (
     ReportEvidenceItem,
     ReportEvidenceKind,
     ReportEvidenceManifest,
+    ReportKnowledgeEvidenceRole,
 )
 from contracts.report_research import (
     ReportChartCandidate,
@@ -40,9 +41,13 @@ from contracts.report_research import (
 )
 from contracts.vector_knowledge import (
     VectorKnowledgeMode,
+    VectorRetrievalOutcome,
     VectorRetrievalTier,
 )
-from knowledge.vector_retrieval import retrieve_vector_knowledge
+from knowledge.vector_retrieval import (
+    get_reference_expansion_mode,
+    retrieve_vector_knowledge,
+)
 from utils.request_deadline import (
     bind_request_execution_scope_snapshot,
     current_request_execution_scope,
@@ -269,28 +274,50 @@ def _collect_vector_knowledge(
         retrieval_mode=VectorKnowledgeMode.active,
         tier=VectorRetrievalTier.FULL,
     )
-    if bundle.error:
+    if bundle.outcome is VectorRetrievalOutcome.unavailable:
         return ReportCollectorOutput(
             collector_id=ReportCollectorId.VECTOR_KNOWLEDGE,
             gaps=("COLLECTOR_VECTOR_KNOWLEDGE_FAILED",),
             failed=True,
         )
-    items = tuple(
-        make_report_narrative_evidence_item(
-            kind=ReportEvidenceKind.KNOWLEDGE,
-            title=(
-                chunk.document_title
-                or chunk.section_title
-                or "Approved knowledge passage"
-            )[:200],
-            source="vector",
-            provenance_refs=[
-                f"vector:{chunk.source_key or chunk.document_id}:{chunk.id}"
-            ],
-            content=chunk.text_content,
-        )
+    role_chunks = [
+        (ReportKnowledgeEvidenceRole.primary, chunk)
         for chunk in bundle.chunks[:6]
-    )
+    ]
+    if get_reference_expansion_mode() == "on":
+        role_chunks.extend(
+            (
+                ReportKnowledgeEvidenceRole.supporting_reference,
+                chunk,
+            )
+            for chunk in bundle.reference_chunks[:4]
+        )
+    seen_chunk_ids: set[str] = set()
+    items_list: list[ReportEvidenceItem] = []
+    for role, chunk in role_chunks:
+        if chunk.id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk.id)
+        items_list.append(
+            make_report_narrative_evidence_item(
+                kind=ReportEvidenceKind.KNOWLEDGE,
+                title=(
+                    chunk.document_title
+                    or chunk.section_title
+                    or "Approved knowledge passage"
+                )[:200],
+                source=f"vector:{bundle.strategy_version.value}",
+                knowledge_role=role,
+                provenance_refs=[
+                    "vector:"
+                    f"{role.value}:"
+                    f"{chunk.source_key or chunk.document_id}:"
+                    f"{chunk.id}"
+                ],
+                content=chunk.text_content,
+            )
+        )
+    items = tuple(items_list)
     if not items:
         return ReportCollectorOutput(
             collector_id=ReportCollectorId.VECTOR_KNOWLEDGE,

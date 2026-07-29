@@ -19,7 +19,10 @@ from contracts.intent_lexicon import (
     SHARE_INTENT_QUERY_SIGNALS,
 )
 from contracts.question_analysis import QuestionAnalysis, ToolName
-from contracts.vector_knowledge import VectorKnowledgeBundle
+from contracts.vector_knowledge import (
+    VectorKnowledgeBundle,
+    VectorRetrievalOutcome,
+)
 
 
 class AnswerMode(str, Enum):
@@ -99,6 +102,7 @@ class QueryContext:
     question_analysis_error: str = ""
     question_analysis_source: str = ""
     vector_knowledge: Optional[VectorKnowledgeBundle] = None
+    vector_knowledge_outcome: Optional[VectorRetrievalOutcome] = None
     vector_knowledge_error: str = ""
     vector_knowledge_source: str = ""
     vector_knowledge_prompt: str = ""

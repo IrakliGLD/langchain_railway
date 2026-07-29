@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -24,14 +26,23 @@ from contracts.question_analysis import (
     VisualizationInfo,
 )
 from contracts.vector_knowledge import (
+    HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
     VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailureStage,
+    VectorRetrievalFilters,
+    VectorRetrievalOutcome,
+    VectorRetrievalTier,
 )
 from knowledge.vector_retrieval import (
+    _lexical_query_text,
+    _reciprocal_rank_fusion,
     build_vector_filters,
     format_vector_knowledge_for_prompt,
+    get_hybrid_retrieval_mode,
     pack_vector_knowledge_for_prompt,
     resolve_adjacent_chunks,
     resolve_reference_chunks,
@@ -58,6 +69,24 @@ class FakeStore:
                 similarity_score=0.91,
             )
         ]
+
+
+def _hybrid_chunk(
+    chunk_id: str,
+    document_id: str,
+    *,
+    similarity: float | None,
+) -> VectorChunkRecord:
+    return VectorChunkRecord(
+        id=chunk_id,
+        document_id=document_id,
+        document_title=f"Document {document_id}",
+        source_key=document_id,
+        section_title=f"Section {chunk_id}",
+        section_path=f"Section {chunk_id}",
+        text_content=f"Evidence {chunk_id}.",
+        similarity_score=similarity,
+    )
 
 
 def _analysis():
@@ -98,6 +127,13 @@ def test_build_vector_filters_uses_candidate_topics():
     assert filters.preferred_topics == ["balancing_price"]
     assert filters.languages == ["en"]
     assert "balancing" in filters.boost_terms
+
+
+def test_lexical_query_uses_raw_terms_when_no_boost_terms_exist():
+    assert _lexical_query_text(
+        "CfD EU",
+        VectorRetrievalFilters(),
+    ) == "cfd eu"
 
 
 def test_build_vector_filters_adds_english_fallback_for_translated_queries():
@@ -185,6 +221,271 @@ def test_retrieve_vector_knowledge_returns_bundle():
     )
     assert bundle.chunk_count == 1
     assert bundle.chunks[0].document_title == "Electricity Market Rules"
+    assert bundle.outcome is VectorRetrievalOutcome.matches
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_mode", "expected"),
+    [
+        ("off", HybridRetrievalMode.off),
+        ("shadow", HybridRetrievalMode.shadow),
+        ("ON", HybridRetrievalMode.on),
+        ("invalid", HybridRetrievalMode.off),
+    ],
+)
+def test_get_hybrid_retrieval_mode_is_fail_closed(
+    monkeypatch,
+    raw_mode,
+    expected,
+):
+    monkeypatch.setenv("VECTOR_HYBRID_RETRIEVAL_MODE", raw_mode)
+
+    assert get_hybrid_retrieval_mode() is expected
+
+
+def test_reciprocal_rank_fusion_is_deterministic_and_deduplicated():
+    dense_a = _hybrid_chunk("chunk-a", "doc-a", similarity=0.90)
+    dense_b = _hybrid_chunk("chunk-b", "doc-b", similarity=0.80)
+    lexical_b = _hybrid_chunk("chunk-b", "doc-b", similarity=None)
+    lexical_c = _hybrid_chunk("chunk-c", "doc-c", similarity=None)
+
+    fused = _reciprocal_rank_fusion(
+        [dense_a, dense_b],
+        [lexical_b, lexical_c],
+        top_k=3,
+        rrf_k=60,
+    )
+
+    assert [chunk.id for chunk in fused] == [
+        "chunk-b",
+        "chunk-a",
+        "chunk-c",
+    ]
+    assert fused[0].similarity_score == 0.80
+
+
+def test_hybrid_off_does_not_call_lexical_search(monkeypatch):
+    class OffStore(FakeStore):
+        def search_lexical_chunks(self, **kwargs):
+            raise AssertionError("off mode must not run lexical retrieval")
+
+    monkeypatch.setenv("VECTOR_HYBRID_RETRIEVAL_MODE", "off")
+
+    bundle = retrieve_vector_knowledge(
+        "Why did balancing electricity price change?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=_analysis(),
+        store=OffStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.hybrid_diagnostics is None
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
+
+
+def test_hybrid_shadow_preserves_dense_chunks_and_records_fused_result(
+    monkeypatch,
+):
+    dense = [
+        _hybrid_chunk("chunk-a", "doc-a", similarity=0.90),
+        _hybrid_chunk("chunk-b", "doc-b", similarity=0.80),
+    ]
+    lexical = [
+        _hybrid_chunk("chunk-b", "doc-b", similarity=None),
+        _hybrid_chunk("chunk-c", "doc-c", similarity=None),
+    ]
+
+    class ShadowStore:
+        def search_chunks(self, **kwargs):
+            return dense
+
+        def search_lexical_chunks(self, **kwargs):
+            return lexical
+
+    monkeypatch.setenv("VECTOR_HYBRID_RETRIEVAL_MODE", "shadow")
+
+    bundle = retrieve_vector_knowledge(
+        "capacity market obligations",
+        retrieval_mode=VectorKnowledgeMode.active,
+        store=ShadowStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert [chunk.id for chunk in bundle.chunks] == [
+        "chunk-a",
+        "chunk-b",
+    ]
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
+    assert bundle.hybrid_diagnostics is not None
+    assert bundle.hybrid_diagnostics.mode is HybridRetrievalMode.shadow
+    assert bundle.hybrid_diagnostics.cutover_applied is False
+    assert [
+        chunk.id
+        for chunk in bundle.hybrid_diagnostics.fused_chunks
+    ] == ["chunk-b", "chunk-a", "chunk-c"]
+
+
+def test_hybrid_on_returns_fused_chunks(monkeypatch):
+    dense = [
+        _hybrid_chunk("chunk-a", "doc-a", similarity=0.90),
+        _hybrid_chunk("chunk-b", "doc-b", similarity=0.80),
+    ]
+    lexical = [
+        _hybrid_chunk("chunk-b", "doc-b", similarity=None),
+        _hybrid_chunk("chunk-c", "doc-c", similarity=None),
+    ]
+
+    class OnStore:
+        def search_chunks(self, **kwargs):
+            return dense
+
+        def search_lexical_chunks(self, **kwargs):
+            return lexical
+
+    class CountingEmbeddingProvider(FakeEmbeddingProvider):
+        def __init__(self):
+            self.calls = 0
+
+        def embed_query(self, text):
+            self.calls += 1
+            return super().embed_query(text)
+
+    monkeypatch.setenv("VECTOR_HYBRID_RETRIEVAL_MODE", "on")
+    provider = CountingEmbeddingProvider()
+
+    bundle = retrieve_vector_knowledge(
+        "capacity market obligations",
+        retrieval_mode=VectorKnowledgeMode.active,
+        store=OnStore(),
+        embedding_provider=provider,
+    )
+
+    assert [chunk.id for chunk in bundle.chunks] == [
+        "chunk-b",
+        "chunk-a",
+        "chunk-c",
+    ]
+    assert bundle.strategy is RetrievalStrategy.hybrid
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
+    assert bundle.hybrid_diagnostics is not None
+    assert bundle.hybrid_diagnostics.cutover_applied is True
+    assert provider.calls == 1
+
+
+def test_hybrid_on_can_return_lexical_only_matches(monkeypatch):
+    lexical = [
+        _hybrid_chunk("chunk-lexical", "doc-lexical", similarity=None),
+    ]
+
+    class LexicalOnlyStore:
+        def search_chunks(self, **kwargs):
+            return []
+
+        def search_lexical_chunks(self, **kwargs):
+            return lexical
+
+        def count_active_documents(self):
+            return 3
+
+    monkeypatch.setenv("VECTOR_HYBRID_RETRIEVAL_MODE", "on")
+
+    bundle = retrieve_vector_knowledge(
+        "rare exact regulatory phrase",
+        retrieval_mode=VectorKnowledgeMode.active,
+        store=LexicalOnlyStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.matches
+    assert [chunk.id for chunk in bundle.chunks] == ["chunk-lexical"]
+    assert bundle.strategy is RetrievalStrategy.hybrid
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
+
+
+def test_hybrid_lexical_failure_falls_back_to_dense(monkeypatch):
+    dense = [
+        _hybrid_chunk("chunk-dense", "doc-dense", similarity=0.90),
+    ]
+
+    class FailingLexicalStore:
+        def search_chunks(self, **kwargs):
+            return dense
+
+        def search_lexical_chunks(self, **kwargs):
+            raise ConnectionError(
+                "database host and credential must stay private"
+            )
+
+    monkeypatch.setenv("VECTOR_HYBRID_RETRIEVAL_MODE", "on")
+
+    bundle = retrieve_vector_knowledge(
+        "capacity market obligations",
+        retrieval_mode=VectorKnowledgeMode.active,
+        store=FailingLexicalStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.matches
+    assert [chunk.id for chunk in bundle.chunks] == ["chunk-dense"]
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
+    assert bundle.failure is None
+    assert bundle.error == ""
+    assert bundle.hybrid_diagnostics is not None
+    assert bundle.hybrid_diagnostics.lexical_failure is not None
+    assert (
+        bundle.hybrid_diagnostics.lexical_failure.stage
+        is VectorRetrievalFailureStage.lexical_search
+    )
+    assert (
+        bundle.hybrid_diagnostics.lexical_failure.reason
+        == "ConnectionError"
+    )
+
+
+def test_retrieve_vector_knowledge_filters_by_embedding_index_identity():
+    captured = {}
+
+    class ProfiledEmbeddingProvider(FakeEmbeddingProvider):
+        _provider_name = "gemini"
+        _model = "gemini-embedding-001"
+        _expected_dimension = 3
+        _normalization_version = "v1"
+        _corpus_version = "corpus-v2"
+        _task_profile = "retrieval_document_query_v1"
+
+    class CaptureStore(FakeStore):
+        def search_chunks(self, **kwargs):
+            captured.update(kwargs)
+            return super().search_chunks(**kwargs)
+
+    retrieve_vector_knowledge(
+        "Why did balancing electricity price change?",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        question_analysis=_analysis(),
+        store=CaptureStore(),
+        embedding_provider=ProfiledEmbeddingProvider(),
+    )
+
+    assert captured["embedding_identity"] != "legacy"
 
 
 def test_format_vector_knowledge_for_prompt_includes_source_headers():
@@ -241,7 +542,7 @@ def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):
             raise AssertionError("search_chunks should not be reached when provider init fails")
 
     def fail_provider():
-        raise RuntimeError("gemini sdk missing")
+        raise RuntimeError("gemini sdk missing; token=do-not-leak")
 
     monkeypatch.setattr("knowledge.vector_embeddings.get_embedding_provider", fail_provider)
 
@@ -254,7 +555,152 @@ def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):
     )
 
     assert bundle.chunk_count == 0
-    assert bundle.error == "gemini sdk missing"
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert (
+        bundle.failure.stage
+        is VectorRetrievalFailureStage.provider_initialization
+    )
+    assert bundle.failure.reason == "RuntimeError"
+    assert "do-not-leak" not in bundle.error
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
+
+
+def test_retrieve_vector_knowledge_reports_no_matches_without_failure():
+    class EmptyStore:
+        def search_chunks(self, **kwargs):
+            return []
+
+        def count_active_documents(self):
+            return 3
+
+    bundle = retrieve_vector_knowledge(
+        "Unrepresented subject",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=EmptyStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.no_matches
+    assert bundle.failure is None
+    assert bundle.error == ""
+
+
+def test_retrieve_vector_knowledge_skip_is_typed_and_does_not_call_dependencies():
+    class FailIfUsed:
+        def __getattr__(self, name):
+            raise AssertionError(f"{name} must not be accessed for SKIP")
+
+    bundle = retrieve_vector_knowledge(
+        "No retrieval needed",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        store=FailIfUsed(),
+        embedding_provider=FailIfUsed(),
+        tier=VectorRetrievalTier.SKIP,
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.not_run
+    assert bundle.strategy is RetrievalStrategy.not_run
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.not_run_v1
+    )
+    assert bundle.top_k == 0
+
+
+def test_retrieve_vector_knowledge_types_vector_search_failure():
+    class FailingStore:
+        def search_chunks(self, **kwargs):
+            raise ConnectionError("database host and credential must stay private")
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=FailingStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert bundle.failure.stage is VectorRetrievalFailureStage.vector_search
+    assert bundle.failure.reason == "ConnectionError"
+    assert "credential" not in bundle.error
+
+
+def test_retrieve_vector_knowledge_types_401_query_embedding_failure():
+    class AccessTokenError(RuntimeError):
+        status_code = 401
+        details = {
+            "error": {
+                "details": [
+                    {"reason": "ACCESS_TOKEN_TYPE_UNSUPPORTED"},
+                ]
+            }
+        }
+
+    class FailingEmbeddingProvider:
+        def embed_query(self, text):
+            raise AccessTokenError(
+                "raw provider message; api_key=must-not-leak"
+            )
+
+    class FailIfSearched:
+        def search_chunks(self, **kwargs):
+            raise AssertionError("search must not run after embedding failure")
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=FailIfSearched(),
+        embedding_provider=FailingEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert (
+        bundle.failure.stage
+        is VectorRetrievalFailureStage.query_embedding
+    )
+    assert (
+        bundle.failure.reason
+        == "401/ACCESS_TOKEN_TYPE_UNSUPPORTED"
+    )
+    assert "must-not-leak" not in bundle.error
+
+
+def test_retrieve_vector_knowledge_bounds_structured_failure_reason():
+    class VerboseStructuredError(RuntimeError):
+        details = {
+            "error": {
+                "details": [
+                    {"reason": f"SAFE_PROVIDER_REASON_{index:02d}_ABCDEFGHIJKLMN"}
+                    for index in range(8)
+                ]
+            }
+        }
+
+    class FailingEmbeddingProvider:
+        def embed_query(self, text):
+            raise VerboseStructuredError("raw message must remain private")
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=object(),
+        embedding_provider=FailingEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert 1 <= len(bundle.failure.reason) <= 128
+    assert "raw message" not in bundle.error
 
 
 def test_retrieve_vector_knowledge_retries_without_language_filter_when_empty():
@@ -1046,7 +1492,7 @@ def test_resolve_adjacent_chunks_returns_empty_for_empty_bundle():
 def test_resolve_adjacent_chunks_returns_empty_when_bundle_errored():
     """A failed retrieval should not trigger adjacency calls."""
     store = FakeAdjacencyStore()
-    bundle = _bundle([_make_chunk(chunk_id="c-1", chunk_index=5)], error="transient")
+    bundle = _bundle([], error="transient")
     assert resolve_adjacent_chunks(bundle, store=store) == []
     assert store.calls == []
 
@@ -2081,4 +2527,3 @@ def test_injected_provider_bypasses_embedding_cache():
             embedding_provider=provider,
         )
     assert calls["n"] == 2
-

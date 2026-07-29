@@ -4,7 +4,13 @@ from knowledge.vector_ingestion import VectorKnowledgeIngestor
 
 
 class FakeEmbeddingProvider:
-    def embed_documents(self, texts):
+    _task_profile = "retrieval_document_query_v1"
+
+    def __init__(self):
+        self.title = None
+
+    def embed_documents(self, texts, *, title=None):
+        self.title = title
         return [[0.1, 0.2, 0.3] for _ in texts]
 
 
@@ -13,14 +19,27 @@ class FakeStore:
         self.document = None
         self.saved_chunks = None
         self.saved_embeddings = None
+        self.embedding_identity = None
+        self.embedding_profile = None
 
     def upsert_document(self, document):
         self.document = document
         return "doc-123"
 
-    def replace_document_chunks(self, *, document_id, source_key, chunks, embeddings):
+    def replace_document_chunks(
+        self,
+        *,
+        document_id,
+        source_key,
+        chunks,
+        embeddings,
+        embedding_identity,
+        embedding_profile,
+    ):
         self.saved_chunks = chunks
         self.saved_embeddings = embeddings
+        self.embedding_identity = embedding_identity
+        self.embedding_profile = embedding_profile
         return {
             "document_id": document_id,
             "chunk_count": len(chunks),
@@ -168,7 +187,11 @@ def test_chunker_preserves_non_article_chunks_unchanged():
 
 def test_ingestor_normalizes_document_type_and_persists_chunks():
     store = FakeStore()
-    ingestor = VectorKnowledgeIngestor(store=store, embedding_provider=FakeEmbeddingProvider())
+    provider = FakeEmbeddingProvider()
+    ingestor = VectorKnowledgeIngestor(
+        store=store,
+        embedding_provider=provider,
+    )
     result = ingestor.ingest_text_document(
         document=DocumentRegistration(
             source_key="doc-1",
@@ -183,3 +206,6 @@ def test_ingestor_normalizes_document_type_and_persists_chunks():
     assert store.saved_chunks
     assert len(store.saved_chunks) == len(store.saved_embeddings)
     assert result["chunk_count"] == len(store.saved_chunks)
+    assert provider.title == "Electricity Law"
+    assert store.embedding_profile == "retrieval_document_query_v1"
+    assert store.embedding_identity != "legacy"

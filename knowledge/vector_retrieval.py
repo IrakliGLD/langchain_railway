@@ -1,4 +1,4 @@
-"""Hybrid retrieval helpers for curated + vector-backed knowledge."""
+"""Dense retrieval with optional lexical fusion and deterministic re-ranking."""
 
 from __future__ import annotations
 
@@ -15,12 +15,20 @@ log = logging.getLogger("Enai")
 from config import ANALYZER_TOPIC_MIN_SCORE
 from contracts.question_analysis import QuestionAnalysis
 from contracts.vector_knowledge import (
+    HybridRetrievalDiagnostics,
+    HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
+    VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
     VectorRetrievalFilters,
+    VectorRetrievalOutcome,
     VectorRetrievalTier,
 )
+from utils.provider_attempts import extract_failure_reason
 
 if TYPE_CHECKING:
     from knowledge.vector_embeddings import EmbeddingProvider
@@ -41,7 +49,27 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _safe_failure_reason(error: BaseException) -> str:
+    """Return a bounded, content-free diagnostic token for retrieval failures."""
+
+    reason = extract_failure_reason(error) or type(error).__name__
+    normalized = re.sub(r"[^A-Za-z0-9_/-]", "_", reason)
+    return normalized[:128].rstrip("/-") or "UnknownError"
+
+
 _ADJACENCY_MODE_VALUES = frozenset({"off", "shadow", "on"})
+
+
+def get_hybrid_retrieval_mode() -> HybridRetrievalMode:
+    """Return the fail-closed dense + lexical rollout mode."""
+
+    raw = str(
+        os.getenv("VECTOR_HYBRID_RETRIEVAL_MODE", "off")
+    ).strip().lower()
+    try:
+        return HybridRetrievalMode(raw)
+    except ValueError:
+        return HybridRetrievalMode.off
 
 
 def get_adjacency_mode() -> str:
@@ -331,6 +359,80 @@ def _extract_boost_terms(
     return boost_terms[:12]
 
 
+def _lexical_query_text(
+    query_text: str,
+    filters: VectorRetrievalFilters,
+) -> str:
+    """Build a forgiving OR query for PostgreSQL ``websearch_to_tsquery``."""
+
+    if not filters.boost_terms:
+        return _normalized_text(str(query_text or "").replace('"', " "))
+    terms = filters.boost_terms
+    safe_terms: list[str] = []
+    for term in terms:
+        normalized = _normalized_text(str(term or "").replace('"', " "))
+        if normalized and normalized not in safe_terms:
+            safe_terms.append(normalized)
+    return " OR ".join(f'"{term}"' for term in safe_terms)
+
+
+def _reciprocal_rank_fusion(
+    dense_chunks: list[VectorChunkRecord],
+    lexical_chunks: list[VectorChunkRecord],
+    *,
+    top_k: int,
+    rrf_k: int,
+) -> list[VectorChunkRecord]:
+    """Fuse independent ranked lists and preserve the dense record on overlap."""
+
+    if not lexical_chunks:
+        return dense_chunks[:top_k]
+
+    dense_rank: dict[str, int] = {}
+    lexical_rank: dict[str, int] = {}
+    records: dict[str, VectorChunkRecord] = {}
+    scores: dict[str, float] = {}
+    denominator_offset = max(1, int(rrf_k))
+
+    for rank, chunk in enumerate(dense_chunks, start=1):
+        if chunk.id in dense_rank:
+            continue
+        dense_rank[chunk.id] = rank
+        records[chunk.id] = chunk
+        scores[chunk.id] = scores.get(chunk.id, 0.0) + (
+            1.0 / (denominator_offset + rank)
+        )
+    for rank, chunk in enumerate(lexical_chunks, start=1):
+        if chunk.id in lexical_rank:
+            continue
+        lexical_rank[chunk.id] = rank
+        records.setdefault(chunk.id, chunk)
+        scores[chunk.id] = scores.get(chunk.id, 0.0) + (
+            1.0 / (denominator_offset + rank)
+        )
+
+    missing_rank = len(records) + 1
+    ordered = [
+        records[chunk_id]
+        for chunk_id in sorted(
+            records,
+            key=lambda chunk_id: (
+                -scores[chunk_id],
+                dense_rank.get(chunk_id, missing_rank),
+                lexical_rank.get(chunk_id, missing_rank),
+                chunk_id,
+            ),
+        )
+    ]
+    from knowledge.vector_store import apply_document_diversity
+
+    return apply_document_diversity(
+        ordered,
+        top_k=top_k,
+        candidate_scores=scores,
+    )
+
+
 def build_vector_filters(
     question_analysis: Optional[QuestionAnalysis],
     *,
@@ -418,7 +520,7 @@ _LIGHT_TIER_TOP_K = 2
 # Keyed by provider class + model so a config change never serves stale
 # vectors. Applied only to factory-built providers — explicitly injected
 # providers (tests, ingestion) always embed directly. Size <= 0 disables.
-_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, int, str, str, str], list[float]]" = OrderedDict()
+_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str, int, str, str, str, str], list[float]]" = OrderedDict()
 _QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
 
 
@@ -478,11 +580,13 @@ def retrieve_vector_knowledge(
         return VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.hybrid,
+            strategy=RetrievalStrategy.not_run,
+            strategy_version=RetrievalStrategyVersion.not_run_v1,
             top_k=0,
             chunk_count=0,
             chunks=[],
             filters=filters,
+            outcome=VectorRetrievalOutcome.not_run,
         )
 
     if tier == VectorRetrievalTier.LIGHT:
@@ -497,24 +601,36 @@ def retrieve_vector_knowledge(
         if filters.boost_terms:
             candidate_k = max(candidate_k, top_k * 6)
     min_similarity = _float_env("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
+    hybrid_mode = get_hybrid_retrieval_mode()
+    failure_stage = VectorRetrievalFailureStage.store_initialization
     try:
         if store is None:
             from knowledge.vector_store import KnowledgeVectorStore
 
             store = KnowledgeVectorStore()
+        failure_stage = VectorRetrievalFailureStage.provider_initialization
         if embedding_provider is None:
             from knowledge.vector_embeddings import get_embedding_provider
 
             embedding_provider = get_embedding_provider()
+            failure_stage = VectorRetrievalFailureStage.query_embedding
             query_embedding = _embed_query_cached(embedding_provider, query_text)
         else:
+            failure_stage = VectorRetrievalFailureStage.query_embedding
             query_embedding = embedding_provider.embed_query(query_text)
+        from knowledge.vector_embeddings import embedding_index_identity
+
+        current_embedding_identity = embedding_index_identity(
+            embedding_provider
+        )
+        failure_stage = VectorRetrievalFailureStage.vector_search
         chunks = store.search_chunks(
             query_embedding=query_embedding,
             filters=filters,
             top_k=top_k,
             candidate_k=candidate_k,
             min_similarity=min_similarity,
+            embedding_identity=current_embedding_identity,
         )
         if not chunks and filters.languages:
             relaxed_filters = filters.model_copy(update={"languages": []})
@@ -524,6 +640,7 @@ def retrieve_vector_knowledge(
                 top_k=top_k,
                 candidate_k=candidate_k,
                 min_similarity=min_similarity,
+                embedding_identity=current_embedding_identity,
             )
             filters = relaxed_filters
         if not chunks and filters.preferred_topics:
@@ -538,6 +655,7 @@ def retrieve_vector_knowledge(
                 top_k=top_k,
                 candidate_k=candidate_k,
                 min_similarity=min_similarity,
+                embedding_identity=current_embedding_identity,
             )
             filters = relaxed_filters
         # Sparse-corpus similarity relaxation: only at FULL tier. LIGHT skips
@@ -555,15 +673,78 @@ def retrieve_vector_knowledge(
                     top_k=top_k,
                     candidate_k=candidate_k,
                     min_similarity=relaxed_similarity,
+                    embedding_identity=current_embedding_identity,
+                )
+        dense_chunks = list(chunks)
+        strategy = RetrievalStrategy.dense_with_deterministic_rerank
+        strategy_version = (
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        )
+        hybrid_diagnostics = None
+        if hybrid_mode is not HybridRetrievalMode.off:
+            try:
+                lexical_chunks = store.search_lexical_chunks(
+                    query_text=_lexical_query_text(query_text, filters),
+                    filters=filters,
+                    candidate_k=candidate_k,
+                    embedding_identity=current_embedding_identity,
+                )
+                fused_chunks = _reciprocal_rank_fusion(
+                    dense_chunks,
+                    lexical_chunks,
+                    top_k=top_k,
+                    rrf_k=_int_env("VECTOR_HYBRID_RRF_K", 60),
+                )
+                cutover_applied = hybrid_mode is HybridRetrievalMode.on
+                hybrid_diagnostics = HybridRetrievalDiagnostics(
+                    mode=hybrid_mode,
+                    dense_chunk_ids=[
+                        chunk.id for chunk in dense_chunks
+                    ],
+                    lexical_chunk_ids=[
+                        chunk.id for chunk in lexical_chunks
+                    ],
+                    fused_chunks=fused_chunks,
+                    cutover_applied=cutover_applied,
+                )
+                if cutover_applied:
+                    chunks = fused_chunks
+                    strategy = RetrievalStrategy.hybrid
+                    strategy_version = (
+                        RetrievalStrategyVersion.postgres_fts_rrf_v1
+                    )
+            except Exception as exc:
+                safe_reason = _safe_failure_reason(exc)
+                log.warning(
+                    "Hybrid lexical retrieval unavailable reason=%s; "
+                    "falling back to dense results",
+                    safe_reason,
+                )
+                hybrid_diagnostics = HybridRetrievalDiagnostics(
+                    mode=hybrid_mode,
+                    dense_chunk_ids=[
+                        chunk.id for chunk in dense_chunks
+                    ],
+                    lexical_failure=VectorRetrievalFailure(
+                        stage=VectorRetrievalFailureStage.lexical_search,
+                        reason=safe_reason,
+                    ),
                 )
         bundle = VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.hybrid,
+            strategy=strategy,
+            strategy_version=strategy_version,
             top_k=top_k,
             chunk_count=len(chunks),
             chunks=chunks,
             filters=filters,
+            hybrid_diagnostics=hybrid_diagnostics,
+            outcome=(
+                VectorRetrievalOutcome.matches
+                if chunks
+                else VectorRetrievalOutcome.no_matches
+            ),
         )
         # Phase A.2: adjacency expansion. When mode != "off", fetch preceding
         # and following section chunks and stash them on ``bundle.adjacent_chunks``.
@@ -579,15 +760,30 @@ def retrieve_vector_knowledge(
             bundle.reference_chunks = resolve_reference_chunks(bundle, store=store)
         return bundle
     except Exception as exc:
+        safe_reason = _safe_failure_reason(exc)
+        safe_error = f"{failure_stage.value}:{safe_reason}"
+        log.warning(
+            "Vector retrieval unavailable at stage=%s reason=%s",
+            failure_stage.value,
+            safe_reason,
+        )
         return VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.hybrid,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            strategy_version=(
+                RetrievalStrategyVersion.dense_cosine_rerank_v2
+            ),
             top_k=top_k,
             chunk_count=0,
             chunks=[],
             filters=filters,
-            error=str(exc),
+            outcome=VectorRetrievalOutcome.unavailable,
+            failure=VectorRetrievalFailure(
+                stage=failure_stage,
+                reason=safe_reason,
+            ),
+            error=safe_error,
         )
 
 
@@ -616,7 +812,7 @@ def resolve_adjacent_chunks(
 
     if bundle is None or not bundle.chunks:
         return []
-    if bundle.error:
+    if bundle.unavailable:
         # When the underlying retrieval errored we already returned an empty
         # bundle; adjacency is meaningless. Stay silent.
         return []
@@ -698,7 +894,7 @@ def resolve_reference_chunks(
       stays usable even if the expander breaks.
     """
 
-    if bundle is None or not bundle.chunks or bundle.error:
+    if bundle is None or not bundle.chunks or bundle.unavailable:
         return []
 
     # Build the set of already-known chunks so we never echo them back.
@@ -899,7 +1095,7 @@ def pack_vector_knowledge_for_prompt(
     the pre-A.3/B.4 packer.
     """
 
-    if bundle is None or not bundle.chunks:
+    if bundle is None or bundle.unavailable or not bundle.chunks:
         return PackedVectorPrompt(prompt="", headers=[], truncated=False)
     max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 9000)
     parts = ["EXTERNAL_SOURCE_PASSAGES:"]

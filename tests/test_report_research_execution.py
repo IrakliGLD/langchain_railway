@@ -20,11 +20,25 @@ from agent.report_research_execution import (
     consolidate_report_evidence_packets,
     execute_report_research,
 )
-from contracts.report_evidence import ReportEvidenceItem, ReportEvidenceKind
+from contracts.report_evidence import (
+    ReportEvidenceItem,
+    ReportEvidenceKind,
+    ReportKnowledgeEvidenceRole,
+)
 from contracts.report_research import (
     ReportCollectorId,
     ReportEvidencePacket,
     ReportResearchPlan,
+)
+from contracts.vector_knowledge import (
+    RetrievalStrategy,
+    RetrievalStrategyVersion,
+    VectorChunkRecord,
+    VectorKnowledgeBundle,
+    VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
+    VectorRetrievalOutcome,
 )
 from tests.test_report_research_contract import (
     _research_plan_payload,
@@ -448,6 +462,166 @@ def test_default_price_collector_uses_query_metric_and_currency(
     assert output.items
     assert captured["metric"] == "deregulated"
     assert captured["currency"] == "usd"
+
+
+def test_default_vector_collector_distinguishes_unavailable_from_no_evidence(
+    monkeypatch,
+):
+    def unavailable(*_args, **_kwargs):
+        return VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            top_k=6,
+            outcome=VectorRetrievalOutcome.unavailable,
+            failure=VectorRetrievalFailure(
+                stage=VectorRetrievalFailureStage.vector_search,
+                reason="ConnectionError",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "agent.report_research_execution.retrieve_vector_knowledge",
+        unavailable,
+    )
+    failed = DEFAULT_REPORT_COLLECTORS[
+        ReportCollectorId.VECTOR_KNOWLEDGE
+    ]("query", _plan().scope)
+
+    monkeypatch.setattr(
+        "agent.report_research_execution.retrieve_vector_knowledge",
+        lambda *_args, **_kwargs: VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=(
+                RetrievalStrategy.dense_with_deterministic_rerank
+            ),
+            top_k=6,
+            outcome=VectorRetrievalOutcome.no_matches,
+        ),
+    )
+    empty = DEFAULT_REPORT_COLLECTORS[
+        ReportCollectorId.VECTOR_KNOWLEDGE
+    ]("query", _plan().scope)
+
+    assert failed.failed is True
+    assert failed.gaps == ("COLLECTOR_VECTOR_KNOWLEDGE_FAILED",)
+    assert empty.failed is False
+    assert empty.gaps == ("COLLECTOR_VECTOR_KNOWLEDGE_NO_EVIDENCE",)
+
+
+def test_vector_collector_preserves_primary_and_reference_evidence_roles(
+    monkeypatch,
+):
+    primary = VectorChunkRecord(
+        id="primary-1",
+        document_id="doc-1",
+        document_title="Market Rules",
+        source_key="market-rules",
+        section_title="Direct match",
+        text_content="Primary matched evidence.",
+    )
+    reference = VectorChunkRecord(
+        id="reference-1",
+        document_id="doc-1",
+        document_title="Market Rules",
+        source_key="market-rules",
+        section_title="Referenced article",
+        text_content="Explicitly referenced supporting evidence.",
+    )
+    adjacent = VectorChunkRecord(
+        id="adjacent-1",
+        document_id="doc-1",
+        document_title="Market Rules",
+        source_key="market-rules",
+        section_title="Adjacent context",
+        text_content="Context that must not become report evidence.",
+    )
+    bundle = VectorKnowledgeBundle(
+        query="query",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        strategy_version=(
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        ),
+        top_k=6,
+        chunk_count=1,
+        chunks=[primary],
+        reference_chunks=[reference, primary],
+        adjacent_chunks=[adjacent],
+        outcome=VectorRetrievalOutcome.matches,
+    )
+    monkeypatch.setenv("VECTOR_REFERENCE_EXPANSION_MODE", "on")
+    monkeypatch.setattr(
+        "agent.report_research_execution.retrieve_vector_knowledge",
+        lambda *_args, **_kwargs: bundle,
+    )
+
+    output = DEFAULT_REPORT_COLLECTORS[
+        ReportCollectorId.VECTOR_KNOWLEDGE
+    ]("query", _plan().scope)
+
+    assert [item.knowledge_role for item in output.items] == [
+        ReportKnowledgeEvidenceRole.primary,
+        ReportKnowledgeEvidenceRole.supporting_reference,
+    ]
+    assert [item.content for item in output.items] == [
+        "Primary matched evidence.",
+        "Explicitly referenced supporting evidence.",
+    ]
+    assert all(
+        item.source == "vector:dense_cosine_rerank_v2"
+        for item in output.items
+    )
+    assert output.items[0].provenance_refs == [
+        "vector:primary:market-rules:primary-1"
+    ]
+    assert output.items[1].provenance_refs == [
+        "vector:supporting_reference:market-rules:reference-1"
+    ]
+
+
+def test_vector_collector_keeps_reference_shadow_out_of_report_evidence(
+    monkeypatch,
+):
+    primary = VectorChunkRecord(
+        id="primary-1",
+        document_id="doc-1",
+        text_content="Primary matched evidence.",
+    )
+    reference = VectorChunkRecord(
+        id="reference-1",
+        document_id="doc-1",
+        text_content="Shadow reference evidence.",
+    )
+    bundle = VectorKnowledgeBundle(
+        query="query",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        strategy_version=(
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        ),
+        top_k=6,
+        chunk_count=1,
+        chunks=[primary],
+        reference_chunks=[reference],
+        outcome=VectorRetrievalOutcome.matches,
+    )
+    monkeypatch.setenv("VECTOR_REFERENCE_EXPANSION_MODE", "shadow")
+    monkeypatch.setattr(
+        "agent.report_research_execution.retrieve_vector_knowledge",
+        lambda *_args, **_kwargs: bundle,
+    )
+
+    output = DEFAULT_REPORT_COLLECTORS[
+        ReportCollectorId.VECTOR_KNOWLEDGE
+    ]("query", _plan().scope)
+
+    assert len(output.items) == 1
+    assert (
+        output.items[0].knowledge_role
+        is ReportKnowledgeEvidenceRole.primary
+    )
 
 
 def test_research_execution_rejects_unbounded_worker_counts():

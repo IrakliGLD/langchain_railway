@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from knowledge import embedding_service
+from knowledge.vector_embeddings import embedding_index_identity
 from utils.request_deadline import current_request_execution_scope
 
 
@@ -32,15 +33,13 @@ def test_gemini_backend_rejects_implicit_legacy_credential(monkeypatch):
         embedding_service.resolve_gemini_embedding_backend()
 
 
-def test_gemini_backend_allows_legacy_credential_only_with_explicit_flag(monkeypatch):
+def test_gemini_backend_rejects_removed_legacy_credential_flag(monkeypatch):
     monkeypatch.delenv("GEMINI_EMBEDDING_API_KEY", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "legacy-key")
     monkeypatch.setenv("ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY", "true")
 
-    backend = embedding_service.resolve_gemini_embedding_backend()
-
-    assert backend.api_key == "legacy-key"
-    assert backend.credential_source == "GOOGLE_API_KEY"
+    with pytest.raises(RuntimeError, match="GEMINI_EMBEDDING_API_KEY"):
+        embedding_service.resolve_gemini_embedding_backend()
 
 
 def test_gemini_backend_rejects_non_developer_api_mode(monkeypatch):
@@ -60,6 +59,7 @@ def test_capability_probe_performs_one_embedding_call_and_returns_safe_status():
         _model="gemini-embedding-001",
         _expected_dimension=3,
         _api_mode="developer",
+        _task_profile="retrieval_document_query_v1",
         calls=0,
     )
 
@@ -82,6 +82,8 @@ def test_capability_probe_performs_one_embedding_call_and_returns_safe_status():
         "model": "gemini-embedding-001",
         "dimension": 3,
         "api_mode": "developer",
+        "task_profile": "retrieval_document_query_v1",
+        "index_identity": embedding_index_identity(provider),
         "failure_disposition": None,
         "failure_reason": None,
     }

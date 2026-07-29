@@ -211,7 +211,43 @@ Active cross-check (`_cross_check_answer_kind`) compares the LLM-emitted `answer
 
 ### 3.3 Stage 0.3 — Vector Knowledge Retrieval
 
-Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT (top-K=2, tighter candidate pool, no boost-term expansion) for narrative data, SKIP for deterministic data and CLARIFY. The tier is computed by `_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`. There is no separate re-rank pass — candidates are over-fetched and ordered by similarity.
+Three-tier (`VectorRetrievalTier`): FULL for knowledge/explanation, LIGHT
+(top-K=2, tighter candidate pool, no boost-term expansion) for narrative data,
+SKIP for deterministic data and CLARIFY. The tier is computed by
+`_resolve_vector_retrieval_tier` from `answer_kind` + `render_style`. Dense
+candidates must first pass the raw-cosine threshold, then bounded deterministic
+topic/domain/lexical signals reorder the survivors.
+
+**True hybrid retrieval (Phase 5, env-gated).** An independent PostgreSQL
+full-text arm queries a weighted `simple`-configuration `tsvector` over section
+title, path, and body, backed by
+`idx_knowledge_chunks_lexical_search`. Equal-weight reciprocal-rank fusion
+combines the dense and lexical ranks, deduplicates chunk IDs, preserves dense
+records on overlap, and reapplies document/section diversity.
+`VECTOR_HYBRID_RETRIEVAL_MODE ∈ {off, shadow, on}` defaults to `off`.
+`shadow` stores the would-be fused chunks in typed diagnostics and emits
+`stage_0_3_vector_knowledge_hybrid` without changing primary chunks or prompt
+content; `on` selects the fused chunks. Lexical failures fall back to dense and
+remain non-terminal. The arm adds one DB query but no model call. See
+[`VECTOR_KNOWLEDGE_ROLLOUT.md`](VECTOR_KNOWLEDGE_ROLLOUT.md) “True hybrid
+retrieval” for migration and cutover checks.
+
+**Cutover identity and report evidence (Phase 6).** `VectorKnowledgeBundle`
+carries a strict `strategy_version`: `not_run_v1`,
+`dense_cosine_rerank_v2`, or `postgres_fts_rrf_v1`. Stage 0.3 emits the
+applied version, while hybrid shadow telemetry also identifies the fused
+candidate version. The report collector maps direct hits to typed `primary`
+knowledge evidence and, only when reference expansion is `on`, maps up to four
+resolved article targets to `supporting_reference`. Adjacency remains
+`provenance_context` and is excluded from standalone report evidence. This
+keeps explicit references claim-bearing while preventing mere neighbouring
+text from being promoted into report facts.
+
+**Cleanup boundary (Phase 7).** Gemini embeddings accept only
+`GEMINI_EMBEDDING_API_KEY`; the temporary `GOOGLE_API_KEY` fallback and its
+enablement flag have been removed. Dense ranking and the in-row embedding
+remain intentional rollback assets. SDK upgrades and optional learned
+reranking are separate, evaluation-gated changes rather than cleanup work.
 
 **Embedding caching (2026-07-07).** The embedding provider is a per-config singleton (`knowledge/vector_embeddings.get_embedding_provider`) so retrieval reuses one SDK client instead of constructing one per request, and query embeddings are memoized at the retrieval call site (`VECTOR_QUERY_EMBEDDING_CACHE_SIZE`, default 256, ≤0 disables) so repeated questions skip the embedding API round trip. Explicitly injected providers bypass the memo.
 
