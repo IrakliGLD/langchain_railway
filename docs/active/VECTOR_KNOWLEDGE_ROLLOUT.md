@@ -40,7 +40,8 @@ Other env vars relevant to retrieval:
 
 - `VECTOR_KNOWLEDGE_TOP_K=6` — top-K at retrieval tier FULL.
 - `VECTOR_KNOWLEDGE_MAX_CHARS=9000` — packing cap on the prompt section.
-- `VECTOR_KNOWLEDGE_MIN_SIMILARITY=0.2` — base similarity threshold.
+- `VECTOR_KNOWLEDGE_MIN_SIMILARITY=0.2` — minimum raw cosine similarity.
+  Topic and lexical signals only rerank candidates that pass this gate.
 
 ### Adjacency expansion (Phase A of the cross-reference rollout)
 
@@ -305,7 +306,9 @@ Send a query that should hit the new document and inspect the `stage_0_3_vector_
 - Curated markdown knowledge in `knowledge/*.md` remains the canonical explanation layer; vector chunks are additive external-source passages.
 - Prompt usage is bounded by `VECTOR_KNOWLEDGE_MAX_CHARS` (default 9000).
 - Retrieval failures degrade safely to non-vector behaviour — the pipeline does not abort the request.
-- No cross-encoder reranker today; retrieval quality depends on chunking + embeddings + topic/keyword boosts. See the architecture doc §5.x for the open improvement items.
+- No cross-encoder reranker today; retrieval quality depends on chunking +
+  embeddings + bounded topic/keyword reranking. See the architecture doc §5.x
+  for the open improvement items.
 
 ## Appendix: Batch Re-ingest All Documents
 

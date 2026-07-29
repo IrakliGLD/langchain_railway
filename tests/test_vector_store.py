@@ -108,6 +108,13 @@ def _chunk(
     )
 
 
+def _raw_candidate_scores(candidates):
+    return {
+        candidate.id: float(candidate.similarity_score or 0.0)
+        for candidate in candidates
+    }
+
+
 def test_search_chunks_pushes_filters_into_sql(monkeypatch):
     captured = {}
     rows = [
@@ -165,6 +172,133 @@ def test_search_chunks_rejects_wrong_embedding_dimension():
     store = vector_store.KnowledgeVectorStore()
     with pytest.raises(ValueError):
         store.search_chunks(query_embedding=[0.1, 0.2, 0.3])
+
+
+def test_search_chunks_applies_minimum_similarity_to_raw_cosine(monkeypatch):
+    rows = [
+        {
+            "id": "chunk-weak-keyword",
+            "document_id": "doc-capacity",
+            "document_title": "Capacity Market Rules",
+            "document_type": "regulation",
+            "document_issuer": "GNERC",
+            "source_key": "capacity-market-rules",
+            "chunk_index": 0,
+            "section_title": "Capacity market participants",
+            "section_path": "Capacity market participants",
+            "page_start": 1,
+            "page_end": 1,
+            "text_content": "Capacity market obligations.",
+            "token_count": 10,
+            "language": "en",
+            "topics": ["market_structure"],
+            "metadata": {},
+            "similarity_score": 0.15,
+        }
+    ]
+    monkeypatch.setattr(
+        vector_store,
+        "ENGINE",
+        _FakeEngine(rows=rows, captured={}),
+    )
+
+    results = vector_store.KnowledgeVectorStore().search_chunks(
+        query_embedding=[0.1] * 1536,
+        filters=VectorRetrievalFilters(
+            preferred_topics=["market_structure"],
+            boost_terms=["capacity market", "capacity"],
+        ),
+        top_k=1,
+        candidate_k=4,
+        min_similarity=0.2,
+    )
+
+    assert results == []
+
+
+def test_candidate_retrieval_score_keeps_lexical_reranking_bounded():
+    semantic_match = _chunk(
+        "semantic-match",
+        "doc-semantic",
+        "Unrelated heading",
+        similarity=0.80,
+    )
+    lexical_match = _chunk(
+        "capacity",
+        "capacity-market-rules",
+        "Capacity market rules",
+        similarity=0.40,
+        section_title="Capacity market rules",
+    )
+    filters = VectorRetrievalFilters(
+        boost_terms=["capacity", "rules"],
+    )
+
+    semantic_score = vector_store._candidate_retrieval_score(
+        semantic_match,
+        filters=filters,
+    )
+    lexical_score = vector_store._candidate_retrieval_score(
+        lexical_match,
+        filters=filters,
+    )
+
+    assert lexical_score == pytest.approx(0.40 * 1.30)
+    assert semantic_score > lexical_score
+
+
+def test_search_chunks_computes_each_candidate_score_once(monkeypatch):
+    rows = [
+        {
+            "id": f"chunk-{index}",
+            "document_id": f"doc-{index}",
+            "document_title": f"Document {index}",
+            "document_type": "regulation",
+            "document_issuer": "GNERC",
+            "source_key": f"document-{index}",
+            "chunk_index": 0,
+            "section_title": f"Section {index}",
+            "section_path": f"Section {index}",
+            "page_start": 1,
+            "page_end": 1,
+            "text_content": "Capacity market obligations.",
+            "token_count": 10,
+            "language": "en",
+            "topics": ["market_structure"],
+            "metadata": {"index": index},
+            "similarity_score": 0.80 - (index * 0.05),
+        }
+        for index in range(3)
+    ]
+    monkeypatch.setattr(
+        vector_store,
+        "ENGINE",
+        _FakeEngine(rows=rows, captured={}),
+    )
+    original_score = vector_store._candidate_retrieval_score
+    score_calls: list[str] = []
+
+    def _counted_score(candidate, *, filters):
+        score_calls.append(candidate.id)
+        return original_score(candidate, filters=filters)
+
+    monkeypatch.setattr(
+        vector_store,
+        "_candidate_retrieval_score",
+        _counted_score,
+    )
+
+    vector_store.KnowledgeVectorStore().search_chunks(
+        query_embedding=[0.1] * 1536,
+        filters=VectorRetrievalFilters(
+            preferred_topics=["market_structure"],
+            boost_terms=["capacity"],
+        ),
+        top_k=2,
+        candidate_k=3,
+    )
+
+    assert sorted(score_calls) == ["chunk-0", "chunk-1", "chunk-2"]
 
 
 def test_search_chunks_prefers_document_diversity_for_competitive_candidates(monkeypatch):
@@ -372,7 +506,7 @@ def test_apply_document_diversity_caps_same_section_in_competitive_selection(mon
     results = vector_store._apply_document_diversity(
         candidates,
         top_k=4,
-        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+        candidate_scores=_raw_candidate_scores(candidates),
     )
 
     assert [result.id for result in results[:3]] == ["chunk-1", "chunk-3", "chunk-4"]
@@ -394,7 +528,7 @@ def test_apply_document_diversity_allows_multiple_sections_in_dominant_document(
     results = vector_store._apply_document_diversity(
         candidates,
         top_k=4,
-        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+        candidate_scores=_raw_candidate_scores(candidates),
     )
 
     assert [result.id for result in results] == ["chunk-1", "chunk-2", "chunk-3"]
@@ -414,7 +548,7 @@ def test_apply_document_diversity_missing_section_metadata_uses_unique_chunk_key
     results = vector_store._apply_document_diversity(
         candidates,
         top_k=3,
-        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+        candidate_scores=_raw_candidate_scores(candidates),
     )
 
     assert [result.id for result in results] == ["chunk-1", "chunk-2", "chunk-3"]
@@ -435,7 +569,7 @@ def test_apply_document_diversity_backfill_prefers_unseen_sections_before_repeat
     results = vector_store._apply_document_diversity(
         candidates,
         top_k=4,
-        filters=VectorRetrievalFilters(preferred_topics=["market_structure"]),
+        candidate_scores=_raw_candidate_scores(candidates),
     )
 
     assert [result.id for result in results] == ["chunk-1", "chunk-3", "chunk-4", "chunk-2"]

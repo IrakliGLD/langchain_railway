@@ -91,6 +91,13 @@ VECTOR_DOCUMENT_DOMAIN_PENALTY = _env_float(
     0.20,
 )
 
+# Deterministic metadata signals may reorder semantically eligible candidates,
+# but must not operate on the same additive scale as cosine similarity.
+# The historical market-concept signal tops out at 0.32, so saturating there
+# preserves that rerank behavior while capping the final lexical effect at 30%.
+_LEXICAL_BOOST_FOR_MAX_RANKING_BONUS = 0.32
+_MAX_LEXICAL_RANKING_BONUS = 0.30
+
 # Document-title / source-key markers that strongly indicate a chunk
 # is from the RETAIL electricity-market segment (consumers,
 # micro-generators, net metering, retail tariff schemes) rather than
@@ -468,48 +475,71 @@ def _candidate_retrieval_score(
     *,
     filters: VectorRetrievalFilters,
 ) -> float:
+    """Return a bounded deterministic rerank score for an eligible vector.
+
+    ``search_chunks`` applies its minimum to raw cosine similarity first.
+    Topic, domain, and lexical signals are then expressed as multipliers so
+    they can reorder those survivors without sharing cosine's additive scale.
+    """
     base_score = float(candidate.similarity_score or 0.0)
     topic_boost = _topic_overlap_boost(candidate, filters.preferred_topics)
     topic_penalty = _topic_mismatch_penalty(candidate, filters.preferred_topics)
     domain_penalty = _document_domain_mismatch_penalty(
         candidate, filters.preferred_topics
     )
+    lexical_ranking_bonus = 0.0
 
-    if not filters.boost_terms:
-        return base_score + topic_boost + topic_penalty + domain_penalty
+    if filters.boost_terms:
+        title_text = _normalize_match_text(candidate.document_title)
+        source_text = _normalize_match_text(candidate.source_key)
+        section_text = _normalize_match_text(
+            f"{candidate.section_title} {candidate.section_path}"
+        )
+        topic_text = _normalize_match_text(" ".join(candidate.topics))
+        metadata_text = _normalize_match_text(
+            json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True)
+        )
+        body_text = _normalize_match_text(candidate.text_content[:1200])
 
-    title_text = _normalize_match_text(candidate.document_title)
-    source_text = _normalize_match_text(candidate.source_key)
-    section_text = _normalize_match_text(f"{candidate.section_title} {candidate.section_path}")
-    topic_text = _normalize_match_text(" ".join(candidate.topics))
-    metadata_text = _normalize_match_text(json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True))
-    body_text = _normalize_match_text(candidate.text_content[:1200])
+        lexical_boost = _market_concept_reference_boost(
+            filters=filters,
+            title_text=title_text,
+            source_text=source_text,
+            section_text=section_text,
+            metadata_text=metadata_text,
+            body_text=body_text,
+        )
+        for term in filters.boost_terms:
+            normalized_term = _normalize_match_text(term)
+            if not normalized_term:
+                continue
+            if normalized_term in title_text:
+                lexical_boost += 0.24
+            if normalized_term in source_text:
+                lexical_boost += 0.18
+            if normalized_term in section_text:
+                lexical_boost += 0.20
+            if normalized_term in topic_text:
+                lexical_boost += 0.16
+            if normalized_term in metadata_text:
+                lexical_boost += 0.08
+            if normalized_term in body_text:
+                lexical_boost += 0.04
+        lexical_ranking_bonus = (
+            min(lexical_boost, _LEXICAL_BOOST_FOR_MAX_RANKING_BONUS)
+            / _LEXICAL_BOOST_FOR_MAX_RANKING_BONUS
+            * _MAX_LEXICAL_RANKING_BONUS
+        )
 
-    boost = _market_concept_reference_boost(
-        filters=filters,
-        title_text=title_text,
-        source_text=source_text,
-        section_text=section_text,
-        metadata_text=metadata_text,
-        body_text=body_text,
+    ranking_multiplier = max(
+        0.0,
+        1.0
+        + topic_boost
+        + topic_penalty
+        + domain_penalty
+        + lexical_ranking_bonus,
     )
-    for term in filters.boost_terms:
-        normalized_term = _normalize_match_text(term)
-        if not normalized_term:
-            continue
-        if normalized_term in title_text:
-            boost += 0.24
-        if normalized_term in source_text:
-            boost += 0.18
-        if normalized_term in section_text:
-            boost += 0.20
-        if normalized_term in topic_text:
-            boost += 0.16
-        if normalized_term in metadata_text:
-            boost += 0.08
-        if normalized_term in body_text:
-            boost += 0.04
-    return base_score + topic_boost + topic_penalty + domain_penalty + min(boost, 0.85)
+    return base_score * ranking_multiplier
 
 
 def _section_key(candidate: VectorChunkRecord) -> str:
@@ -525,21 +555,16 @@ def _apply_document_diversity(
     candidates: List[VectorChunkRecord],
     *,
     top_k: int,
-    filters: VectorRetrievalFilters,
+    candidate_scores: dict[str, float],
 ) -> List[VectorChunkRecord]:
     if len(candidates) < top_k or top_k <= 1:
         return candidates[:top_k]
 
     max_per_document = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_DOCUMENT)
     max_per_section = max(1, VECTOR_KNOWLEDGE_MAX_CHUNKS_PER_SECTION)
-    candidate_scores = {
-        candidate.id: _candidate_retrieval_score(candidate, filters=filters)
-        for candidate in candidates
-    }
     best_score = max(candidate_scores.values())
-    diversity_floor = max(
-        VECTOR_KNOWLEDGE_MIN_SIMILARITY,
-        best_score - max(0.0, VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE),
+    diversity_floor = (
+        best_score - max(0.0, VECTOR_KNOWLEDGE_DIVERSITY_SCORE_TOLERANCE)
     )
 
     competitive: List[VectorChunkRecord] = [
@@ -868,33 +893,40 @@ class KnowledgeVectorStore:
         ) as conn:
             rows = conn.execute(sql, params).mappings().all()
 
-        # Use a relaxed floor for the candidate pool so that chunks with
-        # low raw similarity but high topic/keyword boost can still enter
-        # the reranking stage.  The real min_similarity gate is applied
-        # *after* _candidate_retrieval_score() below.
-        _floor_delta = _env_float("VECTOR_KNOWLEDGE_CANDIDATE_FLOOR_DELTA", 0.10)
-        candidate_floor = max(0.0, float(min_similarity) - _floor_delta)
-        candidates: List[VectorChunkRecord] = []
+        # Eligibility is based only on raw cosine similarity. Deterministic
+        # topic and lexical signals may reorder survivors, but cannot
+        # manufacture semantic relevance for a weak vector match.
+        similarity_floor = float(min_similarity)
+        scored_candidates: list[tuple[float, VectorChunkRecord]] = []
         for row in rows:
             score = float(row.get("similarity_score") or 0.0)
-            if score < candidate_floor:
+            if score < similarity_floor:
                 continue
-            candidates.append(_row_to_chunk_record(row, similarity_score=score))
-        candidates.sort(
-            key=lambda candidate: (
-                _candidate_retrieval_score(candidate, filters=filters),
-                float(candidate.similarity_score or 0.0),
-                -int(candidate.chunk_index or 0),
+            candidate = _row_to_chunk_record(row, similarity_score=score)
+            scored_candidates.append(
+                (
+                    _candidate_retrieval_score(candidate, filters=filters),
+                    candidate,
+                )
+            )
+        scored_candidates.sort(
+            key=lambda item: (
+                item[0],
+                float(item[1].similarity_score or 0.0),
+                -int(item[1].chunk_index or 0),
             ),
             reverse=True,
         )
-        # Apply the real min_similarity threshold on the *boosted* score so
-        # that topic/keyword boosts can rescue weak-but-relevant matches.
-        candidates = [
-            c for c in candidates
-            if _candidate_retrieval_score(c, filters=filters) >= float(min_similarity)
-        ]
-        return _apply_document_diversity(candidates, top_k=top_k, filters=filters)
+        candidates = [candidate for _, candidate in scored_candidates]
+        candidate_scores = {
+            candidate.id: ranking_score
+            for ranking_score, candidate in scored_candidates
+        }
+        return _apply_document_diversity(
+            candidates,
+            top_k=top_k,
+            candidate_scores=candidate_scores,
+        )
 
     def fetch_chunks_by_index(
         self,
