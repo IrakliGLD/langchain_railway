@@ -269,6 +269,54 @@ def _merge_repairs(
     return ReportDocumentDraft.model_validate(payload)
 
 
+def _document_from_repair(
+    plan: ReportDocumentPlan,
+    repair: ReportDocumentRepair,
+) -> ReportDocumentDraft:
+    section_by_id = {
+        section.section_id: section for section in repair.sections
+    }
+
+    def sections_for(
+        role: ReportDocumentSectionRole,
+    ) -> list[Any]:
+        return [
+            section_by_id[section_id]
+            for section_id in _expected_role_ids(plan, role)
+        ]
+
+    analytical_sections = sections_for(
+        ReportDocumentSectionRole.ANALYSIS
+    )
+    implications_sections = sections_for(
+        ReportDocumentSectionRole.IMPLICATIONS
+    )
+    limitations_sections = sections_for(
+        ReportDocumentSectionRole.LIMITATIONS
+    )
+    conclusion_sections = sections_for(
+        ReportDocumentSectionRole.CONCLUSION
+    )
+    summary_sections = sections_for(
+        ReportDocumentSectionRole.EXECUTIVE_SUMMARY
+    )
+    return ReportDocumentDraft(
+        contract_version="report-document-draft-v1",
+        query_digest=plan.query_digest,
+        evidence_manifest_id=plan.evidence_manifest_id,
+        coverage_status=plan.coverage_status,
+        analytical_sections=analytical_sections,
+        implications_section=(
+            implications_sections[0] if implications_sections else None
+        ),
+        limitations_section=limitations_sections[0],
+        conclusion_section=(
+            conclusion_sections[0] if conclusion_sections else None
+        ),
+        executive_summary=summary_sections[0],
+    )
+
+
 def generate_report_document(
     query: str,
     plan: ReportDocumentPlan,
@@ -294,12 +342,13 @@ def generate_report_document(
         list(packets),
     )
     try:
-        draft = (
+        draft: ReportDocumentDraft | None = (
             raw_draft
             if isinstance(raw_draft, ReportDocumentDraft)
             else ReportDocumentDraft.model_validate(raw_draft)
         )
-    except ValidationError as exc:
+    except ValidationError:
+        draft = None
         validation = ReportDocumentValidation(
             contract_version="report-document-validation-v1",
             valid=False,
@@ -307,21 +356,24 @@ def generate_report_document(
             document_errors=["DOCUMENT_SCHEMA_INVALID"],
             word_count=0,
         )
-        raise ReportDocumentGenerationError(validation) from exc
-
-    validation = validate_report_document(
-        draft,
-        plan,
-        manifest,
-        research_plan,
-    )
-    if validation.valid:
-        return draft
+    else:
+        validation = validate_report_document(
+            draft,
+            plan,
+            manifest,
+            research_plan,
+        )
+        if validation.valid:
+            return draft
     if not allow_repair:
         raise ReportDocumentGenerationError(validation)
 
     invalid_section_ids = list(validation.section_errors)
-    if validation.document_errors:
+    if draft is None:
+        invalid_section_ids = [
+            section.section_id for section in plan.sections
+        ]
+    elif validation.document_errors:
         invalid_section_ids = list(
             dict.fromkeys(
                 [
@@ -343,7 +395,7 @@ def generate_report_document(
         research_plan,
         manifest,
         list(packets),
-        draft,
+        raw_draft if draft is None else draft,
         validation,
         section_ids=invalid_section_ids,
     )
@@ -360,7 +412,11 @@ def generate_report_document(
     ):
         raise ReportDocumentGenerationError(validation)
 
-    repaired_draft = _merge_repairs(draft, repair)
+    repaired_draft = (
+        _document_from_repair(plan, repair)
+        if draft is None
+        else _merge_repairs(draft, repair)
+    )
     repaired_validation = validate_report_document(
         repaired_draft,
         plan,
