@@ -28,6 +28,7 @@ from contracts.question_analysis import (
 from contracts.vector_knowledge import (
     HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
     VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
@@ -375,6 +376,10 @@ def test_hybrid_on_returns_fused_chunks(monkeypatch):
         "chunk-c",
     ]
     assert bundle.strategy is RetrievalStrategy.hybrid
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
     assert bundle.hybrid_diagnostics is not None
     assert bundle.hybrid_diagnostics.cutover_applied is True
     assert provider.calls == 1
@@ -407,6 +412,10 @@ def test_hybrid_on_can_return_lexical_only_matches(monkeypatch):
     assert bundle.outcome is VectorRetrievalOutcome.matches
     assert [chunk.id for chunk in bundle.chunks] == ["chunk-lexical"]
     assert bundle.strategy is RetrievalStrategy.hybrid
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
 
 
 def test_hybrid_lexical_failure_falls_back_to_dense(monkeypatch):
@@ -596,6 +605,10 @@ def test_retrieve_vector_knowledge_skip_is_typed_and_does_not_call_dependencies(
 
     assert bundle.outcome is VectorRetrievalOutcome.not_run
     assert bundle.strategy is RetrievalStrategy.not_run
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.not_run_v1
+    )
     assert bundle.top_k == 0
 
 

@@ -77,15 +77,6 @@ def _read_secret_env(name: str) -> str:
     return value
 
 
-def _enabled_env(name: str) -> bool:
-    return os.getenv(name, "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def resolve_gemini_embedding_backend() -> GeminiEmbeddingBackend:
     """Resolve the dedicated Developer API credential, failing closed."""
 
@@ -110,19 +101,8 @@ def resolve_gemini_embedding_backend() -> GeminiEmbeddingBackend:
             api_mode=api_mode,
         )
 
-    if _enabled_env("ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY"):
-        legacy_key = _read_secret_env("GOOGLE_API_KEY")
-        if legacy_key:
-            return GeminiEmbeddingBackend(
-                api_key=legacy_key,
-                credential_source="GOOGLE_API_KEY",
-                api_mode=api_mode,
-            )
-
     raise RuntimeError(
-        "GEMINI_EMBEDDING_API_KEY is required for Gemini vector embeddings; "
-        "set ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY=true only for a temporary "
-        "GOOGLE_API_KEY migration"
+        "GEMINI_EMBEDDING_API_KEY is required for Gemini vector embeddings"
     )
 
 

@@ -232,6 +232,23 @@ remain non-terminal. The arm adds one DB query but no model call. See
 [`VECTOR_KNOWLEDGE_ROLLOUT.md`](VECTOR_KNOWLEDGE_ROLLOUT.md) “True hybrid
 retrieval” for migration and cutover checks.
 
+**Cutover identity and report evidence (Phase 6).** `VectorKnowledgeBundle`
+carries a strict `strategy_version`: `not_run_v1`,
+`dense_cosine_rerank_v2`, or `postgres_fts_rrf_v1`. Stage 0.3 emits the
+applied version, while hybrid shadow telemetry also identifies the fused
+candidate version. The report collector maps direct hits to typed `primary`
+knowledge evidence and, only when reference expansion is `on`, maps up to four
+resolved article targets to `supporting_reference`. Adjacency remains
+`provenance_context` and is excluded from standalone report evidence. This
+keeps explicit references claim-bearing while preventing mere neighbouring
+text from being promoted into report facts.
+
+**Cleanup boundary (Phase 7).** Gemini embeddings accept only
+`GEMINI_EMBEDDING_API_KEY`; the temporary `GOOGLE_API_KEY` fallback and its
+enablement flag have been removed. Dense ranking and the in-row embedding
+remain intentional rollback assets. SDK upgrades and optional learned
+reranking are separate, evaluation-gated changes rather than cleanup work.
+
 **Embedding caching (2026-07-07).** The embedding provider is a per-config singleton (`knowledge/vector_embeddings.get_embedding_provider`) so retrieval reuses one SDK client instead of constructing one per request, and query embeddings are memoized at the retrieval call site (`VECTOR_QUERY_EMBEDDING_CACHE_SIZE`, default 256, ≤0 disables) so repeated questions skip the embedding API round trip. Explicitly injected providers bypass the memo.
 
 **Known coupling risk:** the tier inherits Stage 0.2's classification. If the analyzer mislabels a question that genuinely needs regulatory/conceptual grounding as deterministic data, retrieval is SKIPped and the answer is silently ungrounded — the misclassification costs twice. Tiering is a deliberate cost optimization; treat retrieval-starved wrong answers as a §5.3 routing failure, not a retrieval bug.

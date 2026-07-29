@@ -41,6 +41,7 @@ from contracts.vector_knowledge import (  # noqa: E402
     HybridRetrievalDiagnostics,
     HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
     VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
@@ -94,7 +95,10 @@ def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
     bundle = VectorKnowledgeBundle(
         query="How can electricity be exported?",
         retrieval_mode=VectorKnowledgeMode.active,
-        strategy=RetrievalStrategy.hybrid,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        strategy_version=(
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        ),
         top_k=4,
         chunk_count=2,
         chunks=[
@@ -145,6 +149,7 @@ def test_pipeline_logs_top_section_titles_for_vector_knowledge(monkeypatch):
         "[2] Electricity (Capacity) Market Rules | section: Part II > Registration",
     ]
     assert captured["packed_truncated"] is False
+    assert captured["strategy_version"] == "dense_cosine_rerank_v2"
 
 
 def test_pipeline_traces_typed_retrieval_failure_without_raw_error(monkeypatch):
@@ -227,6 +232,9 @@ def test_pipeline_traces_hybrid_shadow_disagreement(monkeypatch):
         query="What is the exact phrase?",
         retrieval_mode=VectorKnowledgeMode.active,
         strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        strategy_version=(
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        ),
         top_k=1,
         chunk_count=1,
         chunks=[dense],
@@ -275,6 +283,12 @@ def test_pipeline_traces_hybrid_shadow_disagreement(monkeypatch):
         if "stage_0_3_vector_knowledge_hybrid" in args
     )
     assert hybrid_event["hybrid_mode"] == "shadow"
+    assert hybrid_event["applied_strategy_version"] == (
+        "dense_cosine_rerank_v2"
+    )
+    assert hybrid_event["fused_strategy_version"] == (
+        "postgres_fts_rrf_v1"
+    )
     assert hybrid_event["cutover_applied"] is False
     assert hybrid_event["dense_chunk_ids"] == ["chunk-dense"]
     assert hybrid_event["lexical_chunk_ids"] == ["chunk-lexical"]

@@ -40,6 +40,26 @@ class RetrievalStrategy(str, Enum):
     dense_with_deterministic_rerank = "dense_with_deterministic_rerank"
 
 
+class RetrievalStrategyVersion(str, Enum):
+    """Versioned implementation identity for retrieval telemetry."""
+
+    legacy_unspecified = "legacy_unspecified"
+    not_run_v1 = "not_run_v1"
+    dense_cosine_rerank_v2 = "dense_cosine_rerank_v2"
+    postgres_fts_rrf_v1 = "postgres_fts_rrf_v1"
+
+
+_EXPECTED_STRATEGY_VERSION = {
+    RetrievalStrategy.not_run: RetrievalStrategyVersion.not_run_v1,
+    RetrievalStrategy.dense_with_deterministic_rerank: (
+        RetrievalStrategyVersion.dense_cosine_rerank_v2
+    ),
+    RetrievalStrategy.hybrid: (
+        RetrievalStrategyVersion.postgres_fts_rrf_v1
+    ),
+}
+
+
 class VectorRetrievalOutcome(str, Enum):
     """Terminal state of one vector-retrieval attempt."""
 
@@ -227,6 +247,9 @@ class HybridRetrievalDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: HybridRetrievalMode
+    fused_strategy_version: RetrievalStrategyVersion = (
+        RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
     dense_chunk_ids: List[str] = Field(default_factory=list)
     lexical_chunk_ids: List[str] = Field(default_factory=list)
     fused_chunks: List[VectorChunkRecord] = Field(default_factory=list)
@@ -235,6 +258,14 @@ class HybridRetrievalDiagnostics(BaseModel):
 
     @model_validator(mode="after")
     def _validate_cutover(self) -> "HybridRetrievalDiagnostics":
+        if (
+            self.fused_strategy_version
+            is not RetrievalStrategyVersion.postgres_fts_rrf_v1
+        ):
+            raise ValueError(
+                "hybrid diagnostics require "
+                "fused_strategy_version=postgres_fts_rrf_v1"
+            )
         if self.mode is HybridRetrievalMode.off:
             raise ValueError(
                 "off mode must omit hybrid diagnostics"
@@ -299,6 +330,11 @@ class VectorKnowledgeBundle(BaseModel):
     query: str
     retrieval_mode: VectorKnowledgeMode
     strategy: RetrievalStrategy
+    # Serialized bundles from before Phase 6 omit this field. They remain
+    # readable but are reported honestly as unversioned legacy results.
+    strategy_version: RetrievalStrategyVersion = (
+        RetrievalStrategyVersion.legacy_unspecified
+    )
     top_k: int = 0
     chunk_count: int = 0
     chunks: List[VectorChunkRecord] = Field(default_factory=list)
@@ -324,6 +360,24 @@ class VectorKnowledgeBundle(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_and_validate_outcome(self) -> "VectorKnowledgeBundle":
+        if "strategy_version" in self.model_fields_set:
+            expected_strategy_version = _EXPECTED_STRATEGY_VERSION.get(
+                self.strategy
+            )
+            if expected_strategy_version is None:
+                if (
+                    self.strategy_version
+                    is not RetrievalStrategyVersion.legacy_unspecified
+                ):
+                    raise ValueError(
+                        "legacy retrieval strategies require "
+                        "strategy_version=legacy_unspecified"
+                    )
+            elif self.strategy_version is not expected_strategy_version:
+                raise ValueError(
+                    f"strategy={self.strategy.value} requires "
+                    f"strategy_version={expected_strategy_version.value}"
+                )
         # Old serialized bundles pre-date ``outcome``. Derive their state so
         # they remain readable while typed callers migrate.
         if "outcome" not in self.model_fields_set:

@@ -33,15 +33,13 @@ def test_gemini_backend_rejects_implicit_legacy_credential(monkeypatch):
         embedding_service.resolve_gemini_embedding_backend()
 
 
-def test_gemini_backend_allows_legacy_credential_only_with_explicit_flag(monkeypatch):
+def test_gemini_backend_rejects_removed_legacy_credential_flag(monkeypatch):
     monkeypatch.delenv("GEMINI_EMBEDDING_API_KEY", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY", "legacy-key")
     monkeypatch.setenv("ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY", "true")
 
-    backend = embedding_service.resolve_gemini_embedding_backend()
-
-    assert backend.api_key == "legacy-key"
-    assert backend.credential_source == "GOOGLE_API_KEY"
+    with pytest.raises(RuntimeError, match="GEMINI_EMBEDDING_API_KEY"):
+        embedding_service.resolve_gemini_embedding_backend()
 
 
 def test_gemini_backend_rejects_non_developer_api_mode(monkeypatch):

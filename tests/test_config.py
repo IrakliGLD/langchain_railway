@@ -702,28 +702,20 @@ def test_gemini_vector_provider_requires_dedicated_embedding_key():
             google_api_key="legacy-key",
             vector_embedding_provider="gemini",
             gemini_embedding_api_key=None,
-            allow_legacy_google_embedding_key=False,
         )
 
 
-def test_gemini_vector_provider_accepts_explicit_legacy_transition():
-    validate_runtime_settings(
-        supabase_db_url="postgresql://user:pass@localhost/db",
-        gateway_shared_secret="gateway",
-        session_signing_secret="session",
-        evaluate_admin_secret="evaluate",
-        auth_mode="gateway_only",
-        deployment_env="test",
-        supabase_jwt_secret=None,
-        enable_evaluate_endpoint=False,
-        allow_evaluate_endpoint=False,
-        model_type="openai",
-        openai_api_key="test-openai-key",
-        google_api_key="legacy-key",
-        vector_embedding_provider="gemini",
-        gemini_embedding_api_key=None,
-        allow_legacy_google_embedding_key=True,
+def test_legacy_google_embedding_flag_is_removed_from_runtime_sources():
+    root = Path(__file__).resolve().parents[1]
+    runtime_source = "\n".join(
+        (root / relative_path).read_text(encoding="utf-8")
+        for relative_path in (
+            "config.py",
+            "knowledge/embedding_service.py",
+        )
     )
+
+    assert "ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY" not in runtime_source
 
 
 def test_gemini_vector_provider_rejects_non_developer_api_mode():

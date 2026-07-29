@@ -2626,6 +2626,7 @@ def _run_vector_knowledge_stage(
             tier=_retrieval_tier.value,
             chunk_count=bundle.chunk_count,
             strategy=bundle.strategy.value,
+            strategy_version=bundle.strategy_version.value,
             preferred_topics=bundle.filters.preferred_topics,
             top_sources=top_sources,
             top_sections=top_sections,
@@ -2654,6 +2655,7 @@ def _run_vector_knowledge_stage(
             error=bundle.unavailable,
             outcome=bundle.outcome.value,
             strategy=bundle.strategy.value,
+            strategy_version=bundle.strategy_version.value,
         )
         # Phase 5: compare the independent PostgreSQL full-text arm with the
         # dense baseline. Shadow mode records the would-be fused result while
@@ -2677,6 +2679,12 @@ def _run_vector_knowledge_stage(
                 "stage_0_3_vector_knowledge_hybrid",
                 "validated",
                 hybrid_mode=_hybrid.mode.value,
+                applied_strategy_version=(
+                    bundle.strategy_version.value
+                ),
+                fused_strategy_version=(
+                    _hybrid.fused_strategy_version.value
+                ),
                 cutover_applied=_hybrid.cutover_applied,
                 dense_chunk_ids=_dense_ids,
                 lexical_chunk_ids=_lexical_ids,

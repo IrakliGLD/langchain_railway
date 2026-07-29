@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,6 +19,14 @@ class ReportEvidenceKind(str, Enum):
     STATISTICS = "statistics"
     KNOWLEDGE = "knowledge"
     LIMITATION = "limitation"
+
+
+class ReportKnowledgeEvidenceRole(str, Enum):
+    """How a retrieved passage may support a report claim."""
+
+    primary = "primary"
+    supporting_reference = "supporting_reference"
+    provenance_context = "provenance_context"
 
 
 class _StrictEvidenceModel(BaseModel):
@@ -40,6 +48,7 @@ class ReportEvidenceItem(_StrictEvidenceModel):
         max_length=64,
         pattern=r"^[a-z][a-z0-9_:-]*$",
     )
+    knowledge_role: Optional[ReportKnowledgeEvidenceRole] = None
     provenance_refs: List[str] = Field(default_factory=list, max_length=32)
     columns: List[str] = Field(default_factory=list, max_length=32)
     rows: List[EvidenceRow] = Field(default_factory=list, max_length=200)
@@ -77,6 +86,14 @@ class ReportEvidenceItem(_StrictEvidenceModel):
 
     @model_validator(mode="after")
     def _validate_kind_shape(self) -> "ReportEvidenceItem":
+        if self.kind is ReportEvidenceKind.KNOWLEDGE:
+            if self.knowledge_role is None:
+                # Backward compatibility for persisted v1 knowledge items.
+                self.knowledge_role = ReportKnowledgeEvidenceRole.primary
+        elif self.knowledge_role is not None:
+            raise ValueError(
+                "knowledge_role is allowed only for knowledge evidence"
+            )
         if self.kind is ReportEvidenceKind.TABLE:
             if not self.columns or not self.rows:
                 raise ValueError("Table evidence requires columns and rows.")

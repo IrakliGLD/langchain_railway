@@ -75,10 +75,6 @@ def _read_single_worker_count(*names: str) -> int:
 
 
 GEMINI_EMBEDDING_API_KEY = _read_secret_env("GEMINI_EMBEDDING_API_KEY")
-ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY = (
-    os.getenv("ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY", "false").strip().lower()
-    in ("1", "true", "yes", "on")
-)
 
 
 # Durable analytical reports run in a separate, explicitly enabled process.
@@ -655,7 +651,6 @@ def validate_runtime_settings(
     vector_embedding_model: str = "text-embedding-3-small",
     vector_embedding_task_profile: str = "legacy",
     gemini_embedding_api_key: str | None = None,
-    allow_legacy_google_embedding_key: bool = False,
     vector_embedding_api_mode: str = "developer",
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
@@ -750,13 +745,10 @@ def validate_runtime_settings(
             raise RuntimeError(
                 "VECTOR_KNOWLEDGE_EMBEDDING_API_MODE must be 'developer'"
             )
-        if not gemini_embedding_api_key and not (
-            allow_legacy_google_embedding_key and google_api_key
-        ):
+        if not gemini_embedding_api_key:
             raise RuntimeError(
                 "VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER=gemini requires "
-                "GEMINI_EMBEDDING_API_KEY; set "
-                "ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY=true only during migration"
+                "GEMINI_EMBEDDING_API_KEY"
             )
     normalized_task_profile = vector_embedding_task_profile.strip().lower()
     if normalized_task_profile not in {
@@ -859,7 +851,6 @@ validate_runtime_settings(
         VECTOR_KNOWLEDGE_EMBEDDING_TASK_PROFILE
     ),
     gemini_embedding_api_key=GEMINI_EMBEDDING_API_KEY,
-    allow_legacy_google_embedding_key=ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY,
     vector_embedding_api_mode=VECTOR_KNOWLEDGE_EMBEDDING_API_MODE,
 )
 

@@ -10,6 +10,7 @@ from contracts.vector_knowledge import (
     HybridRetrievalDiagnostics,
     HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
     VectorChunkRecord,
     VectorDocumentRecord,
     VectorKnowledgeBundle,
@@ -40,6 +41,49 @@ def test_vector_knowledge_bundle_defaults_are_strict():
     assert bundle.chunks == []
     assert bundle.filters.preferred_topics == []
     assert bundle.outcome is VectorRetrievalOutcome.not_run
+
+
+def test_vector_knowledge_bundle_preserves_legacy_unspecified_strategy_version():
+    bundle = VectorKnowledgeBundle(
+        query="What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        strategy=RetrievalStrategy.hybrid,
+    )
+
+    assert (
+        bundle.strategy_version
+        is RetrievalStrategyVersion.legacy_unspecified
+    )
+
+
+def test_vector_knowledge_bundle_rejects_mismatched_strategy_version():
+    with pytest.raises(ValidationError):
+        VectorKnowledgeBundle(
+            query="What is GENEX?",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=RetrievalStrategy.hybrid,
+            strategy_version=(
+                RetrievalStrategyVersion.dense_cosine_rerank_v2
+            ),
+        )
+
+
+def test_hybrid_diagnostics_identify_the_fusion_strategy_version():
+    diagnostics = HybridRetrievalDiagnostics(
+        mode=HybridRetrievalMode.shadow,
+    )
+
+    assert (
+        diagnostics.fused_strategy_version
+        is RetrievalStrategyVersion.postgres_fts_rrf_v1
+    )
+    with pytest.raises(ValidationError):
+        HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.shadow,
+            fused_strategy_version=(
+                RetrievalStrategyVersion.dense_cosine_rerank_v2
+            ),
+        )
 
 
 def test_vector_knowledge_bundle_derives_legacy_outcomes():

@@ -84,6 +84,65 @@ the dense result; it does not mark otherwise successful retrieval unavailable.
 5. Set the mode to `on`. Continue monitoring the same event; rollback is the
    single env change back to `off`.
 
+### Hybrid and report-evidence cutover (Phase 6)
+
+Every runtime bundle now carries an explicit implementation version alongside
+its strategy:
+
+- `not_run_v1` — retrieval deliberately skipped.
+- `dense_cosine_rerank_v2` — raw-cosine eligibility followed by the bounded
+  deterministic reranker.
+- `postgres_fts_rrf_v1` — PostgreSQL `simple` FTS fused with dense ranks by
+  reciprocal-rank fusion.
+
+Stage `0.3` traces emit `strategy_version`. Hybrid comparison traces emit both
+the applied version and the would-be fused version, so shadow observations
+remain attributable if ranking changes later. Bundles serialized before this
+contract remain readable as `legacy_unspecified`; current runtime retrieval
+never emits that value.
+
+Report evidence preserves retrieval roles:
+
+- Direct top-K hits are `primary`.
+- Same-document chunks resolved through an explicit article reference become
+  `supporting_reference` only when
+  `VECTOR_REFERENCE_EXPANSION_MODE=on`.
+- Adjacent chunks remain `provenance_context`: they can provide conversational
+  prompt continuity when adjacency is `on`, but are not emitted as standalone
+  report evidence because proximity alone does not establish relevance.
+
+Primary report evidence is capped at six chunks and always precedes up to four
+supporting references. Duplicate chunk IDs are removed. Reference `shadow`
+continues to leave report evidence unchanged.
+
+Phase 6 supplies the reversible `on` path; it does not bypass the Phase 5
+observation gate. Production cutover still requires reviewed disagreement
+cases and acceptable known-answer and latency metrics. Rollback remains
+`VECTOR_HYBRID_RETRIEVAL_MODE=off`, with the dense implementation retained.
+
+### Cleanup and deferred upgrades (Phase 7)
+
+The temporary embedding-credential transition is complete.
+`GEMINI_EMBEDDING_API_KEY` is now the only accepted Gemini embedding
+credential. `GOOGLE_API_KEY` remains a generative-model credential and is never
+read by the embedding backend. The former
+`ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY` escape hatch has been removed from
+configuration validation and runtime resolution.
+
+The following assets are deliberately retained:
+
+- `document_chunks.embedding`, because the pragmatic task-profile rollout did
+  not introduce a side-by-side embedding table.
+- `dense_cosine_rerank_v2`, because it is the Phase 5/6 rollback strategy and
+  the lexical arm falls back to it on failure.
+- The pinned `google-genai` version, because a dependency upgrade changes a
+  separate failure surface and requires its own canary deployment.
+
+No learned or generative reranker is added. Revisit a non-generative reranker
+only if reviewed golden-set results show `postgres_fts_rrf_v1` has plateaued.
+Removing dense rollback or the in-row embedding requires a separate migration
+after the production observation and rollback windows have expired.
+
 ### Adjacency expansion (Phase A of the cross-reference rollout)
 
 - `VECTOR_ADJACENCY_MODE` — three-state env controlling whether neighbouring chunks (preceding and following by `chunk_index` within the same document) are pulled at retrieval time. Defaults to `off`.

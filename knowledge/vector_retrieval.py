@@ -18,6 +18,7 @@ from contracts.vector_knowledge import (
     HybridRetrievalDiagnostics,
     HybridRetrievalMode,
     RetrievalStrategy,
+    RetrievalStrategyVersion,
     VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
@@ -580,6 +581,7 @@ def retrieve_vector_knowledge(
             query=query_text,
             retrieval_mode=retrieval_mode,
             strategy=RetrievalStrategy.not_run,
+            strategy_version=RetrievalStrategyVersion.not_run_v1,
             top_k=0,
             chunk_count=0,
             chunks=[],
@@ -675,6 +677,9 @@ def retrieve_vector_knowledge(
                 )
         dense_chunks = list(chunks)
         strategy = RetrievalStrategy.dense_with_deterministic_rerank
+        strategy_version = (
+            RetrievalStrategyVersion.dense_cosine_rerank_v2
+        )
         hybrid_diagnostics = None
         if hybrid_mode is not HybridRetrievalMode.off:
             try:
@@ -705,6 +710,9 @@ def retrieve_vector_knowledge(
                 if cutover_applied:
                     chunks = fused_chunks
                     strategy = RetrievalStrategy.hybrid
+                    strategy_version = (
+                        RetrievalStrategyVersion.postgres_fts_rrf_v1
+                    )
             except Exception as exc:
                 safe_reason = _safe_failure_reason(exc)
                 log.warning(
@@ -726,6 +734,7 @@ def retrieve_vector_knowledge(
             query=query_text,
             retrieval_mode=retrieval_mode,
             strategy=strategy,
+            strategy_version=strategy_version,
             top_k=top_k,
             chunk_count=len(chunks),
             chunks=chunks,
@@ -762,6 +771,9 @@ def retrieve_vector_knowledge(
             query=query_text,
             retrieval_mode=retrieval_mode,
             strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            strategy_version=(
+                RetrievalStrategyVersion.dense_cosine_rerank_v2
+            ),
             top_k=top_k,
             chunk_count=0,
             chunks=[],
