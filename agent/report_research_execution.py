@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -52,6 +53,8 @@ from utils.request_deadline import (
     bind_request_execution_scope_snapshot,
     current_request_execution_scope,
 )
+
+_LOGGER = logging.getLogger("Enai.ReportResearch")
 
 Collector = Callable[
     [str, ReportResearchScope],
@@ -425,6 +428,21 @@ def _numeric_observations(
                 for row in rows
             )
         ]
+        undeclared_numeric_columns = [
+            column
+            for column in numeric_columns
+            if not str(item.unit_by_column.get(column, "")).strip()
+        ]
+        if undeclared_numeric_columns:
+            # Without this the drop is invisible, and a thin report looks like
+            # a lazy writer rather than evidence the writer could not cite.
+            _LOGGER.warning(
+                "Report evidence numeric columns have no declared unit and "
+                "cannot be claimed: evidence_ref=%s source=%s columns=%s",
+                item.evidence_ref,
+                item.source,
+                ",".join(undeclared_numeric_columns),
+            )
         time_columns = [
             column
             for column in item.columns
@@ -476,7 +494,13 @@ def _numeric_observations(
                 ]
                 if not values:
                     continue
-                unit = item.unit_by_column.get(column, "value")
+                # The grounding validator refuses every claim whose column has
+                # no declared unit, so a metric here could only be advertised
+                # under a fabricated unit and then fail verification. Leave the
+                # column out rather than point the writer at an unusable number.
+                unit = str(item.unit_by_column.get(column, "")).strip()
+                if not unit:
+                    continue
                 mean_value = sum(values) / len(values)
                 specs: list[
                     tuple[ReportMetricOperation, float, str, str]

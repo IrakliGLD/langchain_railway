@@ -273,6 +273,48 @@ def test_requested_metrics_limit_deterministic_metric_operations():
     assert operations == {"mean"}
 
 
+def test_metrics_are_not_emitted_for_columns_without_a_declared_unit():
+    """A metric on a unit-less column is a number the writer cannot ground.
+
+    The grounding validator refuses any claim whose column has no unit, so
+    advertising such a metric -- previously under a fabricated "value" unit --
+    points the writer at numbers that can only fail validation.
+    """
+
+    item = _table_item()
+    item["columns"] = ["period", "price_gel", "mystery_metric"]
+    item["rows"] = [
+        {"period": "2025-01", "price_gel": 100.0, "mystery_metric": 7.0},
+        {"period": "2025-02", "price_gel": 120.0, "mystery_metric": 9.0},
+    ]
+    item["unit_by_column"] = {"price_gel": "GEL/MWh"}
+    output = ReportCollectorOutput(
+        collector_id=ReportCollectorId.PRICES,
+        items=(ReportEvidenceItem.model_validate(item),),
+    )
+
+    packets = execute_report_research(
+        _QUERY,
+        _plan(),
+        max_workers=1,
+        collectors={
+            ReportCollectorId.PRICES: (lambda _query, _scope: output),
+        },
+    )
+
+    metrics = [
+        metric
+        for packet in packets
+        for observation in packet.observations
+        for metric in observation.metric_values
+    ]
+    assert metrics, "the declared column should still produce metrics"
+    assert all(metric.unit != "value" for metric in metrics)
+    assert not [
+        metric for metric in metrics if "mystery" in metric.metric_id
+    ], "a column with no declared unit must not be advertised as claimable"
+
+
 def test_packet_metrics_and_manifest_are_deterministic_and_deduplicated():
     packets = execute_report_research(
         _QUERY,
