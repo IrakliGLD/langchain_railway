@@ -75,6 +75,7 @@ from analysis.stats import quick_stats, rows_to_preview
 from core.application_runtime import ReadinessSnapshot
 from core.session_runtime import SessionTurn
 from core.sql_generator import sanitize_sql
+from knowledge.embedding_service import EmbeddingCapabilityStatus
 from main import (
     BALANCING_SEGMENT_NORMALIZER,
     BALANCING_SHARE_PIVOT_SQL,
@@ -1282,11 +1283,59 @@ def test_ask_rejects_invalid_history_shape_and_bounds(payload):
 )
 def test_readyz_preserves_runtime_snapshot_contract(monkeypatch, snapshot, expected_status):
     monkeypatch.setattr(main_module.application_runtime, "readiness", lambda: snapshot)
+    monkeypatch.setattr(main_module, "_embedding_capability_status", None)
 
     response = TestClient(main_module.app).get("/readyz")
 
     assert response.status_code == expected_status
     assert response.json() == snapshot.public_payload()
+
+
+def test_embedding_capability_is_reported_without_failing_http_readiness(
+    monkeypatch,
+):
+    status = EmbeddingCapabilityStatus(
+        available=False,
+        provider="gemini",
+        model="gemini-embedding-001",
+        dimension=1536,
+        api_mode="developer",
+        failure_disposition="rejected",
+        failure_reason="401/UNAUTHENTICATED/ACCESS_TOKEN_TYPE_UNSUPPORTED",
+    )
+    monkeypatch.setattr(
+        main_module.application_runtime,
+        "readiness",
+        lambda: ReadinessSnapshot(True, True),
+    )
+    monkeypatch.setattr(main_module, "_embedding_capability_status", status)
+
+    response = TestClient(main_module.app).get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["embedding_capability"] == status.public_payload()
+
+
+def test_embedding_capability_probe_records_status_without_raising(monkeypatch):
+    status = EmbeddingCapabilityStatus(
+        available=False,
+        provider="gemini",
+        model="gemini-embedding-001",
+        dimension=1536,
+        api_mode="developer",
+        failure_disposition="rejected",
+        failure_reason="401/UNAUTHENTICATED/API_KEY_INVALID",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "probe_embedding_capability",
+        lambda: status,
+    )
+    monkeypatch.setattr(main_module, "_embedding_capability_status", None)
+
+    main_module._refresh_embedding_capability_status()
+
+    assert main_module._embedding_capability_status == status
 
 
 def test_startup_failure_exits_nonzero():

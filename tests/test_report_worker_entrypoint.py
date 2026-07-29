@@ -25,6 +25,11 @@ def test_disabled_report_worker_is_a_noop(monkeypatch):
     monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", False)
     monkeypatch.setattr(
         report_worker,
+        "require_embedding_capability",
+        lambda: pytest.fail("disabled worker must not probe embeddings"),
+    )
+    monkeypatch.setattr(
+        report_worker,
         "build_report_worker_runtime",
         lambda: pytest.fail("disabled worker must not build runtime state"),
     )
@@ -148,6 +153,11 @@ def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch
     )
     monkeypatch.setattr(
         report_worker,
+        "require_embedding_capability",
+        lambda: events.append("embedding_checked"),
+    )
+    monkeypatch.setattr(
+        report_worker,
         "build_report_worker_runtime",
         lambda: (worker, object(), engine),
     )
@@ -156,10 +166,39 @@ def test_enabled_worker_initializes_process_knowledge_before_polling(monkeypatch
     assert report_worker.main() == 0
     assert events == [
         "knowledge_loaded",
+        "embedding_checked",
         "polled",
         "handed_off",
         "disposed",
     ]
+
+
+def test_worker_refuses_to_lease_jobs_when_embedding_capability_is_unavailable(
+    monkeypatch,
+):
+    events = []
+
+    monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", True)
+    monkeypatch.setattr(
+        knowledge_module,
+        "load_knowledge",
+        lambda: events.append("knowledge_loaded"),
+    )
+    monkeypatch.setattr(
+        report_worker,
+        "require_embedding_capability",
+        lambda: (_ for _ in ()).throw(RuntimeError("embedding unavailable")),
+    )
+    monkeypatch.setattr(
+        report_worker,
+        "build_report_worker_runtime",
+        lambda: events.append("runtime_built"),
+    )
+
+    with pytest.raises(RuntimeError, match="embedding unavailable"):
+        report_worker.main()
+
+    assert events == ["knowledge_loaded"]
 
 
 def test_sigterm_triggers_active_job_handoff_before_worker_exit(monkeypatch):
@@ -182,6 +221,11 @@ def test_sigterm_triggers_active_job_handoff_before_worker_exit(monkeypatch):
 
     monkeypatch.setattr(report_worker, "REPORT_WORKER_ENABLED", True)
     monkeypatch.setattr(knowledge_module, "load_knowledge", lambda: None)
+    monkeypatch.setattr(
+        report_worker,
+        "require_embedding_capability",
+        lambda: None,
+    )
     monkeypatch.setattr(
         report_worker,
         "build_report_worker_runtime",

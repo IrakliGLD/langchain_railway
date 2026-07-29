@@ -102,6 +102,7 @@ from config import (
     STATIC_ALLOWED_TABLES,
     SUPABASE_JWT_SECRET,
     TRUST_PROXY_CLIENT_IP,
+    VECTOR_KNOWLEDGE_EMBEDDING_CAPABILITY_PROBE_ENABLED,
 )
 
 # Schema & helpers
@@ -142,6 +143,10 @@ from core.session_runtime import (
 )
 from core.sql_generator import plan_validate_repair, sanitize_sql, simple_table_whitelist_check
 from guardrails.firewall import build_safe_refusal_message, inspect_query
+from knowledge.embedding_service import (
+    EmbeddingCapabilityStatus,
+    probe_embedding_capability,
+)
 from models import (
     CHAT_GATEWAY_CONTRACT_VERSION,
     CHAT_GATEWAY_V2_CONTRACT_VERSION,
@@ -217,6 +222,29 @@ def _warm_skill_reference_cache() -> None:
     warmup_cache()
 
 
+_embedding_capability_status: EmbeddingCapabilityStatus | None = None
+
+
+def _refresh_embedding_capability_status() -> None:
+    """Record embedding availability without making HTTP readiness depend on it."""
+
+    global _embedding_capability_status
+    status = probe_embedding_capability()
+    _embedding_capability_status = status
+    log_method = log.info if status.available else log.warning
+    log_method(
+        "embedding_capability available=%s provider=%s model=%s "
+        "dimension=%s api_mode=%s failure_disposition=%s failure_reason=%s",
+        status.available,
+        status.provider,
+        status.model,
+        status.dimension,
+        status.api_mode,
+        status.failure_disposition or "none",
+        status.failure_reason or "none",
+    )
+
+
 REQUIRED_SCHEMA_COLUMNS = {
     table_name: set(DB_SCHEMA_DICT["views"][table_name]["columns"])
     for table_name in STATIC_ALLOWED_TABLES
@@ -230,7 +258,15 @@ application_runtime = ApplicationRuntime(
     retry_interval_seconds=SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
     logger=log,
     process_initializers=(knowledge_module.load_knowledge,),
-    lifespan_tasks=(_validate_skill_references, _warm_skill_reference_cache),
+    lifespan_tasks=(
+        _validate_skill_references,
+        _warm_skill_reference_cache,
+    )
+    + (
+        (_refresh_embedding_capability_status,)
+        if VECTOR_KNOWLEDGE_EMBEDDING_CAPABILITY_PROBE_ENABLED
+        else ()
+    ),
 )
 application_runtime.initialize_process()
 session_runtime = SessionRuntime(
@@ -812,9 +848,13 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    """Readiness probe: live DB connectivity plus current required schema."""
+    """Report DB/schema readiness plus non-blocking capability diagnostics."""
     snapshot = application_runtime.readiness()
     payload = snapshot.public_payload()
+    if _embedding_capability_status is not None:
+        payload["embedding_capability"] = (
+            _embedding_capability_status.public_payload()
+        )
     if snapshot.ready:
         return payload
     return JSONResponse(status_code=snapshot.status_code, content=payload)

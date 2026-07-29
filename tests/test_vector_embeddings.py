@@ -32,7 +32,7 @@ def test_google_sdk_uses_auth_key_header_without_oauth_bearer(monkeypatch):
     monkeypatch.delenv("GOOGLE_GENAI_USE_ENTERPRISE", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
-    client = genai.Client(api_key="AQ.test-auth-key")
+    client = genai.Client(api_key="AQ.test-auth-key", vertexai=False)
     try:
         headers = client._api_client._http_options.headers
         assert headers["x-goog-api-key"] == "AQ.test-auth-key"
@@ -76,8 +76,9 @@ def test_get_embedding_provider_selects_gemini(monkeypatch, caplog):
     captured = {}
 
     class FakeClient:
-        def __init__(self, *, api_key):
+        def __init__(self, *, api_key, vertexai):
             captured["api_key"] = api_key
+            captured["vertexai"] = vertexai
             self.models = self
 
         def embed_content(self, *, model, contents, config):
@@ -95,7 +96,8 @@ def test_get_embedding_provider_selects_gemini(monkeypatch, caplog):
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
-    monkeypatch.setenv("GOOGLE_API_KEY", '"test-google-key"')
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", '"test-google-key"')
+    monkeypatch.setenv("GOOGLE_API_KEY", "different-generative-key")
     caplog.set_level("INFO", logger="Enai")
     google_module = types.ModuleType("google")
     genai_module = types.ModuleType("google.genai")
@@ -119,6 +121,7 @@ def test_get_embedding_provider_selects_gemini(monkeypatch, caplog):
     assert isinstance(provider, vector_embeddings.GeminiEmbeddingProvider)
     assert captured["model"] == "gemini-embedding-001"
     assert captured["api_key"] == "test-google-key"
+    assert captured["vertexai"] is False
     assert captured["output_dimensionality"] == 768
     expected_fingerprint = hashlib.sha256(
         b"test-google-key"
@@ -129,13 +132,14 @@ def test_get_embedding_provider_selects_gemini(monkeypatch, caplog):
         if record.message.startswith("embedding_provider_initialized ")
     )
     assert "provider=gemini" in init_log
+    assert "credential_source=GEMINI_EMBEDDING_API_KEY" in init_log
     assert f"credential_fingerprint={expected_fingerprint}" in init_log
     assert "test-google-key" not in init_log
 
 
 def test_gemini_provider_validates_embedding_dimensions(monkeypatch):
     class FakeClient:
-        def __init__(self, *, api_key):
+        def __init__(self, *, api_key, vertexai):
             self.models = self
 
         def embed_content(self, *, model, contents, config):
@@ -150,7 +154,7 @@ def test_gemini_provider_validates_embedding_dimensions(monkeypatch):
 
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", "test-google-key")
     google_module = types.ModuleType("google")
     genai_module = types.ModuleType("google.genai")
     genai_module.Client = FakeClient
@@ -177,7 +181,7 @@ def test_gemini_provider_batches_document_embeddings(monkeypatch):
     captured_batches = []
 
     class FakeClient:
-        def __init__(self, *, api_key):
+        def __init__(self, *, api_key, vertexai):
             self.models = self
 
         def embed_content(self, *, model, contents, config):
@@ -197,7 +201,7 @@ def test_gemini_provider_batches_document_embeddings(monkeypatch):
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "768")
     monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_BATCH_SIZE", "100")
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", "test-google-key")
     google_module = types.ModuleType("google")
     genai_module = types.ModuleType("google.genai")
     genai_module.Client = FakeClient
@@ -217,7 +221,7 @@ def test_gemini_provider_requires_google_genai(monkeypatch):
     # The legacy google-generativeai fallback was removed (F10 B6 F1.1);
     # google-genai is a hard production dependency and its absence must fail
     # loudly rather than silently degrade to a legacy backend.
-    monkeypatch.setenv("GOOGLE_API_KEY", "some-google-key")
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", "some-google-key")
 
     google_module = types.ModuleType("google")
     google_module.__path__ = []  # package marker, but without a genai submodule
@@ -278,6 +282,38 @@ def test_embedding_provider_cache_rotates_when_credential_changes(monkeypatch):
 
     first = vector_embeddings.get_embedding_provider()
     monkeypatch.setenv("OPENAI_API_KEY", "second-key")
+    second = vector_embeddings.get_embedding_provider()
+
+    assert second is not first
+
+
+def test_gemini_provider_cache_rotates_with_dedicated_credential(monkeypatch):
+    class FakeClient:
+        def __init__(self, *, api_key, vertexai):
+            self.models = self
+
+    class FakeEmbedContentConfig:
+        def __init__(self, *, output_dimensionality):
+            self.output_dimensionality = output_dimensionality
+
+    monkeypatch.setenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "gemini")
+    monkeypatch.setenv(
+        "VECTOR_KNOWLEDGE_EMBEDDING_MODEL",
+        "gemini-embedding-001",
+    )
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", "first-key")
+    genai_module = types.ModuleType("google.genai")
+    genai_module.Client = FakeClient
+    genai_module.types = types.SimpleNamespace(
+        EmbedContentConfig=FakeEmbedContentConfig
+    )
+    google_module = types.ModuleType("google")
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    first = vector_embeddings.get_embedding_provider()
+    monkeypatch.setenv("GEMINI_EMBEDDING_API_KEY", "second-key")
     second = vector_embeddings.get_embedding_provider()
 
     assert second is not first

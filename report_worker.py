@@ -35,6 +35,7 @@ from core.db_gateway import database_connection
 from core.report_job_processor import ReportJobProcessor
 from core.report_job_repository import PostgresReportJobRepository
 from core.report_job_worker import ReportJobWorker
+from knowledge.embedding_service import require_embedding_capability
 
 log = logging.getLogger("Enai.ReportWorker")
 _REPORT_WORKER_LEASE_SAFETY_MARGIN_SECONDS = 30
@@ -127,6 +128,7 @@ def main() -> int:
         return 0
 
     knowledge_module.load_knowledge()
+    require_embedding_capability()
     worker, processor, engine = build_report_worker_runtime()
     stop_event = threading.Event()
     handoff_finished = threading.Event()

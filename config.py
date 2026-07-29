@@ -74,6 +74,13 @@ def _read_single_worker_count(*names: str) -> int:
     return 1
 
 
+GEMINI_EMBEDDING_API_KEY = _read_secret_env("GEMINI_EMBEDDING_API_KEY")
+ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY = (
+    os.getenv("ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+
 # Durable analytical reports run in a separate, explicitly enabled process.
 # Its database identity must be write-capable and is intentionally not inferred
 # from the read-only API runtime identity.
@@ -557,6 +564,19 @@ VECTOR_KNOWLEDGE_TOP_K = max(1, int(os.getenv("VECTOR_KNOWLEDGE_TOP_K", "6")))
 VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER = max(1, int(os.getenv("VECTOR_KNOWLEDGE_SEARCH_MULTIPLIER", "3")))
 VECTOR_KNOWLEDGE_MAX_CHARS = max(500, int(os.getenv("VECTOR_KNOWLEDGE_MAX_CHARS", "9000")))
 VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER", "openai").strip().lower() or "openai"
+VECTOR_KNOWLEDGE_EMBEDDING_API_MODE = (
+    os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_API_MODE", "developer").strip().lower()
+    or "developer"
+)
+VECTOR_KNOWLEDGE_EMBEDDING_CAPABILITY_PROBE_ENABLED = (
+    os.getenv(
+        "VECTOR_KNOWLEDGE_EMBEDDING_CAPABILITY_PROBE_ENABLED",
+        "true" if ENAI_DEPLOYMENT_ENV in {"staging", "production"} else "false",
+    )
+    .strip()
+    .lower()
+    in ("1", "true", "yes", "on")
+)
 VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION = max(1, int(os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_DIMENSION", "1536")))
 VECTOR_KNOWLEDGE_EMBEDDING_MODEL = os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small").strip()
 VECTOR_KNOWLEDGE_SCHEMA = os.getenv("VECTOR_KNOWLEDGE_SCHEMA", "knowledge").strip() or "knowledge"
@@ -624,6 +644,10 @@ def validate_runtime_settings(
     report_max_generative_calls: int = 3,
     report_research_max_tracks: int = 4,
     report_research_max_workers: int = 3,
+    vector_embedding_provider: str = "openai",
+    gemini_embedding_api_key: str | None = None,
+    allow_legacy_google_embedding_key: bool = False,
+    vector_embedding_api_mode: str = "developer",
 ) -> None:
     valid_auth_modes = {"gateway_only", "gateway_and_bearer"}
     valid_deployment_envs = {"development", "staging", "production", "test"}
@@ -704,6 +728,27 @@ def validate_runtime_settings(
     # credential at startup like the other two.
     if model_type == "openai" and not openai_api_key:
         raise RuntimeError("MODEL_TYPE=openai but OPENAI_API_KEY is missing")
+    normalized_embedding_provider = vector_embedding_provider.strip().lower()
+    if normalized_embedding_provider == "google":
+        normalized_embedding_provider = "gemini"
+    if normalized_embedding_provider not in {"openai", "gemini"}:
+        raise RuntimeError(
+            "Invalid VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER. "
+            "Expected one of: openai, gemini"
+        )
+    if normalized_embedding_provider == "gemini":
+        if vector_embedding_api_mode.strip().lower() != "developer":
+            raise RuntimeError(
+                "VECTOR_KNOWLEDGE_EMBEDDING_API_MODE must be 'developer'"
+            )
+        if not gemini_embedding_api_key and not (
+            allow_legacy_google_embedding_key and google_api_key
+        ):
+            raise RuntimeError(
+                "VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER=gemini requires "
+                "GEMINI_EMBEDDING_API_KEY; set "
+                "ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY=true only during migration"
+            )
     if report_model and not report_model_type:
         raise RuntimeError("REPORT_MODEL requires REPORT_MODEL_TYPE")
     if report_model_type:
@@ -776,6 +821,10 @@ validate_runtime_settings(
     report_max_generative_calls=REPORT_MAX_GENERATIVE_CALLS,
     report_research_max_tracks=REPORT_RESEARCH_MAX_TRACKS,
     report_research_max_workers=REPORT_RESEARCH_MAX_WORKERS,
+    vector_embedding_provider=VECTOR_KNOWLEDGE_EMBEDDING_PROVIDER,
+    gemini_embedding_api_key=GEMINI_EMBEDDING_API_KEY,
+    allow_legacy_google_embedding_key=ALLOW_LEGACY_GOOGLE_EMBEDDING_KEY,
+    vector_embedding_api_mode=VECTOR_KNOWLEDGE_EMBEDDING_API_MODE,
 )
 
 # ===================================================================
