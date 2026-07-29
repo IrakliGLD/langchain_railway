@@ -12,6 +12,9 @@ from contracts.vector_knowledge import (
     VectorDocumentRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
+    VectorRetrievalOutcome,
 )
 from knowledge.vector_embeddings import _validate_embedding_dimensions
 
@@ -34,6 +37,63 @@ def test_vector_knowledge_bundle_defaults_are_strict():
     assert bundle.chunk_count == 0
     assert bundle.chunks == []
     assert bundle.filters.preferred_topics == []
+    assert bundle.outcome is VectorRetrievalOutcome.not_run
+
+
+def test_vector_knowledge_bundle_derives_legacy_outcomes():
+    chunk = VectorChunkRecord(
+        id="chunk-1",
+        document_id="doc-1",
+        text_content="Approved evidence.",
+    )
+
+    matches = VectorKnowledgeBundle(
+        query="query",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=1,
+        chunk_count=1,
+        chunks=[chunk],
+    )
+    no_matches = VectorKnowledgeBundle(
+        query="query",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=4,
+    )
+    unavailable = VectorKnowledgeBundle(
+        query="query",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=4,
+        error="legacy provider failure",
+    )
+
+    assert matches.outcome is VectorRetrievalOutcome.matches
+    assert no_matches.outcome is VectorRetrievalOutcome.no_matches
+    assert unavailable.outcome is VectorRetrievalOutcome.unavailable
+
+
+def test_vector_knowledge_bundle_rejects_inconsistent_typed_outcome():
+    with pytest.raises(ValidationError):
+        VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            top_k=4,
+            outcome=VectorRetrievalOutcome.unavailable,
+            failure=VectorRetrievalFailure(
+                stage=VectorRetrievalFailureStage.vector_search,
+                reason="RuntimeError",
+            ),
+            chunks=[
+                VectorChunkRecord(
+                    id="chunk-1",
+                    document_id="doc-1",
+                    text_content="Evidence cannot coexist with unavailable.",
+                )
+            ],
+        )
 
 
 def test_chunk_ingest_record_requires_text():

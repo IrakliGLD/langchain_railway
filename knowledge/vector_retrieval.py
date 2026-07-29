@@ -1,4 +1,4 @@
-"""Hybrid retrieval helpers for curated + vector-backed knowledge."""
+"""Dense vector retrieval with deterministic metadata/text re-ranking."""
 
 from __future__ import annotations
 
@@ -18,9 +18,13 @@ from contracts.vector_knowledge import (
     RetrievalStrategy,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
     VectorRetrievalFilters,
+    VectorRetrievalOutcome,
     VectorRetrievalTier,
 )
+from utils.provider_attempts import extract_failure_reason
 
 if TYPE_CHECKING:
     from knowledge.vector_embeddings import EmbeddingProvider
@@ -39,6 +43,14 @@ def _float_env(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _safe_failure_reason(error: BaseException) -> str:
+    """Return a bounded, content-free diagnostic token for retrieval failures."""
+
+    reason = extract_failure_reason(error) or type(error).__name__
+    normalized = re.sub(r"[^A-Za-z0-9_/-]", "_", reason)
+    return normalized[:128].rstrip("/-") or "UnknownError"
 
 
 _ADJACENCY_MODE_VALUES = frozenset({"off", "shadow", "on"})
@@ -478,11 +490,12 @@ def retrieve_vector_knowledge(
         return VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.hybrid,
+            strategy=RetrievalStrategy.not_run,
             top_k=0,
             chunk_count=0,
             chunks=[],
             filters=filters,
+            outcome=VectorRetrievalOutcome.not_run,
         )
 
     if tier == VectorRetrievalTier.LIGHT:
@@ -497,18 +510,23 @@ def retrieve_vector_knowledge(
         if filters.boost_terms:
             candidate_k = max(candidate_k, top_k * 6)
     min_similarity = _float_env("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
+    failure_stage = VectorRetrievalFailureStage.store_initialization
     try:
         if store is None:
             from knowledge.vector_store import KnowledgeVectorStore
 
             store = KnowledgeVectorStore()
+        failure_stage = VectorRetrievalFailureStage.provider_initialization
         if embedding_provider is None:
             from knowledge.vector_embeddings import get_embedding_provider
 
             embedding_provider = get_embedding_provider()
+            failure_stage = VectorRetrievalFailureStage.query_embedding
             query_embedding = _embed_query_cached(embedding_provider, query_text)
         else:
+            failure_stage = VectorRetrievalFailureStage.query_embedding
             query_embedding = embedding_provider.embed_query(query_text)
+        failure_stage = VectorRetrievalFailureStage.vector_search
         chunks = store.search_chunks(
             query_embedding=query_embedding,
             filters=filters,
@@ -559,11 +577,16 @@ def retrieve_vector_knowledge(
         bundle = VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.hybrid,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
             top_k=top_k,
             chunk_count=len(chunks),
             chunks=chunks,
             filters=filters,
+            outcome=(
+                VectorRetrievalOutcome.matches
+                if chunks
+                else VectorRetrievalOutcome.no_matches
+            ),
         )
         # Phase A.2: adjacency expansion. When mode != "off", fetch preceding
         # and following section chunks and stash them on ``bundle.adjacent_chunks``.
@@ -579,15 +602,27 @@ def retrieve_vector_knowledge(
             bundle.reference_chunks = resolve_reference_chunks(bundle, store=store)
         return bundle
     except Exception as exc:
+        safe_reason = _safe_failure_reason(exc)
+        safe_error = f"{failure_stage.value}:{safe_reason}"
+        log.warning(
+            "Vector retrieval unavailable at stage=%s reason=%s",
+            failure_stage.value,
+            safe_reason,
+        )
         return VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.hybrid,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
             top_k=top_k,
             chunk_count=0,
             chunks=[],
             filters=filters,
-            error=str(exc),
+            outcome=VectorRetrievalOutcome.unavailable,
+            failure=VectorRetrievalFailure(
+                stage=failure_stage,
+                reason=safe_reason,
+            ),
+            error=safe_error,
         )
 
 
@@ -616,7 +651,7 @@ def resolve_adjacent_chunks(
 
     if bundle is None or not bundle.chunks:
         return []
-    if bundle.error:
+    if bundle.unavailable:
         # When the underlying retrieval errored we already returned an empty
         # bundle; adjacency is meaningless. Stay silent.
         return []
@@ -698,7 +733,7 @@ def resolve_reference_chunks(
       stays usable even if the expander breaks.
     """
 
-    if bundle is None or not bundle.chunks or bundle.error:
+    if bundle is None or not bundle.chunks or bundle.unavailable:
         return []
 
     # Build the set of already-known chunks so we never echo them back.
@@ -899,7 +934,7 @@ def pack_vector_knowledge_for_prompt(
     the pre-A.3/B.4 packer.
     """
 
-    if bundle is None or not bundle.chunks:
+    if bundle is None or bundle.unavailable or not bundle.chunks:
         return PackedVectorPrompt(prompt="", headers=[], truncated=False)
     max_chars = max_chars or _int_env("VECTOR_KNOWLEDGE_MAX_CHARS", 9000)
     parts = ["EXTERNAL_SOURCE_PASSAGES:"]

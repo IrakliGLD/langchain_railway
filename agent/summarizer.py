@@ -11,7 +11,6 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
-from knowledge import get_brief_knowledge_for_query
 
 from agent.analyzer import _extract_forecast_horizon
 from agent.answer_mode_policy import apply_answer_mode_policy
@@ -63,6 +62,7 @@ from config import PIPELINE_MODE
 from context import scrub_schema_mentions, strip_inline_citation_markers
 from contracts.evidence_frames import EntitySetFrame, ForecastFrame, ObservationFrame, ScenarioFrame
 from contracts.question_analysis import AnswerKind, RenderStyle
+from contracts.vector_knowledge import VectorRetrievalOutcome
 from core.llm import (
     SummaryEnvelope,
     classify_query_type,
@@ -72,6 +72,7 @@ from core.llm import (
     llm_summarize,
     llm_summarize_structured,
 )
+from knowledge import get_brief_knowledge_for_query
 from models import GroundingPolicy, QueryContext, ResolutionPolicy, TerminalOutcome
 from utils.language import (
     get_evidence_unavailable_message,
@@ -858,7 +859,11 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
     # proven absent. Without this the model answers "the provided sources do not
     # contain..." even though the regulations were ingested (prod traces
     # d62c2134 / b0aef6fd, where stage_0_3 returned a 400).
-    if getattr(ctx, "vector_knowledge_error", ""):
+    if (
+        getattr(ctx, "vector_knowledge_outcome", None)
+        is VectorRetrievalOutcome.unavailable
+        or bool(getattr(ctx, "vector_knowledge_error", ""))
+    ):
         conceptual_hint += (
             "\n\nIMPORTANT — RETRIEVAL UNAVAILABLE: Retrieval of official "
             "document/regulation passages FAILED for this query due to a technical "

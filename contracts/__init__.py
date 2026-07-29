@@ -18,7 +18,10 @@ from contracts.vector_knowledge import (
     VectorDocumentRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
     VectorRetrievalFilters,
+    VectorRetrievalOutcome,
 )
 
 # Keep the public contract surface explicit for downstream imports.
@@ -35,6 +38,9 @@ __all__ = [
     "VectorChunkRecord",
     "VectorRetrievalFilters",
     "VectorKnowledgeBundle",
+    "VectorRetrievalOutcome",
+    "VectorRetrievalFailureStage",
+    "VectorRetrievalFailure",
     "DocumentRegistration",
     "ChunkIngestRecord",
     "IngestionResult",

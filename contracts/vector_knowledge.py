@@ -17,11 +17,50 @@ class VectorKnowledgeMode(str, Enum):
 
 
 class RetrievalStrategy(str, Enum):
-    """High-level retrieval mode for knowledge assembly."""
+    """How candidate chunks were selected and ranked.
+
+    The original values remain accepted for serialized/backward-compatible
+    bundles. Runtime vector retrieval emits the specific values below rather
+    than claiming ``hybrid`` retrieval when no independent sparse index was
+    queried.
+    """
 
     curated_only = "curated_only"
     vector_only = "vector_only"
     hybrid = "hybrid"
+    not_run = "not_run"
+    dense_with_deterministic_rerank = "dense_with_deterministic_rerank"
+
+
+class VectorRetrievalOutcome(str, Enum):
+    """Terminal state of one vector-retrieval attempt."""
+
+    not_run = "not_run"
+    matches = "matches"
+    no_matches = "no_matches"
+    unavailable = "unavailable"
+
+
+class VectorRetrievalFailureStage(str, Enum):
+    """The operation that made vector retrieval unavailable."""
+
+    store_initialization = "store_initialization"
+    provider_initialization = "provider_initialization"
+    query_embedding = "query_embedding"
+    vector_search = "vector_search"
+
+
+class VectorRetrievalFailure(BaseModel):
+    """Privacy-safe diagnostic for an unavailable retrieval attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: VectorRetrievalFailureStage
+    reason: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_/-]+$",
+    )
 
 
 class VectorRetrievalTier(str, Enum):
@@ -32,9 +71,9 @@ class VectorRetrievalTier(str, Enum):
 
     * ``FULL`` — default top-K + full candidate pool. For knowledge and
       explanation answers that consume the retrieved passages directly.
-    * ``LIGHT`` — ``top_k=2``, reduced candidate pool, no re-rank.  Enough
-      context for narrative data answers that only sprinkle in background
-      definitions.
+    * ``LIGHT`` — ``top_k=2`` and a reduced candidate pool, with the same
+      deterministic metadata/text re-ranking. Enough context for narrative
+      data answers that only sprinkle in background definitions.
     * ``SKIP`` — do not call the vector store at all.  Deterministic data
       paths bypass the LLM summarizer, and clarify paths have no data to
       ground.
@@ -198,6 +237,10 @@ class VectorKnowledgeBundle(BaseModel):
     chunk_count: int = 0
     chunks: List[VectorChunkRecord] = Field(default_factory=list)
     filters: VectorRetrievalFilters = Field(default_factory=VectorRetrievalFilters)
+    outcome: VectorRetrievalOutcome = VectorRetrievalOutcome.not_run
+    failure: Optional[VectorRetrievalFailure] = None
+    # Compatibility field for callers that still use a truthy string. New
+    # retrieval code only writes a content-free ``stage:reason`` code.
     error: str = ""
     # Phase A.2 of the cross-reference plan: chunks fetched via adjacency
     # expansion (preceding/following section by ``chunk_index`` within the
@@ -209,6 +252,51 @@ class VectorKnowledgeBundle(BaseModel):
     # ``VECTOR_REFERENCE_EXPANSION_MODE != "off"``.  Pack consumers ignore
     # this field until B.4 cutover.
     reference_chunks: List[VectorChunkRecord] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _normalize_and_validate_outcome(self) -> "VectorKnowledgeBundle":
+        # Old serialized bundles pre-date ``outcome``. Derive their state so
+        # they remain readable while typed callers migrate.
+        if "outcome" not in self.model_fields_set:
+            if self.failure is not None or self.error:
+                self.outcome = VectorRetrievalOutcome.unavailable
+            elif self.chunks:
+                self.outcome = VectorRetrievalOutcome.matches
+            elif self.top_k == 0:
+                self.outcome = VectorRetrievalOutcome.not_run
+            else:
+                self.outcome = VectorRetrievalOutcome.no_matches
+
+        has_failure = self.failure is not None or bool(self.error)
+        if has_failure and self.outcome is not VectorRetrievalOutcome.unavailable:
+            raise ValueError("retrieval failures require outcome=unavailable")
+        if self.outcome is VectorRetrievalOutcome.unavailable:
+            if self.chunks:
+                raise ValueError("unavailable retrieval cannot carry matched chunks")
+            if not has_failure:
+                raise ValueError("unavailable retrieval requires failure details")
+        elif self.failure is not None:
+            raise ValueError("failure details require outcome=unavailable")
+        if self.outcome is VectorRetrievalOutcome.matches and not self.chunks:
+            raise ValueError("matches outcome requires at least one chunk")
+        if (
+            self.outcome
+            in {VectorRetrievalOutcome.no_matches, VectorRetrievalOutcome.not_run}
+            and self.chunks
+        ):
+            raise ValueError(f"{self.outcome.value} outcome cannot carry chunks")
+        if (
+            self.outcome is VectorRetrievalOutcome.not_run
+            and self.top_k != 0
+        ):
+            raise ValueError("not_run outcome requires top_k=0")
+        return self
+
+    @property
+    def unavailable(self) -> bool:
+        """Whether retrieval failed rather than finding zero evidence."""
+
+        return self.outcome is VectorRetrievalOutcome.unavailable
 
 
 # Registration and ingestion payloads define the write-side contract for new sources.

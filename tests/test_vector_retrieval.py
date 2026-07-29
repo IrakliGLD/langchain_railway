@@ -28,6 +28,9 @@ from contracts.vector_knowledge import (
     VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
+    VectorRetrievalFailureStage,
+    VectorRetrievalOutcome,
+    VectorRetrievalTier,
 )
 from knowledge.vector_retrieval import (
     build_vector_filters,
@@ -185,6 +188,11 @@ def test_retrieve_vector_knowledge_returns_bundle():
     )
     assert bundle.chunk_count == 1
     assert bundle.chunks[0].document_title == "Electricity Market Rules"
+    assert bundle.outcome is VectorRetrievalOutcome.matches
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
 
 
 def test_format_vector_knowledge_for_prompt_includes_source_headers():
@@ -241,7 +249,7 @@ def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):
             raise AssertionError("search_chunks should not be reached when provider init fails")
 
     def fail_provider():
-        raise RuntimeError("gemini sdk missing")
+        raise RuntimeError("gemini sdk missing; token=do-not-leak")
 
     monkeypatch.setattr("knowledge.vector_embeddings.get_embedding_provider", fail_provider)
 
@@ -254,7 +262,148 @@ def test_retrieve_vector_knowledge_captures_provider_init_errors(monkeypatch):
     )
 
     assert bundle.chunk_count == 0
-    assert bundle.error == "gemini sdk missing"
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert (
+        bundle.failure.stage
+        is VectorRetrievalFailureStage.provider_initialization
+    )
+    assert bundle.failure.reason == "RuntimeError"
+    assert "do-not-leak" not in bundle.error
+    assert (
+        bundle.strategy
+        is RetrievalStrategy.dense_with_deterministic_rerank
+    )
+
+
+def test_retrieve_vector_knowledge_reports_no_matches_without_failure():
+    class EmptyStore:
+        def search_chunks(self, **kwargs):
+            return []
+
+        def count_active_documents(self):
+            return 3
+
+    bundle = retrieve_vector_knowledge(
+        "Unrepresented subject",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=EmptyStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.no_matches
+    assert bundle.failure is None
+    assert bundle.error == ""
+
+
+def test_retrieve_vector_knowledge_skip_is_typed_and_does_not_call_dependencies():
+    class FailIfUsed:
+        def __getattr__(self, name):
+            raise AssertionError(f"{name} must not be accessed for SKIP")
+
+    bundle = retrieve_vector_knowledge(
+        "No retrieval needed",
+        retrieval_mode=VectorKnowledgeMode.shadow,
+        store=FailIfUsed(),
+        embedding_provider=FailIfUsed(),
+        tier=VectorRetrievalTier.SKIP,
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.not_run
+    assert bundle.strategy is RetrievalStrategy.not_run
+    assert bundle.top_k == 0
+
+
+def test_retrieve_vector_knowledge_types_vector_search_failure():
+    class FailingStore:
+        def search_chunks(self, **kwargs):
+            raise ConnectionError("database host and credential must stay private")
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=FailingStore(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert bundle.failure.stage is VectorRetrievalFailureStage.vector_search
+    assert bundle.failure.reason == "ConnectionError"
+    assert "credential" not in bundle.error
+
+
+def test_retrieve_vector_knowledge_types_401_query_embedding_failure():
+    class AccessTokenError(RuntimeError):
+        status_code = 401
+        details = {
+            "error": {
+                "details": [
+                    {"reason": "ACCESS_TOKEN_TYPE_UNSUPPORTED"},
+                ]
+            }
+        }
+
+    class FailingEmbeddingProvider:
+        def embed_query(self, text):
+            raise AccessTokenError(
+                "raw provider message; api_key=must-not-leak"
+            )
+
+    class FailIfSearched:
+        def search_chunks(self, **kwargs):
+            raise AssertionError("search must not run after embedding failure")
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=FailIfSearched(),
+        embedding_provider=FailingEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert (
+        bundle.failure.stage
+        is VectorRetrievalFailureStage.query_embedding
+    )
+    assert (
+        bundle.failure.reason
+        == "401/ACCESS_TOKEN_TYPE_UNSUPPORTED"
+    )
+    assert "must-not-leak" not in bundle.error
+
+
+def test_retrieve_vector_knowledge_bounds_structured_failure_reason():
+    class VerboseStructuredError(RuntimeError):
+        details = {
+            "error": {
+                "details": [
+                    {"reason": f"SAFE_PROVIDER_REASON_{index:02d}_ABCDEFGHIJKLMN"}
+                    for index in range(8)
+                ]
+            }
+        }
+
+    class FailingEmbeddingProvider:
+        def embed_query(self, text):
+            raise VerboseStructuredError("raw message must remain private")
+
+    bundle = retrieve_vector_knowledge(
+        "What is GENEX?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        question_analysis=None,
+        store=object(),
+        embedding_provider=FailingEmbeddingProvider(),
+    )
+
+    assert bundle.outcome is VectorRetrievalOutcome.unavailable
+    assert bundle.failure is not None
+    assert 1 <= len(bundle.failure.reason) <= 128
+    assert "raw message" not in bundle.error
 
 
 def test_retrieve_vector_knowledge_retries_without_language_filter_when_empty():
@@ -1046,7 +1195,7 @@ def test_resolve_adjacent_chunks_returns_empty_for_empty_bundle():
 def test_resolve_adjacent_chunks_returns_empty_when_bundle_errored():
     """A failed retrieval should not trigger adjacency calls."""
     store = FakeAdjacencyStore()
-    bundle = _bundle([_make_chunk(chunk_id="c-1", chunk_index=5)], error="transient")
+    bundle = _bundle([], error="transient")
     assert resolve_adjacent_chunks(bundle, store=store) == []
     assert store.calls == []
 
@@ -2081,4 +2230,3 @@ def test_injected_provider_bypasses_embedding_cache():
             embedding_provider=provider,
         )
     assert calls["n"] == 2
-

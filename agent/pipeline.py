@@ -96,7 +96,11 @@ from contracts.question_analysis import (
     PreferredPath,
     RenderStyle,
 )
-from contracts.vector_knowledge import VectorKnowledgeMode, VectorRetrievalTier
+from contracts.vector_knowledge import (
+    VectorKnowledgeMode,
+    VectorRetrievalOutcome,
+    VectorRetrievalTier,
+)
 from core.db_gateway import database_connection
 from core.db_work_coordinator import (
     DatabaseWorkCapacityExceeded,
@@ -368,7 +372,21 @@ def _derive_response_mode(ctx: QueryContext) -> str:
                     getattr(ctx.vector_knowledge, "chunk_count", 0) > 0
                     or (
                         qa_type == "factual_lookup"
-                        and bool(getattr(ctx, "vector_knowledge_error", ""))
+                        and (
+                            getattr(
+                                ctx,
+                                "vector_knowledge_outcome",
+                                None,
+                            )
+                            is VectorRetrievalOutcome.unavailable
+                            or bool(
+                                getattr(
+                                    ctx,
+                                    "vector_knowledge_error",
+                                    "",
+                                )
+                            )
+                        )
                     )
                 )
             ):
@@ -2547,15 +2565,24 @@ def _run_vector_knowledge_stage(
 ) -> None:
     """Stage 0.3 - vector-backed knowledge retrieval (shadow/active).
 
-    No-op when the feature is disabled or the tier is SKIP. Extracted from
-    process_query (audit P0-4b); uses the module-level _emit_trace_stage rather
-    than the process_query-local _trace_stage closure.
+    Records ``not_run`` without touching dependencies when the feature is
+    disabled or the tier is SKIP. Extracted from process_query (audit P0-4b);
+    uses the module-level _emit_trace_stage rather than the
+    process_query-local _trace_stage closure.
     """
     # Stage 0.3: vector-backed knowledge retrieval (shadow/active collection only)
     if (
-        (ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS)
-        and _retrieval_tier != VectorRetrievalTier.SKIP
+        not (
+            ENABLE_VECTOR_KNOWLEDGE_SHADOW
+            or ENABLE_VECTOR_KNOWLEDGE_HINTS
+        )
+        or _retrieval_tier == VectorRetrievalTier.SKIP
     ):
+        ctx.vector_knowledge_outcome = VectorRetrievalOutcome.not_run
+        ctx.vector_knowledge_error = ""
+        return
+
+    if ENABLE_VECTOR_KNOWLEDGE_SHADOW or ENABLE_VECTOR_KNOWLEDGE_HINTS:
         t_stage = time.time()
         retrieval_mode = "active" if ENABLE_VECTOR_KNOWLEDGE_HINTS else "shadow"
         bundle = retrieve_vector_knowledge(
@@ -2570,11 +2597,14 @@ def _run_vector_knowledge_stage(
         )
         ctx.vector_knowledge = bundle
         ctx.vector_knowledge_source = f"vector_{retrieval_mode}"
-        ctx.vector_knowledge_error = bundle.error
+        ctx.vector_knowledge_outcome = bundle.outcome
+        ctx.vector_knowledge_error = (
+            bundle.error if bundle.unavailable else ""
+        )
 
         packed_vector_knowledge = (
             pack_vector_knowledge_for_prompt(bundle)
-            if not bundle.error
+            if not bundle.unavailable
             else None
         )
         ctx.vector_knowledge_prompt = (
@@ -2602,7 +2632,17 @@ def _run_vector_knowledge_stage(
             packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
             packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
             packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
-            error=bundle.error,
+            outcome=bundle.outcome.value,
+            failure_stage=(
+                bundle.failure.stage.value
+                if bundle.failure is not None
+                else ""
+            ),
+            failure_reason=(
+                bundle.failure.reason
+                if bundle.failure is not None
+                else ""
+            ),
         )
         _emit_trace_stage(
             ctx,
@@ -2611,7 +2651,8 @@ def _run_vector_knowledge_stage(
             mode=retrieval_mode,
             tier=_retrieval_tier.value,
             chunk_count=bundle.chunk_count,
-            error=bool(bundle.error),
+            error=bundle.unavailable,
+            outcome=bundle.outcome.value,
             strategy=bundle.strategy.value,
         )
         # Phase A.2: adjacency observability. When

@@ -40,6 +40,7 @@ from contracts.report_research import (
 )
 from contracts.vector_knowledge import (
     VectorKnowledgeMode,
+    VectorRetrievalOutcome,
     VectorRetrievalTier,
 )
 from knowledge.vector_retrieval import retrieve_vector_knowledge
@@ -269,7 +270,7 @@ def _collect_vector_knowledge(
         retrieval_mode=VectorKnowledgeMode.active,
         tier=VectorRetrievalTier.FULL,
     )
-    if bundle.error:
+    if bundle.outcome is VectorRetrievalOutcome.unavailable:
         return ReportCollectorOutput(
             collector_id=ReportCollectorId.VECTOR_KNOWLEDGE,
             gaps=("COLLECTOR_VECTOR_KNOWLEDGE_FAILED",),

@@ -26,6 +26,14 @@ from contracts.report_research import (
     ReportEvidencePacket,
     ReportResearchPlan,
 )
+from contracts.vector_knowledge import (
+    RetrievalStrategy,
+    VectorKnowledgeBundle,
+    VectorKnowledgeMode,
+    VectorRetrievalFailure,
+    VectorRetrievalFailureStage,
+    VectorRetrievalOutcome,
+)
 from tests.test_report_research_contract import (
     _research_plan_payload,
     _table_item,
@@ -448,6 +456,52 @@ def test_default_price_collector_uses_query_metric_and_currency(
     assert output.items
     assert captured["metric"] == "deregulated"
     assert captured["currency"] == "usd"
+
+
+def test_default_vector_collector_distinguishes_unavailable_from_no_evidence(
+    monkeypatch,
+):
+    def unavailable(*_args, **_kwargs):
+        return VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            top_k=6,
+            outcome=VectorRetrievalOutcome.unavailable,
+            failure=VectorRetrievalFailure(
+                stage=VectorRetrievalFailureStage.vector_search,
+                reason="ConnectionError",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "agent.report_research_execution.retrieve_vector_knowledge",
+        unavailable,
+    )
+    failed = DEFAULT_REPORT_COLLECTORS[
+        ReportCollectorId.VECTOR_KNOWLEDGE
+    ]("query", _plan().scope)
+
+    monkeypatch.setattr(
+        "agent.report_research_execution.retrieve_vector_knowledge",
+        lambda *_args, **_kwargs: VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=(
+                RetrievalStrategy.dense_with_deterministic_rerank
+            ),
+            top_k=6,
+            outcome=VectorRetrievalOutcome.no_matches,
+        ),
+    )
+    empty = DEFAULT_REPORT_COLLECTORS[
+        ReportCollectorId.VECTOR_KNOWLEDGE
+    ]("query", _plan().scope)
+
+    assert failed.failed is True
+    assert failed.gaps == ("COLLECTOR_VECTOR_KNOWLEDGE_FAILED",)
+    assert empty.failed is False
+    assert empty.gaps == ("COLLECTOR_VECTOR_KNOWLEDGE_NO_EVIDENCE",)
 
 
 def test_research_execution_rejects_unbounded_worker_counts():
