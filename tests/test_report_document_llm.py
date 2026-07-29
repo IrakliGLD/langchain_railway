@@ -14,7 +14,14 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import core.llm as llm
-from agent.report_document_generation import validate_report_document
+from agent.report_document_generation import (
+    validate_report_document,
+)
+from agent.report_sections import count_section_words
+from contracts.report import (
+    report_aggregate_word_bounds,
+    report_section_validation_word_bounds,
+)
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentRepair,
@@ -181,12 +188,34 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     ) = _document_components()
     draft = _valid_document_draft(document_plan, manifest)
     payload = draft.model_dump(mode="json")
-    payload["analytical_sections"][0]["paragraphs"][0][
-        "direct_claims"
-    ] = []
-    payload["analytical_sections"][0]["paragraphs"][0]["text"] = " ".join(
-        "unsupported" for _ in range(260)
+    spec_by_id = {
+        section.section_id: section for section in document_plan.sections
+    }
+    section_payloads = [
+        *payload["analytical_sections"],
+        payload["implications_section"],
+        payload["limitations_section"],
+        payload["executive_summary"],
+    ]
+    price_spec = spec_by_id["prices"]
+    _, price_maximum = report_section_validation_word_bounds(
+        price_spec.target_words
     )
+    for section_payload in section_payloads:
+        section_id = section_payload["section_id"]
+        _, maximum_words = report_section_validation_word_bounds(
+            spec_by_id[section_id].target_words
+        )
+        paragraph = section_payload["paragraphs"][0]
+        current_words = count_section_words(paragraph["text"])
+        paragraph["text"] += " " + " ".join(
+            "f"
+            for _ in range(
+                maximum_words
+                + (section_id == "prices")
+                - current_words
+            )
+        )
     rejected = ReportDocumentDraft.model_validate(payload)
     validation = validate_report_document(
         rejected,
@@ -264,3 +293,38 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert '"track_id":"prices"' in user[1]
     assert '"track_id":"security"' not in user[1]
     assert "VALIDATION_ERRORS" in user[1]
+    errors_json = user[1].split(
+        "VALIDATION_ERRORS:\n",
+        1,
+    )[1].split("\n\nREJECTED_SECTIONS:", 1)[0]
+    repair_context = json.loads(errors_json)
+    document_minimum, document_maximum = report_aggregate_word_bounds(
+        [section.target_words for section in document_plan.sections]
+    )
+    assert repair_context["document"] == {
+        "error_codes": validation.document_errors,
+        "word_count": validation.word_count,
+        "minimum_words": document_minimum,
+        "maximum_words": document_maximum,
+        "required_reduction_words": 1,
+        "required_additional_words": 0,
+    }
+    assert repair_context["document"]["error_codes"] == [
+        "DOCUMENT_WORD_COUNT_TOO_LONG"
+    ]
+    assert repair_context["sections"]["prices"] == {
+        "error_codes": validation.section_errors["prices"],
+        "word_count": price_maximum + 1,
+        "minimum_words": report_section_validation_word_bounds(
+            price_spec.target_words
+        )[0],
+        "maximum_words": price_maximum,
+        "required_reduction_words": 1,
+        "required_additional_words": 0,
+    }
+    plan_json = user[1].split(
+        "REJECTED_SECTION_PLAN_AND_WORD_BOUNDS:\n",
+        1,
+    )[1].split("\n\nRESEARCH_SCOPE:", 1)[0]
+    repair_plan = json.loads(plan_json)
+    assert repair_plan["sections"][0]["maximum_words"] == price_maximum

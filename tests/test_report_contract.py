@@ -16,6 +16,8 @@ from contracts.report import (
     ReportSectionKind,
     normalize_report_plan_semantics,
     normalize_report_plan_word_budget,
+    report_aggregate_word_bounds,
+    report_section_validation_word_bounds,
 )
 from skills.loader import get_report_guidance, validate_skills
 
@@ -152,6 +154,17 @@ def test_word_budget_normalization_is_bounded_deterministic_and_non_mutating(
     ]
     assert sum(normalized_targets) == target_words
     assert all(40 <= target <= 800 for target in normalized_targets)
+
+
+def test_aggregate_hard_ceiling_matches_section_hard_ceilings():
+    targets = [150] * 8
+
+    _, aggregate_maximum = report_aggregate_word_bounds(targets)
+
+    assert aggregate_maximum == sum(
+        report_section_validation_word_bounds(target)[1]
+        for target in targets
+    )
 
 
 def test_report_plan_schema_is_closed_at_every_level():

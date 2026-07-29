@@ -210,7 +210,7 @@ def test_section_repair_attempt_stage_includes_local_attempt_number(monkeypatch)
         section,
         _manifest(),
         _draft(section),
-        ["WORD_COUNT_OUT_OF_RANGE"],
+        ["WORD_COUNT_TOO_SHORT"],
         attempt_number=2,
     )
 
@@ -329,12 +329,12 @@ def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):
         section,
         _manifest(),
         candidate,
-        ["WORD_COUNT_OUT_OF_RANGE"],
+        ["WORD_COUNT_TOO_SHORT"],
     )
 
     assert repaired.section_id == section.section_id
     assert captured["label"] == "Report section repair"
-    assert "WORD_COUNT_OUT_OF_RANGE" in captured["messages"][1][1]
+    assert "WORD_COUNT_TOO_SHORT" in captured["messages"][1][1]
     assert candidate.paragraphs[0].text in captured["messages"][1][1]
     assert (
         f'"minimum_words":{math.floor(section.target_words * 0.9)}'
@@ -749,7 +749,7 @@ def test_section_repair_resamples_instead_of_regenerating_the_same_draft(monkeyp
             section,
             _manifest(),
             draft,
-            ["WORD_COUNT_OUT_OF_RANGE"],
+            ["WORD_COUNT_TOO_LONG"],
             attempt_number=attempt_number,
         )
 

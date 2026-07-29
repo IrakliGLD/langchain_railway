@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -10,7 +12,10 @@ from pydantic import ValidationError
 
 from agent.report_grounding import build_evidence_grounding_index
 from agent.report_sections import count_section_words, validate_report_section
-from contracts.report import report_aggregate_word_bounds
+from contracts.report import (
+    report_aggregate_word_bounds,
+    report_section_validation_word_bounds,
+)
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentPlan,
@@ -27,6 +32,7 @@ from contracts.report_research import (
 DocumentWriter = Callable[..., Any]
 DocumentRepairer = Callable[..., Any]
 _TOKEN_PATTERN = re.compile(r"\b[\w'-]+\b", re.UNICODE)
+_LOGGER = logging.getLogger("Enai.ReportDocument")
 
 
 class ReportDocumentGenerationError(RuntimeError):
@@ -44,6 +50,64 @@ class ReportDocumentGenerationError(RuntimeError):
             "Report document failed validation: "
             + ",".join(dict.fromkeys(codes))
         )
+
+
+def _log_document_diagnostic(
+    *,
+    event: str,
+    plan: ReportDocumentPlan,
+    validation: ReportDocumentValidation,
+    draft: ReportDocumentDraft | None,
+    repair_section_ids: Sequence[str],
+) -> None:
+    minimum_words, maximum_words = report_aggregate_word_bounds(
+        [section.target_words for section in plan.sections]
+    )
+    section_by_id = (
+        {
+            section.section_id: section
+            for section in draft.generation_order_sections()
+        }
+        if draft is not None
+        else {}
+    )
+    section_word_counts = {
+        section_id: count_section_words(section.content_markdown)
+        for section_id, section in section_by_id.items()
+    }
+    section_bounds = {
+        section.section_id: {
+            "minimum_words": report_section_validation_word_bounds(
+                section.target_words
+            )[0],
+            "maximum_words": report_section_validation_word_bounds(
+                section.target_words
+            )[1],
+        }
+        for section in plan.sections
+    }
+    _LOGGER.info(
+        "REPORT_DOCUMENT_DIAGNOSTIC %s",
+        json.dumps(
+            {
+                "document_error_codes": validation.document_errors,
+                "event": event,
+                "failing_section_ids": sorted(
+                    validation.section_errors
+                ),
+                "maximum_words": maximum_words,
+                "minimum_words": minimum_words,
+                "repair_section_ids": list(repair_section_ids),
+                "section_bounds": section_bounds,
+                "section_error_codes": validation.section_errors,
+                "section_word_counts": section_word_counts,
+                "word_count": validation.word_count,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 def _expected_role_ids(
@@ -222,8 +286,10 @@ def validate_report_document(
     minimum_words, maximum_words = report_aggregate_word_bounds(
         [section.target_words for section in plan.sections]
     )
-    if not minimum_words <= total_words <= maximum_words:
-        document_errors.append("DOCUMENT_WORD_COUNT_OUT_OF_RANGE")
+    if total_words < minimum_words:
+        document_errors.append("DOCUMENT_WORD_COUNT_TOO_SHORT")
+    elif total_words > maximum_words:
+        document_errors.append("DOCUMENT_WORD_COUNT_TOO_LONG")
 
     document_errors = list(dict.fromkeys(document_errors))
     return ReportDocumentValidation(
@@ -317,6 +383,37 @@ def _document_from_repair(
     )
 
 
+def _repair_moves_word_counts_in_required_direction(
+    draft: ReportDocumentDraft,
+    repair: ReportDocumentRepair,
+    validation: ReportDocumentValidation,
+) -> bool:
+    original_by_id = {
+        section.section_id: section
+        for section in draft.generation_order_sections()
+    }
+    for replacement in repair.sections:
+        original = original_by_id[replacement.section_id]
+        original_words = count_section_words(original.content_markdown)
+        replacement_words = count_section_words(
+            replacement.content_markdown
+        )
+        error_codes = set(
+            validation.section_errors.get(replacement.section_id, [])
+        )
+        if (
+            "WORD_COUNT_TOO_LONG" in error_codes
+            and replacement_words >= original_words
+        ):
+            return False
+        if (
+            "WORD_COUNT_TOO_SHORT" in error_codes
+            and replacement_words <= original_words
+        ):
+            return False
+    return True
+
+
 def generate_report_document(
     query: str,
     plan: ReportDocumentPlan,
@@ -373,7 +470,10 @@ def generate_report_document(
         invalid_section_ids = [
             section.section_id for section in plan.sections
         ]
-    elif validation.document_errors:
+    elif set(validation.document_errors) - {
+        "DOCUMENT_WORD_COUNT_TOO_SHORT",
+        "DOCUMENT_WORD_COUNT_TOO_LONG",
+    }:
         invalid_section_ids = list(
             dict.fromkeys(
                 [
@@ -389,6 +489,13 @@ def generate_report_document(
         from core.llm import llm_repair_report_document_sections
 
         repair_sections = llm_repair_report_document_sections
+    _log_document_diagnostic(
+        event="repair_requested",
+        plan=plan,
+        validation=validation,
+        draft=draft,
+        repair_section_ids=invalid_section_ids,
+    )
     raw_repair = repair_sections(
         query,
         plan,
@@ -411,6 +518,14 @@ def generate_report_document(
         invalid_section_ids
     ):
         raise ReportDocumentGenerationError(validation)
+    repair_moves_in_required_direction = (
+        draft is None
+        or _repair_moves_word_counts_in_required_direction(
+            draft,
+            repair,
+            validation,
+        )
+    )
 
     repaired_draft = (
         _document_from_repair(plan, repair)
@@ -423,6 +538,23 @@ def generate_report_document(
         manifest,
         research_plan,
     )
+    _log_document_diagnostic(
+        event=(
+            "repair_direction_rejected"
+            if not repair_moves_in_required_direction
+            else (
+                "repair_validated"
+                if repaired_validation.valid
+                else "repair_rejected"
+            )
+        ),
+        plan=plan,
+        validation=repaired_validation,
+        draft=repaired_draft,
+        repair_section_ids=invalid_section_ids,
+    )
+    if not repair_moves_in_required_direction:
+        raise ReportDocumentGenerationError(validation)
     if not repaired_validation.valid:
         raise ReportDocumentGenerationError(repaired_validation)
     return repaired_draft

@@ -230,6 +230,35 @@ def test_section_validation_enforces_budget_refs_and_numeric_grounding():
     assert "REQUIRED_EVIDENCE_NOT_USED" in wrong_ref.error_codes
 
 
+def test_section_word_count_errors_are_directional():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    minimum_words = math.floor(section.target_words * 0.9)
+    maximum_words = math.ceil(section.target_words * 1.35)
+
+    too_short = validate_report_section(
+        ReportSectionDraft.model_validate(
+            _draft(section, text=_words(minimum_words - 1))
+        ),
+        section,
+        _manifest(),
+    )
+    too_long = validate_report_section(
+        ReportSectionDraft.model_validate(
+            _draft(section, text=_words(maximum_words + 1))
+        ),
+        section,
+        _manifest(),
+    )
+
+    assert "WORD_COUNT_TOO_SHORT" in too_short.error_codes
+    assert "WORD_COUNT_TOO_LONG" in too_long.error_codes
+    assert "WORD_COUNT_OUT_OF_RANGE" not in {
+        *too_short.error_codes,
+        *too_long.error_codes,
+    }
+
+
 def test_section_validation_extracts_each_evidence_fact_set_once(monkeypatch):
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[2]
@@ -1092,7 +1121,7 @@ def test_only_invalid_sections_receive_one_repair_call():
 
     def repair(_query, _plan, section, _manifest, _draft_value, error_codes):
         repaired[section.section_id] += 1
-        assert "WORD_COUNT_OUT_OF_RANGE" in error_codes
+        assert "WORD_COUNT_TOO_SHORT" in error_codes
         return _draft(section)
 
     drafts = generate_report_sections(
@@ -1158,7 +1187,7 @@ def test_invalid_section_can_converge_on_second_local_repair():
         failed_section.section_id,
         failed_section.section_id,
     ]
-    assert "WORD_COUNT_OUT_OF_RANGE" in repair_calls[0][1]
+    assert "WORD_COUNT_TOO_SHORT" in repair_calls[0][1]
     assert repair_calls[1][1] == ["UNGROUNDED_NUMERIC_CLAIM"]
     assert drafts[0].section_id == failed_section.section_id
 
@@ -1254,9 +1283,9 @@ def test_failed_repair_aborts_with_typed_section_error(caplog):
     assert exc_info.value.section_id in {
         section.section_id for section in plan.sections
     }
-    assert "WORD_COUNT_OUT_OF_RANGE" in exc_info.value.error_codes
+    assert "WORD_COUNT_TOO_SHORT" in exc_info.value.error_codes
     assert '"section_id":' in caplog.text
-    assert "WORD_COUNT_OUT_OF_RANGE" in caplog.text
+    assert "WORD_COUNT_TOO_SHORT" in caplog.text
     assert "This repaired section" not in caplog.text
 
 
@@ -1872,10 +1901,9 @@ def test_section_word_tolerance_admits_observed_model_overshoot():
     assert maximum_words >= 141
 
 
-def test_aggregate_word_budget_repairs_largest_overrun_before_return():
+def test_aggregate_hard_budget_accepts_sections_within_hard_tolerance():
     plan = ReportPlan.model_validate(_plan_payload())
     manifest = _manifest()
-    repaired = []
 
     def generate(_query, _plan, section, _manifest_value):
         return _draft(
@@ -1883,61 +1911,21 @@ def test_aggregate_word_budget_repairs_largest_overrun_before_return():
             text=_words(math.ceil(section.target_words * 1.25)),
         )
 
-    def repair(
-        _query,
-        _plan,
-        section,
-        _manifest_value,
-        _draft_value,
-        error_codes,
-    ):
-        repaired.append((section.section_id, error_codes))
-        return _draft(section)
-
     drafts = generate_report_sections(
         "Explain the price trend.",
         plan,
         manifest,
         generate_section=generate,
-        repair_section=repair,
+        repair_section=lambda *_args, **_kwargs: pytest.fail(
+            "a section within the hard tolerance must not be repaired"
+        ),
         max_workers=len(plan.sections),
     )
 
-    assert repaired == [
-        ("key_findings", ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"])
-    ]
     assert sum(
         validate_report_section(draft, section, manifest).word_count
         for section, draft in zip(plan.sections, drafts, strict=True)
-    ) <= sum(math.ceil(section.target_words * 1.2) for section in plan.sections)
-
-
-def test_aggregate_word_budget_fails_when_repairs_do_not_reduce_total():
-    plan = ReportPlan.model_validate(_plan_payload())
-
-    def oversized(section):
-        return _draft(
-            section,
-            text=_words(math.ceil(section.target_words * 1.25)),
-        )
-
-    with pytest.raises(ReportSectionGenerationError) as exc_info:
-        generate_report_sections(
-            "Explain the price trend.",
-            plan,
-            _manifest(),
-            generate_section=lambda _q, _p, section, _m: oversized(section),
-            repair_section=(
-                lambda _q, _p, section, _m, _draft_value, _errors: (
-                    oversized(section)
-                )
-            ),
-            max_workers=len(plan.sections),
-        )
-
-    assert exc_info.value.error_codes == [
-        "AGGREGATE_WORD_COUNT_OUT_OF_RANGE"
-    ]
+    ) <= sum(math.ceil(section.target_words * 1.35) for section in plan.sections)
 
 
 def test_direct_claim_may_be_rendered_at_readable_precision():

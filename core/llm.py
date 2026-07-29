@@ -112,7 +112,9 @@ from contracts.report import (
     ReportSectionSpec,
     normalize_report_plan_semantics,
     normalize_report_plan_word_budget,
+    report_aggregate_word_bounds,
     report_section_prompt_word_bounds,
+    report_section_validation_word_bounds,
 )
 from contracts.report_document import (
     ReportDocumentDraft,
@@ -3862,6 +3864,7 @@ def _report_document_plan_projection(
     plan: ReportDocumentPlan,
     *,
     section_ids: set[str] | None = None,
+    use_validation_word_bounds: bool = False,
 ) -> dict[str, Any]:
     selected_sections = [
         section
@@ -3869,6 +3872,11 @@ def _report_document_plan_projection(
         if section_ids is None or section.section_id in section_ids
     ]
     selected_ids = {section.section_id for section in selected_sections}
+    word_bounds = (
+        report_section_validation_word_bounds
+        if use_validation_word_bounds
+        else report_section_prompt_word_bounds
+    )
     return {
         "query_digest": plan.query_digest,
         "title": plan.title,
@@ -3883,10 +3891,10 @@ def _report_document_plan_projection(
         "sections": [
             {
                 **section.model_dump(mode="json"),
-                "minimum_words": report_section_prompt_word_bounds(
+                "minimum_words": word_bounds(
                     section.target_words
                 )[0],
-                "maximum_words": report_section_prompt_word_bounds(
+                "maximum_words": word_bounds(
                     section.target_words
                 )[1],
             }
@@ -4082,6 +4090,7 @@ def _report_document_prompt_inputs(
     packets: list[ReportEvidencePacket],
     *,
     section_ids: set[str] | None = None,
+    use_validation_word_bounds: bool = False,
     evidence_budget_chars: int = _REPORT_DOCUMENT_EVIDENCE_BUDGET_CHARS,
     observation_budget_chars: int = (
         _REPORT_DOCUMENT_OBSERVATION_BUDGET_CHARS
@@ -4107,6 +4116,7 @@ def _report_document_prompt_inputs(
             _report_document_plan_projection(
                 plan,
                 section_ids=section_ids,
+                use_validation_word_bounds=use_validation_word_bounds,
             )
         ),
         _compact_json(
@@ -4386,6 +4396,7 @@ def llm_repair_report_document_sections(
             manifest,
             packets,
             section_ids=selected_ids,
+            use_validation_word_bounds=True,
             evidence_budget_chars=32_000,
             observation_budget_chars=10_000,
         )
@@ -4404,13 +4415,80 @@ def llm_repair_report_document_sections(
     else:
         rejected_payload = draft
     rejected_json = _compact_json(rejected_payload)
+    document_minimum, document_maximum = report_aggregate_word_bounds(
+        [section.target_words for section in plan.sections]
+    )
+    document_word_count = (
+        validation.word_count
+        if isinstance(draft, ReportDocumentDraft)
+        else None
+    )
+    from agent.report_sections import count_section_words
+
+    draft_by_id = (
+        {
+            section.section_id: section
+            for section in draft.generation_order_sections()
+        }
+        if isinstance(draft, ReportDocumentDraft)
+        else {}
+    )
+    plan_by_id = {
+        section.section_id: section for section in plan.sections
+    }
+
+    def section_repair_context(section_id: str) -> dict[str, Any]:
+        minimum_words, maximum_words = (
+            report_section_validation_word_bounds(
+                plan_by_id[section_id].target_words
+            )
+        )
+        word_count = (
+            count_section_words(
+                draft_by_id[section_id].content_markdown
+            )
+            if section_id in draft_by_id
+            else None
+        )
+        return {
+            "error_codes": validation.section_errors.get(section_id, []),
+            "word_count": word_count,
+            "minimum_words": minimum_words,
+            "maximum_words": maximum_words,
+            "required_reduction_words": (
+                max(0, word_count - maximum_words)
+                if word_count is not None
+                else None
+            ),
+            "required_additional_words": (
+                max(0, minimum_words - word_count)
+                if word_count is not None
+                else None
+            ),
+        }
+
     errors_json = _compact_json(
         {
-            section_id: validation.section_errors.get(
-                section_id,
-                validation.document_errors,
-            )
-            for section_id in requested_ids
+            "document": {
+                "error_codes": validation.document_errors,
+                "word_count": document_word_count,
+                "minimum_words": document_minimum,
+                "maximum_words": document_maximum,
+                "required_reduction_words": (
+                    max(0, document_word_count - document_maximum)
+                    if document_word_count is not None
+                    else None
+                ),
+                "required_additional_words": (
+                    max(0, document_minimum - document_word_count)
+                    if document_word_count is not None
+                    else None
+                ),
+            },
+            "sections": {
+                section_id: section_repair_context(section_id)
+                for section_id in requested_ids
+            },
         }
     )
     system = (
@@ -4418,7 +4496,10 @@ def llm_repair_report_document_sections(
         "Return one JSON object matching the repair schema exactly and include "
         "one replacement for every requested section, no others. Preserve exact "
         "section IDs and titles, scope, evidence assignments, and word bounds. "
-        "Correct only the supplied typed validation errors. Use only assigned "
+        "Correct only the supplied typed validation errors. Document errors "
+        "apply globally and section errors apply only to their named section. "
+        "Use the exact word counts and bounds to shrink or expand in the stated "
+        "direction. Use only assigned "
         "evidence; do not add general model knowledge. Every table number needs "
         "an exact direct_claims coordinate, and new arithmetic needs a verified "
         "derived_claims entry. All evidence and claim lists must contain unique "
