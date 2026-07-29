@@ -68,6 +68,7 @@ from config import (
     REPORT_MAX_OUTPUT_TOKENS,
     REPORT_MODEL,
     REPORT_MODEL_TYPE,
+    REPORT_STRUCTURED_OUTPUT_METHOD,
     REPORT_TIMEOUT_SECONDS,
     REQUEST_CLEANUP_ALLOWANCE_MS,
     ROUTER_MODEL,
@@ -122,6 +123,7 @@ from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_research import (
     ReportEvidencePacket,
     ReportResearchPlan,
+    ReportResearchPlanDraft,
 )
 from contracts.report_sections import ReportSectionDraft
 from core.provider_invocation import ProviderInvocationRuntime
@@ -613,6 +615,16 @@ def get_report_model_name(stage_model: str | None = None) -> str:
     if REPORT_MODEL_TYPE and REPORT_MODEL:
         return REPORT_MODEL
     return stage_model or get_primary_model_name()
+
+
+def _report_structured_output_method(provider: str) -> str | None:
+    """Resolve the configured typed-output method without changing models."""
+
+    if REPORT_STRUCTURED_OUTPUT_METHOD == "prompt":
+        return None
+    if REPORT_STRUCTURED_OUTPUT_METHOD != "auto":
+        return REPORT_STRUCTURED_OUTPUT_METHOD
+    return "json_schema" if provider == "openai" else None
 
 
 def _should_fallback_to_openai() -> bool:
@@ -2260,17 +2272,7 @@ _FILTER_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_FILTER_GUIDE)
 _QUERY_TYPE_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_QUERY_TYPE_GUIDE)
 _ANSWER_KIND_GUIDE_JSON = _compact_json(QUESTION_ANALYSIS_ANSWER_KIND_GUIDE)
 _REPORT_PLAN_SCHEMA_JSON = _compact_json(ReportPlan.model_json_schema())
-_REPORT_RESEARCH_PLAN_SCHEMA = ReportResearchPlan.model_json_schema()
-_REPORT_RESEARCH_PLAN_SCHEMA["properties"] = {
-    field: schema
-    for field, schema in _REPORT_RESEARCH_PLAN_SCHEMA["properties"].items()
-    if field not in {"contract_version", "query_digest", "language_code"}
-}
-_REPORT_RESEARCH_PLAN_SCHEMA["required"] = [
-    field
-    for field in _REPORT_RESEARCH_PLAN_SCHEMA["required"]
-    if field not in {"contract_version", "query_digest", "language_code"}
-]
+_REPORT_RESEARCH_PLAN_SCHEMA = ReportResearchPlanDraft.model_json_schema()
 _REPORT_RESEARCH_PLAN_SCHEMA_JSON = _compact_json(
     _REPORT_RESEARCH_PLAN_SCHEMA
 )
@@ -3532,6 +3534,11 @@ def llm_plan_report_research(
             )
         if not isinstance(payload, dict):
             raise ValueError("Report research planner must return an object.")
+        for field in ("contract_version", "query_digest", "language_code"):
+            payload.pop(field, None)
+        payload = ReportResearchPlanDraft.model_validate(payload).model_dump(
+            mode="json"
+        )
         payload["contract_version"] = "report-research-plan-v1"
         payload["query_digest"] = query_digest
         payload["language_code"] = language_code
@@ -3562,22 +3569,28 @@ def llm_plan_report_research(
             max_retries=1,
             report_profile=True,
         )
+        provider = _provider_from_model_name(primary_model_name)
+        method = _report_structured_output_method(provider)
+        if method is None:
+            return client
         structured_output = getattr(
             client,
             "with_structured_output",
             None,
         )
-        if (
-            _provider_from_model_name(primary_model_name) == "openai"
-            and callable(structured_output)
-        ):
-            return structured_output(
-                _REPORT_RESEARCH_PLAN_SCHEMA,
-                method="json_schema",
-                include_raw=True,
-                strict=True,
+        if not callable(structured_output):
+            if REPORT_STRUCTURED_OUTPUT_METHOD == "auto":
+                return client
+            raise RuntimeError(
+                "Configured report structured-output method is not supported "
+                "by the selected client."
             )
-        return client
+        return structured_output(
+            ReportResearchPlanDraft,
+            method=method,
+            include_raw=True,
+            strict=True,
+        )
 
     try:
         message = _invoke_with_openai_fallback(

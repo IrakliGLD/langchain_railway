@@ -305,6 +305,20 @@ REPORT_TIMEOUT_SECONDS = _read_bounded_int_env(
 REPORT_REASONING_EFFORT = (
     os.getenv("REPORT_REASONING_EFFORT", "").strip().lower() or None
 )
+REPORT_STRUCTURED_OUTPUT_METHOD = os.getenv(
+    "REPORT_STRUCTURED_OUTPUT_METHOD",
+    "auto",
+).strip().lower()
+if REPORT_STRUCTURED_OUTPUT_METHOD not in {
+    "auto",
+    "json_schema",
+    "function_calling",
+    "prompt",
+}:
+    raise RuntimeError(
+        "Invalid REPORT_STRUCTURED_OUTPUT_METHOD. Expected one of: "
+        "auto, json_schema, function_calling, prompt"
+    )
 
 # Merely configuring OPENAI_API_KEY must not turn OpenAI into an implicit
 # fallback for Gemini or NVIDIA. Fallback is opt-in and disabled by default.

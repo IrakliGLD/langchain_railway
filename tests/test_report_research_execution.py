@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+from copy import deepcopy
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
@@ -143,6 +144,119 @@ def test_collector_failure_becomes_a_typed_partial_packet_not_global_failure():
     assert "provider detail" not in " ".join(
         security.gaps + market_model.gaps
     )
+
+
+def test_knowledge_collector_runs_per_track_with_track_research_questions():
+    knowledge_queries = []
+
+    def knowledge(query, _scope):
+        knowledge_queries.append(query)
+        return _knowledge_output()
+
+    execute_report_research(
+        _QUERY,
+        _plan(),
+        max_workers=3,
+        collectors={
+            ReportCollectorId.PRICES: (
+                lambda _query, _scope: _table_output(
+                    ReportCollectorId.PRICES
+                )
+            ),
+            ReportCollectorId.GENERATION_MIX: (
+                lambda _query, _scope: _table_output(
+                    ReportCollectorId.GENERATION_MIX
+                )
+            ),
+            ReportCollectorId.VECTOR_KNOWLEDGE: knowledge,
+        },
+    )
+
+    assert len(knowledge_queries) == 2
+    assert any(
+        "measurable supply-security risks" in query
+        for query in knowledge_queries
+    )
+    assert any(
+        "deregulation stage and target model" in query
+        for query in knowledge_queries
+    )
+    assert all(_QUERY in query for query in knowledge_queries)
+
+
+def test_identical_table_requests_are_deduplicated_across_tracks():
+    payload = _research_plan_payload(
+        query_digest=hashlib.sha256(_QUERY.encode("utf-8")).hexdigest()
+    )
+    second_topic = {
+        **payload["request_topics"][0],
+        "topic_id": "price_context",
+        "label": "Price context",
+    }
+    second_track = deepcopy(payload["tracks"][0])
+    second_track.update(
+        {
+            "track_id": "price_context",
+            "title": "Price context",
+            "topic_ids": ["price_context"],
+            "research_questions": [
+                "What is the minimum observed electricity price?"
+            ],
+            "requested_metrics": ["minimum_price"],
+            "expected_exhibits": [],
+        }
+    )
+    payload["request_topics"] = [payload["request_topics"][0], second_topic]
+    payload["tracks"] = [payload["tracks"][0], second_track]
+    plan = ReportResearchPlan.model_validate(payload)
+    calls = []
+
+    def prices(query, _scope):
+        calls.append(query)
+        return _table_output(ReportCollectorId.PRICES)
+
+    packets = execute_report_research(
+        _QUERY,
+        plan,
+        max_workers=2,
+        collectors={ReportCollectorId.PRICES: prices},
+    )
+
+    assert calls == [_QUERY]
+    assert [packet.track_id for packet in packets] == [
+        "prices",
+        "price_context",
+    ]
+
+
+def test_requested_metrics_limit_deterministic_metric_operations():
+    plan_payload = _research_plan_payload(
+        query_digest=hashlib.sha256(_QUERY.encode("utf-8")).hexdigest()
+    )
+    plan_payload["tracks"] = [plan_payload["tracks"][0]]
+    plan_payload["request_topics"] = [plan_payload["request_topics"][0]]
+    plan_payload["tracks"][0]["requested_metrics"] = ["average_price"]
+    plan = ReportResearchPlan.model_validate(plan_payload)
+
+    packets = execute_report_research(
+        _QUERY,
+        plan,
+        max_workers=1,
+        collectors={
+            ReportCollectorId.PRICES: (
+                lambda _query, _scope: _table_output(
+                    ReportCollectorId.PRICES
+                )
+            ),
+        },
+    )
+
+    operations = {
+        metric.operation.value
+        for observation in packets[0].observations
+        for metric in observation.metric_values
+    }
+    assert operations == {"mean"}
 
 
 def test_packet_metrics_and_manifest_are_deterministic_and_deduplicated():

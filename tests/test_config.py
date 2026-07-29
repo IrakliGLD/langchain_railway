@@ -142,6 +142,48 @@ def test_report_pipeline_v2_rejects_worker_count_above_track_count():
     assert "REPORT_RESEARCH_MAX_WORKERS" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "method",
+    ["auto", "json_schema", "function_calling", "prompt"],
+)
+def test_report_structured_output_accepts_declared_methods(method):
+    env = os.environ.copy()
+    env["REPORT_STRUCTURED_OUTPUT_METHOD"] = method
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import config; print(config.REPORT_STRUCTURED_OUTPUT_METHOD)",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == method
+
+
+def test_report_structured_output_rejects_unknown_method():
+    env = os.environ.copy()
+    env["REPORT_STRUCTURED_OUTPUT_METHOD"] = "best_effort"
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "REPORT_STRUCTURED_OUTPUT_METHOD" in result.stderr
+
+
 def test_report_section_concurrency_defaults_to_one_eight_section_wave():
     env = os.environ.copy()
     env.pop("ENAI_REPORT_SECTION_MAX_WORKERS", None)

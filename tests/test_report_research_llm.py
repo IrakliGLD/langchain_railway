@@ -17,7 +17,7 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import core.llm as llm
-from contracts.report_research import ReportResearchPlan
+from contracts.report_research import ReportResearchPlan, ReportResearchPlanDraft
 from tests.test_report_research_contract import _research_plan_payload
 
 _QUERY = (
@@ -76,8 +76,10 @@ def test_report_research_planner_uses_report_model_without_fallback(monkeypatch)
     )
 
 
-def test_openai_report_research_planner_uses_strict_structured_output(
+@pytest.mark.parametrize("method", ["json_schema", "function_calling"])
+def test_openai_report_research_planner_uses_configured_structured_output(
     monkeypatch,
+    method,
 ):
     captured = {}
     structured_client = object()
@@ -90,6 +92,12 @@ def test_openai_report_research_planner_uses_strict_structured_output(
 
     monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
     monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-luna", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "REPORT_STRUCTURED_OUTPUT_METHOD",
+        method,
+        raising=False,
+    )
     monkeypatch.setattr(
         llm,
         "_cache_get_or_reserve",
@@ -125,15 +133,50 @@ def test_openai_report_research_planner_uses_strict_structured_output(
 
     assert isinstance(plan, ReportResearchPlan)
     assert captured["client"] is structured_client
-    assert isinstance(captured["structured_schema"], dict)
-    for field in ("contract_version", "query_digest", "language_code"):
-        assert field not in captured["structured_schema"]["properties"]
-        assert field not in captured["structured_schema"]["required"]
+    assert captured["structured_schema"] is ReportResearchPlanDraft
     assert captured["structured_kwargs"] == {
-        "method": "json_schema",
+        "method": method,
         "include_raw": True,
         "strict": True,
     }
+
+
+def test_report_research_planner_can_use_portable_prompt_output(monkeypatch):
+    report_client = object()
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "future-model", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "REPORT_STRUCTURED_OUTPUT_METHOD",
+        "prompt",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "cache-token"),
+    )
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+    monkeypatch.setattr(
+        llm,
+        "get_llm_for_stage",
+        lambda *_args, **_kwargs: report_client,
+    )
+
+    def invoke(factory, _model, _messages, **_kwargs):
+        assert factory() is report_client
+        return SimpleNamespace(content=json.dumps(_response_payload()))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+
+    assert isinstance(
+        llm.llm_plan_report_research(
+            _QUERY,
+            language_code="en",
+            max_tracks=4,
+        ),
+        ReportResearchPlan,
+    )
 
 
 def test_report_research_planner_releases_cache_after_provider_failure(

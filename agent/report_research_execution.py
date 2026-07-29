@@ -35,6 +35,7 @@ from contracts.report_research import (
     ReportMetricValue,
     ReportResearchPlan,
     ReportResearchScope,
+    ReportResearchTrack,
     ReportTrackStatus,
 )
 from contracts.vector_knowledge import (
@@ -51,6 +52,14 @@ Collector = Callable[
     [str, ReportResearchScope],
     "ReportCollectorOutput",
 ]
+CollectorRequestKey = tuple[ReportCollectorId, str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ReportCollectorRequest:
+    collector_id: ReportCollectorId
+    query: str
+    scope: ReportResearchScope
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,10 +346,32 @@ def _display_number(value: float, *, percent: bool = False) -> str:
     return f"{display}%" if percent else display
 
 
+def _requested_metric_operations(
+    requested_metrics: Sequence[str],
+) -> set[ReportMetricOperation]:
+    tokens = {
+        token
+        for metric in requested_metrics
+        for token in re.findall(r"[a-z]+", metric.casefold())
+    }
+    operations: set[ReportMetricOperation] = set()
+    if tokens & {"average", "avg", "mean"}:
+        operations.add(ReportMetricOperation.MEAN)
+    if tokens & {"minimum", "min"}:
+        operations.add(ReportMetricOperation.MINIMUM)
+    if tokens & {"maximum", "max"}:
+        operations.add(ReportMetricOperation.MAXIMUM)
+    if "change" in tokens and tokens & {"percent", "percentage"}:
+        operations.add(ReportMetricOperation.PERCENT_CHANGE)
+    return operations
+
+
 def _numeric_observations(
     items: Sequence[ReportEvidenceItem],
+    requested_metrics: Sequence[str] = (),
 ) -> list[ReportEvidenceObservation]:
     observations: list[ReportEvidenceObservation] = []
+    requested_operations = _requested_metric_operations(requested_metrics)
     for item in items:
         if item.kind is not ReportEvidenceKind.TABLE:
             observations.append(
@@ -454,6 +485,12 @@ def _numeric_observations(
                             "%",
                         )
                     )
+                if requested_operations:
+                    specs = [
+                        spec
+                        for spec in specs
+                        if spec[0] in requested_operations
+                    ]
                 metric_context = f" for {context}" if context else ""
                 metrics = [
                     ReportMetricValue(
@@ -598,7 +635,10 @@ def _packet_for_track(
             for item in items
         }.values()
     )[:12]
-    observations = _numeric_observations(items)
+    observations = _numeric_observations(
+        items,
+        track.requested_metrics,
+    )
     candidates, exhibit_gaps = _chart_candidates(
         track.track_id,
         track.expected_exhibits,
@@ -632,6 +672,22 @@ def _packet_for_track(
     )
 
 
+def _collector_query(
+    user_query: str,
+    track: ReportResearchTrack,
+    collector_id: ReportCollectorId,
+) -> str:
+    if collector_id is not ReportCollectorId.VECTOR_KNOWLEDGE:
+        return user_query
+    return "\n".join(
+        [
+            f"Research track: {track.title}",
+            *track.research_questions,
+            f"Report context: {user_query}",
+        ]
+    )
+
+
 def execute_report_research(
     query: str,
     plan: ReportResearchPlan,
@@ -644,22 +700,36 @@ def execute_report_research(
     if not 1 <= max_workers <= 8:
         raise ValueError("max_workers must be between 1 and 8.")
     registry = collectors or DEFAULT_REPORT_COLLECTORS
-    collector_ids = list(
-        dict.fromkeys(
-            collector_id
-            for track in plan.tracks
-            for collector_id in track.collector_ids
-        )
-    )
+    scope_key = plan.scope.model_dump_json()
+    requests: dict[CollectorRequestKey, ReportCollectorRequest] = {}
+    request_keys_by_track: dict[
+        str,
+        dict[ReportCollectorId, CollectorRequestKey],
+    ] = {}
+    for track in plan.tracks:
+        track_keys: dict[ReportCollectorId, CollectorRequestKey] = {}
+        for collector_id in track.collector_ids:
+            collector_query = _collector_query(query, track, collector_id)
+            request_key = (collector_id, collector_query, scope_key)
+            requests.setdefault(
+                request_key,
+                ReportCollectorRequest(
+                    collector_id=collector_id,
+                    query=collector_query,
+                    scope=plan.scope,
+                ),
+            )
+            track_keys[collector_id] = request_key
+        request_keys_by_track[track.track_id] = track_keys
     parent_scope = current_request_execution_scope()
 
-    def run(collector_id: ReportCollectorId) -> ReportCollectorOutput:
-        collector = registry.get(collector_id)
+    def run(request: ReportCollectorRequest) -> ReportCollectorOutput:
+        collector = registry.get(request.collector_id)
         if collector is None:
             return ReportCollectorOutput(
-                collector_id=collector_id,
+                collector_id=request.collector_id,
                 gaps=(
-                    f"COLLECTOR_{collector_id.value.upper()}_UNAVAILABLE",
+                    f"COLLECTOR_{request.collector_id.value.upper()}_UNAVAILABLE",
                 ),
                 failed=True,
             )
@@ -672,32 +742,41 @@ def execute_report_research(
             scope=parent_scope,
         ):
             try:
-                output = collector(query, plan.scope)
-                if output.collector_id is not collector_id:
+                output = collector(request.query, request.scope)
+                if output.collector_id is not request.collector_id:
                     raise ValueError("Collector output identity mismatch.")
                 return output
             except Exception:
                 return ReportCollectorOutput(
-                    collector_id=collector_id,
+                    collector_id=request.collector_id,
                     gaps=(
-                        f"COLLECTOR_{collector_id.value.upper()}_FAILED",
+                        "COLLECTOR_"
+                        f"{request.collector_id.value.upper()}_FAILED",
                     ),
                     failed=True,
                 )
 
-    outputs: dict[ReportCollectorId, ReportCollectorOutput] = {}
+    outputs: dict[CollectorRequestKey, ReportCollectorOutput] = {}
     with ThreadPoolExecutor(
-        max_workers=min(max_workers, len(collector_ids)),
+        max_workers=min(max_workers, len(requests)),
         thread_name_prefix="report-research",
     ) as pool:
         futures = {
-            collector_id: pool.submit(run, collector_id)
-            for collector_id in collector_ids
+            request_key: pool.submit(run, request)
+            for request_key, request in requests.items()
         }
-        for collector_id, future in futures.items():
-            outputs[collector_id] = future.result()
+        for request_key, future in futures.items():
+            outputs[request_key] = future.result()
     return [
-        _packet_for_track(track, outputs)
+        _packet_for_track(
+            track,
+            {
+                collector_id: outputs[request_key]
+                for collector_id, request_key in request_keys_by_track[
+                    track.track_id
+                ].items()
+            },
+        )
         for track in plan.tracks
     ]
 
