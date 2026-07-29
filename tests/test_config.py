@@ -683,3 +683,68 @@ def test_validate_runtime_settings_allows_evaluate_with_explicit_opt_in_in_test(
         openai_api_key="test-openai-key",
         google_api_key=None,
     )
+
+
+def test_gemini_vector_provider_requires_dedicated_embedding_key():
+    with pytest.raises(RuntimeError, match="GEMINI_EMBEDDING_API_KEY"):
+        validate_runtime_settings(
+            supabase_db_url="postgresql://user:pass@localhost/db",
+            gateway_shared_secret="gateway",
+            session_signing_secret="session",
+            evaluate_admin_secret="evaluate",
+            auth_mode="gateway_only",
+            deployment_env="test",
+            supabase_jwt_secret=None,
+            enable_evaluate_endpoint=False,
+            allow_evaluate_endpoint=False,
+            model_type="openai",
+            openai_api_key="test-openai-key",
+            google_api_key="legacy-key",
+            vector_embedding_provider="gemini",
+            gemini_embedding_api_key=None,
+            allow_legacy_google_embedding_key=False,
+        )
+
+
+def test_gemini_vector_provider_accepts_explicit_legacy_transition():
+    validate_runtime_settings(
+        supabase_db_url="postgresql://user:pass@localhost/db",
+        gateway_shared_secret="gateway",
+        session_signing_secret="session",
+        evaluate_admin_secret="evaluate",
+        auth_mode="gateway_only",
+        deployment_env="test",
+        supabase_jwt_secret=None,
+        enable_evaluate_endpoint=False,
+        allow_evaluate_endpoint=False,
+        model_type="openai",
+        openai_api_key="test-openai-key",
+        google_api_key="legacy-key",
+        vector_embedding_provider="gemini",
+        gemini_embedding_api_key=None,
+        allow_legacy_google_embedding_key=True,
+    )
+
+
+def test_gemini_vector_provider_rejects_non_developer_api_mode():
+    with pytest.raises(
+        RuntimeError,
+        match="VECTOR_KNOWLEDGE_EMBEDDING_API_MODE",
+    ):
+        validate_runtime_settings(
+            supabase_db_url="postgresql://user:pass@localhost/db",
+            gateway_shared_secret="gateway",
+            session_signing_secret="session",
+            evaluate_admin_secret="evaluate",
+            auth_mode="gateway_only",
+            deployment_env="test",
+            supabase_jwt_secret=None,
+            enable_evaluate_endpoint=False,
+            allow_evaluate_endpoint=False,
+            model_type="openai",
+            openai_api_key="test-openai-key",
+            google_api_key=None,
+            vector_embedding_provider="gemini",
+            gemini_embedding_api_key="embedding-key",
+            vector_embedding_api_mode="vertex",
+        )

@@ -8,6 +8,7 @@ import os
 import threading
 from typing import Any, Callable, List, Literal, Protocol
 
+from knowledge.embedding_service import resolve_gemini_embedding_backend
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
     claim_provider_attempt,
@@ -226,15 +227,15 @@ class GeminiEmbeddingProvider:
     """Gemini-backed embedding provider using the available Google SDK."""
 
     def __init__(self, model: str | None = None) -> None:
-        api_key = _read_api_key("GOOGLE_API_KEY")
+        backend = resolve_gemini_embedding_backend()
+        api_key = backend.api_key
         resolved_model = (model or os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", "gemini-embedding-001")).strip()
-        if not api_key:
-            raise RuntimeError("GOOGLE_API_KEY is required for Gemini vector embeddings")
 
         self._expected_dimension = _expected_dimension()
         self._batch_size = _batch_size()
         self._provider_name = "gemini"
         self._model = resolved_model
+        self._api_mode = backend.api_mode.value
         self._normalization_version = os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1"
         self._corpus_version = os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1"
         # google-genai is a hard production dependency (the legacy
@@ -251,6 +252,7 @@ class GeminiEmbeddingProvider:
         if hasattr(types, "HttpOptions") and hasattr(types, "HttpRetryOptions"):
             self._client = genai.Client(
                 api_key=api_key,
+                vertexai=False,
                 http_options=types.HttpOptions(
                     timeout=max(
                         1,
@@ -260,7 +262,7 @@ class GeminiEmbeddingProvider:
                 ),
             )
         else:
-            self._client = genai.Client(api_key=api_key)
+            self._client = genai.Client(api_key=api_key, vertexai=False)
         self._config = types.EmbedContentConfig(
             output_dimensionality=self._expected_dimension,
         )
@@ -268,7 +270,7 @@ class GeminiEmbeddingProvider:
             provider=self._provider_name,
             model=self._model,
             dimension=self._expected_dimension,
-            credential_source="GOOGLE_API_KEY",
+            credential_source=backend.credential_source,
             credential=api_key,
         )
 
@@ -348,11 +350,15 @@ _PROVIDER_CACHE_LOCK = threading.Lock()
 
 def _provider_cache_key(resolved_provider: str) -> tuple[str, ...]:
     default_model = "gemini-embedding-001" if resolved_provider == "gemini" else "text-embedding-3-small"
-    credential_name = (
-        "GOOGLE_API_KEY"
-        if resolved_provider == "gemini"
-        else "OPENAI_API_KEY"
-    )
+    if resolved_provider == "gemini":
+        backend = resolve_gemini_embedding_backend()
+        credential = backend.api_key
+        credential_source = backend.credential_source
+        api_mode = backend.api_mode.value
+    else:
+        credential = _read_api_key("OPENAI_API_KEY")
+        credential_source = "OPENAI_API_KEY"
+        api_mode = "public"
     return (
         resolved_provider,
         os.getenv("VECTOR_KNOWLEDGE_EMBEDDING_MODEL", default_model).strip() or default_model,
@@ -360,7 +366,9 @@ def _provider_cache_key(resolved_provider: str) -> tuple[str, ...]:
         os.getenv("VECTOR_KNOWLEDGE_NORMALIZATION_VERSION", "v1").strip() or "v1",
         os.getenv("VECTOR_KNOWLEDGE_CORPUS_VERSION", "v1").strip() or "v1",
         str(_batch_size()),
-        _credential_fingerprint(_read_api_key(credential_name)),
+        api_mode,
+        credential_source,
+        _credential_fingerprint(credential),
     )
 
 
