@@ -423,6 +423,132 @@ def test_numeric_analysis_requires_two_findings_when_two_cells_are_available():
     assert "NUMERIC_FINDING_MISSING" in validation.section_errors["prices"]
 
 
+def test_document_generation_normalizes_plan_owned_section_roles(caplog):
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    misplaced_payloads = []
+
+    summary_swap = valid_draft.model_dump(mode="json")
+    summary_swap["executive_summary"], summary_swap[
+        "limitations_section"
+    ] = (
+        summary_swap["limitations_section"],
+        summary_swap["executive_summary"],
+    )
+    misplaced_payloads.append(summary_swap)
+
+    analysis_swap = valid_draft.model_dump(mode="json")
+    analysis_swap["analytical_sections"][0], analysis_swap[
+        "implications_section"
+    ] = (
+        analysis_swap["implications_section"],
+        analysis_swap["analytical_sections"][0],
+    )
+    misplaced_payloads.append(analysis_swap)
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportDocument"):
+        for payload in misplaced_payloads:
+            misplaced_draft = ReportDocumentDraft.model_validate(payload)
+            assert "SECTION_ROLE_MISMATCH" in validate_report_document(
+                misplaced_draft,
+                document_plan,
+                manifest,
+                research_plan,
+            ).document_errors
+
+            normalized = generate_report_document(
+                _QUERY,
+                document_plan,
+                research_plan,
+                manifest,
+                packets,
+                write_document=lambda *_args, value=misplaced_draft: value,
+                repair_sections=lambda *_args, **_kwargs: (
+                    (_ for _ in ()).throw(
+                        AssertionError(
+                            "plan-owned role placement must not use repair"
+                        )
+                    )
+                ),
+            )
+
+            assert normalized == valid_draft
+
+    diagnostics = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("REPORT_DOCUMENT_DIAGNOSTIC ")
+    ]
+    normalized_events = [
+        item for item in diagnostics if item["event"] == "roles_normalized"
+    ]
+    assert len(normalized_events) == 2
+    assert all(
+        item["role_normalization_applied"]
+        and item["expected_role_section_ids"]
+        != item["pre_normalization_role_section_ids"]
+        for item in normalized_events
+    )
+
+
+def test_document_set_mismatch_repairs_the_complete_planned_set():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    payload = valid_draft.model_dump(mode="json")
+    payload["analytical_sections"][0]["section_id"] = (
+        "unexpected_section"
+    )
+    mismatched_draft = ReportDocumentDraft.model_validate(payload)
+    expected_ids = [
+        section.section_id for section in document_plan.sections
+    ]
+    repair_calls = []
+
+    def repair_sections(
+        _query,
+        _plan,
+        _research_plan,
+        _manifest,
+        _packets,
+        _draft,
+        _validation,
+        *,
+        section_ids,
+    ):
+        repair_calls.append(list(section_ids))
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=valid_draft.generation_order_sections(),
+        )
+
+    repaired = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_document=lambda *_args: mismatched_draft,
+        repair_sections=repair_sections,
+    )
+
+    assert repair_calls == [expected_ids]
+    assert repaired == valid_draft
+
+
 def test_document_generation_repairs_only_invalid_sections_once():
     (
         research_plan,
@@ -723,6 +849,7 @@ def test_document_repair_diagnostics_include_safe_counts_and_bounds(caplog):
         maximum_words
     )
     assert validated["word_count"] < requested["word_count"]
+    assert validated["section_word_deltas"]["prices"] < 0
     assert "sensitiveoverflow" not in caplog.text
 
 

@@ -28,6 +28,7 @@ from contracts.report_research import (
     ReportEvidencePacket,
     ReportResearchPlan,
 )
+from contracts.report_sections import ReportSectionDraft
 
 DocumentWriter = Callable[..., Any]
 DocumentRepairer = Callable[..., Any]
@@ -59,6 +60,12 @@ def _log_document_diagnostic(
     validation: ReportDocumentValidation,
     draft: ReportDocumentDraft | None,
     repair_section_ids: Sequence[str],
+    pre_normalization_role_section_ids: dict[
+        str,
+        list[str],
+    ] | None = None,
+    role_normalization_applied: bool = False,
+    baseline_draft: ReportDocumentDraft | None = None,
 ) -> None:
     minimum_words, maximum_words = report_aggregate_word_bounds(
         [section.target_words for section in plan.sections]
@@ -74,6 +81,21 @@ def _log_document_diagnostic(
     section_word_counts = {
         section_id: count_section_words(section.content_markdown)
         for section_id, section in section_by_id.items()
+    }
+    baseline_word_counts = (
+        {
+            section.section_id: count_section_words(
+                section.content_markdown
+            )
+            for section in baseline_draft.generation_order_sections()
+        }
+        if baseline_draft is not None
+        else {}
+    )
+    section_word_deltas = {
+        section_id: word_count - baseline_word_counts[section_id]
+        for section_id, word_count in section_word_counts.items()
+        if section_id in baseline_word_counts
     }
     section_bounds = {
         section.section_id: {
@@ -92,15 +114,26 @@ def _log_document_diagnostic(
             {
                 "document_error_codes": validation.document_errors,
                 "event": event,
+                "expected_role_section_ids": {
+                    role.value: _expected_role_ids(plan, role)
+                    for role in ReportDocumentSectionRole
+                },
                 "failing_section_ids": sorted(
                     validation.section_errors
                 ),
                 "maximum_words": maximum_words,
                 "minimum_words": minimum_words,
                 "repair_section_ids": list(repair_section_ids),
+                "role_normalization_applied": (
+                    role_normalization_applied
+                ),
                 "section_bounds": section_bounds,
                 "section_error_codes": validation.section_errors,
+                "section_word_deltas": section_word_deltas,
                 "section_word_counts": section_word_counts,
+                "pre_normalization_role_section_ids": (
+                    pre_normalization_role_section_ids or {}
+                ),
                 "word_count": validation.word_count,
             },
             ensure_ascii=True,
@@ -139,6 +172,15 @@ def _actual_role_ids(
         else draft.conclusion_section
     )
     return [] if section is None else [section.section_id]
+
+
+def _actual_role_section_ids(
+    draft: ReportDocumentDraft,
+) -> dict[str, list[str]]:
+    return {
+        role.value: _actual_role_ids(draft, role)
+        for role in ReportDocumentSectionRole
+    }
 
 
 def _paragraph_tokens(text: str) -> set[str]:
@@ -335,17 +377,17 @@ def _merge_repairs(
     return ReportDocumentDraft.model_validate(payload)
 
 
-def _document_from_repair(
+def _document_from_sections(
     plan: ReportDocumentPlan,
-    repair: ReportDocumentRepair,
+    sections: Sequence[ReportSectionDraft],
 ) -> ReportDocumentDraft:
     section_by_id = {
-        section.section_id: section for section in repair.sections
+        section.section_id: section for section in sections
     }
 
     def sections_for(
         role: ReportDocumentSectionRole,
-    ) -> list[Any]:
+    ) -> list[ReportSectionDraft]:
         return [
             section_by_id[section_id]
             for section_id in _expected_role_ids(plan, role)
@@ -381,6 +423,22 @@ def _document_from_repair(
         ),
         executive_summary=summary_sections[0],
     )
+
+
+def _normalize_document_roles(
+    draft: ReportDocumentDraft,
+    plan: ReportDocumentPlan,
+) -> tuple[ReportDocumentDraft, bool]:
+    sections = draft.generation_order_sections()
+    if {section.section_id for section in sections} != {
+        section.section_id for section in plan.sections
+    }:
+        return draft, False
+    roles_normalized = any(
+        _actual_role_ids(draft, role) != _expected_role_ids(plan, role)
+        for role in ReportDocumentSectionRole
+    )
+    return _document_from_sections(plan, sections), roles_normalized
 
 
 def _repair_moves_word_counts_in_required_direction(
@@ -438,6 +496,8 @@ def generate_report_document(
         manifest,
         list(packets),
     )
+    pre_normalization_role_section_ids: dict[str, list[str]] | None = None
+    role_normalization_applied = False
     try:
         draft: ReportDocumentDraft | None = (
             raw_draft
@@ -454,37 +514,48 @@ def generate_report_document(
             word_count=0,
         )
     else:
+        pre_normalization_role_section_ids = (
+            _actual_role_section_ids(draft)
+        )
+        draft, role_normalization_applied = (
+            _normalize_document_roles(draft, plan)
+        )
         validation = validate_report_document(
             draft,
             plan,
             manifest,
             research_plan,
         )
+        if role_normalization_applied:
+            _log_document_diagnostic(
+                event="roles_normalized",
+                plan=plan,
+                validation=validation,
+                draft=draft,
+                repair_section_ids=[],
+                pre_normalization_role_section_ids=(
+                    pre_normalization_role_section_ids
+                ),
+                role_normalization_applied=True,
+            )
         if validation.valid:
             return draft
     if not allow_repair:
         raise ReportDocumentGenerationError(validation)
 
-    invalid_section_ids = list(validation.section_errors)
-    if draft is None:
+    structural_repair = draft is None or bool(
+        set(validation.document_errors)
+        - {
+            "DOCUMENT_WORD_COUNT_TOO_SHORT",
+            "DOCUMENT_WORD_COUNT_TOO_LONG",
+        }
+    )
+    if structural_repair:
         invalid_section_ids = [
             section.section_id for section in plan.sections
         ]
-    elif set(validation.document_errors) - {
-        "DOCUMENT_WORD_COUNT_TOO_SHORT",
-        "DOCUMENT_WORD_COUNT_TOO_LONG",
-    }:
-        invalid_section_ids = list(
-            dict.fromkeys(
-                [
-                    *invalid_section_ids,
-                    *(
-                        section.section_id
-                        for section in draft.generation_order_sections()
-                    ),
-                ]
-            )
-        )
+    else:
+        invalid_section_ids = list(validation.section_errors)
     if repair_sections is None:
         from core.llm import llm_repair_report_document_sections
 
@@ -495,6 +566,10 @@ def generate_report_document(
         validation=validation,
         draft=draft,
         repair_section_ids=invalid_section_ids,
+        pre_normalization_role_section_ids=(
+            pre_normalization_role_section_ids
+        ),
+        role_normalization_applied=role_normalization_applied,
     )
     raw_repair = repair_sections(
         query,
@@ -519,7 +594,7 @@ def generate_report_document(
     ):
         raise ReportDocumentGenerationError(validation)
     repair_moves_in_required_direction = (
-        draft is None
+        structural_repair
         or _repair_moves_word_counts_in_required_direction(
             draft,
             repair,
@@ -528,8 +603,8 @@ def generate_report_document(
     )
 
     repaired_draft = (
-        _document_from_repair(plan, repair)
-        if draft is None
+        _document_from_sections(plan, repair.sections)
+        if structural_repair
         else _merge_repairs(draft, repair)
     )
     repaired_validation = validate_report_document(
@@ -552,6 +627,11 @@ def generate_report_document(
         validation=repaired_validation,
         draft=repaired_draft,
         repair_section_ids=invalid_section_ids,
+        pre_normalization_role_section_ids=(
+            pre_normalization_role_section_ids
+        ),
+        role_normalization_applied=role_normalization_applied,
+        baseline_draft=draft,
     )
     if not repair_moves_in_required_direction:
         raise ReportDocumentGenerationError(validation)

@@ -142,6 +142,14 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
         in system[1].lower()
     )
     assert "require exactly two unique operands" in system[1].lower()
+    assert "paragraph prose, not json metadata" in system[1].lower()
+    assert "verify every section" in system[1].lower()
+    assert "prefer direct observations" in system[1].lower()
+    assert (
+        "do not introduce new arithmetic unless"
+        in system[1].lower()
+    )
+    assert "do not emit unused claim entries" in system[1].lower()
     assert "NUMERIC_OBSERVATIONS" in user[1]
     assert '"row_index":0' in user[1]
     assert "prompt_projection_truncated" in user[1]
@@ -288,6 +296,16 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert isinstance(captured["structured_schema"], dict)
     system, user = captured["messages"]
     assert "only the rejected sections" in system[1].lower()
+    assert (
+        "word_count_too_short replacement must contain more prose words"
+        in system[1].lower()
+    )
+    assert "prefer direct observations" in system[1].lower()
+    assert (
+        "do not introduce new arithmetic unless"
+        in system[1].lower()
+    )
+    assert "do not emit unused claim entries" in system[1].lower()
     assert '"section_id":"prices"' in user[1]
     assert '"section_id":"security"' not in user[1]
     assert '"track_id":"prices"' in user[1]
