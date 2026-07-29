@@ -115,6 +115,40 @@ class _StrictResearchModel(BaseModel):
     )
 
 
+class ReportRequiredExhibit(_StrictResearchModel):
+    requirement: ReportResearchRequirement
+    collector_id: ReportCollectorId
+    purpose: ReportChartPurpose
+
+
+class ReportPlanningConstraints(_StrictResearchModel):
+    contract_version: Literal["report-planning-constraints-v1"]
+    maximum_total_exhibits: int = Field(
+        ge=1,
+        le=REPORT_MAX_EXHIBITS,
+    )
+    required_exhibits: List[ReportRequiredExhibit] = Field(
+        default_factory=list,
+        max_length=REPORT_MAX_EXHIBITS,
+    )
+
+    @model_validator(mode="after")
+    def _require_unique_exhibits(self) -> "ReportPlanningConstraints":
+        identities = [
+            (
+                exhibit.requirement,
+                exhibit.collector_id,
+                exhibit.purpose,
+            )
+            for exhibit in self.required_exhibits
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError(
+                "Required planning exhibits must be unique."
+            )
+        return self
+
+
 class ReportResearchScope(_StrictResearchModel):
     geography: str = Field(min_length=1, max_length=120)
     period_start: date | None = None

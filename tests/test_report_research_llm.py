@@ -17,6 +17,7 @@ os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import core.llm as llm
+from agent.report_research_planner import build_report_planning_constraints
 from contracts.report_research import ReportResearchPlan, ReportResearchPlanDraft
 from tests.test_report_research_contract import _research_plan_payload
 
@@ -183,14 +184,15 @@ def test_report_research_planner_can_use_portable_prompt_output(monkeypatch):
     )
 
 
-def test_report_research_planner_releases_cache_after_provider_failure(
+def test_report_research_planner_does_not_touch_cache_after_provider_failure(
     monkeypatch,
 ):
+    acquired = []
     cancelled = []
     monkeypatch.setattr(
         llm,
         "_cache_get_or_reserve",
-        lambda _key: (None, "cache-token"),
+        lambda key: acquired.append(key),
     )
     monkeypatch.setattr(
         llm,
@@ -212,8 +214,8 @@ def test_report_research_planner_releases_cache_after_provider_failure(
             max_tracks=4,
         )
 
-    assert len(cancelled) == 1
-    assert cancelled[0][1] == "cache-token"
+    assert acquired == []
+    assert cancelled == []
 
 
 def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
@@ -242,6 +244,7 @@ def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
         _QUERY,
         language_code="en",
         max_tracks=4,
+        planning_constraints=build_report_planning_constraints(_QUERY),
     )
 
     system, user = captured["messages"]
@@ -252,6 +255,10 @@ def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
     assert "vector_knowledge" in user[1]
     assert "MAX_RESEARCH_TRACKS:\n4" in user[1]
     assert "MAX_TOTAL_EXHIBITS:\n4" in user[1]
+    assert "REQUIRED_EXHIBITS:" in user[1]
+    assert '"purpose":"trend"' in user[1]
+    assert '"purpose":"composition"' in user[1]
+    assert "must include every required exhibit" in system[1].lower()
     assert "REQUIRED_QUERY_DIGEST" not in user[1]
     assert "REQUIRED_LANGUAGE_CODE" not in user[1]
     assert "same language as USER_REPORT_REQUEST" in system[1]
@@ -261,3 +268,36 @@ def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
     assert "mixed mode requires both" in system[1]
     assert "all lists within a track must contain unique values" in system[1]
     assert len(user[1]) < 30_000
+
+
+def test_report_research_planner_does_not_use_the_generic_response_cache(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("research plans must not use the generic cache")
+        ),
+    )
+    monkeypatch.setattr(
+        llm,
+        "get_llm_for_stage",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            content=json.dumps(_response_payload())
+        ),
+    )
+
+    plan = llm.llm_plan_report_research(
+        _QUERY,
+        language_code="en",
+        max_tracks=4,
+        planning_constraints=build_report_planning_constraints(_QUERY),
+    )
+
+    assert isinstance(plan, ReportResearchPlan)

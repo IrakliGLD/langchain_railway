@@ -10,7 +10,10 @@ from pydantic import ValidationError
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentPlan,
+    ReportDocumentProfile,
     ReportDocumentSectionSpec,
+    ReportDocumentValidation,
+    ReportEvidenceCapacity,
 )
 from contracts.report_generation import ReportGenerationCheckpoint
 from contracts.report_research import (
@@ -37,23 +40,23 @@ def _document_plan_payload() -> dict:
         "title": "Electricity prices, security, and market design",
         "objective": "Assess observed market evidence without unsupported causal claims.",
         "language_code": "en",
-        "target_words": 1100,
+        "profile": "full",
+        "evidence_capacity": {
+            "profile": "full",
+            "usable_track_count": 3,
+            "complete_track_count": 3,
+            "partial_track_count": 0,
+            "unavailable_track_count": 0,
+            "usable_exhibit_count": 2,
+            "validated_finding_count": 6,
+        },
+        "target_words": 950,
         "evidence_manifest_id": "manifest:" + "4" * 32,
         "coverage_status": "ready",
         "required_track_ids": ["prices", "security", "market_model"],
         "completed_track_ids": ["prices", "security", "market_model"],
         "gap_track_ids": [],
         "sections": [
-            {
-                "section_id": "executive_summary",
-                "role": "executive_summary",
-                "title": "Executive summary",
-                "objective": "Summarize the strongest cross-track findings.",
-                "target_words": 150,
-                "track_ids": ["prices", "security", "market_model"],
-                "required_evidence_refs": [_TABLE_REF, _KNOWLEDGE_REF],
-                "chart_refs": [],
-            },
             {
                 "section_id": "price_dynamics",
                 "role": "analysis",
@@ -155,7 +158,7 @@ def _document_draft_payload() -> dict:
         "query_digest": "a" * 64,
         "evidence_manifest_id": "manifest:" + "4" * 32,
         "coverage_status": "ready",
-        "analytical_sections": [
+        "sections": [
             _section_draft("price_dynamics", "Price dynamics", _TABLE_REF),
             _section_draft("energy_security", "Energy security", _TABLE_REF),
             _section_draft(
@@ -163,24 +166,59 @@ def _document_draft_payload() -> dict:
                 "Market model and legislation",
                 _KNOWLEDGE_REF,
             ),
+            _section_draft(
+                "implications",
+                "Implications",
+                _TABLE_REF,
+            ),
+            _section_draft(
+                "limitations",
+                "Method and limitations",
+                _LIMITATION_REF,
+            ),
         ],
-        "implications_section": _section_draft(
-            "implications",
-            "Implications",
-            _TABLE_REF,
-        ),
-        "limitations_section": _section_draft(
-            "limitations",
-            "Method and limitations",
-            _LIMITATION_REF,
-        ),
-        "conclusion_section": None,
-        "executive_summary": _section_draft(
-            "executive_summary",
-            "Executive summary",
-            _TABLE_REF,
-        ),
     }
+
+
+def test_adaptive_document_contract_uses_ordered_sections_without_summary():
+    plan_payload = _document_plan_payload()
+    plan = ReportDocumentPlan.model_validate(plan_payload)
+
+    draft_payload = _document_draft_payload()
+    ordered_sections = draft_payload["sections"]
+    draft = ReportDocumentDraft.model_validate(draft_payload)
+
+    assert plan.profile is ReportDocumentProfile.FULL
+    assert isinstance(plan.evidence_capacity, ReportEvidenceCapacity)
+    assert all(
+        section.role.value != "executive_summary"
+        for section in plan.sections
+    )
+    expected_ids = [section["section_id"] for section in ordered_sections]
+    assert [
+        section.section_id for section in draft.display_order_sections()
+    ] == expected_ids
+    assert [
+        section.section_id for section in draft.generation_order_sections()
+    ] == expected_ids
+
+
+def test_document_validation_treats_length_deviation_as_a_warning():
+    validation = ReportDocumentValidation(
+        contract_version="report-document-validation-v1",
+        valid=True,
+        section_errors={},
+        document_errors=[],
+        section_warnings={
+            "price_dynamics": ["SECTION_SHORTER_THAN_RECOMMENDED"]
+        },
+        document_warnings=["DOCUMENT_LENGTH_DEVIATION"],
+        word_count=420,
+    )
+
+    assert validation.valid is True
+    assert validation.section_warnings
+    assert validation.document_warnings == ["DOCUMENT_LENGTH_DEVIATION"]
 
 
 def test_report_contracts_publish_a_four_exhibit_limit():
@@ -214,11 +252,18 @@ def test_report_contracts_publish_a_four_exhibit_limit():
         assert schema["omitted_charts"]["maxItems"] == 4
 
 
+def test_adaptive_result_does_not_restore_the_legacy_report_word_floor():
+    word_count_schema = ReportResultV2.model_json_schema()["properties"][
+        "word_count"
+    ]
+
+    assert word_count_schema["minimum"] == 1
+
+
 def test_document_plan_supports_track_driven_structure_without_single_intent():
     plan = ReportDocumentPlan.model_validate(_document_plan_payload())
 
     assert [section.role.value for section in plan.sections] == [
-        "executive_summary",
         "analysis",
         "analysis",
         "analysis",
@@ -255,8 +300,11 @@ def test_document_plan_rejects_missing_track_assignment_and_invalid_gap_status()
 
 def test_document_plan_rejects_fixed_structure_regressions():
     payload = _document_plan_payload()
-    payload["sections"][0]["role"] = "analysis"
-    with pytest.raises(ValidationError, match="executive summary"):
+    payload["sections"][0], payload["sections"][3] = (
+        payload["sections"][3],
+        payload["sections"][0],
+    )
+    with pytest.raises(ValidationError, match="Implications"):
         ReportDocumentPlan.model_validate(payload)
 
     payload = _document_plan_payload()
@@ -272,7 +320,7 @@ def test_document_plan_rejects_fixed_structure_regressions():
         ReportDocumentPlan.model_validate(payload)
 
 
-def test_document_draft_encodes_body_first_generation_and_summary_first_display():
+def test_document_draft_preserves_plan_owned_section_order():
     draft = ReportDocumentDraft.model_validate(_document_draft_payload())
 
     assert [
@@ -283,12 +331,11 @@ def test_document_draft_encodes_body_first_generation_and_summary_first_display(
         "market_model",
         "implications",
         "limitations",
-        "executive_summary",
     ]
-    assert draft.display_order_sections()[0].section_id == "executive_summary"
+    assert draft.display_order_sections()[0].section_id == "price_dynamics"
 
     payload = _document_draft_payload()
-    payload["executive_summary"]["section_id"] = "price_dynamics"
+    payload["sections"][-1]["section_id"] = "price_dynamics"
     with pytest.raises(ValidationError, match="section IDs"):
         ReportDocumentDraft.model_validate(payload)
 
@@ -315,14 +362,7 @@ def _checkpoint_bound_payloads():
     draft_payload = _document_draft_payload()
     draft_payload["query_digest"] = manifest_payload["query_digest"]
     draft_payload["evidence_manifest_id"] = manifest_payload["manifest_id"]
-    for section in (
-        draft_payload["analytical_sections"]
-        + [
-            draft_payload["implications_section"],
-            draft_payload["limitations_section"],
-            draft_payload["executive_summary"],
-        ]
-    ):
+    for section in draft_payload["sections"]:
         section["paragraphs"][0]["evidence_refs"] = [
             manifest_payload["items"][0]["evidence_ref"]
         ]
@@ -427,7 +467,7 @@ def test_checkpoint_v3_rejects_duplicate_packet_tracks_and_unbound_drafts():
             }
         )
 
-    draft["analytical_sections"][0]["section_id"] = "unknown_section"
+    draft["sections"][0]["section_id"] = "unknown_section"
     with pytest.raises(ValidationError, match="document draft"):
         ReportGenerationCheckpoint.model_validate(
             {
@@ -448,6 +488,8 @@ def test_checkpoint_v3_rejects_unknown_tracks_and_manifest_evidence():
     manifest, research, document_plan, draft = _checkpoint_bound_payloads()
     document_plan["completed_track_ids"].append("unknown_track")
     document_plan["sections"][1]["track_ids"].append("unknown_track")
+    document_plan["evidence_capacity"]["usable_track_count"] = 4
+    document_plan["evidence_capacity"]["complete_track_count"] = 4
 
     with pytest.raises(ValidationError, match="unknown research tracks"):
         ReportGenerationCheckpoint.model_validate(
@@ -486,12 +528,12 @@ def test_checkpoint_v3_rejects_unknown_tracks_and_manifest_evidence():
 
 def test_checkpoint_v3_binds_draft_roles_and_evidence_to_document_plan():
     manifest, research, document_plan, draft = _checkpoint_bound_payloads()
-    draft["executive_summary"], draft["analytical_sections"][0] = (
-        draft["analytical_sections"][0],
-        draft["executive_summary"],
+    draft["sections"][0], draft["sections"][3] = (
+        draft["sections"][3],
+        draft["sections"][0],
     )
 
-    with pytest.raises(ValidationError, match="document-plan roles"):
+    with pytest.raises(ValidationError, match="document-plan order"):
         ReportGenerationCheckpoint.model_validate(
             {
                 "contract_version": "report-generation-checkpoint-v3",
@@ -507,7 +549,7 @@ def test_checkpoint_v3_binds_draft_roles_and_evidence_to_document_plan():
         )
 
     manifest, research, document_plan, draft = _checkpoint_bound_payloads()
-    draft["analytical_sections"][0]["paragraphs"][0]["evidence_refs"] = [
+    draft["sections"][0]["paragraphs"][0]["evidence_refs"] = [
         "evidence:table:" + "f" * 16
     ]
     with pytest.raises(ValidationError, match="unknown manifest evidence"):

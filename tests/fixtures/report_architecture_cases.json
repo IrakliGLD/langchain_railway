@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "id": "compact_price",
+      "query": "What were electricity prices over the available period?",
+      "usable_tracks": 1,
+      "usable_exhibits": 1,
+      "validated_findings": 2,
+      "expected_profile": "compact"
+    },
+    {
+      "id": "focused_price_security",
+      "query": "Compare electricity prices with the generation mix and discuss energy security.",
+      "usable_tracks": 2,
+      "usable_exhibits": 2,
+      "validated_findings": 4,
+      "expected_profile": "focused"
+    },
+    {
+      "id": "full_market_report",
+      "query": "Assess prices, energy security, tariffs, and the new market model.",
+      "usable_tracks": 4,
+      "usable_exhibits": 4,
+      "validated_findings": 8,
+      "expected_profile": "full"
+    },
+    {
+      "id": "knowledge_only",
+      "query": "Explain the current market model and deregulation stage.",
+      "usable_tracks": 1,
+      "usable_exhibits": 0,
+      "validated_findings": 3,
+      "expected_profile": "compact"
+    },
+    {
+      "id": "partial_secondary",
+      "query": "Assess prices and tariffs when tariff history is incomplete.",
+      "usable_tracks": 1,
+      "usable_exhibits": 1,
+      "validated_findings": 2,
+      "expected_profile": "compact"
+    }
+  ]
+}

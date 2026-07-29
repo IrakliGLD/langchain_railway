@@ -17,11 +17,6 @@ import core.llm as llm
 from agent.report_document_generation import (
     validate_report_document,
 )
-from agent.report_sections import count_section_words
-from contracts.report import (
-    report_aggregate_word_bounds,
-    report_section_validation_word_bounds,
-)
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentRepair,
@@ -131,8 +126,8 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
     system, user = captured["messages"]
     assert "report mode is already selected" in system[1].lower()
     assert "do not classify" in system[1].lower()
-    assert "body first" in system[1].lower()
-    assert "executive summary last" in system[1].lower()
+    assert "plan order" in system[1].lower()
+    assert "executive summary" not in system[1].lower()
     assert (
         "all evidence and claim lists must contain unique values"
         in system[1].lower()
@@ -142,8 +137,10 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
         in system[1].lower()
     )
     assert "require exactly two unique operands" in system[1].lower()
-    assert "paragraph prose, not json metadata" in system[1].lower()
-    assert "verify every section" in system[1].lower()
+    assert "word targets are recommendations" in system[1].lower()
+    assert "stop when the assigned evidence is exhausted" in system[1].lower()
+    assert "never pad" in system[1].lower()
+    assert "verify every section" not in system[1].lower()
     assert "prefer direct observations" in system[1].lower()
     assert (
         "do not introduce new arithmetic unless"
@@ -183,6 +180,114 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
     assert_strict_objects(captured["structured_schema"])
 
 
+def test_analysis_writer_projects_only_analysis_sections(monkeypatch):
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value == "analysis"
+    ]
+    expected = ReportDocumentRepair(
+        contract_version="report-document-repair-v1",
+        sections=[
+            section
+            for section in draft.sections
+            if section.section_id in analysis_ids
+        ],
+    )
+    captured = {}
+
+    def invoke_contract(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(llm, "_invoke_report_document_contract", invoke_contract)
+
+    result = llm.llm_write_report_analysis_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        section_ids=analysis_ids,
+    )
+
+    assert result == expected
+    assert captured["attempt_stage"] == "report_analysis_writer"
+    assert captured["payload_bindings"] == {
+        "contract_version": "report-document-repair-v1"
+    }
+    assert '"section_id":"prices"' in captured["prompt"]
+    assert '"section_id":"implications"' not in captured["prompt"]
+    assert '"section_id":"limitations"' not in captured["prompt"]
+
+
+def test_synthesis_writer_consumes_validated_analysis(monkeypatch):
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    analysis_sections = [
+        section
+        for section, spec in zip(
+            draft.sections,
+            document_plan.sections,
+            strict=True,
+        )
+        if spec.role.value == "analysis"
+    ]
+    synthesis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value != "analysis"
+    ]
+    expected = ReportDocumentRepair(
+        contract_version="report-document-repair-v1",
+        sections=[
+            section
+            for section in draft.sections
+            if section.section_id in synthesis_ids
+        ],
+    )
+    captured = {}
+
+    def invoke_contract(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(llm, "_invoke_report_document_contract", invoke_contract)
+
+    result = llm.llm_write_report_synthesis_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        analysis_sections=analysis_sections,
+        section_ids=synthesis_ids,
+    )
+
+    assert result == expected
+    assert captured["attempt_stage"] == "report_synthesis_writer"
+    assert "VALIDATED_ANALYSIS_SECTIONS" in captured["prompt"]
+    assert '"section_id":"prices"' in captured["prompt"]
+    assert "must not introduce a numeric claim" in captured["system"].lower()
+    assert '"section_id":"implications"' in captured["prompt"]
+
+
 def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     monkeypatch,
 ):
@@ -196,34 +301,7 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     ) = _document_components()
     draft = _valid_document_draft(document_plan, manifest)
     payload = draft.model_dump(mode="json")
-    spec_by_id = {
-        section.section_id: section for section in document_plan.sections
-    }
-    section_payloads = [
-        *payload["analytical_sections"],
-        payload["implications_section"],
-        payload["limitations_section"],
-        payload["executive_summary"],
-    ]
-    price_spec = spec_by_id["prices"]
-    _, price_maximum = report_section_validation_word_bounds(
-        price_spec.target_words
-    )
-    for section_payload in section_payloads:
-        section_id = section_payload["section_id"]
-        _, maximum_words = report_section_validation_word_bounds(
-            spec_by_id[section_id].target_words
-        )
-        paragraph = section_payload["paragraphs"][0]
-        current_words = count_section_words(paragraph["text"])
-        paragraph["text"] += " " + " ".join(
-            "f"
-            for _ in range(
-                maximum_words
-                + (section_id == "prices")
-                - current_words
-            )
-        )
+    payload["sections"][0]["paragraphs"][0]["direct_claims"] = []
     rejected = ReportDocumentDraft.model_validate(payload)
     validation = validate_report_document(
         rejected,
@@ -231,13 +309,30 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         manifest,
         research_plan,
     )
-    replacement = draft.analytical_sections[0]
+    validation = validation.model_copy(
+        update={
+            "valid": False,
+            "document_errors": ["DOCUMENT_IDENTITY_MISMATCH"],
+        }
+    )
+    replacement = draft.sections[0]
     expected = ReportDocumentRepair(
         contract_version="report-document-repair-v1",
         sections=[replacement],
     )
     captured = {}
     structured_client = object()
+    project_inputs = llm._report_document_prompt_inputs
+
+    def capture_projection(*args, **kwargs):
+        captured["projection_kwargs"] = kwargs
+        return project_inputs(*args, **kwargs)
+
+    monkeypatch.setattr(
+        llm,
+        "_report_document_prompt_inputs",
+        capture_projection,
+    )
 
     class _ReportClient:
         def with_structured_output(self, schema, **kwargs):
@@ -284,6 +379,8 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
 
     assert result == expected
     assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
+    assert captured["projection_kwargs"]["evidence_budget_chars"] == 20_000
+    assert captured["projection_kwargs"]["observation_budget_chars"] == 6_000
     assert (
         captured["invoke_kwargs"]["attempt_stage"]
         == "report_document_repair"
@@ -296,10 +393,8 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert isinstance(captured["structured_schema"], dict)
     system, user = captured["messages"]
     assert "only the rejected sections" in system[1].lower()
-    assert (
-        "word_count_too_short replacement must contain more prose words"
-        in system[1].lower()
-    )
+    assert "blocking validation errors" in system[1].lower()
+    assert "word_count_too_short" not in system[1].lower()
     assert "prefer direct observations" in system[1].lower()
     assert (
         "do not introduce new arithmetic unless"
@@ -316,33 +411,22 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         1,
     )[1].split("\n\nREJECTED_SECTIONS:", 1)[0]
     repair_context = json.loads(errors_json)
-    document_minimum, document_maximum = report_aggregate_word_bounds(
-        [section.target_words for section in document_plan.sections]
-    )
-    assert repair_context["document"] == {
-        "error_codes": validation.document_errors,
-        "word_count": validation.word_count,
-        "minimum_words": document_minimum,
-        "maximum_words": document_maximum,
-        "required_reduction_words": 1,
-        "required_additional_words": 0,
-    }
     assert repair_context["document"]["error_codes"] == [
-        "DOCUMENT_WORD_COUNT_TOO_LONG"
+        "DOCUMENT_IDENTITY_MISMATCH"
     ]
-    assert repair_context["sections"]["prices"] == {
-        "error_codes": validation.section_errors["prices"],
-        "word_count": price_maximum + 1,
-        "minimum_words": report_section_validation_word_bounds(
-            price_spec.target_words
-        )[0],
-        "maximum_words": price_maximum,
-        "required_reduction_words": 1,
-        "required_additional_words": 0,
-    }
+    assert repair_context["sections"]["prices"]["error_codes"] == (
+        [
+            "DOCUMENT_IDENTITY_MISMATCH",
+            *validation.section_errors["prices"],
+        ]
+    )
+    assert validation.section_errors["prices"]
     plan_json = user[1].split(
-        "REJECTED_SECTION_PLAN_AND_WORD_BOUNDS:\n",
+        "REJECTED_SECTION_PLAN_AND_RECOMMENDED_WORD_TARGETS:\n",
         1,
     )[1].split("\n\nRESEARCH_SCOPE:", 1)[0]
     repair_plan = json.loads(plan_json)
-    assert repair_plan["sections"][0]["maximum_words"] == price_maximum
+    assert (
+        repair_plan["sections"][0]["recommended_maximum_words"]
+        > repair_plan["sections"][0]["recommended_minimum_words"]
+    )

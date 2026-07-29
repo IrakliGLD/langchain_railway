@@ -112,6 +112,19 @@ DocumentGenerator = Callable[..., Any]
 DocumentAssembler = Callable[..., Any]
 DocumentChartBuilder = Callable[..., Any]
 
+def _report_document_allows_repair(
+    *,
+    profile: Any,
+    generative_calls_used: int,
+    maximum_calls: int,
+) -> bool:
+    profile_value = getattr(profile, "value", profile)
+    generation_calls = 1 if profile_value == "compact" else 2
+    return (
+        generative_calls_used + generation_calls + 1
+        <= maximum_calls
+    )
+
 _REPORT_FAILURE_RETRYABILITY = {
     "REPORT_ASSEMBLY_INVALID": False,
     "REPORT_CANCELLED": False,
@@ -857,7 +870,10 @@ class ReportJobProcessor:
                         list(exc.schema_error_codes)
                     ),
                 )
-                raise _report_failure("REPORT_PLAN_INVALID") from exc
+                raise _report_failure(
+                    "REPORT_PLAN_INVALID",
+                    retryable=True,
+                ) from exc
             except (ValidationError, ValueError) as exc:
                 raise _report_failure("REPORT_PLAN_INVALID") from exc
             generative_calls_used = 1
@@ -1015,9 +1031,10 @@ class ReportJobProcessor:
                     progress_percent=progress,
                     checkpoint=None,
                 )
-            allow_repair = (
-                generative_calls_used + 2
-                <= self._max_generative_calls
+            allow_repair = _report_document_allows_repair(
+                profile=document_plan.profile,
+                generative_calls_used=generative_calls_used,
+                maximum_calls=self._max_generative_calls,
             )
             try:
                 raw_draft = self._document_generator(

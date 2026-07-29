@@ -10,6 +10,7 @@ import pytest
 
 from agent.report_research_planner import (
     ReportResearchPlanError,
+    build_report_planning_constraints,
     plan_report_research,
     validate_report_research_plan,
 )
@@ -41,6 +42,23 @@ def test_research_plan_validator_accepts_compound_required_coverage():
         "energy_security",
         "market_knowledge",
         "prices",
+    }
+
+
+def test_planning_constraints_publish_required_exhibits_before_llm_call():
+    constraints = build_report_planning_constraints(_COMPOUND_QUERY)
+
+    assert constraints.maximum_total_exhibits == 4
+    assert {
+        (
+            exhibit.requirement.value,
+            exhibit.collector_id.value,
+            exhibit.purpose.value,
+        )
+        for exhibit in constraints.required_exhibits
+    } == {
+        ("prices", "prices", "trend"),
+        ("energy_security", "generation_mix", "composition"),
     }
 
 
@@ -96,8 +114,21 @@ def test_research_planner_binds_identity_language_and_uses_one_model_call():
     raw_payload = _bound_plan_payload("placeholder")
     raw_payload["language_code"] = "ru"
 
-    def invoke_model(query: str, *, language_code: str, max_tracks: int):
-        calls.append((query, language_code, max_tracks))
+    def invoke_model(
+        query: str,
+        *,
+        language_code: str,
+        max_tracks: int,
+        planning_constraints,
+    ):
+        calls.append(
+            (
+                query,
+                language_code,
+                max_tracks,
+                planning_constraints,
+            )
+        )
         return raw_payload
 
     plan = plan_report_research(
@@ -106,7 +137,11 @@ def test_research_planner_binds_identity_language_and_uses_one_model_call():
         invoke_model=invoke_model,
     )
 
-    assert calls == [(_COMPOUND_QUERY, "en", 4)]
+    assert len(calls) == 1
+    assert calls[0][:3] == (_COMPOUND_QUERY, "en", 4)
+    assert calls[0][3] == build_report_planning_constraints(
+        _COMPOUND_QUERY
+    )
     assert plan.query_digest == hashlib.sha256(
         _COMPOUND_QUERY.encode("utf-8")
     ).hexdigest()

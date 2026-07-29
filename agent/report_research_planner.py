@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from contracts.report import REPORT_MAX_EXHIBITS, ReportChartPurpose
 from contracts.report_research import (
     ReportCollectorId,
+    ReportPlanningConstraints,
+    ReportRequiredExhibit,
     ReportResearchPlan,
     ReportResearchPlanAssessment,
     ReportResearchRequirement,
@@ -66,6 +68,18 @@ _SCENARIO_SIGNALS = (
     "hypothetical",
     "სცენარ",
     "сценар",
+)
+_REQUIRED_EXHIBIT_POLICIES = (
+    (
+        ReportResearchRequirement.PRICES,
+        ReportCollectorId.PRICES,
+        ReportChartPurpose.TREND,
+    ),
+    (
+        ReportResearchRequirement.ENERGY_SECURITY,
+        ReportCollectorId.GENERATION_MIX,
+        ReportChartPurpose.COMPOSITION,
+    ),
 )
 
 
@@ -172,6 +186,29 @@ def _assessment(
     )
 
 
+def build_report_planning_constraints(
+    query: str,
+) -> ReportPlanningConstraints:
+    """Publish deterministic exhibit obligations before model planning."""
+
+    requirements = _recognized_requirements(query)
+    return ReportPlanningConstraints(
+        contract_version="report-planning-constraints-v1",
+        maximum_total_exhibits=REPORT_MAX_EXHIBITS,
+        required_exhibits=[
+            ReportRequiredExhibit(
+                requirement=requirement,
+                collector_id=collector,
+                purpose=purpose,
+            )
+            for requirement, collector, purpose in (
+                _REQUIRED_EXHIBIT_POLICIES
+            )
+            if requirement in requirements
+        ],
+    )
+
+
 def _enforce_exhibit_budget(
     plan: ReportResearchPlan,
     requirements: set[ReportResearchRequirement],
@@ -182,20 +219,8 @@ def _enforce_exhibit_budget(
     if exhibit_count <= REPORT_MAX_EXHIBITS:
         return plan
 
-    required_exhibits = (
-        (
-            ReportResearchRequirement.PRICES,
-            ReportCollectorId.PRICES,
-            ReportChartPurpose.TREND,
-        ),
-        (
-            ReportResearchRequirement.ENERGY_SECURITY,
-            ReportCollectorId.GENERATION_MIX,
-            ReportChartPurpose.COMPOSITION,
-        ),
-    )
     essential: set[tuple[int, int]] = set()
-    for requirement, collector, purpose in required_exhibits:
+    for requirement, collector, purpose in _REQUIRED_EXHIBIT_POLICIES:
         if requirement not in requirements:
             continue
         for track_index, track in enumerate(plan.tracks):
@@ -346,6 +371,7 @@ def plan_report_research(
         raise ValueError("max_tracks must be between 1 and 8.")
     query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
     language_code = detect_language(query)
+    planning_constraints = build_report_planning_constraints(query)
     if invoke_model is None:
         from core.llm import llm_plan_report_research
 
@@ -356,6 +382,7 @@ def plan_report_research(
             query,
             language_code=language_code,
             max_tracks=max_tracks,
+            planning_constraints=planning_constraints,
         )
         payload = (
             raw_plan.model_dump(mode="json")
