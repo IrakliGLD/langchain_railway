@@ -493,6 +493,70 @@ def test_every_report_writer_prompt_carries_the_claim_contract(monkeypatch):
         assert llm._REPORT_CLAIM_CONTRACT_RULES in system
 
 
+def _capture_repair_invocation(monkeypatch):
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    validation = validate_report_document(
+        draft, document_plan, manifest, research_plan
+    )
+    captured = {}
+
+    def invoke_contract(**kwargs):
+        captured.update(kwargs)
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[draft.sections[0]],
+        )
+
+    monkeypatch.setattr(
+        llm, "_invoke_report_document_contract", invoke_contract
+    )
+    llm.llm_repair_report_document_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        draft,
+        validation,
+        section_ids=[draft.sections[0].section_id],
+    )
+    return captured
+
+
+def test_document_repair_resamples_when_the_model_accepts_temperature(
+    monkeypatch,
+):
+    monkeypatch.setattr(llm, "REPORT_REASONING_EFFORT", None, raising=False)
+
+    captured = _capture_repair_invocation(monkeypatch)
+
+    assert captured["sampling_temperature"] == (
+        llm._repair_sampling_temperature(1)
+    )
+    assert captured["use_cache"] is False
+
+
+def test_document_repair_sends_no_temperature_to_a_reasoning_model(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        llm, "REPORT_REASONING_EFFORT", "medium", raising=False
+    )
+
+    captured = _capture_repair_invocation(monkeypatch)
+
+    assert captured["sampling_temperature"] is None
+    assert captured["use_cache"] is False
+
+
 def test_compact_writer_and_repair_share_the_claim_contract(monkeypatch):
     (
         research_plan,

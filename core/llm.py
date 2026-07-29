@@ -70,6 +70,7 @@ from config import (
     REPORT_MAX_OUTPUT_TOKENS,
     REPORT_MODEL,
     REPORT_MODEL_TYPE,
+    REPORT_REASONING_EFFORT,
     REPORT_STRUCTURED_OUTPUT_METHOD,
     REPORT_TIMEOUT_SECONDS,
     REQUEST_CLEANUP_ALLOWANCE_MS,
@@ -4174,6 +4175,7 @@ def _invoke_report_document_contract(
     use_cache: bool,
     cache_validator: Callable[[Any], bool] | None = None,
     payload_bindings: dict[str, Any] | None = None,
+    sampling_temperature: float | None = None,
 ) -> ReportDocumentDraft | ReportDocumentRepair | dict[str, Any]:
     bindings = payload_bindings or {}
     cache_token = None
@@ -4229,6 +4231,14 @@ def _invoke_report_document_contract(
             label=label,
             attempt_stage=attempt_stage,
             allow_openai_fallback=False,
+            # Only the resampling repair path varies temperature. Passing the
+            # keyword unconditionally would change the call surface for every
+            # other stage for no behavioural reason.
+            **(
+                {"sampling_temperature": sampling_temperature}
+                if sampling_temperature is not None
+                else {}
+            ),
         )
         if (
             isinstance(message, dict)
@@ -4722,6 +4732,7 @@ def llm_repair_report_document_sections(
         result_type=ReportDocumentRepair,
         structured_schema=_REPORT_DOCUMENT_REPAIR_SCHEMA,
         use_cache=False,
+        sampling_temperature=_report_document_repair_temperature(),
     )
 
 
@@ -4745,6 +4756,20 @@ def _repair_sampling_temperature(attempt_number: int) -> float:
         _REPAIR_BASE_SAMPLING_TEMPERATURE
         + repair_index * _REPAIR_SAMPLING_TEMPERATURE_STEP,
     )
+
+
+def _report_document_repair_temperature() -> float | None:
+    """Return the repair temperature, or None when the model rejects one.
+
+    Reasoning models take reasoning_effort instead of temperature and error on
+    the parameter, which is why get_report_llm never sets one. Sending it
+    anyway would turn every repair into a provider failure — strictly worse
+    than a repair that merely fails to converge.
+    """
+
+    if REPORT_REASONING_EFFORT:
+        return None
+    return _repair_sampling_temperature(1)
 
 
 def _report_section_validation_rules(section: ReportSectionSpec) -> str:
