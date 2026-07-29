@@ -101,6 +101,33 @@ def test_report_planner_uses_dedicated_model_and_disables_fallback(monkeypatch):
     assert captured["invoke_kwargs"]["allow_openai_fallback"] is False
 
 
+def test_report_planner_releases_cache_after_provider_failure(monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "cache-token"),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_cancel_in_flight",
+        lambda key, token: cancelled.append((key, token)),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        llm.llm_plan_report("Explain the price trend.", _manifest())
+
+    assert len(cancelled) == 1
+    assert cancelled[0][1] == "cache-token"
+
+
 def test_report_planner_accepts_openai_responses_content_blocks(monkeypatch):
     monkeypatch.setattr(llm, "_cache_get_or_reserve", lambda _key: (None, "token"))
     monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)

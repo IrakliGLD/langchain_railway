@@ -42,3 +42,32 @@ def test_invalid_json_is_not_retried(monkeypatch):
         llm.llm_analyze_question("What was the balancing price in January 2024?")
 
     assert len(calls) == 1
+
+
+def test_provider_failure_releases_analyzer_cache_reservation(monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "cache-token"),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_cancel_in_flight",
+        lambda key, token: cancelled.append((key, token)),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        llm.llm_analyze_question(
+            "What was the balancing price in January 2024?"
+        )
+
+    assert len(cancelled) == 1
+    assert cancelled[0][1] == "cache-token"
