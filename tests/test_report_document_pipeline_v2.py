@@ -430,6 +430,58 @@ def test_document_generation_repairs_only_invalid_sections_once():
     ).valid
 
 
+def test_document_generation_repairs_a_schema_invalid_draft_once():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    invalid_payload = valid_draft.model_dump(mode="json")
+    invalid_payload.pop("analytical_sections")
+    repair_calls = []
+
+    def repair_sections(
+        _query,
+        _plan,
+        _research_plan,
+        _manifest,
+        _packets,
+        rejected,
+        validation,
+        *,
+        section_ids,
+    ):
+        repair_calls.append((rejected, validation, list(section_ids)))
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=valid_draft.generation_order_sections(),
+        )
+
+    repaired = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_document=lambda *_args: invalid_payload,
+        repair_sections=repair_sections,
+    )
+
+    assert repaired == valid_draft
+    assert len(repair_calls) == 1
+    assert repair_calls[0][0] is invalid_payload
+    assert repair_calls[0][1].document_errors == [
+        "DOCUMENT_SCHEMA_INVALID"
+    ]
+    assert repair_calls[0][2] == [
+        section.section_id for section in document_plan.sections
+    ]
+
+
 def test_document_generation_fails_after_one_invalid_repair():
     (
         research_plan,

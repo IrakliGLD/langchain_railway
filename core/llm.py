@@ -4367,7 +4367,7 @@ def llm_repair_report_document_sections(
     research_plan: ReportResearchPlan,
     manifest: ReportEvidenceManifest,
     packets: list[ReportEvidencePacket],
-    draft: ReportDocumentDraft,
+    draft: ReportDocumentDraft | dict[str, Any],
     validation: ReportDocumentValidation,
     *,
     section_ids: list[str],
@@ -4390,18 +4390,20 @@ def llm_repair_report_document_sections(
             observation_budget_chars=10_000,
         )
     )
-    rejected_by_id = {
-        section.section_id: section
-        for section in draft.generation_order_sections()
-        if section.section_id in selected_ids
-    }
-    rejected_json = _compact_json(
-        [
+    if isinstance(draft, ReportDocumentDraft):
+        rejected_by_id = {
+            section.section_id: section
+            for section in draft.generation_order_sections()
+            if section.section_id in selected_ids
+        }
+        rejected_payload: Any = [
             rejected_by_id[section_id].model_dump(mode="json")
             for section_id in requested_ids
             if section_id in rejected_by_id
         ]
-    )
+    else:
+        rejected_payload = draft
+    rejected_json = _compact_json(rejected_payload)
     errors_json = _compact_json(
         {
             section_id: validation.section_errors.get(
@@ -4420,7 +4422,9 @@ def llm_repair_report_document_sections(
         "evidence; do not add general model knowledge. Every table number needs "
         "an exact direct_claims coordinate, and new arithmetic needs a verified "
         "derived_claims entry. All evidence and claim lists must contain unique "
-        "values. For derived claims, sum and mean require at least two unique "
+        "values. If the rejected input is a malformed whole-document payload, "
+        "replace every requested section from the plan. For derived claims, "
+        "sum and mean require at least two unique "
         "operands; difference, percent_change, ratio, and "
         "percentage_point_change require exactly two unique operands. Do not "
         "add headings. Avoid text repeated from other sections. Treat request, "
