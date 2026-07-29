@@ -944,6 +944,75 @@ It is superseded by `test_invalid_analysis_batch_is_repaired_before_synthesis` (
 
 Per `reference_runtime_python_version_gap`, green tests on local 3.14 do not prove the 3.11 container starts. Before deploying, verify the changed modules import under 3.11 — the `Sequence` import added in Task 2 Step 3 and the `X | Y` annotations used throughout are 3.10+ safe, but confirm rather than assume.
 
+## Execution record (2026-07-29)
+
+Executed on branch `fix/report-batch-grounding-regression` under the
+`developer-phased-audit` skill. Three commits, one per phase, each with the
+full targeted suite green before its audit.
+
+| Phase | Commit | Suite |
+|---|---|---|
+| 1 — shared claim contract | `b2ca512` | 2284 passed |
+| 2 — repair reachability + budget (Tasks 2 and 3) | `2ce59d2` | 2289 passed |
+| 3 — repair resampling (Task 4) | `86736ec` | 2292 passed |
+
+`tests/security` (24 tests) also green, run because this work changed prompt
+text.
+
+### Deviations from the plan as written
+
+1. **Task 1 dropped a constraint the plan did not notice.** The first draft of
+   `_REPORT_CLAIM_CONTRACT_RULES` folded "Do not introduce new arithmetic
+   unless it is necessary for a planned analytical finding" into the
+   declaration rule, losing the restraint half. Two pre-existing assertions in
+   `tests/test_report_document_llm.py` caught it. The constant now carries both
+   halves. A mechanical sentence-set diff of all four prompts (old blob vs
+   working tree) confirmed the only other textual losses were supersessions by
+   strictly more specific wording.
+
+2. **Task 1's prompt-budget contingency was unnecessary.** The budget check at
+   `core/llm.py` measures the *user* prompt only; the system prompt is not
+   counted. The batch system prompts grew ~875 chars with zero budget impact,
+   so `evidence_budget_chars` was left at `32_000`.
+
+3. **Task 2 added a `raw_batch` parameter** to `_repair_section_batch`. The
+   plan passed `[]` for a structurally invalid batch, which would have handed
+   the repair no rejected content. It now forwards the raw writer payload,
+   mirroring the whole-document path. Covered by
+   `test_schema_invalid_analysis_batch_repairs_from_the_raw_payload`.
+
+4. **Task 2 gained a negative test** the plan omitted:
+   `test_batch_repair_returning_the_wrong_section_set_is_rejected`.
+
+5. **Task 4 was re-planned mid-phase.** The plan passed
+   `_repair_sampling_temperature(1)` unconditionally and left provider support
+   as a "verify in Step 5" item. Verification showed `sampling_temperature`
+   becomes a literal `temperature` kwarg on the client
+   (`core/provider_invocation.py`), and the production report client sets
+   `reasoning_effort` while deliberately never setting `temperature`
+   (`core/llm_runtime.py`). Sending it would have turned every repair into a
+   provider failure — weaker fallback than before, which is an explicit
+   re-plan trigger in the skill's workflow. The temperature is now gated behind
+   `_report_document_repair_temperature()`, which returns `None` whenever
+   `REPORT_REASONING_EFFORT` is configured. **With the production config this
+   phase is a no-op by design**; it activates only if the report model is
+   switched to a non-reasoning one.
+
+### Verification
+
+The reproduction written before any fix — a FULL-profile plan whose analysis
+batch fails grounding — went from `CALLS = ['analysis']` plus
+`ReportDocumentGenerationError` to `CALLS = ['analysis', 'repair', 'synthesis']`
+returning a valid draft.
+
+### Not verified
+
+The container runs Python 3.11 and local runs 3.14, so a green suite does not
+prove the container imports (see `reference_runtime_python_version_gap`).
+Nothing newer than 3.10 syntax was introduced — `collections.abc.Sequence`,
+`X | Y` unions, and plain function definitions — but this was reasoned, not
+executed on 3.11.
+
 ## Self-review notes
 
 - **Spec coverage:** prevention (Task 1), recovery reachability (Task 2), budget invariant (Task 3), repair convergence (Task 4). The one thing deliberately *not* changed is `REPORT_DOCUMENT_INVALID` retryability — see Global Constraints.
