@@ -430,3 +430,106 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         repair_plan["sections"][0]["recommended_maximum_words"]
         > repair_plan["sections"][0]["recommended_minimum_words"]
     )
+
+
+def test_every_report_writer_prompt_carries_the_claim_contract(monkeypatch):
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value == "analysis"
+    ]
+    synthesis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value != "analysis"
+    ]
+    analysis_sections = [
+        section
+        for section in draft.sections
+        if section.section_id in analysis_ids
+    ]
+    captured = []
+
+    def invoke_contract(**kwargs):
+        captured.append(kwargs["system"])
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=analysis_sections,
+        )
+
+    monkeypatch.setattr(
+        llm, "_invoke_report_document_contract", invoke_contract
+    )
+
+    llm.llm_write_report_analysis_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        section_ids=analysis_ids,
+    )
+    llm.llm_write_report_synthesis_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        analysis_sections=analysis_sections,
+        section_ids=synthesis_ids,
+    )
+
+    assert len(captured) == 2
+    for system in captured:
+        assert llm._REPORT_CLAIM_CONTRACT_RULES in system
+
+
+def test_compact_writer_and_repair_share_the_claim_contract(monkeypatch):
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    validation = validate_report_document(
+        draft, document_plan, manifest, research_plan
+    )
+    captured = []
+
+    def invoke_contract(**kwargs):
+        captured.append(kwargs["system"])
+        return draft
+
+    monkeypatch.setattr(
+        llm, "_invoke_report_document_contract", invoke_contract
+    )
+
+    llm.llm_write_report_document(
+        _QUERY, document_plan, research_plan, manifest, packets
+    )
+    llm.llm_repair_report_document_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        draft,
+        validation,
+        section_ids=[document_plan.sections[0].section_id],
+    )
+
+    assert len(captured) == 2
+    for system in captured:
+        assert llm._REPORT_CLAIM_CONTRACT_RULES in system
