@@ -133,7 +133,11 @@ def test_openai_report_research_planner_uses_configured_structured_output(
 
     assert isinstance(plan, ReportResearchPlan)
     assert captured["client"] is structured_client
-    assert captured["structured_schema"] is ReportResearchPlanDraft
+    assert isinstance(captured["structured_schema"], dict)
+    assert (
+        captured["structured_schema"]
+        == ReportResearchPlanDraft.model_json_schema()
+    )
     assert captured["structured_kwargs"] == {
         "method": method,
         "include_raw": True,
@@ -251,4 +255,9 @@ def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
     assert "REQUIRED_QUERY_DIGEST" not in user[1]
     assert "REQUIRED_LANGUAGE_CODE" not in user[1]
     assert "same language as USER_REPORT_REQUEST" in system[1]
+    assert "period_start and period_end must both be null" in system[1]
+    assert "every request topic must be covered" in system[1]
+    assert "knowledge mode requires vector_knowledge" in system[1]
+    assert "mixed mode requires both" in system[1]
+    assert "all lists within a track must contain unique values" in system[1]
     assert len(user[1]) < 30_000
