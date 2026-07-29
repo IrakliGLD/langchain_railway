@@ -4154,6 +4154,8 @@ _REPORT_CLAIM_CONTRACT_RULES = (
     "analytical finding and every operand is available in assigned table "
     "evidence; new arithmetic requires a code-verifiable derived_claims "
     "entry. "
+    "When a column's unit is a ratio, fraction or share, state the claim as a "
+    "percentage: set display_value to the percent form and unit to \"%\". "
     "Use every required_evidence_refs value assigned to each section. "
     "All evidence and claim lists must contain unique values. "
     "For derived claims, sum and mean require at least two unique operands; "

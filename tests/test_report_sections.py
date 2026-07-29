@@ -133,6 +133,103 @@ def test_section_grounding_binds_direct_value_to_its_row_metric_and_unit():
     assert "DIRECT_CLAIM_INVALID" in wrong_unit.error_codes
 
 
+def test_ratio_claims_do_not_require_the_unit_word_in_the_prose():
+    """A ratio-unit claim must be renderable the way people actually write.
+
+    "ratio", "fraction" and "share (0-1)" are scale labels, not units anyone
+    writes beside a number. Requiring the literal token means the only
+    accepted prose is "a share of 0.62 ratio", so a correctly declared claim
+    fails as DIRECT_CLAIM_NOT_USED plus DIRECT_CLAIM_UNIT_NOT_RENDERED --
+    the rejection seen on report job 7184caf4.
+    """
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "generation_share"]
+    table["rows"] = [
+        {"period": "2026-01", "generation_share": 0.62},
+        {"period": "2026-02", "generation_share": 0.55},
+    ]
+    table["unit_by_column"] = {"generation_share": "ratio"}
+    manifest = _manifest().model_validate(manifest_payload)
+    draft_payload = _draft(
+        section,
+        text=(
+            "Hydro held a generation share of 0.62 in the supplied evidence. "
+            + _words(section.target_words)
+        ),
+    )
+    draft_payload["paragraphs"][0]["evidence_refs"] = (
+        section.required_evidence_refs
+    )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(
+            column="generation_share",
+            display_value="0.62",
+            unit="ratio",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(draft_payload),
+        section,
+        manifest,
+    )
+
+    assert validation.error_codes == []
+    assert validation.valid is True
+
+
+def test_dimensionless_claims_are_rendered_at_the_end_of_a_sentence():
+    """A value that ends a sentence still renders its claim.
+
+    The lookahead that stops "0.6" matching inside "0.62" also rejected the
+    full stop after a sentence-final value, so "The observed count was 12."
+    failed while "There were 12 plants." passed. Units that carry a token
+    after the number were never affected, which is why this stayed hidden.
+    """
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[2]
+    manifest_payload = deepcopy(_manifest().model_dump(mode="json"))
+    table = manifest_payload["items"][0]
+    table["columns"] = ["period", "plant_count"]
+    table["rows"] = [
+        {"period": "2026-01", "plant_count": 12},
+        {"period": "2026-02", "plant_count": 14},
+    ]
+    table["unit_by_column"] = {"plant_count": "count"}
+    manifest = _manifest().model_validate(manifest_payload)
+    draft_payload = _draft(
+        section,
+        text=(
+            "The supplied evidence records a plant count of 12. "
+            + _words(section.target_words)
+        ),
+    )
+    draft_payload["paragraphs"][0]["evidence_refs"] = (
+        section.required_evidence_refs
+    )
+    draft_payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(
+            column="plant_count",
+            display_value="12",
+            unit="count",
+        )
+    ]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(draft_payload),
+        section,
+        manifest,
+    )
+
+    assert validation.error_codes == []
+    assert validation.valid is True
+
+
 def test_verified_numeric_unit_notation_is_not_an_independent_claim():
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[1]
