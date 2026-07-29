@@ -12,6 +12,8 @@ from contracts.question_analysis_catalogs import (
 from contracts.vector_knowledge import (
     ChunkIngestRecord,
     DocumentRegistration,
+    HybridRetrievalDiagnostics,
+    HybridRetrievalMode,
     IngestionResult,
     RetrievalStrategy,
     VectorChunkRecord,
@@ -33,6 +35,8 @@ __all__ = [
     "QUESTION_ANALYSIS_CHART_POLICY",
     "QUESTION_ANALYSIS_DERIVED_METRIC_CATALOG",
     "VectorKnowledgeMode",
+    "HybridRetrievalMode",
+    "HybridRetrievalDiagnostics",
     "RetrievalStrategy",
     "VectorDocumentRecord",
     "VectorChunkRecord",

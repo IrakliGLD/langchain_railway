@@ -2655,6 +2655,50 @@ def _run_vector_knowledge_stage(
             outcome=bundle.outcome.value,
             strategy=bundle.strategy.value,
         )
+        # Phase 5: compare the independent PostgreSQL full-text arm with the
+        # dense baseline. Shadow mode records the would-be fused result while
+        # ``bundle.chunks`` remains dense; on mode records the applied cutover.
+        if bundle.hybrid_diagnostics is not None:
+            _hybrid = bundle.hybrid_diagnostics
+            _dense_ids = list(_hybrid.dense_chunk_ids)
+            _lexical_ids = list(_hybrid.lexical_chunk_ids)
+            _fused_ids = [
+                chunk.id for chunk in _hybrid.fused_chunks
+            ]
+            _fused_sections = [
+                f"{chunk.document_title or chunk.source_key} | "
+                f"{chunk.section_title or chunk.section_path or f'chunk_{chunk.chunk_index}'}"
+                for chunk in _hybrid.fused_chunks[:6]
+            ]
+            _lexical_failure = _hybrid.lexical_failure
+            trace_detail(
+                log,
+                ctx,
+                "stage_0_3_vector_knowledge_hybrid",
+                "validated",
+                hybrid_mode=_hybrid.mode.value,
+                cutover_applied=_hybrid.cutover_applied,
+                dense_chunk_ids=_dense_ids,
+                lexical_chunk_ids=_lexical_ids,
+                fused_chunk_ids=_fused_ids,
+                dense_lexical_overlap_count=len(
+                    set(_dense_ids) & set(_lexical_ids)
+                ),
+                dense_fused_overlap_count=len(
+                    set(_dense_ids) & set(_fused_ids)
+                ),
+                fused_sections=_fused_sections,
+                lexical_failure_stage=(
+                    _lexical_failure.stage.value
+                    if _lexical_failure is not None
+                    else ""
+                ),
+                lexical_failure_reason=(
+                    _lexical_failure.reason
+                    if _lexical_failure is not None
+                    else ""
+                ),
+            )
         # Phase A.2: adjacency observability. When
         # ``VECTOR_ADJACENCY_MODE != "off"``, the bundle carries any
         # adjacent chunks the retriever fetched. Emit a separate trace

@@ -7,6 +7,8 @@ from pydantic import ValidationError
 from contracts.vector_knowledge import (
     ChunkIngestRecord,
     DocumentRegistration,
+    HybridRetrievalDiagnostics,
+    HybridRetrievalMode,
     RetrievalStrategy,
     VectorChunkRecord,
     VectorDocumentRecord,
@@ -96,6 +98,127 @@ def test_vector_knowledge_bundle_rejects_inconsistent_typed_outcome():
         )
 
 
+def test_hybrid_diagnostics_allow_consistent_on_cutover():
+    dense = VectorChunkRecord(
+        id="dense-1",
+        document_id="doc-1",
+        text_content="Dense evidence.",
+    )
+    fused = VectorChunkRecord(
+        id="fused-1",
+        document_id="doc-2",
+        text_content="Fused evidence.",
+    )
+
+    bundle = VectorKnowledgeBundle(
+        query="query",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=1,
+        chunk_count=1,
+        chunks=[fused],
+        outcome=VectorRetrievalOutcome.matches,
+        hybrid_diagnostics=HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.on,
+            dense_chunk_ids=[dense.id],
+            lexical_chunk_ids=[fused.id],
+            fused_chunks=[fused],
+            cutover_applied=True,
+        ),
+    )
+
+    assert bundle.hybrid_diagnostics is not None
+    assert bundle.hybrid_diagnostics.cutover_applied is True
+
+
+def test_hybrid_diagnostics_reject_shadow_cutover():
+    with pytest.raises(ValidationError):
+        HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.shadow,
+            cutover_applied=True,
+        )
+
+
+def test_hybrid_diagnostics_reject_off_mode_payload():
+    with pytest.raises(ValidationError):
+        HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.off,
+        )
+
+
+def test_hybrid_diagnostics_reject_failed_candidates():
+    chunk = VectorChunkRecord(
+        id="fused-1",
+        document_id="doc-1",
+        text_content="Candidate cannot coexist with lexical failure.",
+    )
+
+    with pytest.raises(ValidationError):
+        HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.shadow,
+            lexical_chunk_ids=[chunk.id],
+            fused_chunks=[chunk],
+            lexical_failure=VectorRetrievalFailure(
+                stage=VectorRetrievalFailureStage.lexical_search,
+                reason="ConnectionError",
+            ),
+        )
+
+
+def test_vector_knowledge_bundle_rejects_shadow_result_drift():
+    dense = VectorChunkRecord(
+        id="dense-1",
+        document_id="doc-1",
+        text_content="Dense evidence.",
+    )
+    fused = VectorChunkRecord(
+        id="fused-1",
+        document_id="doc-2",
+        text_content="Fused evidence.",
+    )
+
+    with pytest.raises(ValidationError):
+        VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            top_k=1,
+            chunk_count=1,
+            chunks=[fused],
+            outcome=VectorRetrievalOutcome.matches,
+            hybrid_diagnostics=HybridRetrievalDiagnostics(
+                mode=HybridRetrievalMode.shadow,
+                dense_chunk_ids=[dense.id],
+                lexical_chunk_ids=[fused.id],
+                fused_chunks=[fused],
+                cutover_applied=False,
+            ),
+        )
+
+
+def test_vector_knowledge_bundle_rejects_hybrid_strategy_without_cutover():
+    dense = VectorChunkRecord(
+        id="dense-1",
+        document_id="doc-1",
+        text_content="Dense evidence.",
+    )
+
+    with pytest.raises(ValidationError):
+        VectorKnowledgeBundle(
+            query="query",
+            retrieval_mode=VectorKnowledgeMode.active,
+            strategy=RetrievalStrategy.hybrid,
+            top_k=1,
+            chunk_count=1,
+            chunks=[dense],
+            outcome=VectorRetrievalOutcome.matches,
+            hybrid_diagnostics=HybridRetrievalDiagnostics(
+                mode=HybridRetrievalMode.shadow,
+                dense_chunk_ids=[dense.id],
+            ),
+        )
+
+
 def test_chunk_ingest_record_requires_text():
     with pytest.raises(ValidationError):
         ChunkIngestRecord(chunk_index=0, text_content="   ")
@@ -112,6 +235,8 @@ def test_schema_sql_declares_expected_embedding_dimension():
     assert "is_latest boolean not null default true" in sql.lower()
     assert "abolished boolean not null default false" in sql.lower()
     assert "supersedes_document_id uuid null references knowledge.documents(id) on delete set null" in sql.lower()
+    assert "idx_knowledge_chunks_lexical_search" in sql.lower()
+    assert "'pg_catalog.simple'" in sql.lower()
 
 
 def test_structured_summary_prompt_allows_external_source_citations():

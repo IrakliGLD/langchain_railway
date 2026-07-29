@@ -16,6 +16,14 @@ class VectorKnowledgeMode(str, Enum):
     active = "active"
 
 
+class HybridRetrievalMode(str, Enum):
+    """Whether fused dense + lexical results are observed or selected."""
+
+    off = "off"
+    shadow = "shadow"
+    on = "on"
+
+
 class RetrievalStrategy(str, Enum):
     """How candidate chunks were selected and ranked.
 
@@ -48,6 +56,7 @@ class VectorRetrievalFailureStage(str, Enum):
     provider_initialization = "provider_initialization"
     query_embedding = "query_embedding"
     vector_search = "vector_search"
+    lexical_search = "lexical_search"
 
 
 class VectorRetrievalFailure(BaseModel):
@@ -212,6 +221,63 @@ class VectorChunkRecord(BaseModel):
         return text
 
 
+class HybridRetrievalDiagnostics(BaseModel):
+    """Comparison payload for the optional dense + lexical retrieval arm."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: HybridRetrievalMode
+    dense_chunk_ids: List[str] = Field(default_factory=list)
+    lexical_chunk_ids: List[str] = Field(default_factory=list)
+    fused_chunks: List[VectorChunkRecord] = Field(default_factory=list)
+    cutover_applied: bool = False
+    lexical_failure: Optional[VectorRetrievalFailure] = None
+
+    @model_validator(mode="after")
+    def _validate_cutover(self) -> "HybridRetrievalDiagnostics":
+        if self.mode is HybridRetrievalMode.off:
+            raise ValueError(
+                "off mode must omit hybrid diagnostics"
+            )
+        if self.cutover_applied and self.mode is not HybridRetrievalMode.on:
+            raise ValueError("hybrid cutover requires mode=on")
+        if (
+            self.mode is HybridRetrievalMode.on
+            and self.lexical_failure is None
+            and not self.cutover_applied
+        ):
+            raise ValueError(
+                "successful on mode requires hybrid cutover"
+            )
+        if self.lexical_failure is not None:
+            if (
+                self.lexical_failure.stage
+                is not VectorRetrievalFailureStage.lexical_search
+            ):
+                raise ValueError(
+                    "hybrid lexical failure requires stage=lexical_search"
+                )
+            if self.cutover_applied:
+                raise ValueError(
+                    "failed lexical retrieval cannot apply hybrid cutover"
+                )
+            if self.lexical_chunk_ids or self.fused_chunks:
+                raise ValueError(
+                    "failed lexical retrieval cannot carry lexical candidates"
+                )
+        for label, chunk_ids in (
+            ("dense_chunk_ids", self.dense_chunk_ids),
+            ("lexical_chunk_ids", self.lexical_chunk_ids),
+            (
+                "fused_chunk_ids",
+                [chunk.id for chunk in self.fused_chunks],
+            ),
+        ):
+            if len(chunk_ids) != len(set(chunk_ids)):
+                raise ValueError(f"{label} must be unique")
+        return self
+
+
 class VectorRetrievalFilters(BaseModel):
     """Optional filters for vector-backed document retrieval."""
 
@@ -252,6 +318,9 @@ class VectorKnowledgeBundle(BaseModel):
     # ``VECTOR_REFERENCE_EXPANSION_MODE != "off"``.  Pack consumers ignore
     # this field until B.4 cutover.
     reference_chunks: List[VectorChunkRecord] = Field(default_factory=list)
+    # Phase 5: independent full-text results and fused ranking. In shadow mode
+    # this carries the would-be fused chunks without changing ``chunks``.
+    hybrid_diagnostics: Optional[HybridRetrievalDiagnostics] = None
 
     @model_validator(mode="after")
     def _normalize_and_validate_outcome(self) -> "VectorKnowledgeBundle":
@@ -290,6 +359,28 @@ class VectorKnowledgeBundle(BaseModel):
             and self.top_k != 0
         ):
             raise ValueError("not_run outcome requires top_k=0")
+        diagnostics = self.hybrid_diagnostics
+        if diagnostics is not None:
+            chunk_ids = [chunk.id for chunk in self.chunks]
+            if diagnostics.cutover_applied:
+                if self.strategy is not RetrievalStrategy.hybrid:
+                    raise ValueError(
+                        "hybrid cutover requires strategy=hybrid"
+                    )
+                if chunk_ids != [
+                    chunk.id for chunk in diagnostics.fused_chunks
+                ]:
+                    raise ValueError(
+                        "hybrid cutover chunks must match fused chunks"
+                    )
+            elif chunk_ids != diagnostics.dense_chunk_ids:
+                raise ValueError(
+                    "non-cutover hybrid diagnostics must preserve dense chunks"
+                )
+            elif self.strategy is RetrievalStrategy.hybrid:
+                raise ValueError(
+                    "strategy=hybrid requires applied cutover"
+                )
         return self
 
     @property

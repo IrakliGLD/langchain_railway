@@ -174,6 +174,89 @@ def test_search_chunks_rejects_wrong_embedding_dimension():
         store.search_chunks(query_embedding=[0.1, 0.2, 0.3])
 
 
+def test_search_lexical_chunks_uses_bound_full_text_query_and_filters(
+    monkeypatch,
+):
+    captured = {}
+    rows = [
+        {
+            "id": "chunk-lexical",
+            "document_id": "doc-capacity",
+            "document_title": "Capacity Market Rules",
+            "document_type": "regulation",
+            "document_issuer": "GNERC",
+            "source_key": "capacity-market-rules",
+            "chunk_index": 0,
+            "section_title": "Capacity market participants",
+            "section_path": "Capacity market participants",
+            "page_start": 1,
+            "page_end": 1,
+            "text_content": "Capacity market obligations.",
+            "token_count": 10,
+            "language": "en",
+            "topics": ["market_structure"],
+            "metadata": {},
+            "lexical_score": 0.72,
+        }
+    ]
+    monkeypatch.setattr(
+        vector_store,
+        "ENGINE",
+        _FakeEngine(rows=rows, captured=captured),
+    )
+    query_text = (
+        '"capacity market" OR "export"); '
+        "drop table knowledge.documents; --"
+    )
+
+    results = vector_store.KnowledgeVectorStore().search_lexical_chunks(
+        query_text=query_text,
+        filters=VectorRetrievalFilters(
+            languages=["en"],
+            document_types=["regulation"],
+            issuers=["GNERC"],
+        ),
+        candidate_k=7,
+        embedding_identity="embedding-v1:test",
+    )
+
+    sql = captured["sql"].lower()
+    assert "websearch_to_tsquery" in sql
+    assert "'pg_catalog.simple'" in sql
+    assert "ts_rank_cd" in sql
+    assert "@@" in sql
+    assert "c.language in" in sql
+    assert "d.document_type in" in sql
+    assert "d.issuer in" in sql
+    assert "vector_embedding_identity" in sql
+    assert query_text not in captured["sql"]
+    assert captured["params"]["lexical_query"] == query_text
+    assert captured["params"]["candidate_k"] == 7
+    assert (
+        captured["params"]["embedding_identity"]
+        == "embedding-v1:test"
+    )
+    assert [result.id for result in results] == ["chunk-lexical"]
+    assert results[0].similarity_score is None
+
+
+def test_search_lexical_chunks_skips_blank_query_without_database_access(
+    monkeypatch,
+):
+    class _ExplosiveEngine:
+        def begin(self):
+            raise AssertionError("blank lexical query must not touch database")
+
+    monkeypatch.setattr(vector_store, "ENGINE", _ExplosiveEngine())
+
+    results = vector_store.KnowledgeVectorStore().search_lexical_chunks(
+        query_text="  ",
+        candidate_k=4,
+    )
+
+    assert results == []
+
+
 def test_search_chunks_applies_minimum_similarity_to_raw_cosine(monkeypatch):
     rows = [
         {
@@ -503,7 +586,7 @@ def test_apply_document_diversity_caps_same_section_in_competitive_selection(mon
         _chunk("chunk-4", "doc-b", "Section C", similarity=0.92, chunk_index=0, section_title="Section C"),
     ]
 
-    results = vector_store._apply_document_diversity(
+    results = vector_store.apply_document_diversity(
         candidates,
         top_k=4,
         candidate_scores=_raw_candidate_scores(candidates),
@@ -525,7 +608,7 @@ def test_apply_document_diversity_allows_multiple_sections_in_dominant_document(
         _chunk("chunk-4", "doc-b", "Section D", similarity=0.30, chunk_index=0, section_title="Section D"),
     ]
 
-    results = vector_store._apply_document_diversity(
+    results = vector_store.apply_document_diversity(
         candidates,
         top_k=4,
         candidate_scores=_raw_candidate_scores(candidates),
@@ -545,7 +628,7 @@ def test_apply_document_diversity_missing_section_metadata_uses_unique_chunk_key
         _chunk("chunk-3", "doc-a", "", similarity=0.93, chunk_index=2),
     ]
 
-    results = vector_store._apply_document_diversity(
+    results = vector_store.apply_document_diversity(
         candidates,
         top_k=3,
         candidate_scores=_raw_candidate_scores(candidates),
@@ -566,7 +649,7 @@ def test_apply_document_diversity_backfill_prefers_unseen_sections_before_repeat
         _chunk("chunk-4", "doc-a", "Section C", similarity=0.70, chunk_index=2, section_title="Section C"),
     ]
 
-    results = vector_store._apply_document_diversity(
+    results = vector_store.apply_document_diversity(
         candidates,
         top_k=4,
         candidate_scores=_raw_candidate_scores(candidates),

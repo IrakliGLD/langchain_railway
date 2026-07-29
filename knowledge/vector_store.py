@@ -98,6 +98,27 @@ VECTOR_DOCUMENT_DOMAIN_PENALTY = _env_float(
 _LEXICAL_BOOST_FOR_MAX_RANKING_BONUS = 0.32
 _MAX_LEXICAL_RANKING_BONUS = 0.30
 
+# Independent sparse-retrieval document. The explicit ``simple`` text-search
+# configuration lowercases tokens without applying an English-only stemmer.
+_LEXICAL_SEARCH_VECTOR_SQL = """
+(
+    setweight(
+        to_tsvector('pg_catalog.simple', coalesce(c.section_title, '')),
+        'A'
+    )
+    ||
+    setweight(
+        to_tsvector('pg_catalog.simple', coalesce(c.section_path, '')),
+        'B'
+    )
+    ||
+    setweight(
+        to_tsvector('pg_catalog.simple', coalesce(c.text_content, '')),
+        'D'
+    )
+)
+"""
+
 # Document-title / source-key markers that strongly indicate a chunk
 # is from the RETAIL electricity-market segment (consumers,
 # micro-generators, net metering, retail tariff schemes) rather than
@@ -326,6 +347,88 @@ def _row_to_chunk_record(
     )
 
 
+def _search_filter_parts(
+    filters: VectorRetrievalFilters,
+    *,
+    embedding_identity: str,
+) -> tuple[list[str], dict[str, object], list]:
+    """Build the hard SQL filters shared by dense and lexical retrieval."""
+
+    clauses = [
+        "d.is_active = true",
+        (
+            "coalesce(d.metadata ->> 'vector_embedding_identity', "
+            "'legacy') = :embedding_identity"
+        ),
+    ]
+    params: dict[str, object] = {
+        "embedding_identity": embedding_identity,
+    }
+    bind_params = []
+    languages = [
+        language
+        for language in filters.languages
+        if str(language or "").strip()
+    ]
+    document_types = [
+        doc_type
+        for doc_type in filters.document_types
+        if str(doc_type or "").strip()
+    ]
+    issuers = [
+        issuer
+        for issuer in filters.issuers
+        if str(issuer or "").strip()
+    ]
+    if languages:
+        clauses.append("c.language in :languages")
+        params["languages"] = languages
+        bind_params.append(bindparam("languages", expanding=True))
+    if document_types:
+        clauses.append("d.document_type in :document_types")
+        params["document_types"] = document_types
+        bind_params.append(bindparam("document_types", expanding=True))
+    if issuers:
+        clauses.append("d.issuer in :issuers")
+        params["issuers"] = issuers
+        bind_params.append(bindparam("issuers", expanding=True))
+    return clauses, params, bind_params
+
+
+def _search_select_list(*, score_expression: str) -> str:
+    """Return the shared document/chunk projection for search queries."""
+
+    phase_b1_cols = (
+        ",\n                ".join(f"c.{col}" for col in _PHASE_B1_COLUMNS)
+        if _check_phase_b1_columns_present()
+        else ""
+    )
+    phase_b1_select = (
+        f"\n                {phase_b1_cols},"
+        if phase_b1_cols
+        else ""
+    )
+    return f"""
+        c.id::text as id,
+        c.document_id::text as document_id,
+        d.title as document_title,
+        d.document_type as document_type,
+        d.issuer as document_issuer,
+        d.source_key as source_key,
+        c.chunk_index,
+        c.section_title,
+        c.section_path,{phase_b1_select}
+        c.page_start,
+        c.page_end,
+        c.text_content,
+        c.token_count,
+        c.language,
+        c.topics,
+        c.metadata,
+        {score_expression}
+    """
+
+
 def _topic_overlap_boost(
     candidate: VectorChunkRecord,
     preferred_topics: list[str],
@@ -551,7 +654,7 @@ def _section_key(candidate: VectorChunkRecord) -> str:
     return f"{candidate.document_id}:chunk_{candidate.chunk_index}"
 
 
-def _apply_document_diversity(
+def apply_document_diversity(
     candidates: List[VectorChunkRecord],
     *,
     top_k: int,
@@ -817,68 +920,30 @@ class KnowledgeVectorStore:
         filters = filters or VectorRetrievalFilters()
         _validate_embedding_length(query_embedding, label="query_embedding")
         embedding_literal = _vector_literal(query_embedding)
-        clauses = [
-            "d.is_active = true",
-            (
-                "coalesce(d.metadata ->> 'vector_embedding_identity', "
-                "'legacy') = :embedding_identity"
-            ),
-        ]
-        params = {
+        clauses, params, bind_params = _search_filter_parts(
+            filters,
+            embedding_identity=embedding_identity,
+        )
+        params.update({
             "embedding": embedding_literal,
             "candidate_k": max(candidate_k, top_k),
-            "embedding_identity": embedding_identity,
-        }
-        bind_params = []
-
-        languages = [language for language in filters.languages if str(language or "").strip()]
-        document_types = [doc_type for doc_type in filters.document_types if str(doc_type or "").strip()]
-        issuers = [issuer for issuer in filters.issuers if str(issuer or "").strip()]
+        })
 
         # preferred_topics are used as a soft scoring boost in
         # _candidate_retrieval_score(), NOT as a hard SQL filter.
         # This allows semantically similar chunks from all documents
         # to enter the candidate pool, with topic-matching chunks
         # ranked higher during Python-side reranking.
-        if languages:
-            clauses.append("c.language in :languages")
-            params["languages"] = languages
-            bind_params.append(bindparam("languages", expanding=True))
-        if document_types:
-            clauses.append("d.document_type in :document_types")
-            params["document_types"] = document_types
-            bind_params.append(bindparam("document_types", expanding=True))
-        if issuers:
-            clauses.append("d.issuer in :issuers")
-            params["issuers"] = issuers
-            bind_params.append(bindparam("issuers", expanding=True))
-
-        phase_b1_cols = (
-            ",\n                ".join(f"c.{col}" for col in _PHASE_B1_COLUMNS)
-            if _check_phase_b1_columns_present()
-            else ""
+        select_list = _search_select_list(
+            score_expression=(
+                "(1 - (c.embedding <=> cast(:embedding as vector))) "
+                "as similarity_score"
+            )
         )
-        phase_b1_select = (f"\n                {phase_b1_cols}," if phase_b1_cols else "")
         sql = text(
             f"""
             select
-                c.id::text as id,
-                c.document_id::text as document_id,
-                d.title as document_title,
-                d.document_type as document_type,
-                d.issuer as document_issuer,
-                d.source_key as source_key,
-                c.chunk_index,
-                c.section_title,
-                c.section_path,{phase_b1_select}
-                c.page_start,
-                c.page_end,
-                c.text_content,
-                c.token_count,
-                c.language,
-                c.topics,
-                c.metadata,
-                (1 - (c.embedding <=> cast(:embedding as vector))) as similarity_score
+                {select_list}
             from {self.schema}.document_chunks c
             join {self.schema}.documents d on d.id = c.document_id
             where {" and ".join(clauses)}
@@ -922,11 +987,76 @@ class KnowledgeVectorStore:
             candidate.id: ranking_score
             for ranking_score, candidate in scored_candidates
         }
-        return _apply_document_diversity(
+        return apply_document_diversity(
             candidates,
             top_k=top_k,
             candidate_scores=candidate_scores,
         )
+
+    def search_lexical_chunks(
+        self,
+        *,
+        query_text: str,
+        filters: VectorRetrievalFilters | None = None,
+        candidate_k: int = 12,
+        embedding_identity: str = "legacy",
+    ) -> List[VectorChunkRecord]:
+        """Return an independently ranked PostgreSQL full-text candidate arm."""
+
+        normalized_query = str(query_text or "").strip()
+        if not normalized_query:
+            return []
+        filters = filters or VectorRetrievalFilters()
+        clauses, params, bind_params = _search_filter_parts(
+            filters,
+            embedding_identity=embedding_identity,
+        )
+        params.update({
+            "lexical_query": normalized_query,
+            "candidate_k": max(1, int(candidate_k)),
+        })
+        select_list = _search_select_list(
+            score_expression=(
+                "ts_rank_cd("
+                f"{_LEXICAL_SEARCH_VECTOR_SQL}, "
+                "lexical_query.query, 32"
+                ") as lexical_score"
+            )
+        )
+        clauses.append(
+            f"lexical_query.query @@ {_LEXICAL_SEARCH_VECTOR_SQL}"
+        )
+        sql = text(
+            f"""
+            with lexical_query as (
+                select websearch_to_tsquery(
+                    'pg_catalog.simple',
+                    :lexical_query
+                ) as query
+            )
+            select
+                {select_list}
+            from {self.schema}.document_chunks c
+            join {self.schema}.documents d on d.id = c.document_id
+            cross join lexical_query
+            where {" and ".join(clauses)}
+            order by lexical_score desc, c.id asc
+            limit :candidate_k
+            """
+        )
+        if bind_params:
+            sql = sql.bindparams(*bind_params)
+        with database_connection(
+            _resolve_engine(),
+            operation="lexical_search",
+            begin=True,
+            read_only=True,
+        ) as conn:
+            rows = conn.execute(sql, params).mappings().all()
+        return [
+            _row_to_chunk_record(row, similarity_score=None)
+            for row in rows
+        ]
 
     def fetch_chunks_by_index(
         self,

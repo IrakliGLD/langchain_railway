@@ -43,6 +43,47 @@ Other env vars relevant to retrieval:
 - `VECTOR_KNOWLEDGE_MIN_SIMILARITY=0.2` — minimum raw cosine similarity.
   Topic and lexical signals only rerank candidates that pass this gate.
 
+### True hybrid retrieval (Phase 5)
+
+`VECTOR_HYBRID_RETRIEVAL_MODE` controls an independent PostgreSQL
+full-text-search arm:
+
+- `off` (default) — dense retrieval only; no lexical database query.
+- `shadow` — run the lexical arm and reciprocal-rank fusion, emit
+  `stage_0_3_vector_knowledge_hybrid`, but keep the dense chunks and prompt
+  unchanged.
+- `on` — use the fused chunks as the primary retrieval result.
+- Unknown values fail closed to `off`.
+
+The lexical arm uses PostgreSQL `websearch_to_tsquery` with the explicit
+language-neutral `simple` configuration. Section title, section path, and body
+are weighted and indexed by `idx_knowledge_chunks_lexical_search`. Fusion is
+deterministic, deduplicates by chunk ID, preserves the dense record when both
+arms find the same chunk, and reapplies the existing document/section diversity
+policy. `VECTOR_HYBRID_RRF_K` controls the reciprocal-rank constant (default
+`60`, minimum `1`).
+
+Hybrid retrieval adds one database query in `shadow` or `on`. It does not add
+an embedding or LLM call. A lexical-query failure is traced and falls back to
+the dense result; it does not mark otherwise successful retrieval unavailable.
+
+#### Safe rollout path
+
+1. Apply `schemas/knowledge_vector.sql` so the idempotent GIN expression index
+   exists. No document re-ingestion is required.
+2. Deploy with `VECTOR_HYBRID_RETRIEVAL_MODE=off` and verify dense canaries are
+   unchanged.
+3. Enable `shadow`. Review `dense_chunk_ids`, `lexical_chunk_ids`,
+   `fused_chunk_ids`, overlap counts, fused sections, lexical failures, and
+   Stage 0.3 latency on known-answer canaries and representative production
+   queries.
+4. Review disagreement cases manually. Cut over only when known-answer
+   retrieval is non-regressing, fused-only evidence is relevant, lexical
+   failures are absent or understood, and latency remains within the service
+   SLO.
+5. Set the mode to `on`. Continue monitoring the same event; rollback is the
+   single env change back to `off`.
+
 ### Adjacency expansion (Phase A of the cross-reference rollout)
 
 - `VECTOR_ADJACENCY_MODE` — three-state env controlling whether neighbouring chunks (preceding and following by `chunk_index` within the same document) are pulled at retrieval time. Defaults to `off`.

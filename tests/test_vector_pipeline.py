@@ -38,6 +38,8 @@ sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignor
 
 from agent import pipeline  # noqa: E402
 from contracts.vector_knowledge import (  # noqa: E402
+    HybridRetrievalDiagnostics,
+    HybridRetrievalMode,
     RetrievalStrategy,
     VectorChunkRecord,
     VectorKnowledgeBundle,
@@ -200,6 +202,90 @@ def test_pipeline_traces_typed_retrieval_failure_without_raw_error(monkeypatch):
     assert vector_event["failure_reason"] == "401/API_KEY_INVALID"
     assert "error" not in vector_event
     assert out.vector_knowledge_error == "query_embedding:401/API_KEY_INVALID"
+
+
+def test_pipeline_traces_hybrid_shadow_disagreement(monkeypatch):
+    events = []
+    dense = VectorChunkRecord(
+        id="chunk-dense",
+        document_id="doc-dense",
+        document_title="Dense Rules",
+        source_key="dense-rules",
+        section_title="Dense section",
+        text_content="Dense evidence.",
+        similarity_score=0.80,
+    )
+    fused = VectorChunkRecord(
+        id="chunk-lexical",
+        document_id="doc-lexical",
+        document_title="Lexical Rules",
+        source_key="lexical-rules",
+        section_title="Exact phrase",
+        text_content="Lexical evidence.",
+    )
+    bundle = VectorKnowledgeBundle(
+        query="What is the exact phrase?",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+        top_k=1,
+        chunk_count=1,
+        chunks=[dense],
+        outcome=VectorRetrievalOutcome.matches,
+        hybrid_diagnostics=HybridRetrievalDiagnostics(
+            mode=HybridRetrievalMode.shadow,
+            dense_chunk_ids=[dense.id],
+            lexical_chunk_ids=[fused.id],
+            fused_chunks=[fused],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_VECTOR_KNOWLEDGE_HINTS", True)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(
+        pipeline.planner,
+        "prepare_context",
+        lambda ctx: setattr(ctx, "is_conceptual", True) or ctx,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_vector_knowledge",
+        lambda *args, **kwargs: bundle,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "trace_detail",
+        lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "answer_conceptual",
+        lambda ctx: setattr(ctx, "summary", "Conceptual answer") or ctx,
+    )
+
+    pipeline.process_query(
+        "what is the exact phrase?",
+        trace_id="trace-hybrid-shadow",
+        session_id="session-hybrid-shadow",
+    )
+
+    hybrid_event = next(
+        kwargs
+        for args, kwargs in events
+        if "stage_0_3_vector_knowledge_hybrid" in args
+    )
+    assert hybrid_event["hybrid_mode"] == "shadow"
+    assert hybrid_event["cutover_applied"] is False
+    assert hybrid_event["dense_chunk_ids"] == ["chunk-dense"]
+    assert hybrid_event["lexical_chunk_ids"] == ["chunk-lexical"]
+    assert hybrid_event["fused_chunk_ids"] == ["chunk-lexical"]
+    assert hybrid_event["dense_lexical_overlap_count"] == 0
+    assert hybrid_event["dense_fused_overlap_count"] == 0
+    assert hybrid_event["fused_sections"] == [
+        "Lexical Rules | Exact phrase",
+    ]
+    assert hybrid_event["lexical_failure_stage"] == ""
+    assert hybrid_event["lexical_failure_reason"] == ""
 
 
 def test_pipeline_marks_disabled_or_skipped_retrieval_as_not_run(monkeypatch):

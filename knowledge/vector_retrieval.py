@@ -1,4 +1,4 @@
-"""Dense vector retrieval with deterministic metadata/text re-ranking."""
+"""Dense retrieval with optional lexical fusion and deterministic re-ranking."""
 
 from __future__ import annotations
 
@@ -15,7 +15,10 @@ log = logging.getLogger("Enai")
 from config import ANALYZER_TOPIC_MIN_SCORE
 from contracts.question_analysis import QuestionAnalysis
 from contracts.vector_knowledge import (
+    HybridRetrievalDiagnostics,
+    HybridRetrievalMode,
     RetrievalStrategy,
+    VectorChunkRecord,
     VectorKnowledgeBundle,
     VectorKnowledgeMode,
     VectorRetrievalFailure,
@@ -54,6 +57,18 @@ def _safe_failure_reason(error: BaseException) -> str:
 
 
 _ADJACENCY_MODE_VALUES = frozenset({"off", "shadow", "on"})
+
+
+def get_hybrid_retrieval_mode() -> HybridRetrievalMode:
+    """Return the fail-closed dense + lexical rollout mode."""
+
+    raw = str(
+        os.getenv("VECTOR_HYBRID_RETRIEVAL_MODE", "off")
+    ).strip().lower()
+    try:
+        return HybridRetrievalMode(raw)
+    except ValueError:
+        return HybridRetrievalMode.off
 
 
 def get_adjacency_mode() -> str:
@@ -343,6 +358,80 @@ def _extract_boost_terms(
     return boost_terms[:12]
 
 
+def _lexical_query_text(
+    query_text: str,
+    filters: VectorRetrievalFilters,
+) -> str:
+    """Build a forgiving OR query for PostgreSQL ``websearch_to_tsquery``."""
+
+    if not filters.boost_terms:
+        return _normalized_text(str(query_text or "").replace('"', " "))
+    terms = filters.boost_terms
+    safe_terms: list[str] = []
+    for term in terms:
+        normalized = _normalized_text(str(term or "").replace('"', " "))
+        if normalized and normalized not in safe_terms:
+            safe_terms.append(normalized)
+    return " OR ".join(f'"{term}"' for term in safe_terms)
+
+
+def _reciprocal_rank_fusion(
+    dense_chunks: list[VectorChunkRecord],
+    lexical_chunks: list[VectorChunkRecord],
+    *,
+    top_k: int,
+    rrf_k: int,
+) -> list[VectorChunkRecord]:
+    """Fuse independent ranked lists and preserve the dense record on overlap."""
+
+    if not lexical_chunks:
+        return dense_chunks[:top_k]
+
+    dense_rank: dict[str, int] = {}
+    lexical_rank: dict[str, int] = {}
+    records: dict[str, VectorChunkRecord] = {}
+    scores: dict[str, float] = {}
+    denominator_offset = max(1, int(rrf_k))
+
+    for rank, chunk in enumerate(dense_chunks, start=1):
+        if chunk.id in dense_rank:
+            continue
+        dense_rank[chunk.id] = rank
+        records[chunk.id] = chunk
+        scores[chunk.id] = scores.get(chunk.id, 0.0) + (
+            1.0 / (denominator_offset + rank)
+        )
+    for rank, chunk in enumerate(lexical_chunks, start=1):
+        if chunk.id in lexical_rank:
+            continue
+        lexical_rank[chunk.id] = rank
+        records.setdefault(chunk.id, chunk)
+        scores[chunk.id] = scores.get(chunk.id, 0.0) + (
+            1.0 / (denominator_offset + rank)
+        )
+
+    missing_rank = len(records) + 1
+    ordered = [
+        records[chunk_id]
+        for chunk_id in sorted(
+            records,
+            key=lambda chunk_id: (
+                -scores[chunk_id],
+                dense_rank.get(chunk_id, missing_rank),
+                lexical_rank.get(chunk_id, missing_rank),
+                chunk_id,
+            ),
+        )
+    ]
+    from knowledge.vector_store import apply_document_diversity
+
+    return apply_document_diversity(
+        ordered,
+        top_k=top_k,
+        candidate_scores=scores,
+    )
+
+
 def build_vector_filters(
     question_analysis: Optional[QuestionAnalysis],
     *,
@@ -510,6 +599,7 @@ def retrieve_vector_knowledge(
         if filters.boost_terms:
             candidate_k = max(candidate_k, top_k * 6)
     min_similarity = _float_env("VECTOR_KNOWLEDGE_MIN_SIMILARITY", 0.2)
+    hybrid_mode = get_hybrid_retrieval_mode()
     failure_stage = VectorRetrievalFailureStage.store_initialization
     try:
         if store is None:
@@ -583,14 +673,64 @@ def retrieve_vector_knowledge(
                     min_similarity=relaxed_similarity,
                     embedding_identity=current_embedding_identity,
                 )
+        dense_chunks = list(chunks)
+        strategy = RetrievalStrategy.dense_with_deterministic_rerank
+        hybrid_diagnostics = None
+        if hybrid_mode is not HybridRetrievalMode.off:
+            try:
+                lexical_chunks = store.search_lexical_chunks(
+                    query_text=_lexical_query_text(query_text, filters),
+                    filters=filters,
+                    candidate_k=candidate_k,
+                    embedding_identity=current_embedding_identity,
+                )
+                fused_chunks = _reciprocal_rank_fusion(
+                    dense_chunks,
+                    lexical_chunks,
+                    top_k=top_k,
+                    rrf_k=_int_env("VECTOR_HYBRID_RRF_K", 60),
+                )
+                cutover_applied = hybrid_mode is HybridRetrievalMode.on
+                hybrid_diagnostics = HybridRetrievalDiagnostics(
+                    mode=hybrid_mode,
+                    dense_chunk_ids=[
+                        chunk.id for chunk in dense_chunks
+                    ],
+                    lexical_chunk_ids=[
+                        chunk.id for chunk in lexical_chunks
+                    ],
+                    fused_chunks=fused_chunks,
+                    cutover_applied=cutover_applied,
+                )
+                if cutover_applied:
+                    chunks = fused_chunks
+                    strategy = RetrievalStrategy.hybrid
+            except Exception as exc:
+                safe_reason = _safe_failure_reason(exc)
+                log.warning(
+                    "Hybrid lexical retrieval unavailable reason=%s; "
+                    "falling back to dense results",
+                    safe_reason,
+                )
+                hybrid_diagnostics = HybridRetrievalDiagnostics(
+                    mode=hybrid_mode,
+                    dense_chunk_ids=[
+                        chunk.id for chunk in dense_chunks
+                    ],
+                    lexical_failure=VectorRetrievalFailure(
+                        stage=VectorRetrievalFailureStage.lexical_search,
+                        reason=safe_reason,
+                    ),
+                )
         bundle = VectorKnowledgeBundle(
             query=query_text,
             retrieval_mode=retrieval_mode,
-            strategy=RetrievalStrategy.dense_with_deterministic_rerank,
+            strategy=strategy,
             top_k=top_k,
             chunk_count=len(chunks),
             chunks=chunks,
             filters=filters,
+            hybrid_diagnostics=hybrid_diagnostics,
             outcome=(
                 VectorRetrievalOutcome.matches
                 if chunks
