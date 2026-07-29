@@ -7,6 +7,8 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -102,13 +104,14 @@ def test_openai_report_research_planner_uses_strict_structured_output(
 
     def invoke(factory, _model, _messages, **_kwargs):
         captured["client"] = factory()
+        parsed = _response_payload()
+        for field in ("contract_version", "query_digest", "language_code"):
+            parsed.pop(field)
         return {
             "raw": SimpleNamespace(
-                content=json.dumps(_response_payload())
+                content=json.dumps(parsed)
             ),
-            "parsed": ReportResearchPlan.model_validate(
-                _response_payload()
-            ),
+            "parsed": parsed,
             "parsing_error": None,
         }
 
@@ -122,12 +125,48 @@ def test_openai_report_research_planner_uses_strict_structured_output(
 
     assert isinstance(plan, ReportResearchPlan)
     assert captured["client"] is structured_client
-    assert captured["structured_schema"] is ReportResearchPlan
+    assert isinstance(captured["structured_schema"], dict)
+    for field in ("contract_version", "query_digest", "language_code"):
+        assert field not in captured["structured_schema"]["properties"]
+        assert field not in captured["structured_schema"]["required"]
     assert captured["structured_kwargs"] == {
         "method": "json_schema",
         "include_raw": True,
         "strict": True,
     }
+
+
+def test_report_research_planner_releases_cache_after_provider_failure(
+    monkeypatch,
+):
+    cancelled = []
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "cache-token"),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_cache_cancel_in_flight",
+        lambda key, token: cancelled.append((key, token)),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_invoke_with_openai_fallback",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("provider failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        llm.llm_plan_report_research(
+            _QUERY,
+            language_code="en",
+            max_tracks=4,
+        )
+
+    assert len(cancelled) == 1
+    assert cancelled[0][1] == "cache-token"
 
 
 def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
@@ -166,4 +205,7 @@ def test_report_research_prompt_is_bounded_and_does_not_reclassify_mode(
     assert "vector_knowledge" in user[1]
     assert "MAX_RESEARCH_TRACKS:\n4" in user[1]
     assert "MAX_TOTAL_EXHIBITS:\n4" in user[1]
+    assert "REQUIRED_QUERY_DIGEST" not in user[1]
+    assert "REQUIRED_LANGUAGE_CODE" not in user[1]
+    assert "same language as USER_REPORT_REQUEST" in system[1]
     assert len(user[1]) < 30_000

@@ -152,12 +152,19 @@ def _diagnostic_error_codes(error_codes: list[str]) -> str:
     return ",".join(safe_codes) or "unknown"
 
 
-def _report_failure(error_code: str) -> ReportJobFailure:
+def _report_failure(
+    error_code: str,
+    *,
+    retryable: bool | None = None,
+) -> ReportJobFailure:
     try:
-        retryable = _REPORT_FAILURE_RETRYABILITY[error_code]
+        default_retryable = _REPORT_FAILURE_RETRYABILITY[error_code]
     except KeyError as exc:
         raise ValueError("Unknown report failure policy code.") from exc
-    return ReportJobFailure(error_code, retryable=retryable)
+    return ReportJobFailure(
+        error_code,
+        retryable=default_retryable if retryable is None else retryable,
+    )
 
 
 class ReportJobProcessor:
@@ -833,7 +840,8 @@ class ReportJobProcessor:
                     exc.disposition.value,
                 )
                 raise _report_failure(
-                    "REPORT_PLAN_PROVIDER_FAILED"
+                    "REPORT_PLAN_PROVIDER_FAILED",
+                    retryable=exc.safe_to_retry,
                 ) from exc
             except ReportResearchPlanError as exc:
                 _LOGGER.warning(
@@ -1037,7 +1045,8 @@ class ReportJobProcessor:
                     exc.disposition.value,
                 )
                 raise _report_failure(
-                    "REPORT_DOCUMENT_PROVIDER_FAILED"
+                    "REPORT_DOCUMENT_PROVIDER_FAILED",
+                    retryable=exc.safe_to_retry,
                 ) from exc
             except ReportDocumentGenerationError as exc:
                 _LOGGER.warning(
@@ -1259,7 +1268,10 @@ class ReportJobProcessor:
                     _diagnostic_identifier(exc.stage),
                     exc.disposition.value,
                 )
-                raise _report_failure("REPORT_PLAN_PROVIDER_FAILED") from exc
+                raise _report_failure(
+                    "REPORT_PLAN_PROVIDER_FAILED",
+                    retryable=exc.safe_to_retry,
+                ) from exc
             except (ReportPlanEvidenceError, ReportPlanSemanticError) as exc:
                 raise _report_failure("REPORT_PLAN_INVALID") from exc
             except (ValidationError, ValueError) as exc:

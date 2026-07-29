@@ -844,6 +844,28 @@ def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
     assert private_value not in caplog.text
 
 
+def test_enabled_v2_does_not_retry_ambiguous_research_planner_delivery():
+    processor = ReportJobProcessor(
+        pipeline_v2_mode="enabled",
+        research_planner=lambda *_args, **_kwargs: (
+            _ for _ in ()
+        ).throw(
+            ProviderExecutionError(
+                "provider response could not be reconciled",
+                provider="openai",
+                stage="report_research_planner",
+                disposition=ProviderDeliveryDisposition.AMBIGUOUS,
+            )
+        ),
+    )
+
+    with pytest.raises(ReportJobFailure) as exc_info:
+        processor(_lease(query=_V2_QUERY), _Control())
+
+    assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
+    assert exc_info.value.retryable is False
+
+
 def test_enabled_v2_document_plan_validation_failure_is_typed_as_plan_invalid():
     (
         research_plan,
@@ -1118,7 +1140,7 @@ def test_report_plan_cannot_override_processor_planning_semantics():
     assert exc_info.value.retryable is False
 
 
-def test_report_plan_provider_failure_remains_retryable_and_is_diagnosable(
+def test_report_plan_provider_failure_respects_delivery_and_is_diagnosable(
     caplog,
 ):
     lease = _lease()
@@ -1142,7 +1164,7 @@ def test_report_plan_provider_failure_remains_retryable_and_is_diagnosable(
             processor(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
-    assert exc_info.value.retryable is True
+    assert exc_info.value.retryable is False
     assert f"job_id={lease.job_id}" in caplog.text
     assert f"job_attempt={lease.attempt_count}" in caplog.text
     assert "provider=nvidia" in caplog.text
