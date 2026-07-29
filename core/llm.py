@@ -17,6 +17,7 @@ import math
 import random
 import re
 import time
+from collections.abc import Sequence
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
@@ -4592,12 +4593,17 @@ def llm_repair_report_document_sections(
     research_plan: ReportResearchPlan,
     manifest: ReportEvidenceManifest,
     packets: list[ReportEvidencePacket],
-    draft: ReportDocumentDraft | dict[str, Any],
+    draft: ReportDocumentDraft | Sequence[ReportSectionDraft] | dict[str, Any],
     validation: ReportDocumentValidation,
     *,
     section_ids: list[str],
 ) -> ReportDocumentRepair | dict[str, Any]:
-    """Replace only rejected document sections in the single repair call."""
+    """Replace only rejected document sections in the single repair call.
+
+    ``draft`` is the whole rejected document, the rejected sections of one
+    generation batch, or the raw payload a writer returned when it did not
+    even parse.
+    """
 
     requested_ids = list(dict.fromkeys(section_ids))
     known_ids = {section.section_id for section in plan.sections}
@@ -4616,18 +4622,34 @@ def llm_repair_report_document_sections(
         )
     )
     if isinstance(draft, ReportDocumentDraft):
+        rejected_sections: Sequence[ReportSectionDraft] | None = (
+            draft.generation_order_sections()
+        )
+    elif isinstance(draft, Sequence) and not isinstance(draft, (str, bytes)):
+        candidates = list(draft)
+        rejected_sections = (
+            candidates
+            if all(
+                isinstance(section, ReportSectionDraft)
+                for section in candidates
+            )
+            else None
+        )
+    else:
+        rejected_sections = None
+    if rejected_sections is None:
+        rejected_payload: Any = draft
+    else:
         rejected_by_id = {
             section.section_id: section
-            for section in draft.generation_order_sections()
+            for section in rejected_sections
             if section.section_id in selected_ids
         }
-        rejected_payload: Any = [
+        rejected_payload = [
             rejected_by_id[section_id].model_dump(mode="json")
             for section_id in requested_ids
             if section_id in rejected_by_id
         ]
-    else:
-        rejected_payload = draft
     rejected_json = _compact_json(rejected_payload)
 
     def section_repair_context(section_id: str) -> dict[str, Any]:

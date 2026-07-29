@@ -1053,3 +1053,371 @@ def test_document_generation_respects_a_two_call_budget_without_repair():
         pass
     else:
         raise AssertionError("invalid unrepairable draft was accepted")
+
+
+def _ungrounded_section(section):
+    return section.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(update={"direct_claims": []})
+                for paragraph in section.paragraphs
+            ]
+        }
+    )
+
+
+def test_invalid_analysis_batch_is_repaired_before_synthesis():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value == "analysis"
+    ]
+    calls = []
+
+    def write_analysis(*_args, section_ids):
+        calls.append("analysis")
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                if index == 0
+                else section_by_id[section_id]
+                for index, section_id in enumerate(section_ids)
+            ],
+        )
+
+    def write_synthesis(*_args, analysis_sections, section_ids):
+        calls.append("synthesis")
+        assert list(analysis_sections) == [
+            section_by_id[section_id] for section_id in analysis_ids
+        ], "synthesis must receive the repaired analysis sections"
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    repaired_ids = []
+
+    def repair_sections(*_args, section_ids, **_kwargs):
+        calls.append("repair")
+        repaired_ids.append(list(section_ids))
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    generated = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+        repair_sections=repair_sections,
+        allow_repair=True,
+    )
+
+    assert calls == ["analysis", "repair", "synthesis"]
+    assert repaired_ids == [["prices"]]
+    assert generated == valid_draft
+
+
+def test_invalid_analysis_batch_still_fails_when_repair_is_not_allowed():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+
+    def write_analysis(*_args, section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                for section_id in section_ids
+            ],
+        )
+
+    try:
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=write_analysis,
+            write_synthesis_sections=lambda *_a, **_k: (
+                (_ for _ in ()).throw(
+                    AssertionError("synthesis must not run")
+                )
+            ),
+            repair_sections=lambda *_a, **_k: (
+                (_ for _ in ()).throw(
+                    AssertionError("repair exceeds the call budget")
+                )
+            ),
+            allow_repair=False,
+        )
+    except ReportDocumentGenerationError as exc:
+        assert "UNGROUNDED_NUMERIC_CLAIM" in exc.validation.section_errors[
+            "prices"
+        ]
+    else:
+        raise AssertionError("invalid unrepairable batch was accepted")
+
+
+def test_invalid_synthesis_batch_is_repaired():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    calls = []
+
+    def write_analysis(*_args, section_ids):
+        calls.append("analysis")
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    def write_synthesis(*_args, analysis_sections, section_ids):
+        calls.append("synthesis")
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                if index == 0
+                else section_by_id[section_id]
+                for index, section_id in enumerate(section_ids)
+            ],
+        )
+
+    def repair_sections(*_args, section_ids, **_kwargs):
+        calls.append("repair")
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    generated = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+        repair_sections=repair_sections,
+        allow_repair=True,
+    )
+
+    assert calls == ["analysis", "synthesis", "repair"]
+    assert generated == valid_draft
+
+
+def test_batch_path_spends_at_most_one_repair_call():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+
+    def write_analysis(*_args, section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                for section_id in section_ids
+            ],
+        )
+
+    def write_synthesis(*_args, analysis_sections, section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                for section_id in section_ids
+            ],
+        )
+
+    repair_calls = []
+
+    def repair_sections(*_args, section_ids, **_kwargs):
+        repair_calls.append(list(section_ids))
+        # Repairs the analysis batch correctly; synthesis then fails with no
+        # repair left, which is the budget boundary under test.
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    try:
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=write_analysis,
+            write_synthesis_sections=write_synthesis,
+            repair_sections=repair_sections,
+            allow_repair=True,
+        )
+    except ReportDocumentGenerationError:
+        pass
+    else:
+        raise AssertionError("second batch failure must not be repaired")
+
+    assert len(repair_calls) == 1
+
+
+def test_batch_repair_returning_the_wrong_section_set_is_rejected():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    synthesis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role.value != "analysis"
+    ]
+
+    def write_analysis(*_args, section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                for section_id in section_ids
+            ],
+        )
+
+    def repair_sections(*_args, section_ids, **_kwargs):
+        # Answers with synthesis sections instead of the rejected analysis set.
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in synthesis_ids],
+        )
+
+    try:
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=write_analysis,
+            write_synthesis_sections=lambda *_a, **_k: (
+                (_ for _ in ()).throw(
+                    AssertionError("synthesis must not run")
+                )
+            ),
+            repair_sections=repair_sections,
+            allow_repair=True,
+        )
+    except ReportDocumentGenerationError as exc:
+        assert "UNGROUNDED_NUMERIC_CLAIM" in exc.validation.section_errors[
+            "prices"
+        ]
+    else:
+        raise AssertionError("mismatched batch repair was accepted")
+
+
+def test_schema_invalid_analysis_batch_repairs_from_the_raw_payload():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    raw_payload = {"contract_version": "report-document-repair-v1"}
+    rejected_inputs = []
+
+    def write_analysis(*_args, section_ids):
+        return raw_payload
+
+    def write_synthesis(*_args, analysis_sections, section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    def repair_sections(
+        _query,
+        _plan,
+        _research_plan,
+        _manifest,
+        _packets,
+        rejected,
+        _validation,
+        *,
+        section_ids,
+    ):
+        rejected_inputs.append(rejected)
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[section_by_id[sid] for sid in section_ids],
+        )
+
+    generated = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+        repair_sections=repair_sections,
+        allow_repair=True,
+    )
+
+    assert rejected_inputs == [raw_payload]
+    assert generated == valid_draft

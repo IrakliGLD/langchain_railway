@@ -501,6 +501,82 @@ def _normalize_document_roles(
     return _document_from_sections(plan, sections), roles_normalized
 
 
+def _repair_section_batch(
+    query: str,
+    plan: ReportDocumentPlan,
+    research_plan: ReportResearchPlan,
+    manifest: ReportEvidenceManifest,
+    packets: Sequence[ReportEvidencePacket],
+    sections: list[ReportSectionDraft] | None,
+    raw_batch: Any,
+    validation: ReportDocumentValidation,
+    repair_sections: DocumentRepairer,
+    *,
+    section_ids: Sequence[str],
+) -> tuple[list[ReportSectionDraft] | None, ReportDocumentValidation]:
+    """Spend one repair call on a rejected batch and re-validate the result.
+
+    A batch that fails structurally (schema or section-set) has no usable
+    sections, so the whole requested batch is rewritten from the raw payload
+    the writer returned; otherwise only the sections the validator rejected
+    are replaced.
+    """
+
+    structural = sections is None or bool(validation.document_errors)
+    invalid_ids = (
+        list(section_ids) if structural else list(validation.section_errors)
+    )
+    if not invalid_ids:
+        return sections, validation
+    _log_document_diagnostic(
+        event="batch_repair_requested",
+        plan=plan,
+        validation=validation,
+        draft=None,
+        repair_section_ids=invalid_ids,
+    )
+    raw_repair = repair_sections(
+        query,
+        plan,
+        research_plan,
+        manifest,
+        list(packets),
+        raw_batch if sections is None else list(sections),
+        validation,
+        section_ids=invalid_ids,
+    )
+    try:
+        repair = (
+            raw_repair
+            if isinstance(raw_repair, ReportDocumentRepair)
+            else ReportDocumentRepair.model_validate(raw_repair)
+        )
+    except ValidationError:
+        return None, validation
+    if {section.section_id for section in repair.sections} != set(invalid_ids):
+        return None, validation
+    replacements = {
+        section.section_id: section for section in repair.sections
+    }
+    merged = (
+        list(repair.sections)
+        if structural
+        else [
+            replacements.get(section.section_id, section)
+            for section in sections or []
+        ]
+    )
+    return _materialize_section_batch(
+        ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=merged,
+        ),
+        plan,
+        manifest,
+        section_ids=section_ids,
+    )
+
+
 def generate_report_document(
     query: str,
     plan: ReportDocumentPlan,
@@ -550,6 +626,10 @@ def generate_report_document(
             for section in plan.sections
             if section.role is not ReportDocumentSectionRole.ANALYSIS
         ]
+        if repair_sections is None:
+            from core.llm import llm_repair_report_document_sections
+
+            repair_sections = llm_repair_report_document_sections
         raw_analysis = write_analysis_sections(
             query,
             plan,
@@ -565,7 +645,25 @@ def generate_report_document(
             section_ids=analysis_ids,
         )
         if analysis_sections is None or not analysis_validation.valid:
-            raise ReportDocumentGenerationError(analysis_validation)
+            if not allow_repair:
+                raise ReportDocumentGenerationError(analysis_validation)
+            # Whichever stage spends the repair, the later gates short-circuit:
+            # the processor's budget reserves exactly one repair call.
+            allow_repair = False
+            analysis_sections, analysis_validation = _repair_section_batch(
+                query,
+                plan,
+                research_plan,
+                manifest,
+                packets,
+                analysis_sections,
+                raw_analysis,
+                analysis_validation,
+                repair_sections,
+                section_ids=analysis_ids,
+            )
+            if analysis_sections is None or not analysis_validation.valid:
+                raise ReportDocumentGenerationError(analysis_validation)
         raw_synthesis = write_synthesis_sections(
             query,
             plan,
@@ -582,7 +680,23 @@ def generate_report_document(
             section_ids=synthesis_ids,
         )
         if synthesis_sections is None or not synthesis_validation.valid:
-            raise ReportDocumentGenerationError(synthesis_validation)
+            if not allow_repair:
+                raise ReportDocumentGenerationError(synthesis_validation)
+            allow_repair = False
+            synthesis_sections, synthesis_validation = _repair_section_batch(
+                query,
+                plan,
+                research_plan,
+                manifest,
+                packets,
+                synthesis_sections,
+                raw_synthesis,
+                synthesis_validation,
+                repair_sections,
+                section_ids=synthesis_ids,
+            )
+            if synthesis_sections is None or not synthesis_validation.valid:
+                raise ReportDocumentGenerationError(synthesis_validation)
         raw_draft = _document_from_sections(
             plan,
             [*analysis_sections, *synthesis_sections],
