@@ -22,7 +22,6 @@ from agent.report_grounding import (
 from contracts.report import (
     ReportPlan,
     ReportSectionSpec,
-    report_aggregate_word_bounds,
     report_section_validation_word_bounds,
 )
 from contracts.report_evidence import ReportEvidenceManifest
@@ -169,8 +168,10 @@ def validate_report_section(
 
     word_count = count_section_words(draft.content_markdown)
     minimum_words, maximum_words = _section_word_bounds(section)
-    if not minimum_words <= word_count <= maximum_words:
-        errors.append("WORD_COUNT_OUT_OF_RANGE")
+    if word_count < minimum_words:
+        errors.append("WORD_COUNT_TOO_SHORT")
+    elif word_count > maximum_words:
+        errors.append("WORD_COUNT_TOO_LONG")
 
     item_by_ref = manifest.item_by_ref()
     allowed_refs = set(section.required_evidence_refs)
@@ -555,128 +556,5 @@ def generate_report_sections(
             raise
         else:
             executor.shutdown(wait=True)
-
-    _, maximum_report_words = report_aggregate_word_bounds(
-        [section.target_words for section in plan.sections]
-    )
-    word_count_by_id = {
-        section.section_id: count_section_words(
-            completed[section.section_id].content_markdown
-        )
-        for section in plan.sections
-    }
-    total_words = sum(word_count_by_id.values())
-    if total_words > maximum_report_words:
-        effective_repair = repair_section
-        uses_default_repair = effective_repair is None
-        if uses_default_repair:
-            from core.llm import llm_repair_report_section
-
-            effective_repair = llm_repair_report_section
-        candidates = sorted(
-            plan.sections,
-            key=lambda section: (
-                word_count_by_id[section.section_id] - section.target_words,
-                section.target_words,
-            ),
-            reverse=True,
-        )
-        for section in candidates:
-            if total_words <= maximum_report_words:
-                break
-            current_word_count = word_count_by_id[section.section_id]
-            if current_word_count <= section.target_words:
-                continue
-            repair_started_at = time.monotonic()
-            try:
-                repair_args = (
-                    query,
-                    plan,
-                    section,
-                    manifest,
-                    completed[section.section_id],
-                    ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"],
-                )
-                if uses_default_repair:
-                    repaired_raw = effective_repair(
-                        *repair_args,
-                        attempt_number=4,
-                    )
-                else:
-                    repaired_raw = effective_repair(*repair_args)
-            except ProviderExecutionError as exc:
-                _log_section_diagnostic(
-                    event="provider_failed",
-                    section=section,
-                    attempt=4,
-                    started_at=repair_started_at,
-                    error_codes=["SECTION_REPAIR_PROVIDER_FAILED"],
-                    provider_error=exc,
-                    level=logging.WARNING,
-                )
-                raise ReportSectionGenerationError(
-                    section.section_id,
-                    ["SECTION_REPAIR_PROVIDER_FAILED"],
-                    provider=exc.provider,
-                    provider_stage=exc.stage,
-                    provider_disposition=exc.disposition.value,
-                ) from exc
-            try:
-                repaired = (
-                    repaired_raw
-                    if isinstance(repaired_raw, ReportSectionDraft)
-                    else ReportSectionDraft.model_validate(repaired_raw)
-                )
-            except ValidationError:
-                continue
-            repaired_validation = validate_report_section(
-                repaired,
-                section,
-                manifest,
-                evidence_facts_by_ref=grounding_index,
-            )
-            if (
-                not repaired_validation.valid
-                or repaired_validation.word_count >= current_word_count
-            ):
-                _log_section_diagnostic(
-                    event="aggregate_repair_rejected",
-                    section=section,
-                    attempt=4,
-                    started_at=repair_started_at,
-                    error_codes=(
-                        repaired_validation.error_codes
-                        or ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"]
-                    ),
-                    word_count=repaired_validation.word_count,
-                    draft=repaired,
-                    level=logging.WARNING,
-                )
-                continue
-            completed[section.section_id] = repaired
-            word_count_by_id[section.section_id] = (
-                repaired_validation.word_count
-            )
-            total_words += repaired_validation.word_count - current_word_count
-            if progress_callback is not None:
-                progress_callback(
-                    len(completed),
-                    len(plan.sections),
-                    repaired,
-                )
-            _log_section_diagnostic(
-                event="aggregate_repair_validated",
-                section=section,
-                attempt=4,
-                started_at=repair_started_at,
-                error_codes=[],
-                word_count=repaired_validation.word_count,
-                draft=repaired,
-            )
-        if total_words > maximum_report_words:
-            raise ReportSectionGenerationError(
-                candidates[0].section_id,
-                ["AGGREGATE_WORD_COUNT_OUT_OF_RANGE"],
-            )
 
     return [completed[section.section_id] for section in plan.sections]
