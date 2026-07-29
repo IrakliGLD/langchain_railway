@@ -145,6 +145,19 @@ class ReportResearchScope(_StrictResearchModel):
         return self
 
 
+class ReportResearchScopeDraft(ReportResearchScope):
+    """Model-owned scope fields with explicit nullable values."""
+
+    period_start: date | None
+    period_end: date | None
+    timezone: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^(?:UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+)$",
+    )
+    grain: ReportTimeGrain
+
+
 class ReportRequestTopic(_StrictResearchModel):
     topic_id: Identifier
     label: str = Field(min_length=1, max_length=160)
@@ -230,6 +243,30 @@ class ReportResearchTrack(_StrictResearchModel):
                 "A knowledge-only track cannot request numeric metrics."
             )
         return self
+
+
+class ReportResearchTrackDraft(ReportResearchTrack):
+    """Model-owned track fields without application defaults."""
+
+    requested_metrics: List[Identifier] = Field(max_length=16)
+    expected_exhibits: List[ReportChartPurpose] = Field(
+        max_length=REPORT_MAX_EXHIBITS,
+    )
+
+
+class ReportResearchPlanDraft(_StrictResearchModel):
+    """Provider response contract before application-owned identity binding."""
+
+    objective: str = Field(min_length=1, max_length=2000)
+    scope: ReportResearchScopeDraft
+    request_topics: List[ReportRequestTopic] = Field(
+        min_length=1,
+        max_length=8,
+    )
+    tracks: List[ReportResearchTrackDraft] = Field(
+        min_length=1,
+        max_length=8,
+    )
 
 
 class ReportResearchPlan(_StrictResearchModel):

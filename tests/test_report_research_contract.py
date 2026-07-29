@@ -11,6 +11,7 @@ from contracts.report_research import (
     ReportEvidenceGate,
     ReportEvidencePacket,
     ReportResearchPlan,
+    ReportResearchPlanDraft,
 )
 
 
@@ -172,6 +173,27 @@ def test_compound_research_plan_is_closed_and_covers_every_required_topic():
     assert plan.scope.timezone == "Asia/Tbilisi"
     schema = ReportResearchPlan.model_json_schema()
     assert schema["additionalProperties"] is False
+
+
+def test_research_plan_draft_schema_is_strict_and_model_owned():
+    schema = ReportResearchPlanDraft.model_json_schema()
+    server_owned = {"contract_version", "query_digest", "language_code"}
+
+    assert server_owned.isdisjoint(schema["properties"])
+
+    def assert_strict_objects(node):
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                assert node.get("additionalProperties") is False
+                assert set(node.get("required", [])) == set(properties)
+            for child in node.values():
+                assert_strict_objects(child)
+        elif isinstance(node, list):
+            for child in node:
+                assert_strict_objects(child)
+
+    assert_strict_objects(schema)
 
 
 def test_research_plan_rejects_uncovered_or_unknown_topics():

@@ -130,6 +130,7 @@ REPORT_MODEL=gpt-5.6-terra
 REPORT_MAX_OUTPUT_TOKENS=8192
 REPORT_TIMEOUT_SECONDS=240
 REPORT_REASONING_EFFORT=medium
+REPORT_STRUCTURED_OUTPUT_METHOD=auto
 REPORT_PIPELINE_V2_MODE=shadow
 REPORT_MAX_GENERATIVE_CALLS=3
 REPORT_RESEARCH_MAX_TRACKS=4
@@ -141,6 +142,13 @@ Supported `REPORT_MODEL_TYPE` values are `openai`, `gemini`, and `nvidia`.
 Use `OPENAI_API_KEY`, `GOOGLE_API_KEY`, or `NVIDIA_API_KEY` respectively.
 When `REPORT_MODEL_TYPE` is absent, Report inherits the existing primary/stage
 model behavior. Report calls never use the implicit OpenAI fallback.
+
+`REPORT_STRUCTURED_OUTPUT_METHOD=auto` uses native JSON Schema for OpenAI and
+portable prompt-plus-validation output for Gemini and NVIDIA, preserving their
+existing behavior. When changing to a model with different capabilities, set
+`json_schema`, `function_calling`, or `prompt` explicitly. This changes only
+the output mechanism for the configured Report model; it never switches
+providers or enables provider fallback.
 
 `ENABLE_OPENAI_FALLBACK` defaults to `false` globally. Leave it unset to keep
 Standard and other primary-provider calls from falling back merely because an
