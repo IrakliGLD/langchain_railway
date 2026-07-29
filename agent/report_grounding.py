@@ -175,11 +175,20 @@ def _normalize_unit(unit: str) -> str:
 
 
 def _is_ratio_column(item: ReportEvidenceItem, column: str) -> bool:
-    normalized_column = str(column).strip().lower()
+    """Return whether a column holds a 0-1 ratio needing percent conversion.
+
+    A declared unit is the authority. The name heuristics below only decide
+    columns the manifest left undeclared: a ``share_percent`` column carrying
+    "%" is already percent-scaled, and re-scaling it by name would turn 62.0
+    into 6200% and reject the one claim a writer could correctly make.
+    """
+
     normalized_unit = _normalize_unit(item.unit_by_column.get(column, ""))
+    if normalized_unit:
+        return normalized_unit in _RATIO_UNITS
+    normalized_column = str(column).strip().lower()
     return (
-        normalized_unit in _RATIO_UNITS
-        or normalized_column.startswith("share_")
+        normalized_column.startswith("share_")
         or normalized_column in _RATIO_COLUMN_NAMES
     )
 

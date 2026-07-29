@@ -89,18 +89,21 @@ def _log_document_diagnostic(
     ] | None = None,
     role_normalization_applied: bool = False,
     baseline_draft: ReportDocumentDraft | None = None,
+    sections: Sequence[ReportSectionDraft] | None = None,
 ) -> None:
     minimum_words, maximum_words = report_document_recommended_word_bounds(
         plan
     )
-    section_by_id = (
-        {
-            section.section_id: section
-            for section in draft.generation_order_sections()
-        }
+    # A generation batch carries only part of the plan, so it reports its
+    # sections directly rather than as a draft.
+    reported_sections = (
+        draft.generation_order_sections()
         if draft is not None
-        else {}
+        else (sections or [])
     )
+    section_by_id = {
+        section.section_id: section for section in reported_sections
+    }
     section_word_counts = {
         section_id: count_section_words(section.content_markdown)
         for section_id, section in section_by_id.items()
@@ -533,6 +536,10 @@ def _repair_section_batch(
         plan=plan,
         validation=validation,
         draft=None,
+        # A batch holds only part of the plan, so it cannot form a whole draft.
+        # Report its sections directly: otherwise the diagnostic shows empty
+        # word counts exactly when they would explain the rejection.
+        sections=sections,
         repair_section_ids=invalid_ids,
     )
     raw_repair = repair_sections(

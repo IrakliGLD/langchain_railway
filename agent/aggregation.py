@@ -337,26 +337,33 @@ def get_aggregation_guidance(intent: Dict[str, bool]) -> str:
         guidance.append("""
 CRITICAL - TOTAL CALCULATION:
 - User wants a SINGLE total number
-- Use SUM(column_name) AS total
+- Use SUM(column_name) AS total_column_name
+- ALWAYS keep the aggregated column's name inside the alias: the unit is read
+  from the alias, and a bare alias like "total" makes the number unusable downstream
 - DO NOT use GROUP BY (should return 1 row)
-- Example: SELECT SUM(quantity_tech) FROM tech_quantity_view WHERE type_tech IN (...)
+- Example: SELECT SUM(quantity_tech) AS total_quantity_tech FROM tech_quantity_view WHERE type_tech IN (...)
 """)
 
     elif intent.get("needs_breakdown"):
         guidance.append("""
 BREAKDOWN CALCULATION:
 - User wants totals/values FOR EACH category
-- Use SUM(column) or other aggregation
+- Use SUM(column) or other aggregation, always aliased
+- ALWAYS keep the aggregated column's name inside the alias: the unit is read
+  from the alias, and an unaliased aggregate becomes a column named "sum"
 - MUST use GROUP BY category_column
-- Example: SELECT type_tech, SUM(quantity_tech) FROM ... GROUP BY type_tech
+- Example: SELECT type_tech, SUM(quantity_tech) AS total_quantity_tech FROM ... GROUP BY type_tech
 """)
 
     if intent.get("needs_average"):
         guidance.append("""
 AVERAGE CALCULATION:
-- Use AVG(column_name) AS average
+- Use AVG(column_name) AS average_column_name
+- ALWAYS keep the averaged column's name inside the alias: the unit is read
+  from the alias, and a bare alias like "average" makes the number unusable downstream
 - If no breakdown, should return 1 row
 - If breakdown requested, use AVG with GROUP BY
+- Example: SELECT AVG(p_bal_gel) AS average_p_bal_gel FROM ...
 """)
 
     if intent.get("needs_share"):
@@ -364,9 +371,12 @@ AVERAGE CALCULATION:
 SHARE/PERCENTAGE CALCULATION:
 - Requires: (individual_value / total_value) * 100
 - Best practice: Use CTE to calculate total first, then divide
+- Name a 0-100 result "share_percent", never a bare "share": a bare "share"
+  means the 0-1 ratio elsewhere in this system, and the unit is read from the
+  alias, so the two scales must not share a name
 - Example:
-  WITH totals AS (SELECT SUM(qty) as total FROM ...)
-  SELECT entity, (qty/total)*100 as share FROM ..., totals
+  WITH totals AS (SELECT SUM(qty) AS total_qty FROM ...)
+  SELECT entity, (qty/total_qty)*100 AS share_percent FROM ..., totals
 """)
 
     if not guidance:
