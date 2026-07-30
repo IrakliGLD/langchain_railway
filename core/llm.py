@@ -53,9 +53,6 @@ from config import (
     MODEL_TYPE,
     NVIDIA_CONFIGURED_MAX_TOKENS,
     NVIDIA_INPUT_COST_PER_1K_USD,
-    QWEN_INPUT_COST_PER_1K_USD,
-    QWEN_MODEL,
-    QWEN_OUTPUT_COST_PER_1K_USD,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_OUTPUT_COST_PER_1K_USD,
@@ -70,6 +67,9 @@ from config import (
     PROMPT_BUDGET_MAX_CHARS,
     PROVIDER_MINIMUM_START_BUDGET_MS,
     PROVIDER_RETRY_JITTER_MAX_MS,
+    QWEN_INPUT_COST_PER_1K_USD,
+    QWEN_MODEL,
+    QWEN_OUTPUT_COST_PER_1K_USD,
     REPORT_BATCH_EVIDENCE_BUDGET_CHARS,
     REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS,
     REPORT_MAX_OUTPUT_TOKENS,
@@ -127,7 +127,11 @@ from contracts.report_document import (
     ReportDocumentRepair,
     ReportDocumentValidation,
 )
-from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
+from contracts.report_evidence import (
+    ReportEvidenceItem,
+    ReportEvidenceKind,
+    ReportEvidenceManifest,
+)
 from contracts.report_research import (
     ReportEvidencePacket,
     ReportPlanningConstraints,
@@ -195,8 +199,8 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
     _to_int,
     get_gemini,
     get_nvidia,
-    get_qwen,
     get_openai,
+    get_qwen,
     get_report,
 )
 from core.query_classifier import (  # noqa: F401 — re-export surface
