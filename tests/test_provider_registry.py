@@ -77,7 +77,7 @@ def test_cost_attribution_uses_matched_provider_rates(monkeypatch, model_name, i
 
 
 def test_registry_is_single_source_of_truth():
-    assert set(llm._PROVIDERS) == {"gemini", "openai", "nvidia"}
+    assert set(llm._PROVIDERS) == {"gemini", "openai", "nvidia", "qwen"}
     for key, prov in llm._PROVIDERS.items():
         assert prov.key == key
         assert callable(prov.make_client)

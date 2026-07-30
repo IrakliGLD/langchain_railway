@@ -15,7 +15,6 @@ from typing import Any, Iterable, Mapping
 
 from config_metrics.metric_units import metric_is_additive
 
-
 _SCENARIO_METRICS = frozenset({
     "scenario_scale",
     "scenario_offset",

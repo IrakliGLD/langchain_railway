@@ -8272,7 +8272,8 @@ def test_recent_analyzer_window_preserved_for_dateless_query():
     """A dateless query with a FRESH analyzer window (ending within the
     staleness threshold) keeps the analyzer's dates — the guard only fires
     on windows ending far in the past."""
-    from datetime import date as _date, timedelta
+    from datetime import date as _date
+    from datetime import timedelta
 
     from agent.planner import build_tool_invocation_from_analysis
     from contracts.question_analysis import QuestionAnalysis

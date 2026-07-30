@@ -45,22 +45,22 @@ from config import (
     ENABLE_TRACE_DEBUG_ARTIFACTS,
     FAST_MODE_ANALYZER_BUDGET,
     FAST_MODE_SUMMARIZER_BUDGET,
+    GEMINI_CACHED_INPUT_COST_PER_1K_USD,
     GEMINI_INPUT_COST_PER_1K_USD,
     GEMINI_MODEL,
     GEMINI_OUTPUT_COST_PER_1K_USD,
     GEMINI_TIMEOUT_SECONDS,
     GOOGLE_API_KEY,
     MODEL_TYPE,
-    NVIDIA_CONFIGURED_MAX_TOKENS,
-    GEMINI_CACHED_INPUT_COST_PER_1K_USD,
     NVIDIA_CACHED_INPUT_COST_PER_1K_USD,
+    NVIDIA_CONFIGURED_MAX_TOKENS,
     NVIDIA_INPUT_COST_PER_1K_USD,
-    OPENAI_CACHED_INPUT_COST_PER_1K_USD,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_OUTPUT_COST_PER_1K_USD,
     NVIDIA_TIMEOUT_SECONDS,
     OPENAI_API_KEY,
+    OPENAI_CACHED_INPUT_COST_PER_1K_USD,
     OPENAI_INPUT_COST_PER_1K_USD,
     OPENAI_MODEL,
     OPENAI_OUTPUT_COST_PER_1K_USD,
@@ -70,6 +70,10 @@ from config import (
     PROMPT_BUDGET_MAX_CHARS,
     PROVIDER_MINIMUM_START_BUDGET_MS,
     PROVIDER_RETRY_JITTER_MAX_MS,
+    QWEN_CACHED_INPUT_COST_PER_1K_USD,
+    QWEN_INPUT_COST_PER_1K_USD,
+    QWEN_MODEL,
+    QWEN_OUTPUT_COST_PER_1K_USD,
     REPORT_BATCH_EVIDENCE_BUDGET_CHARS,
     REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS,
     REPORT_MAX_OUTPUT_TOKENS,
@@ -127,7 +131,11 @@ from contracts.report_document import (
     ReportDocumentRepair,
     ReportDocumentValidation,
 )
-from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
+from contracts.report_evidence import (
+    ReportEvidenceItem,
+    ReportEvidenceKind,
+    ReportEvidenceManifest,
+)
 from contracts.report_research import (
     ReportEvidencePacket,
     ReportPlanningConstraints,
@@ -197,6 +205,7 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
     get_gemini,
     get_nvidia,
     get_openai,
+    get_qwen,
     get_report,
 )
 from core.query_classifier import (  # noqa: F401 — re-export surface
@@ -567,6 +576,7 @@ def _cache_cancel_in_flight(cache_input: str, token=None):
 make_gemini = get_gemini
 make_openai = get_openai
 make_nvidia = get_nvidia
+make_qwen = get_qwen
 make_report = get_report
 
 
@@ -625,6 +635,15 @@ _PROVIDERS: dict[str, _Provider] = {
         cached_input_rate=lambda: NVIDIA_CACHED_INPUT_COST_PER_1K_USD,
         namespaced=True,
     ),
+    "qwen": _Provider(
+        key="qwen",
+        make_client=lambda: make_qwen(),
+        model_name=lambda: QWEN_MODEL,
+        input_rate=lambda: QWEN_INPUT_COST_PER_1K_USD,
+        output_rate=lambda: QWEN_OUTPUT_COST_PER_1K_USD,
+        cached_input_rate=lambda: QWEN_CACHED_INPUT_COST_PER_1K_USD,
+        name_prefixes=("qwen",),
+    ),
 }
 
 _DEFAULT_PROVIDER = "gemini"
@@ -670,7 +689,17 @@ def _report_structured_output_method(provider: str) -> str | None:
         return None
     if REPORT_STRUCTURED_OUTPUT_METHOD != "auto":
         return REPORT_STRUCTURED_OUTPUT_METHOD
-    return "json_schema" if provider == "openai" else None
+    if provider == "openai":
+        return "json_schema"
+    # qwencloud's structured-output guide documents response_format
+    # {"type": "json_object"} only — no json_schema and no strict mode — and
+    # states it guarantees valid JSON syntax but not schema conformance. Tool
+    # calling is the documented way to get a typed shape, so auto takes it.
+    # Forcing REPORT_STRUCTURED_OUTPUT_METHOD=json_schema here would send a
+    # response_format the endpoint does not implement.
+    if provider == "qwen":
+        return "function_calling"
+    return None
 
 
 def _should_fallback_to_openai() -> bool:
