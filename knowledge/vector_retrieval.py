@@ -57,6 +57,44 @@ def _safe_failure_reason(error: BaseException) -> str:
     return normalized[:128].rstrip("/-") or "UnknownError"
 
 
+def _failure_cause_chain(error: BaseException, *, limit: int = 4) -> str:
+    """Return the chained exception type names, outermost first.
+
+    A bare class name cannot separate "the provider rejected us" from "we never
+    asked". Type names carry no request content, so the chain is safe to log and
+    is usually the whole diagnosis.
+    """
+
+    names: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and len(names) < limit:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        names.append(type(current).__name__)
+        current = current.__cause__ or current.__context__
+    return "<-".join(names) or "Unknown"
+
+
+def _failure_provider_context(error: BaseException) -> str:
+    """Return content-free provider attribution when the error carries it.
+
+    ``ProviderExecutionError`` knows the provider, stage and delivery
+    disposition that decided the outcome. Dropping them is what made a
+    per-request attempt collision indistinguishable from an API outage.
+    """
+
+    parts: list[str] = []
+    for field in ("provider", "stage", "disposition"):
+        value = getattr(error, field, None)
+        if value is None:
+            continue
+        # Enum-valued fields log their value, not their repr.
+        parts.append(f"{field}={getattr(value, 'value', value)}")
+    return " ".join(parts) or "unattributed"
+
+
 _ADJACENCY_MODE_VALUES = frozenset({"off", "shadow", "on"})
 
 
@@ -763,9 +801,12 @@ def retrieve_vector_knowledge(
         safe_reason = _safe_failure_reason(exc)
         safe_error = f"{failure_stage.value}:{safe_reason}"
         log.warning(
-            "Vector retrieval unavailable at stage=%s reason=%s",
+            "Vector retrieval unavailable at stage=%s reason=%s "
+            "cause_chain=%s provider_context=%s",
             failure_stage.value,
             safe_reason,
+            _failure_cause_chain(exc),
+            _failure_provider_context(exc),
         )
         return VectorKnowledgeBundle(
             query=query_text,
