@@ -226,6 +226,28 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # Any NIM model id works env-only, e.g. NVIDIA_MODEL=z-ai/glm-5.2 (with
 # MODEL_TYPE=nvidia); namespaced vendor/model ids classify to this provider
 # for cost attribution automatically. Restart required (env read at import).
+# Qwen (qwencloud / DashScope) — OpenAI-API-compatible endpoint driven via
+# ChatOpenAI, with its own provider key so cost attribution and the circuit
+# breaker stay separate from NVIDIA. QWEN_BASE_URL has no default on purpose:
+# the compatible-mode URL differs by deployment region and a wrong default
+# would fail as an opaque auth error rather than a clear configuration one.
+QWEN_BASE_URL = (os.getenv("QWEN_BASE_URL", "") or "").strip()
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.7-max")
+# DASHSCOPE_API_KEY is the name Qwen's own SDK reads, so accept it as a
+# fallback rather than making operators duplicate the secret.
+QWEN_API_KEY = (
+    os.getenv("QWEN_API_KEY")
+    or os.getenv("DASHSCOPE_API_KEY")
+)
+QWEN_MAX_TOKENS = max(1, int(os.getenv("QWEN_MAX_TOKENS", "4096")))
+QWEN_TEMPERATURE = float(os.getenv("QWEN_TEMPERATURE", "0"))
+_raw_qwen_timeout = os.getenv("QWEN_TIMEOUT_SECONDS", "").strip()
+QWEN_TIMEOUT_SECONDS: float | None = (
+    float(_raw_qwen_timeout)
+    if _raw_qwen_timeout and float(_raw_qwen_timeout) > 0
+    else None
+)
+
 NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Output-token cap and sampling temperature for the NVIDIA client. The original
@@ -613,6 +635,8 @@ GEMINI_INPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_INPUT_COST_PER_1K_USD", "
 GEMINI_OUTPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_OUTPUT_COST_PER_1K_USD", "0"))
 NVIDIA_INPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_INPUT_COST_PER_1K_USD", "0"))
 NVIDIA_OUTPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_OUTPUT_COST_PER_1K_USD", "0"))
+QWEN_INPUT_COST_PER_1K_USD = float(os.getenv("QWEN_INPUT_COST_PER_1K_USD", "0"))
+QWEN_OUTPUT_COST_PER_1K_USD = float(os.getenv("QWEN_OUTPUT_COST_PER_1K_USD", "0"))
 
 # Memory Limits (PRODUCTION SAFETY: Prevents OOM errors)
 MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
@@ -636,6 +660,8 @@ def validate_runtime_settings(
     model_type: str,
     google_api_key: str | None,
     nvidia_api_key: str | None = None,
+    qwen_api_key: str | None = None,
+    qwen_base_url: str = "",
     gateway_actor_assertion_mode: str = "optional",
     evidence_finalization_mode: str = "shadow",
     plan_validation_mode: str = "warn",
@@ -718,15 +744,26 @@ def validate_runtime_settings(
             raise RuntimeError(
                 "ENABLE_EVALUATE_ENDPOINT=true requires ALLOW_EVALUATE_ENDPOINT=true"
             )
-    valid_model_types = {"gemini", "openai", "nvidia"}
+    valid_model_types = {"gemini", "openai", "nvidia", "qwen"}
     if model_type not in valid_model_types:
         raise RuntimeError(
-            "Invalid MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+            "Invalid MODEL_TYPE. Expected one of: gemini, openai, nvidia, qwen"
         )
     if model_type == "gemini" and not google_api_key:
         raise RuntimeError("MODEL_TYPE=gemini but GOOGLE_API_KEY is missing")
     if model_type == "nvidia" and not nvidia_api_key:
         raise RuntimeError("MODEL_TYPE=nvidia but NVIDIA_API_KEY is missing")
+    if model_type == "qwen":
+        if not qwen_api_key:
+            raise RuntimeError(
+                "MODEL_TYPE=qwen but neither QWEN_API_KEY nor "
+                "DASHSCOPE_API_KEY is set"
+            )
+        if not qwen_base_url:
+            raise RuntimeError(
+                "MODEL_TYPE=qwen but QWEN_BASE_URL is missing; set it to "
+                "the OpenAI-compatible endpoint for your region"
+            )
     # P5.4 (finding M11): OpenAI-primary deployments previously started without
     # a key and failed at first use; every selected provider now validates its
     # credential at startup like the other two.
@@ -778,7 +815,8 @@ def validate_runtime_settings(
     if report_model_type:
         if report_model_type not in valid_model_types:
             raise RuntimeError(
-                "Invalid REPORT_MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+                "Invalid REPORT_MODEL_TYPE. Expected one of: gemini, openai, "
+                "nvidia, qwen"
             )
         if not report_model:
             raise RuntimeError(
@@ -788,12 +826,14 @@ def validate_runtime_settings(
             "gemini": google_api_key,
             "openai": openai_api_key,
             "nvidia": nvidia_api_key,
+            "qwen": qwen_api_key,
         }[report_model_type]
         if not report_key:
             key_name = {
                 "gemini": "GOOGLE_API_KEY",
                 "openai": "OPENAI_API_KEY",
                 "nvidia": "NVIDIA_API_KEY",
+                "qwen": "QWEN_API_KEY",
             }[report_model_type]
             raise RuntimeError(
                 f"REPORT_MODEL_TYPE={report_model_type} but {key_name} is missing"
@@ -834,6 +874,8 @@ validate_runtime_settings(
     model_type=MODEL_TYPE,
     google_api_key=GOOGLE_API_KEY,
     nvidia_api_key=NVIDIA_API_KEY,
+    qwen_api_key=QWEN_API_KEY,
+    qwen_base_url=QWEN_BASE_URL,
     gateway_actor_assertion_mode=GATEWAY_ACTOR_ASSERTION_MODE,
     evidence_finalization_mode=EVIDENCE_FINALIZATION_MODE,
     plan_validation_mode=PLAN_VALIDATION_MODE,

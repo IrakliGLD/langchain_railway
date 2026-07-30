@@ -26,6 +26,12 @@ from config import (
     GOOGLE_API_KEY,
     NVIDIA_API_KEY,
     NVIDIA_BASE_URL,
+    QWEN_API_KEY,
+    QWEN_BASE_URL,
+    QWEN_MAX_TOKENS,
+    QWEN_MODEL,
+    QWEN_TEMPERATURE,
+    QWEN_TIMEOUT_SECONDS,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_TEMPERATURE,
@@ -316,6 +322,7 @@ class LLMResponseCache:
 _gemini_llm = None
 _openai_llm = None
 _nvidia_llm = None
+_qwen_llm = None
 _report_llm = None
 
 
@@ -371,6 +378,50 @@ def get_openai() -> ChatOpenAI:
             client_kwargs["max_retries"],
         )
     return _openai_llm
+
+
+def get_qwen() -> ChatOpenAI:
+    """Get cached Qwen LLM instance (singleton pattern).
+
+    qwencloud exposes an OpenAI-compatible API, so it is driven through
+    ``ChatOpenAI`` with a custom ``base_url`` — the same shape as
+    ``get_nvidia()``, but under its own provider key so cost attribution and the
+    circuit breaker do not merge with NVIDIA's.
+
+    ``reasoning_effort`` is deliberately never sent: it is an OpenAI-specific
+    parameter and compatible endpoints reject unknown sampling arguments.
+
+    Raises:
+        RuntimeError: If the key or the compatible-mode base URL is missing.
+    """
+    global _qwen_llm
+    if not QWEN_API_KEY:
+        raise RuntimeError(
+            "QWEN_API_KEY (or DASHSCOPE_API_KEY) not set"
+        )
+    if not QWEN_BASE_URL:
+        raise RuntimeError("QWEN_BASE_URL not set")
+    if _qwen_llm is None:
+        client_kwargs = dict(
+            model=QWEN_MODEL,
+            temperature=QWEN_TEMPERATURE,
+            max_tokens=QWEN_MAX_TOKENS,
+            openai_api_key=QWEN_API_KEY,
+            base_url=QWEN_BASE_URL,
+            max_retries=0,  # application owns the only safe fallback
+        )
+        if QWEN_TIMEOUT_SECONDS:
+            client_kwargs["request_timeout"] = QWEN_TIMEOUT_SECONDS
+        _qwen_llm = ChatOpenAI(**client_kwargs)
+        log.info(
+            "✅ Qwen LLM instance cached (model=%s, max_tokens=%s, "
+            "temperature=%s, timeout=%s)",
+            QWEN_MODEL,
+            QWEN_MAX_TOKENS,
+            QWEN_TEMPERATURE,
+            QWEN_TIMEOUT_SECONDS,
+        )
+    return _qwen_llm
 
 
 def get_nvidia() -> ChatOpenAI:
@@ -449,18 +500,18 @@ def get_report():
         if REPORT_REASONING_EFFORT:
             client_kwargs["thinking_level"] = REPORT_REASONING_EFFORT
         _report_llm = ChatGoogleGenerativeAI(**client_kwargs)
-    elif REPORT_MODEL_TYPE in {"openai", "nvidia"}:
-        api_key = (
-            OPENAI_API_KEY
-            if REPORT_MODEL_TYPE == "openai"
-            else NVIDIA_API_KEY
-        )
+    elif REPORT_MODEL_TYPE in {"openai", "nvidia", "qwen"}:
+        api_key = {
+            "openai": OPENAI_API_KEY,
+            "nvidia": NVIDIA_API_KEY,
+            "qwen": QWEN_API_KEY,
+        }[REPORT_MODEL_TYPE]
         if not api_key:
-            key_name = (
-                "OPENAI_API_KEY"
-                if REPORT_MODEL_TYPE == "openai"
-                else "NVIDIA_API_KEY"
-            )
+            key_name = {
+                "openai": "OPENAI_API_KEY",
+                "nvidia": "NVIDIA_API_KEY",
+                "qwen": "QWEN_API_KEY",
+            }[REPORT_MODEL_TYPE]
             raise RuntimeError(
                 f"REPORT_MODEL_TYPE={REPORT_MODEL_TYPE} but {key_name} is missing"
             )
@@ -473,6 +524,8 @@ def get_report():
         }
         if REPORT_MODEL_TYPE == "openai":
             client_kwargs["use_responses_api"] = True
+        elif REPORT_MODEL_TYPE == "qwen":
+            client_kwargs["base_url"] = QWEN_BASE_URL
         else:
             client_kwargs["base_url"] = NVIDIA_BASE_URL
         if REPORT_REASONING_EFFORT:

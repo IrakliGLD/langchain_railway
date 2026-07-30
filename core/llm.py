@@ -53,6 +53,9 @@ from config import (
     MODEL_TYPE,
     NVIDIA_CONFIGURED_MAX_TOKENS,
     NVIDIA_INPUT_COST_PER_1K_USD,
+    QWEN_INPUT_COST_PER_1K_USD,
+    QWEN_MODEL,
+    QWEN_OUTPUT_COST_PER_1K_USD,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_OUTPUT_COST_PER_1K_USD,
@@ -190,6 +193,7 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
     _to_int,
     get_gemini,
     get_nvidia,
+    get_qwen,
     get_openai,
     get_report,
 )
@@ -532,6 +536,7 @@ def _cache_cancel_in_flight(cache_input: str, token=None):
 make_gemini = get_gemini
 make_openai = get_openai
 make_nvidia = get_nvidia
+make_qwen = get_qwen
 make_report = get_report
 
 
@@ -583,6 +588,14 @@ _PROVIDERS: dict[str, _Provider] = {
         output_rate=lambda: NVIDIA_OUTPUT_COST_PER_1K_USD,
         namespaced=True,
     ),
+    "qwen": _Provider(
+        key="qwen",
+        make_client=lambda: make_qwen(),
+        model_name=lambda: QWEN_MODEL,
+        input_rate=lambda: QWEN_INPUT_COST_PER_1K_USD,
+        output_rate=lambda: QWEN_OUTPUT_COST_PER_1K_USD,
+        name_prefixes=("qwen",),
+    ),
 }
 
 _DEFAULT_PROVIDER = "gemini"
@@ -628,7 +641,15 @@ def _report_structured_output_method(provider: str) -> str | None:
         return None
     if REPORT_STRUCTURED_OUTPUT_METHOD != "auto":
         return REPORT_STRUCTURED_OUTPUT_METHOD
-    return "json_schema" if provider == "openai" else None
+    if provider == "openai":
+        return "json_schema"
+    # qwencloud documents both Structured Outputs and Function Calling.
+    # Tool calling is the more consistently implemented of the two on
+    # OpenAI-compatible endpoints, so auto takes it and an operator can
+    # opt into strict schemas with REPORT_STRUCTURED_OUTPUT_METHOD.
+    if provider == "qwen":
+        return "function_calling"
+    return None
 
 
 def _should_fallback_to_openai() -> bool:

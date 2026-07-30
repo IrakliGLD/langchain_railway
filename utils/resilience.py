@@ -193,6 +193,11 @@ _llm_breakers = {
         failure_threshold=LLM_CB_FAILURE_THRESHOLD,
         reset_timeout_seconds=LLM_CB_RESET_TIMEOUT_SECONDS,
     ),
+    "qwen": CircuitBreaker(
+        name="llm_qwen",
+        failure_threshold=LLM_CB_FAILURE_THRESHOLD,
+        reset_timeout_seconds=LLM_CB_RESET_TIMEOUT_SECONDS,
+    ),
 }
 
 db_circuit_breaker = CircuitBreaker(

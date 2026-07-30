@@ -268,3 +268,122 @@ def test_validate_runtime_settings_nvidia_requires_key():
 def test_validate_runtime_settings_rejects_unknown_model_type():
     with pytest.raises(RuntimeError, match="Invalid MODEL_TYPE"):
         config.validate_runtime_settings(model_type="bogus", **_VALIDATE_BASE)
+
+
+def test_qwen_is_a_first_class_provider_not_an_nvidia_alias():
+    """Qwen must attribute cost and trip its breaker under its own key.
+
+    Routing qwencloud through the NVIDIA slot works, because both are
+    OpenAI-compatible endpoints reached with a custom base_url, but it merges
+    the two providers' cost attribution and circuit-breaker state.
+    """
+
+    assert "qwen" in llm._PROVIDERS
+    assert llm._provider_from_model_name("qwen3.7-max") == "qwen"
+    assert llm._provider_from_model_name("qwen-plus") == "qwen"
+    # Prefix classification must not steal the other providers' ids.
+    assert llm._provider_from_model_name("gpt-5.6-terra") == "openai"
+    assert llm._provider_from_model_name("openai/gpt-oss-120b") == "nvidia"
+
+
+def test_qwen_cost_attribution_uses_qwen_rates(monkeypatch):
+    monkeypatch.setattr(llm, "QWEN_INPUT_COST_PER_1K_USD", 0.002)
+    monkeypatch.setattr(llm, "QWEN_OUTPUT_COST_PER_1K_USD", 0.006)
+
+    cost = llm._estimate_cost_usd(1000, 1000, model_name="qwen3.7-max")
+    assert cost == pytest.approx(0.008)
+
+
+def test_qwen_report_structured_output_prefers_tool_calling(monkeypatch):
+    """auto must not assume strict json_schema on a compatible endpoint.
+
+    qwencloud documents Structured Outputs and Function Calling; tool calling is
+    the more consistently implemented of the two, and the report writers depend
+    on typed output, so auto takes the safer one. Strict schemas stay available
+    through REPORT_STRUCTURED_OUTPUT_METHOD.
+    """
+
+    monkeypatch.setattr(llm, "REPORT_STRUCTURED_OUTPUT_METHOD", "auto")
+    assert llm._report_structured_output_method("qwen") == "function_calling"
+    assert llm._report_structured_output_method("openai") == "json_schema"
+    assert llm._report_structured_output_method("nvidia") is None
+
+    monkeypatch.setattr(llm, "REPORT_STRUCTURED_OUTPUT_METHOD", "json_schema")
+    assert llm._report_structured_output_method("qwen") == "json_schema"
+
+
+def test_qwen_client_requires_key_and_compatible_base_url(monkeypatch):
+    """A missing base URL must fail as configuration, not as an opaque 401."""
+
+    monkeypatch.setattr(llm_runtime, "_qwen_llm", None)
+    monkeypatch.setattr(llm_runtime, "QWEN_API_KEY", "test-qwen-key")
+    monkeypatch.setattr(llm_runtime, "QWEN_BASE_URL", "")
+    with pytest.raises(RuntimeError, match="QWEN_BASE_URL"):
+        llm_runtime.get_qwen()
+
+    monkeypatch.setattr(llm_runtime, "QWEN_API_KEY", None)
+    monkeypatch.setattr(llm_runtime, "QWEN_BASE_URL", "https://example.invalid/v1")
+    with pytest.raises(RuntimeError, match="QWEN_API_KEY"):
+        llm_runtime.get_qwen()
+
+
+def test_qwen_client_is_built_from_env_without_reasoning_effort(monkeypatch):
+    """reasoning_effort is OpenAI-specific and must never reach a Qwen call."""
+
+    captured = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm_runtime, "_qwen_llm", None)
+    monkeypatch.setattr(llm_runtime, "ChatOpenAI", _Client)
+    monkeypatch.setattr(llm_runtime, "QWEN_API_KEY", "test-qwen-key")
+    monkeypatch.setattr(
+        llm_runtime, "QWEN_BASE_URL", "https://example.invalid/compatible/v1"
+    )
+    monkeypatch.setattr(llm_runtime, "QWEN_MODEL", "qwen3.7-max")
+
+    llm_runtime.get_qwen()
+
+    assert captured["model"] == "qwen3.7-max"
+    assert captured["base_url"] == "https://example.invalid/compatible/v1"
+    assert captured["openai_api_key"] == "test-qwen-key"
+    assert captured["max_retries"] == 0
+    assert "reasoning_effort" not in captured
+
+
+def test_config_accepts_qwen_and_reports_missing_qwen_settings():
+    base = dict(
+        supabase_db_url="postgresql://user:pass@localhost/db",
+        gateway_shared_secret="gateway",
+        session_signing_secret="session",
+        evaluate_admin_secret="evaluate",
+        auth_mode="gateway_only",
+        deployment_env="development",
+        supabase_jwt_secret=None,
+        enable_evaluate_endpoint=False,
+        allow_evaluate_endpoint=False,
+        google_api_key=None,
+        model_type="qwen",
+    )
+
+    config.validate_runtime_settings(
+        **base,
+        qwen_api_key="test-qwen-key",
+        qwen_base_url="https://example.invalid/compatible/v1",
+    )
+
+    with pytest.raises(RuntimeError, match="QWEN_BASE_URL"):
+        config.validate_runtime_settings(
+            **base,
+            qwen_api_key="test-qwen-key",
+            qwen_base_url="",
+        )
+
+    with pytest.raises(RuntimeError, match="QWEN_API_KEY"):
+        config.validate_runtime_settings(
+            **base,
+            qwen_api_key=None,
+            qwen_base_url="https://example.invalid/compatible/v1",
+        )
