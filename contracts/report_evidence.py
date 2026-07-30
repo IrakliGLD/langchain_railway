@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+REPORT_EVIDENCE_CONTENT_MAX_CHARS = 60_000
 REPORT_EVIDENCE_MANIFEST_VERSION = "report-evidence-manifest-v1"
 REPORT_EVIDENCE_MANIFEST_MAX_BYTES = 786_432
 
@@ -52,7 +53,18 @@ class ReportEvidenceItem(_StrictEvidenceModel):
     provenance_refs: List[str] = Field(default_factory=list, max_length=32)
     columns: List[str] = Field(default_factory=list, max_length=32)
     rows: List[EvidenceRow] = Field(default_factory=list, max_length=200)
-    content: str = Field(default="", max_length=6000)
+    # 6000 was sized for a retrieved passage. The computed-statistics item
+    # carries the whole analytical layer the standard pipeline produces —
+    # column aggregates, correlations and why-context — which runs to tens of
+    # thousands of characters — 59,131 on report job 22237205 — so a
+    # passage-sized cap discarded ~90% of it and left reports restating raw
+    # cells. Sized to hold a full stats_hint, still far under the 768 KB
+    # manifest and 1 MB checkpoint ceilings; the prompt share is allocated
+    # separately at projection time.
+    content: str = Field(
+        default="",
+        max_length=REPORT_EVIDENCE_CONTENT_MAX_CHARS,
+    )
     unit_by_column: Dict[str, str] = Field(default_factory=dict)
     total_row_count: int = Field(ge=0, le=10_000_000)
     truncated: bool

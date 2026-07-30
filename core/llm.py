@@ -70,6 +70,8 @@ from config import (
     PROMPT_BUDGET_MAX_CHARS,
     PROVIDER_MINIMUM_START_BUDGET_MS,
     PROVIDER_RETRY_JITTER_MAX_MS,
+    REPORT_BATCH_EVIDENCE_BUDGET_CHARS,
+    REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS,
     REPORT_MAX_OUTPUT_TOKENS,
     REPORT_MODEL,
     REPORT_MODEL_TYPE,
@@ -3884,7 +3886,7 @@ def llm_repair_report_plan(
     )
 
 
-_REPORT_DOCUMENT_PROMPT_BUDGET_CHARS = 96_000
+_REPORT_DOCUMENT_PROMPT_BUDGET_CHARS = 128_000
 _REPORT_DOCUMENT_EVIDENCE_BUDGET_CHARS = 48_000
 _REPORT_DOCUMENT_OBSERVATION_BUDGET_CHARS = 16_000
 
@@ -3972,10 +3974,42 @@ def _report_document_evidence_projection(
         return _compact_json(
             {"items": [], "prompt_projection_truncated": False}
         )
-    per_item_budget = max(700, (budget_chars - 100) // len(items))
+    # An even split treats the computed-statistics item like one retrieved
+    # passage, even though it carries the report's whole analytical layer. Give
+    # it a reserved share first, then divide the remainder evenly, so adding
+    # knowledge passages cannot squeeze the analysis out of the prompt.
+    statistics_refs = {
+        item.evidence_ref
+        for item in items
+        if item.kind is ReportEvidenceKind.STATISTICS
+    }
+    statistics_budget = (
+        min(
+            REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS,
+            (budget_chars - 100) // 2,
+        )
+        if statistics_refs
+        else 0
+    )
+    remaining_items = len(items) - len(statistics_refs)
+    shared_budget = max(
+        700,
+        (budget_chars - 100 - statistics_budget) // max(1, remaining_items),
+    )
+    statistics_item_budget = max(
+        700,
+        statistics_budget // max(1, len(statistics_refs)),
+    )
+
+    def budget_for(item: ReportEvidenceItem) -> int:
+        if item.evidence_ref in statistics_refs:
+            return statistics_item_budget
+        return shared_budget
+
     projected_items: list[dict[str, Any]] = []
     any_truncated = False
     for item in items:
+        per_item_budget = budget_for(item)
         projected: dict[str, Any] = {
             "evidence_ref": item.evidence_ref,
             "kind": item.kind.value,
@@ -4451,7 +4485,7 @@ def _llm_write_report_section_batch(
             manifest,
             packets,
             section_ids=selected_ids,
-            evidence_budget_chars=32_000,
+            evidence_budget_chars=REPORT_BATCH_EVIDENCE_BUDGET_CHARS,
             observation_budget_chars=12_000,
         )
     )

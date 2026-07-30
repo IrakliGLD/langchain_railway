@@ -112,6 +112,29 @@ DocumentGenerator = Callable[..., Any]
 DocumentAssembler = Callable[..., Any]
 DocumentChartBuilder = Callable[..., Any]
 
+# Stages the generative-call budget governs: planning the report, writing it,
+# and repairing it. Deliberately excludes report_question_analyzer, which is the
+# query pipeline's analyzer running under a report-prefixed stage name during
+# narrative enrichment.
+_REPORT_GENERATION_STAGES = frozenset(
+    {
+        "report_research_planner",
+        "report_plan_repair",
+        "report_document_writer",
+        "report_analysis_writer",
+        "report_synthesis_writer",
+        "report_document_repair",
+    }
+)
+
+
+def _is_report_generation_stage(stage: str) -> bool:
+    # Legacy per-section stages carry the section id and attempt number.
+    return stage in _REPORT_GENERATION_STAGES or stage.startswith(
+        "report_section_"
+    )
+
+
 def _report_document_allows_repair(
     *,
     profile: Any,
@@ -453,10 +476,12 @@ class ReportJobProcessor:
         try:
             usage = metrics.finalize_request_telemetry()
             llm_calls = max(0, int(usage.get("llm_calls", 0)))
-            # The generative budget governs the report's own stages. Narrative
-            # enrichment runs the query pipeline, whose calls are counted in
-            # llm_calls too, so comparing the raw total to the budget would
-            # report every enriched report as over budget.
+            # The generative budget governs the report's own generation stages.
+            # Narrative enrichment runs the query pipeline, whose calls land in
+            # llm_calls too — and one of them is named report_question_analyzer,
+            # so a "report_" prefix test counts enrichment as generation and
+            # reports every enriched report as over budget. Match the stages
+            # the budget actually governs.
             stage_usage = usage.get("stages", {})
             report_stage_calls = sum(
                 max(0, int((stats or {}).get("calls", 0)))
@@ -465,7 +490,7 @@ class ReportJobProcessor:
                     if isinstance(stage_usage, dict)
                     else ()
                 )
-                if str(stage).startswith("report_")
+                if _is_report_generation_stage(str(stage))
             )
             payload = {
                 "attempt": lease.attempt_count,

@@ -141,6 +141,24 @@ REPORT_RESEARCH_MAX_TRACKS = _read_bounded_int_env(
     1,
     8,
 )
+# Reserved share of a report prompt's evidence budget for the computed
+# statistics item. An even split across manifest items gave the report's
+# whole analytical layer the same room as one retrieved passage.
+REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS = _read_bounded_int_env(
+    "REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS",
+    24_000,
+    1_000,
+    60_000,
+)
+# Evidence characters offered to one section-batch prompt. The observed
+# analysis-writer prompt used ~44,000 of a 96,000 ceiling at the old 32,000
+# budget, so the ceiling was never the constraint — the budget was.
+REPORT_BATCH_EVIDENCE_BUDGET_CHARS = _read_bounded_int_env(
+    "REPORT_BATCH_EVIDENCE_BUDGET_CHARS",
+    56_000,
+    8_000,
+    96_000,
+)
 REPORT_RESEARCH_MAX_WORKERS = _read_bounded_int_env(
     "REPORT_RESEARCH_MAX_WORKERS",
     3,
