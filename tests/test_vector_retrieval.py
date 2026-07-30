@@ -2527,3 +2527,64 @@ def test_injected_provider_bypasses_embedding_cache():
             embedding_provider=provider,
         )
     assert calls["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Failure diagnostics
+# ---------------------------------------------------------------------------
+# A per-request provider-attempt collision and a rejected API call both
+# surfaced as "reason=ProviderExecutionError" with no further detail, which is
+# why report-side retrieval read as an outage for days. These pin the extra
+# content-free attribution that separates them.
+
+
+def test_failure_cause_chain_reports_the_wrapped_cause():
+    from knowledge.vector_retrieval import _failure_cause_chain
+
+    root = ValueError("inner")
+    try:
+        try:
+            raise root
+        except ValueError as inner:
+            raise RuntimeError("outer") from inner
+    except RuntimeError as outer:
+        assert _failure_cause_chain(outer) == "RuntimeError<-ValueError"
+
+
+def test_failure_cause_chain_is_bounded_and_survives_cycles():
+    from knowledge.vector_retrieval import _failure_cause_chain
+
+    first = RuntimeError("a")
+    second = RuntimeError("b")
+    first.__cause__ = second
+    second.__cause__ = first
+    chain = _failure_cause_chain(first)
+    assert chain == "RuntimeError<-RuntimeError"
+    assert _failure_cause_chain(ValueError("x")) == "ValueError"
+
+
+def test_failure_provider_context_attributes_a_provider_execution_error():
+    from knowledge.vector_retrieval import _failure_provider_context
+    from utils.provider_attempts import (
+        ProviderDeliveryDisposition,
+        ProviderExecutionError,
+    )
+
+    error = ProviderExecutionError(
+        "provider execution already recorded for actor-bound request",
+        provider="gemini",
+        stage="query_embedding",
+        disposition=ProviderDeliveryDisposition.COMPLETED,
+    )
+    context = _failure_provider_context(error)
+    assert "provider=gemini" in context
+    assert "stage=query_embedding" in context
+    # The enum's value, not its repr — an attempt collision is identifiable
+    # from the disposition alone.
+    assert "disposition=completed" in context
+
+
+def test_failure_provider_context_tolerates_unattributed_errors():
+    from knowledge.vector_retrieval import _failure_provider_context
+
+    assert _failure_provider_context(TimeoutError("slow")) == "unattributed"

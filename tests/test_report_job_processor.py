@@ -341,8 +341,11 @@ def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
     assert pipeline_query == lease.query
     assert pipeline_kwargs["trace_id"] == str(lease.job_id)
     assert pipeline_kwargs["actor_id"] == str(lease.actor_user_id)
+    # Derived from the attempt identity, not equal to it: the nested pipeline
+    # needs its own provider-attempt namespace (see the narrative-identity
+    # tests), while still being traceable back to this attempt.
     assert pipeline_kwargs["request_id"] == (
-        f"{lease.request_id}:attempt:{lease.attempt_count}"
+        f"{lease.request_id}:attempt:{lease.attempt_count}:narrative"
     )
     assert pipeline_kwargs["request_deadline"].source == "report_job"
     assert pipeline_kwargs["answer_mode"] == "report"
@@ -393,7 +396,12 @@ def test_report_attempt_binds_identity_and_deadline_for_deep_calls():
     assert scope.deadline.source == "report_job"
     assert 0 < scope.deadline.remaining_seconds() <= 120
     assert pipeline_calls[0][1]["request_deadline"] is scope.deadline
-    assert pipeline_calls[0][1]["request_id"] == scope.request_id
+    # The trusted parts of the identity -- actor and deadline -- are shared with
+    # the nested run. Only the request id is namespaced, so the pipeline's
+    # provider claims cannot collide with the report's own.
+    assert pipeline_calls[0][1]["request_id"].startswith(scope.request_id)
+    assert pipeline_calls[0][1]["request_id"] != scope.request_id
+    assert pipeline_calls[0][1]["actor_id"] == str(lease.actor_user_id)
 
 
 class _AttemptMetrics:
@@ -1496,3 +1504,86 @@ def test_generative_budget_counts_generation_stages_not_enrichment():
     assert not report_job_processor._is_report_generation_stage(
         "report_question_analyzer"
     )
+
+
+# ---------------------------------------------------------------------------
+# Narrative enrichment provider identity
+# ---------------------------------------------------------------------------
+
+
+def test_narrative_pipeline_runs_under_a_distinct_request_identity():
+    """The nested query pipeline must not share the report's provider claims.
+
+    Provider attempts are claimed once per (actor, request_id, provider,
+    stage). The report claims gemini|query_embedding for its own retrieval, so
+    reusing its request identity got the nested pipeline's vector-knowledge
+    stage refused before it could send -- reported as ProviderExecutionError
+    with no HTTP call, and mistaken for a provider outage.
+    """
+
+    lease = _lease()
+    pipeline_calls: list = []
+    scopes: list = []
+
+    result = _processor(
+        pipeline_calls=pipeline_calls,
+        execution_scopes=scopes,
+        job_timeout_seconds=120,
+    )(lease, _Control())
+
+    ReportResult.model_validate(result)
+    outer_request_id = scopes[0].request_id
+    nested_request_id = pipeline_calls[0][1]["request_id"]
+    assert outer_request_id
+    assert nested_request_id != outer_request_id
+    assert nested_request_id.startswith(outer_request_id)
+    assert nested_request_id.endswith(":narrative")
+
+
+def test_report_and_narrative_identities_can_each_claim_one_embedding():
+    """Two distinct request identities each get their own single claim.
+
+    This is the mechanism the fix relies on, asserted directly: the same
+    provider and stage collides inside one identity and does not collide across
+    the report's identity and the derived narrative one. The no-replay
+    guarantee still holds within each identity.
+    """
+
+    from core.report_job_processor import _NARRATIVE_REQUEST_ID_SUFFIX
+    from utils.provider_attempts import (
+        ProviderDeliveryDisposition,
+        ProviderExecutionError,
+        claim_provider_attempt,
+        finish_provider_attempt,
+        reset_provider_attempts_for_tests,
+    )
+    from utils.request_deadline import bind_request_execution_scope
+
+    actor_id = str(uuid4())
+    report_request_id = "report:req-collision:attempt:1"
+
+    reset_provider_attempts_for_tests()
+    try:
+        with bind_request_execution_scope(
+            deadline=None, request_id=report_request_id, actor_id=actor_id
+        ):
+            token = claim_provider_attempt("gemini", "query_embedding")
+            finish_provider_attempt(
+                token, ProviderDeliveryDisposition.COMPLETED
+            )
+            # Same identity, same provider and stage: refused, as designed.
+            with pytest.raises(ProviderExecutionError):
+                claim_provider_attempt("gemini", "query_embedding")
+
+        with bind_request_execution_scope(
+            deadline=None,
+            request_id=f"{report_request_id}{_NARRATIVE_REQUEST_ID_SUFFIX}",
+            actor_id=actor_id,
+        ):
+            nested = claim_provider_attempt("gemini", "query_embedding")
+            assert nested.bound
+            finish_provider_attempt(
+                nested, ProviderDeliveryDisposition.COMPLETED
+            )
+    finally:
+        reset_provider_attempts_for_tests()

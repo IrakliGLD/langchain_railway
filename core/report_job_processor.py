@@ -126,6 +126,13 @@ _REPORT_GENERATION_STAGES = frozenset(
         "report_document_repair",
     }
 )
+# Provider attempts are claimed once per (actor, request_id, provider, stage).
+# Narrative enrichment runs the whole query pipeline inside the report's own
+# request identity, so its vector-knowledge stage asked for a second
+# gemini|query_embedding and was refused before it could send. Give the nested
+# run its own request identity: these are two distinct logical calls, and the
+# no-replay guarantee still holds within each.
+_NARRATIVE_REQUEST_ID_SUFFIX = ":narrative"
 
 
 def _is_report_generation_stage(stage: str) -> bool:
@@ -602,11 +609,14 @@ class ReportJobProcessor:
             if execution_scope is not None
             else lease.request_id
         )
+        # process_query binds its own execution scope from this request_id, so
+        # deriving it here is what separates the nested run's provider claims
+        # from the report's. trace_id stays the job id, so traces still join.
         return pipeline(
             lease.query,
             trace_id=str(lease.job_id),
             actor_id=str(lease.actor_user_id),
-            request_id=request_id,
+            request_id=f"{request_id}{_NARRATIVE_REQUEST_ID_SUFFIX}",
             request_deadline=request_deadline,
             answer_mode="report",
         )
