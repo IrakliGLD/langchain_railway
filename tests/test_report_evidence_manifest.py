@@ -319,3 +319,94 @@ def test_emitted_share_columns_carry_the_unit_they_actually_hold():
     # Label columns stay unit-less: they carry no magnitude to claim.
     assert "segment" not in units
     assert "period" not in units
+
+
+def test_statistics_narrative_keeps_far_more_than_a_passage_sized_clip():
+    """A 59 KB stats_hint must not be truncated to a passage's worth.
+
+    Report job 22237205 produced 59,131 characters of computed statistics --
+    21 column aggregates, 4 correlation targets and why-context -- of which a
+    6,000-character cap kept 10%. The correlations sit late in the text, so the
+    clip removed exactly the analytical content reports were missing.
+    """
+
+    from agent.report_evidence import build_report_narrative_items
+    from contracts.report_evidence import REPORT_EVIDENCE_CONTENT_MAX_CHARS
+
+    # Sized like the 59,131-character stats_hint from job 22237205.
+    long_stats = "Observed mean was 141.0 GEL/MWh. " * 1800
+    assert len(long_stats) > 4 * 6_000, "must dwarf the old passage-sized cap"
+
+    items = build_report_narrative_items(
+        SimpleNamespace(
+            stats_hint=long_stats,
+            summary_domain_knowledge="",
+            provenance_refs=[],
+            query="",
+        )
+    )
+
+    statistics = next(
+        item for item in items if item.kind is ReportEvidenceKind.STATISTICS
+    )
+    # A real stats_hint must survive whole, not be clipped to a passage.
+    assert len(statistics.content) == len(long_stats.strip())
+    assert REPORT_EVIDENCE_CONTENT_MAX_CHARS >= 59_131
+
+
+def test_report_mode_selects_curated_knowledge_without_the_summarizer(
+    monkeypatch,
+):
+    """Report mode bypasses the summarizer, where knowledge is normally set."""
+
+    from agent import report_evidence
+
+    captured = {}
+
+    def fake_selector(query, *, use_cache, preferred_topics):
+        captured.update(
+            query=query, use_cache=use_cache, preferred_topics=preferred_topics
+        )
+        return "The balancing market settles hourly."
+
+    monkeypatch.setattr(
+        "core.llm.get_relevant_domain_knowledge", fake_selector
+    )
+
+    items = report_evidence.build_report_narrative_items(
+        SimpleNamespace(
+            stats_hint="",
+            summary_domain_knowledge="",
+            provenance_refs=[],
+            query="Explain the generation mix and prices.",
+            question_analysis=None,
+            question_analysis_source="",
+        )
+    )
+
+    knowledge = next(
+        item for item in items if item.kind is ReportEvidenceKind.KNOWLEDGE
+    )
+    assert knowledge.source == "curated_knowledge"
+    assert captured["query"] == "Explain the generation mix and prices."
+    assert captured["use_cache"] is False
+
+
+def test_curated_knowledge_failure_never_fails_a_report(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("knowledge unavailable")
+
+    monkeypatch.setattr("core.llm.get_relevant_domain_knowledge", boom)
+
+    from agent import report_evidence
+
+    assert report_evidence.build_report_narrative_items(
+        SimpleNamespace(
+            stats_hint="",
+            summary_domain_knowledge="",
+            provenance_refs=[],
+            query="Explain prices.",
+            question_analysis=None,
+            question_analysis_source="",
+        )
+    ) == []

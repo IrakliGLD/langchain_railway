@@ -13,6 +13,7 @@ from typing import Any, Iterable, Sequence
 from agent.metric_units import METRIC_UNITS
 from config_metrics.metric_units import metric_value_unit
 from contracts.report_evidence import (
+    REPORT_EVIDENCE_CONTENT_MAX_CHARS,
     REPORT_EVIDENCE_MANIFEST_VERSION,
     ReportEvidenceItem,
     ReportEvidenceKind,
@@ -285,6 +286,53 @@ def make_report_table_evidence_item(
     )
 
 
+def _curated_knowledge_for_context(ctx: Any) -> str:
+    """Select curated knowledge-file content for one report context.
+
+    Mirrors the standard summarizer: the analyzer's ranked topics steer the
+    selection when it ran, otherwise the query's own topic match is used.
+    Returns "" on any failure — knowledge enriches a report, never fails one.
+    """
+
+    query = str(getattr(ctx, "query", "") or "").strip()
+    if not query:
+        return ""
+    preferred_topics: list[str] | None = None
+    analysis = getattr(ctx, "question_analysis", None)
+    if (
+        analysis is not None
+        and getattr(ctx, "question_analysis_source", "") == "llm_active"
+    ):
+        try:
+            ranked = sorted(
+                analysis.knowledge.candidate_topics,
+                key=lambda candidate: candidate.score,
+                reverse=True,
+            )
+            preferred_topics = [
+                candidate.name.value
+                if hasattr(candidate.name, "value")
+                else str(candidate.name)
+                for candidate in ranked
+                if candidate.score >= 0.25
+            ][:3] or None
+        except Exception:
+            preferred_topics = None
+    try:
+        from core.llm import get_relevant_domain_knowledge
+
+        return str(
+            get_relevant_domain_knowledge(
+                query,
+                use_cache=False,
+                preferred_topics=preferred_topics,
+            )
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
 def build_report_narrative_items(ctx: Any) -> list[ReportEvidenceItem]:
     """Derive the narrative evidence the standard query pipeline computes.
 
@@ -317,6 +365,13 @@ def build_report_narrative_items(ctx: Any) -> list[ReportEvidenceItem]:
     knowledge = str(
         getattr(ctx, "summary_domain_knowledge", "") or ""
     ).strip()
+    if not knowledge:
+        # summary_domain_knowledge is populated inside the summarizer, and
+        # report mode bypasses that stage ("Stage 4 bypassed | report evidence
+        # ready"), so the curated knowledge files never reached a report.
+        # Select them here with the same broad selector standard mode uses,
+        # steered by the analyzer's topics when it ran.
+        knowledge = _curated_knowledge_for_context(ctx)
     if knowledge:
         items.append(
             make_report_narrative_evidence_item(
@@ -346,7 +401,7 @@ def make_report_narrative_evidence_item(
         source=source,
         knowledge_role=knowledge_role,
         provenance_refs=provenance_refs,
-        content=str(content or "").strip()[:6000],
+        content=str(content or "").strip()[:REPORT_EVIDENCE_CONTENT_MAX_CHARS],
     )
 
 
@@ -413,7 +468,7 @@ def build_report_evidence_manifest(
         normalized_content = str(content or "").strip()
         if not normalized_content:
             return
-        clipped = normalized_content[:6000]
+        clipped = normalized_content[:REPORT_EVIDENCE_CONTENT_MAX_CHARS]
         items.append(
             _make_item(
                 kind=kind,

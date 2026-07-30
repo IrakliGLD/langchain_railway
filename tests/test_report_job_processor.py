@@ -1474,3 +1474,25 @@ def test_invalid_checkpoint_identity_is_not_reported_as_oversized(monkeypatch):
 
     assert excinfo.value.error_code == "REPORT_CHECKPOINT_INVALID"
     assert excinfo.value.retryable is False
+
+
+def test_generative_budget_counts_generation_stages_not_enrichment():
+    """report_question_analyzer is enrichment, not a budgeted generation call.
+
+    Narrative enrichment runs the query pipeline, whose analyzer reports under a
+    report-prefixed stage name. Counting it made an in-budget report look over
+    budget (job 22237205: 5 calls against a budget of 4).
+    """
+
+    assert report_job_processor._is_report_generation_stage(
+        "report_analysis_writer"
+    )
+    assert report_job_processor._is_report_generation_stage(
+        "report_document_repair"
+    )
+    assert report_job_processor._is_report_generation_stage(
+        "report_section_prices_attempt_1"
+    )
+    assert not report_job_processor._is_report_generation_stage(
+        "report_question_analyzer"
+    )
