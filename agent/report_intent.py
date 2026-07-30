@@ -96,6 +96,20 @@ def _analysis_requires_table(analysis: Any) -> bool:
         return True
     if getattr(requirements, "derived_metrics", []):
         return True
+    # A report request the analyzer could not classify still has to be answered
+    # with data. `ambiguous` and `unsupported` both map to a CLARIFY answer
+    # kind, and a background report worker cannot ask a clarifying question --
+    # so letting an unclassified verdict fall through to the knowledge path
+    # silently drops the report's entire statistics layer while the job still
+    # reports success. Observed 2026-07-30: "create a report about the current
+    # and future market models and electricity prices" classified ambiguous
+    # with preferred_path=knowledge, and the report was written from curated
+    # knowledge alone with no tool evidence at all.
+    if query_type in {
+        QueryType.AMBIGUOUS.value,
+        QueryType.UNSUPPORTED.value,
+    }:
+        return True
     if preferred_path == PreferredPath.KNOWLEDGE.value:
         return False
     return bool(
