@@ -220,3 +220,42 @@ def test_shadow_analysis_is_not_used_as_report_semantic_authority():
     assert planning_context.intent is ReportIntent.KNOWLEDGE
     assert planning_context.language_code == "ka"
     assert planning_context.source == "pipeline_fallback"
+
+
+def test_unclassified_report_request_still_requires_table_evidence():
+    """An analyzer verdict of ambiguous must not strip the statistics layer.
+
+    `ambiguous` and `unsupported` both map to a CLARIFY answer kind, and a
+    background report worker cannot ask a clarifying question. Before this,
+    such a verdict reached the knowledge path with tools blocked, so the report
+    was written from curated knowledge alone and still reported success --
+    observed in production on 2026-07-30 for "create a report about the current
+    and future market models and electricity prices".
+    """
+
+    for query_type in (QueryType.AMBIGUOUS, QueryType.UNSUPPORTED):
+        planning_context = build_report_planning_context(
+            _context(
+                answer_kind=AnswerKind.CLARIFY,
+                query_type=query_type,
+                preferred_path=PreferredPath.KNOWLEDGE,
+            )
+        )
+        assert planning_context.requires_table is True, query_type
+
+
+def test_genuinely_conceptual_report_request_still_skips_table_evidence():
+    """The widening is scoped to unclassified verdicts, not to knowledge ones.
+
+    A conceptual definition routed to knowledge is a legitimate table-free
+    report; forcing tool evidence there would attach data nobody asked for.
+    """
+
+    planning_context = build_report_planning_context(
+        _context(
+            answer_kind=AnswerKind.EXPLANATION,
+            query_type=QueryType.CONCEPTUAL_DEFINITION,
+            preferred_path=PreferredPath.KNOWLEDGE,
+        )
+    )
+    assert planning_context.requires_table is False
