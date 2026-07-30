@@ -123,6 +123,7 @@ class Metrics:
         self.tool_time_by_source = {}
         self.tool_fallback_intents = {}
         self.llm_prompt_tokens = 0
+        self.llm_cached_prompt_tokens = 0
         self.llm_completion_tokens = 0
         self.llm_total_tokens = 0
         self.llm_estimated_cost_usd = 0.0
@@ -222,6 +223,7 @@ class Metrics:
                 "trace_id": str(trace_id or ""),
                 "llm_calls": 0,
                 "prompt_tokens": 0,
+                "cached_prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
@@ -238,6 +240,7 @@ class Metrics:
         completion_tokens: int,
         total_tokens: int,
         estimated_cost_usd: float,
+        cached_prompt_tokens: int = 0,
         attempt_stage: str = "",
         provider: str = "",
         finish_reason: str = "",
@@ -260,6 +263,12 @@ class Metrics:
             str(finish_reason or "unreported").strip().lower(),
         )[:128] or "unreported"
         prompt_tokens = max(0, int(prompt_tokens or 0))
+        # Bounded by prompt_tokens: a provider reporting more cached than
+        # prompt tokens would otherwise show a hit rate above 100%.
+        cached_prompt_tokens = min(
+            prompt_tokens,
+            max(0, int(cached_prompt_tokens or 0)),
+        )
         completion_tokens = max(0, int(completion_tokens or 0))
         total_tokens = max(0, int(total_tokens or 0))
         if total_tokens == 0:
@@ -267,6 +276,7 @@ class Metrics:
         cost = max(0.0, float(estimated_cost_usd or 0.0))
 
         self.llm_prompt_tokens += prompt_tokens
+        self.llm_cached_prompt_tokens += cached_prompt_tokens
         self.llm_completion_tokens += completion_tokens
         self.llm_total_tokens += total_tokens
         self.llm_estimated_cost_usd += cost
@@ -276,6 +286,7 @@ class Metrics:
             {
                 "calls": 0,
                 "prompt_tokens": 0,
+                "cached_prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
@@ -283,6 +294,7 @@ class Metrics:
         )
         bucket["calls"] += 1
         bucket["prompt_tokens"] += prompt_tokens
+        bucket["cached_prompt_tokens"] += cached_prompt_tokens
         bucket["completion_tokens"] += completion_tokens
         bucket["total_tokens"] += total_tokens
         bucket["estimated_cost_usd"] += cost
@@ -291,6 +303,9 @@ class Metrics:
         if current is not None:
             current["llm_calls"] += 1
             current["prompt_tokens"] += prompt_tokens
+            current["cached_prompt_tokens"] = (
+                current.get("cached_prompt_tokens", 0) + cached_prompt_tokens
+            )
             current["completion_tokens"] += completion_tokens
             current["total_tokens"] += total_tokens
             current["estimated_cost_usd"] += cost
@@ -634,6 +649,7 @@ class Metrics:
             "load_shed_events": self.load_shed_count,
             "circuit_open_events": dict(self.circuit_open_events),
             "llm_prompt_tokens": self.llm_prompt_tokens,
+            "llm_cached_prompt_tokens": self.llm_cached_prompt_tokens,
             "llm_completion_tokens": self.llm_completion_tokens,
             "llm_total_tokens": self.llm_total_tokens,
             "llm_estimated_cost_usd": self.llm_estimated_cost_usd,

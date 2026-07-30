@@ -668,6 +668,13 @@ NVIDIA_INPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_INPUT_COST_PER_1K_USD", "
 NVIDIA_OUTPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_OUTPUT_COST_PER_1K_USD", "0"))
 QWEN_INPUT_COST_PER_1K_USD = float(os.getenv("QWEN_INPUT_COST_PER_1K_USD", "0"))
 QWEN_OUTPUT_COST_PER_1K_USD = float(os.getenv("QWEN_OUTPUT_COST_PER_1K_USD", "0"))
+# Cached prompt tokens are billed below fresh ones. Left at 0, a provider's
+# cached share is priced at its full input rate, so cost is over-stated
+# rather than under-stated until an operator supplies the real figure.
+GEMINI_CACHED_INPUT_COST_PER_1K_USD = float(os.getenv("GEMINI_CACHED_INPUT_COST_PER_1K_USD", "0"))
+OPENAI_CACHED_INPUT_COST_PER_1K_USD = float(os.getenv("OPENAI_CACHED_INPUT_COST_PER_1K_USD", "0"))
+NVIDIA_CACHED_INPUT_COST_PER_1K_USD = float(os.getenv("NVIDIA_CACHED_INPUT_COST_PER_1K_USD", "0"))
+QWEN_CACHED_INPUT_COST_PER_1K_USD = float(os.getenv("QWEN_CACHED_INPUT_COST_PER_1K_USD", "0"))
 
 # Memory Limits (PRODUCTION SAFETY: Prevents OOM errors)
 MAX_RESULT_SIZE_MB = int(os.getenv("MAX_RESULT_SIZE_MB", "100"))
