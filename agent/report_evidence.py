@@ -285,6 +285,50 @@ def make_report_table_evidence_item(
     )
 
 
+def build_report_narrative_items(ctx: Any) -> list[ReportEvidenceItem]:
+    """Derive the narrative evidence the standard query pipeline computes.
+
+    ``stats_hint`` is the verified computed-statistics channel and
+    ``summary_domain_knowledge`` holds the curated knowledge-file content. Both
+    reach the report as narrative items, whose facts ground every sentence of a
+    paragraph that cites them — which is how a report states an average or a
+    year-on-year change without binding it to a single table coordinate.
+
+    Returns an empty list rather than raising: this evidence enriches a report
+    and must never be able to fail one.
+    """
+
+    if ctx is None:
+        return []
+    items: list[ReportEvidenceItem] = []
+    statistics = str(getattr(ctx, "stats_hint", "") or "").strip()
+    if statistics:
+        items.append(
+            make_report_narrative_evidence_item(
+                kind=ReportEvidenceKind.STATISTICS,
+                title="Verified statistics",
+                source="derived",
+                provenance_refs=list(
+                    getattr(ctx, "provenance_refs", None) or []
+                ),
+                content=statistics,
+            )
+        )
+    knowledge = str(
+        getattr(ctx, "summary_domain_knowledge", "") or ""
+    ).strip()
+    if knowledge:
+        items.append(
+            make_report_narrative_evidence_item(
+                kind=ReportEvidenceKind.KNOWLEDGE,
+                title="Curated domain knowledge",
+                source="curated_knowledge",
+                content=knowledge,
+            )
+        )
+    return items
+
+
 def make_report_narrative_evidence_item(
     *,
     kind: ReportEvidenceKind,

@@ -310,12 +310,31 @@ def build_report_document_plan(
             "Document plan exceeds the configured exhibit limit."
         )
 
+    # The standard pipeline's computed statistics and curated knowledge are
+    # report-wide: they belong to no research packet, so a track-scoped
+    # assignment would leave them in the manifest uncited and therefore unable
+    # to ground a single sentence. Every analysis section may cite them, and
+    # they lead the list because a section's analysis rests on them.
+    packet_refs = {
+        item.evidence_ref
+        for packet in packets
+        for item in packet.items
+    }
+    shared_narrative_refs = [
+        item.evidence_ref
+        for item in manifest.items
+        if (
+            item.evidence_ref not in packet_refs
+            and item.kind is not ReportEvidenceKind.LIMITATION
+        )
+    ]
+
     analysis_sections: list[ReportDocumentSectionSpec] = []
     all_analysis_refs: list[str] = []
     for index, (group, section_id) in enumerate(
         zip(groups, group_section_ids, strict=True)
     ):
-        evidence_refs = list(
+        track_refs = list(
             dict.fromkeys(
                 item.evidence_ref
                 for track_id in group
@@ -326,10 +345,13 @@ def build_report_document_plan(
                 )
             )
         )
-        if not evidence_refs:
+        if not track_refs:
             raise ValueError(
                 "A usable analysis track has no manifest evidence."
             )
+        evidence_refs = list(
+            dict.fromkeys([*shared_narrative_refs, *track_refs])
+        )
         all_analysis_refs.extend(evidence_refs)
         track_titles = [
             research_track_by_id[track_id].title for track_id in group
