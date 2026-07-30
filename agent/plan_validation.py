@@ -6,8 +6,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from agent.shape_requirements import get_requirement
 from agent.scenario_contract import ground_scenario_request
+from agent.shape_requirements import get_requirement
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
     AnswerKind,

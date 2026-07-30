@@ -83,8 +83,8 @@ from agent import pipeline  # noqa: E402
 from agent.pipeline import _cross_check_answer_kind  # noqa: E402
 from contracts.question_analysis import (  # noqa: E402
     AnswerKind,
-    QuestionAnalysis,
     QueryType,
+    QuestionAnalysis,
     VisualizationInfo,
 )
 from models import QueryContext  # noqa: E402
