@@ -56,6 +56,13 @@ from utils.request_deadline import (
 
 _LOGGER = logging.getLogger("Enai.ReportResearch")
 
+# The prompt's evidence budget is divided evenly across manifest items, so each
+# retrieved passage takes room away from the data tables. Ten passages left a
+# price table roughly 2,600 characters of a 32,000-character budget and the
+# writer produced market-design prose instead of price analysis.
+_REPORT_VECTOR_PRIMARY_CHUNKS = 2
+_REPORT_VECTOR_REFERENCE_CHUNKS = 1
+
 Collector = Callable[
     [str, ReportResearchScope],
     "ReportCollectorOutput",
@@ -285,7 +292,7 @@ def _collect_vector_knowledge(
         )
     role_chunks = [
         (ReportKnowledgeEvidenceRole.primary, chunk)
-        for chunk in bundle.chunks[:6]
+        for chunk in bundle.chunks[:_REPORT_VECTOR_PRIMARY_CHUNKS]
     ]
     if get_reference_expansion_mode() == "on":
         role_chunks.extend(
@@ -293,7 +300,9 @@ def _collect_vector_knowledge(
                 ReportKnowledgeEvidenceRole.supporting_reference,
                 chunk,
             )
-            for chunk in bundle.reference_chunks[:4]
+            for chunk in bundle.reference_chunks[
+                :_REPORT_VECTOR_REFERENCE_CHUNKS
+            ]
         )
     seen_chunk_ids: set[str] = set()
     items_list: list[ReportEvidenceItem] = []
@@ -835,11 +844,24 @@ def execute_report_research(
 def consolidate_report_evidence_packets(
     query: str,
     packets: Sequence[ReportEvidencePacket],
+    *,
+    extra_items: Sequence[ReportEvidenceItem] = (),
 ) -> ReportEvidenceManifest:
-    """Freeze packet evidence and explicit gaps into one closed manifest."""
+    """Freeze packet evidence and explicit gaps into one closed manifest.
+
+    ``extra_items`` carries the standard pipeline's computed statistics and
+    curated knowledge. They lead the manifest so the item cap can never drop
+    them: they are the only evidence that states an analysis rather than a
+    raw cell.
+    """
 
     items: list[ReportEvidenceItem] = []
     seen_refs: set[str] = set()
+    for item in extra_items:
+        if item.evidence_ref in seen_refs:
+            continue
+        seen_refs.add(item.evidence_ref)
+        items.append(item)
     for packet in packets:
         for item in packet.items:
             if item.evidence_ref in seen_refs:

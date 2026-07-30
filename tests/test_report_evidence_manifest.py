@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -241,6 +242,47 @@ def test_conceptual_answer_exposes_curated_knowledge_to_report_manifest(
     )
     assert ctx.summary_domain_knowledge == curated_knowledge
     assert knowledge_item.content == curated_knowledge
+
+
+def test_pipeline_narrative_items_carry_statistics_and_curated_knowledge():
+    """The adaptive path must still receive what the standard pipeline computes.
+
+    ``stats_hint`` is the verified computed-statistics channel and
+    ``summary_domain_knowledge`` is the curated knowledge file content. The v1
+    manifest carried both; the v2 collector path carried neither, so reports
+    had no computed analysis and never saw the knowledge files at all.
+    """
+
+    from agent.report_evidence import build_report_narrative_items
+
+    ctx = SimpleNamespace(
+        stats_hint="Observed mean balancing price was 141.0 GEL/MWh.",
+        summary_domain_knowledge="The balancing market settles hourly.",
+        provenance_refs=["query:prices"],
+    )
+
+    items = build_report_narrative_items(ctx)
+    by_kind = {item.kind: item for item in items}
+
+    assert ReportEvidenceKind.STATISTICS in by_kind
+    assert ReportEvidenceKind.KNOWLEDGE in by_kind
+    statistics = by_kind[ReportEvidenceKind.STATISTICS]
+    assert "141.0" in statistics.content
+    assert statistics.provenance_refs == ["query:prices"]
+    assert by_kind[ReportEvidenceKind.KNOWLEDGE].source == "curated_knowledge"
+
+
+def test_pipeline_narrative_items_skip_empty_sources():
+    from agent.report_evidence import build_report_narrative_items
+
+    assert build_report_narrative_items(
+        SimpleNamespace(
+            stats_hint="   ",
+            summary_domain_knowledge="",
+            provenance_refs=[],
+        )
+    ) == []
+    assert build_report_narrative_items(None) == []
 
 
 def test_count_like_columns_receive_a_dimensionless_unit():

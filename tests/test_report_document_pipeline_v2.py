@@ -37,6 +37,7 @@ from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentProfile,
     ReportDocumentRepair,
+    ReportDocumentSectionRole,
     ReportEvidenceCapacity,
 )
 from contracts.report_evidence import ReportEvidenceKind
@@ -92,6 +93,60 @@ def test_evidence_capacity_profiles_follow_golden_architecture_cases():
             usable_exhibit_count=case["usable_exhibits"],
             validated_finding_count=case["validated_findings"],
         ).value == case["expected_profile"]
+
+
+def test_report_wide_narrative_evidence_is_assigned_to_analysis_sections():
+    """Manifest-level statistics and knowledge must reach the writer.
+
+    A section's evidence comes from its research packets, but the standard
+    pipeline's computed statistics and curated knowledge are report-wide and
+    belong to no packet. Without an explicit assignment they sit in the
+    manifest uncited, so their facts never ground a sentence and the writer
+    cannot use them at all.
+    """
+
+    from agent.report_evidence import make_report_narrative_evidence_item
+    from agent.report_research_execution import (
+        consolidate_report_evidence_packets,
+    )
+
+    research_plan, packets, _, decisions, gate = _ready_components()
+    statistics = make_report_narrative_evidence_item(
+        kind=ReportEvidenceKind.STATISTICS,
+        title="Verified statistics",
+        source="derived",
+        content="Observed mean balancing price was 141.0 GEL/MWh.",
+    )
+    knowledge = make_report_narrative_evidence_item(
+        kind=ReportEvidenceKind.KNOWLEDGE,
+        title="Curated domain knowledge",
+        source="curated_knowledge",
+        content="The balancing market settles hourly.",
+    )
+    manifest = consolidate_report_evidence_packets(
+        _QUERY,
+        packets,
+        extra_items=[statistics, knowledge],
+    )
+
+    plan = build_report_document_plan(
+        _QUERY,
+        research_plan,
+        packets,
+        manifest,
+        gate,
+        decisions,
+    )
+
+    analysis_sections = [
+        section
+        for section in plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+    assert analysis_sections
+    for section in analysis_sections:
+        assert statistics.evidence_ref in section.required_evidence_refs
+        assert knowledge.evidence_ref in section.required_evidence_refs
 
 
 def test_document_plan_profile_uses_collected_evidence_not_planned_exhibits():

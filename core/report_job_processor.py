@@ -453,6 +453,20 @@ class ReportJobProcessor:
         try:
             usage = metrics.finalize_request_telemetry()
             llm_calls = max(0, int(usage.get("llm_calls", 0)))
+            # The generative budget governs the report's own stages. Narrative
+            # enrichment runs the query pipeline, whose calls are counted in
+            # llm_calls too, so comparing the raw total to the budget would
+            # report every enriched report as over budget.
+            stage_usage = usage.get("stages", {})
+            report_stage_calls = sum(
+                max(0, int((stats or {}).get("calls", 0)))
+                for stage, stats in (
+                    stage_usage.items()
+                    if isinstance(stage_usage, dict)
+                    else ()
+                )
+                if str(stage).startswith("report_")
+            )
             payload = {
                 "attempt": lease.attempt_count,
                 "completion_tokens": max(
@@ -473,8 +487,9 @@ class ReportJobProcessor:
                 "models": usage.get("models", {}),
                 "outcome": outcome,
                 "over_generative_call_budget": (
-                    llm_calls > self._max_generative_calls
+                    report_stage_calls > self._max_generative_calls
                 ),
+                "report_stage_calls": report_stage_calls,
                 "pipeline_v2_mode": self._pipeline_v2_mode,
                 "prompt_tokens": max(
                     0,
@@ -502,6 +517,42 @@ class ReportJobProcessor:
                 lease.job_id,
                 lease.attempt_count,
             )
+
+    def _pipeline_narrative_items(
+        self,
+        lease: ReportJobLease,
+    ) -> list[Any]:
+        """Return the standard pipeline's computed statistics and knowledge.
+
+        The adaptive collectors return raw tables only. The query pipeline is
+        what computes statistics and selects curated knowledge, and a report
+        without them can only restate cells — which is why adaptive reports
+        read far weaker than the same question asked in standard mode.
+
+        Enrichment must never fail a report, so every failure here degrades to
+        an empty list and is logged.
+        """
+
+        from agent.report_evidence import build_report_narrative_items
+
+        try:
+            context = self._run_query_pipeline(lease)
+            items = build_report_narrative_items(context)
+        except Exception as exc:
+            _LOGGER.warning(
+                "Report narrative enrichment skipped: job_id=%s "
+                "job_attempt=%s exception_type=%s",
+                lease.job_id,
+                lease.attempt_count,
+                _diagnostic_identifier(type(exc).__name__),
+            )
+            return []
+        _LOGGER.info(
+            "Report narrative enrichment ready: job_id=%s kinds=%s",
+            lease.job_id,
+            ",".join(item.kind.value for item in items) or "none",
+        )
+        return items
 
     def _run_query_pipeline(self, lease: ReportJobLease) -> Any:
         pipeline = self._query_pipeline
@@ -921,6 +972,7 @@ class ReportJobProcessor:
                 raw_manifest = self._manifest_consolidator(
                     lease.query,
                     packets,
+                    extra_items=self._pipeline_narrative_items(lease),
                 )
                 manifest = (
                     raw_manifest

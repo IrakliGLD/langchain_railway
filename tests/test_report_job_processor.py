@@ -8,6 +8,7 @@ import logging
 import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -586,6 +587,15 @@ def test_disabled_pipeline_does_not_invoke_research_planner():
 
 
 def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
+    """The pipeline enriches evidence; tracks still own planning and tables.
+
+    v2 originally refused the query pipeline outright, which left it with no
+    computed statistics and no curated knowledge -- the reason adaptive reports
+    read weaker than the same question in standard mode. It now runs once,
+    purely to contribute narrative evidence, and must still never drive
+    planning, evidence collection or per-section generation.
+    """
+
     (
         research_plan,
         packets,
@@ -596,6 +606,7 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
     ) = _document_components()
     draft = _valid_document_draft(document_plan, manifest)
     calls = []
+    consolidator_kwargs = {}
 
     def record(name, value):
         calls.append(name)
@@ -607,8 +618,13 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
         return draft
 
     processor = ReportJobProcessor(
-        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
-            "enabled v2 must not invoke the legacy query analyzer"
+        query_pipeline=lambda *_args, **_kwargs: record(
+            "query_pipeline",
+            SimpleNamespace(
+                stats_hint="Observed mean balancing price was 141.0 GEL/MWh.",
+                summary_domain_knowledge="The balancing market settles hourly.",
+                provenance_refs=["query:prices"],
+            ),
         ),
         planner=lambda *_args, **_kwargs: pytest.fail(
             "enabled v2 must not invoke the legacy report planner"
@@ -625,9 +641,9 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
             "research_executor",
             packets,
         ),
-        manifest_consolidator=lambda *_args, **_kwargs: record(
-            "manifest_consolidator",
-            manifest,
+        manifest_consolidator=lambda *_args, **kwargs: (
+            consolidator_kwargs.update(kwargs)
+            or record("manifest_consolidator", manifest)
         ),
         research_exhibit_builder=lambda *_args, **_kwargs: record(
             "research_exhibit_builder",
@@ -650,9 +666,14 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
     )
 
     assert result.contract_version == "report-result-v2"
+    # The pipeline's products reach the manifest as narrative evidence.
+    assert [
+        item.kind.value for item in consolidator_kwargs["extra_items"]
+    ] == ["statistics", "knowledge"]
     assert calls == [
         "research_planner",
         "research_executor",
+        "query_pipeline",
         "manifest_consolidator",
         "research_exhibit_builder",
         "evidence_gate_evaluator",
@@ -783,6 +804,9 @@ def test_enabled_v2_two_call_budget_disables_document_repair():
     draft = _valid_document_draft(document_plan, manifest)
     repair_flags = []
     processor = ReportJobProcessor(
+        # Inert pipeline: narrative enrichment is not this test's subject,
+        # and without an injection the processor would run the real one.
+        query_pipeline=lambda *_args, **_kwargs: None,
         pipeline_v2_mode="enabled",
         max_generative_calls=2,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -904,6 +928,9 @@ def test_enabled_v2_document_plan_validation_failure_is_typed_as_plan_invalid():
         _,
     ) = _document_components()
     processor = ReportJobProcessor(
+        # Inert pipeline: narrative enrichment is not this test's subject,
+        # and without an injection the processor would run the real one.
+        query_pipeline=lambda *_args, **_kwargs: None,
         pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
