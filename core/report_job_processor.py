@@ -520,6 +520,12 @@ class ReportJobProcessor:
                     0,
                     int(usage.get("prompt_tokens", 0)),
                 ),
+                # The cached share of the prompt, so prefix-cache behaviour is
+                # measurable per attempt rather than inferred from cost.
+                "cached_prompt_tokens": max(
+                    0,
+                    int(usage.get("cached_prompt_tokens", 0)),
+                ),
                 "stages": usage.get("stages", {}),
                 "total_tokens": max(
                     0,

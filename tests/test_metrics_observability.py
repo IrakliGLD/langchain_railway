@@ -10,6 +10,11 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+from types import SimpleNamespace
+
+import pytest
+
+from core import llm
 from utils.metrics import Metrics
 
 
@@ -311,3 +316,67 @@ def test_router_and_fallback_intent_metrics_are_tracked():
     assert stats["router_misses"] == 1
     assert stats["provenance_gate_failures"] == 1
     assert len(stats["tool_fallback_intents_top"]) >= 1
+
+
+def test_cached_prompt_tokens_are_extracted_from_both_provider_shapes():
+    """Cache hits must be visible; providers report them in different places."""
+
+    from core.llm_runtime import _extract_cached_prompt_tokens
+
+    openai_shape = SimpleNamespace(
+        usage_metadata={},
+        response_metadata={
+            "token_usage": {
+                "prompt_tokens": 11_076,
+                "prompt_tokens_details": {"cached_tokens": 8_192},
+            }
+        },
+    )
+    gemini_shape = SimpleNamespace(
+        usage_metadata={"input_tokens": 900, "cached_content_token_count": 512},
+        response_metadata={},
+    )
+    unreported = SimpleNamespace(
+        usage_metadata={"input_tokens": 900},
+        response_metadata={"token_usage": {"prompt_tokens": 900}},
+    )
+
+    assert _extract_cached_prompt_tokens(openai_shape) == 8_192
+    assert _extract_cached_prompt_tokens(gemini_shape) == 512
+    assert _extract_cached_prompt_tokens(unreported) == 0
+
+
+def test_cached_prompt_tokens_are_priced_at_the_cached_rate(monkeypatch):
+    monkeypatch.setattr(llm, "OPENAI_INPUT_COST_PER_1K_USD", 1.0)
+    monkeypatch.setattr(llm, "OPENAI_OUTPUT_COST_PER_1K_USD", 0.0)
+    monkeypatch.setattr(llm, "OPENAI_CACHED_INPUT_COST_PER_1K_USD", 0.25)
+
+    # 1000 prompt tokens, 800 of them cached: 200 fresh @1.0 + 800 cached @0.25.
+    cost = llm._estimate_cost_usd(
+        1000, 0, model_name="gpt-5.6-terra", cached_prompt_tokens=800
+    )
+    assert cost == pytest.approx(0.2 + 0.2)
+
+
+def test_unset_cached_rate_never_understates_cost(monkeypatch):
+    """0 means unconfigured, so cached tokens bill at the full input rate."""
+
+    monkeypatch.setattr(llm, "OPENAI_INPUT_COST_PER_1K_USD", 1.0)
+    monkeypatch.setattr(llm, "OPENAI_OUTPUT_COST_PER_1K_USD", 0.0)
+    monkeypatch.setattr(llm, "OPENAI_CACHED_INPUT_COST_PER_1K_USD", 0.0)
+
+    assert llm._estimate_cost_usd(
+        1000, 0, model_name="gpt-5.6-terra", cached_prompt_tokens=800
+    ) == pytest.approx(1.0)
+
+
+def test_cached_tokens_cannot_exceed_prompt_tokens(monkeypatch):
+    monkeypatch.setattr(llm, "OPENAI_INPUT_COST_PER_1K_USD", 1.0)
+    monkeypatch.setattr(llm, "OPENAI_OUTPUT_COST_PER_1K_USD", 0.0)
+    monkeypatch.setattr(llm, "OPENAI_CACHED_INPUT_COST_PER_1K_USD", 0.25)
+
+    # A provider over-reporting cached tokens must not produce a negative
+    # fresh count or a hit rate above 100%.
+    assert llm._estimate_cost_usd(
+        100, 0, model_name="gpt-5.6-terra", cached_prompt_tokens=5000
+    ) == pytest.approx(0.025)

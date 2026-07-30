@@ -52,7 +52,10 @@ from config import (
     GOOGLE_API_KEY,
     MODEL_TYPE,
     NVIDIA_CONFIGURED_MAX_TOKENS,
+    GEMINI_CACHED_INPUT_COST_PER_1K_USD,
+    NVIDIA_CACHED_INPUT_COST_PER_1K_USD,
     NVIDIA_INPUT_COST_PER_1K_USD,
+    OPENAI_CACHED_INPUT_COST_PER_1K_USD,
     NVIDIA_MAX_TOKENS,
     NVIDIA_MODEL,
     NVIDIA_OUTPUT_COST_PER_1K_USD,
@@ -188,6 +191,7 @@ def _is_fast_pipeline_mode() -> bool:
 from contracts.summary import SummaryEnvelope  # noqa: F401 — re-export surface
 from core.llm_runtime import (  # noqa: F401 — re-export surface
     LLMResponseCache,
+    _extract_cached_prompt_tokens,
     _extract_token_usage,
     _to_int,
     get_gemini,
@@ -240,7 +244,12 @@ def _is_openai_model_name(model_name: str) -> bool:
     return _provider_from_model_name(model_name) == "openai"
 
 
-def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: str) -> float:
+def _estimate_cost_usd(
+    prompt_tokens: int,
+    completion_tokens: int,
+    model_name: str,
+    cached_prompt_tokens: int = 0,
+) -> float:
     """Estimate USD cost based on provider-level token rates and actual model used.
 
     Stays in core.llm (not llm_runtime): the ``_PROVIDERS`` rate accessors read
@@ -248,7 +257,22 @@ def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int, model_name: s
     (test_metrics_observability).
     """
     provider = _PROVIDERS[_provider_from_model_name(model_name)]
-    return (prompt_tokens / 1000.0) * provider.input_rate() + (completion_tokens / 1000.0) * provider.output_rate()
+    cached = max(0, min(int(cached_prompt_tokens), int(prompt_tokens)))
+    fresh = max(0, int(prompt_tokens) - cached)
+    cached_rate = (
+        provider.cached_input_rate()
+        if provider.cached_input_rate is not None
+        else 0.0
+    )
+    if cached_rate <= 0:
+        # Unset: price the cached share at the full input rate so an
+        # unconfigured deployment over-states cost rather than under-stating it.
+        cached_rate = provider.input_rate()
+    return (
+        (fresh / 1000.0) * provider.input_rate()
+        + (cached / 1000.0) * cached_rate
+        + (completion_tokens / 1000.0) * provider.output_rate()
+    )
 
 
 def _content_free_log_value(value: Any, *, default: str = "unreported") -> str:
@@ -342,7 +366,13 @@ def _log_usage_for_message(
     ):
         message = message["raw"]
     prompt_tokens, completion_tokens, total_tokens = _extract_token_usage(message)
-    estimated_cost = _estimate_cost_usd(prompt_tokens, completion_tokens, model_name)
+    cached_prompt_tokens = _extract_cached_prompt_tokens(message)
+    estimated_cost = _estimate_cost_usd(
+        prompt_tokens,
+        completion_tokens,
+        model_name,
+        cached_prompt_tokens=cached_prompt_tokens,
+    )
     provider = _provider_from_model_name(model_name)
     if (
         REPORT_MODEL_TYPE
@@ -360,13 +390,15 @@ def _log_usage_for_message(
     finish_reason, provider_reported_limit = _response_diagnostics(message)
     log.info(
         "llm_response_telemetry provider=%s model=%s stage=%s "
-        "prompt_tokens=%d completion_tokens=%d total_tokens=%d "
+        "prompt_tokens=%d cached_prompt_tokens=%d "
+        "completion_tokens=%d total_tokens=%d "
         "finish_reason=%s configured_output_token_limit=%s "
         "effective_output_token_limit=%s provider_reported_output_token_limit=%s",
         provider,
         _content_free_log_value(model_name),
         _content_free_log_value(attempt_stage),
         prompt_tokens,
+        cached_prompt_tokens,
         completion_tokens,
         total_tokens,
         finish_reason,
@@ -383,6 +415,7 @@ def _log_usage_for_message(
     metrics.log_llm_usage(
         model_name=model_name,
         prompt_tokens=prompt_tokens,
+        cached_prompt_tokens=cached_prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         estimated_cost_usd=estimated_cost,
@@ -556,6 +589,10 @@ class _Provider:
     model_name: Callable[[], str]
     input_rate: Callable[[], float]
     output_rate: Callable[[], float]
+    # Cache hits are billed below a fresh prompt token. Defaults to None,
+    # which prices cached tokens at the full input rate: an unconfigured
+    # deployment then over-states cost rather than under-stating it.
+    cached_input_rate: Callable[[], float] | None = None
     name_prefixes: tuple[str, ...] = ()
     namespaced: bool = False  # NIM-style "vendor/model" ids classify here
 
@@ -567,6 +604,7 @@ _PROVIDERS: dict[str, _Provider] = {
         model_name=lambda: GEMINI_MODEL,
         input_rate=lambda: GEMINI_INPUT_COST_PER_1K_USD,
         output_rate=lambda: GEMINI_OUTPUT_COST_PER_1K_USD,
+        cached_input_rate=lambda: GEMINI_CACHED_INPUT_COST_PER_1K_USD,
         name_prefixes=("gemini",),
     ),
     "openai": _Provider(
@@ -575,6 +613,7 @@ _PROVIDERS: dict[str, _Provider] = {
         model_name=lambda: OPENAI_MODEL,
         input_rate=lambda: OPENAI_INPUT_COST_PER_1K_USD,
         output_rate=lambda: OPENAI_OUTPUT_COST_PER_1K_USD,
+        cached_input_rate=lambda: OPENAI_CACHED_INPUT_COST_PER_1K_USD,
         name_prefixes=("gpt-", "o1", "o3", "o4"),
     ),
     "nvidia": _Provider(
@@ -583,6 +622,7 @@ _PROVIDERS: dict[str, _Provider] = {
         model_name=lambda: NVIDIA_MODEL,
         input_rate=lambda: NVIDIA_INPUT_COST_PER_1K_USD,
         output_rate=lambda: NVIDIA_OUTPUT_COST_PER_1K_USD,
+        cached_input_rate=lambda: NVIDIA_CACHED_INPUT_COST_PER_1K_USD,
         namespaced=True,
     ),
 }

@@ -66,6 +66,49 @@ def _to_int(value) -> int:
         return 0
 
 
+def _extract_cached_prompt_tokens(message) -> int:
+    """Best-effort extraction of the cached share of the prompt.
+
+    Providers price a cache hit below a fresh prompt token, so the split has to
+    be visible before caching can be tuned or costed. OpenAI-compatible
+    endpoints report it under ``prompt_tokens_details.cached_tokens``; Gemini
+    reports ``cached_content_token_count``. Anything unreported reads as 0,
+    which is indistinguishable from a genuine miss — that is the honest answer
+    when a provider does not tell us.
+    """
+
+    candidates: list[dict] = []
+    usage_metadata = getattr(message, "usage_metadata", None)
+    if isinstance(usage_metadata, dict):
+        candidates.append(usage_metadata)
+        details = usage_metadata.get("input_token_details")
+        if isinstance(details, dict):
+            candidates.append(details)
+    response_metadata = getattr(message, "response_metadata", None)
+    if isinstance(response_metadata, dict):
+        for key in ("token_usage", "usage"):
+            usage = response_metadata.get(key)
+            if isinstance(usage, dict):
+                candidates.append(usage)
+                details = usage.get("prompt_tokens_details")
+                if isinstance(details, dict):
+                    candidates.append(details)
+        details = response_metadata.get("usage_metadata")
+        if isinstance(details, dict):
+            candidates.append(details)
+    for source in candidates:
+        for field in (
+            "cached_tokens",
+            "cache_read",
+            "cache_read_input_tokens",
+            "cached_content_token_count",
+        ):
+            value = _to_int(source.get(field))
+            if value > 0:
+                return value
+    return 0
+
+
 def _extract_token_usage(message) -> tuple[int, int, int]:
     """Best-effort extraction of prompt/completion/total tokens from LLM message."""
     prompt_tokens = 0
