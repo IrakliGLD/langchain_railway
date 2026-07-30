@@ -643,10 +643,12 @@ def _report_structured_output_method(provider: str) -> str | None:
         return REPORT_STRUCTURED_OUTPUT_METHOD
     if provider == "openai":
         return "json_schema"
-    # qwencloud documents both Structured Outputs and Function Calling.
-    # Tool calling is the more consistently implemented of the two on
-    # OpenAI-compatible endpoints, so auto takes it and an operator can
-    # opt into strict schemas with REPORT_STRUCTURED_OUTPUT_METHOD.
+    # qwencloud's structured-output guide documents response_format
+    # {"type": "json_object"} only — no json_schema and no strict mode — and
+    # states it guarantees valid JSON syntax but not schema conformance. Tool
+    # calling is the documented way to get a typed shape, so auto takes it.
+    # Forcing REPORT_STRUCTURED_OUTPUT_METHOD=json_schema here would send a
+    # response_format the endpoint does not implement.
     if provider == "qwen":
         return "function_calling"
     return None

@@ -308,6 +308,8 @@ def test_qwen_report_structured_output_prefers_tool_calling(monkeypatch):
     assert llm._report_structured_output_method("openai") == "json_schema"
     assert llm._report_structured_output_method("nvidia") is None
 
+    # An operator can still force it, but qwencloud documents only
+    # response_format {"type": "json_object"}, so this is not a supported path.
     monkeypatch.setattr(llm, "REPORT_STRUCTURED_OUTPUT_METHOD", "json_schema")
     assert llm._report_structured_output_method("qwen") == "json_schema"
 
@@ -328,7 +330,12 @@ def test_qwen_client_requires_key_and_compatible_base_url(monkeypatch):
 
 
 def test_qwen_client_is_built_from_env_without_reasoning_effort(monkeypatch):
-    """reasoning_effort is OpenAI-specific and must never reach a Qwen call."""
+    """No reasoning_effort, and no output cap unless one is configured.
+
+    reasoning_effort is OpenAI-specific. max_tokens is omitted because
+    qwencloud's structured-output guide warns that truncated output produces
+    invalid JSON, and every report stage returns JSON.
+    """
 
     captured = {}
 
@@ -351,6 +358,20 @@ def test_qwen_client_is_built_from_env_without_reasoning_effort(monkeypatch):
     assert captured["openai_api_key"] == "test-qwen-key"
     assert captured["max_retries"] == 0
     assert "reasoning_effort" not in captured
+    assert "max_tokens" not in captured
+
+    monkeypatch.setattr(llm_runtime, "_qwen_llm", None)
+    monkeypatch.setattr(llm_runtime, "QWEN_MAX_TOKENS", 8192)
+    llm_runtime.get_qwen()
+    assert captured["max_tokens"] == 8192
+
+
+def test_qwen_default_base_url_is_the_documented_compatible_endpoint():
+    """The default comes from qwencloud's getting-started guide, not a guess."""
+
+    assert config.QWEN_BASE_URL == (
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    )
 
 
 def test_config_accepts_qwen_and_reports_missing_qwen_settings():

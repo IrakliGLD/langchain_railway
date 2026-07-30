@@ -228,10 +228,16 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # for cost attribution automatically. Restart required (env read at import).
 # Qwen (qwencloud / DashScope) — OpenAI-API-compatible endpoint driven via
 # ChatOpenAI, with its own provider key so cost attribution and the circuit
-# breaker stay separate from NVIDIA. QWEN_BASE_URL has no default on purpose:
-# the compatible-mode URL differs by deployment region and a wrong default
-# would fail as an opaque auth error rather than a clear configuration one.
-QWEN_BASE_URL = (os.getenv("QWEN_BASE_URL", "") or "").strip()
+# breaker stay separate from NVIDIA. The default is the international
+# compatible-mode endpoint documented in qwencloud's getting-started guide;
+# accounts in other regions must override it.
+QWEN_BASE_URL = (
+    os.getenv(
+        "QWEN_BASE_URL",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    or ""
+).strip()
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.7-max")
 # DASHSCOPE_API_KEY is the name Qwen's own SDK reads, so accept it as a
 # fallback rather than making operators duplicate the secret.
@@ -239,7 +245,14 @@ QWEN_API_KEY = (
     os.getenv("QWEN_API_KEY")
     or os.getenv("DASHSCOPE_API_KEY")
 )
-QWEN_MAX_TOKENS = max(1, int(os.getenv("QWEN_MAX_TOKENS", "4096")))
+# Unset by default, deliberately. Qwen's structured-output guide states
+# "Don't set max_tokens: Truncated output produces invalid JSON", and every
+# report stage returns JSON, so capping output turns a long section batch into
+# a parse failure. Operators can still set a cap explicitly.
+_raw_qwen_max_tokens = os.getenv("QWEN_MAX_TOKENS", "").strip()
+QWEN_MAX_TOKENS: int | None = (
+    max(1, int(_raw_qwen_max_tokens)) if _raw_qwen_max_tokens else None
+)
 QWEN_TEMPERATURE = float(os.getenv("QWEN_TEMPERATURE", "0"))
 _raw_qwen_timeout = os.getenv("QWEN_TIMEOUT_SECONDS", "").strip()
 QWEN_TIMEOUT_SECONDS: float | None = (

@@ -405,11 +405,15 @@ def get_qwen() -> ChatOpenAI:
         client_kwargs = dict(
             model=QWEN_MODEL,
             temperature=QWEN_TEMPERATURE,
-            max_tokens=QWEN_MAX_TOKENS,
             openai_api_key=QWEN_API_KEY,
             base_url=QWEN_BASE_URL,
             max_retries=0,  # application owns the only safe fallback
         )
+        # Only send an output cap when one is configured: Qwen's
+        # structured-output guide warns that truncated output produces invalid
+        # JSON, and every report stage returns JSON.
+        if QWEN_MAX_TOKENS:
+            client_kwargs["max_tokens"] = QWEN_MAX_TOKENS
         if QWEN_TIMEOUT_SECONDS:
             client_kwargs["request_timeout"] = QWEN_TIMEOUT_SECONDS
         _qwen_llm = ChatOpenAI(**client_kwargs)
