@@ -330,6 +330,7 @@ class Metrics:
                 {
                     "calls": 0,
                     "prompt_tokens": 0,
+                    "cached_prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
                     "models": {},
@@ -339,6 +340,10 @@ class Metrics:
             )
             stage_bucket["calls"] += 1
             stage_bucket["prompt_tokens"] += prompt_tokens
+            stage_bucket["cached_prompt_tokens"] = (
+                stage_bucket.get("cached_prompt_tokens", 0)
+                + cached_prompt_tokens
+            )
             stage_bucket["completion_tokens"] += completion_tokens
             stage_bucket["total_tokens"] += total_tokens
             stage_bucket["models"][model_key] = (
@@ -360,6 +365,7 @@ class Metrics:
                 "trace_id": "",
                 "llm_calls": 0,
                 "prompt_tokens": 0,
+                "cached_prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
@@ -370,6 +376,9 @@ class Metrics:
             stage: {
                 "calls": int(bucket.get("calls", 0)),
                 "prompt_tokens": int(bucket.get("prompt_tokens", 0)),
+                "cached_prompt_tokens": int(
+                    bucket.get("cached_prompt_tokens", 0)
+                ),
                 "completion_tokens": int(
                     bucket.get("completion_tokens", 0)
                 ),
@@ -386,6 +395,11 @@ class Metrics:
             "trace_id": current.get("trace_id", ""),
             "llm_calls": int(current.get("llm_calls", 0)),
             "prompt_tokens": int(current.get("prompt_tokens", 0)),
+            # Rebuilding this dict field-by-field is what silently dropped the
+            # cached share: every rollup reads the snapshot, never the counter.
+            "cached_prompt_tokens": int(
+                current.get("cached_prompt_tokens", 0)
+            ),
             "completion_tokens": int(current.get("completion_tokens", 0)),
             "total_tokens": int(current.get("total_tokens", 0)),
             "estimated_cost_usd": float(current.get("estimated_cost_usd", 0.0)),

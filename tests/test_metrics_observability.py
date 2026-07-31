@@ -87,6 +87,7 @@ def test_request_telemetry_breaks_report_usage_out_by_stage_and_finish_reason():
     assert snapshot["stages"]["report_research_planner"] == {
         "calls": 1,
         "prompt_tokens": 500,
+        "cached_prompt_tokens": 0,
         "completion_tokens": 100,
         "total_tokens": 600,
         "models": {"gpt-5.6-luna": 1},
@@ -380,3 +381,50 @@ def test_cached_tokens_cannot_exceed_prompt_tokens(monkeypatch):
     assert llm._estimate_cost_usd(
         100, 0, model_name="gpt-5.6-terra", cached_prompt_tokens=5000
     ) == pytest.approx(0.025)
+
+
+def test_request_telemetry_snapshot_surfaces_the_cached_prompt_share():
+    """The per-request snapshot must carry cached tokens, not just accumulate them.
+
+    Production showed `llm_response_telemetry cached_prompt_tokens=2065` on the
+    same call whose REPORT_JOB_ATTEMPT_TELEMETRY rollup read
+    `cached_prompt_tokens: 0`. The counter was incremented correctly; the
+    snapshot that feeds every rollup rebuilt an explicit dict and dropped the
+    field, so no consumer could ever see a cache hit.
+    """
+
+    from utils.metrics import metrics
+
+    metrics.start_request_telemetry(trace_id="cache-visibility")
+    try:
+        metrics.log_llm_usage(
+            model_name="gpt-5.6-terra",
+            prompt_tokens=2_068,
+            cached_prompt_tokens=2_065,
+            completion_tokens=497,
+            total_tokens=2_565,
+            estimated_cost_usd=0.0,
+            attempt_stage="report_research_planner",
+            provider="openai",
+        )
+        snapshot = metrics.get_current_request_telemetry()
+    finally:
+        metrics.finalize_request_telemetry()
+
+    assert snapshot["prompt_tokens"] == 2_068
+    assert snapshot["cached_prompt_tokens"] == 2_065
+    # Per stage too: knowing the total cached is useless for deciding which
+    # prompt to restructure.
+    stage = snapshot["stages"]["report_research_planner"]
+    assert stage["prompt_tokens"] == 2_068
+    assert stage["cached_prompt_tokens"] == 2_065
+
+
+def test_request_telemetry_snapshot_reports_zero_cache_without_a_context():
+    """The no-context default must expose the field rather than omit it."""
+
+    from utils.metrics import metrics
+
+    metrics.finalize_request_telemetry()
+    snapshot = metrics.get_current_request_telemetry()
+    assert snapshot["cached_prompt_tokens"] == 0
