@@ -197,3 +197,43 @@ def test_absence_guardrail_allows_column_citation_only():
         "Year-end values were not available for some periods."
     )
     assert summarizer._has_unsupported_absence_claims(proxy_only) is False
+
+
+def test_empty_model_summary_is_not_returned_as_a_successful_answer():
+    """A truncated model response must not surface as a blank 200.
+
+    Production 2026-07-31: the structured writer stopped at the output cap, its
+    legacy text fallback stopped at the cap too, and the extracted text was
+    empty. Nothing checked, so the request completed with a chart and no prose
+    -- indistinguishable to the user from the feature being broken.
+    """
+
+    from models import QueryContext
+
+    ctx = QueryContext(query="Explain the balancing price move.")
+    ctx.lang_code = "en"
+    ctx.summary = "   "
+    ctx.summary_source = "legacy_text_fallback"
+    ctx.summary_claims = ["stale"]
+    ctx.summary_confidence = 0.5
+
+    summarizer.answer_unusable_summary(ctx)
+
+    assert ctx.summary.strip(), "user must get a message, not a blank answer"
+    assert ctx.summary_source == "unusable_summary"
+    assert ctx.summary_claims == []
+    assert ctx.summary_confidence == 0.0
+    assert ctx.terminal_outcome == "transient_failure"
+
+
+def test_deterministic_renders_may_still_leave_the_summary_blank():
+    """The emptiness guard is scoped to model-written prose.
+
+    Deterministic render styles hand output to the renderer and legitimately
+    leave ctx.summary empty; converting those to a failure would break every
+    table-rendered answer.
+    """
+
+    guarded_sources = {"structured_summary", "legacy_text_fallback"}
+    assert "deterministic_table" not in guarded_sources
+    assert summarizer._DETERMINISTIC_SUMMARY_SOURCES.isdisjoint(guarded_sources)

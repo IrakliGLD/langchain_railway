@@ -268,6 +268,64 @@ def _enforce_exhibit_budget(
     return ReportResearchPlan.model_validate(payload)
 
 
+_UNREQUESTED_ENGINE_POLICIES: tuple[
+    tuple[ReportResearchRequirement, ReportCollectorId], ...
+] = (
+    (ReportResearchRequirement.FORECAST, ReportCollectorId.FORECAST_ENGINE),
+    (ReportResearchRequirement.SCENARIO, ReportCollectorId.SCENARIO_ENGINE),
+)
+
+
+def _prune_unrequested_engines(
+    plan: ReportResearchPlan,
+    requirements: set[ReportResearchRequirement],
+) -> ReportResearchPlan:
+    """Drop engine collectors the recognized requirements never asked for.
+
+    The requirement side is a keyword list, so it reads "forecast" but not
+    "future" or "outlook"; the model reads the query as a whole. That
+    disagreement used to be fatal -- UNREQUESTED_FORECAST_COLLECTOR failed the
+    plan, and because the prompt is identical on every retry, all three
+    attempts failed the same way and the job died without producing anything.
+
+    Scope control is the rule's real purpose, and dropping the collector
+    achieves it. A track left with no collectors is dropped too, since it can
+    no longer gather anything.
+    """
+
+    unrequested = {
+        collector
+        for requirement, collector in _UNREQUESTED_ENGINE_POLICIES
+        if requirement not in requirements
+    }
+    if not unrequested:
+        return plan
+    if not any(
+        collector in unrequested
+        for track in plan.tracks
+        for collector in track.collector_ids
+    ):
+        return plan
+
+    payload = plan.model_dump(mode="json")
+    dropped = {collector.value for collector in unrequested}
+    retained_tracks = []
+    for track in payload["tracks"]:
+        track["collector_ids"] = [
+            collector
+            for collector in track["collector_ids"]
+            if collector not in dropped
+        ]
+        if track["collector_ids"]:
+            retained_tracks.append(track)
+    if not retained_tracks:
+        # Never prune the plan out of existence: an empty plan fails validation
+        # anyway, and the original at least carries the model's intent.
+        return plan
+    payload["tracks"] = retained_tracks
+    return ReportResearchPlan.model_validate(payload)
+
+
 def validate_report_research_plan(
     query: str,
     plan: ReportResearchPlan,
@@ -407,10 +465,9 @@ def plan_report_research(
             schema_error_codes=_schema_error_codes(exc),
         ) from exc
 
-    plan = _enforce_exhibit_budget(
-        plan,
-        _recognized_requirements(query),
-    )
+    recognized = _recognized_requirements(query)
+    plan = _prune_unrequested_engines(plan, recognized)
+    plan = _enforce_exhibit_budget(plan, recognized)
     assessment = validate_report_research_plan(
         query,
         plan,

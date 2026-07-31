@@ -315,3 +315,69 @@ def test_evidence_gate_distinguishes_ready_gapped_and_failed_outcomes():
         status="failed",
     )
     assert ReportEvidenceGate.model_validate(failed).ready_for_writing is False
+
+
+def _plan_with_forecast_engine(query: str):
+    """A plan whose model added a forecast collector, keyed to `query`."""
+
+    import hashlib
+
+    from contracts.report_research import ReportResearchPlan
+
+    payload = _research_plan_payload(
+        query_digest=hashlib.sha256(query.encode("utf-8")).hexdigest()
+    )
+    payload["tracks"][0]["collector_ids"] = ["prices", "forecast_engine"]
+    return ReportResearchPlan.model_validate(payload)
+
+
+def test_unrequested_forecast_collector_is_pruned_not_fatal():
+    """A "future" query has no forecast keyword, but the model still plans one.
+
+    `_FORECAST_SIGNALS` matches "forecast"/"projection"/"predict" and not
+    "future" or "outlook", so the model's reading and the keyword list
+    disagree. That disagreement used to fail the plan outright, and since the
+    planner prompt is identical on every retry, all three attempts died the
+    same way -- observed in production on 2026-07-31.
+    """
+
+    from agent.report_research_planner import (
+        _prune_unrequested_engines,
+        _recognized_requirements,
+        validate_report_research_plan,
+    )
+    from contracts.report_research import ReportCollectorId
+
+    query = "Report on the current and future market model and prices."
+    plan = _plan_with_forecast_engine(query)
+
+    # Precondition: unpruned, this plan is rejected.
+    rejected = validate_report_research_plan(query, plan, max_tracks=4)
+    assert not rejected.valid
+    assert "UNREQUESTED_FORECAST_COLLECTOR" in rejected.finding_codes
+
+    pruned = _prune_unrequested_engines(plan, _recognized_requirements(query))
+    collectors = {
+        collector for track in pruned.tracks for collector in track.collector_ids
+    }
+    assert ReportCollectorId.FORECAST_ENGINE not in collectors
+    assert validate_report_research_plan(query, pruned, max_tracks=4).valid
+
+
+def test_requested_forecast_collector_survives_pruning():
+    """When the query does ask for a forecast, the collector must stay."""
+
+    from agent.report_research_planner import (
+        _prune_unrequested_engines,
+        _recognized_requirements,
+    )
+    from contracts.report_research import ReportCollectorId
+
+    query = "Report on the price forecast for the market model."
+    plan = _plan_with_forecast_engine(query)
+
+    pruned = _prune_unrequested_engines(plan, _recognized_requirements(query))
+    collectors = {
+        collector for track in pruned.tracks for collector in track.collector_ids
+    }
+    assert ReportCollectorId.FORECAST_ENGINE in collectors

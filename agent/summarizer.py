@@ -682,6 +682,38 @@ def answer_transient_failure(
     return ctx
 
 
+def answer_unusable_summary(ctx: QueryContext) -> QueryContext:
+    """Refuse to present an empty model answer as a successful one.
+
+    A truncated response (finish_reason=length) leaves the extracted text
+    blank. Both the structured writer and its legacy text fallback can return
+    that, and nothing downstream checked -- so the request completed 200 with a
+    chart and no prose, which reads to the user as a silent failure rather than
+    a failure. Observed 2026-07-31: both summarize calls stopped at the output
+    cap and the answer came back empty.
+
+    The terminal state matches ``answer_transient_failure``: the request is
+    genuinely unanswerable this attempt, and the user gets a message saying so.
+    """
+
+    ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
+    ctx.summary_domain_knowledge = ""
+    ctx.summary = get_transient_failure_message(
+        getattr(ctx, "lang_code", "") or "en"
+    )
+    ctx.summary_source = "unusable_summary"
+    ctx.summary_claims = []
+    ctx.summary_citations = []
+    ctx.summary_confidence = 0.0
+    ctx.summary_claim_provenance = []
+    ctx.summary_provenance_coverage = 0.0
+    ctx.summary_provenance_gate_passed = True
+    ctx.summary_provenance_gate_reason = "not_applicable_unusable_summary"
+    ctx.terminal_outcome = TerminalOutcome.TRANSIENT_FAILURE.value
+    metrics.log_terminal_outcome(TerminalOutcome.TRANSIENT_FAILURE.value)
+    return ctx
+
+
 def answer_brief_knowledge(ctx: QueryContext) -> QueryContext:
     """Produce a curated-knowledge Brief response with one model stage."""
     ctx.grounding_policy = GroundingPolicy.NOT_APPLICABLE
@@ -2106,6 +2138,21 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             ctx.summary_confidence = 0.5
 
     ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
+    # Scoped to the two sources where a model was asked for prose: deterministic
+    # render styles legitimately leave this blank because the renderer owns the
+    # output.
+    if not str(ctx.summary or "").strip() and ctx.summary_source in {
+        "structured_summary",
+        "legacy_text_fallback",
+    }:
+        log.warning(
+            "Summary was empty after %s; answering as a transient failure "
+            "rather than returning a blank answer.",
+            ctx.summary_source,
+        )
+        # Mutate and continue rather than returning, so this lands in the
+        # stage-4 gate traces exactly like answer_transient_failure does.
+        answer_unusable_summary(ctx)
     _apply_absence_claim_guardrail(ctx)
     if apply_answer_mode_policy(ctx) and ctx.summary_claims:
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
