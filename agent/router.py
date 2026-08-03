@@ -81,6 +81,17 @@ _MONTH_YEAR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SHARED_YEAR_MONTH_RANGE_PATTERN = re.compile(
+    r"\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r")\b\s*(?:,\s*|(?:and|to|through|until|&|[-\u2013\u2014])\s*)\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r")\s+(20\d{2})\b",
+    re.IGNORECASE,
+)
+
 _SEMANTIC_TOOL_TERMS: Dict[str, Set[str]] = {
     "get_prices": {
         "price", "prices", "cost", "costs", "balancing price", "deregulated",
@@ -228,6 +239,14 @@ def extract_date_range(query_lower: str, is_explanation: bool = False) -> Tuple[
 
     explicit_months: list[tuple[int, int]] = []
     seen_months: set[tuple[int, int]] = set()
+    for match in _SHARED_YEAR_MONTH_RANGE_PATTERN.finditer(query_text):
+        year = int(match.group(3))
+        for token in (match.group(1), match.group(2)):
+            month_num = MONTH_MAP.get(token.lower())
+            key = (year, month_num) if month_num else None
+            if key is not None and key not in seen_months:
+                seen_months.add(key)
+                explicit_months.append(key)
     for match in _MONTH_YEAR_PATTERN.finditer(query_text):
         month_token = match.group(1).lower()
         year = int(match.group(2))

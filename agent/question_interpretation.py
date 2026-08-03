@@ -708,29 +708,46 @@ _MONTH_PATTERN_BY_NUMBER = {
 
 
 def _extract_explicit_month_period(raw_query: str) -> tuple[Optional[str], Optional[str]]:
-    """Extract a concrete month-year period directly from the raw query text."""
+    """Extract the full bounds of explicitly named month(s) from raw text."""
     query_lower = str(raw_query or "").lower()
     year_match = re.search(r"\b(20\d{2})\b", query_lower)
     if not year_match:
         return None, None
-    year = int(year_match.group(1))
-
-    # Resolve a unique month mention so the guardrail can force a precise analysis window.
+    # Require named months so a generic year or relative range cannot trigger
+    # the balancing-month explanation guardrail.
     matched_months = [
         month_num
         for month_num, pattern in _MONTH_PATTERN_BY_NUMBER.items()
         if re.search(pattern, query_lower)
     ]
-    if len(matched_months) != 1:
+    if not matched_months:
         return None, None
-    month = matched_months[0]
 
-    last_day = monthrange(year, month)[1]
-    return date(year, month, 1).isoformat(), date(year, month, last_day).isoformat()
+    start_date, end_date = extract_date_range(raw_query)
+    start_dt = _parse_iso_date(start_date)
+    end_dt = _parse_iso_date(end_date)
+    if start_dt is None or end_dt is None:
+        return None, None
+    if (
+        len(set(re.findall(r"\b20\d{2}\b", query_lower))) == 1
+        and start_dt.month == 1
+        and start_dt.day == 1
+        and end_dt.month == 12
+        and end_dt.day == 31
+    ):
+        # ``extract_date_range`` recognizes English month names. Preserve the
+        # interpretation layer's Russian/Georgian month matches when its only
+        # result was the surrounding full year.
+        year = start_dt.year
+        start_dt = date(year, min(matched_months), 1)
+        last_month = max(matched_months)
+        end_dt = date(year, last_month, monthrange(year, last_month)[1])
+    full_end = date(end_dt.year, end_dt.month, monthrange(end_dt.year, end_dt.month)[1])
+    return start_dt.isoformat(), full_end.isoformat()
 
 
 def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
-    """Detect month-specific balancing-price why/explanation questions.
+    """Detect explicitly month-bounded balancing-price explanation questions.
 
     This guardrail catches phrasing such as "why balancing electricity prices
     changed in November 2024" so the runtime analyzer cannot misroute it to
@@ -753,7 +770,7 @@ def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
     end_dt = _parse_iso_date(end_date)
     if start_dt is None or end_dt is None:
         return False
-    return (start_dt.year, start_dt.month) == (end_dt.year, end_dt.month)
+    return start_dt <= end_dt
 
 
 def _apply_balancing_month_explanation_guardrail(
@@ -823,22 +840,21 @@ def _apply_balancing_month_explanation_guardrail(
         },
     ]
 
-    period_payload = payload.get("sql_hints", {}).get("period")
     start_dt = _parse_iso_date(start_date)
     end_dt = _parse_iso_date(end_date)
-    if (
-        not isinstance(period_payload, dict)
-        and start_dt is not None
-        and end_dt is not None
-        and (start_dt.year, start_dt.month) == (end_dt.year, end_dt.month)
-    ):
+    if start_dt is not None and end_dt is not None:
+        is_single_month = (start_dt.year, start_dt.month) == (end_dt.year, end_dt.month)
         payload.setdefault("sql_hints", {})
         payload["sql_hints"]["period"] = {
-            "kind": "month",
+            "kind": "month" if is_single_month else "range",
             "start_date": start_date,
             "end_date": end_date,
-            "granularity": "month",
-            "raw_text": f"{start_dt.strftime('%B')} {start_dt.year}",
+            "granularity": "month" if is_single_month else "range",
+            "raw_text": (
+                f"{start_dt.strftime('%B')} {start_dt.year}"
+                if is_single_month
+                else f"{start_dt.strftime('%B %Y')} to {end_dt.strftime('%B %Y')}"
+            ),
         }
     payload.setdefault("sql_hints", {})
     if not payload["sql_hints"].get("metric"):
@@ -864,11 +880,14 @@ def _apply_balancing_month_explanation_guardrail(
     topic_rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
     payload["knowledge"]["candidate_topics"] = topic_rows[:5]
 
+    is_single_month = bool(
+        start_dt is not None
+        and end_dt is not None
+        and (start_dt.year, start_dt.month) == (end_dt.year, end_dt.month)
+    )
     forced_metrics = [
         {"metric_name": "mom_absolute_change", "metric": "balancing"},
         {"metric_name": "mom_percent_change", "metric": "balancing"},
-        {"metric_name": "yoy_absolute_change", "metric": "balancing"},
-        {"metric_name": "yoy_percent_change", "metric": "balancing"},
         {"metric_name": "mom_absolute_change", "metric": "exchange_rate"},
         {"metric_name": "share_delta_mom", "metric": "share_import"},
         {"metric_name": "share_delta_mom", "metric": "share_regulated_hpp"},
@@ -876,7 +895,22 @@ def _apply_balancing_month_explanation_guardrail(
         {"metric_name": "share_delta_mom", "metric": "share_renewable_ppa"},
         {"metric_name": "share_delta_mom", "metric": "share_thermal_ppa"},
     ]
+    if is_single_month:
+        forced_metrics[2:2] = [
+            {"metric_name": "yoy_absolute_change", "metric": "balancing"},
+            {"metric_name": "yoy_percent_change", "metric": "balancing"},
+        ]
     existing_metrics = payload["analysis_requirements"].get("derived_metrics", []) or []
+    if not is_single_month:
+        # The explicit range owns the evidence boundary. Do not retain LLM-
+        # requested YoY/correlation/trend metrics that require data outside it.
+        existing_metrics = [
+            item
+            for item in existing_metrics
+            if isinstance(item, dict)
+            and str(item.get("metric_name") or "")
+            in {"mom_absolute_change", "mom_percent_change", "share_delta_mom"}
+        ]
     merged_metrics = []
     seen_metric_keys: set[tuple[str, str | None]] = set()
     for item in list(existing_metrics) + forced_metrics:

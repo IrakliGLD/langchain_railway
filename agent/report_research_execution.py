@@ -18,6 +18,7 @@ from agent.report_evidence import (
     build_report_narrative_items,
     make_report_narrative_evidence_item,
     make_report_table_evidence_item,
+    report_pipeline_context_block_reason,
 )
 from agent.router import extract_currency, extract_price_metric
 from agent.tools.composition_tools import get_balancing_composition
@@ -818,6 +819,12 @@ def execute_report_track_analysis(
         request_deadline=request_deadline,
         answer_mode="report",
     )
+    block_reason = report_pipeline_context_block_reason(context)
+    if block_reason:
+        raise ValueError(
+            "Track analysis pipeline context is not usable: "
+            f"{block_reason}."
+        )
     manifest = build_report_evidence_manifest(context)
     # Statistics and curated knowledge are the analyzed findings the report
     # writers need most. Put them ahead of supporting raw tables so the packet

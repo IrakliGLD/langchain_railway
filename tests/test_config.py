@@ -154,6 +154,15 @@ def test_report_track_analysis_defaults_disabled():
     assert REPORT_TRACK_ANALYSIS_MODE == "disabled"
 
 
+def test_enabled_report_pipeline_defaults_track_analysis_to_enabled():
+    result = _report_pipeline_v2_with_env(
+        REPORT_PIPELINE_V2_MODE="enabled",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[-1] == "enabled"
+
+
 def test_report_pipeline_v2_rejects_worker_count_above_track_count():
     result = _report_pipeline_v2_with_env(
         REPORT_RESEARCH_MAX_TRACKS="2",

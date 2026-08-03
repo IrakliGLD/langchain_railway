@@ -132,6 +132,7 @@ REPORT_TIMEOUT_SECONDS=240
 REPORT_REASONING_EFFORT=medium
 REPORT_STRUCTURED_OUTPUT_METHOD=auto
 REPORT_PIPELINE_V2_MODE=shadow
+REPORT_TRACK_ANALYSIS_MODE=shadow
 REPORT_MAX_GENERATIVE_CALLS=3
 REPORT_RESEARCH_MAX_TRACKS=4
 REPORT_RESEARCH_MAX_WORKERS=3
@@ -162,6 +163,11 @@ the legacy result. After validating coverage and cost, apply the
 function and frontend, and then set the worker to `enabled`. Enabled mode uses
 at most one research-planner call, one whole-document writer call, and one
 targeted repair call. Set `REPORT_MAX_GENERATIVE_CALLS=2` to disable repair.
+
+When `REPORT_PIPELINE_V2_MODE=enabled`, track-scoped standard-quality analysis
+also defaults to `enabled`. Set `REPORT_TRACK_ANALYSIS_MODE=shadow` or
+`disabled` explicitly only for observation or rollback. An explicit override
+always takes precedence over the derived default.
 
 ## Manual Endpoint Validation
 

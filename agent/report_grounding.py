@@ -6,7 +6,7 @@ import math
 import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from contracts.report_evidence import ReportEvidenceItem, ReportEvidenceKind
 from contracts.report_sections import (
@@ -513,6 +513,136 @@ def _verified_derived_fact(
             )
         )
     return displayed, operand_period_facts
+
+
+def _verified_derived_display_value(
+    claim: ReportDerivedClaim,
+    paragraph_refs: set[str],
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> str | None:
+    operands = [
+        _resolve_operand(operand, paragraph_refs, item_by_ref)
+        for operand in claim.operands
+    ]
+    if any(operand is None for operand in operands):
+        return None
+    declared = _parse_numeric_token(claim.display_value)
+    if declared is None:
+        return None
+    try:
+        computed = _compute_derived_value(
+            claim,
+            [operand for operand in operands if operand is not None],
+        )
+        if computed is None:
+            return None
+        quantum = Decimal(1).scaleb(-declared.precision)
+        rounded = computed.quantize(quantum, rounding=ROUND_HALF_UP)
+    except DecimalException:
+        return None
+    if rounded == 0:
+        rounded = abs(rounded)
+    rendered = format(rounded, f".{declared.precision}f")
+    return rendered + ("%" if declared.is_percent else "")
+
+
+def _replace_unique_declared_value(
+    text: str,
+    claim: ReportDerivedClaim,
+    replacement: str,
+) -> str | None:
+    declared = re.escape(claim.display_value)
+    normalized_unit = _normalize_unit(claim.unit)
+    if claim.display_value.endswith("%"):
+        pattern = rf"(?<![\w.,]){declared}(?!\w)"
+    elif normalized_unit in _DIMENSIONLESS_UNITS:
+        pattern = rf"(?<![\w.,]){declared}(?!\d)(?![.,]\d)(?!%)(?!\w)"
+    else:
+        unit_pattern = _claim_unit_pattern(claim.unit)
+        pattern = (
+            rf"(?<![\w.,]){declared}(?![\d.,])"
+            rf"(?=\s+{unit_pattern}(?!\w))"
+        )
+    matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    return text[: match.start()] + replacement + text[match.end() :]
+
+
+def normalize_repairable_derived_claims(
+    draft: Any,
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> tuple[Any, int]:
+    """Correct unambiguous derived displays from their verified operands."""
+    repaired_count = 0
+    repaired_paragraphs: list[ReportSectionParagraph] = []
+    for paragraph in draft.paragraphs:
+        paragraph_refs = set(paragraph.evidence_refs)
+        text = paragraph.text
+        claims: list[ReportDerivedClaim] = []
+        for claim in paragraph.derived_claims:
+            expected = _verified_derived_display_value(
+                claim,
+                paragraph_refs,
+                item_by_ref,
+            )
+            if expected is None or expected == claim.display_value:
+                claims.append(claim)
+                continue
+            repaired_text = _replace_unique_declared_value(
+                text,
+                claim,
+                expected,
+            )
+            if repaired_text is None:
+                claims.append(claim)
+                continue
+            text = repaired_text
+            claims.append(claim.model_copy(update={"display_value": expected}))
+            repaired_count += 1
+        repaired_paragraphs.append(
+            paragraph.model_copy(
+                update={"text": text, "derived_claims": claims}
+            )
+        )
+    if not repaired_count:
+        return draft, 0
+    return draft.model_copy(update={"paragraphs": repaired_paragraphs}), repaired_count
+
+
+def build_derived_claim_repair_hints(
+    sections: Sequence[Any],
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> list[dict[str, Any]]:
+    """Project code-computed derived values for the report repair prompt."""
+    hints: list[dict[str, Any]] = []
+    for section in sections:
+        for paragraph_index, paragraph in enumerate(section.paragraphs):
+            paragraph_refs = set(paragraph.evidence_refs)
+            for claim_index, claim in enumerate(paragraph.derived_claims):
+                expected = _verified_derived_display_value(
+                    claim,
+                    paragraph_refs,
+                    item_by_ref,
+                )
+                if expected is None:
+                    continue
+                hints.append(
+                    {
+                        "section_id": section.section_id,
+                        "paragraph_index": paragraph_index,
+                        "claim_index": claim_index,
+                        "operation": claim.operation,
+                        "operands": [
+                            operand.model_dump(mode="json")
+                            for operand in claim.operands
+                        ],
+                        "verified_display_value": expected,
+                        "unit": claim.unit,
+                    }
+                )
+    return hints
 
 
 def _derived_claim_appears(

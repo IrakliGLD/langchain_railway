@@ -35,7 +35,10 @@ from pydantic import BaseModel, Field, ValidationError
 
 import knowledge as knowledge_module
 from agent.report_charts import chart_column_roles
-from agent.report_grounding import observed_period_span
+from agent.report_grounding import (
+    build_derived_claim_repair_hints,
+    observed_period_span,
+)
 from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
@@ -4766,6 +4769,12 @@ def llm_repair_report_document_sections(
             if section_id in rejected_by_id
         ]
     rejected_json = _compact_json(rejected_payload)
+    derived_repair_hints_json = _compact_json(
+        build_derived_claim_repair_hints(
+            rejected_sections or [],
+            manifest.item_by_ref(),
+        )
+    )
 
     def section_repair_context(section_id: str) -> dict[str, Any]:
         return {
@@ -4798,6 +4807,10 @@ def llm_repair_report_document_sections(
         "the supplied blocking validation errors; length recommendations are "
         "not repair requirements. Every section receives the union of applicable "
         "document and section errors. "
+        "Do not delete a repairable analytical finding merely to satisfy "
+        "grounding. Rebuild it from VERIFIED_DERIVED_REPAIR_HINTS, render the "
+        "verified display value and unit in the paragraph, and emit the matching "
+        "derived_claims entry. "
         f"{_REPORT_CLAIM_CONTRACT_RULES} "
         "Use only assigned "
         "evidence; do not add general model knowledge. "
@@ -4818,6 +4831,8 @@ def llm_repair_report_document_sections(
         f"{errors_json}\n\n"
         "REJECTED_SECTIONS:\n"
         f"{rejected_json}\n\n"
+        "VERIFIED_DERIVED_REPAIR_HINTS:\n"
+        f"{derived_repair_hints_json}\n\n"
         "EVIDENCE_PACKET:\n"
         f"{evidence_json}\n\n"
         "NUMERIC_OBSERVATIONS:\n"

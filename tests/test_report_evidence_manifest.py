@@ -285,6 +285,20 @@ def test_pipeline_narrative_items_skip_empty_sources():
     assert build_report_narrative_items(None) == []
 
 
+def test_pipeline_narrative_items_reject_blocked_or_incomplete_contexts():
+    from agent.report_evidence import build_report_narrative_items
+
+    blocked = SimpleNamespace(
+        terminal_outcome="clarification_required",
+        missing_evidence_for_metrics=["mom_percent_change"],
+        stats_hint="Observed mean balancing price was 141.0 GEL/MWh.",
+        summary_domain_knowledge="The balancing market settles hourly.",
+        provenance_refs=["query:prices"],
+    )
+
+    assert build_report_narrative_items(blocked) == []
+
+
 def test_count_like_columns_receive_a_dimensionless_unit():
     from agent.report_evidence import _inferred_unit_by_column
 

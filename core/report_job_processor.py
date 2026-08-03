@@ -584,10 +584,23 @@ class ReportJobProcessor:
         an empty list and is logged.
         """
 
-        from agent.report_evidence import build_report_narrative_items
+        from agent.report_evidence import (
+            build_report_narrative_items,
+            report_pipeline_context_block_reason,
+        )
 
         try:
             context = self._run_query_pipeline(lease)
+            block_reason = report_pipeline_context_block_reason(context)
+            if block_reason:
+                _LOGGER.warning(
+                    "Report narrative enrichment skipped: job_id=%s "
+                    "job_attempt=%s reason=%s",
+                    lease.job_id,
+                    lease.attempt_count,
+                    block_reason,
+                )
+                return []
             items = build_report_narrative_items(context)
         except Exception as exc:
             _LOGGER.warning(
