@@ -10,9 +10,12 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from numbers import Real
+from typing import Any
 
 from agent.report_evidence import (
+    build_report_evidence_manifest,
     build_report_manifest_from_items,
+    build_report_narrative_items,
     make_report_narrative_evidence_item,
     make_report_table_evidence_item,
 )
@@ -677,18 +680,14 @@ def _chart_candidates(
     return candidates, gaps
 
 
-def _packet_for_track(
-    track,
-    outputs: Mapping[ReportCollectorId, ReportCollectorOutput],
+def _packet_from_items(
+    track: ReportResearchTrack,
+    items: Sequence[ReportEvidenceItem],
+    *,
+    gaps: Sequence[str] = (),
+    failed: bool = False,
 ) -> ReportEvidencePacket:
-    items: list[ReportEvidenceItem] = []
-    gaps: list[str] = []
-    failed = False
-    for collector_id in track.collector_ids:
-        output = outputs[collector_id]
-        items.extend(output.items)
-        gaps.extend(output.gaps)
-        failed = failed or output.failed
+    gaps = list(gaps)
     items = list(
         {
             item.evidence_ref: item
@@ -732,6 +731,26 @@ def _packet_for_track(
     )
 
 
+def _packet_for_track(
+    track: ReportResearchTrack,
+    outputs: Mapping[ReportCollectorId, ReportCollectorOutput],
+) -> ReportEvidencePacket:
+    items: list[ReportEvidenceItem] = []
+    gaps: list[str] = []
+    failed = False
+    for collector_id in track.collector_ids:
+        output = outputs[collector_id]
+        items.extend(output.items)
+        gaps.extend(output.gaps)
+        failed = failed or output.failed
+    return _packet_from_items(
+        track,
+        items,
+        gaps=gaps,
+        failed=failed,
+    )
+
+
 def _collector_query(
     user_query: str,
     track: ReportResearchTrack,
@@ -745,6 +764,96 @@ def _collector_query(
             *track.research_questions,
             f"Report context: {user_query}",
         ]
+    )
+
+
+def build_report_track_analysis_query(
+    report_query: str,
+    track: ReportResearchTrack,
+) -> str:
+    """Build one bounded analytical query for a planned research track.
+
+    The first planner question is authoritative. Remaining questions are
+    coverage constraints, not independent pipeline runs; treating every list
+    entry as a new request would multiply one track into as many as six model
+    and database executions.
+    """
+
+    def bounded(value: str, limit: int) -> str:
+        return str(value or "").strip()[:limit]
+
+    primary, *coverage = track.research_questions
+    parts = [
+        bounded(primary, 600),
+        f"Research track: {bounded(track.title, 160)}",
+    ]
+    if coverage:
+        parts.extend(
+            [
+                "Required coverage:",
+                *(f"- {bounded(question, 300)}" for question in coverage),
+            ]
+        )
+    parts.append(f"Report context: {bounded(report_query, 1000)}")
+    return "\n".join(parts)
+
+
+def execute_report_track_analysis(
+    report_query: str,
+    track: ReportResearchTrack,
+    *,
+    query_pipeline: Callable[..., Any],
+    trace_id: str = "",
+    actor_id: str = "",
+    request_id: str = "",
+    request_deadline: Any = None,
+) -> ReportEvidencePacket:
+    """Run one standard-quality, evidence-only pipeline for one track."""
+
+    context = query_pipeline(
+        build_report_track_analysis_query(report_query, track),
+        trace_id=trace_id,
+        actor_id=actor_id,
+        request_id=request_id,
+        request_deadline=request_deadline,
+        answer_mode="report",
+    )
+    manifest = build_report_evidence_manifest(context)
+    # Statistics and curated knowledge are the analyzed findings the report
+    # writers need most. Put them ahead of supporting raw tables so the packet
+    # cap cannot silently discard them on evidence-heavy tracks.
+    items = build_report_narrative_items(context)
+    items.extend(
+        item
+        for item in manifest.items
+        if item.kind is not ReportEvidenceKind.LIMITATION
+    )
+    return _packet_from_items(track, items)
+
+
+def merge_report_track_analysis_packet(
+    track: ReportResearchTrack,
+    baseline: ReportEvidencePacket,
+    analysis: ReportEvidencePacket,
+) -> ReportEvidencePacket:
+    """Attach track findings while retaining deterministic evidence fallback."""
+
+    if baseline.track_id != track.track_id or analysis.track_id != track.track_id:
+        raise ValueError("Track packet identity mismatch.")
+    gaps = [
+        gap
+        for packet in (analysis, baseline)
+        for gap in packet.gaps
+        if not gap.startswith("EXPECTED_EXHIBIT_")
+    ]
+    return _packet_from_items(
+        track,
+        [*analysis.items, *baseline.items],
+        gaps=gaps,
+        failed=(
+            baseline.status is ReportTrackStatus.FAILED
+            and analysis.status is ReportTrackStatus.FAILED
+        ),
     )
 
 

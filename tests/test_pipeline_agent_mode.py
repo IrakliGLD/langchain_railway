@@ -43,6 +43,8 @@ class _DummyEngine:
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
 from agent import pipeline  # noqa: E402
+from agent.report_evidence import make_report_narrative_evidence_item  # noqa: E402
+from contracts.report_evidence import ReportEvidenceKind  # noqa: E402
 
 
 def _minimal_df():
@@ -131,3 +133,55 @@ def test_report_pipeline_stops_after_evidence_without_rendering_chat_answer(
     assert out.terminal_outcome == "data_answer"
     assert "stage_4_summarize_data" not in out.stage_timings_ms
     assert "stage_5_chart_build" not in out.stage_timings_ms
+
+
+def test_report_pipeline_conceptual_path_stops_without_rendering_chat_answer(
+    monkeypatch,
+):
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_HINTS", False)
+    monkeypatch.setattr(pipeline, "ENABLE_QUESTION_ANALYZER_SHADOW", False)
+    monkeypatch.setattr(pipeline, "ENABLE_TYPED_TOOLS", False)
+
+    def _prepare(ctx):
+        ctx.is_conceptual = True
+        return ctx
+
+    monkeypatch.setattr(pipeline.planner, "prepare_context", _prepare)
+    monkeypatch.setattr(
+        pipeline,
+        "_run_vector_knowledge_stage",
+        lambda ctx, *_args, **_kwargs: ctx,
+    )
+    monkeypatch.setattr(
+        pipeline.summarizer,
+        "answer_conceptual",
+        lambda _ctx: (_ for _ in ()).throw(
+            AssertionError("report evidence must not render a conceptual answer")
+        ),
+    )
+    curated_knowledge = "Curated evidence describes the Georgian market model."
+    monkeypatch.setattr(
+        pipeline,
+        "build_report_narrative_items",
+        lambda _ctx: [
+            make_report_narrative_evidence_item(
+                kind=ReportEvidenceKind.KNOWLEDGE,
+                title="Curated domain knowledge",
+                source="curated_knowledge",
+                content=curated_knowledge,
+            )
+        ],
+        raising=False,
+    )
+
+    out = pipeline.process_query(
+        "Explain the Georgian electricity market model.",
+        trace_id="trace-report-conceptual",
+        session_id="session-report-conceptual",
+        answer_mode="report",
+    )
+
+    assert out.terminal_outcome == "conceptual_answer"
+    assert out.summary == ""
+    assert out.summary_domain_knowledge == curated_knowledge
+    assert "stage_4_conceptual_summary" not in out.stage_timings_ms

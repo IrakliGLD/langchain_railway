@@ -129,6 +129,13 @@ REPORT_PIPELINE_V2_MODE = (
     os.getenv("REPORT_PIPELINE_V2_MODE", "disabled").strip().lower()
     or "disabled"
 )
+# Track-scoped analysis rolls out independently from the document-pipeline v2
+# cutover. Keeping its default disabled lets operators shadow and compare the
+# new evidence packets before they can change a report.
+REPORT_TRACK_ANALYSIS_MODE = (
+    os.getenv("REPORT_TRACK_ANALYSIS_MODE", "disabled").strip().lower()
+    or "disabled"
+)
 REPORT_MAX_GENERATIVE_CALLS = _read_bounded_int_env(
     "REPORT_MAX_GENERATIVE_CALLS",
     3,
@@ -708,6 +715,7 @@ def validate_runtime_settings(
     report_model: str | None = None,
     report_reasoning_effort: str | None = None,
     report_pipeline_v2_mode: str = "disabled",
+    report_track_analysis_mode: str = "disabled",
     report_max_generative_calls: int = 3,
     report_research_max_tracks: int = 4,
     report_research_max_workers: int = 3,
@@ -735,6 +743,11 @@ def validate_runtime_settings(
     if report_pipeline_v2_mode not in {"disabled", "shadow", "enabled"}:
         raise RuntimeError(
             "Invalid REPORT_PIPELINE_V2_MODE. Expected one of: "
+            "disabled, shadow, enabled"
+        )
+    if report_track_analysis_mode not in {"disabled", "shadow", "enabled"}:
+        raise RuntimeError(
+            "Invalid REPORT_TRACK_ANALYSIS_MODE. Expected one of: "
             "disabled, shadow, enabled"
         )
     if not 2 <= report_max_generative_calls <= 6:
@@ -922,6 +935,7 @@ validate_runtime_settings(
     report_model=REPORT_MODEL,
     report_reasoning_effort=REPORT_REASONING_EFFORT,
     report_pipeline_v2_mode=REPORT_PIPELINE_V2_MODE,
+    report_track_analysis_mode=REPORT_TRACK_ANALYSIS_MODE,
     report_max_generative_calls=REPORT_MAX_GENERATIVE_CALLS,
     report_research_max_tracks=REPORT_RESEARCH_MAX_TRACKS,
     report_research_max_workers=REPORT_RESEARCH_MAX_WORKERS,
