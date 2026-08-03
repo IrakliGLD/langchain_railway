@@ -1363,6 +1363,101 @@ def test_invalid_synthesis_batch_is_repaired():
     assert generated == valid_draft
 
 
+def test_analysis_section_ships_grounded_subset_when_repair_leaves_a_stray_number():
+    """The production shape: repair does not converge on one stray figure.
+
+    Job 33403df2 died with DERIVED_CLAIM_NOT_USED,UNGROUNDED_NUMERIC_CLAIM
+    after its single repair call, and the reader got nothing. The verified
+    claims around the stray value are still publishable.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+
+    def with_stray_number(section):
+        first, *rest = section.paragraphs
+        return section.model_copy(
+            update={
+                "paragraphs": [
+                    first.model_copy(
+                        update={
+                            "text": (
+                                first.text
+                                + " A stray reading reached 987.6 GEL/MWh."
+                            )
+                        }
+                    ),
+                    *rest,
+                ]
+            }
+        )
+
+    # Production job 33403df2 had a single analysis section, and only it
+    # carried the stray value.
+    poisoned_id = "prices"
+
+    def batch(section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                with_stray_number(section_by_id[section_id])
+                if section_id == poisoned_id
+                else section_by_id[section_id]
+                for section_id in section_ids
+            ],
+        )
+
+    def write_analysis(*_args, section_ids):
+        return batch(section_ids)
+
+    def write_synthesis(*_args, analysis_sections, section_ids):
+        return batch(section_ids)
+
+    def unconverged_repair(*_args, section_ids, **_kwargs):
+        # The repairer returns the same stray value, exactly as in production.
+        return batch(section_ids)
+
+    generated = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+        repair_sections=unconverged_repair,
+        allow_repair=True,
+    )
+
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+    published = {
+        section.section_id: section
+        for section in generated.generation_order_sections()
+    }
+    assert poisoned_id in analysis_ids
+    section = published[poisoned_id]
+    assert "987.6" not in section.content_markdown
+    # Trimmed, not gutted: the verified findings still ship.
+    assert sum(
+        len(paragraph.direct_claims) + len(paragraph.derived_claims)
+        for paragraph in section.paragraphs
+    ) >= 1
+
+
 def test_batch_path_spends_at_most_one_repair_call():
     (
         research_plan,
@@ -1406,24 +1501,38 @@ def test_batch_path_spends_at_most_one_repair_call():
             sections=[section_by_id[sid] for sid in section_ids],
         )
 
-    try:
-        generate_report_document(
-            _QUERY,
-            document_plan,
-            research_plan,
-            manifest,
-            packets,
-            write_analysis_sections=write_analysis,
-            write_synthesis_sections=write_synthesis,
-            repair_sections=repair_sections,
-            allow_repair=True,
-        )
-    except ReportDocumentGenerationError:
-        pass
-    else:
-        raise AssertionError("second batch failure must not be repaired")
+    generated = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+        repair_sections=repair_sections,
+        allow_repair=True,
+    )
 
+    # The budget boundary under test: synthesis fails with no repair left, so
+    # it must not buy a second call. It now ships the grounded subset of that
+    # batch instead of costing the reader the whole report.
     assert len(repair_calls) == 1
+    synthesis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role is not ReportDocumentSectionRole.ANALYSIS
+    ]
+    salvaged = {
+        section.section_id: section
+        for section in generated.generation_order_sections()
+        if section.section_id in synthesis_ids
+    }
+    assert salvaged
+    assert any(
+        section.content_markdown
+        != section_by_id[section_id].content_markdown
+        for section_id, section in salvaged.items()
+    )
 
 
 def test_batch_repair_returning_the_wrong_section_set_is_rejected():

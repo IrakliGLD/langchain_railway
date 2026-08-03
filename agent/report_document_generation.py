@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from agent.report_grounding import (
     build_evidence_grounding_index,
     normalize_repairable_derived_claims,
+    select_grounded_paragraphs,
 )
 from agent.report_sections import count_section_words, validate_report_section
 from contracts.report import report_section_validation_word_bounds
@@ -326,50 +327,13 @@ def validate_report_document(
             else:
                 add_section_error(section_id, code)
 
-        if section_spec.role is ReportDocumentSectionRole.ANALYSIS:
-            needs_numbers = any(
-                track.requested_metrics
-                for track in research_plan.tracks
-                if track.track_id in section_spec.track_ids
-            )
-            item_by_ref = manifest.item_by_ref()
-            available_numeric_coordinates = sum(
-                1
-                for evidence_ref in section_spec.required_evidence_refs
-                if (
-                    evidence_ref in item_by_ref
-                    and item_by_ref[evidence_ref].kind.value == "table"
-                )
-                for row in item_by_ref[evidence_ref].rows
-                for column, value in row.items()
-                if (
-                    isinstance(value, (int, float))
-                    and not isinstance(value, bool)
-                    and bool(
-                        item_by_ref[evidence_ref].unit_by_column.get(
-                            column
-                        )
-                    )
-                )
-            )
-            required_numeric_claims = (
-                min(2, available_numeric_coordinates)
-                if available_numeric_coordinates
-                else 1
-            )
-            numeric_claim_count = sum(
-                len(paragraph.direct_claims)
-                + len(paragraph.derived_claims)
-                for paragraph in draft_section.paragraphs
-            )
-            if (
-                needs_numbers
-                and numeric_claim_count < required_numeric_claims
-            ):
-                add_section_error(
-                    section_id,
-                    "NUMERIC_FINDING_MISSING",
-                )
+        if _analysis_numeric_finding_missing(
+            draft_section,
+            section_spec,
+            manifest,
+            research_plan,
+        ):
+            add_section_error(section_id, "NUMERIC_FINDING_MISSING")
 
     for section_id in _repeated_section_ids(draft):
         add_section_error(section_id, "CROSS_SECTION_REPETITION")
@@ -512,6 +476,138 @@ def _materialize_section_batch(
         section_warnings=section_warnings,
         word_count=word_count,
     )
+
+
+def _analysis_numeric_finding_missing(
+    draft_section: ReportSectionDraft,
+    section_spec: Any,
+    manifest: ReportEvidenceManifest,
+    research_plan: ReportResearchPlan,
+) -> bool:
+    """Return whether an analysis section carries too few verified numbers.
+
+    Single authority for the rule, so the document gate and the grounded-subset
+    guard cannot disagree about what counts as an analysis section worth
+    shipping.
+    """
+
+    if section_spec.role is not ReportDocumentSectionRole.ANALYSIS:
+        return False
+    needs_numbers = any(
+        track.requested_metrics
+        for track in research_plan.tracks
+        if track.track_id in section_spec.track_ids
+    )
+    if not needs_numbers:
+        return False
+    item_by_ref = manifest.item_by_ref()
+    available_numeric_coordinates = sum(
+        1
+        for evidence_ref in section_spec.required_evidence_refs
+        if (
+            evidence_ref in item_by_ref
+            and item_by_ref[evidence_ref].kind.value == "table"
+        )
+        for row in item_by_ref[evidence_ref].rows
+        for column, value in row.items()
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and bool(item_by_ref[evidence_ref].unit_by_column.get(column))
+        )
+    )
+    required_numeric_claims = (
+        min(2, available_numeric_coordinates)
+        if available_numeric_coordinates
+        else 1
+    )
+    numeric_claim_count = sum(
+        len(paragraph.direct_claims) + len(paragraph.derived_claims)
+        for paragraph in draft_section.paragraphs
+    )
+    return numeric_claim_count < required_numeric_claims
+
+
+def _sections_or_grounded_subset(
+    sections: list[ReportSectionDraft] | None,
+    validation: ReportDocumentValidation,
+    plan: ReportDocumentPlan,
+    manifest: ReportEvidenceManifest,
+    *,
+    section_ids: Sequence[str],
+    stage: str,
+    research_plan: ReportResearchPlan,
+) -> tuple[list[ReportSectionDraft] | None, ReportDocumentValidation]:
+    """Ship the grounded subset when the repair budget did not converge.
+
+    Called only where the pipeline is otherwise about to give up. Dropping the
+    sentences the evidence cannot support costs the reader a shorter section;
+    raising costs them the whole report, and REPORT_DOCUMENT_INVALID is not
+    retryable. Fails closed: a subset that still does not validate is returned
+    as-is so the caller raises exactly as before.
+    """
+
+    if sections is None or validation.valid:
+        return sections, validation
+    item_by_ref = manifest.item_by_ref()
+    salvaged_sections: list[ReportSectionDraft] = []
+    dropped_total = 0
+    for section in sections:
+        salvaged, dropped = select_grounded_paragraphs(section, item_by_ref)
+        salvaged_sections.append(salvaged)
+        dropped_total += dropped
+    if not dropped_total:
+        return sections, validation
+    plan_by_id = {section.section_id: section for section in plan.sections}
+    # A salvage that strips an analysis section of every number leaves prose
+    # that reads like a report and reports nothing. Refuse it here rather than
+    # letting it travel to the document gate as NUMERIC_FINDING_MISSING.
+    if any(
+        _analysis_numeric_finding_missing(
+            section,
+            plan_by_id[section.section_id],
+            manifest,
+            research_plan,
+        )
+        for section in salvaged_sections
+        if section.section_id in plan_by_id
+    ):
+        return sections, validation
+    subset_sections, subset_validation = _materialize_section_batch(
+        ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=salvaged_sections,
+        ),
+        plan,
+        manifest,
+        section_ids=section_ids,
+    )
+    _LOGGER.info(
+        "REPORT_GROUNDED_SUBSET %s",
+        json.dumps(
+            {
+                "applied": subset_validation.valid,
+                "dropped_sentence_count": dropped_total,
+                "recovered_section_ids": sorted(
+                    set(section_ids) - set(subset_validation.section_errors)
+                ),
+                "residual_error_codes": sorted(
+                    {
+                        code
+                        for errors in subset_validation.section_errors.values()
+                        for code in errors
+                    }
+                ),
+                "stage": stage,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    if not subset_validation.valid:
+        return sections, validation
+    return subset_sections, subset_validation
 
 
 def _normalize_document_roles(
@@ -681,7 +777,19 @@ def generate_report_document(
         )
         if analysis_sections is None or not analysis_validation.valid:
             if not allow_repair:
-                raise ReportDocumentGenerationError(analysis_validation)
+                analysis_sections, analysis_validation = (
+                    _sections_or_grounded_subset(
+                        analysis_sections,
+                        analysis_validation,
+                        plan,
+                        manifest,
+                        section_ids=analysis_ids,
+                        stage="analysis_unrepaired",
+                        research_plan=research_plan,
+                    )
+                )
+                if analysis_sections is None or not analysis_validation.valid:
+                    raise ReportDocumentGenerationError(analysis_validation)
             # Whichever stage spends the repair, the later gates short-circuit:
             # the processor's budget reserves exactly one repair call.
             allow_repair = False
@@ -696,6 +804,17 @@ def generate_report_document(
                 analysis_validation,
                 repair_sections,
                 section_ids=analysis_ids,
+            )
+            analysis_sections, analysis_validation = (
+                _sections_or_grounded_subset(
+                    analysis_sections,
+                    analysis_validation,
+                    plan,
+                    manifest,
+                    section_ids=analysis_ids,
+                    stage="analysis_repaired",
+                    research_plan=research_plan,
+                )
             )
             if analysis_sections is None or not analysis_validation.valid:
                 raise ReportDocumentGenerationError(analysis_validation)
@@ -716,7 +835,22 @@ def generate_report_document(
         )
         if synthesis_sections is None or not synthesis_validation.valid:
             if not allow_repair:
-                raise ReportDocumentGenerationError(synthesis_validation)
+                synthesis_sections, synthesis_validation = (
+                    _sections_or_grounded_subset(
+                        synthesis_sections,
+                        synthesis_validation,
+                        plan,
+                        manifest,
+                        section_ids=synthesis_ids,
+                        stage="synthesis_unrepaired",
+                        research_plan=research_plan,
+                    )
+                )
+                if (
+                    synthesis_sections is None
+                    or not synthesis_validation.valid
+                ):
+                    raise ReportDocumentGenerationError(synthesis_validation)
             allow_repair = False
             synthesis_sections, synthesis_validation = _repair_section_batch(
                 query,
@@ -729,6 +863,17 @@ def generate_report_document(
                 synthesis_validation,
                 repair_sections,
                 section_ids=synthesis_ids,
+            )
+            synthesis_sections, synthesis_validation = (
+                _sections_or_grounded_subset(
+                    synthesis_sections,
+                    synthesis_validation,
+                    plan,
+                    manifest,
+                    section_ids=synthesis_ids,
+                    stage="synthesis_repaired",
+                    research_plan=research_plan,
+                )
             )
             if synthesis_sections is None or not synthesis_validation.valid:
                 raise ReportDocumentGenerationError(synthesis_validation)
