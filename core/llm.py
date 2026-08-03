@@ -37,6 +37,7 @@ import knowledge as knowledge_module
 from agent.report_charts import chart_column_roles
 from agent.report_grounding import (
     build_derived_claim_repair_hints,
+    build_ungrounded_claim_repair_hints,
     observed_period_span,
 )
 from agent.report_projection import projected_row_indices
@@ -3940,10 +3941,22 @@ _REPORT_DOCUMENT_EVIDENCE_BUDGET_CHARS = 48_000
 _REPORT_DOCUMENT_OBSERVATION_BUDGET_CHARS = 16_000
 
 
+def _section_evidence_row_count(
+    section: Any,
+    manifest: ReportEvidenceManifest | None,
+) -> int | None:
+    """Return the rows a section may cite, or None when they are unknown."""
+
+    if manifest is None:
+        return None
+    return manifest.assigned_row_count(section.required_evidence_refs)
+
+
 def _report_document_plan_projection(
     plan: ReportDocumentPlan,
     *,
     section_ids: set[str] | None = None,
+    manifest: ReportEvidenceManifest | None = None,
 ) -> dict[str, Any]:
     selected_sections = [
         section
@@ -3968,10 +3981,14 @@ def _report_document_plan_projection(
             {
                 **section.model_dump(mode="json"),
                 "recommended_minimum_words": report_section_prompt_word_bounds(
-                    section.target_words
+                    section.target_words,
+                    evidence_row_count=_section_evidence_row_count(
+                        section,
+                        manifest,
+                    ),
                 )[0],
                 "recommended_maximum_words": report_section_prompt_word_bounds(
-                    section.target_words
+                    section.target_words,
                 )[1],
             }
             for section in selected_sections
@@ -4223,6 +4240,7 @@ def _report_document_prompt_inputs(
             _report_document_plan_projection(
                 plan,
                 section_ids=section_ids,
+                manifest=manifest,
             )
         ),
         _compact_json(
@@ -4775,6 +4793,12 @@ def llm_repair_report_document_sections(
             manifest.item_by_ref(),
         )
     )
+    ungrounded_repair_hints_json = _compact_json(
+        build_ungrounded_claim_repair_hints(
+            rejected_sections or [],
+            manifest.item_by_ref(),
+        )
+    )
 
     def section_repair_context(section_id: str) -> dict[str, Any]:
         return {
@@ -4811,6 +4835,11 @@ def llm_repair_report_document_sections(
         "grounding. Rebuild it from VERIFIED_DERIVED_REPAIR_HINTS, render the "
         "verified display value and unit in the paragraph, and emit the matching "
         "derived_claims entry. "
+        "UNGROUNDED_VALUE_REPAIR_HINTS lists the exact values each paragraph "
+        "asserts that its assigned evidence cannot support. Resolve every one: "
+        "cite it as a direct_claims or derived_claims entry if the evidence "
+        "carries it, otherwise remove the value and the assertion that depends "
+        "on it. Introduce no replacement number that is not itself cited. "
         f"{_REPORT_CLAIM_CONTRACT_RULES} "
         "Use only assigned "
         "evidence; do not add general model knowledge. "
@@ -4833,6 +4862,8 @@ def llm_repair_report_document_sections(
         f"{rejected_json}\n\n"
         "VERIFIED_DERIVED_REPAIR_HINTS:\n"
         f"{derived_repair_hints_json}\n\n"
+        "UNGROUNDED_VALUE_REPAIR_HINTS:\n"
+        f"{ungrounded_repair_hints_json}\n\n"
         "EVIDENCE_PACKET:\n"
         f"{evidence_json}\n\n"
         "NUMERIC_OBSERVATIONS:\n"
@@ -4892,9 +4923,17 @@ def _report_document_repair_temperature() -> float | None:
     return _repair_sampling_temperature(1)
 
 
-def _report_section_validation_rules(section: ReportSectionSpec) -> str:
+def _report_section_validation_rules(
+    section: ReportSectionSpec,
+    manifest: ReportEvidenceManifest | None = None,
+) -> str:
     minimum_words, maximum_words = report_section_prompt_word_bounds(
-        section.target_words
+        section.target_words,
+        evidence_row_count=(
+            None
+            if manifest is None
+            else manifest.assigned_row_count(section.required_evidence_refs)
+        ),
     )
     bounds = _compact_json(
         {
@@ -5124,7 +5163,7 @@ def llm_write_report_section(
 
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
-    validation_rules = _report_section_validation_rules(section)
+    validation_rules = _report_section_validation_rules(section, manifest)
     section_json = _compact_json(section.model_dump(mode="json"))
 
     def cacheable(draft: ReportSectionDraft) -> bool:
@@ -5204,7 +5243,7 @@ def llm_repair_report_section(
         raise ValueError("attempt_number must be between 2 and 4.")
     guidance = get_report_guidance("section_writing")
     evidence_slice = _report_section_evidence_slice(section, manifest)
-    validation_rules = _report_section_validation_rules(section)
+    validation_rules = _report_section_validation_rules(section, manifest)
     section_json = _compact_json(section.model_dump(mode="json"))
     draft_json = (
         draft.model_dump_json()
@@ -5217,6 +5256,12 @@ def llm_repair_report_section(
         if re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code)
     ]
     errors_json = _compact_json(safe_error_codes or ["SECTION_VALIDATION_FAILED"])
+    ungrounded_repair_hints_json = _compact_json(
+        build_ungrounded_claim_repair_hints(
+            [draft] if isinstance(draft, ReportSectionDraft) else [],
+            manifest.item_by_ref(),
+        )
+    )
     system = (
         "You repair one rejected evidence-grounded report section. Return one "
         "replacement JSON object matching the supplied schema exactly. Treat "
@@ -5230,11 +5275,16 @@ def llm_repair_report_section(
         "statements from narrative evidence need no direct_claims entry. Equivalent "
         "formatting and conventional display rounding are allowed. For derived "
         "arithmetic, populate derived_claims with exact zero-based table row "
-        "coordinates; never calculate from narrative evidence."
+        "coordinates; never calculate from narrative evidence. "
+        "UNGROUNDED_VALUE_REPAIR_HINTS names the exact values this candidate "
+        "asserts that its assigned evidence cannot support. Resolve every one: "
+        "cite it if the evidence carries it, otherwise remove the value and the "
+        "assertion resting on it, and add no uncited replacement number."
     )
     cache_input = (
         f"report_section_repair_v1|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|errors={errors_json}|"
+        f"ungrounded={ungrounded_repair_hints_json}|"
         f"candidate={draft_json}|guidance={guidance}|"
         f"validation={validation_rules}|"
         f"schema={_REPORT_SECTION_SCHEMA_JSON}|system={system}"
@@ -5254,6 +5304,8 @@ def llm_repair_report_section(
         f"{evidence_slice}\n\n"
         "VALIDATION_ERROR_CODES:\n"
         f"{errors_json}\n\n"
+        "UNGROUNDED_VALUE_REPAIR_HINTS:\n"
+        f"{ungrounded_repair_hints_json}\n\n"
         "REJECTED_CANDIDATE:\n"
         f"{draft_json}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"

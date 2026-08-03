@@ -93,6 +93,7 @@ def _log_document_diagnostic(
     role_normalization_applied: bool = False,
     baseline_draft: ReportDocumentDraft | None = None,
     sections: Sequence[ReportSectionDraft] | None = None,
+    manifest: ReportEvidenceManifest | None = None,
 ) -> None:
     minimum_words, maximum_words = report_document_recommended_word_bounds(
         plan
@@ -126,10 +127,20 @@ def _log_document_diagnostic(
         for section_id, word_count in section_word_counts.items()
         if section_id in baseline_word_counts
     }
+    # Report the bounds validation actually applied. The floor scales with the
+    # rows a section can cite, so logging the flat one would describe a gate
+    # that never ran.
     section_bounds = {
         section.section_id: {
             "minimum_words": report_section_validation_word_bounds(
-                section.target_words
+                section.target_words,
+                evidence_row_count=(
+                    None
+                    if manifest is None
+                    else manifest.assigned_row_count(
+                        section.required_evidence_refs
+                    )
+                ),
             )[0],
             "maximum_words": report_section_validation_word_bounds(
                 section.target_words
@@ -548,6 +559,7 @@ def _repair_section_batch(
     if not invalid_ids:
         return sections, validation
     _log_document_diagnostic(
+        manifest=manifest,
         event="batch_repair_requested",
         plan=plan,
         validation=validation,
@@ -756,6 +768,7 @@ def generate_report_document(
         )
         if role_normalization_applied:
             _log_document_diagnostic(
+                manifest=manifest,
                 event="roles_normalized",
                 plan=plan,
                 validation=validation,
@@ -783,6 +796,7 @@ def generate_report_document(
 
         repair_sections = llm_repair_report_document_sections
     _log_document_diagnostic(
+        manifest=manifest,
         event="repair_requested",
         plan=plan,
         validation=validation,
@@ -827,6 +841,7 @@ def generate_report_document(
         research_plan,
     )
     _log_document_diagnostic(
+        manifest=manifest,
         event=(
             "repair_validated"
             if repaired_validation.valid

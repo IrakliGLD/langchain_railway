@@ -69,9 +69,17 @@ def count_section_words(text: str) -> int:
 # A +20% ceiling is simply unreachable for it, so the repair loop burned
 # provider calls it could never satisfy. The lower bound stays tight — a short
 # section is a content failure, an overlong one is a formatting one.
-def _section_word_bounds(section: ReportSectionSpec) -> tuple[int, int]:
+def _section_word_bounds(
+    section: ReportSectionSpec,
+    manifest: ReportEvidenceManifest | None = None,
+) -> tuple[int, int]:
     return report_section_validation_word_bounds(
-        section.target_words
+        section.target_words,
+        evidence_row_count=(
+            None
+            if manifest is None
+            else manifest.assigned_row_count(section.required_evidence_refs)
+        ),
     )
 
 
@@ -115,8 +123,11 @@ def _log_section_diagnostic(
     provider_error: ProviderExecutionError | None = None,
     draft: Any = None,
     level: int = logging.INFO,
+    manifest: ReportEvidenceManifest | None = None,
 ) -> None:
-    minimum_words, maximum_words = _section_word_bounds(section)
+    # Report the same bounds validation applied; a diagnostic that disagrees
+    # with the gate it explains is worse than no diagnostic at all.
+    minimum_words, maximum_words = _section_word_bounds(section, manifest)
     payload: dict[str, Any] = {
         "attempt": attempt,
         "duration_ms": round(max(0.0, (time.monotonic() - started_at) * 1000), 2),
@@ -168,7 +179,7 @@ def validate_report_section(
         errors.append("SECTION_TITLE_MISMATCH")
 
     word_count = count_section_words(draft.content_markdown)
-    minimum_words, maximum_words = _section_word_bounds(section)
+    minimum_words, maximum_words = _section_word_bounds(section, manifest)
     if word_count < minimum_words:
         errors.append("WORD_COUNT_TOO_SHORT")
     elif word_count > maximum_words:
@@ -294,6 +305,7 @@ def generate_report_sections(
             )
         except ProviderExecutionError as exc:
             _log_section_diagnostic(
+                manifest=manifest,
                 event="provider_failed",
                 section=section,
                 attempt=1,
@@ -337,6 +349,7 @@ def generate_report_sections(
 
         if error_codes:
             _log_section_diagnostic(
+                manifest=manifest,
                 event="candidate_rejected",
                 section=section,
                 attempt=1,
@@ -374,6 +387,7 @@ def generate_report_sections(
                         repaired_raw = effective_repair(*repair_args)
                 except ProviderExecutionError as exc:
                     _log_section_diagnostic(
+                        manifest=manifest,
                         event="provider_failed",
                         section=section,
                         attempt=attempt,
@@ -392,6 +406,7 @@ def generate_report_sections(
                 except ValidationError as exc:
                     current_error_codes = ["SECTION_SCHEMA_INVALID"]
                     _log_section_diagnostic(
+                        manifest=manifest,
                         event="repair_rejected",
                         section=section,
                         attempt=attempt,
@@ -425,6 +440,7 @@ def generate_report_sections(
                     current_draft = repaired_raw
                     current_error_codes = ["SECTION_SCHEMA_INVALID"]
                     _log_section_diagnostic(
+                        manifest=manifest,
                         event="repair_rejected",
                         section=section,
                         attempt=attempt,
@@ -446,6 +462,7 @@ def generate_report_sections(
                 )
                 if repaired_validation.valid:
                     _log_section_diagnostic(
+                        manifest=manifest,
                         event="repair_validated",
                         section=section,
                         attempt=attempt,
@@ -458,6 +475,7 @@ def generate_report_sections(
                 current_draft = repaired
                 current_error_codes = repaired_validation.error_codes
                 _log_section_diagnostic(
+                    manifest=manifest,
                     event="repair_rejected",
                     section=section,
                     attempt=attempt,
@@ -472,6 +490,7 @@ def generate_report_sections(
                 current_error_codes,
             )
         _log_section_diagnostic(
+            manifest=manifest,
             event="candidate_validated",
             section=section,
             attempt=1,

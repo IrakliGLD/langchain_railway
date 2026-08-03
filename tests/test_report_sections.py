@@ -28,7 +28,12 @@ from agent.report_sections import (
     generate_report_sections,
     validate_report_section,
 )
-from contracts.report import ReportPlan
+from contracts.report import (
+    REPORT_SECTION_MIN_WORDS,
+    ReportPlan,
+    report_section_prompt_word_bounds,
+    report_section_validation_word_bounds,
+)
 from contracts.report_sections import ReportSectionDraft
 from tests.test_report_planner import _manifest, _plan_payload
 from utils.provider_attempts import (
@@ -330,8 +335,12 @@ def test_section_validation_enforces_budget_refs_and_numeric_grounding():
 def test_section_word_count_errors_are_directional():
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[2]
-    minimum_words = math.floor(section.target_words * 0.9)
-    maximum_words = math.ceil(section.target_words * 1.35)
+    minimum_words, maximum_words = report_section_validation_word_bounds(
+        section.target_words,
+        evidence_row_count=_manifest().assigned_row_count(
+            section.required_evidence_refs
+        ),
+    )
 
     too_short = validate_report_section(
         ReportSectionDraft.model_validate(
@@ -2238,3 +2247,126 @@ def test_an_unrendered_unit_is_reported_separately_from_a_bad_value():
         _manifest(),
     )
     assert "DIRECT_CLAIM_UNIT_NOT_RENDERED" in validation.error_codes
+
+
+def test_ungrounded_claim_repair_hints_name_the_offending_value():
+    """A blind UNGROUNDED_NUMERIC_CLAIM cannot converge inside one repair call.
+
+    The repairer is told only the error code, so it must guess which of its
+    numbers offended. Naming the value is what made DERIVED_CLAIM_INVALID
+    repairable, and this is the same contract for the ungrounded path.
+    """
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            "A later reading reached 999.9 GEL/MWh. "
+            + _words(section.target_words - 16)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _manifest()
+
+    validation = validate_report_section(draft, section, manifest)
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validation.error_codes
+
+    hints = report_grounding.build_ungrounded_claim_repair_hints(
+        [draft],
+        manifest.item_by_ref(),
+    )
+
+    assert [hint["section_id"] for hint in hints] == [section.section_id]
+    assert hints[0]["paragraph_index"] == 0
+    assert "999.9" in hints[0]["ungrounded_values"]
+    # The grounded period literal shares the sentence and must not be blamed.
+    assert "2026-01" not in hints[0]["ungrounded_values"]
+
+
+def test_ungrounded_claim_repair_hints_stay_empty_for_a_grounded_section():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            + _words(section.target_words - 9)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _manifest()
+
+    assert validate_report_section(draft, section, manifest).valid is True
+    assert (
+        report_grounding.build_ungrounded_claim_repair_hints(
+            [draft],
+            manifest.item_by_ref(),
+        )
+        == []
+    )
+
+
+def test_section_word_floor_scales_down_with_thin_table_evidence():
+    """Two rows of evidence must not demand the full prose floor.
+
+    A flat ``target_words * 0.9`` floor asks the writer for more prose than the
+    assigned rows can ground, and padding a section is exactly how ungrounded
+    numbers get invented.
+    """
+
+    flat_minimum, flat_maximum = report_section_validation_word_bounds(120)
+    assert flat_minimum == 108
+
+    thin_minimum, thin_maximum = report_section_validation_word_bounds(
+        120,
+        evidence_row_count=2,
+    )
+    assert thin_minimum < flat_minimum
+    # Relaxing the floor must never relax the ceiling.
+    assert thin_maximum == flat_maximum
+
+    deep_minimum, _ = report_section_validation_word_bounds(
+        120,
+        evidence_row_count=24,
+    )
+    assert deep_minimum == flat_minimum
+
+
+def test_section_prompt_word_floor_scales_down_with_thin_table_evidence():
+    flat_minimum, flat_maximum = report_section_prompt_word_bounds(120)
+    thin_minimum, thin_maximum = report_section_prompt_word_bounds(
+        120,
+        evidence_row_count=2,
+    )
+
+    assert thin_minimum < flat_minimum
+    assert thin_maximum == flat_maximum
+    assert thin_minimum >= REPORT_SECTION_MIN_WORDS
+
+
+def test_thin_evidence_section_is_not_rejected_for_being_short():
+    """The end-to-end effect: a grounded short section stops failing length."""
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            + _words(66)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+
+    validation = validate_report_section(
+        ReportSectionDraft.model_validate(payload),
+        section,
+        _manifest(),
+    )
+
+    assert "WORD_COUNT_TOO_SHORT" not in validation.error_codes
+    assert validation.valid is True

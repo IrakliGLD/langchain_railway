@@ -20,7 +20,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import core.llm as llm
 from agent.report_sections import generate_report_sections
-from contracts.report import ReportPlan
+from contracts.report import ReportPlan, report_section_prompt_word_bounds
 from contracts.report_sections import ReportSectionDraft
 from core.llm import _report_section_evidence_slice
 from tests.test_report_planner import TABLE_REF, _manifest, _plan_payload
@@ -74,7 +74,7 @@ def test_section_writer_receives_only_its_evidence_slice_and_skill_rules(monkeyp
     assert TABLE_REF in user[1]
     assert "Average price was 125 GEL/MWh." not in user[1]
     assert (
-        f'"minimum_words":{math.floor(section.target_words * 0.9)}'
+        f'"minimum_words":{report_section_prompt_word_bounds(section.target_words, evidence_row_count=_manifest().assigned_row_count(section.required_evidence_refs))[0]}'
         in user[1]
     )
     assert (
@@ -337,7 +337,7 @@ def test_section_repair_gets_typed_errors_and_cannot_change_scope(monkeypatch):
     assert "WORD_COUNT_TOO_SHORT" in captured["messages"][1][1]
     assert candidate.paragraphs[0].text in captured["messages"][1][1]
     assert (
-        f'"minimum_words":{math.floor(section.target_words * 0.9)}'
+        f'"minimum_words":{report_section_prompt_word_bounds(section.target_words, evidence_row_count=_manifest().assigned_row_count(section.required_evidence_refs))[0]}'
         in captured["messages"][1][1]
     )
     assert (

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -149,3 +149,19 @@ class ReportEvidenceManifest(_StrictEvidenceModel):
 
     def item_by_ref(self) -> Dict[str, ReportEvidenceItem]:
         return {item.evidence_ref: item for item in self.items}
+
+    def assigned_row_count(self, evidence_refs: Iterable[str]) -> int:
+        """Count the table rows a section may actually cite.
+
+        Only tabular rows count: narrative items carry context a section can
+        restate, but each row is one more period a writer can ground a claim
+        against, which is what the prose floor should scale on.
+        """
+
+        item_by_ref = self.item_by_ref()
+        return sum(
+            len(item.rows)
+            for ref in dict.fromkeys(evidence_refs)
+            if (item := item_by_ref.get(ref)) is not None
+            and item.kind is ReportEvidenceKind.TABLE
+        )
