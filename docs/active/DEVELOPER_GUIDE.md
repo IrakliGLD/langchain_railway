@@ -183,6 +183,18 @@ two-row section that was asked for a full-length essay could only reach the
 floor by inventing numbers the grounding gate then rejected. The ceiling never
 scales.
 
+When a batch is still invalid after its one repair call, the pipeline ships the
+grounded subset rather than nothing: `select_grounded_paragraphs` drops the
+sentences the evidence cannot support plus the claims they orphaned, and the
+result is revalidated before publication. It fails closed — a paragraph too
+short to persist, a section left with no paragraphs, or an analysis section
+stripped below `_analysis_numeric_finding_missing`'s threshold all fall back to
+the original failure, because a report that reports nothing is worse than an
+error. That guard shares one authority with the document gate, so the two
+cannot disagree about what is worth shipping. Watch `REPORT_GROUNDED_SUBSET`
+for how often this fires; a rising rate means the writer contract is drifting,
+not that the salvage is working.
+
 ## Manual Endpoint Validation
 
 ```bash

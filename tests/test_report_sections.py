@@ -2286,6 +2286,101 @@ def test_ungrounded_claim_repair_hints_name_the_offending_value():
     assert "2026-01" not in hints[0]["ungrounded_values"]
 
 
+def test_grounded_subset_drops_only_the_unsupported_sentence():
+    """One unsupported figure must cost its sentence, not the whole report.
+
+    Mirrors select_grounded_claims for Stage-4 summaries: repair rather than
+    discard, because REPORT_DOCUMENT_INVALID is not retryable and the reader
+    gets nothing at all.
+    """
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "Observed price in 2026-01 was 120.0 GEL/MWh. "
+            "A later reading reached 999.9 GEL/MWh. "
+            + _words(70)
+        ),
+    )
+    payload["paragraphs"][0]["direct_claims"] = [_direct_claim()]
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _manifest()
+
+    assert "UNGROUNDED_NUMERIC_CLAIM" in validate_report_section(
+        draft,
+        section,
+        manifest,
+    ).error_codes
+
+    salvaged, dropped = report_grounding.select_grounded_paragraphs(
+        draft,
+        manifest.item_by_ref(),
+    )
+
+    assert dropped == 1
+    text = salvaged.paragraphs[0].text
+    assert "999.9" not in text
+    assert "120.0 GEL/MWh" in text
+    # The surviving verified claim must be kept, or the section trades an
+    # ungrounded value for DIRECT_CLAIM_NOT_USED.
+    assert len(salvaged.paragraphs[0].direct_claims) == 1
+    assert validate_report_section(salvaged, section, manifest).valid is True
+
+
+def test_grounded_subset_drops_claims_orphaned_by_the_sentences_it_removed():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "An unsupported reading reached 999.9 GEL/MWh. "
+            "Observed price in 2026-02 was 130.0 GEL/MWh. "
+            + _words(70)
+        ),
+    )
+    # A claim whose only rendering sits in the sentence about to be dropped.
+    payload["paragraphs"][0]["direct_claims"] = [
+        _direct_claim(row_index=1, column="price", display_value="130.0"),
+    ]
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _manifest()
+
+    salvaged, _ = report_grounding.select_grounded_paragraphs(
+        draft,
+        manifest.item_by_ref(),
+    )
+
+    assert "999.9" not in salvaged.paragraphs[0].text
+    assert validate_report_section(salvaged, section, manifest).valid is True
+
+
+def test_grounded_subset_fails_closed_when_nothing_survives():
+    """A draft with no supportable sentence must not be silently emptied."""
+
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "An unsupported reading reached 999.9 GEL/MWh. "
+            "Another unsupported reading reached 888.8 GEL/MWh."
+        ),
+    )
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _manifest()
+
+    salvaged, _ = report_grounding.select_grounded_paragraphs(
+        draft,
+        manifest.item_by_ref(),
+    )
+
+    # Unsalvageable: the caller keeps failing rather than shipping an empty
+    # section that claims to be a report.
+    assert validate_report_section(salvaged, section, manifest).valid is False
+
+
 def test_ungrounded_claim_repair_hints_stay_empty_for_a_grounded_section():
     plan = ReportPlan.model_validate(_plan_payload())
     section = plan.sections[1]

@@ -93,6 +93,9 @@ _MINIMUM_GROUNDED_YEAR = 1900
 _MAXIMUM_GROUNDED_YEAR = 2100
 _MAXIMUM_UNGROUNDED_VALUES_PER_PARAGRAPH = 12
 _MAXIMUM_UNGROUNDED_HINTS = 32
+# ReportSectionParagraph.text enforces this floor; a shorter salvage cannot be
+# persisted as a paragraph at all.
+_MINIMUM_PARAGRAPH_TEXT_CHARS = 20
 
 
 def _parse_numeric_token(token: str) -> _NumericFact | None:
@@ -950,6 +953,103 @@ def build_ungrounded_claim_repair_hints(
             if len(hints) >= _MAXIMUM_UNGROUNDED_HINTS:
                 return hints
     return hints
+
+
+def _surviving_paragraph_claims(
+    paragraph: ReportSectionParagraph,
+    text: str,
+    paragraph_refs: set[str],
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> tuple[list[Any], list[Any]]:
+    """Keep the claims still verified and still rendered in the kept text.
+
+    A claim left behind by a dropped sentence becomes CLAIM_NOT_USED, trading
+    one blocking error for another.
+    """
+
+    direct_claims = [
+        claim
+        for claim in paragraph.direct_claims
+        if _verified_direct_fact(claim, paragraph_refs, item_by_ref) is not None
+        and _direct_claim_appears(claim, text)
+    ]
+    derived_claims = [
+        claim
+        for claim in paragraph.derived_claims
+        if _verified_derived_fact(claim, paragraph_refs, item_by_ref) is not None
+        and _derived_claim_appears(claim, text)
+    ]
+    return direct_claims, derived_claims
+
+
+def select_grounded_paragraphs(
+    draft: Any,
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> tuple[Any, int]:
+    """Drop the sentences a paragraph cannot support, plus the claims they carried.
+
+    Repair rather than discard: one unsupported figure should cost its own
+    sentence, not the entire report. ``REPORT_DOCUMENT_INVALID`` is not
+    retryable, so the alternative to a shorter section is no report at all.
+    Mirrors :func:`agent.summary_grounding.select_grounded_claims` for Stage-4
+    summaries.
+
+    Fails closed. A paragraph whose surviving text is too short to be a
+    paragraph is dropped, and a draft left with no paragraphs is returned
+    unchanged so the caller's validation rejects it exactly as before.
+    """
+
+    dropped = 0
+    kept_paragraphs: list[ReportSectionParagraph] = []
+    seen_texts: set[str] = set()
+    for paragraph in draft.paragraphs:
+        (
+            sentences,
+            sentence_facts,
+            table_facts,
+            _,
+        ) = _paragraph_grounding_support(paragraph, item_by_ref, None)
+        kept_sentences = [
+            sentence
+            for sentence, supported_facts in zip(
+                sentences,
+                sentence_facts,
+                strict=True,
+            )
+            if not _unsupported_sentence_claims(
+                sentence,
+                supported_facts,
+                table_facts,
+            )
+        ]
+        if len(kept_sentences) == len(sentences):
+            if paragraph.text not in seen_texts:
+                seen_texts.add(paragraph.text)
+                kept_paragraphs.append(paragraph)
+            continue
+        dropped += len(sentences) - len(kept_sentences)
+        text = " ".join(kept_sentences).strip()
+        if len(text) < _MINIMUM_PARAGRAPH_TEXT_CHARS or text in seen_texts:
+            continue
+        direct_claims, derived_claims = _surviving_paragraph_claims(
+            paragraph,
+            text,
+            set(paragraph.evidence_refs),
+            item_by_ref,
+        )
+        seen_texts.add(text)
+        kept_paragraphs.append(
+            paragraph.model_copy(
+                update={
+                    "text": text,
+                    "direct_claims": direct_claims,
+                    "derived_claims": derived_claims,
+                }
+            )
+        )
+    if not dropped or not kept_paragraphs:
+        return draft, dropped
+    return draft.model_copy(update={"paragraphs": kept_paragraphs}), dropped
 
 
 def validate_paragraph_grounding(
