@@ -91,6 +91,8 @@ class _ResolvedOperand:
 _GroundingFact = _NumericFact | _PeriodFact | _YearFact
 _MINIMUM_GROUNDED_YEAR = 1900
 _MAXIMUM_GROUNDED_YEAR = 2100
+_MAXIMUM_UNGROUNDED_VALUES_PER_PARAGRAPH = 12
+_MAXIMUM_UNGROUNDED_HINTS = 32
 
 
 def _parse_numeric_token(token: str) -> _NumericFact | None:
@@ -754,17 +756,27 @@ def _paragraph_sentences(text: str) -> list[str]:
     ]
 
 
-def validate_paragraph_grounding(
+def _paragraph_grounding_support(
     paragraph: ReportSectionParagraph,
     item_by_ref: Mapping[str, ReportEvidenceItem],
-    *,
     evidence_facts_by_ref: Mapping[
         str,
         frozenset[_GroundingFact],
     ]
-    | None = None,
-) -> list[str]:
-    """Validate direct and explicitly typed derived facts for one paragraph."""
+    | None,
+) -> tuple[
+    list[str],
+    list[set[_GroundingFact]],
+    set[_GroundingFact],
+    list[str],
+]:
+    """Resolve which facts each sentence may rely on, plus claim-shape errors.
+
+    Validation and repair-hint building must agree on what counts as supported;
+    computing it twice is how the gate and the hint that explains it drift
+    apart. Returns the sentences, their supporting facts, the table facts held
+    back for temporal fallback, and the typed-claim errors found on the way.
+    """
 
     errors: list[str] = []
     paragraph_refs = set(paragraph.evidence_refs)
@@ -854,17 +866,123 @@ def validate_paragraph_grounding(
             sentence_facts[index].add(displayed)
             sentence_facts[index].update(operand_period_facts)
 
+    return sentences, sentence_facts, table_facts, errors
+
+
+def _unsupported_sentence_claims(
+    sentence: str,
+    supported_facts: set[_GroundingFact],
+    table_facts: set[_GroundingFact],
+) -> list[_GroundingFact]:
+    """Return the facts a sentence asserts that its evidence cannot support."""
+
+    claims = _grounding_facts_from_text(sentence)
+    if claims and all(_is_temporal_claim(claim) for claim in claims):
+        supported_facts = supported_facts | _temporal_evidence_facts(
+            table_facts
+        )
+    return [
+        claim
+        for claim in claims
+        if not _grounding_claim_is_supported(claim, supported_facts)
+    ]
+
+
+def _render_grounding_fact(fact: _GroundingFact) -> str:
+    if isinstance(fact, _YearFact):
+        return str(fact.value)
+    if isinstance(fact, _PeriodFact):
+        return fact.value
+    rendered = format(fact.value, f".{fact.precision}f")
+    return rendered + ("%" if fact.is_percent else "")
+
+
+def build_ungrounded_claim_repair_hints(
+    sections: Sequence[Any],
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> list[dict[str, Any]]:
+    """Name the exact values a repair pass must ground, cite, or drop.
+
+    UNGROUNDED_NUMERIC_CLAIM on its own tells a repairer only that one of its
+    numbers is unsupported, leaving it to guess which — and a guess costs the
+    whole document, because the code is not retryable. Naming the values is the
+    same contract that made derived claims repairable.
+    """
+
+    hints: list[dict[str, Any]] = []
+    for section in sections:
+        for paragraph_index, paragraph in enumerate(section.paragraphs):
+            (
+                sentences,
+                sentence_facts,
+                table_facts,
+                _,
+            ) = _paragraph_grounding_support(paragraph, item_by_ref, None)
+            ungrounded: list[str] = []
+            for sentence, supported_facts in zip(
+                sentences,
+                sentence_facts,
+                strict=True,
+            ):
+                ungrounded.extend(
+                    _render_grounding_fact(claim)
+                    for claim in _unsupported_sentence_claims(
+                        sentence,
+                        supported_facts,
+                        table_facts,
+                    )
+                )
+            if not ungrounded:
+                continue
+            # The repair prompt raises when it exceeds its char budget, so an
+            # unbounded hint list would turn a repairable document into a hard
+            # failure. A paragraph with more offenders than this needs rewriting
+            # rather than a value-by-value correction.
+            hints.append(
+                {
+                    "section_id": section.section_id,
+                    "paragraph_index": paragraph_index,
+                    "ungrounded_values": list(dict.fromkeys(ungrounded))[
+                        :_MAXIMUM_UNGROUNDED_VALUES_PER_PARAGRAPH
+                    ],
+                }
+            )
+            if len(hints) >= _MAXIMUM_UNGROUNDED_HINTS:
+                return hints
+    return hints
+
+
+def validate_paragraph_grounding(
+    paragraph: ReportSectionParagraph,
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+    *,
+    evidence_facts_by_ref: Mapping[
+        str,
+        frozenset[_GroundingFact],
+    ]
+    | None = None,
+) -> list[str]:
+    """Validate direct and explicitly typed derived facts for one paragraph."""
+
+    (
+        sentences,
+        sentence_facts,
+        table_facts,
+        errors,
+    ) = _paragraph_grounding_support(
+        paragraph,
+        item_by_ref,
+        evidence_facts_by_ref,
+    )
     for sentence, supported_facts in zip(
         sentences,
         sentence_facts,
         strict=True,
     ):
-        claims = _grounding_facts_from_text(sentence)
-        if claims and all(_is_temporal_claim(claim) for claim in claims):
-            supported_facts.update(_temporal_evidence_facts(table_facts))
-        if any(
-            not _grounding_claim_is_supported(claim, supported_facts)
-            for claim in claims
+        if _unsupported_sentence_claims(
+            sentence,
+            supported_facts,
+            table_facts,
         ):
             errors.append("UNGROUNDED_NUMERIC_CLAIM")
             break

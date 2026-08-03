@@ -408,6 +408,23 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert '"track_id":"security"' not in user[1]
     assert "VALIDATION_ERRORS" in user[1]
     assert "VERIFIED_DERIVED_REPAIR_HINTS" in user[1]
+    # A bare UNGROUNDED_NUMERIC_CLAIM makes the repairer guess which of its
+    # numbers offended, and the code is not retryable, so a wrong guess costs
+    # the whole report. The prompt must name the values.
+    assert "UNGROUNDED_VALUE_REPAIR_HINTS" in user[1]
+    assert "ungrounded_value_repair_hints" in system[1].lower()
+    ungrounded_json = user[1].split(
+        "UNGROUNDED_VALUE_REPAIR_HINTS:\n",
+        1,
+    )[1].split("\n\nEVIDENCE_PACKET:", 1)[0]
+    ungrounded_hints = json.loads(ungrounded_json)
+    assert [hint["section_id"] for hint in ungrounded_hints] == ["prices"]
+    stripped_paragraph = rejected.sections[0].paragraphs[0]
+    assert ungrounded_hints[0]["ungrounded_values"]
+    assert all(
+        value in stripped_paragraph.text
+        for value in ungrounded_hints[0]["ungrounded_values"]
+    )
     errors_json = user[1].split(
         "VALIDATION_ERRORS:\n",
         1,

@@ -41,9 +41,40 @@ REPORT_SECTION_MIN_WORDS = 40
 REPORT_SECTION_MAX_WORDS = 800
 
 
-def report_section_prompt_word_bounds(target_words: int) -> tuple[int, int]:
+def report_section_word_floor_ratio(
+    evidence_row_count: int | None = None,
+) -> float:
+    """Scale the prose floor to how many rows the section can actually cite.
+
+    A flat floor asks a two-row section for as much prose as a deep one, and
+    the only way a writer reaches it is by padding with numbers the grounding
+    gate then rejects as ungrounded. Row count is the proxy for how many
+    distinct things a section has to say; the document-level bounds already
+    scale the same way on usable exhibits. ``None`` keeps the flat floor for
+    callers that cannot see the assigned evidence.
+    """
+
+    if evidence_row_count is None:
+        return REPORT_SECTION_WORD_FLOOR_RATIO
+    if evidence_row_count <= 2:
+        return 0.5
+    if evidence_row_count <= 3:
+        return 0.65
+    if evidence_row_count <= 5:
+        return 0.75
+    return REPORT_SECTION_WORD_FLOOR_RATIO
+
+
+def report_section_prompt_word_bounds(
+    target_words: int,
+    *,
+    evidence_row_count: int | None = None,
+) -> tuple[int, int]:
     return (
-        math.floor(target_words * REPORT_SECTION_WORD_FLOOR_RATIO),
+        math.floor(
+            target_words
+            * report_section_word_floor_ratio(evidence_row_count)
+        ),
         math.ceil(
             target_words * REPORT_SECTION_PROMPT_WORD_CEILING_RATIO
         ),
@@ -52,9 +83,14 @@ def report_section_prompt_word_bounds(target_words: int) -> tuple[int, int]:
 
 def report_section_validation_word_bounds(
     target_words: int,
+    *,
+    evidence_row_count: int | None = None,
 ) -> tuple[int, int]:
     return (
-        math.floor(target_words * REPORT_SECTION_WORD_FLOOR_RATIO),
+        math.floor(
+            target_words
+            * report_section_word_floor_ratio(evidence_row_count)
+        ),
         math.ceil(
             target_words * REPORT_SECTION_VALIDATION_WORD_CEILING_RATIO
         ),

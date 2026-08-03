@@ -169,6 +169,20 @@ also defaults to `enabled`. Set `REPORT_TRACK_ANALYSIS_MODE=shadow` or
 `disabled` explicitly only for observation or rollback. An explicit override
 always takes precedence over the derived default.
 
+Every blocking section error must reach the repairer as a named offender, not
+just a code. `DERIVED_CLAIM_INVALID` carries `VERIFIED_DERIVED_REPAIR_HINTS`
+and `UNGROUNDED_NUMERIC_CLAIM` carries `UNGROUNDED_VALUE_REPAIR_HINTS`, which
+lists the exact values a paragraph asserts that its evidence cannot support.
+Without them the repairer guesses which of its numbers offended, and a wrong
+guess ends the job: `REPORT_DOCUMENT_INVALID` is not retryable. Add a hint
+alongside any new blocking code.
+
+The section word floor scales with the rows a section can actually cite
+(`report_section_word_floor_ratio`), mirroring the document-level bounds. A
+two-row section that was asked for a full-length essay could only reach the
+floor by inventing numbers the grounding gate then rejected. The ceiling never
+scales.
+
 ## Manual Endpoint Validation
 
 ```bash
