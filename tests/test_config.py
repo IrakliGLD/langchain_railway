@@ -30,6 +30,7 @@ from config import (  # noqa: E402
     REPORT_RESEARCH_MAX_TRACKS,
     REPORT_RESEARCH_MAX_WORKERS,
     REPORT_SECTION_MAX_WORKERS,
+    REPORT_TRACK_ANALYSIS_MODE,
     SCHEMA_READINESS_CACHE_TTL_SECONDS,
     SCHEMA_READINESS_RETRY_INTERVAL_SECONDS,
     SESSION_HISTORY_MAX_ITEM_CHARS,
@@ -87,6 +88,7 @@ def _report_pipeline_v2_with_env(**overrides) -> subprocess.CompletedProcess:
         "REPORT_MAX_GENERATIVE_CALLS",
         "REPORT_RESEARCH_MAX_TRACKS",
         "REPORT_RESEARCH_MAX_WORKERS",
+        "REPORT_TRACK_ANALYSIS_MODE",
     ):
         env.pop(name, None)
     env.update(overrides)
@@ -99,7 +101,8 @@ def _report_pipeline_v2_with_env(**overrides) -> subprocess.CompletedProcess:
                 "print(config.REPORT_PIPELINE_V2_MODE, "
                 "config.REPORT_MAX_GENERATIVE_CALLS, "
                 "config.REPORT_RESEARCH_MAX_TRACKS, "
-                "config.REPORT_RESEARCH_MAX_WORKERS)"
+                "config.REPORT_RESEARCH_MAX_WORKERS, "
+                "config.REPORT_TRACK_ANALYSIS_MODE)"
             ),
         ],
         cwd=Path(__file__).resolve().parents[1],
@@ -114,7 +117,7 @@ def test_report_pipeline_v2_defaults_are_disabled_and_bounded():
     result = _report_pipeline_v2_with_env()
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["disabled", "3", "4", "3"]
+    assert result.stdout.split() == ["disabled", "3", "4", "3", "disabled"]
 
 
 @pytest.mark.parametrize("mode", ["disabled", "shadow", "enabled"])
@@ -130,6 +133,25 @@ def test_report_pipeline_v2_rejects_unknown_rollout_mode():
 
     assert result.returncode != 0
     assert "REPORT_PIPELINE_V2_MODE" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["disabled", "shadow", "enabled"])
+def test_report_track_analysis_accepts_only_declared_rollout_modes(mode):
+    result = _report_pipeline_v2_with_env(REPORT_TRACK_ANALYSIS_MODE=mode)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[-1] == mode
+
+
+def test_report_track_analysis_rejects_unknown_rollout_mode():
+    result = _report_pipeline_v2_with_env(REPORT_TRACK_ANALYSIS_MODE="maybe")
+
+    assert result.returncode != 0
+    assert "REPORT_TRACK_ANALYSIS_MODE" in result.stderr
+
+
+def test_report_track_analysis_defaults_disabled():
+    assert REPORT_TRACK_ANALYSIS_MODE == "disabled"
 
 
 def test_report_pipeline_v2_rejects_worker_count_above_track_count():

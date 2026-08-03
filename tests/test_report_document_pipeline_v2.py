@@ -149,6 +149,71 @@ def test_report_wide_narrative_evidence_is_assigned_to_analysis_sections():
         assert knowledge.evidence_ref in section.required_evidence_refs
 
 
+def test_track_owned_narrative_evidence_is_not_broadcast_to_other_tracks():
+    from agent.report_evidence import make_report_narrative_evidence_item
+    from contracts.report_research import ReportEvidencePacket
+
+    research_plan, packets, _, decisions, gate = _ready_components()
+    statistics = make_report_narrative_evidence_item(
+        kind=ReportEvidenceKind.STATISTICS,
+        title="Track verified statistics",
+        source="derived",
+        content="This finding belongs only to the first research track.",
+    )
+    first_payload = packets[0].model_dump(mode="json")
+    first_payload["items"].append(statistics.model_dump(mode="json"))
+    first_payload["observations"].append(
+        {
+            "observation_id": "documented_track_statistic",
+            "statement": (
+                "Approved statistics evidence was retrieved for this track."
+            ),
+            "evidence_refs": [statistics.evidence_ref],
+            "metric_values": [],
+        }
+    )
+    packets = [
+        ReportEvidencePacket.model_validate(first_payload),
+        *packets[1:],
+    ]
+    manifest = consolidate_report_evidence_packets(_QUERY, packets)
+
+    plan = build_report_document_plan(
+        _QUERY,
+        research_plan,
+        packets,
+        manifest,
+        gate,
+        decisions,
+    )
+
+    owner_track_id = packets[0].track_id
+    owner_sections = [
+        section
+        for section in plan.sections
+        if owner_track_id in section.track_ids
+    ]
+    other_sections = [
+        section
+        for section in plan.sections
+        if (
+            section.role is ReportDocumentSectionRole.ANALYSIS
+            and owner_track_id not in section.track_ids
+        )
+    ]
+    assert owner_sections
+    assert other_sections
+    assert all(
+        statistics.evidence_ref in section.required_evidence_refs
+        for section in owner_sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    )
+    assert all(
+        statistics.evidence_ref not in section.required_evidence_refs
+        for section in other_sections
+    )
+
+
 def test_document_plan_profile_uses_collected_evidence_not_planned_exhibits():
     research_plan, packets, manifest, decisions, gate = _ready_components()
     capacity = assess_report_evidence_capacity(

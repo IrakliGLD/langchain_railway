@@ -9,6 +9,7 @@ import math
 import re
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pydantic import ValidationError
@@ -45,6 +46,8 @@ from agent.report_planner import (
 from agent.report_research_execution import (
     consolidate_report_evidence_packets,
     execute_report_research,
+    execute_report_track_analysis,
+    merge_report_track_analysis_packet,
 )
 from agent.report_research_planner import (
     ReportResearchPlanError,
@@ -60,6 +63,7 @@ from config import (
     REPORT_PIPELINE_V2_MODE,
     REPORT_RESEARCH_MAX_TRACKS,
     REPORT_RESEARCH_MAX_WORKERS,
+    REPORT_TRACK_ANALYSIS_MODE,
 )
 from contracts.report import ReportPlan, ReportPlanningContext
 from contracts.report_charts import ReportChartBuildDecision
@@ -104,6 +108,7 @@ SectionGenerator = Callable[..., list[ReportSectionDraft]]
 Assembler = Callable[..., Any]
 ResearchPlanner = Callable[..., Any]
 ResearchExecutor = Callable[..., Any]
+TrackAnalyzer = Callable[..., Any]
 ManifestConsolidator = Callable[..., Any]
 ResearchExhibitBuilder = Callable[..., Any]
 EvidenceGateEvaluator = Callable[..., Any]
@@ -230,6 +235,8 @@ class ReportJobProcessor:
         research_planner: ResearchPlanner = plan_report_research,
         max_research_tracks: int = REPORT_RESEARCH_MAX_TRACKS,
         research_executor: ResearchExecutor = execute_report_research,
+        track_analysis_mode: str = REPORT_TRACK_ANALYSIS_MODE,
+        track_analyzer: TrackAnalyzer = execute_report_track_analysis,
         manifest_consolidator: ManifestConsolidator = (
             consolidate_report_evidence_packets
         ),
@@ -261,6 +268,10 @@ class ReportJobProcessor:
             raise ValueError(
                 "pipeline_v2_mode must be disabled, shadow, or enabled."
             )
+        if track_analysis_mode not in {"disabled", "shadow", "enabled"}:
+            raise ValueError(
+                "track_analysis_mode must be disabled, shadow, or enabled."
+            )
         if not 2 <= max_generative_calls <= 6:
             raise ValueError(
                 "max_generative_calls must be between 2 and 6."
@@ -288,6 +299,8 @@ class ReportJobProcessor:
         self._research_planner = research_planner
         self._max_research_tracks = max_research_tracks
         self._research_executor = research_executor
+        self._track_analysis_mode = track_analysis_mode
+        self._track_analyzer = track_analyzer
         self._manifest_consolidator = manifest_consolidator
         self._max_research_workers = max_research_workers
         self._research_exhibit_builder = research_exhibit_builder
@@ -593,11 +606,7 @@ class ReportJobProcessor:
         return items
 
     def _run_query_pipeline(self, lease: ReportJobLease) -> Any:
-        pipeline = self._query_pipeline
-        if pipeline is None:
-            from agent.pipeline import process_query
-
-            pipeline = process_query
+        pipeline = self._resolved_query_pipeline()
         execution_scope = current_request_execution_scope()
         request_deadline = (
             execution_scope.deadline
@@ -620,6 +629,187 @@ class ReportJobProcessor:
             request_deadline=request_deadline,
             answer_mode="report",
         )
+
+    def _resolved_query_pipeline(self) -> QueryPipeline:
+        if self._query_pipeline is not None:
+            return self._query_pipeline
+        from agent.pipeline import process_query
+
+        return process_query
+
+    def _run_track_analysis(
+        self,
+        lease: ReportJobLease,
+        plan: ReportResearchPlan,
+        baseline_packets: list[ReportEvidencePacket],
+    ) -> list[ReportEvidencePacket]:
+        """Run isolated track pipelines and apply the configured rollout mode."""
+
+        started_at = time.monotonic()
+        execution_scope = current_request_execution_scope()
+        request_deadline = (
+            execution_scope.deadline
+            if execution_scope is not None
+            else None
+        )
+        base_request_id = (
+            execution_scope.request_id
+            if execution_scope is not None
+            else lease.request_id
+        )
+        pipeline = self._resolved_query_pipeline()
+
+        def analyze(track) -> ReportEvidencePacket:
+            raw_packet = self._track_analyzer(
+                lease.query,
+                track,
+                query_pipeline=pipeline,
+                trace_id=str(lease.job_id),
+                actor_id=str(lease.actor_user_id),
+                request_id=f"{base_request_id}:track:{track.track_id}",
+                request_deadline=request_deadline,
+            )
+            packet = (
+                raw_packet
+                if isinstance(raw_packet, ReportEvidencePacket)
+                else ReportEvidencePacket.model_validate(raw_packet)
+            )
+            if packet.track_id != track.track_id:
+                raise ValueError("Track analysis packet identity mismatch.")
+            return packet
+
+        completed: dict[str, ReportEvidencePacket] = {}
+        failure_types: list[str] = []
+        with ThreadPoolExecutor(
+            max_workers=min(
+                self._max_research_workers,
+                len(plan.tracks),
+            ),
+            thread_name_prefix="report-track-analysis",
+        ) as pool:
+            futures = {
+                track.track_id: pool.submit(analyze, track)
+                for track in plan.tracks
+            }
+            for track_id, future in futures.items():
+                try:
+                    completed[track_id] = future.result()
+                except Exception as exc:
+                    failure_types.append(
+                        _diagnostic_identifier(type(exc).__name__)
+                    )
+
+        payload = {
+            "job_id": str(lease.job_id),
+            "mode": self._track_analysis_mode,
+            "duration_ms": max(
+                0,
+                int((time.monotonic() - started_at) * 1000),
+            ),
+            "track_count": len(plan.tracks),
+            "completed_count": len(completed),
+            "failed_count": len(failure_types),
+            "baseline_packet_count": len(baseline_packets),
+            "baseline_item_count": sum(
+                len(packet.items) for packet in baseline_packets
+            ),
+            "analysis_item_count": sum(
+                len(packet.items) for packet in completed.values()
+            ),
+            "analysis_numeric_observation_count": sum(
+                packet.numeric_observation_count
+                for packet in completed.values()
+            ),
+            "fallback_count": sum(
+                1
+                for track in plan.tracks
+                if not (
+                    completed.get(track.track_id)
+                    and completed[track.track_id].items
+                )
+            ),
+            "failure_types": sorted(failure_types),
+        }
+        _LOGGER.info(
+            "REPORT_TRACK_ANALYSIS_%s %s",
+            self._track_analysis_mode.upper(),
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        if self._track_analysis_mode == "shadow":
+            return baseline_packets
+
+        baseline_by_track = {
+            packet.track_id: packet for packet in baseline_packets
+        }
+        selected: list[ReportEvidencePacket] = []
+        for track in plan.tracks:
+            baseline = baseline_by_track.get(track.track_id)
+            analysis = completed.get(track.track_id)
+            if analysis is not None and analysis.items:
+                selected.append(
+                    merge_report_track_analysis_packet(
+                        track,
+                        baseline,
+                        analysis,
+                    )
+                    if baseline is not None
+                    else analysis
+                )
+            elif baseline is not None:
+                selected.append(baseline)
+        return selected
+
+    def _apply_track_analysis_safely(
+        self,
+        lease: ReportJobLease,
+        plan: ReportResearchPlan,
+        baseline_packets: list[ReportEvidencePacket],
+    ) -> list[ReportEvidencePacket]:
+        """Keep rollout infrastructure outside the report outcome."""
+
+        if self._track_analysis_mode == "disabled":
+            return baseline_packets
+        try:
+            return self._run_track_analysis(
+                lease,
+                plan,
+                baseline_packets,
+            )
+        except Exception as exc:
+            payload = {
+                "job_id": str(lease.job_id),
+                "mode": self._track_analysis_mode,
+                "duration_ms": 0,
+                "track_count": len(plan.tracks),
+                "completed_count": 0,
+                "failed_count": len(plan.tracks),
+                "baseline_packet_count": len(baseline_packets),
+                "baseline_item_count": sum(
+                    len(packet.items) for packet in baseline_packets
+                ),
+                "analysis_item_count": 0,
+                "analysis_numeric_observation_count": 0,
+                "fallback_count": len(plan.tracks),
+                "failure_types": [
+                    _diagnostic_identifier(type(exc).__name__)
+                ],
+            }
+            _LOGGER.info(
+                "REPORT_TRACK_ANALYSIS_%s %s",
+                self._track_analysis_mode.upper(),
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            return baseline_packets
 
     def _run_shadow_research_planner(self, lease: ReportJobLease) -> None:
         """Evaluate v2 planning without changing durable state or output."""
@@ -675,6 +865,11 @@ class ReportJobProcessor:
                 else ReportEvidencePacket.model_validate(packet)
                 for packet in raw_packets
             ]
+            packets = self._apply_track_analysis_safely(
+                lease,
+                plan,
+                packets,
+            )
             raw_manifest = self._manifest_consolidator(
                 lease.query,
                 packets,
@@ -1010,10 +1205,19 @@ class ReportJobProcessor:
                         else ReportEvidencePacket.model_validate(packet)
                         for packet in raw_packets
                     ]
+                packets = self._apply_track_analysis_safely(
+                    lease,
+                    research_plan,
+                    packets,
+                )
                 raw_manifest = self._manifest_consolidator(
                     lease.query,
                     packets,
-                    extra_items=self._pipeline_narrative_items(lease),
+                    extra_items=(
+                        []
+                        if self._track_analysis_mode == "enabled"
+                        else self._pipeline_narrative_items(lease)
+                    ),
                 )
                 manifest = (
                     raw_manifest

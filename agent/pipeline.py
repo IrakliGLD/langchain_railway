@@ -56,6 +56,7 @@ from agent.provenance import (
     tool_invocation_hash,
 )
 from agent.render_fitness import df_date_span, period_bounds_from_hint
+from agent.report_evidence import build_report_narrative_items
 from agent.report_intent import report_context_requires_table
 from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
 from agent.scenario_contract import (
@@ -96,6 +97,7 @@ from contracts.question_analysis import (
     PreferredPath,
     RenderStyle,
 )
+from contracts.report_evidence import ReportEvidenceKind
 from contracts.vector_knowledge import (
     VectorKnowledgeMode,
     VectorRetrievalOutcome,
@@ -2817,6 +2819,28 @@ def _early_answer_conceptual(ctx: QueryContext) -> StageResult:
     """
     if ctx.response_mode != ResponseMode.KNOWLEDGE_PRIMARY:
         return StageResult(ctx, terminal=False)
+    if ctx.answer_mode == AnswerMode.REPORT.value:
+        # Report callers consume the retrieved evidence, not the ordinary chat
+        # answer. In particular, do not spend a provider call rendering prose
+        # that the report writer will discard.
+        for item in build_report_narrative_items(ctx):
+            if item.kind is ReportEvidenceKind.KNOWLEDGE:
+                ctx.summary_domain_knowledge = item.content
+                break
+        if not ctx.terminal_outcome:
+            ctx.terminal_outcome = TerminalOutcome.CONCEPTUAL_ANSWER.value
+            metrics.log_terminal_outcome(
+                TerminalOutcome.CONCEPTUAL_ANSWER.value
+            )
+        _emit_trace_stage(
+            ctx,
+            "stage_4_report_evidence_ready",
+            time.time(),
+            evidence_only=True,
+            response_mode=ResponseMode.KNOWLEDGE_PRIMARY.value,
+        )
+        log.info("Stage 4 bypassed | conceptual report evidence ready")
+        return StageResult(ctx, terminal=True)
     t_stage = time.time()
     ctx = summarizer.answer_conceptual(ctx)
     if not ctx.terminal_outcome:

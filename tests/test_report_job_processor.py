@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -705,6 +706,265 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
         == "report-generation-checkpoint-v3"
         for checkpoint in checkpoints
     )
+
+
+def test_track_analysis_shadow_is_parallel_isolated_and_does_not_change_output(
+    caplog,
+):
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+    barrier = threading.Barrier(len(research_plan.tracks))
+    analysis_calls = []
+    consolidated_packets = []
+
+    def query_pipeline(query, **_kwargs):
+        return _pipeline_context(query)
+
+    def track_analyzer(report_query, track, **kwargs):
+        analysis_calls.append((report_query, track.track_id, kwargs))
+        barrier.wait(timeout=2)
+        if track.track_id == research_plan.tracks[-1].track_id:
+            raise RuntimeError("private-track-fragment")
+        return packet_by_track[track.track_id]
+
+    def consolidate(query, received_packets, **_kwargs):
+        consolidated_packets.extend(received_packets)
+        return manifest
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=query_pipeline,
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="shadow",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=consolidate,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), _Control())
+    )
+
+    assert result.contract_version == "report-result-v2"
+    assert [packet.track_id for packet in consolidated_packets] == [
+        packet.track_id for packet in packets
+    ]
+    assert sorted(call[1] for call in analysis_calls) == sorted(
+        track.track_id for track in research_plan.tracks
+    )
+    assert len(
+        {
+            call[2]["request_id"]
+            for call in analysis_calls
+        }
+    ) == len(research_plan.tracks)
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_SHADOW ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["mode"] == "shadow"
+    assert payload["track_count"] == len(research_plan.tracks)
+    assert payload["completed_count"] == len(research_plan.tracks) - 1
+    assert payload["failed_count"] == 1
+    assert "private-track-fragment" not in record
+
+
+def test_track_analysis_shadow_infrastructure_failure_cannot_fail_report(
+    monkeypatch,
+    caplog,
+):
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+
+    def fail_executor(*_args, **_kwargs):
+        raise RuntimeError("private-shadow-infrastructure-fragment")
+
+    monkeypatch.setattr(
+        report_job_processor,
+        "ThreadPoolExecutor",
+        fail_executor,
+    )
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="shadow",
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), _Control())
+    )
+
+    assert result.contract_version == "report-result-v2"
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_SHADOW ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["completed_count"] == 0
+    assert payload["failed_count"] == len(research_plan.tracks)
+    assert "private-shadow-infrastructure-fragment" not in record
+
+
+def test_track_analysis_enabled_uses_track_packets_without_global_broadcast(
+    caplog,
+):
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+    analysis_calls = []
+    consolidation = {}
+
+    def global_pipeline(*_args, **_kwargs):
+        raise AssertionError(
+            "enabled track analysis must not run global enrichment"
+        )
+
+    def track_analyzer(_query, track, **_kwargs):
+        analysis_calls.append(track.track_id)
+        return packet_by_track[track.track_id]
+
+    def consolidate(_query, received_packets, **kwargs):
+        consolidation["packets"] = list(received_packets)
+        consolidation["extra_items"] = list(kwargs["extra_items"])
+        return manifest
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=global_pipeline,
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=consolidate,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), _Control())
+    )
+
+    assert result.contract_version == "report-result-v2"
+    assert sorted(analysis_calls) == sorted(packet_by_track)
+    assert consolidation["extra_items"] == []
+    assert [packet.track_id for packet in consolidation["packets"]] == [
+        track.track_id for track in research_plan.tracks
+    ]
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["completed_count"] == len(research_plan.tracks)
+    assert payload["failed_count"] == 0
+
+
+def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
+    caplog,
+):
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+    failed_track_id = research_plan.tracks[-1].track_id
+    consolidated_packets = []
+
+    def track_analyzer(_query, track, **_kwargs):
+        if track.track_id == failed_track_id:
+            raise RuntimeError("private-enabled-track-fragment")
+        return packet_by_track[track.track_id]
+
+    def consolidate(_query, received_packets, **_kwargs):
+        consolidated_packets.extend(received_packets)
+        return manifest
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
+            "enabled track analysis must not run global enrichment"
+        ),
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=consolidate,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), _Control())
+    )
+
+    assert result.contract_version == "report-result-v2"
+    selected_by_track = {
+        packet.track_id: packet for packet in consolidated_packets
+    }
+    assert set(selected_by_track) == set(packet_by_track)
+    assert (
+        selected_by_track[failed_track_id].model_dump(mode="json")
+        == packet_by_track[failed_track_id].model_dump(mode="json")
+    )
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["failed_count"] == 1
+    assert payload["fallback_count"] == 1
+    assert "private-enabled-track-fragment" not in record
 
 
 def test_enabled_v2_resumes_document_plan_without_research_calls():

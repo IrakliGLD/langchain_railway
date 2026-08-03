@@ -17,8 +17,11 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 from agent.report_research_execution import (
     DEFAULT_REPORT_COLLECTORS,
     ReportCollectorOutput,
+    build_report_track_analysis_query,
     consolidate_report_evidence_packets,
     execute_report_research,
+    execute_report_track_analysis,
+    merge_report_track_analysis_packet,
 )
 from contracts.report_evidence import (
     ReportEvidenceItem,
@@ -29,6 +32,7 @@ from contracts.report_research import (
     ReportCollectorId,
     ReportEvidencePacket,
     ReportResearchPlan,
+    ReportResearchTrack,
 )
 from contracts.vector_knowledge import (
     RetrievalStrategy,
@@ -40,6 +44,7 @@ from contracts.vector_knowledge import (
     VectorRetrievalFailureStage,
     VectorRetrievalOutcome,
 )
+from models import QueryContext
 from tests.test_report_research_contract import (
     _research_plan_payload,
     _table_item,
@@ -89,6 +94,175 @@ def _knowledge_output() -> ReportCollectorOutput:
             ),
         ),
     )
+
+
+def test_track_analysis_query_uses_one_primary_question_and_bounded_coverage():
+    track = _plan().tracks[0]
+
+    query = build_report_track_analysis_query(_QUERY, track)
+
+    assert query.startswith(track.research_questions[0])
+    assert f"Research track: {track.title}" in query
+    assert f"Report context: {_QUERY}" in query
+    for coverage_question in track.research_questions[1:]:
+        assert coverage_question in query
+    assert len(query) <= 4000
+
+
+def test_track_analysis_query_reserves_room_for_report_context():
+    payload = _plan().tracks[0].model_dump(mode="json")
+    payload["research_questions"] = [
+        f"question-{index}-" + "q" * 580 for index in range(6)
+    ]
+    track = ReportResearchTrack.model_validate(payload)
+    report_query = "report-context-" + "r" * 3000
+
+    query = build_report_track_analysis_query(report_query, track)
+
+    assert query.startswith(track.research_questions[0])
+    assert f"Report context: {report_query[:1000]}" in query
+    assert len(query) <= 4000
+
+
+def test_track_analysis_runs_report_pipeline_once_and_builds_existing_packet():
+    calls = []
+
+    def query_pipeline(query, **kwargs):
+        calls.append((query, kwargs))
+        return QueryContext(
+            query=query,
+            cols=["period", "price_gel"],
+            rows=[
+                ["2025-01", 100.0],
+                ["2025-02", 120.0],
+            ],
+            provenance_cols=["period", "price_gel"],
+            provenance_rows=[
+                ["2025-01", 100.0],
+                ["2025-02", 120.0],
+            ],
+            provenance_refs=["query:track:prices"],
+            provenance_source="pipeline",
+            stats_hint="Mean observed price was 110 GEL/MWh.",
+            summary_domain_knowledge=(
+                "Prices are formed under the applicable market rules."
+            ),
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _plan().tracks[0],
+        query_pipeline=query_pipeline,
+        trace_id="report-job-1",
+        actor_id="actor-1",
+        request_id="request-1:track:prices",
+        request_deadline="deadline-sentinel",
+    )
+
+    assert len(calls) == 1
+    query, kwargs = calls[0]
+    assert query.startswith(_plan().tracks[0].research_questions[0])
+    assert kwargs == {
+        "trace_id": "report-job-1",
+        "actor_id": "actor-1",
+        "request_id": "request-1:track:prices",
+        "request_deadline": "deadline-sentinel",
+        "answer_mode": "report",
+    }
+    assert packet.track_id == "prices"
+    assert packet.status.value == "complete"
+    assert {item.kind for item in packet.items} == {
+        ReportEvidenceKind.TABLE,
+        ReportEvidenceKind.STATISTICS,
+        ReportEvidenceKind.KNOWLEDGE,
+    }
+    assert all(
+        item.kind is not ReportEvidenceKind.LIMITATION
+        for item in packet.items
+    )
+
+
+def test_track_analysis_reserves_packet_capacity_for_analysis_and_knowledge():
+    supporting = {
+        f"support_{index:02d}": {
+            "tool": f"support_tool_{index:02d}",
+            "cols": ["period", "price_gel"],
+            "rows": [["2025-01", float(index + 1)]],
+            "provenance_refs": [f"query:support:{index:02d}"],
+        }
+        for index in range(12)
+    }
+
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=["period", "price_gel"],
+            rows=[["2025-01", 100.0]],
+            evidence_collected=supporting,
+            stats_hint="Mean observed price was 100 GEL/MWh.",
+            summary_domain_knowledge="Applicable market rules govern prices.",
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _plan().tracks[0],
+        query_pipeline=query_pipeline,
+    )
+
+    kinds = {item.kind for item in packet.items}
+    assert ReportEvidenceKind.TABLE in kinds
+    assert ReportEvidenceKind.STATISTICS in kinds
+    assert ReportEvidenceKind.KNOWLEDGE in kinds
+    assert len(packet.items) == 12
+
+
+def test_track_analysis_merge_keeps_deterministic_table_and_track_findings():
+    plan = _plan()
+    baseline = execute_report_research(
+        _QUERY,
+        plan,
+        max_workers=3,
+        collectors={
+            ReportCollectorId.PRICES: lambda *_args: _table_output(
+                ReportCollectorId.PRICES
+            ),
+            ReportCollectorId.GENERATION_MIX: lambda *_args: _table_output(
+                ReportCollectorId.GENERATION_MIX
+            ),
+            ReportCollectorId.VECTOR_KNOWLEDGE: lambda *_args: (
+                _knowledge_output()
+            ),
+        },
+    )[0]
+
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            stats_hint="Mean observed price was 110 GEL/MWh.",
+            summary_domain_knowledge="Applicable market rules govern prices.",
+            answer_mode="report",
+        )
+
+    analysis = execute_report_track_analysis(
+        _QUERY,
+        plan.tracks[0],
+        query_pipeline=query_pipeline,
+    )
+    merged = merge_report_track_analysis_packet(
+        plan.tracks[0],
+        baseline,
+        analysis,
+    )
+
+    assert {item.kind for item in merged.items} == {
+        ReportEvidenceKind.TABLE,
+        ReportEvidenceKind.STATISTICS,
+        ReportEvidenceKind.KNOWLEDGE,
+    }
+    assert merged.status.value == "complete"
+    assert merged.gaps == []
 
 
 def test_research_executes_unique_collectors_in_parallel_and_keeps_track_order():
