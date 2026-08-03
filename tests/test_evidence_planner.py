@@ -542,6 +542,31 @@ class TestResolveToolParams:
         assert params["start_date"] == "2024-05-01"
         assert params["end_date"] == "2024-05-31"
 
+    def test_explicit_multi_month_query_repairs_collapsed_analyzer_window(self):
+        payload = _make_qa_payload(
+            query_type="data_explanation",
+            needs_driver=True,
+            derived_metrics=[
+                {"metric_name": "mom_absolute_change", "metric": "balancing"},
+            ],
+            period={
+                "kind": "month",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-01",
+                "granularity": "month",
+                "raw_text": "May 2026",
+            },
+        )
+        payload["raw_query"] = "How did balancing prices change during April and May 2026?"
+        payload["canonical_query_en"] = payload["raw_query"]
+        qa = QuestionAnalysis.model_validate(payload)
+
+        params = resolve_tool_params(qa, "get_prices", payload["raw_query"])
+
+        assert params is not None
+        assert params["start_date"] == "2026-04-01"
+        assert params["end_date"] == "2026-05-01"
+
     def test_balancing_prices_with_driver_analysis_adds_composition_and_tariffs(self):
         payload = _make_qa_payload(
             query_type="data_explanation",

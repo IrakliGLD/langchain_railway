@@ -401,11 +401,13 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         in system[1].lower()
     )
     assert "do not emit unused claim entries" in system[1].lower()
+    assert "do not delete a repairable analytical finding" in system[1].lower()
     assert '"section_id":"prices"' in user[1]
     assert '"section_id":"security"' not in user[1]
     assert '"track_id":"prices"' in user[1]
     assert '"track_id":"security"' not in user[1]
     assert "VALIDATION_ERRORS" in user[1]
+    assert "VERIFIED_DERIVED_REPAIR_HINTS" in user[1]
     errors_json = user[1].split(
         "VALIDATION_ERRORS:\n",
         1,

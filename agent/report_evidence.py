@@ -346,7 +346,7 @@ def build_report_narrative_items(ctx: Any) -> list[ReportEvidenceItem]:
     and must never be able to fail one.
     """
 
-    if ctx is None:
+    if report_pipeline_context_block_reason(ctx):
         return []
     items: list[ReportEvidenceItem] = []
     statistics = str(getattr(ctx, "stats_hint", "") or "").strip()
@@ -382,6 +382,23 @@ def build_report_narrative_items(ctx: Any) -> list[ReportEvidenceItem]:
             )
         )
     return items
+
+
+def report_pipeline_context_block_reason(ctx: Any) -> str:
+    """Return a stable reason when pipeline output is unsafe for reports."""
+    if ctx is None:
+        return "missing_context"
+    if list(getattr(ctx, "missing_evidence_for_metrics", None) or []):
+        return "missing_derived_evidence"
+    terminal_outcome = str(
+        getattr(ctx, "terminal_outcome", "") or ""
+    ).strip().lower()
+    if terminal_outcome and terminal_outcome not in {
+        "data_answer",
+        "conceptual_answer",
+    }:
+        return f"terminal_{re.sub(r'[^a-z0-9_]+', '_', terminal_outcome)[:48]}"
+    return ""
 
 
 def make_report_narrative_evidence_item(

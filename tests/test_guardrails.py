@@ -6309,6 +6309,17 @@ def test_extract_date_range_month_year_range():
     assert end == "2024-12-01"
 
 
+def test_extract_date_range_month_list_with_shared_year():
+    """A trailing year applies to every coordinated month, not only the last one."""
+    from agent.router import extract_date_range
+
+    start, end = extract_date_range(
+        "How did prices change during April and May 2026?"
+    )
+    assert start == "2026-04-01"
+    assert end == "2026-05-01"
+
+
 def test_extract_date_range_sparse_month_list_is_case_insensitive_and_uses_min_max_bounds():
     """Explicit month lists should preserve sparse month coverage instead of collapsing to the first year."""
     from agent.router import extract_date_range

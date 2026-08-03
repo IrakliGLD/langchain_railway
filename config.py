@@ -129,12 +129,18 @@ REPORT_PIPELINE_V2_MODE = (
     os.getenv("REPORT_PIPELINE_V2_MODE", "disabled").strip().lower()
     or "disabled"
 )
-# Track-scoped analysis rolls out independently from the document-pipeline v2
-# cutover. Keeping its default disabled lets operators shadow and compare the
-# new evidence packets before they can change a report.
+# Track-scoped analysis is the evidence path for an enabled document pipeline.
+# An explicit setting remains authoritative for rollback/shadow comparison;
+# otherwise enabling v2 also enables its analyzed per-track packets.
+_REPORT_TRACK_ANALYSIS_DEFAULT = (
+    "enabled" if REPORT_PIPELINE_V2_MODE == "enabled" else "disabled"
+)
 REPORT_TRACK_ANALYSIS_MODE = (
-    os.getenv("REPORT_TRACK_ANALYSIS_MODE", "disabled").strip().lower()
-    or "disabled"
+    os.getenv(
+        "REPORT_TRACK_ANALYSIS_MODE",
+        _REPORT_TRACK_ANALYSIS_DEFAULT,
+    ).strip().lower()
+    or _REPORT_TRACK_ANALYSIS_DEFAULT
 )
 REPORT_MAX_GENERATIVE_CALLS = _read_bounded_int_env(
     "REPORT_MAX_GENERATIVE_CALLS",

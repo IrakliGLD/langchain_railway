@@ -2030,6 +2030,98 @@ def test_dimensionless_derived_claim_is_still_recomputed():
     assert "DERIVED_CLAIM_INVALID" in validation.error_codes
 
 
+def test_repairable_derived_claim_is_normalized_from_verified_operands():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The observed fleet grew by 9 reporting plants. "
+            + _words(section.target_words - 7)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="difference",
+            display_value="9",
+            unit="count",
+            column="plant_count",
+        )
+    ]
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _count_derived_manifest()
+
+    repaired, repair_count = report_grounding.normalize_repairable_derived_claims(
+        draft,
+        manifest.item_by_ref(),
+    )
+
+    assert repair_count == 1
+    assert "grew by 4 reporting plants" in repaired.content_markdown
+    assert repaired.paragraphs[0].derived_claims[0].display_value == "4"
+    assert validate_report_section(repaired, section, manifest).valid is True
+
+
+def test_repairable_percent_change_is_normalized_from_verified_operands():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "The observed price increased by 9% between the two periods. "
+            + _words(section.target_words - 10)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="percent_change",
+            display_value="9%",
+            unit="%",
+        )
+    ]
+    draft = ReportSectionDraft.model_validate(payload)
+    manifest = _manifest()
+
+    repaired, repair_count = report_grounding.normalize_repairable_derived_claims(
+        draft,
+        manifest.item_by_ref(),
+    )
+
+    assert repair_count == 1
+    assert "increased by 8%" in repaired.content_markdown
+    assert repaired.paragraphs[0].derived_claims[0].display_value == "8%"
+    assert validate_report_section(repaired, section, manifest).valid is True
+
+
+def test_derived_claim_normalization_fails_closed_when_rendering_is_ambiguous():
+    plan = ReportPlan.model_validate(_plan_payload())
+    section = plan.sections[1]
+    payload = _draft(
+        section,
+        text=(
+            "One draft statement says growth was 9 plants, while another repeats 9 plants. "
+            + _words(section.target_words - 13)
+        ),
+    )
+    payload["paragraphs"][0]["derived_claims"] = [
+        _derived_claim(
+            operation="difference",
+            display_value="9",
+            unit="count",
+            column="plant_count",
+        )
+    ]
+    draft = ReportSectionDraft.model_validate(payload)
+
+    repaired, repair_count = report_grounding.normalize_repairable_derived_claims(
+        draft,
+        _count_derived_manifest().item_by_ref(),
+    )
+
+    assert repair_count == 0
+    assert repaired is draft
+
+
 def test_section_word_tolerance_admits_observed_model_overshoot():
     """gpt-oss-20b overshot a 109-word target at 136 and 141 words repeatedly,
     and a 118-word target at 159 (jobs c7823cc9 / acf48571). A +20% ceiling is

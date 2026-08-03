@@ -7,6 +7,8 @@ import os
 import threading
 from copy import deepcopy
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -181,6 +183,26 @@ def test_track_analysis_runs_report_pipeline_once_and_builds_existing_packet():
         item.kind is not ReportEvidenceKind.LIMITATION
         for item in packet.items
     )
+
+
+def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence():
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=["period", "price_gel"],
+            rows=[["2026-04", 100.0], ["2026-05", 120.0]],
+            stats_hint="Mean observed price was 110 GEL/MWh.",
+            terminal_outcome="clarification_required",
+            missing_evidence_for_metrics=["mom_percent_change"],
+            answer_mode="report",
+        )
+
+    with pytest.raises(ValueError, match="missing_derived_evidence"):
+        execute_report_track_analysis(
+            _QUERY,
+            _plan().tracks[0],
+            query_pipeline=query_pipeline,
+        )
 
 
 def test_track_analysis_reserves_packet_capacity_for_analysis_and_knowledge():

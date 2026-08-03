@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from agent.report_grounding import (
     build_evidence_grounding_index,
+    normalize_repairable_derived_claims,
     validate_paragraph_grounding,
 )
 from contracts.report import (
@@ -312,6 +313,16 @@ def generate_report_sections(
             draft = (
                 raw_draft if isinstance(raw_draft, ReportSectionDraft) else ReportSectionDraft.model_validate(raw_draft)
             )
+            draft, normalized_count = normalize_repairable_derived_claims(
+                draft,
+                item_by_ref,
+            )
+            if normalized_count:
+                _LOGGER.info(
+                    "REPORT_DERIVED_CLAIM_NORMALIZED section_id=%s count=%d",
+                    section.section_id,
+                    normalized_count,
+                )
             validation = validate_report_section(
                 draft,
                 section,
@@ -400,6 +411,16 @@ def generate_report_sections(
                         if isinstance(repaired_raw, ReportSectionDraft)
                         else ReportSectionDraft.model_validate(repaired_raw)
                     )
+                    repaired, normalized_count = normalize_repairable_derived_claims(
+                        repaired,
+                        item_by_ref,
+                    )
+                    if normalized_count:
+                        _LOGGER.info(
+                            "REPORT_DERIVED_CLAIM_NORMALIZED section_id=%s count=%d",
+                            section.section_id,
+                            normalized_count,
+                        )
                 except ValidationError as exc:
                     current_draft = repaired_raw
                     current_error_codes = ["SECTION_SCHEMA_INVALID"]

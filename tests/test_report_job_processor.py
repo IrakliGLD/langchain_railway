@@ -708,6 +708,28 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
     )
 
 
+def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
+    blocked = QueryContext(
+        query=_V2_QUERY,
+        stats_hint="Observed mean balancing price was 141.0 GEL/MWh.",
+        summary_domain_knowledge="The balancing market settles hourly.",
+        terminal_outcome="clarification_required",
+        missing_evidence_for_metrics=["mom_percent_change"],
+        answer_mode="report",
+    )
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: blocked,
+    )
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+
+    items = processor._pipeline_narrative_items(
+        _lease(query=_V2_QUERY)
+    )
+
+    assert items == []
+    assert "reason=missing_derived_evidence" in caplog.text
+
+
 def test_track_analysis_shadow_is_parallel_isolated_and_does_not_change_output(
     caplog,
 ):

@@ -82,6 +82,17 @@ log = logging.getLogger("Enai")
 _STALE_ANALYZER_WINDOW_MAX_AGE_DAYS = 120
 
 
+def _extract_authoritative_date_range(
+    raw_query: str,
+    canonical_query: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Prefer explicit dates in user-authored text over the LLM canonicalization."""
+    start_date, end_date = extract_date_range(raw_query)
+    if start_date or end_date:
+        return start_date, end_date
+    return extract_date_range(canonical_query)
+
+
 def _expand_single_month_explanation_window(
     qa: QuestionAnalysis,
     start_date: Optional[str],
@@ -996,7 +1007,7 @@ def resolve_tool_params(
         start_date = start_date or qa.sql_hints.period.start_date
         end_date = end_date or qa.sql_hints.period.end_date
     if not start_date or not end_date:
-        regex_start, regex_end = extract_date_range(effective_query)
+        regex_start, regex_end = _extract_authoritative_date_range(raw_query, effective_query)
         start_date = start_date or regex_start
         end_date = end_date or regex_end
 
@@ -1050,7 +1061,7 @@ def resolve_tool_params(
             end_dt is not None
             and (date.today() - end_dt).days > _STALE_ANALYZER_WINDOW_MAX_AGE_DAYS
         ):
-            regex_start, regex_end = extract_date_range(effective_query)
+            regex_start, regex_end = _extract_authoritative_date_range(raw_query, effective_query)
             if regex_start is None and regex_end is None:
                 log.info(
                     "Analyzer resolved stale window (%s-%s) for dateless query; clearing so tools fetch latest data",
@@ -1064,7 +1075,7 @@ def resolve_tool_params(
     # to a single point, fall back to regex for a wider range.
     _RANGE_QUERY_TYPES = {QueryType.COMPARISON, QueryType.DATA_EXPLANATION, QueryType.DATA_RETRIEVAL}
     if qa.classification.query_type in _RANGE_QUERY_TYPES and start_date and start_date == end_date:
-        regex_start, regex_end = extract_date_range(effective_query)
+        regex_start, regex_end = _extract_authoritative_date_range(raw_query, effective_query)
         if regex_start and regex_end and regex_start != regex_end:
             log.info(
                 "Analyzer returned single-point dates (%s) for %s query; "

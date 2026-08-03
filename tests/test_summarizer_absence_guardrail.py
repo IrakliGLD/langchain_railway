@@ -100,7 +100,7 @@ def _make_tariff_ctx() -> QueryContext:
     )
 
 
-def test_absence_claim_guardrail_replaces_unsupported_summary(monkeypatch):
+def test_absence_claim_guardrail_rewrites_unsupported_summary(monkeypatch):
     def _fake_structured(*_args, **_kwargs):
         return SummaryEnvelope(
             answer=(
@@ -117,11 +117,41 @@ def test_absence_claim_guardrail_replaces_unsupported_summary(monkeypatch):
 
     out = summarizer.summarize_data(_make_tariff_ctx())
 
-    assert out.summary_source == "absence_claim_guardrail"
-    # Fallback is now the localized conservative message (English here, no lang_code).
-    assert "could not fully ground" in out.summary
+    assert out.summary_source == "structured_summary"
+    assert "provided data does not establish" in out.summary.lower()
     assert "did not have active tariff values recorded" not in out.summary
-    assert out.summary_citations == ["absence_claim_guardrail"]
+    assert out.summary_citations[:2] == ["data_preview", "absence_claim_repair"]
+    assert out.summary_confidence == 0.6
+
+
+def test_absence_claim_guardrail_preserves_grounded_analysis_and_claims(monkeypatch):
+    def _fake_structured(*_args, **_kwargs):
+        return SummaryEnvelope(
+            answer=(
+                "Enguri's tariff was 18.57 GEL/MWh in the retrieved month. "
+                "G-POWER's tariff was not available."
+            ),
+            claims=[
+                "Enguri's tariff was 18.57 GEL/MWh in the retrieved month.",
+                "G-POWER's tariff was not available.",
+            ],
+            citations=["data_preview"],
+            confidence=0.95,
+        )
+
+    monkeypatch.setattr(summarizer, "llm_summarize_structured", _fake_structured)
+    monkeypatch.setattr(summarizer, "get_relevant_domain_knowledge", lambda *_args, **_kwargs: "")
+
+    out = summarizer.summarize_data(_make_tariff_ctx())
+
+    assert "18.57 GEL/MWh" in out.summary
+    assert "was not available" not in out.summary
+    assert "provided data does not establish" in out.summary.lower()
+    assert out.summary_claims == [
+        "Enguri's tariff was 18.57 GEL/MWh in the retrieved month."
+    ]
+    assert out.summary_citations[:2] == ["data_preview", "absence_claim_repair"]
+    assert out.summary_source == "structured_summary"
 
 
 def test_absence_claim_guardrail_allows_conservative_limited_availability_language(monkeypatch):

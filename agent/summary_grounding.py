@@ -44,13 +44,8 @@ _UNSUPPORTED_ABSENCE_PATTERNS = (
     re.compile(r"\bnot\s+(?:recorded|available|present)\b", re.IGNORECASE),
 )
 
-_SAFE_LIMITED_AVAILABILITY_PHRASES = (
-    "not established from the provided data",
-    "not shown in the provided data",
-    "not visible in the provided data",
-    "the provided data does not establish",
-    "the retrieved rows do not establish",
-    "this result set does not establish",
+_CONSERVATIVE_ABSENCE_REWRITE = (
+    "The provided data does not establish the asserted absence for the referenced entity or period."
 )
 
 _DATA_SHAPE_MAPPING_SIGNALS = (
@@ -465,8 +460,6 @@ def _has_unsupported_absence_claims(summary: str) -> bool:
         return False
 
     text_lower = text.lower()
-    if any(phrase in text_lower for phrase in _SAFE_LIMITED_AVAILABILITY_PHRASES):
-        return False
     # Fix F (2026-05-17) — skip the guardrail when the LLM is doing
     # transparent DATA-SHAPE equivalence-mapping (Q2 trace 5a00ee06).
     # See _DATA_SHAPE_MAPPING_SIGNALS comment block above.
@@ -482,8 +475,40 @@ def _has_unsupported_absence_claims(summary: str) -> bool:
     return any(pattern.search(text) for pattern in _UNSUPPORTED_ABSENCE_PATTERNS)
 
 
+def _unsupported_absence_pattern_ids(text: str) -> list[int]:
+    return [
+        index
+        for index, pattern in enumerate(_UNSUPPORTED_ABSENCE_PATTERNS, start=1)
+        if pattern.search(str(text or ""))
+    ]
+
+
+def _repair_unsupported_absence_sentences(summary: str) -> tuple[str, list[int], int]:
+    """Replace only unsafe absence sentences and retain all other analysis."""
+    text = str(summary or "").strip()
+    if not _has_unsupported_absence_claims(text):
+        return text, [], 0
+
+    pattern_ids: set[int] = set()
+    repaired_count = 0
+    repaired_parts: list[str] = []
+    for part in re.split(r"(?<=[.!?])(?=\s)|(?<=\n)", text):
+        ids = _unsupported_absence_pattern_ids(part)
+        if not ids:
+            repaired_parts.append(part)
+            continue
+        pattern_ids.update(ids)
+        repaired_count += 1
+        prefix_match = re.match(r"^(\s*(?:(?:[-*+]|\d+[.)])\s+)?)", part)
+        prefix = prefix_match.group(1) if prefix_match else ""
+        repaired_parts.append(prefix + _CONSERVATIVE_ABSENCE_REWRITE)
+
+    repaired = "".join(repaired_parts).strip()
+    return repaired, sorted(pattern_ids), repaired_count
+
+
 def _apply_absence_claim_guardrail(ctx: QueryContext) -> None:
-    """Replace unsupported absence claims with a conservative fallback.
+    """Rewrite unsupported absence sentences while preserving grounded analysis.
 
     Blank or omitted cells in a non-empty result set do not prove that an
     entity-period truly lacked a value. This guardrail only applies to LLM
@@ -494,16 +519,41 @@ def _apply_absence_claim_guardrail(ctx: QueryContext) -> None:
         return
     if not ((ctx.df is not None and not ctx.df.empty) or ctx.rows):
         return
-    if not _has_unsupported_absence_claims(ctx.summary):
+    repaired_summary, pattern_ids, repaired_count = _repair_unsupported_absence_sentences(
+        ctx.summary
+    )
+    if not pattern_ids:
         return
 
-    log.warning("Summary contained unsupported absence claims; replacing with conservative fallback.")
-    # Localized so a non-English question doesn't get an English non-answer.
-    ctx.summary = get_grounding_fallback_message(getattr(ctx, "lang_code", "") or "en")
-    ctx.summary_source = "absence_claim_guardrail"
-    ctx.summary_claims = []
-    ctx.summary_citations = ["absence_claim_guardrail"]
-    ctx.summary_confidence = 0.2
+    original_claims = list(ctx.summary_claims or [])
+    ctx.summary = repaired_summary
+    ctx.summary_claims = [
+        claim
+        for claim in original_claims
+        if not _has_unsupported_absence_claims(str(claim or ""))
+    ]
+    ctx.summary_citations = list(
+        dict.fromkeys(list(ctx.summary_citations or []) + ["absence_claim_repair"])
+    )
+    ctx.summary_confidence = min(float(ctx.summary_confidence or 0.0), 0.6)
+    log.warning(
+        "Summary absence claims repaired at sentence scope: pattern_ids=%s "
+        "repaired_sentences=%d preserved_claims=%d original_claims=%d",
+        pattern_ids,
+        repaired_count,
+        len(ctx.summary_claims),
+        len(original_claims),
+    )
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_summarize_data",
+        "absence_claim_repair",
+        pattern_ids=pattern_ids,
+        repaired_sentences=repaired_count,
+        preserved_claims=len(ctx.summary_claims),
+        original_claims=len(original_claims),
+    )
 
 
 def _serialize_scalar(value: Any) -> Any:

@@ -404,10 +404,11 @@ def test_active_planner_coerces_between_month_balancing_why_query(monkeypatch):
     tool_names = [tool.name.value for tool in out.question_analysis.tooling.candidate_tools]
     assert tool_names[:2] == ["get_prices", "get_balancing_composition"]
     metric_names = {metric.metric_name.value for metric in out.question_analysis.analysis_requirements.derived_metrics}
-    assert {"mom_absolute_change", "mom_percent_change", "yoy_absolute_change", "yoy_percent_change"} <= metric_names
+    assert {"mom_absolute_change", "mom_percent_change"} <= metric_names
     assert out.question_analysis.sql_hints.period is not None
-    assert out.question_analysis.sql_hints.period.start_date == "2024-11-01"
-    assert out.question_analysis.sql_hints.period.granularity.value == "month"
+    assert out.question_analysis.sql_hints.period.start_date == "2024-10-01"
+    assert out.question_analysis.sql_hints.period.end_date == "2024-11-30"
+    assert out.question_analysis.sql_hints.period.granularity.value == "range"
 
 
 def test_active_planner_coerces_russian_month_specific_balancing_why_query(monkeypatch):

@@ -11,7 +11,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agent.report_grounding import build_evidence_grounding_index
+from agent.report_grounding import (
+    build_evidence_grounding_index,
+    normalize_repairable_derived_claims,
+)
 from agent.report_sections import count_section_words, validate_report_section
 from contracts.report import report_section_validation_word_bounds
 from contracts.report_document import (
@@ -456,7 +459,20 @@ def _materialize_section_batch(
     section_errors: dict[str, list[str]] = {}
     section_warnings: dict[str, list[str]] = {}
     word_count = 0
+    normalized_sections: list[ReportSectionDraft] = []
+    item_by_ref = manifest.item_by_ref()
     for draft_section in batch.sections:
+        draft_section, normalized_count = normalize_repairable_derived_claims(
+            draft_section,
+            item_by_ref,
+        )
+        normalized_sections.append(draft_section)
+        if normalized_count:
+            _LOGGER.info(
+                "REPORT_DERIVED_CLAIM_NORMALIZED section_id=%s count=%d",
+                draft_section.section_id,
+                normalized_count,
+            )
         section_spec = plan_by_id[draft_section.section_id]
         validation = validate_report_section(
             draft_section,
@@ -478,7 +494,7 @@ def _materialize_section_batch(
             section_errors[draft_section.section_id] = blocking_codes
         if warning_codes:
             section_warnings[draft_section.section_id] = warning_codes
-    return list(batch.sections), ReportDocumentValidation(
+    return normalized_sections, ReportDocumentValidation(
         contract_version="report-document-validation-v1",
         valid=not section_errors,
         section_errors=section_errors,
