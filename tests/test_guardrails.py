@@ -1,6 +1,7 @@
 """
 Tests for Stage-0 firewall and prompt/guardrail enforcement paths.
 """
+import contextlib
 import importlib
 import json
 import logging
@@ -53,7 +54,9 @@ from agent import (  # noqa: E402
     sql_executor,
     summarizer,
 )
+from agent.evidence_derivation import missing_requested_evidence  # noqa: E402
 from agent.provenance import sql_query_hash  # noqa: E402
+from agent.report_evidence import report_pipeline_context_block_reason  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from core.llm import SummaryEnvelope  # noqa: E402
 from guardrails.firewall import build_safe_refusal_message, inspect_query  # noqa: E402
@@ -4011,6 +4014,89 @@ def test_missing_trend_slope_evidence_blocks_data_summary(monkeypatch):
     assert out.missing_evidence_for_metrics == ["trend_slope"]
     assert out.data_summary_blocked_reason.startswith("missing_derived_evidence:")
     assert out.summary == "need clarification"
+
+
+def test_multi_month_analysis_uses_contract_end_period_for_mom_evidence(monkeypatch):
+    """April-May tracks must compare May with April, not anchor on April."""
+    payload = _make_analyzer_payload("data_explanation", "tool", confidence=0.95)
+    payload["raw_query"] = (
+        "How did observed balancing electricity prices change during April and May 2026?"
+    )
+    payload["canonical_query_en"] = payload["raw_query"]
+    payload["sql_hints"]["period"] = {
+        "kind": "range",
+        "start_date": "2026-04-01",
+        "end_date": "2026-05-31",
+        "granularity": "range",
+        "raw_text": "April 2026 to May 2026",
+    }
+    payload["analysis_requirements"]["derived_metrics"] = [
+        {"metric_name": "mom_absolute_change", "metric": "balancing"},
+        {"metric_name": "mom_percent_change", "metric": "balancing"},
+        {"metric_name": "share_delta_mom", "metric": "share_import"},
+    ]
+    qa = QuestionAnalysis.model_validate(payload)
+    frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-04-01", "2026-05-01"]),
+            "p_bal_gel": [155.6065727, 132.4],
+            "share_import": [0.01, 0.0942],
+        }
+    )
+    ctx = QueryContext(
+        query=payload["raw_query"],
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        df=frame,
+        cols=list(frame.columns),
+        rows=[tuple(row) for row in frame.itertuples(index=False, name=None)],
+    )
+
+    setup = analyzer._prepare_timeseries_rows(ctx)
+
+    assert setup is not None
+    data, time_col, current_ts, current_row, previous_ts, previous_row = setup
+    assert current_ts == pd.Timestamp("2026-05-01")
+    assert previous_ts == pd.Timestamp("2026-04-01")
+
+    evidence = analyzer._build_requested_analysis_evidence(
+        ctx,
+        data,
+        time_col,
+        current_ts,
+        current_row,
+        previous_ts,
+        previous_row,
+        cur_shares={"share_import": 0.0942},
+        prev_shares={"share_import": 0.01},
+    )
+    assert set(evidence["derived_metric_name"]) == {
+        "mom_absolute_change",
+        "mom_percent_change",
+        "share_delta_mom",
+    }
+
+    monkeypatch.setattr(analyzer, "stamp_provenance", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        analyzer,
+        "database_connection",
+        lambda *_args, **_kwargs: contextlib.nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        analyzer,
+        "compute_regulated_plant_sales",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    analyzer._build_why_context(ctx)
+    ctx.requested_derived_metrics = [
+        "mom_absolute_change",
+        "mom_percent_change",
+        "share_delta_mom",
+    ]
+    ctx.missing_evidence_for_metrics = missing_requested_evidence(ctx)
+
+    assert ctx.missing_evidence_for_metrics == []
+    assert report_pipeline_context_block_reason(ctx) == ""
 
 
 def test_truncation_priority_knowledge_protects_knowledge_sections():

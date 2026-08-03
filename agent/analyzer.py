@@ -2931,6 +2931,32 @@ def enrich(ctx: QueryContext) -> QueryContext:
     return ctx
 
 
+def _resolve_analysis_target_period(
+    ctx: QueryContext,
+    df: pd.DataFrame,
+    time_col: str,
+) -> pd.Timestamp:
+    """Resolve the comparison anchor, preferring the authoritative period end."""
+    if ctx.has_authoritative_question_analysis:
+        period = ctx.question_analysis.sql_hints.period
+        if period is not None:
+            period_end = pd.to_datetime(period.end_date, errors="coerce")
+            if not pd.isna(period_end):
+                return period_end
+
+    years = [int(year) for year in re.findall(r"(20\d{2})", ctx.query)]
+    month = _month_from_text(ctx.query.lower())
+    if month is None and ctx.question_analysis is not None:
+        canonical = getattr(ctx.question_analysis, "canonical_query_en", "") or ""
+        if canonical.strip():
+            month = _month_from_text(canonical.lower())
+    return (
+        pd.Timestamp(years[0], month or 1, 1)
+        if years
+        else pd.to_datetime(df[time_col].iloc[-1])
+    )
+
+
 def _prepare_timeseries_rows(
     ctx: QueryContext,
 ) -> Optional[Tuple[pd.DataFrame, str, Optional[pd.Timestamp], pd.DataFrame, Optional[pd.Timestamp], pd.DataFrame]]:
@@ -2950,14 +2976,7 @@ def _prepare_timeseries_rows(
     if df.empty:
         return None
 
-    # Resolve target period from the query text.
-    years = [int(y) for y in re.findall(r"(20\d{2})", ctx.query)]
-    mon = _month_from_text(ctx.query.lower())
-    if mon is None and ctx.question_analysis is not None:
-        canonical = getattr(ctx.question_analysis, "canonical_query_en", "") or ""
-        if canonical.strip():
-            mon = _month_from_text(canonical.lower())
-    target_period = pd.Timestamp(years[0], mon or 1, 1) if years else df[t_series_col].iloc[-1]
+    target_period = _resolve_analysis_target_period(ctx, df, t_series_col)
 
     cur_row = df.loc[df[t_series_col] == target_period]
     if cur_row.empty:
@@ -3218,14 +3237,7 @@ def _build_why_context(ctx: QueryContext) -> None:
     df[t_series_col] = normalize_period_series(df[t_series_col])
     df = df.dropna(subset=[t_series_col]).sort_values(t_series_col)
 
-    years = [int(y) for y in re.findall(r"(20\d{2})", ctx.query)]
-    mon = _month_from_text(ctx.query.lower())
-    # Fallback: try English canonical query from analyzer
-    if mon is None and ctx.question_analysis is not None:
-        canonical = getattr(ctx.question_analysis, "canonical_query_en", "") or ""
-        if canonical.strip():
-            mon = _month_from_text(canonical.lower())
-    target_period = pd.Timestamp(years[0], mon or 1, 1) if years else df[t_series_col].iloc[-1]
+    target_period = _resolve_analysis_target_period(ctx, df, t_series_col)
 
     cur_row = df.loc[df[t_series_col] == target_period]
     if cur_row.empty:
