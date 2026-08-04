@@ -11,8 +11,12 @@ from pydantic import ValidationError
 from agent import summarizer
 from agent.report_evidence import (
     build_report_evidence_manifest,
+    build_report_manifest_from_items,
+    make_report_narrative_evidence_item,
 )
 from contracts.report_evidence import (
+    REPORT_EVIDENCE_CONTENT_MAX_CHARS,
+    REPORT_EVIDENCE_MANIFEST_MAX_BYTES,
     REPORT_EVIDENCE_MANIFEST_VERSION,
     ReportEvidenceItem,
     ReportEvidenceKind,
@@ -203,6 +207,35 @@ def test_manifest_rejects_duplicate_refs_and_oversized_serialized_content():
     }
     with pytest.raises(ValidationError, match="unique evidence_ref"):
         ReportEvidenceManifest.model_validate(payload)
+
+
+def test_manifest_builder_skips_items_that_exceed_the_persistence_budget():
+    large_items = [
+        make_report_narrative_evidence_item(
+            kind=ReportEvidenceKind.STATISTICS,
+            title=f"Track statistics {index}",
+            source="derived",
+            content=f"{index:02d}" + "x" * REPORT_EVIDENCE_CONTENT_MAX_CHARS,
+        )
+        for index in range(20)
+    ]
+    limitation = make_report_narrative_evidence_item(
+        kind=ReportEvidenceKind.LIMITATION,
+        title="Evidence boundary",
+        source="system",
+        content="Only evidence retained in this manifest may support claims.",
+    )
+
+    manifest = build_report_manifest_from_items(
+        "Explain the electricity price trend.",
+        [*large_items, limitation],
+    )
+
+    assert len(manifest.model_dump_json().encode("utf-8")) <= (
+        REPORT_EVIDENCE_MANIFEST_MAX_BYTES
+    )
+    assert len(manifest.items) < len(large_items) + 1
+    assert limitation in manifest.items
 
 
 def test_conceptual_answer_exposes_curated_knowledge_to_report_manifest(
