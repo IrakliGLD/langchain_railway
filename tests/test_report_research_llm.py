@@ -386,3 +386,37 @@ def test_research_planner_omits_the_knowledge_block_when_absent(monkeypatch):
     _capture_planner_messages(monkeypatch, captured)
 
     assert "TOPIC_KNOWLEDGE" not in dict(captured["messages"])["user"]
+
+
+_REPORT_PROMPT_BUILDERS = (
+    "llm_plan_report_research",
+    "llm_plan_report",
+    "llm_repair_report_plan",
+    "llm_write_report_document",
+    "_llm_write_report_section_batch",
+    "llm_repair_report_document_sections",
+    "llm_write_report_section",
+)
+
+
+@pytest.mark.parametrize("builder_name", _REPORT_PROMPT_BUILDERS)
+def test_report_prompts_put_the_schema_before_the_variable_request(builder_name):
+    """Constants must precede per-request content, or nothing caches.
+
+    Providers cache on longest common prefix. Every report prompt used to put
+    OUTPUT_JSON_SCHEMA — its largest constant — last, behind the user request
+    and the evidence, so the cacheable prefix ended a few lines in and every
+    report ran at cached_prompt_tokens=0.
+    """
+    import inspect
+
+    source = inspect.getsource(getattr(llm, builder_name))
+    schema_at = source.find('"OUTPUT_JSON_SCHEMA:')
+    request_at = source.find('"USER_REPORT_REQUEST:')
+
+    assert schema_at != -1, f"{builder_name} has no schema block"
+    assert request_at != -1, f"{builder_name} has no request block"
+    assert schema_at < request_at, (
+        f"{builder_name} emits the constant schema after the variable request, "
+        "which poisons the cacheable prefix"
+    )

@@ -350,3 +350,156 @@ def test_report_table_keeps_a_short_table_verbatim():
     assert artifact is not None
     assert len(artifact.data) == 3
     assert "segment" not in artifact.data[0]
+
+
+def _wide_manifest(numeric_columns: int = 20) -> ReportEvidenceManifest:
+    """The enriched frame shape: one period column plus many driver columns."""
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    names = [f"driver_{index:02d}_gel" for index in range(numeric_columns)]
+    table["columns"] = ["period", *names]
+    table["rows"] = [
+        {"period": "2026-01", **{name: 1.0 + index for index, name in enumerate(names)}},
+        {"period": "2026-02", **{name: 2.0 + index for index, name in enumerate(names)}},
+    ]
+    table["unit_by_column"] = {name: "GEL/MWh" for name in names}
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _wide_plan(purpose: str, *, explicit_series: bool) -> ReportPlan:
+    payload = _plan_payload()
+    chart = payload["charts"][0]
+    chart["purpose"] = purpose
+    chart.pop("x_field", None)
+    if explicit_series:
+        # The contract caps series_fields at 8, so this is the widest a planner
+        # can legally request.
+        chart["series_fields"] = [f"driver_{index:02d}_gel" for index in range(8)]
+    else:
+        chart.pop("series_fields", None)
+    return ReportPlan.model_validate(payload)
+
+
+@pytest.mark.parametrize("purpose", ["trend", "table"])
+@pytest.mark.parametrize("explicit_series", [False, True])
+def test_report_charts_never_render_an_unreadable_number_of_series(
+    purpose,
+    explicit_series,
+):
+    """A legend of twenty series is not a chart, it is a wall.
+
+    The enriched balancing frame carries 31 driver columns, so any exhibit
+    built over it can request far more series than a reader can follow.
+    """
+    decisions = build_report_charts(
+        _wide_plan(purpose, explicit_series=explicit_series),
+        _wide_manifest(),
+    )
+
+    artifact = decisions[0].artifact
+    assert artifact is not None, decisions[0].omitted_reason
+    assert len(artifact.metadata.series) <= 8
+
+
+def test_chart_data_carries_only_the_declared_axis_and_series():
+    """metadata.series caps the legend; data must not smuggle the rest.
+
+    The enriched balancing frame has 31 driver columns. _built passed rows
+    through verbatim, so a renderer keying off the row dicts drew every column
+    while metadata truthfully claimed eight — the report chart that came back
+    as an unreadable wall of lines.
+    """
+    decisions = build_report_charts(
+        _wide_plan("trend", explicit_series=False),
+        _wide_manifest(numeric_columns=20),
+    )
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    declared = {artifact.metadata.x_axis, *artifact.metadata.series}
+    for row in artifact.data:
+        assert set(row) <= declared, (
+            f"row carries undeclared columns: {sorted(set(row) - declared)}"
+        )
+
+
+def test_chart_data_projection_preserves_every_declared_value():
+    """Projection must drop columns, never rows or declared values."""
+    manifest = _wide_manifest(numeric_columns=20)
+    decisions = build_report_charts(
+        _wide_plan("trend", explicit_series=False),
+        manifest,
+    )
+
+    artifact = decisions[0].artifact
+    source_rows = manifest.items[0].rows
+    assert len(artifact.data) == len(source_rows)
+    for projected, source in zip(artifact.data, source_rows, strict=True):
+        for column in projected:
+            assert projected[column] == source[column]
+
+
+def _temporal_manifest(period_values: list[str]) -> ReportEvidenceManifest:
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "p_bal_gel"]
+    table["rows"] = [
+        {"date": value, "p_bal_gel": 100.0 + index}
+        for index, value in enumerate(period_values)
+    ]
+    table["unit_by_column"] = {"p_bal_gel": "GEL/MWh"}
+    table["total_row_count"] = len(period_values)
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _temporal_plan() -> ReportPlan:
+    payload = _plan_payload()
+    chart = payload["charts"][0]
+    chart["purpose"] = "trend"
+    chart["x_field"] = "date"
+    chart["series_fields"] = ["p_bal_gel"]
+    return ReportPlan.model_validate(payload)
+
+
+def _axis_values(period_values: list[str]) -> list[str]:
+    decisions = build_report_charts(
+        _temporal_plan(),
+        _temporal_manifest(period_values),
+    )
+    artifact = decisions[0].artifact
+    assert artifact is not None, decisions[0].reason_code
+    return [row["date"] for row in artifact.data]
+
+
+def test_monthly_series_renders_month_labels_not_midnight_timestamps():
+    """Job 4bd4d24f axis read 2026-06-01T00:00:00 for a monthly series.
+
+    ``date`` is detected as temporal by column name, so its ISO-timestamp
+    values never met _TIME_VALUE_PATTERN and were never normalized.
+    """
+    assert _axis_values(
+        ["2026-04-01T00:00:00", "2026-05-01T00:00:00", "2026-06-01T00:00:00"]
+    ) == ["2026-04", "2026-05", "2026-06"]
+
+
+def test_daily_series_keeps_its_day_component():
+    """Collapsing to month would merge distinct observations."""
+    assert _axis_values(
+        ["2026-06-01T00:00:00", "2026-06-02T00:00:00", "2026-06-03T00:00:00"]
+    ) == ["2026-06-01", "2026-06-02", "2026-06-03"]
+
+
+def test_annual_series_renders_years():
+    assert _axis_values(
+        ["2024-01-01T00:00:00", "2025-01-01T00:00:00", "2026-01-01T00:00:00"]
+    ) == ["2024", "2025", "2026"]
+
+
+def test_already_normalized_periods_are_left_alone():
+    assert _axis_values(["2026-04", "2026-05"]) == ["2026-04", "2026-05"]
+
+
+def test_intraday_timestamps_are_not_truncated():
+    """A non-midnight component is real data, not padding."""
+    values = ["2026-06-01T09:30:00", "2026-06-01T10:30:00"]
+    assert _axis_values(values) == values

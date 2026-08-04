@@ -31,6 +31,9 @@ _TIME_VALUE_PATTERN = re.compile(r"^\d{4}(?:-\d{2}(?:-\d{2})?)?(?:Q[1-4])?$")
 # Below this a table is already readable, and summarizing it would destroy
 # information rather than condense it.
 _TABLE_SUMMARY_ROW_THRESHOLD = 6
+# Mirrors ReportChartArtifact.metadata.series (max_length=8): a builder that
+# emitted more would fail contract validation rather than render.
+_MAXIMUM_CHART_SERIES = 8
 
 
 def _period_month(value: Any) -> int | None:
@@ -99,6 +102,43 @@ def _summary_statistics_rows(
                 }
             )
     return summary
+
+
+_ISO_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})"
+    r"(?:[T ](?P<hour>\d{2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?)?$"
+)
+
+
+def _normalized_axis_values(values: list[Any]) -> list[Any] | None:
+    """Render a temporal axis at the granularity the series actually carries.
+
+    ``date`` is temporal by column name, so its ISO-timestamp values never met
+    _TIME_VALUE_PATTERN and reached the axis whole: job 4bd4d24f labelled a
+    monthly series ``2026-06-01T00:00:00``.
+
+    Only components that are constant *and* at their default across every row
+    are dropped, so this never merges distinct observations — a daily series
+    keeps its day, and a non-midnight time is real data rather than padding.
+    Returns None when the column is not a uniform timestamp, leaving it as-is.
+    """
+
+    matches = [_ISO_TIMESTAMP_PATTERN.match(str(value)) for value in values]
+    if not matches or any(match is None for match in matches):
+        return None
+    if any(
+        part not in (None, "00")
+        for match in matches
+        for part in (match["hour"], match["minute"], match["second"])
+    ):
+        return None
+    if all(match["day"] == "01" for match in matches):
+        if all(match["month"] == "01" for match in matches):
+            return [match["year"] for match in matches]
+        return [f"{match['year']}-{match['month']}" for match in matches]
+    return [
+        f"{match['year']}-{match['month']}-{match['day']}" for match in matches
+    ]
 
 
 def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
@@ -237,12 +277,41 @@ def _built(
     x_axis: str,
     series: list[str],
     units: dict[str, str],
+    context_columns: tuple[str, ...] = (),
 ) -> ReportChartBuildDecision:
+    # Project rows onto the declared axis and series. metadata.series caps the
+    # legend, but passing rows through verbatim let the payload carry every
+    # column of the source table — 31 of them on the enriched balancing frame —
+    # so a renderer keying off the row dicts drew all of them while metadata
+    # truthfully claimed eight. Projecting here makes the wider chart
+    # unrepresentable rather than merely undeclared, and shrinks the payload.
+    # ``context_columns`` keeps a non-series column a reader still needs — the
+    # period a composition snapshot was filtered to, which is otherwise
+    # unrecoverable from the rows. One temporal column cannot recreate the
+    # defect above, which was thirty numeric ones.
+    projected_columns = [x_axis, *series, *context_columns]
+    projected_data = [
+        {
+            column: row[column]
+            for column in projected_columns
+            if column in row
+        }
+        for row in data
+    ]
+    if projected_data and all(x_axis in row for row in projected_data):
+        normalized = _normalized_axis_values(
+            [row[x_axis] for row in projected_data]
+        )
+        if normalized is not None:
+            projected_data = [
+                {**row, x_axis: value}
+                for row, value in zip(projected_data, normalized, strict=True)
+            ]
     artifact = ReportChartArtifact(
         chart_id=chart.chart_id,
         section_id=chart.section_id,
         type=chart_type,
-        data=data,
+        data=projected_data,
         metadata=ReportChartMetadata(
             title=chart.title,
             deterministic=True,
@@ -289,9 +358,15 @@ def build_report_chart_requests(
 
         if chart.purpose is ReportChartPurpose.TABLE:
             x_axis = chart.x_field or (temporal or categorical or columns)[0]
-            series = chart.series_fields or [
-                column for column in columns if column != x_axis
-            ][:8]
+            # The cap has to wrap the whole choice. Written as
+            # ``series_fields or [...][:_MAXIMUM_CHART_SERIES]`` it binds to the fallback alone, so
+            # a supplied list skipped the cap entirely. Unreachable today only
+            # because the contract caps series_fields at 8 as well; relying on
+            # that leaves the guard here silently doing nothing.
+            series = (
+                chart.series_fields
+                or [column for column in columns if column != x_axis]
+            )[:_MAXIMUM_CHART_SERIES]
             if not series:
                 decisions.append(_omitted(chart, "REPORT_CHART_TABLE_FIELDS_REQUIRED"))
                 continue
@@ -358,7 +433,7 @@ def build_report_chart_requests(
                     chart_type=ReportChartType.LINE,
                     data=rows,
                     x_axis=x_axis,
-                    series=requested_series[:8],
+                    series=requested_series[:_MAXIMUM_CHART_SERIES],
                     units=units,
                 )
             )
@@ -407,7 +482,7 @@ def build_report_chart_requests(
                         for row in rows
                         if str(row.get(time_column)) == latest_period
                     ]
-                snapshot_series = (chart.series_fields or [numeric[0]])[:8]
+                snapshot_series = (chart.series_fields or [numeric[0]])[:_MAXIMUM_CHART_SERIES]
                 decisions.append(
                     _built(
                         chart,
@@ -423,6 +498,9 @@ def build_report_chart_requests(
                         x_axis=x_axis,
                         series=snapshot_series,
                         units=units,
+                        context_columns=(
+                            (temporal[0],) if temporal else ()
+                        ),
                     )
                 )
                 continue
@@ -430,7 +508,7 @@ def build_report_chart_requests(
                 latest = rows[-1]
                 pivot_columns = [
                     column
-                    for column in numeric[:8]
+                    for column in numeric[:_MAXIMUM_CHART_SERIES]
                     if _is_numeric(latest.get(column))
                 ]
                 if not pivot_columns:
@@ -485,7 +563,7 @@ def build_report_chart_requests(
                     chart_type=ReportChartType.BAR,
                     data=rows,
                     x_axis=x_axis,
-                    series=requested_series[:8],
+                    series=requested_series[:_MAXIMUM_CHART_SERIES],
                     units=units,
                 )
             )
@@ -493,7 +571,7 @@ def build_report_chart_requests(
         if len(rows) == 1 and len(numeric) >= 2:
             comparison_rows = [
                 {"category": column, "value": rows[0].get(column)}
-                for column in numeric[:8]
+                for column in numeric[:_MAXIMUM_CHART_SERIES]
             ]
             decisions.append(
                 _built(
