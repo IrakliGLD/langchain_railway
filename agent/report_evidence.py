@@ -14,6 +14,7 @@ from agent.metric_units import METRIC_UNITS
 from config_metrics.metric_units import metric_value_unit
 from contracts.report_evidence import (
     REPORT_EVIDENCE_CONTENT_MAX_CHARS,
+    REPORT_EVIDENCE_MANIFEST_MAX_BYTES,
     REPORT_EVIDENCE_MANIFEST_VERSION,
     ReportEvidenceItem,
     ReportEvidenceKind,
@@ -426,20 +427,33 @@ def build_report_manifest_from_items(
     query: str,
     items: Sequence[ReportEvidenceItem],
 ) -> ReportEvidenceManifest:
-    """Bind a de-duplicated evidence sequence to one deterministic manifest."""
+    """Bind prioritized evidence to one deterministic, persistence-safe manifest."""
 
+    query_digest = hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
     unique_items: list[ReportEvidenceItem] = []
     seen_refs: set[str] = set()
     for item in items:
         if item.evidence_ref in seen_refs:
             continue
         seen_refs.add(item.evidence_ref)
-        unique_items.append(item)
+
+        candidate_items = [*unique_items, item]
+        candidate = ReportEvidenceManifest.model_construct(
+            contract_version=REPORT_EVIDENCE_MANIFEST_VERSION,
+            manifest_id="manifest:" + "0" * 32,
+            query_digest=query_digest,
+            items=candidate_items,
+        )
+        if (
+            len(candidate.model_dump_json().encode("utf-8"))
+            > REPORT_EVIDENCE_MANIFEST_MAX_BYTES
+        ):
+            continue
+        unique_items = candidate_items
         if len(unique_items) == 32:
             break
     if not unique_items:
         raise ValueError("A report evidence manifest requires evidence items.")
-    query_digest = hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
     manifest_material = {
         "contract_version": REPORT_EVIDENCE_MANIFEST_VERSION,
         "query_digest": query_digest,
