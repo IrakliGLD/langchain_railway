@@ -3109,16 +3109,28 @@ def _has_active_scenario_request(ctx: QueryContext) -> bool:
         return False
 
 
+# Answer shapes whose prose reports change across periods. EXPLANATION is
+# absent on purpose: _build_why_context owns its full enrichment path and the
+# two are mutually exclusive at the call site.
+_DERIVED_EVIDENCE_ANSWER_KINDS = frozenset({
+    AnswerKind.COMPARISON,
+    AnswerKind.TIMESERIES,
+})
+
+
 def _needs_standalone_analysis(ctx: QueryContext) -> bool:
     """Return True when derived metrics should be computed outside why-mode."""
-    # A comparison answers "how did X change", so its own deltas are the
-    # substance of the answer, not an enrichment. The analyzer can classify
-    # such a query light with no derived_metrics (production trace
-    # span-e29376193b14); enrichment was then skipped, ctx.analysis_evidence
-    # stayed empty, and Stage 4 rejected the summary for stating changes the
-    # grounding corpus had no computed values for. Keyed on the answer shape
-    # rather than on analysis_mode so the two cannot disagree about it.
-    if ctx.effective_answer_kind == AnswerKind.COMPARISON:
+    # These answer shapes state period-over-period change, so their deltas are
+    # the substance of the answer rather than an enrichment. The analyzer can
+    # classify such a query light with no derived_metrics (traces
+    # span-e29376193b14, span-9b42bf97); enrichment was skipped,
+    # ctx.analysis_evidence stayed empty, and the summarizer computed the
+    # change itself — reporting 17.8 where the rows give 17.7432, which Stage 4
+    # then had no computed value to check against. Keyed on the answer shape
+    # rather than on analysis_mode so the two cannot disagree, and covering
+    # both kinds because the analyzer returns them interchangeably for the same
+    # question. A single-period frame simply yields no MoM row and drops out.
+    if ctx.effective_answer_kind in _DERIVED_EVIDENCE_ANSWER_KINDS:
         return True
     qa = ctx.question_analysis if ctx.has_authoritative_question_analysis else None
     if qa is not None:
