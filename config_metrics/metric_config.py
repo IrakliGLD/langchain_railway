@@ -64,6 +64,11 @@ DERIVED_METRIC_DEFAULTS: list[dict[str, Any]] = [
     # MoM
     {"metric_name": "mom_absolute_change", "metric": "p_bal_gel"},
     {"metric_name": "mom_percent_change", "metric": "p_bal_gel"},
+    # USD carried YoY defaults but no MoM, so a month-over-month answer
+    # quoting the USD series had no computed value to ground against while
+    # the GEL half of the same sentence did.
+    {"metric_name": "mom_absolute_change", "metric": "p_bal_usd"},
+    {"metric_name": "mom_percent_change", "metric": "p_bal_usd"},
     {"metric_name": "mom_absolute_change", "metric": "xrate"},
     {"metric_name": "mom_percent_change", "metric": "xrate"},
     {"metric_name": "share_delta_mom", "metric": "share_import"},

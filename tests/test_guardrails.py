@@ -8386,3 +8386,49 @@ def test_recent_analyzer_window_preserved_for_dateless_query():
     assert inv is not None
     assert inv.params.get("start_date") == recent_start
     assert inv.params.get("end_date") == recent_end
+
+
+def test_grounding_failure_names_the_missing_tokens(caplog):
+    """The failure log must name the tokens, not just count them.
+
+    summarizer.py documents logging "the first 20 missing tokens (sorted)" to
+    tell derivation and rounding apart from hallucination, but only emitted
+    len(missing) — so a production grounding failure was undiagnosable without
+    a rerun (trace span-e29376193b14, 10/15 tokens).
+    """
+    import logging
+
+    from models import GroundingPolicy, QueryContext
+
+    ctx = QueryContext(
+        query="how did balancing price change",
+        preview="date p_bal_gel\n2026-04 155.61\n2026-05 137.86",
+        stats_hint="Rows: 2",
+        cols=["date", "p_bal_gel"],
+        rows=[("2026-04", 155.61), ("2026-05", 137.86)],
+    )
+    ctx.grounding_policy = GroundingPolicy.EVIDENCE_AWARE
+
+    envelope = SummaryEnvelope(
+        answer=(
+            "Balancing price fell from 155.61 to 137.86 GEL/MWh, "
+            "a drop of 17.75 GEL/MWh or 11.41 percent."
+        ),
+        claims=[],
+        citations=["data_preview"],
+        confidence=0.9,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        grounded = summarizer._is_summary_grounded(envelope, ctx)
+
+    assert grounded is False
+    failure_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "Grounding fail: matched" in record.getMessage()
+    ]
+    assert failure_logs, "expected a grounding failure log"
+    message = failure_logs[0]
+    # The derived values the answer computed are the whole point of the log.
+    assert "17.75" in message or "11.41" in message

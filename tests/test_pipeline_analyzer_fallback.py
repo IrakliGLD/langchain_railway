@@ -278,3 +278,60 @@ def test_generate_cagr_forecast_emits_both_currencies_when_present():
     assert set(fc["season"].dropna().unique()) == {"summer", "winter"}
     # Horizon: 5 years × 2 seasons = 10 forecast rows.
     assert len(fc) == 10
+
+
+def _light_comparison_ctx() -> QueryContext:
+    """A change query the analyzer classified light with no derived metrics.
+
+    Mirrors production trace span-e29376193b14: answer_kind=comparison,
+    analyzer_mode=light, derived_metrics=[].
+    """
+    from types import SimpleNamespace
+
+    ctx = QueryContext(query="how did balancing price change in april and may 2026")
+    ctx.question_analysis = SimpleNamespace(
+        analysis_requirements=SimpleNamespace(derived_metrics=[]),
+        classification=SimpleNamespace(
+            analysis_mode=SimpleNamespace(value="light"),
+        ),
+    )
+    ctx.question_analysis_source = "llm_active"
+    ctx.mode = "light"
+    ctx.effective_answer_kind = AnswerKind.COMPARISON
+    return ctx
+
+
+def test_comparison_answer_kind_triggers_standalone_analysis():
+    """A query asking how something changed must compute its own deltas.
+
+    Without this the Stage-4 grounding corpus holds no MoM values, the summary
+    states changes it cannot support, and the token-ratio gate replaces a
+    correct answer with the conservative fallback (production 10/15 = 0.67).
+    """
+    from agent import analyzer
+
+    assert analyzer._needs_standalone_analysis(_light_comparison_ctx()) is True
+
+
+def test_light_scalar_query_still_skips_standalone_analysis():
+    """The gate must not widen to every light-mode query."""
+    from agent import analyzer
+
+    ctx = _light_comparison_ctx()
+    ctx.effective_answer_kind = AnswerKind.SCALAR
+
+    assert analyzer._needs_standalone_analysis(ctx) is False
+
+
+def test_balancing_usd_has_month_over_month_defaults():
+    """p_bal_usd carried YoY defaults but no MoM, so USD deltas never grounded."""
+    from config_metrics.metric_config import DERIVED_METRIC_DEFAULTS
+
+    usd_metrics = {
+        entry["metric_name"]
+        for entry in DERIVED_METRIC_DEFAULTS
+        if entry["metric"] == "p_bal_usd"
+    }
+
+    assert "mom_absolute_change" in usd_metrics
+    assert "mom_percent_change" in usd_metrics

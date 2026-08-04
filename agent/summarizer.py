@@ -321,13 +321,14 @@ def _is_summary_grounded(envelope: SummaryEnvelope, ctx: QueryContext) -> bool:
         missing = [t for t in answer_tokens if t not in source_tokens]
         log.warning(
             "🔬 Grounding fail: matched %d/%d tokens (ratio=%.2f, threshold=%.2f, policy=%s). "
-            "missing_token_count=%d",
+            "missing_token_count=%d missing_tokens=%s",
             matched,
             len(answer_tokens),
             match_ratio,
             min_ratio,
             grounding_policy,
             len(missing),
+            sorted(missing)[:20],
         )
     _maybe_log_grounding_shadow(envelope, ctx)
     return passed
