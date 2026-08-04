@@ -8432,3 +8432,59 @@ def test_grounding_failure_names_the_missing_tokens(caplog):
     message = failure_logs[0]
     # The derived values the answer computed are the whole point of the log.
     assert "17.75" in message or "11.41" in message
+
+
+def test_rounded_source_variants_cover_every_precision_the_model_may_quote():
+    """A faithful rounding must match at any precision, not just 0/1/2.
+
+    Production trace span-abcaae4d: the corpus held 137.8633431 and the model
+    quoted 137.863, so the gate reported it missing and replaced a correct
+    answer with the conservative fallback. The variant set stopped at two
+    decimals.
+    """
+    from agent.summary_grounding import _add_rounded_source_variants
+
+    tokens = {"137.8633431", "155.6065727"}
+    _add_rounded_source_variants(tokens)
+
+    # The precisions that already worked.
+    assert {"138", "137.9", "137.86"} <= tokens
+    # The precision that production actually used.
+    assert "137.863" in tokens
+    assert "155.607" in tokens
+
+
+def test_rounded_source_variants_still_reject_a_fabricated_number():
+    """Widening precision must not weaken the anti-hallucination property."""
+    from agent.summary_grounding import _add_rounded_source_variants
+
+    tokens = {"137.8633431"}
+    _add_rounded_source_variants(tokens)
+
+    assert "999.999" not in tokens
+    assert "137.964" not in tokens
+
+
+def test_summary_quoting_three_decimal_source_values_is_grounded():
+    from models import GroundingPolicy, QueryContext
+
+    ctx = QueryContext(
+        query="balancing price in april and may 2026",
+        preview="date p_bal_gel\n2026-04 155.6065727\n2026-05 137.8633431",
+        stats_hint="Rows: 2",
+        cols=["date", "p_bal_gel"],
+        rows=[("2026-04", 155.6065727), ("2026-05", 137.8633431)],
+    )
+    ctx.grounding_policy = GroundingPolicy.STRICT_NUMERIC
+
+    envelope = SummaryEnvelope(
+        answer=(
+            "Balancing price was 155.607 GEL/MWh in April 2026 "
+            "and 137.863 GEL/MWh in May 2026."
+        ),
+        claims=[],
+        citations=["data_preview"],
+        confidence=0.9,
+    )
+
+    assert summarizer._is_summary_grounded(envelope, ctx) is True
