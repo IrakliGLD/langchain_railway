@@ -350,3 +350,52 @@ def test_report_table_keeps_a_short_table_verbatim():
     assert artifact is not None
     assert len(artifact.data) == 3
     assert "segment" not in artifact.data[0]
+
+
+def _wide_manifest(numeric_columns: int = 20) -> ReportEvidenceManifest:
+    """The enriched frame shape: one period column plus many driver columns."""
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    names = [f"driver_{index:02d}_gel" for index in range(numeric_columns)]
+    table["columns"] = ["period", *names]
+    table["rows"] = [
+        {"period": "2026-01", **{name: 1.0 + index for index, name in enumerate(names)}},
+        {"period": "2026-02", **{name: 2.0 + index for index, name in enumerate(names)}},
+    ]
+    table["unit_by_column"] = {name: "GEL/MWh" for name in names}
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _wide_plan(purpose: str, *, explicit_series: bool) -> ReportPlan:
+    payload = _plan_payload()
+    chart = payload["charts"][0]
+    chart["purpose"] = purpose
+    chart.pop("x_field", None)
+    if explicit_series:
+        # The contract caps series_fields at 8, so this is the widest a planner
+        # can legally request.
+        chart["series_fields"] = [f"driver_{index:02d}_gel" for index in range(8)]
+    else:
+        chart.pop("series_fields", None)
+    return ReportPlan.model_validate(payload)
+
+
+@pytest.mark.parametrize("purpose", ["trend", "table"])
+@pytest.mark.parametrize("explicit_series", [False, True])
+def test_report_charts_never_render_an_unreadable_number_of_series(
+    purpose,
+    explicit_series,
+):
+    """A legend of twenty series is not a chart, it is a wall.
+
+    The enriched balancing frame carries 31 driver columns, so any exhibit
+    built over it can request far more series than a reader can follow.
+    """
+    decisions = build_report_charts(
+        _wide_plan(purpose, explicit_series=explicit_series),
+        _wide_manifest(),
+    )
+
+    artifact = decisions[0].artifact
+    assert artifact is not None, decisions[0].omitted_reason
+    assert len(artifact.metadata.series) <= 8

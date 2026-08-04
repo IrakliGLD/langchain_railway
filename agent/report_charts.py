@@ -31,6 +31,9 @@ _TIME_VALUE_PATTERN = re.compile(r"^\d{4}(?:-\d{2}(?:-\d{2})?)?(?:Q[1-4])?$")
 # Below this a table is already readable, and summarizing it would destroy
 # information rather than condense it.
 _TABLE_SUMMARY_ROW_THRESHOLD = 6
+# Mirrors ReportChartArtifact.metadata.series (max_length=8): a builder that
+# emitted more would fail contract validation rather than render.
+_MAXIMUM_CHART_SERIES = 8
 
 
 def _period_month(value: Any) -> int | None:
@@ -289,9 +292,15 @@ def build_report_chart_requests(
 
         if chart.purpose is ReportChartPurpose.TABLE:
             x_axis = chart.x_field or (temporal or categorical or columns)[0]
-            series = chart.series_fields or [
-                column for column in columns if column != x_axis
-            ][:8]
+            # The cap has to wrap the whole choice. Written as
+            # ``series_fields or [...][:_MAXIMUM_CHART_SERIES]`` it binds to the fallback alone, so
+            # a supplied list skipped the cap entirely. Unreachable today only
+            # because the contract caps series_fields at 8 as well; relying on
+            # that leaves the guard here silently doing nothing.
+            series = (
+                chart.series_fields
+                or [column for column in columns if column != x_axis]
+            )[:_MAXIMUM_CHART_SERIES]
             if not series:
                 decisions.append(_omitted(chart, "REPORT_CHART_TABLE_FIELDS_REQUIRED"))
                 continue
@@ -358,7 +367,7 @@ def build_report_chart_requests(
                     chart_type=ReportChartType.LINE,
                     data=rows,
                     x_axis=x_axis,
-                    series=requested_series[:8],
+                    series=requested_series[:_MAXIMUM_CHART_SERIES],
                     units=units,
                 )
             )
@@ -407,7 +416,7 @@ def build_report_chart_requests(
                         for row in rows
                         if str(row.get(time_column)) == latest_period
                     ]
-                snapshot_series = (chart.series_fields or [numeric[0]])[:8]
+                snapshot_series = (chart.series_fields or [numeric[0]])[:_MAXIMUM_CHART_SERIES]
                 decisions.append(
                     _built(
                         chart,
@@ -430,7 +439,7 @@ def build_report_chart_requests(
                 latest = rows[-1]
                 pivot_columns = [
                     column
-                    for column in numeric[:8]
+                    for column in numeric[:_MAXIMUM_CHART_SERIES]
                     if _is_numeric(latest.get(column))
                 ]
                 if not pivot_columns:
@@ -485,7 +494,7 @@ def build_report_chart_requests(
                     chart_type=ReportChartType.BAR,
                     data=rows,
                     x_axis=x_axis,
-                    series=requested_series[:8],
+                    series=requested_series[:_MAXIMUM_CHART_SERIES],
                     units=units,
                 )
             )
@@ -493,7 +502,7 @@ def build_report_chart_requests(
         if len(rows) == 1 and len(numeric) >= 2:
             comparison_rows = [
                 {"category": column, "value": rows[0].get(column)}
-                for column in numeric[:8]
+                for column in numeric[:_MAXIMUM_CHART_SERIES]
             ]
             decisions.append(
                 _built(
