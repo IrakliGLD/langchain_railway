@@ -20,6 +20,10 @@ import core.llm as llm
 from agent.report_research_planner import build_report_planning_constraints
 from contracts.report_research import ReportResearchPlan, ReportResearchPlanDraft
 from tests.test_report_research_contract import _research_plan_payload
+from utils.provider_attempts import (
+    ProviderDeliveryDisposition,
+    ProviderExecutionError,
+)
 
 _QUERY = (
     "Assess current market model and prices and explain the implications for "
@@ -420,3 +424,86 @@ def test_report_prompts_put_the_schema_before_the_variable_request(builder_name)
         f"{builder_name} emits the constant schema after the variable request, "
         "which poisons the cacheable prefix"
     )
+
+
+def _timed_out_error():
+    return ProviderExecutionError(
+        "provider call failed: APITimeoutError",
+        provider="openai",
+        stage="report_synthesis_writer",
+        disposition=ProviderDeliveryDisposition.TIMED_OUT,
+    )
+
+
+def _drive_report_call(monkeypatch, *, primary_raises, fallback_client):
+    """Run one report-profile invocation, recording which client answered."""
+    seen = {}
+    monkeypatch.setattr(llm, "get_report_fallback", lambda: fallback_client)
+    monkeypatch.setattr(llm, "_wait_before_safe_fallback", lambda _stage: None)
+
+    def invoke_at_stage(client, _messages, model_name, _stage, **_kwargs):
+        seen.setdefault("clients", []).append(client)
+        if client is not fallback_client:
+            raise primary_raises
+        return SimpleNamespace(content="fallback answered")
+
+    monkeypatch.setattr(llm, "_invoke_at_stage", invoke_at_stage)
+    monkeypatch.setattr(llm, "_log_usage_for_message", lambda *_a, **_k: None)
+    message = llm._invoke_with_openai_fallback(
+        lambda: object(),
+        "gpt-5.6-terra",
+        [("system", "s"), ("user", "u")],
+        llm_start=0.0,
+        label="Report synthesis writer",
+        attempt_stage="report_synthesis_writer",
+        allow_openai_fallback=False,
+        report_fallback=True,
+    )
+    return message, seen.get("clients", [])
+
+
+def test_report_timeout_completes_on_the_configured_fallback_provider(monkeypatch):
+    """A slow report provider must not end the job outright.
+
+    Job 32e80854: report_synthesis_writer hit the 240s client timeout, and
+    safe_to_retry bars same-provider replay, so the report failed with the
+    analysis sections already written. safe_to_fallback permits a different
+    provider, which is what this uses.
+    """
+    fallback_client = object()
+
+    message, clients = _drive_report_call(
+        monkeypatch,
+        primary_raises=_timed_out_error(),
+        fallback_client=fallback_client,
+    )
+
+    assert message.content == "fallback answered"
+    assert clients[-1] is fallback_client
+
+
+def test_report_keeps_failing_when_no_fallback_provider_is_configured(monkeypatch):
+    """Unconfigured must mean unchanged behaviour, not a silent new path."""
+    with pytest.raises(ProviderExecutionError):
+        _drive_report_call(
+            monkeypatch,
+            primary_raises=_timed_out_error(),
+            fallback_client=None,
+        )
+
+
+def test_report_does_not_fall_back_on_an_ambiguous_transport_failure(monkeypatch):
+    """The no-replay policy holds: only REJECTED and TIMED_OUT may retry."""
+    ambiguous = ProviderExecutionError(
+        "provider call failed",
+        provider="openai",
+        stage="report_synthesis_writer",
+        disposition=ProviderDeliveryDisposition.AMBIGUOUS,
+    )
+
+    with pytest.raises(ProviderExecutionError):
+        _drive_report_call(
+            monkeypatch,
+            primary_raises=ambiguous,
+            fallback_client=object(),
+        )

@@ -131,6 +131,8 @@ REPORT_MAX_OUTPUT_TOKENS=8192
 REPORT_TIMEOUT_SECONDS=240
 REPORT_REASONING_EFFORT=medium
 REPORT_STRUCTURED_OUTPUT_METHOD=auto
+REPORT_FALLBACK_MODEL_TYPE=gemini
+REPORT_FALLBACK_MODEL=gemini-3-pro
 REPORT_PIPELINE_V2_MODE=shadow
 REPORT_TRACK_ANALYSIS_MODE=shadow
 REPORT_MAX_GENERATIVE_CALLS=3
@@ -182,6 +184,16 @@ The section word floor scales with the rows a section can actually cite
 two-row section that was asked for a full-length essay could only reach the
 floor by inventing numbers the grounding gate then rejected. The ceiling never
 scales.
+
+`REPORT_FALLBACK_MODEL_TYPE` is optional and unset by default, which keeps a
+report provider timeout failing exactly as before. When set it must name a
+*different* provider than `REPORT_MODEL_TYPE` and supply that provider's key,
+because same-provider replay stays barred: a locally-enforced timeout may
+already have been billed, so only a distinct provider is a distinct ledger
+claim (`utils.provider_attempts.safe_to_fallback`). Both clients are built by
+one factory, so timeout, token ceiling, and reasoning effort cannot drift
+between them. Only REJECTED and TIMED_OUT dispositions fall back; a genuinely
+ambiguous transport failure still retries nowhere.
 
 The research planner is told what a report must cover, not only how many
 tracks it may spend. The rubric is domain-agnostic — level and movement, what

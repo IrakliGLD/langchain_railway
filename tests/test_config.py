@@ -815,3 +815,71 @@ def test_embedding_task_profile_rejects_unsupported_provider_or_model():
             ),
             gemini_embedding_api_key="embedding-key",
         )
+
+
+def _report_fallback_kwargs(**overrides):
+    base = dict(
+        supabase_db_url="postgresql://user:pass@localhost/db",
+        gateway_shared_secret="gateway",
+        session_signing_secret="session",
+        evaluate_admin_secret="evaluate",
+        auth_mode="gateway_only",
+        deployment_env="development",
+        supabase_jwt_secret=None,
+        enable_evaluate_endpoint=False,
+        allow_evaluate_endpoint=False,
+        model_type="openai",
+        openai_api_key="test-openai-key",
+        google_api_key="test-google-key",
+        nvidia_api_key="test-nvidia-key",
+        report_model_type="openai",
+        report_model="gpt-5.6-terra",
+    )
+    base.update(overrides)
+    return base
+
+
+def test_report_fallback_must_use_a_different_provider():
+    """Falling back onto the provider that just timed out is not a fallback.
+
+    safe_to_fallback permits a retry precisely because a different provider is
+    a distinct ledger claim; same-provider replay stays barred.
+    """
+    with pytest.raises(RuntimeError, match="different provider"):
+        validate_runtime_settings(
+            **_report_fallback_kwargs(
+                report_fallback_model_type="openai",
+                report_fallback_model="gpt-5.6-luna",
+            )
+        )
+
+
+def test_report_fallback_requires_its_own_model():
+    with pytest.raises(RuntimeError, match="REPORT_FALLBACK_MODEL"):
+        validate_runtime_settings(
+            **_report_fallback_kwargs(report_fallback_model_type="gemini")
+        )
+
+
+def test_report_fallback_requires_the_providers_api_key():
+    with pytest.raises(RuntimeError, match="NVIDIA_API_KEY"):
+        validate_runtime_settings(
+            **_report_fallback_kwargs(
+                report_fallback_model_type="nvidia",
+                report_fallback_model="openai/gpt-oss-20b",
+                nvidia_api_key=None,
+            )
+        )
+
+
+def test_report_fallback_accepts_a_distinct_configured_provider():
+    validate_runtime_settings(
+        **_report_fallback_kwargs(
+            report_fallback_model_type="gemini",
+            report_fallback_model="gemini-3-pro",
+        )
+    )
+
+
+def test_report_fallback_is_optional():
+    validate_runtime_settings(**_report_fallback_kwargs())
