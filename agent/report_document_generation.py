@@ -402,6 +402,7 @@ def _materialize_section_batch(
     manifest: ReportEvidenceManifest,
     *,
     section_ids: Sequence[str],
+    research_plan: ReportResearchPlan | None = None,
 ) -> tuple[list[ReportSectionDraft] | None, ReportDocumentValidation]:
     expected_ids = list(section_ids)
     try:
@@ -465,6 +466,17 @@ def _materialize_section_batch(
             for code in validation.error_codes
             if code in _WORD_COUNT_CODES
         ]
+        # The document gate rejects an analysis section with too few numbers,
+        # so the gate that accepts one has to see the same thing. Without this
+        # the single repair call is spent on grounding, and the shortfall
+        # surfaces afterwards with no budget left (job 522b9b73).
+        if research_plan is not None and _analysis_numeric_finding_missing(
+            draft_section,
+            section_spec,
+            manifest,
+            research_plan,
+        ):
+            blocking_codes = [*blocking_codes, "NUMERIC_FINDING_MISSING"]
         if blocking_codes:
             section_errors[draft_section.section_id] = blocking_codes
         if warning_codes:
@@ -581,6 +593,7 @@ def _sections_or_grounded_subset(
         plan,
         manifest,
         section_ids=section_ids,
+        research_plan=research_plan,
     )
     _LOGGER.info(
         "REPORT_GROUNDED_SUBSET %s",
@@ -705,6 +718,7 @@ def _repair_section_batch(
         plan,
         manifest,
         section_ids=section_ids,
+        research_plan=research_plan,
     )
 
 
@@ -774,6 +788,7 @@ def generate_report_document(
             plan,
             manifest,
             section_ids=analysis_ids,
+            research_plan=research_plan,
         )
         if analysis_sections is None or not analysis_validation.valid:
             if not allow_repair:
@@ -832,6 +847,7 @@ def generate_report_document(
             plan,
             manifest,
             section_ids=synthesis_ids,
+            research_plan=research_plan,
         )
         if synthesis_sections is None or not synthesis_validation.valid:
             if not allow_repair:

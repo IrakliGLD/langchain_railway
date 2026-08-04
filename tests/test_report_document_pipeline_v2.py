@@ -1650,3 +1650,85 @@ def test_schema_invalid_analysis_batch_repairs_from_the_raw_payload():
 
     assert rejected_inputs == [raw_payload]
     assert generated == valid_draft
+
+
+def _numberless_section(section):
+    """A section with no claims and no numbers — clean to the section gate."""
+    return section.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={
+                        # Distinct per paragraph: ReportSectionDraft requires
+                        # unique texts, and a duplicate would fail on schema
+                        # rather than on the numeric floor under test.
+                        # Number-free: a digit anywhere in the prose — even a
+                        # paragraph index — reads as an ungrounded claim.
+                        "text": (
+                            "abcdefghij"[index % 10]
+                            + " "
+                            + " ".join(["evidence"] * 120)
+                        ),
+                        "direct_claims": [],
+                        "derived_claims": [],
+                    }
+                )
+                for index, paragraph in enumerate(section.paragraphs)
+            ]
+        }
+    )
+
+
+def test_materialization_reports_a_numberless_analysis_section():
+    """The accepting gate must see what the publishing gate will reject.
+
+    Job 522b9b73: the writer's sections failed grounding, the one repair call
+    was spent clearing UNGROUNDED_NUMERIC_CLAIM by deleting the numbers, and
+    the document gate then rejected NUMERIC_FINDING_MISSING with no budget
+    left. Reporting the shortfall here lets a single repair address both.
+    """
+    from agent import report_document_generation as generation
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+    batch = ReportDocumentRepair(
+        contract_version="report-document-repair-v1",
+        sections=[
+            _numberless_section(section_by_id[section_id])
+            for section_id in analysis_ids
+        ],
+    )
+
+    _sections, validation = generation._materialize_section_batch(
+        batch,
+        document_plan,
+        manifest,
+        section_ids=analysis_ids,
+        research_plan=research_plan,
+    )
+
+    assert validation.valid is False
+    flagged = {
+        section_id
+        for section_id, codes in validation.section_errors.items()
+        if "NUMERIC_FINDING_MISSING" in codes
+    }
+    # Only tracks that actually requested metrics owe numbers; a knowledge-only
+    # analysis track is exempt, which is why this is not every analysis id.
+    assert flagged, validation.section_errors
+    assert flagged <= set(analysis_ids)
