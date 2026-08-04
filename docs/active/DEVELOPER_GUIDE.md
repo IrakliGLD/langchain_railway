@@ -183,6 +183,20 @@ two-row section that was asked for a full-length essay could only reach the
 floor by inventing numbers the grounding gate then rejected. The ceiling never
 scales.
 
+The research planner is told what a report must cover, not only how many
+tracks it may spend. The rubric is domain-agnostic — level and movement, what
+composes or drives the quantity, the context explaining the movement, and the
+evidence boundary — and it lives in the system message so the provider's
+prefix cache absorbs it. Topic specifics come from `_planning_topic_knowledge`,
+which hands the planner the matching `knowledge/*.md` before it chooses tracks
+rather than after; per-track vector retrieval still runs later. So a new topic
+needs a knowledge file, not a planner change. That lookup is read-only over the
+files `load_knowledge()` puts in memory at worker startup and fails open: it
+enriches a prompt, so losing it must not cost the job. Both changes are
+confined to the report worker — `report_research_planner` is imported only by
+`core/report_job_processor.py`, and Standard and Brief never build a research
+plan at all.
+
 When a batch is still invalid after its one repair call, the pipeline ships the
 grounded subset rather than nothing: `select_grounded_paragraphs` drops the
 sentences the evidence cannot support plus the claims they orphaned, and the

@@ -301,3 +301,88 @@ def test_report_research_planner_does_not_use_the_generic_response_cache(
     )
 
     assert isinstance(plan, ReportResearchPlan)
+
+
+def _capture_planner_messages(monkeypatch, captured, **kwargs):
+    """Drive llm_plan_report_research far enough to capture its messages."""
+    monkeypatch.setattr(llm, "REPORT_MODEL_TYPE", "openai", raising=False)
+    monkeypatch.setattr(llm, "REPORT_MODEL", "gpt-5.6-luna", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "_cache_get_or_reserve",
+        lambda _key: (None, "cache-token"),
+    )
+    monkeypatch.setattr(llm, "_cache_set", lambda *_args: None)
+    monkeypatch.setattr(llm, "get_llm_for_stage", lambda *_a, **_k: object())
+
+    def invoke(_factory, _model_name, messages, **_kwargs):
+        captured["messages"] = messages
+        return SimpleNamespace(content=json.dumps(_response_payload()))
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", invoke)
+    return llm.llm_plan_report_research(
+        _QUERY,
+        language_code="en",
+        max_tracks=4,
+        **kwargs,
+    )
+
+
+def test_research_planner_system_prompt_carries_a_coverage_rubric(monkeypatch):
+    """The planner must be told what a report has to cover, not just its budget.
+
+    Job ff5d1142 planned "balancing prices in Georgia" as price levels plus a
+    market-design explainer: on topic, but 9 numeric observations and no
+    composition, currency, or tariff context. The prompt constrained track
+    count and legal collectors and said nothing about coverage.
+    """
+    captured = {}
+    _capture_planner_messages(monkeypatch, captured)
+
+    system = dict(captured["messages"])["system"]
+    lowered = system.lower()
+    # Domain-agnostic obligations, so a new topic needs no code change.
+    assert "drives" in lowered or "driver" in lowered
+    assert "composition" in lowered or "composes" in lowered
+    assert "limitation" in lowered or "gap" in lowered
+
+
+def test_research_planner_rubric_precedes_the_variable_request(monkeypatch):
+    """Stable guidance belongs in the cached prefix, ahead of the request.
+
+    OpenAI caches by prefix, so a rubric in the system message rides the cache
+    while anything query-shaped must follow it.
+    """
+    captured = {}
+    _capture_planner_messages(monkeypatch, captured)
+
+    roles = [role for role, _ in captured["messages"]]
+    assert roles.index("system") < roles.index("user")
+    user_prompt = dict(captured["messages"])["user"]
+    assert user_prompt.index("COLLECTOR_CATALOG") < user_prompt.index(
+        "USER_REPORT_REQUEST"
+    )
+
+
+def test_research_planner_prompt_carries_injected_topic_knowledge(monkeypatch):
+    captured = {}
+    _capture_planner_messages(
+        monkeypatch,
+        captured,
+        topic_knowledge="Balancing price is driven by composition and FX.",
+    )
+
+    user_prompt = dict(captured["messages"])["user"]
+    assert "TOPIC_KNOWLEDGE" in user_prompt
+    assert "driven by composition and FX" in user_prompt
+    # Variable content must not land ahead of the stable catalog.
+    assert user_prompt.index("COLLECTOR_CATALOG") < user_prompt.index(
+        "TOPIC_KNOWLEDGE"
+    )
+
+
+def test_research_planner_omits_the_knowledge_block_when_absent(monkeypatch):
+    captured = {}
+    _capture_planner_messages(monkeypatch, captured)
+
+    assert "TOPIC_KNOWLEDGE" not in dict(captured["messages"])["user"]
