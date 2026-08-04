@@ -437,3 +437,69 @@ def test_chart_data_projection_preserves_every_declared_value():
     for projected, source in zip(artifact.data, source_rows, strict=True):
         for column in projected:
             assert projected[column] == source[column]
+
+
+def _temporal_manifest(period_values: list[str]) -> ReportEvidenceManifest:
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "p_bal_gel"]
+    table["rows"] = [
+        {"date": value, "p_bal_gel": 100.0 + index}
+        for index, value in enumerate(period_values)
+    ]
+    table["unit_by_column"] = {"p_bal_gel": "GEL/MWh"}
+    table["total_row_count"] = len(period_values)
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _temporal_plan() -> ReportPlan:
+    payload = _plan_payload()
+    chart = payload["charts"][0]
+    chart["purpose"] = "trend"
+    chart["x_field"] = "date"
+    chart["series_fields"] = ["p_bal_gel"]
+    return ReportPlan.model_validate(payload)
+
+
+def _axis_values(period_values: list[str]) -> list[str]:
+    decisions = build_report_charts(
+        _temporal_plan(),
+        _temporal_manifest(period_values),
+    )
+    artifact = decisions[0].artifact
+    assert artifact is not None, decisions[0].reason_code
+    return [row["date"] for row in artifact.data]
+
+
+def test_monthly_series_renders_month_labels_not_midnight_timestamps():
+    """Job 4bd4d24f axis read 2026-06-01T00:00:00 for a monthly series.
+
+    ``date`` is detected as temporal by column name, so its ISO-timestamp
+    values never met _TIME_VALUE_PATTERN and were never normalized.
+    """
+    assert _axis_values(
+        ["2026-04-01T00:00:00", "2026-05-01T00:00:00", "2026-06-01T00:00:00"]
+    ) == ["2026-04", "2026-05", "2026-06"]
+
+
+def test_daily_series_keeps_its_day_component():
+    """Collapsing to month would merge distinct observations."""
+    assert _axis_values(
+        ["2026-06-01T00:00:00", "2026-06-02T00:00:00", "2026-06-03T00:00:00"]
+    ) == ["2026-06-01", "2026-06-02", "2026-06-03"]
+
+
+def test_annual_series_renders_years():
+    assert _axis_values(
+        ["2024-01-01T00:00:00", "2025-01-01T00:00:00", "2026-01-01T00:00:00"]
+    ) == ["2024", "2025", "2026"]
+
+
+def test_already_normalized_periods_are_left_alone():
+    assert _axis_values(["2026-04", "2026-05"]) == ["2026-04", "2026-05"]
+
+
+def test_intraday_timestamps_are_not_truncated():
+    """A non-midnight component is real data, not padding."""
+    values = ["2026-06-01T09:30:00", "2026-06-01T10:30:00"]
+    assert _axis_values(values) == values

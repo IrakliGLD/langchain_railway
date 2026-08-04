@@ -104,6 +104,43 @@ def _summary_statistics_rows(
     return summary
 
 
+_ISO_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})"
+    r"(?:[T ](?P<hour>\d{2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?)?$"
+)
+
+
+def _normalized_axis_values(values: list[Any]) -> list[Any] | None:
+    """Render a temporal axis at the granularity the series actually carries.
+
+    ``date`` is temporal by column name, so its ISO-timestamp values never met
+    _TIME_VALUE_PATTERN and reached the axis whole: job 4bd4d24f labelled a
+    monthly series ``2026-06-01T00:00:00``.
+
+    Only components that are constant *and* at their default across every row
+    are dropped, so this never merges distinct observations — a daily series
+    keeps its day, and a non-midnight time is real data rather than padding.
+    Returns None when the column is not a uniform timestamp, leaving it as-is.
+    """
+
+    matches = [_ISO_TIMESTAMP_PATTERN.match(str(value)) for value in values]
+    if not matches or any(match is None for match in matches):
+        return None
+    if any(
+        part not in (None, "00")
+        for match in matches
+        for part in (match["hour"], match["minute"], match["second"])
+    ):
+        return None
+    if all(match["day"] == "01" for match in matches):
+        if all(match["month"] == "01" for match in matches):
+            return [match["year"] for match in matches]
+        return [f"{match['year']}-{match['month']}" for match in matches]
+    return [
+        f"{match['year']}-{match['month']}-{match['day']}" for match in matches
+    ]
+
+
 def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
     """Ask Standard's selector what a composition snapshot should render as.
 
@@ -261,6 +298,15 @@ def _built(
         }
         for row in data
     ]
+    if projected_data and all(x_axis in row for row in projected_data):
+        normalized = _normalized_axis_values(
+            [row[x_axis] for row in projected_data]
+        )
+        if normalized is not None:
+            projected_data = [
+                {**row, x_axis: value}
+                for row, value in zip(projected_data, normalized, strict=True)
+            ]
     artifact = ReportChartArtifact(
         chart_id=chart.chart_id,
         section_id=chart.section_id,
