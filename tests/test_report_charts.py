@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
+
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import pytest
 
@@ -167,3 +175,178 @@ def test_demotion_leaves_a_buildable_required_chart_untouched():
 
     assert demoted_plan is plan
     assert demoted_decisions is decisions
+
+
+def _mixed_unit_manifest() -> ReportEvidenceManifest:
+    """A table whose numeric columns share no unit — a price, an FX rate, a quantity."""
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "p_bal_gel", "xrate", "quantity_hydro"]
+    table["rows"] = [
+        {
+            "period": "2026-01",
+            "p_bal_gel": 137.86,
+            "xrate": 2.6693,
+            "quantity_hydro": 812.4,
+        },
+        {
+            "period": "2026-02",
+            "p_bal_gel": 140.99,
+            "xrate": 2.6453,
+            "quantity_hydro": 903.1,
+        },
+    ]
+    table["unit_by_column"] = {
+        "p_bal_gel": "GEL/MWh",
+        "xrate": "GEL/USD",
+        "quantity_hydro": "MWh",
+    }
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _composition_plan() -> ReportPlan:
+    payload = _plan_payload()
+    payload["charts"][0]["purpose"] = "composition"
+    payload["charts"][0].pop("series_fields", None)
+    payload["charts"][0].pop("x_field", None)
+    return ReportPlan.model_validate(payload)
+
+
+def test_composition_never_pies_columns_that_share_no_unit():
+    """A price, an exchange rate and a quantity are not slices of one whole.
+
+    Production job 83010f04 rendered p_bal_gel, p_bal_usd, xrate,
+    quantity_hydro and quantity_thermal as one pie. The builder pivoted every
+    numeric column of the last row and stamped the first unit it found onto
+    all of them.
+    """
+
+    decisions = build_report_charts(_composition_plan(), _mixed_unit_manifest())
+
+    assert decisions
+    artifact = decisions[0].artifact
+    if artifact is not None:
+        assert artifact.type != "pie"
+
+
+def test_time_series_without_categories_renders_as_a_line():
+    """Standard's selector returns line for this shape; reports must agree."""
+
+    decisions = build_report_charts(_composition_plan(), _mixed_unit_manifest())
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    assert artifact.type == "line"
+
+
+def test_composition_still_pies_genuine_shares():
+    """The share case is what a pie is for, and must keep working."""
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "share_hydro", "share_thermal"]
+    table["rows"] = [
+        {"period": "2026-01", "share_hydro": 0.8, "share_thermal": 0.2},
+        {"period": "2026-02", "share_hydro": 0.7, "share_thermal": 0.3},
+    ]
+    table["unit_by_column"] = {
+        "share_hydro": "share (0-1)",
+        "share_thermal": "share (0-1)",
+    }
+    manifest = ReportEvidenceManifest.model_validate(payload)
+
+    decisions = build_report_charts(_composition_plan(), manifest)
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    assert artifact.type == "pie"
+
+
+def _monthly_price_manifest(months: int = 14) -> ReportEvidenceManifest:
+    """A year-plus of monthly prices — the raw list a report should not print."""
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "p_bal_gel"]
+    table["rows"] = [
+        {
+            "period": f"2025-{month:02d}" if month <= 12 else f"2026-{month - 12:02d}",
+            "p_bal_gel": 100.0 + month,
+        }
+        for month in range(1, months + 1)
+    ]
+    table["unit_by_column"] = {"p_bal_gel": "GEL/MWh"}
+    table["total_row_count"] = months
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _table_plan() -> ReportPlan:
+    payload = _plan_payload()
+    payload["charts"][0]["purpose"] = "table"
+    payload["charts"][0].pop("series_fields", None)
+    payload["charts"][0].pop("x_field", None)
+    return ReportPlan.model_validate(payload)
+
+
+def test_report_table_summarizes_instead_of_listing_every_row():
+    """A report needs analytics, not the dataset.
+
+    Job 83010f04 printed all 138 monthly prices as an exhibit.
+    """
+    decisions = build_report_charts(_table_plan(), _monthly_price_manifest())
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    assert artifact.type == "table"
+    # One row per segment, not one per observation.
+    assert len(artifact.data) < 14
+    segments = {str(row.get("segment")) for row in artifact.data}
+    assert segments == {"summer", "winter", "total"}
+
+
+def test_report_table_reports_mean_stdev_min_and_max():
+    decisions = build_report_charts(_table_plan(), _monthly_price_manifest())
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    total = next(
+        row for row in artifact.data if row.get("segment") == "total"
+    )
+    assert set(total) >= {
+        "segment",
+        "metric",
+        "mean",
+        "std_dev",
+        "minimum",
+        "maximum",
+        "observations",
+    }
+    # 14 months of 101..114 GEL/MWh.
+    assert total["minimum"] == 101.0
+    assert total["maximum"] == 114.0
+    assert total["observations"] == 14
+    assert total["metric"] == "p_bal_gel"
+
+
+def test_report_table_splits_summer_from_winter():
+    """SUMMER_MONTHS is April-July; the split must use that one authority."""
+    decisions = build_report_charts(_table_plan(), _monthly_price_manifest())
+
+    rows = {
+        str(row["segment"]): row
+        for row in decisions[0].artifact.data
+        if row.get("metric") == "p_bal_gel"
+    }
+    # 2025-04..07 -> 104..107, plus 2026-04..05 is absent at 14 months.
+    assert rows["summer"]["observations"] == 4
+    assert rows["summer"]["minimum"] == 104.0
+    assert rows["summer"]["maximum"] == 107.0
+    assert rows["winter"]["observations"] == 10
+
+
+def test_report_table_keeps_a_short_table_verbatim():
+    """Summarizing three rows would destroy information, not condense it."""
+    decisions = build_report_charts(_table_plan(), _monthly_price_manifest(months=3))
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    assert len(artifact.data) == 3
+    assert "segment" not in artifact.data[0]

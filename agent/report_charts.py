@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
+from config import SUMMER_MONTHS, WINTER_MONTHS
 from contracts.report import ReportChartPurpose, ReportChartRequest, ReportPlan
 from contracts.report_charts import (
     ReportChartArtifact,
@@ -14,6 +16,7 @@ from contracts.report_charts import (
 )
 from contracts.report_evidence import ReportEvidenceKind, ReportEvidenceManifest
 from contracts.report_research import ReportEvidencePacket
+from visualization.chart_selector import infer_dimension, select_chart_type
 
 _TIME_COLUMN_NAMES = {
     "date",
@@ -25,6 +28,98 @@ _TIME_COLUMN_NAMES = {
     "year",
 }
 _TIME_VALUE_PATTERN = re.compile(r"^\d{4}(?:-\d{2}(?:-\d{2})?)?(?:Q[1-4])?$")
+# Below this a table is already readable, and summarizing it would destroy
+# information rather than condense it.
+_TABLE_SUMMARY_ROW_THRESHOLD = 6
+
+
+def _period_month(value: Any) -> int | None:
+    """Extract the calendar month from a period literal like ``2026-04``."""
+
+    match = re.match(r"^(\d{4})-(\d{2})", str(value or ""))
+    if match is None:
+        return None
+    month = int(match.group(2))
+    return month if 1 <= month <= 12 else None
+
+
+def _summary_statistics_rows(
+    rows: list[dict[str, Any]],
+    numeric_columns: list[str],
+    time_column: str | None,
+) -> list[dict[str, Any]]:
+    """Summarize a long series instead of printing every observation.
+
+    A report needs analytics: job 83010f04 shipped all 138 monthly prices as an
+    exhibit. Seasons split on the shared SUMMER_MONTHS authority rather than a
+    local month list, so a report and an answer never disagree about which
+    months are summer.
+    """
+
+    segments: list[tuple[str, list[dict[str, Any]]]] = [("total", rows)]
+    if time_column is not None:
+        summer = [
+            row
+            for row in rows
+            if (_period_month(row.get(time_column)) or 0) in SUMMER_MONTHS
+        ]
+        winter = [
+            row
+            for row in rows
+            if (_period_month(row.get(time_column)) or 0) in WINTER_MONTHS
+        ]
+        if summer and winter:
+            segments = [("summer", summer), ("winter", winter), ("total", rows)]
+
+    summary: list[dict[str, Any]] = []
+    for column in numeric_columns:
+        for segment, segment_rows in segments:
+            values = [
+                float(row[column])
+                for row in segment_rows
+                if _is_numeric(row.get(column))
+            ]
+            if not values:
+                continue
+            mean = sum(values) / len(values)
+            variance = (
+                sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+                if len(values) > 1
+                else 0.0
+            )
+            summary.append(
+                {
+                    "segment": segment,
+                    "metric": column,
+                    "mean": round(mean, 4),
+                    "std_dev": round(math.sqrt(variance), 4),
+                    "minimum": round(min(values), 4),
+                    "maximum": round(max(values), 4),
+                    "observations": len(values),
+                }
+            )
+    return summary
+
+
+def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
+    """Ask Standard's selector what a composition snapshot should render as.
+
+    Reports used to reach PIE for any composition request, so job 83010f04
+    pied a GEL price, an FX rate and two quantities as slices of one whole and
+    stamped the first unit it found onto all of them. Standard already answers
+    this correctly — a pie needs a ``share`` dimension — so it owns the rule
+    and this calls it rather than keeping a second copy that can drift.
+
+    The snapshot has already collapsed to one period, so it is asked as
+    categories-without-time regardless of the source table's date column.
+    """
+
+    return select_chart_type(
+        has_time=False,
+        has_categories=True,
+        dimensions={infer_dimension(column) for column in columns},
+        category_count=category_count,
+    )
 
 
 def _is_numeric(value: Any) -> bool:
@@ -200,6 +295,34 @@ def build_report_chart_requests(
             if not series:
                 decisions.append(_omitted(chart, "REPORT_CHART_TABLE_FIELDS_REQUIRED"))
                 continue
+            summary = (
+                _summary_statistics_rows(
+                    rows,
+                    [column for column in series if column in numeric],
+                    temporal[0] if temporal else None,
+                )
+                if len(rows) > _TABLE_SUMMARY_ROW_THRESHOLD
+                else []
+            )
+            if summary:
+                decisions.append(
+                    _built(
+                        chart,
+                        chart_type=ReportChartType.TABLE,
+                        data=summary,
+                        x_axis="segment",
+                        series=[
+                            "metric",
+                            "mean",
+                            "std_dev",
+                            "minimum",
+                            "maximum",
+                            "observations",
+                        ],
+                        units=units,
+                    )
+                )
+                continue
             decisions.append(
                 _built(
                     chart,
@@ -284,39 +407,67 @@ def build_report_chart_requests(
                         for row in rows
                         if str(row.get(time_column)) == latest_period
                     ]
+                snapshot_series = (chart.series_fields or [numeric[0]])[:8]
                 decisions.append(
                     _built(
                         chart,
-                        chart_type=ReportChartType.PIE,
+                        chart_type=(
+                            ReportChartType.PIE
+                            if _composition_snapshot_type(
+                                snapshot_series,
+                                len(composition_rows),
+                            ) == "pie"
+                            else ReportChartType.BAR
+                        ),
                         data=composition_rows,
                         x_axis=x_axis,
-                        series=(chart.series_fields or [numeric[0]])[:8],
+                        series=snapshot_series,
                         units=units,
                     )
                 )
                 continue
             if temporal and len(numeric) >= 2:
                 latest = rows[-1]
-                composition_rows = [
-                    {"category": column, "value": latest.get(column)}
+                pivot_columns = [
+                    column
                     for column in numeric[:8]
                     if _is_numeric(latest.get(column))
                 ]
-                if not composition_rows:
+                if not pivot_columns:
                     decisions.append(
                         _omitted(chart, "REPORT_CHART_NO_NUMERIC_EVIDENCE")
+                    )
+                    continue
+                if _composition_snapshot_type(
+                    pivot_columns,
+                    len(pivot_columns),
+                ) != "pie":
+                    # Not parts of one whole. Chart the series over time
+                    # instead, which is what Standard renders for this shape.
+                    decisions.append(
+                        _built(
+                            chart,
+                            chart_type=ReportChartType.LINE,
+                            data=rows,
+                            x_axis=temporal[0],
+                            series=pivot_columns,
+                            units=units,
+                        )
                     )
                     continue
                 decisions.append(
                     _built(
                         chart,
                         chart_type=ReportChartType.PIE,
-                        data=composition_rows,
+                        data=[
+                            {"category": column, "value": latest.get(column)}
+                            for column in pivot_columns
+                        ],
                         x_axis="category",
                         series=["value"],
                         units={
                             "value": next(
-                                (units[column] for column in numeric if column in units),
+                                (units[column] for column in pivot_columns if column in units),
                                 "",
                             )
                         },
