@@ -335,3 +335,27 @@ def test_balancing_usd_has_month_over_month_defaults():
 
     assert "mom_absolute_change" in usd_metrics
     assert "mom_percent_change" in usd_metrics
+
+
+def test_timeseries_answer_kind_triggers_standalone_analysis():
+    """A multi-period series answer states changes, so it must compute them.
+
+    Production trace span-9b42bf97: the same query came back COMPARISON on one
+    run and TIMESERIES on the next. The TIMESERIES run computed its own delta,
+    got 17.8 where the data gives 17.7432, and shipped a numberless answer.
+    """
+    from agent import analyzer
+
+    ctx = _light_comparison_ctx()
+    ctx.effective_answer_kind = AnswerKind.TIMESERIES
+
+    assert analyzer._needs_standalone_analysis(ctx) is True
+
+
+def test_knowledge_answer_kind_still_skips_standalone_analysis():
+    from agent import analyzer
+
+    ctx = _light_comparison_ctx()
+    ctx.effective_answer_kind = AnswerKind.KNOWLEDGE
+
+    assert analyzer._needs_standalone_analysis(ctx) is False
