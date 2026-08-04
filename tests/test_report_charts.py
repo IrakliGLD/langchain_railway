@@ -399,3 +399,41 @@ def test_report_charts_never_render_an_unreadable_number_of_series(
     artifact = decisions[0].artifact
     assert artifact is not None, decisions[0].omitted_reason
     assert len(artifact.metadata.series) <= 8
+
+
+def test_chart_data_carries_only_the_declared_axis_and_series():
+    """metadata.series caps the legend; data must not smuggle the rest.
+
+    The enriched balancing frame has 31 driver columns. _built passed rows
+    through verbatim, so a renderer keying off the row dicts drew every column
+    while metadata truthfully claimed eight — the report chart that came back
+    as an unreadable wall of lines.
+    """
+    decisions = build_report_charts(
+        _wide_plan("trend", explicit_series=False),
+        _wide_manifest(numeric_columns=20),
+    )
+
+    artifact = decisions[0].artifact
+    assert artifact is not None
+    declared = {artifact.metadata.x_axis, *artifact.metadata.series}
+    for row in artifact.data:
+        assert set(row) <= declared, (
+            f"row carries undeclared columns: {sorted(set(row) - declared)}"
+        )
+
+
+def test_chart_data_projection_preserves_every_declared_value():
+    """Projection must drop columns, never rows or declared values."""
+    manifest = _wide_manifest(numeric_columns=20)
+    decisions = build_report_charts(
+        _wide_plan("trend", explicit_series=False),
+        manifest,
+    )
+
+    artifact = decisions[0].artifact
+    source_rows = manifest.items[0].rows
+    assert len(artifact.data) == len(source_rows)
+    for projected, source in zip(artifact.data, source_rows, strict=True):
+        for column in projected:
+            assert projected[column] == source[column]

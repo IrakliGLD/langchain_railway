@@ -240,12 +240,32 @@ def _built(
     x_axis: str,
     series: list[str],
     units: dict[str, str],
+    context_columns: tuple[str, ...] = (),
 ) -> ReportChartBuildDecision:
+    # Project rows onto the declared axis and series. metadata.series caps the
+    # legend, but passing rows through verbatim let the payload carry every
+    # column of the source table — 31 of them on the enriched balancing frame —
+    # so a renderer keying off the row dicts drew all of them while metadata
+    # truthfully claimed eight. Projecting here makes the wider chart
+    # unrepresentable rather than merely undeclared, and shrinks the payload.
+    # ``context_columns`` keeps a non-series column a reader still needs — the
+    # period a composition snapshot was filtered to, which is otherwise
+    # unrecoverable from the rows. One temporal column cannot recreate the
+    # defect above, which was thirty numeric ones.
+    projected_columns = [x_axis, *series, *context_columns]
+    projected_data = [
+        {
+            column: row[column]
+            for column in projected_columns
+            if column in row
+        }
+        for row in data
+    ]
     artifact = ReportChartArtifact(
         chart_id=chart.chart_id,
         section_id=chart.section_id,
         type=chart_type,
-        data=data,
+        data=projected_data,
         metadata=ReportChartMetadata(
             title=chart.title,
             deterministic=True,
@@ -432,6 +452,9 @@ def build_report_chart_requests(
                         x_axis=x_axis,
                         series=snapshot_series,
                         units=units,
+                        context_columns=(
+                            (temporal[0],) if temporal else ()
+                        ),
                     )
                 )
                 continue
