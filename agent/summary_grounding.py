@@ -290,7 +290,7 @@ def _build_grounding_tokens(ctx: QueryContext) -> Set[str]:
 
 
 def _add_rounded_source_variants(tokens: Set[str]) -> None:
-    """Emit rounded forms (0/1/2 decimals) of every fractional source token.
+    """Emit every rounded form of a fractional source token, 0 decimals to its own.
 
     The corpus holds full precision (``1514.2836``) while the LLM quotes a
     rounded figure (``1,514 thousand MWh`` → token ``1514``); exact string
@@ -300,6 +300,13 @@ def _add_rounded_source_variants(tokens: Set[str]) -> None:
     legitimate rounding match while preserving the gate's anti-hallucination
     property — a fabricated number still cannot match unless a genuine source
     value rounds to it. Mutates ``tokens`` in place.
+
+    The precision ceiling is the source value's own, not a fixed two decimals:
+    a corpus holding ``137.8633431`` met an answer quoting ``137.863`` and
+    reported it missing, costing a correct answer (2026-08-04 trace
+    span-abcaae4d). Nothing distinguishes three decimals from two except which
+    precision the model happened to choose, so every rounding of a real value
+    is admitted and the anti-hallucination property is unchanged.
     """
     variants: Set[str] = set()
     for tok in tokens:
@@ -309,7 +316,11 @@ def _add_rounded_source_variants(tokens: Set[str]) -> None:
             dec = Decimal(tok)
         except (InvalidOperation, ValueError):
             continue
-        for places in (0, 1, 2):
+        source_places = max(0, -dec.as_tuple().exponent)
+        for places in range(
+            0,
+            min(source_places, _MAXIMUM_ROUNDED_VARIANT_PLACES) + 1,
+        ):
             # Emit BOTH rounding conventions: Decimal.quantize defaults to
             # banker's rounding (180.65 → 180.6) while LLMs and humans round
             # half-up (180.65 → 180.7); only the half-even variant existed and
@@ -329,6 +340,11 @@ def _add_rounded_source_variants(tokens: Set[str]) -> None:
                     variants.add(normalized)
     tokens.update(variants)
 
+
+# Bounds the variant set per token. Six decimals covers any precision a
+# summary realistically quotes; beyond that the extra tokens only inflate the
+# corpus without matching anything a reader would write.
+_MAXIMUM_ROUNDED_VARIANT_PLACES = 6
 
 _RATIO_COLUMN_RE = re.compile(r"(?:^share_|_share$|(?:^|_)ratio(?:$|_)|percent|_pct$)", re.IGNORECASE)
 
