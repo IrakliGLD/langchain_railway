@@ -80,6 +80,7 @@ from config import (
     QWEN_OUTPUT_COST_PER_1K_USD,
     REPORT_BATCH_EVIDENCE_BUDGET_CHARS,
     REPORT_EVIDENCE_STATISTICS_PROMPT_CHARS,
+    REPORT_FALLBACK_MODEL,
     REPORT_MAX_OUTPUT_TOKENS,
     REPORT_MODEL,
     REPORT_MODEL_TYPE,
@@ -211,6 +212,7 @@ from core.llm_runtime import (  # noqa: F401 — re-export surface
     get_openai,
     get_qwen,
     get_report,
+    get_report_fallback,
 )
 from core.query_classifier import (  # noqa: F401 — re-export surface
     classify_query_type,
@@ -805,6 +807,54 @@ def _fallback_to_openai(
     return message
 
 
+def _fallback_to_report_provider(
+    messages,
+    primary_exc: Exception,
+    *,
+    llm_start: float,
+    label: str,
+    attempt_stage: str,
+):
+    """Retry one report call on the configured second provider, if any.
+
+    A locally-enforced timeout leaves same-provider replay barred, so without
+    this a slow report provider ends the job with its analysis sections
+    already written and validated (job 32e80854, report_synthesis_writer).
+    ``safe_to_fallback`` admits exactly REJECTED and TIMED_OUT, and the retry
+    lands on a DIFFERENT provider, so the no-replay policy is untouched.
+
+    Returns None when there is nothing to try, leaving the caller to raise the
+    primary failure exactly as before.
+    """
+
+    if (
+        not isinstance(primary_exc, ProviderExecutionError)
+        or not primary_exc.safe_to_fallback
+    ):
+        return None
+    fallback_llm = get_report_fallback()
+    if fallback_llm is None:
+        return None
+    _wait_before_safe_fallback(attempt_stage)
+    message = _invoke_at_stage(
+        fallback_llm,
+        messages,
+        REPORT_FALLBACK_MODEL or "report_fallback",
+        attempt_stage,
+    )
+    log.warning(
+        "%s recovered on the report fallback provider after %s",
+        label,
+        primary_exc.disposition.value,
+    )
+    _log_usage_for_message(
+        message,
+        model_name=REPORT_FALLBACK_MODEL or "report_fallback",
+        attempt_stage=attempt_stage,
+    )
+    return message
+
+
 def _invoke_with_openai_fallback(
     primary_factory,
     primary_model_name: str,
@@ -815,6 +865,7 @@ def _invoke_with_openai_fallback(
     attempt_stage: str | None = None,
     sampling_temperature: float | None = None,
     allow_openai_fallback: bool = True,
+    report_fallback: bool = False,
 ):
     """Invoke once, falling back only when the first provider rejected delivery."""
     stage = attempt_stage or _attempt_stage(label)
@@ -824,6 +875,16 @@ def _invoke_with_openai_fallback(
     except Exception as factory_exc:
         primary_exc = _record_pre_send_failure(provider, stage, factory_exc)
         log.warning("%s failed before provider send: %s", label, type(factory_exc).__name__)
+        if report_fallback:
+            recovered = _fallback_to_report_provider(
+                messages,
+                primary_exc,
+                llm_start=llm_start,
+                label=label,
+                attempt_stage=stage,
+            )
+            if recovered is not None:
+                return recovered
         return _fallback_to_openai(
             messages,
             primary_exc,
@@ -846,6 +907,16 @@ def _invoke_with_openai_fallback(
         )
     except Exception as primary_exc:
         log.warning("%s failed with primary model: %s", label, primary_exc)
+        if report_fallback:
+            recovered = _fallback_to_report_provider(
+                messages,
+                primary_exc,
+                llm_start=llm_start,
+                label=label,
+                attempt_stage=stage,
+            )
+            if recovered is not None:
+                return recovered
         return _fallback_to_openai(
             messages,
             primary_exc,
@@ -3765,6 +3836,7 @@ def llm_plan_report_research(
         label="Report research planner",
         attempt_stage="report_research_planner",
         allow_openai_fallback=False,
+        report_fallback=True,
     )
     return _materialize(message)
 
@@ -3872,6 +3944,7 @@ def llm_plan_report(
             llm_start=llm_start,
             label="Report planner",
             allow_openai_fallback=False,
+        report_fallback=True,
         )
         result = ReportPlan.model_validate(
             normalize_report_plan_semantics(
@@ -3951,6 +4024,7 @@ def llm_repair_report_plan(
         label="Report plan repair",
         attempt_stage="report_plan_repair",
         allow_openai_fallback=False,
+        report_fallback=True,
     )
     return ReportPlan.model_validate(
         normalize_report_plan_semantics(
@@ -4383,6 +4457,7 @@ def _invoke_report_document_contract(
             label=label,
             attempt_stage=attempt_stage,
             allow_openai_fallback=False,
+        report_fallback=True,
             # Only the resampling repair path varies temperature. Passing the
             # keyword unconditionally would change the call surface for every
             # other stage for no behavioural reason.
@@ -4863,7 +4938,11 @@ def llm_repair_report_document_sections(
         "Do not delete a repairable analytical finding merely to satisfy "
         "grounding. Rebuild it from VERIFIED_DERIVED_REPAIR_HINTS, render the "
         "verified display value and unit in the paragraph, and emit the matching "
-        "derived_claims entry. "
+        "derived_claims entry. An analysis section that ends with no verified "
+        "numeric claim is rejected as NUMERIC_FINDING_MISSING, so stripping "
+        "the numbers trades one blocking error for another: every analysis "
+        "section must still carry at least two direct or derived claims, or "
+        "every claim its evidence supports when that is fewer. "
         "UNGROUNDED_VALUE_REPAIR_HINTS lists the exact values each paragraph "
         "asserts that its assigned evidence cannot support. Resolve every one: "
         "cite it as a direct_claims or derived_claims entry if the evidence "
@@ -5150,6 +5229,7 @@ def _invoke_report_section_contract(
             label=label,
             attempt_stage=attempt_stage,
             allow_openai_fallback=False,
+        report_fallback=True,
             # Only the resampling repair path varies temperature. Passing the
             # keyword unconditionally would change the call surface for every
             # other stage for no behavioural reason.

@@ -359,6 +359,15 @@ REPORT_MODEL_TYPE = (
     os.getenv("REPORT_MODEL_TYPE", "").strip().lower() or None
 )
 REPORT_MODEL = os.getenv("REPORT_MODEL", "").strip() or None
+# Optional second provider for report calls. A locally-enforced timeout leaves
+# same-provider replay barred (utils.provider_attempts.safe_to_retry), so a
+# slow report provider ends the job outright unless a DIFFERENT provider can
+# take the retry — which safe_to_fallback already permits. Unset means the
+# current behaviour: a timeout fails the report.
+REPORT_FALLBACK_MODEL_TYPE = (
+    os.getenv("REPORT_FALLBACK_MODEL_TYPE", "").strip().lower() or None
+)
+REPORT_FALLBACK_MODEL = os.getenv("REPORT_FALLBACK_MODEL", "").strip() or None
 REPORT_MAX_OUTPUT_TOKENS = _read_bounded_int_env(
     "REPORT_MAX_OUTPUT_TOKENS",
     8192,
@@ -719,6 +728,8 @@ def validate_runtime_settings(
     openai_api_key: str | None = None,
     report_model_type: str | None = None,
     report_model: str | None = None,
+    report_fallback_model_type: str | None = None,
+    report_fallback_model: str | None = None,
     report_reasoning_effort: str | None = None,
     report_pipeline_v2_mode: str = "disabled",
     report_track_analysis_mode: str = "disabled",
@@ -895,6 +906,45 @@ def validate_runtime_settings(
             raise RuntimeError(
                 f"REPORT_MODEL_TYPE={report_model_type} but {key_name} is missing"
             )
+    if report_fallback_model and not report_fallback_model_type:
+        raise RuntimeError(
+            "REPORT_FALLBACK_MODEL requires REPORT_FALLBACK_MODEL_TYPE"
+        )
+    if report_fallback_model_type:
+        if report_fallback_model_type not in valid_model_types:
+            raise RuntimeError(
+                "Invalid REPORT_FALLBACK_MODEL_TYPE. Expected one of: gemini, "
+                "openai, nvidia, qwen"
+            )
+        if not report_fallback_model:
+            raise RuntimeError(
+                "REPORT_FALLBACK_MODEL_TYPE requires REPORT_FALLBACK_MODEL"
+            )
+        # Retrying on the provider that just timed out is not a fallback: the
+        # no-replay policy bars same-provider replay precisely because that
+        # attempt may already have been billed.
+        if report_fallback_model_type == report_model_type:
+            raise RuntimeError(
+                "REPORT_FALLBACK_MODEL_TYPE must name a different provider "
+                "than REPORT_MODEL_TYPE"
+            )
+        fallback_key = {
+            "gemini": google_api_key,
+            "openai": openai_api_key,
+            "nvidia": nvidia_api_key,
+            "qwen": qwen_api_key,
+        }[report_fallback_model_type]
+        if not fallback_key:
+            key_name = {
+                "gemini": "GOOGLE_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "nvidia": "NVIDIA_API_KEY",
+                "qwen": "QWEN_API_KEY",
+            }[report_fallback_model_type]
+            raise RuntimeError(
+                f"REPORT_FALLBACK_MODEL_TYPE={report_fallback_model_type} but "
+                f"{key_name} is missing"
+            )
     valid_reasoning_efforts = {
         "none",
         "minimal",
@@ -939,6 +989,8 @@ validate_runtime_settings(
     openai_api_key=OPENAI_API_KEY,
     report_model_type=REPORT_MODEL_TYPE,
     report_model=REPORT_MODEL,
+    report_fallback_model_type=REPORT_FALLBACK_MODEL_TYPE,
+    report_fallback_model=REPORT_FALLBACK_MODEL,
     report_reasoning_effort=REPORT_REASONING_EFFORT,
     report_pipeline_v2_mode=REPORT_PIPELINE_V2_MODE,
     report_track_analysis_mode=REPORT_TRACK_ANALYSIS_MODE,

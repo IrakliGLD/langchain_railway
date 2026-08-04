@@ -40,6 +40,8 @@ from config import (
     QWEN_MODEL,
     QWEN_TEMPERATURE,
     QWEN_TIMEOUT_SECONDS,
+    REPORT_FALLBACK_MODEL,
+    REPORT_FALLBACK_MODEL_TYPE,
     REPORT_MAX_OUTPUT_TOKENS,
     REPORT_MODEL,
     REPORT_MODEL_TYPE,
@@ -367,6 +369,7 @@ _openai_llm = None
 _nvidia_llm = None
 _qwen_llm = None
 _report_llm = None
+_report_fallback_llm = None
 
 
 def get_gemini() -> ChatGoogleGenerativeAI:
@@ -512,6 +515,83 @@ def get_nvidia() -> ChatOpenAI:
     return _nvidia_llm
 
 
+def _build_report_client(model_type: str, model: str, *, role: str):
+    """Construct one report-profile client for the given provider and model.
+
+    Shared by the primary report client and its optional fallback so the two
+    cannot drift on timeout, token ceiling, or reasoning-effort handling — a
+    fallback configured differently from the primary would be a second set of
+    behaviours to reason about at exactly the wrong moment.
+    """
+
+    common_output = {
+        "max_output_tokens": REPORT_MAX_OUTPUT_TOKENS,
+        "timeout": REPORT_TIMEOUT_SECONDS,
+    }
+    if model_type == "gemini":
+        if not GOOGLE_API_KEY:
+            raise RuntimeError(
+                f"{role} provider is gemini but GOOGLE_API_KEY is missing"
+            )
+        client_kwargs = {
+            "model": model,
+            "google_api_key": GOOGLE_API_KEY,
+            "convert_system_message_to_human": True,
+            **common_output,
+            "max_retries": 1,
+        }
+        if REPORT_REASONING_EFFORT:
+            client_kwargs["thinking_level"] = REPORT_REASONING_EFFORT
+        client = ChatGoogleGenerativeAI(**client_kwargs)
+    elif model_type in {"openai", "nvidia", "qwen"}:
+        api_key = {
+            "openai": OPENAI_API_KEY,
+            "nvidia": NVIDIA_API_KEY,
+            "qwen": QWEN_API_KEY,
+        }[model_type]
+        if not api_key:
+            key_name = {
+                "openai": "OPENAI_API_KEY",
+                "nvidia": "NVIDIA_API_KEY",
+                "qwen": "QWEN_API_KEY",
+            }[model_type]
+            raise RuntimeError(
+                f"{role} provider is {model_type} but {key_name} is missing"
+            )
+        client_kwargs = {
+            "model": model,
+            "openai_api_key": api_key,
+            "max_tokens": REPORT_MAX_OUTPUT_TOKENS,
+            "request_timeout": REPORT_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+        if model_type == "openai":
+            client_kwargs["use_responses_api"] = True
+        elif model_type == "qwen":
+            client_kwargs["base_url"] = QWEN_BASE_URL
+        else:
+            client_kwargs["base_url"] = NVIDIA_BASE_URL
+        if REPORT_REASONING_EFFORT:
+            client_kwargs["reasoning_effort"] = REPORT_REASONING_EFFORT
+        client = ChatOpenAI(**client_kwargs)
+    else:
+        raise RuntimeError(
+            f"Invalid {role} provider. Expected one of: gemini, openai, nvidia, qwen"
+        )
+
+    log.info(
+        "%s instance cached: provider=%s model=%s "
+        "max_output_tokens=%s timeout=%ss reasoning_effort=%s",
+        role,
+        model_type,
+        model,
+        REPORT_MAX_OUTPUT_TOKENS,
+        REPORT_TIMEOUT_SECONDS,
+        REPORT_REASONING_EFFORT or "provider_default",
+    )
+    return client
+
+
 def get_report():
     """Return the dedicated durable-report client selected by REPORT_*.
 
@@ -525,71 +605,28 @@ def get_report():
         raise RuntimeError(
             "Dedicated report provider requires REPORT_MODEL_TYPE and REPORT_MODEL"
         )
-    if _report_llm is not None:
-        return _report_llm
-
-    common_output = {
-        "max_output_tokens": REPORT_MAX_OUTPUT_TOKENS,
-        "timeout": REPORT_TIMEOUT_SECONDS,
-    }
-    if REPORT_MODEL_TYPE == "gemini":
-        if not GOOGLE_API_KEY:
-            raise RuntimeError(
-                "REPORT_MODEL_TYPE=gemini but GOOGLE_API_KEY is missing"
-            )
-        client_kwargs = {
-            "model": REPORT_MODEL,
-            "google_api_key": GOOGLE_API_KEY,
-            "convert_system_message_to_human": True,
-            **common_output,
-            "max_retries": 1,
-        }
-        if REPORT_REASONING_EFFORT:
-            client_kwargs["thinking_level"] = REPORT_REASONING_EFFORT
-        _report_llm = ChatGoogleGenerativeAI(**client_kwargs)
-    elif REPORT_MODEL_TYPE in {"openai", "nvidia", "qwen"}:
-        api_key = {
-            "openai": OPENAI_API_KEY,
-            "nvidia": NVIDIA_API_KEY,
-            "qwen": QWEN_API_KEY,
-        }[REPORT_MODEL_TYPE]
-        if not api_key:
-            key_name = {
-                "openai": "OPENAI_API_KEY",
-                "nvidia": "NVIDIA_API_KEY",
-                "qwen": "QWEN_API_KEY",
-            }[REPORT_MODEL_TYPE]
-            raise RuntimeError(
-                f"REPORT_MODEL_TYPE={REPORT_MODEL_TYPE} but {key_name} is missing"
-            )
-        client_kwargs = {
-            "model": REPORT_MODEL,
-            "openai_api_key": api_key,
-            "max_tokens": REPORT_MAX_OUTPUT_TOKENS,
-            "request_timeout": REPORT_TIMEOUT_SECONDS,
-            "max_retries": 0,
-        }
-        if REPORT_MODEL_TYPE == "openai":
-            client_kwargs["use_responses_api"] = True
-        elif REPORT_MODEL_TYPE == "qwen":
-            client_kwargs["base_url"] = QWEN_BASE_URL
-        else:
-            client_kwargs["base_url"] = NVIDIA_BASE_URL
-        if REPORT_REASONING_EFFORT:
-            client_kwargs["reasoning_effort"] = REPORT_REASONING_EFFORT
-        _report_llm = ChatOpenAI(**client_kwargs)
-    else:
-        raise RuntimeError(
-            "Invalid REPORT_MODEL_TYPE. Expected one of: gemini, openai, nvidia"
+    if _report_llm is None:
+        _report_llm = _build_report_client(
+            REPORT_MODEL_TYPE,
+            REPORT_MODEL,
+            role="Report LLM",
         )
-
-    log.info(
-        "Report LLM instance cached: provider=%s model=%s "
-        "max_output_tokens=%s timeout=%ss reasoning_effort=%s",
-        REPORT_MODEL_TYPE,
-        REPORT_MODEL,
-        REPORT_MAX_OUTPUT_TOKENS,
-        REPORT_TIMEOUT_SECONDS,
-        REPORT_REASONING_EFFORT or "provider_default",
-    )
     return _report_llm
+
+
+def get_report_fallback():
+    """Return the optional second-provider report client, or None if unset.
+
+    Returns None rather than raising: the fallback is an availability feature,
+    so an unconfigured one must leave the primary path exactly as it was.
+    """
+    global _report_fallback_llm
+    if not REPORT_FALLBACK_MODEL_TYPE or not REPORT_FALLBACK_MODEL:
+        return None
+    if _report_fallback_llm is None:
+        _report_fallback_llm = _build_report_client(
+            REPORT_FALLBACK_MODEL_TYPE,
+            REPORT_FALLBACK_MODEL,
+            role="Report fallback LLM",
+        )
+    return _report_fallback_llm
