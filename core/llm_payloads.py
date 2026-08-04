@@ -18,6 +18,7 @@ from dateutil.relativedelta import relativedelta
 
 from contracts.question_analysis import (
     _VALID_ROLES_BY_INTENT,
+    MAX_CANDIDATE_TOPICS,
     AnswerKind,
     ChartFamily,
     ChartIntent,
@@ -327,7 +328,23 @@ def _sanitize_question_analysis_payload(payload: dict) -> dict:
             except (TypeError, ValueError):
                 score_val = 0.5
             sanitized_topics.append({"name": name, "score": score_val})
-        return sanitized_topics
+        if len(sanitized_topics) <= MAX_CANDIDATE_TOPICS:
+            # Already valid — return it untouched rather than reordering a list
+            # the analyzer deliberately ranked.
+            return sanitized_topics
+        # Same sanitize-don't-crash policy as the unknown-name drop above:
+        # KnowledgeInfo caps this list, so one extra valid topic used to fail
+        # the whole QuestionAnalysis into heuristic routing (job 83010f04 cost
+        # its market_design_context track every tool it would have called).
+        # Drop the least confident, and break score ties on name so the same
+        # payload always keeps the same five.
+        log.warning(
+            "Sanitized candidate_topics %d → %d (dropped lowest-scoring)",
+            len(sanitized_topics),
+            MAX_CANDIDATE_TOPICS,
+        )
+        sanitized_topics.sort(key=lambda topic: (-topic["score"], topic["name"]))
+        return sanitized_topics[:MAX_CANDIDATE_TOPICS]
 
     def _guess_tool_name_from_params_hint(params_hint: dict) -> str | None:
         if not isinstance(params_hint, dict):

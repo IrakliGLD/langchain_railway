@@ -355,10 +355,19 @@ class TopicCandidate(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
 
 
+# Bounds how many topics reach retrieval. Named so the payload sanitizer can
+# clamp to the same number instead of letting an over-long list fail the whole
+# QuestionAnalysis (job 83010f04: six valid topics cost a track its analyzer).
+MAX_CANDIDATE_TOPICS = 5
+
+
 class KnowledgeInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    candidate_topics: List[TopicCandidate] = Field(default_factory=list, max_length=5)
+    candidate_topics: List[TopicCandidate] = Field(
+        default_factory=list,
+        max_length=MAX_CANDIDATE_TOPICS,
+    )
 
 
 class FilterOperator(str, Enum):
