@@ -120,6 +120,7 @@ def test_research_planner_binds_identity_language_and_uses_one_model_call():
         language_code: str,
         max_tracks: int,
         planning_constraints,
+        topic_knowledge: str = "",
     ):
         calls.append(
             (
@@ -272,3 +273,68 @@ def test_validator_rejects_unrequested_expensive_engines():
     )
 
     assert "UNREQUESTED_FORECAST_COLLECTOR" in assessment.finding_codes
+
+
+def test_planner_injects_topic_knowledge_for_the_request(monkeypatch):
+    """The planner must see what the system knows about the topic first.
+
+    Knowledge retrieval used to run per-track, after the tracks were already
+    chosen, so the planner decided coverage without ever consulting
+    knowledge/balancing_price.md -- whose own title is "Formation and Drivers".
+    """
+    from agent import report_research_planner
+    from knowledge import load_knowledge
+
+    # Same precondition the worker establishes at startup (report_worker.py).
+    load_knowledge()
+    query = "create a report about balancing prices in georgia"
+    captured = {}
+
+    def fake_invoke(user_query, **kwargs):
+        captured.update(kwargs)
+        captured["user_query"] = user_query
+        return ReportResearchPlan.model_validate(
+            _research_plan_payload(
+                query_digest=hashlib.sha256(query.encode("utf-8")).hexdigest()
+            )
+        )
+
+    report_research_planner.plan_report_research(
+        query,
+        max_tracks=4,
+        invoke_model=fake_invoke,
+    )
+
+    knowledge = captured.get("topic_knowledge") or ""
+    assert knowledge, "planner received no topic knowledge"
+    assert "balancing" in knowledge.lower()
+
+
+def test_injected_topic_knowledge_is_bounded(monkeypatch):
+    """A whole knowledge file would crowd out the request and the catalog."""
+    from agent import report_research_planner
+    from knowledge import load_knowledge
+
+    load_knowledge()
+    knowledge = report_research_planner._planning_topic_knowledge(
+        "create a report about balancing prices in georgia"
+    )
+
+    assert 0 < len(knowledge) <= report_research_planner._PLANNING_KNOWLEDGE_BUDGET_CHARS
+
+
+def test_planning_topic_knowledge_survives_a_knowledge_failure(monkeypatch):
+    """Planning must not die because a knowledge lookup did.
+
+    The report already fails closed in enough places; losing the whole job to
+    an optional prompt enrichment would be a strictly worse trade.
+    """
+    from agent import report_research_planner
+
+    monkeypatch.setattr(
+        report_research_planner,
+        "infer_topic_matches",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("knowledge down")),
+    )
+
+    assert report_research_planner._planning_topic_knowledge("anything") == ""

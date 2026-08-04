@@ -18,9 +18,15 @@ from contracts.report_research import (
     ReportResearchPlanAssessment,
     ReportResearchRequirement,
 )
+from knowledge import get_knowledge_for_topics, infer_topic_matches
 from utils.language import detect_language
 
 ResearchPlanInvoker = Callable[..., Any]
+
+# Enough for a topic's drivers without crowding out the collector catalog or
+# the request itself. The planner prompt is ~2k tokens today; this roughly
+# doubles it once, and the provider's prefix cache absorbs the rest.
+_PLANNING_KNOWLEDGE_BUDGET_CHARS = 8_000
 
 _PRICE_SIGNALS = (
     "price",
@@ -184,6 +190,37 @@ def _assessment(
         ),
         finding_codes=sorted(findings),
     )
+
+
+def _planning_topic_knowledge(query: str) -> str:
+    """Return the request's topic knowledge for the planner prompt.
+
+    The planner used to choose its tracks before any knowledge was retrieved —
+    per-track retrieval runs afterwards — so it decided what a report should
+    cover without consulting what the system already knows about the subject.
+    Handing it the topic's own Markdown keeps the coverage rubric general: a
+    new topic needs a knowledge file, not a code change.
+
+    Read-only over the files loaded at boot, and fail-open: this enriches a
+    prompt, so losing it must never cost the job.
+    """
+
+    try:
+        topics = infer_topic_matches(query)
+        knowledge = get_knowledge_for_topics(
+            sorted(topics),
+            fallback_query=query,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return ""
+    text = str(knowledge or "").strip()
+    if len(text) <= _PLANNING_KNOWLEDGE_BUDGET_CHARS:
+        return text
+    # Cut on a line boundary so the tail is not a severed sentence the model
+    # might read as a fact.
+    clipped = text[:_PLANNING_KNOWLEDGE_BUDGET_CHARS]
+    boundary = clipped.rfind("\n")
+    return (clipped[:boundary] if boundary > 0 else clipped).rstrip()
 
 
 def build_report_planning_constraints(
@@ -441,6 +478,7 @@ def plan_report_research(
             language_code=language_code,
             max_tracks=max_tracks,
             planning_constraints=planning_constraints,
+            topic_knowledge=_planning_topic_knowledge(query),
         )
         payload = (
             raw_plan.model_dump(mode="json")
