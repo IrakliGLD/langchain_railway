@@ -185,6 +185,45 @@ def test_track_analysis_runs_report_pipeline_once_and_builds_existing_packet():
     )
 
 
+def test_track_analysis_preserves_deterministic_derived_chart_evidence():
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=["period", "p_bal_gel"],
+            rows=[["2025-01", 100.0], ["2025-02", 120.0]],
+            provenance_cols=["period", "p_bal_gel"],
+            provenance_rows=[["2025-01", 100.0], ["2025-02", 120.0]],
+            provenance_refs=["query:track:prices"],
+            provenance_source="pipeline",
+            stats_hint="Observed price change was 20 percent.",
+            chart_override_specs=[
+                {
+                    "type": "line",
+                    "data": [
+                        {"period": "2025-01", "mom_pct": 0.0},
+                        {"period": "2025-02", "mom_pct": 20.0},
+                    ],
+                    "metadata": {"title": "Month-on-month price change"},
+                }
+            ],
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _plan().tracks[0],
+        query_pipeline=query_pipeline,
+    )
+
+    candidate = packet.chart_candidates[0]
+    evidence = {
+        item.evidence_ref: item for item in packet.items
+    }[candidate.evidence_refs[0]]
+    assert evidence.title == "Month-on-month price change"
+    assert candidate.x_field == "period"
+    assert candidate.series_fields == ["mom_pct"]
+
+
 def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence():
     def query_pipeline(query, **_kwargs):
         return QueryContext(

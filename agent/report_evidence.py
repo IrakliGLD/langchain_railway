@@ -79,7 +79,7 @@ def _normalize_table(
 ) -> tuple[list[str], list[dict[str, Any]], int, bool]:
     normalized_columns = [str(column)[:128] for column in list(columns)[:max_columns]]
     materialized_rows = list(rows)
-    preferred_indices = [
+    preferred_indices = {
         index
         for index, row in enumerate(materialized_rows)
         if relevant_tokens
@@ -92,7 +92,30 @@ def _normalize_table(
                 else row
             )
         )
-    ]
+    }
+    for column_index, column in enumerate(normalized_columns[:8]):
+        numeric_values: list[tuple[int, float]] = []
+        for row_index, row in enumerate(materialized_rows):
+            value = (
+                row.get(column)
+                if isinstance(row, dict)
+                else row[column_index]
+                if column_index < len(row)
+                else None
+            )
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric_values.append((row_index, float(value)))
+        if not numeric_values:
+            continue
+        preferred_indices.add(min(numeric_values, key=lambda item: item[1])[0])
+        preferred_indices.add(max(numeric_values, key=lambda item: item[1])[0])
+        if len(numeric_values) > 1:
+            previous, current = max(
+                zip(numeric_values, numeric_values[1:], strict=False),
+                key=lambda pair: abs(pair[1][1] - pair[0][1]),
+            )
+            preferred_indices.update((previous[0], current[0]))
+    preferred_indices = sorted(preferred_indices)
     if len(preferred_indices) > max_rows and max_rows > 1:
         preferred_indices = [
             preferred_indices[

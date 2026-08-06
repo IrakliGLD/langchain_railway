@@ -149,6 +149,25 @@ def test_research_planner_binds_identity_language_and_uses_one_model_call():
     assert plan.language_code == "en"
 
 
+def test_research_planner_honors_output_language_requested_in_query():
+    calls = []
+    raw_payload = _bound_plan_payload("placeholder")
+    query = f"{_COMPOUND_QUERY} Answer in Georgian."
+
+    def invoke_model(query: str, **kwargs):
+        calls.append((query, kwargs["language_code"]))
+        return raw_payload
+
+    plan = plan_report_research(
+        query,
+        max_tracks=4,
+        invoke_model=invoke_model,
+    )
+
+    assert calls == [(query, "ka")]
+    assert plan.language_code == "ka"
+
+
 def test_research_planner_bounds_excess_exhibits_without_another_model_call():
     calls = []
     raw_payload = _bound_plan_payload()

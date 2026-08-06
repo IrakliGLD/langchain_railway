@@ -19,7 +19,7 @@ from contracts.report_research import (
     ReportResearchRequirement,
 )
 from knowledge import get_knowledge_for_topics, infer_topic_matches
-from utils.language import detect_language
+from utils.language import resolve_answer_language
 
 ResearchPlanInvoker = Callable[..., Any]
 
@@ -378,7 +378,7 @@ def validate_report_research_plan(
     findings: set[str] = set()
     if plan.query_digest != query_digest:
         findings.add("QUERY_DIGEST_MISMATCH")
-    if plan.language_code != detect_language(query):
+    if plan.language_code != resolve_answer_language(query):
         findings.add("LANGUAGE_MISMATCH")
     if len(plan.tracks) > max_tracks:
         findings.add("TRACK_LIMIT_EXCEEDED")
@@ -465,7 +465,7 @@ def plan_report_research(
     if not 1 <= max_tracks <= 8:
         raise ValueError("max_tracks must be between 1 and 8.")
     query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
-    language_code = detect_language(query)
+    language_code = resolve_answer_language(query)
     planning_constraints = build_report_planning_constraints(query)
     if invoke_model is None:
         from core.llm import llm_plan_report_research

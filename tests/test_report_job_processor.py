@@ -623,7 +623,8 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
 
     def document_generator(*_args, **kwargs):
         calls.append("document_generator")
-        assert kwargs["allow_repair"] is False
+        assert kwargs["allow_repair"] is True
+        assert kwargs["max_repair_attempts"] == 2
         return draft
 
     processor = ReportJobProcessor(
@@ -1142,6 +1143,24 @@ def test_document_repair_budget_depends_on_document_profile():
         )
         is True
     )
+
+
+def test_document_repair_budget_reserves_generation_and_uses_spare_calls():
+    assert report_job_processor._report_document_repair_budget(
+        profile="compact",
+        generative_calls_used=1,
+        maximum_calls=4,
+    ) == 2
+    assert report_job_processor._report_document_repair_budget(
+        profile="full",
+        generative_calls_used=1,
+        maximum_calls=5,
+    ) == 2
+    assert report_job_processor._report_document_repair_budget(
+        profile="full",
+        generative_calls_used=1,
+        maximum_calls=3,
+    ) == 0
 
 
 def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):

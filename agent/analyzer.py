@@ -656,6 +656,76 @@ def _find_historical_month_rows(
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
+def _query_requests_seasonal_comparison(query: str) -> bool:
+    normalized = re.sub(r"[_-]+", " ", str(query or "").casefold())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "same calendar month",
+            "same month",
+            "seasonal",
+            "seasonality",
+            "year over year",
+            "year on year",
+            "yoy",
+            "summer",
+            "winter",
+            "სეზონურ",
+            "ზაფხულ",
+            "ზამთარ",
+            "სეზонн",
+            "летн",
+            "зимн",
+        )
+    )
+
+
+def _semantic_focus_periods(
+    df: pd.DataFrame,
+    time_col: str,
+    target_ts: Optional[pd.Timestamp],
+    value_columns: list[str],
+) -> list[pd.Timestamp]:
+    """Choose trend landmarks: boundaries, extrema, and largest movement."""
+
+    if target_ts is None or pd.isna(target_ts) or df.empty:
+        return []
+    working = df[df[time_col] <= pd.to_datetime(target_ts)].copy()
+    working = working.dropna(subset=[time_col]).sort_values(time_col)
+    value_col = next(
+        (
+            column
+            for column in value_columns
+            if column in working.columns
+            and pd.to_numeric(working[column], errors="coerce").notna().any()
+        ),
+        None,
+    )
+    if value_col is None or working.empty:
+        return []
+    values = pd.to_numeric(working[value_col], errors="coerce")
+    valid = working.loc[values.notna(), [time_col]].copy()
+    valid["__value"] = values[values.notna()].astype(float).values
+    if valid.empty:
+        return []
+    selected = {
+        pd.to_datetime(valid.iloc[0][time_col]).normalize(),
+        pd.to_datetime(valid.iloc[-1][time_col]).normalize(),
+        pd.to_datetime(valid.loc[valid["__value"].idxmin(), time_col]).normalize(),
+        pd.to_datetime(valid.loc[valid["__value"].idxmax(), time_col]).normalize(),
+    }
+    changes = valid["__value"].diff().abs()
+    if changes.notna().any():
+        change_index = changes.idxmax()
+        position = valid.index.get_loc(change_index)
+        selected.add(pd.to_datetime(valid.iloc[position][time_col]).normalize())
+        if position > 0:
+            selected.add(
+                pd.to_datetime(valid.iloc[position - 1][time_col]).normalize()
+            )
+    return sorted(selected)
+
+
 def _build_historical_month_context(
     historical_rows: pd.DataFrame,
     current_row: pd.DataFrame,
@@ -3299,8 +3369,25 @@ def _build_why_context(ctx: QueryContext) -> None:
     yoy_usd = _get_val(yoy_row, _metric_aliases("p_bal_usd")) if not yoy_row.empty else None
     yoy_xrate = _get_val(yoy_row, _metric_aliases("xrate")) if not yoy_row.empty else None
 
-    # 5-year historical month context
-    historical_rows = _find_historical_month_rows(df, t_series_col, target_ts, lookback_years=5)
+    canonical_query = str(
+        getattr(getattr(ctx, "question_analysis", None), "canonical_query_en", "")
+        or ""
+    )
+    seasonal_comparison = _query_requests_seasonal_comparison(
+        f"{ctx.query} {canonical_query}"
+    )
+    # Same-month history is meaningful only when the request is explicitly
+    # seasonal/YoY. General explanations use trend landmarks instead.
+    historical_rows = (
+        _find_historical_month_rows(
+            df,
+            t_series_col,
+            target_ts,
+            lookback_years=5,
+        )
+        if seasonal_comparison
+        else pd.DataFrame()
+    )
 
     # Focus periods for anchored explanation charts: the same periods the
     # narrative cites (same month across prior years, previous month, anchor)
@@ -3310,6 +3397,24 @@ def _build_why_context(ctx: QueryContext) -> None:
     focus_periods: list[pd.Timestamp] = []
     if not historical_rows.empty:
         focus_periods.extend(pd.to_datetime(historical_rows[t_series_col]).tolist())
+    else:
+        preferred_value_columns = [
+            *[column for column in _metric_aliases("p_bal_gel") if column in df.columns],
+            *[column for column in _metric_aliases("p_bal_usd") if column in df.columns],
+            *[
+                column
+                for column in df.select_dtypes(include="number").columns
+                if column != t_series_col
+            ],
+        ]
+        focus_periods.extend(
+            _semantic_focus_periods(
+                df,
+                t_series_col,
+                target_ts,
+                list(dict.fromkeys(preferred_value_columns)),
+            )
+        )
     for candidate_ts in (prev_ts, target_ts):
         if candidate_ts is not None and not pd.isna(candidate_ts):
             focus_periods.append(pd.to_datetime(candidate_ts))

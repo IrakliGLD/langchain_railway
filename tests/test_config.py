@@ -117,7 +117,7 @@ def test_report_pipeline_v2_defaults_are_disabled_and_bounded():
     result = _report_pipeline_v2_with_env()
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["disabled", "3", "4", "3", "disabled"]
+    assert result.stdout.split() == ["disabled", "5", "4", "3", "disabled"]
 
 
 @pytest.mark.parametrize("mode", ["disabled", "shadow", "enabled"])

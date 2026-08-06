@@ -144,7 +144,7 @@ REPORT_TRACK_ANALYSIS_MODE = (
 )
 REPORT_MAX_GENERATIVE_CALLS = _read_bounded_int_env(
     "REPORT_MAX_GENERATIVE_CALLS",
-    3,
+    5,
     2,
     6,
 )

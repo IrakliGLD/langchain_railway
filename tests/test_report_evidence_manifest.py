@@ -156,6 +156,26 @@ def test_manifest_uses_registered_storage_units_for_raw_table_columns():
     assert primary.unit_by_column == {"quantity_tech": "thousand MWh"}
 
 
+def test_long_table_sampling_preserves_extrema_and_largest_change():
+    rows = [
+        (f"2025-{index + 1:03d}", float(index))
+        for index in range(300)
+    ]
+    rows[137] = (rows[137][0], -500.0)
+    rows[138] = (rows[138][0], 900.0)
+    ctx = QueryContext(query="Analyze the price trend.")
+    ctx.provenance_cols = ["period", "p_bal_gel"]
+    ctx.provenance_rows = rows
+    ctx.provenance_source = "tool"
+
+    manifest = build_report_evidence_manifest(ctx)
+    primary = next(item for item in manifest.items if item.kind is ReportEvidenceKind.TABLE)
+    sampled = {row["p_bal_gel"] for row in primary.rows}
+
+    assert -500.0 in sampled
+    assert 900.0 in sampled
+
+
 def test_evidence_item_shape_is_closed_and_kind_consistent():
     table = {
         "evidence_ref": "evidence:table:" + "a" * 16,

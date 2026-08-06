@@ -6046,6 +6046,54 @@ def test_find_historical_month_rows_partial():
     assert len(result) == 2, f"Expected 2 rows, got {len(result)}"
 
 
+def test_semantic_focus_periods_choose_boundaries_extrema_and_largest_change():
+    from agent.analyzer import _semantic_focus_periods
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2025-01-01",
+                    "2025-02-01",
+                    "2025-03-01",
+                    "2025-04-01",
+                    "2025-05-01",
+                ]
+            ),
+            "p_bal_gel": [100.0, 90.0, 250.0, 120.0, 130.0],
+        }
+    )
+
+    periods = _semantic_focus_periods(
+        df,
+        "date",
+        pd.Timestamp("2025-05-01"),
+        ["p_bal_gel"],
+    )
+
+    assert pd.Timestamp("2025-01-01") in periods
+    assert pd.Timestamp("2025-02-01") in periods
+    assert pd.Timestamp("2025-03-01") in periods
+    assert pd.Timestamp("2025-05-01") in periods
+
+
+def test_seasonal_focus_requires_explicit_seasonal_or_yoy_intent():
+    from agent.analyzer import _query_requests_seasonal_comparison
+
+    assert _query_requests_seasonal_comparison(
+        "Compare July with the same month in prior years"
+    )
+    assert _query_requests_seasonal_comparison(
+        "Show the year-over-year seasonal pattern"
+    )
+    assert _query_requests_seasonal_comparison(
+        "აჩვენე ფასების სეზონური დინამიკა"
+    )
+    assert not _query_requests_seasonal_comparison(
+        "Explain the overall balancing-price trend"
+    )
+
+
 def test_historical_month_context_stats():
     """_build_historical_month_context computes correct min/max/avg/trend."""
     import numpy as np

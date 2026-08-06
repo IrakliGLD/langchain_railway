@@ -605,15 +605,64 @@ def _chart_candidates(
     items: Sequence[ReportEvidenceItem],
     *,
     required: bool,
+    requested_metrics: Sequence[str] = (),
 ) -> tuple[list[ReportChartCandidate], list[str]]:
     tables = [
         item for item in items if item.kind is ReportEvidenceKind.TABLE
     ]
+    requested_tokens = {
+        token
+        for metric in requested_metrics
+        for token in re.findall(r"[a-z0-9]+", metric.casefold())
+        if token not in {
+            "average",
+            "change",
+            "maximum",
+            "minimum",
+            "percent",
+            "ratio",
+        }
+    }
+
+    def table_score(item: ReportEvidenceItem, purpose: ReportChartPurpose) -> int:
+        numeric_fields = [
+            column
+            for column in item.columns
+            if any(
+                isinstance(row.get(column), Real)
+                and not isinstance(row.get(column), bool)
+                for row in item.rows
+            )
+        ]
+        dimension_fields = [
+            column for column in item.columns if column not in numeric_fields
+        ]
+        material = " ".join(
+            [item.title, item.source, *item.columns]
+        ).casefold()
+        score = sum(6 for token in requested_tokens if token in material)
+        if purpose in {ReportChartPurpose.TREND, ReportChartPurpose.FORECAST}:
+            score += 8 if any(
+                any(token in column.casefold() for token in ("date", "period", "year", "month"))
+                for column in dimension_fields
+            ) else -20
+        elif purpose is ReportChartPurpose.COMPOSITION:
+            score += 10 if any("share" in column.casefold() for column in numeric_fields) else 0
+            score += 5 if any(
+                any(token in column.casefold() for token in ("type", "entity", "segment", "category"))
+                for column in dimension_fields
+            ) else 0
+        return score + min(len(numeric_fields), 8)
+
     candidates: list[ReportChartCandidate] = []
     gaps: list[str] = []
     for purpose in purposes[:REPORT_MAX_EXHIBITS]:
         built = None
-        for item in tables:
+        ranked_tables = sorted(
+            enumerate(tables),
+            key=lambda pair: (-table_score(pair[1], purpose), pair[0]),
+        )
+        for _table_index, item in ranked_tables:
             numeric_fields = [
                 column
                 for column in item.columns
@@ -646,17 +695,25 @@ def _chart_candidates(
                 ),
                 dimension_fields[0] if dimension_fields else None,
             )
-            series_fields = [
+            series_fields = sorted(
+                [
                 column for column in numeric_fields if column != x_field
-            ][:8]
+                ],
+                key=lambda column: (
+                    -sum(token in column.casefold() for token in requested_tokens),
+                    "share" not in column.casefold()
+                    if purpose is ReportChartPurpose.COMPOSITION
+                    else False,
+                    numeric_fields.index(column),
+                ),
+            )[:8]
             if purpose is ReportChartPurpose.COMPOSITION:
-                series_fields = sorted(
-                    series_fields,
-                    key=lambda column: (
-                        "share" not in column.casefold(),
-                        column,
-                    ),
-                )[:1]
+                has_category_axis = x_field is not None and any(
+                    token in x_field.casefold()
+                    for token in ("type", "entity", "segment", "category")
+                )
+                if has_category_axis:
+                    series_fields = series_fields[:1]
             if not series_fields:
                 continue
             built = ReportChartCandidate(
@@ -704,6 +761,7 @@ def _packet_from_items(
         track.expected_exhibits,
         items,
         required=track.required,
+        requested_metrics=track.requested_metrics,
     )
     gaps.extend(exhibit_gaps)
     gaps = list(dict.fromkeys(gaps))[:12]
@@ -799,6 +857,49 @@ def build_report_track_analysis_query(
     return "\n".join(parts)
 
 
+def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
+    """Preserve analyzer-built chart frames as deterministic report tables."""
+
+    items: list[ReportEvidenceItem] = []
+    for index, spec in enumerate(
+        list(getattr(context, "chart_override_specs", None) or [])
+    ):
+        if not isinstance(spec, dict):
+            continue
+        rows = spec.get("data")
+        if not isinstance(rows, list) or not rows or not all(
+            isinstance(row, dict) for row in rows
+        ):
+            continue
+        columns = list(
+            dict.fromkeys(
+                column
+                for row in rows
+                for column in row
+            )
+        )
+        metadata = spec.get("metadata")
+        title = (
+            str(metadata.get("title") or "").strip()
+            if isinstance(metadata, dict)
+            else ""
+        )
+        item = make_report_table_evidence_item(
+            query=str(getattr(context, "query", "") or ""),
+            title=title or f"Derived chart evidence {index + 1}",
+            source="derived_chart",
+            columns=columns,
+            rows=rows,
+            provenance_refs=list(
+                getattr(context, "provenance_refs", None) or []
+            ),
+            max_rows=200,
+        )
+        if item is not None:
+            items.append(item)
+    return items[:REPORT_MAX_EXHIBITS]
+
+
 def execute_report_track_analysis(
     report_query: str,
     track: ReportResearchTrack,
@@ -830,6 +931,7 @@ def execute_report_track_analysis(
     # writers need most. Put them ahead of supporting raw tables so the packet
     # cap cannot silently discard them on evidence-heavy tracks.
     items = build_report_narrative_items(context)
+    items.extend(_derived_chart_evidence_items(context))
     items.extend(
         item
         for item in manifest.items

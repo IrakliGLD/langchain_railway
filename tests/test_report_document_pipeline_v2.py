@@ -7,6 +7,8 @@ import logging
 import os
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
 os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
@@ -524,7 +526,7 @@ def test_whole_document_validation_catches_repetition_and_missing_numbers():
     assert "NUMERIC_FINDING_MISSING" in invalid.section_errors["prices"]
 
 
-def test_document_word_count_deviations_are_directional_warnings():
+def test_document_word_count_policy_blocks_short_and_warns_on_long():
     research_plan, _, manifest, _, _, document_plan = _document_components()
     valid_draft = _valid_document_draft(document_plan, manifest)
     spec_by_id = {
@@ -567,13 +569,13 @@ def test_document_word_count_deviations_are_directional_warnings():
         research_plan,
     )
 
-    assert short_validation.valid is True
-    assert "WORD_COUNT_TOO_SHORT" in short_validation.section_warnings[
+    assert short_validation.valid is False
+    assert "WORD_COUNT_TOO_SHORT" in short_validation.section_errors[
         "prices"
     ]
     assert (
         "DOCUMENT_WORD_COUNT_TOO_SHORT"
-        in short_validation.document_warnings
+        in short_validation.document_errors
     )
     assert long_validation.valid is True
     assert "WORD_COUNT_TOO_LONG" in long_validation.section_warnings["prices"]
@@ -967,7 +969,7 @@ def test_document_generation_repairs_only_invalid_sections_once():
     ).valid
 
 
-def test_document_length_warning_does_not_trigger_repair():
+def test_document_upper_length_warning_does_not_trigger_repair():
     (
         research_plan,
         packets,
@@ -1017,6 +1019,72 @@ def test_document_length_warning_does_not_trigger_repair():
     assert validation.section_warnings["prices"] == [
         "WORD_COUNT_TOO_LONG"
     ]
+
+
+def test_document_short_section_is_repaired_to_its_evidence_aware_floor():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    payload = valid_draft.model_dump(mode="json")
+    price_section = next(
+        section
+        for section in payload["sections"]
+        if section["section_id"] == "prices"
+    )
+    price_paragraph = price_section["paragraphs"][0]
+    price_paragraph["text"] = " ".join(
+        price_paragraph["text"].split()[:50]
+    )
+    short_draft = ReportDocumentDraft.model_validate(payload)
+    repair_calls = []
+
+    def repair_sections(
+        _query,
+        _plan,
+        _research_plan,
+        _manifest,
+        _packets,
+        _rejected,
+        validation,
+        *,
+        section_ids,
+    ):
+        repair_calls.append((validation, list(section_ids)))
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                section
+                for section in valid_draft.sections
+                if section.section_id in section_ids
+            ],
+        )
+
+    repaired = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_document=lambda *_args: short_draft,
+        repair_sections=repair_sections,
+    )
+
+    assert repair_calls[0][1] == ["prices"]
+    assert repair_calls[0][0].section_errors["prices"] == [
+        "WORD_COUNT_TOO_SHORT"
+    ]
+    assert validate_report_document(
+        repaired,
+        document_plan,
+        manifest,
+        research_plan,
+    ).valid
 
 
 def test_document_generation_repairs_a_schema_invalid_draft_once():
@@ -1117,6 +1185,49 @@ def test_document_generation_fails_after_one_invalid_repair():
         raise AssertionError("invalid targeted repair was accepted")
 
     assert len(calls) == 1
+
+
+def test_document_generation_uses_a_second_repair_when_budgeted():
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    payload = valid_draft.model_dump(mode="json")
+    payload["sections"][0]["paragraphs"][0]["direct_claims"] = []
+    invalid_draft = ReportDocumentDraft.model_validate(payload)
+    calls = []
+
+    def repair(*_args, section_ids, **_kwargs):
+        calls.append(list(section_ids))
+        if len(calls) == 1:
+            replacement = valid_draft.sections[0].model_copy(
+                update={"title": "Still invalid"}
+            )
+        else:
+            replacement = valid_draft.sections[0]
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[replacement],
+        )
+
+    repaired = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_document=lambda *_args: invalid_draft,
+        repair_sections=repair,
+        max_repair_attempts=2,
+    )
+
+    assert calls == [["prices"], ["prices"]]
+    assert repaired == valid_draft
 
 
 def test_document_generation_respects_a_two_call_budget_without_repair():
@@ -1363,7 +1474,7 @@ def test_invalid_synthesis_batch_is_repaired():
     assert generated == valid_draft
 
 
-def test_analysis_section_ships_grounded_subset_when_repair_leaves_a_stray_number():
+def test_analysis_section_fails_when_two_repairs_leave_a_stray_number():
     """The production shape: repair does not converge on one stray figure.
 
     Job 33403df2 died with DERIVED_CLAIM_NOT_USED,UNGROUNDED_NUMERIC_CLAIM
@@ -1423,42 +1534,31 @@ def test_analysis_section_ships_grounded_subset_when_repair_leaves_a_stray_numbe
     def write_synthesis(*_args, analysis_sections, section_ids):
         return batch(section_ids)
 
+    repair_calls = []
+
     def unconverged_repair(*_args, section_ids, **_kwargs):
         # The repairer returns the same stray value, exactly as in production.
+        repair_calls.append(list(section_ids))
         return batch(section_ids)
 
-    generated = generate_report_document(
-        _QUERY,
-        document_plan,
-        research_plan,
-        manifest,
-        packets,
-        write_analysis_sections=write_analysis,
-        write_synthesis_sections=write_synthesis,
-        repair_sections=unconverged_repair,
-        allow_repair=True,
-    )
+    with pytest.raises(ReportDocumentGenerationError):
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=write_analysis,
+            write_synthesis_sections=write_synthesis,
+            repair_sections=unconverged_repair,
+            allow_repair=True,
+            max_repair_attempts=2,
+        )
 
-    analysis_ids = [
-        section.section_id
-        for section in document_plan.sections
-        if section.role is ReportDocumentSectionRole.ANALYSIS
-    ]
-    published = {
-        section.section_id: section
-        for section in generated.generation_order_sections()
-    }
-    assert poisoned_id in analysis_ids
-    section = published[poisoned_id]
-    assert "987.6" not in section.content_markdown
-    # Trimmed, not gutted: the verified findings still ship.
-    assert sum(
-        len(paragraph.direct_claims) + len(paragraph.derived_claims)
-        for paragraph in section.paragraphs
-    ) >= 1
+    assert repair_calls == [[poisoned_id], [poisoned_id]]
 
 
-def test_batch_path_spends_at_most_one_repair_call():
+def test_batch_path_uses_two_budgeted_repairs_across_writer_batches():
     (
         research_plan,
         packets,
@@ -1494,8 +1594,7 @@ def test_batch_path_spends_at_most_one_repair_call():
 
     def repair_sections(*_args, section_ids, **_kwargs):
         repair_calls.append(list(section_ids))
-        # Repairs the analysis batch correctly; synthesis then fails with no
-        # repair left, which is the budget boundary under test.
+        # The two-call repair budget can repair analysis and synthesis once.
         return ReportDocumentRepair(
             contract_version="report-document-repair-v1",
             sections=[section_by_id[sid] for sid in section_ids],
@@ -1511,28 +1610,11 @@ def test_batch_path_spends_at_most_one_repair_call():
         write_synthesis_sections=write_synthesis,
         repair_sections=repair_sections,
         allow_repair=True,
+        max_repair_attempts=2,
     )
 
-    # The budget boundary under test: synthesis fails with no repair left, so
-    # it must not buy a second call. It now ships the grounded subset of that
-    # batch instead of costing the reader the whole report.
-    assert len(repair_calls) == 1
-    synthesis_ids = [
-        section.section_id
-        for section in document_plan.sections
-        if section.role is not ReportDocumentSectionRole.ANALYSIS
-    ]
-    salvaged = {
-        section.section_id: section
-        for section in generated.generation_order_sections()
-        if section.section_id in synthesis_ids
-    }
-    assert salvaged
-    assert any(
-        section.content_markdown
-        != section_by_id[section_id].content_markdown
-        for section_id, section in salvaged.items()
-    )
+    assert len(repair_calls) == 2
+    assert generated == valid_draft
 
 
 def test_batch_repair_returning_the_wrong_section_set_is_rejected():
