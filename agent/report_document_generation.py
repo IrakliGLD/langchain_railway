@@ -37,9 +37,12 @@ DocumentRepairer = Callable[..., Any]
 SectionBatchWriter = Callable[..., Any]
 _TOKEN_PATTERN = re.compile(r"\b[\w'-]+\b", re.UNICODE)
 _LOGGER = logging.getLogger("Enai.ReportDocument")
-_WORD_COUNT_CODES = {
-    "WORD_COUNT_TOO_SHORT",
-    "WORD_COUNT_TOO_LONG",
+_LONG_WORD_COUNT_CODE = "WORD_COUNT_TOO_LONG"
+_STRUCTURAL_DOCUMENT_ERROR_CODES = {
+    "DOCUMENT_IDENTITY_MISMATCH",
+    "DOCUMENT_SCHEMA_INVALID",
+    "SECTION_ROLE_MISMATCH",
+    "SECTION_SET_MISMATCH",
 }
 
 
@@ -322,7 +325,7 @@ def validate_report_document(
         )
         total_words += validation.word_count
         for code in validation.error_codes:
-            if code in _WORD_COUNT_CODES:
+            if code == _LONG_WORD_COUNT_CODE:
                 add_section_warning(section_id, code)
             else:
                 add_section_error(section_id, code)
@@ -342,7 +345,7 @@ def validate_report_document(
         plan
     )
     if total_words < minimum_words:
-        document_warnings.append("DOCUMENT_WORD_COUNT_TOO_SHORT")
+        document_errors.append("DOCUMENT_WORD_COUNT_TOO_SHORT")
     elif total_words > maximum_words:
         document_warnings.append("DOCUMENT_WORD_COUNT_TOO_LONG")
 
@@ -459,12 +462,12 @@ def _materialize_section_batch(
         blocking_codes = [
             code
             for code in validation.error_codes
-            if code not in _WORD_COUNT_CODES
+            if code != _LONG_WORD_COUNT_CODE
         ]
         warning_codes = [
             code
             for code in validation.error_codes
-            if code in _WORD_COUNT_CODES
+            if code == _LONG_WORD_COUNT_CODE
         ]
         # The document gate rejects an analysis section with too few numbers,
         # so the gate that accepts one has to see the same thing. Without this
@@ -722,6 +725,58 @@ def _repair_section_batch(
     )
 
 
+def _repair_section_batch_until_valid(
+    query: str,
+    plan: ReportDocumentPlan,
+    research_plan: ReportResearchPlan,
+    manifest: ReportEvidenceManifest,
+    packets: Sequence[ReportEvidencePacket],
+    sections: list[ReportSectionDraft] | None,
+    raw_batch: Any,
+    validation: ReportDocumentValidation,
+    repair_sections: DocumentRepairer,
+    *,
+    section_ids: Sequence[str],
+    repair_attempts: int,
+    stage: str,
+) -> tuple[
+    list[ReportSectionDraft] | None,
+    ReportDocumentValidation,
+    int,
+]:
+    """Repair one batch within budget, then try the grounded subset."""
+
+    used = 0
+    while (
+        (sections is None or not validation.valid)
+        and used < repair_attempts
+    ):
+        sections, validation = _repair_section_batch(
+            query,
+            plan,
+            research_plan,
+            manifest,
+            packets,
+            sections,
+            raw_batch,
+            validation,
+            repair_sections,
+            section_ids=section_ids,
+        )
+        used += 1
+    if sections is None or not validation.valid:
+        sections, validation = _sections_or_grounded_subset(
+            sections,
+            validation,
+            plan,
+            manifest,
+            section_ids=section_ids,
+            stage=stage,
+            research_plan=research_plan,
+        )
+    return sections, validation, used
+
+
 def generate_report_document(
     query: str,
     plan: ReportDocumentPlan,
@@ -734,8 +789,17 @@ def generate_report_document(
     write_synthesis_sections: SectionBatchWriter | None = None,
     repair_sections: DocumentRepairer | None = None,
     allow_repair: bool = True,
+    max_repair_attempts: int | None = None,
 ) -> ReportDocumentDraft:
-    """Generate an adaptive document and use at most one targeted repair."""
+    """Generate an adaptive document with a bounded targeted repair budget."""
+
+    if max_repair_attempts is not None and not 0 <= max_repair_attempts <= 2:
+        raise ValueError("max_repair_attempts must be between 0 and 2.")
+    remaining_repairs = (
+        (1 if allow_repair else 0)
+        if max_repair_attempts is None
+        else (max_repair_attempts if allow_repair else 0)
+    )
 
     if (
         write_document is not None
@@ -791,46 +855,23 @@ def generate_report_document(
             research_plan=research_plan,
         )
         if analysis_sections is None or not analysis_validation.valid:
-            if not allow_repair:
-                analysis_sections, analysis_validation = (
-                    _sections_or_grounded_subset(
-                        analysis_sections,
-                        analysis_validation,
-                        plan,
-                        manifest,
-                        section_ids=analysis_ids,
-                        stage="analysis_unrepaired",
-                        research_plan=research_plan,
-                    )
-                )
-                if analysis_sections is None or not analysis_validation.valid:
-                    raise ReportDocumentGenerationError(analysis_validation)
-            # Whichever stage spends the repair, the later gates short-circuit:
-            # the processor's budget reserves exactly one repair call.
-            allow_repair = False
-            analysis_sections, analysis_validation = _repair_section_batch(
-                query,
-                plan,
-                research_plan,
-                manifest,
-                packets,
-                analysis_sections,
-                raw_analysis,
-                analysis_validation,
-                repair_sections,
-                section_ids=analysis_ids,
-            )
-            analysis_sections, analysis_validation = (
-                _sections_or_grounded_subset(
-                    analysis_sections,
-                    analysis_validation,
+            analysis_sections, analysis_validation, repairs_used = (
+                _repair_section_batch_until_valid(
+                    query,
                     plan,
+                    research_plan,
                     manifest,
+                    packets,
+                    analysis_sections,
+                    raw_analysis,
+                    analysis_validation,
+                    repair_sections,
                     section_ids=analysis_ids,
-                    stage="analysis_repaired",
-                    research_plan=research_plan,
+                    repair_attempts=remaining_repairs,
+                    stage="analysis_repair_exhausted",
                 )
             )
+            remaining_repairs -= repairs_used
             if analysis_sections is None or not analysis_validation.valid:
                 raise ReportDocumentGenerationError(analysis_validation)
         raw_synthesis = write_synthesis_sections(
@@ -850,47 +891,23 @@ def generate_report_document(
             research_plan=research_plan,
         )
         if synthesis_sections is None or not synthesis_validation.valid:
-            if not allow_repair:
-                synthesis_sections, synthesis_validation = (
-                    _sections_or_grounded_subset(
-                        synthesis_sections,
-                        synthesis_validation,
-                        plan,
-                        manifest,
-                        section_ids=synthesis_ids,
-                        stage="synthesis_unrepaired",
-                        research_plan=research_plan,
-                    )
-                )
-                if (
-                    synthesis_sections is None
-                    or not synthesis_validation.valid
-                ):
-                    raise ReportDocumentGenerationError(synthesis_validation)
-            allow_repair = False
-            synthesis_sections, synthesis_validation = _repair_section_batch(
-                query,
-                plan,
-                research_plan,
-                manifest,
-                packets,
-                synthesis_sections,
-                raw_synthesis,
-                synthesis_validation,
-                repair_sections,
-                section_ids=synthesis_ids,
-            )
-            synthesis_sections, synthesis_validation = (
-                _sections_or_grounded_subset(
-                    synthesis_sections,
-                    synthesis_validation,
+            synthesis_sections, synthesis_validation, repairs_used = (
+                _repair_section_batch_until_valid(
+                    query,
                     plan,
+                    research_plan,
                     manifest,
+                    packets,
+                    synthesis_sections,
+                    raw_synthesis,
+                    synthesis_validation,
+                    repair_sections,
                     section_ids=synthesis_ids,
-                    stage="synthesis_repaired",
-                    research_plan=research_plan,
+                    repair_attempts=remaining_repairs,
+                    stage="synthesis_repair_exhausted",
                 )
             )
+            remaining_repairs -= repairs_used
             if synthesis_sections is None or not synthesis_validation.valid:
                 raise ReportDocumentGenerationError(synthesis_validation)
         raw_draft = _document_from_sections(
@@ -942,82 +959,84 @@ def generate_report_document(
             )
         if validation.valid:
             return draft
-    if not allow_repair:
-        raise ReportDocumentGenerationError(validation)
-
-    structural_repair = draft is None or bool(validation.document_errors)
-    if structural_repair:
-        invalid_section_ids = [
-            section.section_id for section in plan.sections
-        ]
-    else:
-        invalid_section_ids = list(validation.section_errors)
     if repair_sections is None:
         from core.llm import llm_repair_report_document_sections
 
         repair_sections = llm_repair_report_document_sections
-    _log_document_diagnostic(
-        manifest=manifest,
-        event="repair_requested",
-        plan=plan,
-        validation=validation,
-        draft=draft,
-        repair_section_ids=invalid_section_ids,
-        pre_normalization_role_section_ids=(
-            pre_normalization_role_section_ids
-        ),
-        role_normalization_applied=role_normalization_applied,
-    )
-    raw_repair = repair_sections(
-        query,
-        plan,
-        research_plan,
-        manifest,
-        list(packets),
-        raw_draft if draft is None else draft,
-        validation,
-        section_ids=invalid_section_ids,
-    )
-    try:
-        repair = (
-            raw_repair
-            if isinstance(raw_repair, ReportDocumentRepair)
-            else ReportDocumentRepair.model_validate(raw_repair)
+    while remaining_repairs > 0:
+        structural_repair = draft is None or any(
+            code in _STRUCTURAL_DOCUMENT_ERROR_CODES
+            for code in validation.document_errors
         )
-    except ValidationError as exc:
-        raise ReportDocumentGenerationError(validation) from exc
-    if {section.section_id for section in repair.sections} != set(
-        invalid_section_ids
-    ):
-        raise ReportDocumentGenerationError(validation)
-    repaired_draft = (
-        _document_from_sections(plan, repair.sections)
-        if structural_repair
-        else _merge_repairs(draft, repair)
-    )
-    repaired_validation = validate_report_document(
-        repaired_draft,
-        plan,
-        manifest,
-        research_plan,
-    )
-    _log_document_diagnostic(
-        manifest=manifest,
-        event=(
-            "repair_validated"
-            if repaired_validation.valid
-            else "repair_rejected"
-        ),
-        plan=plan,
-        validation=repaired_validation,
-        draft=repaired_draft,
-        repair_section_ids=invalid_section_ids,
-        pre_normalization_role_section_ids=(
-            pre_normalization_role_section_ids
-        ),
-        role_normalization_applied=role_normalization_applied,
-        baseline_draft=draft,
-    )
-    if not repaired_validation.valid:
-        raise ReportDocumentGenerationError(repaired_validation)
-    return repaired_draft
+        invalid_section_ids = (
+            [section.section_id for section in plan.sections]
+            if structural_repair or not validation.section_errors
+            else list(validation.section_errors)
+        )
+        _log_document_diagnostic(
+            manifest=manifest,
+            event="repair_requested",
+            plan=plan,
+            validation=validation,
+            draft=draft,
+            repair_section_ids=invalid_section_ids,
+            pre_normalization_role_section_ids=(
+                pre_normalization_role_section_ids
+            ),
+            role_normalization_applied=role_normalization_applied,
+        )
+        baseline_draft = draft
+        raw_repair = repair_sections(
+            query,
+            plan,
+            research_plan,
+            manifest,
+            list(packets),
+            raw_draft if draft is None else draft,
+            validation,
+            section_ids=invalid_section_ids,
+        )
+        remaining_repairs -= 1
+        try:
+            repair = (
+                raw_repair
+                if isinstance(raw_repair, ReportDocumentRepair)
+                else ReportDocumentRepair.model_validate(raw_repair)
+            )
+        except ValidationError:
+            continue
+        if {section.section_id for section in repair.sections} != set(
+            invalid_section_ids
+        ):
+            continue
+        draft = (
+            _document_from_sections(plan, repair.sections)
+            if structural_repair
+            else _merge_repairs(draft, repair)
+        )
+        validation = validate_report_document(
+            draft,
+            plan,
+            manifest,
+            research_plan,
+        )
+        _log_document_diagnostic(
+            manifest=manifest,
+            event=(
+                "repair_validated"
+                if validation.valid
+                else "repair_rejected"
+            ),
+            plan=plan,
+            validation=validation,
+            draft=draft,
+            repair_section_ids=invalid_section_ids,
+            pre_normalization_role_section_ids=(
+                pre_normalization_role_section_ids
+            ),
+            role_normalization_applied=role_normalization_applied,
+            baseline_draft=baseline_draft,
+        )
+        if validation.valid:
+            return draft
+    raise ReportDocumentGenerationError(validation)

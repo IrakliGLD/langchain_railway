@@ -5,6 +5,68 @@ Supports Georgian, Russian, and English language detection
 based on Unicode character ranges.
 """
 
+import re
+
+_REQUESTED_LANGUAGE_PATTERNS = {
+    "ka": (
+        re.compile(
+            r"\b(?:answer|respond|reply|write|prepare|provide|produce|generate)"
+            r"(?:\s+(?:the|this|my|your|a))?"
+            r"(?:\s+(?:answer|response|report|analysis|output))?"
+            r"\s+in\s+georgian\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:მიპასუხე|უპასუხე|დაწერე|მომიმზადე|მოამზადე|წარმოადგინე)"
+            r"[^.!?\n]{0,80}ქართულად",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:ответь|ответьте|напиши|напишите|подготовь|подготовьте|составь|составьте)"
+            r"[^.!?\n]{0,80}(?:на грузинском|по-грузински)",
+            re.IGNORECASE,
+        ),
+    ),
+    "ru": (
+        re.compile(
+            r"\b(?:answer|respond|reply|write|prepare|provide|produce|generate)"
+            r"(?:\s+(?:the|this|my|your|a))?"
+            r"(?:\s+(?:answer|response|report|analysis|output))?"
+            r"\s+in\s+russian\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:მიპასუხე|უპასუხე|დაწერე|მომიმზადე|მოამზადე|წარმოადგინე)"
+            r"[^.!?\n]{0,80}რუსულად",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:ответь|ответьте|напиши|напишите|подготовь|подготовьте|составь|составьте)"
+            r"[^.!?\n]{0,80}(?:на русском|по-русски)",
+            re.IGNORECASE,
+        ),
+    ),
+    "en": (
+        re.compile(
+            r"\b(?:answer|respond|reply|write|prepare|provide|produce|generate)"
+            r"(?:\s+(?:the|this|my|your|a))?"
+            r"(?:\s+(?:answer|response|report|analysis|output))?"
+            r"\s+in\s+english\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:მიპასუხე|უპასუხე|დაწერე|მომიმზადე|მოამზადე|წარმოადგინე)"
+            r"[^.!?\n]{0,80}ინგლისურად",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:ответь|ответьте|напиши|напишите|подготовь|подготовьте|составь|составьте)"
+            r"[^.!?\n]{0,80}(?:на английском|по-английски)",
+            re.IGNORECASE,
+        ),
+    ),
+}
+
 
 def detect_language(text: str) -> str:
     """
@@ -39,6 +101,15 @@ def detect_language(text: str) -> str:
 
     # Default to English
     return "en"
+
+
+def resolve_answer_language(text: str) -> str:
+    """Honor an explicit answer-language instruction, else detect the query."""
+
+    for language_code, patterns in _REQUESTED_LANGUAGE_PATTERNS.items():
+        if any(pattern.search(text) for pattern in patterns):
+            return language_code
+    return detect_language(text)
 
 
 def get_language_instruction(lang_code: str) -> str:

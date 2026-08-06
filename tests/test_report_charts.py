@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from copy import deepcopy
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -229,14 +230,120 @@ def test_composition_never_pies_columns_that_share_no_unit():
         assert artifact.type != "pie"
 
 
-def test_time_series_without_categories_renders_as_a_line():
-    """Standard's selector returns line for this shape; reports must agree."""
+def test_time_series_with_three_incompatible_dimensions_is_omitted():
+    """Two axes cannot represent price, exchange rate, and quantity."""
 
     decisions = build_report_charts(_composition_plan(), _mixed_unit_manifest())
 
-    artifact = decisions[0].artifact
+    assert decisions[0].artifact is None
+    assert decisions[0].reason_code == "REPORT_CHART_INCOMPATIBLE_UNITS"
+
+
+def test_mixed_dimension_line_declares_human_labels_and_dual_axes():
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "share_tech", "quantity_tech"]
+    table["rows"] = [
+        {"period": "2026-01", "share_tech": 0.4, "quantity_tech": 800.0},
+        {"period": "2026-02", "share_tech": 0.6, "quantity_tech": 1200.0},
+    ]
+    table["unit_by_column"] = {
+        "share_tech": "ratio",
+        "quantity_tech": "thousand MWh",
+    }
+    manifest = ReportEvidenceManifest.model_validate(payload)
+    plan_payload = _plan_payload()
+    plan_payload["charts"][0].update(
+        {
+            "purpose": "trend",
+            "x_field": "period",
+            "series_fields": ["share_tech", "quantity_tech"],
+        }
+    )
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        manifest,
+    )[0]
+
+    artifact = decision.artifact
     assert artifact is not None
-    assert artifact.type == "line"
+    assert artifact.metadata.axis_mode == "dual"
+    assert artifact.metadata.axis_by_series == {
+        "share_tech": "left",
+        "quantity_tech": "right",
+    }
+    assert artifact.metadata.dimension_by_series == {
+        "share_tech": "share",
+        "quantity_tech": "energy_qty",
+    }
+    assert artifact.metadata.label_by_field == {
+        "period": "Period",
+        "share_tech": "Share Tech",
+        "quantity_tech": "Quantity (thousand MWh)",
+    }
+
+
+def test_line_with_more_than_two_incompatible_axis_groups_is_omitted():
+    plan_payload = _plan_payload()
+    plan_payload["charts"][0].update(
+        {
+            "purpose": "trend",
+            "x_field": "period",
+            "series_fields": ["p_bal_gel", "xrate", "quantity_hydro"],
+        }
+    )
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        _mixed_unit_manifest(),
+    )[0]
+
+    assert decision.status == "omitted"
+    assert decision.reason_code == "REPORT_CHART_INCOMPATIBLE_UNITS"
+
+
+def test_one_category_composition_is_omitted_as_noninformative():
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["type_tech", "share_tech"]
+    table["rows"] = [{"type_tech": "hydro", "share_tech": 1.0}]
+    table["unit_by_column"] = {"share_tech": "ratio"}
+    table["total_row_count"] = 1
+    manifest = ReportEvidenceManifest.model_validate(payload)
+    plan_payload = _plan_payload()
+    plan_payload["charts"][0].update(
+        {
+            "purpose": "composition",
+            "x_field": "type_tech",
+            "series_fields": ["share_tech"],
+        }
+    )
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        manifest,
+    )[0]
+
+    assert decision.status == "omitted"
+    assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"
+
+
+def test_chart_build_decision_is_logged_without_evidence_values(caplog):
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        build_report_charts(
+            ReportPlan.model_validate(_plan_payload()),
+            _manifest(),
+        )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_CHART_DECISION ")
+    )
+    assert '"status":"built"' in record
+    assert '"chart_id":"price_trend"' in record
+    assert "120.0" not in record
 
 
 def test_composition_still_pies_genuine_shares():
@@ -324,6 +431,16 @@ def test_report_table_reports_mean_stdev_min_and_max():
     assert total["maximum"] == 114.0
     assert total["observations"] == 14
     assert total["metric"] == "p_bal_gel"
+    assert total["first_period"] == "2025-01"
+    assert total["last_period"] == "2026-02"
+    assert total["minimum_period"] == "2025-01"
+    assert total["maximum_period"] == "2026-02"
+    assert total["largest_increase"] == 1.0
+    assert total["largest_increase_period"] == "2025-02"
+    assert artifact.metadata.label_by_field["std_dev"] == "Standard deviation"
+    assert artifact.metadata.label_by_value["p_bal_gel"] == (
+        "Balancing electricity price (GEL/MWh)"
+    )
 
 
 def test_report_table_splits_summer_from_winter():

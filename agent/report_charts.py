@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 import re
 from typing import Any
 
 from config import SUMMER_MONTHS, WINTER_MONTHS
+from context import COLUMN_LABELS, DERIVED_LABELS
 from contracts.report import ReportChartPurpose, ReportChartRequest, ReportPlan
 from contracts.report_charts import (
     ReportChartArtifact,
@@ -34,6 +37,97 @@ _TABLE_SUMMARY_ROW_THRESHOLD = 6
 # Mirrors ReportChartArtifact.metadata.series (max_length=8): a builder that
 # emitted more would fail contract validation rather than render.
 _MAXIMUM_CHART_SERIES = 8
+_LOGGER = logging.getLogger("Enai.ReportCharts")
+_SUMMARY_FIELD_LABELS = {
+    "first": "First value",
+    "first_period": "First period",
+    "largest_decrease": "Largest decrease",
+    "largest_decrease_period": "Largest decrease period",
+    "largest_increase": "Largest increase",
+    "largest_increase_period": "Largest increase period",
+    "last": "Last value",
+    "last_period": "Last period",
+    "mean": "Mean",
+    "metric": "Metric",
+    "maximum": "Maximum",
+    "maximum_period": "Maximum period",
+    "minimum": "Minimum",
+    "minimum_period": "Minimum period",
+    "observations": "Observations",
+    "segment": "Segment",
+    "std_dev": "Standard deviation",
+}
+_KNOWN_FIELD_LABELS = {
+    **COLUMN_LABELS,
+    **DERIVED_LABELS,
+    **_SUMMARY_FIELD_LABELS,
+}
+
+
+def _field_label(field: str) -> str:
+    return _KNOWN_FIELD_LABELS.get(
+        field,
+        field.replace("_", " ").strip().title(),
+    )
+
+
+def _chart_decision_log(
+    decision: ReportChartBuildDecision,
+    *,
+    chart_type: ReportChartType | None = None,
+) -> None:
+    artifact = decision.artifact
+    _LOGGER.info(
+        "REPORT_CHART_DECISION %s",
+        json.dumps(
+            {
+                "axis_mode": (
+                    artifact.metadata.axis_mode
+                    if artifact is not None
+                    else ""
+                ),
+                "chart_id": decision.chart_id,
+                "chart_type": (
+                    chart_type.value if chart_type is not None else ""
+                ),
+                "reason_code": decision.reason_code,
+                "series_count": (
+                    len(artifact.metadata.series)
+                    if artifact is not None
+                    else 0
+                ),
+                "status": decision.status,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _axis_metadata(
+    chart_type: ReportChartType,
+    series: list[str],
+    units: dict[str, str],
+) -> tuple[str, dict[str, str], dict[str, str]] | None:
+    dimensions = {name: infer_dimension(name) for name in series}
+    if chart_type not in {ReportChartType.LINE, ReportChartType.BAR}:
+        return "single", {}, dimensions
+    groups: list[tuple[str, str]] = []
+    group_by_series: dict[str, tuple[str, str]] = {}
+    for name in series:
+        group = (dimensions[name], units.get(name, ""))
+        if group not in groups:
+            groups.append(group)
+        group_by_series[name] = group
+    if len(groups) <= 1:
+        return "single", {}, dimensions
+    if len(groups) > 2:
+        return None
+    axis_by_series = {
+        name: ("left" if groups.index(group_by_series[name]) == 0 else "right")
+        for name in series
+    }
+    return "dual", axis_by_series, dimensions
 
 
 def _period_month(value: Any) -> int | None:
@@ -77,11 +171,12 @@ def _summary_statistics_rows(
     summary: list[dict[str, Any]] = []
     for column in numeric_columns:
         for segment, segment_rows in segments:
-            values = [
-                float(row[column])
+            observations = [
+                (row.get(time_column) if time_column else None, float(row[column]))
                 for row in segment_rows
                 if _is_numeric(row.get(column))
             ]
+            values = [value for _period, value in observations]
             if not values:
                 continue
             mean = sum(values) / len(values)
@@ -90,8 +185,7 @@ def _summary_statistics_rows(
                 if len(values) > 1
                 else 0.0
             )
-            summary.append(
-                {
+            summary_row = {
                     "segment": segment,
                     "metric": column,
                     "mean": round(mean, 4),
@@ -100,7 +194,53 @@ def _summary_statistics_rows(
                     "maximum": round(max(values), 4),
                     "observations": len(values),
                 }
-            )
+            if time_column is not None and segment == "total":
+                ordered = sorted(
+                    observations,
+                    key=lambda item: str(item[0]),
+                )
+                minimum = min(ordered, key=lambda item: item[1])
+                maximum = max(ordered, key=lambda item: item[1])
+                summary_row.update(
+                    {
+                        "first": round(ordered[0][1], 4),
+                        "first_period": ordered[0][0],
+                        "last": round(ordered[-1][1], 4),
+                        "last_period": ordered[-1][0],
+                        "minimum_period": minimum[0],
+                        "maximum_period": maximum[0],
+                    }
+                )
+                changes = [
+                    (
+                        current[0],
+                        current[1] - previous[1],
+                    )
+                    for previous, current in zip(
+                        ordered,
+                        ordered[1:],
+                        strict=False,
+                    )
+                ]
+                increases = [change for change in changes if change[1] > 0]
+                decreases = [change for change in changes if change[1] < 0]
+                if increases:
+                    period, change = max(increases, key=lambda item: item[1])
+                    summary_row.update(
+                        {
+                            "largest_increase": round(change, 4),
+                            "largest_increase_period": period,
+                        }
+                    )
+                if decreases:
+                    period, change = min(decreases, key=lambda item: item[1])
+                    summary_row.update(
+                        {
+                            "largest_decrease": round(change, 4),
+                            "largest_decrease_period": period,
+                        }
+                    )
+            summary.append(summary_row)
     return summary
 
 
@@ -260,13 +400,15 @@ def demote_unbuildable_required_charts(
 
 
 def _omitted(chart, code: str) -> ReportChartBuildDecision:
-    return ReportChartBuildDecision(
+    decision = ReportChartBuildDecision(
         chart_id=chart.chart_id,
         required=chart.required,
         status="omitted",
         reason_code=code,
         artifact=None,
     )
+    _chart_decision_log(decision)
+    return decision
 
 
 def _built(
@@ -279,6 +421,10 @@ def _built(
     units: dict[str, str],
     context_columns: tuple[str, ...] = (),
 ) -> ReportChartBuildDecision:
+    axis_metadata = _axis_metadata(chart_type, series, units)
+    if axis_metadata is None:
+        return _omitted(chart, "REPORT_CHART_INCOMPATIBLE_UNITS")
+    axis_mode, axis_by_series, dimension_by_series = axis_metadata
     # Project rows onto the declared axis and series. metadata.series caps the
     # legend, but passing rows through verbatim let the payload carry every
     # column of the source table — 31 of them on the enriched balancing frame —
@@ -307,6 +453,16 @@ def _built(
                 {**row, x_axis: value}
                 for row, value in zip(projected_data, normalized, strict=True)
             ]
+    label_by_field = {
+        field: _field_label(field)
+        for field in dict.fromkeys(projected_columns)
+    }
+    label_by_value = {
+        value: _field_label(value)
+        for row in projected_data
+        for value in row.values()
+        if isinstance(value, str) and value in _KNOWN_FIELD_LABELS
+    }
     artifact = ReportChartArtifact(
         chart_id=chart.chart_id,
         section_id=chart.section_id,
@@ -323,15 +479,22 @@ def _built(
                 for series_name in series
                 if series_name in units
             },
+            label_by_field=label_by_field,
+            label_by_value=label_by_value,
+            dimension_by_series=dimension_by_series,
+            axis_mode=axis_mode,
+            axis_by_series=axis_by_series,
         ),
     )
-    return ReportChartBuildDecision(
+    decision = ReportChartBuildDecision(
         chart_id=chart.chart_id,
         required=chart.required,
         status="built",
         reason_code="",
         artifact=artifact,
     )
+    _chart_decision_log(decision, chart_type=chart_type)
+    return decision
 
 
 def build_report_chart_requests(
@@ -395,6 +558,18 @@ def build_report_chart_requests(
                             "observations",
                         ],
                         units=units,
+                        context_columns=(
+                            "first",
+                            "first_period",
+                            "last",
+                            "last_period",
+                            "minimum_period",
+                            "maximum_period",
+                            "largest_increase",
+                            "largest_increase_period",
+                            "largest_decrease",
+                            "largest_decrease_period",
+                        ),
                     )
                 )
                 continue
@@ -483,15 +658,24 @@ def build_report_chart_requests(
                         if str(row.get(time_column)) == latest_period
                     ]
                 snapshot_series = (chart.series_fields or [numeric[0]])[:_MAXIMUM_CHART_SERIES]
+                snapshot_type = _composition_snapshot_type(
+                    snapshot_series,
+                    len(composition_rows),
+                )
+                if snapshot_type == "pie" and len(composition_rows) < 2:
+                    decisions.append(
+                        _omitted(
+                            chart,
+                            "REPORT_CHART_INSUFFICIENT_CATEGORIES",
+                        )
+                    )
+                    continue
                 decisions.append(
                     _built(
                         chart,
                         chart_type=(
                             ReportChartType.PIE
-                            if _composition_snapshot_type(
-                                snapshot_series,
-                                len(composition_rows),
-                            ) == "pie"
+                            if snapshot_type == "pie"
                             else ReportChartType.BAR
                         ),
                         data=composition_rows,
@@ -530,6 +714,14 @@ def build_report_chart_requests(
                             x_axis=temporal[0],
                             series=pivot_columns,
                             units=units,
+                        )
+                    )
+                    continue
+                if len(pivot_columns) < 2:
+                    decisions.append(
+                        _omitted(
+                            chart,
+                            "REPORT_CHART_INSUFFICIENT_CATEGORIES",
                         )
                     )
                     continue

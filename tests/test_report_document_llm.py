@@ -140,6 +140,7 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
     assert "word targets are recommendations" in system[1].lower()
     assert "stop when the assigned evidence is exhausted" in system[1].lower()
     assert "never pad" in system[1].lower()
+    assert "do not append a sources" in system[1].lower()
     assert "verify every section" not in system[1].lower()
     assert "prefer direct observations" in system[1].lower()
     assert (
@@ -222,6 +223,7 @@ def test_analysis_writer_projects_only_analysis_sections(monkeypatch):
 
     assert result == expected
     assert captured["attempt_stage"] == "report_analysis_writer"
+    assert "do not append a sources" in captured["system"].lower()
     assert captured["payload_bindings"] == {
         "contract_version": "report-document-repair-v1"
     }
@@ -285,6 +287,7 @@ def test_synthesis_writer_consumes_validated_analysis(monkeypatch):
     assert "VALIDATED_ANALYSIS_SECTIONS" in captured["prompt"]
     assert '"section_id":"prices"' in captured["prompt"]
     assert "must not introduce a numeric claim" in captured["system"].lower()
+    assert "do not append a sources" in captured["system"].lower()
     assert '"section_id":"implications"' in captured["prompt"]
 
 
@@ -393,6 +396,7 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert isinstance(captured["structured_schema"], dict)
     system, user = captured["messages"]
     assert "only the rejected sections" in system[1].lower()
+    assert "do not append a sources" in system[1].lower()
     assert "blocking validation errors" in system[1].lower()
     assert "word_count_too_short" not in system[1].lower()
     assert "prefer direct observations" in system[1].lower()

@@ -4368,6 +4368,9 @@ def _report_document_prompt_inputs(
 # 664dd59b-c826-479e-a023-13e5c8026730 on the first run after deploy.
 _REPORT_CLAIM_CONTRACT_RULES = (
     "Do not add headings inside paragraph text. "
+    "Do not append a Sources, References, citations, evidence list, or "
+    "Unavailable exhibits block; evidence references stay only in JSON "
+    "metadata and must never appear in report prose. "
     "Prefer direct observations with coordinate-bound claims. "
     "Do not emit unused claim entries; each claim's displayed value and unit "
     "must appear in the same paragraph. "

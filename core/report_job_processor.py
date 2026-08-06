@@ -153,11 +153,29 @@ def _report_document_allows_repair(
     generative_calls_used: int,
     maximum_calls: int,
 ) -> bool:
+    return _report_document_repair_budget(
+        profile=profile,
+        generative_calls_used=generative_calls_used,
+        maximum_calls=maximum_calls,
+    ) > 0
+
+
+def _report_document_repair_budget(
+    *,
+    profile: Any,
+    generative_calls_used: int,
+    maximum_calls: int,
+) -> int:
+    """Reserve generation calls and expose at most two targeted repairs."""
+
     profile_value = getattr(profile, "value", profile)
     generation_calls = 1 if profile_value == "compact" else 2
-    return (
-        generative_calls_used + generation_calls + 1
-        <= maximum_calls
+    return min(
+        2,
+        max(
+            0,
+            maximum_calls - generative_calls_used - generation_calls,
+        ),
     )
 
 _REPORT_FAILURE_RETRYABILITY = {
@@ -1341,7 +1359,7 @@ class ReportJobProcessor:
                     progress_percent=progress,
                     checkpoint=None,
                 )
-            allow_repair = _report_document_allows_repair(
+            repair_budget = _report_document_repair_budget(
                 profile=document_plan.profile,
                 generative_calls_used=generative_calls_used,
                 maximum_calls=self._max_generative_calls,
@@ -1353,7 +1371,8 @@ class ReportJobProcessor:
                     research_plan,
                     manifest,
                     packets,
-                    allow_repair=allow_repair,
+                    allow_repair=repair_budget > 0,
+                    max_repair_attempts=repair_budget,
                 )
                 document_draft = (
                     raw_draft
