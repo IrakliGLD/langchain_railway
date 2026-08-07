@@ -38,6 +38,8 @@ SectionBatchWriter = Callable[..., Any]
 _TOKEN_PATTERN = re.compile(r"\b[\w'-]+\b", re.UNICODE)
 _LOGGER = logging.getLogger("Enai.ReportDocument")
 _LONG_WORD_COUNT_CODE = "WORD_COUNT_TOO_LONG"
+_SHORT_SECTION_CODE = "WORD_COUNT_TOO_SHORT"
+_SHORT_DOCUMENT_CODE = "DOCUMENT_WORD_COUNT_TOO_SHORT"
 _STRUCTURAL_DOCUMENT_ERROR_CODES = {
     "DOCUMENT_IDENTITY_MISMATCH",
     "DOCUMENT_SCHEMA_INVALID",
@@ -493,54 +495,135 @@ def _materialize_section_batch(
     )
 
 
-def _analysis_numeric_finding_missing(
+def report_analysis_numeric_claim_requirement(
     draft_section: ReportSectionDraft,
     section_spec: Any,
     manifest: ReportEvidenceManifest,
     research_plan: ReportResearchPlan,
-) -> bool:
-    """Return whether an analysis section carries too few verified numbers.
+) -> tuple[int, int]:
+    """Return ``(claims_made, claims_required)`` for one analysis section.
 
-    Single authority for the rule, so the document gate and the grounded-subset
-    guard cannot disagree about what counts as an analysis section worth
-    shipping.
+    Single authority for the rule, so the document gate, the grounded-subset
+    guard, and the repair prompt cannot disagree about what counts as an
+    analysis section worth shipping — or about how many numbers it still owes.
+
+    The requirement never exceeds what the assigned evidence can support. A
+    section whose tables declare no unit on any numeric column has nothing a
+    claim could cite, so demanding one number of it is a gate no draft can
+    pass: the writer either omits the claim and fails here, or invents one and
+    fails grounding. That deadlock burned the repair budget on job cf47a2f6.
     """
 
     if section_spec.role is not ReportDocumentSectionRole.ANALYSIS:
-        return False
+        return (0, 0)
     needs_numbers = any(
         track.requested_metrics
         for track in research_plan.tracks
         if track.track_id in section_spec.track_ids
     )
     if not needs_numbers:
-        return False
+        return (0, 0)
     item_by_ref = manifest.item_by_ref()
     available_numeric_coordinates = sum(
-        1
-        for evidence_ref in section_spec.required_evidence_refs
-        if (
-            evidence_ref in item_by_ref
-            and item_by_ref[evidence_ref].kind.value == "table"
-        )
-        for row in item_by_ref[evidence_ref].rows
-        for column, value in row.items()
-        if (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and bool(item_by_ref[evidence_ref].unit_by_column.get(column))
-        )
-    )
-    required_numeric_claims = (
-        min(2, available_numeric_coordinates)
-        if available_numeric_coordinates
-        else 1
+        len(item.citable_numeric_coordinates())
+        for evidence_ref in dict.fromkeys(section_spec.required_evidence_refs)
+        if (item := item_by_ref.get(evidence_ref)) is not None
     )
     numeric_claim_count = sum(
         len(paragraph.direct_claims) + len(paragraph.derived_claims)
         for paragraph in draft_section.paragraphs
     )
-    return numeric_claim_count < required_numeric_claims
+    return (numeric_claim_count, min(2, available_numeric_coordinates))
+
+
+def _analysis_numeric_finding_missing(
+    draft_section: ReportSectionDraft,
+    section_spec: Any,
+    manifest: ReportEvidenceManifest,
+    research_plan: ReportResearchPlan,
+) -> bool:
+    """Return whether an analysis section carries too few verified numbers."""
+
+    made, required = report_analysis_numeric_claim_requirement(
+        draft_section,
+        section_spec,
+        manifest,
+        research_plan,
+    )
+    return made < required
+
+
+def _concede_length_shortfall(
+    validation: ReportDocumentValidation,
+    *,
+    stage: str,
+) -> ReportDocumentValidation | None:
+    """Downgrade a pure length shortfall to a warning, or return ``None``.
+
+    Called only where the pipeline is otherwise about to give up. Prose length
+    is a quality signal, not a correctness one: a section that is grounded,
+    carries its numeric findings, cites its assigned evidence, and is merely
+    shorter than its target is a report the reader can use. Failing it emits
+    REPORT_DOCUMENT_INVALID, which is not retryable, so the reader gets nothing
+    instead. Concedes nothing else — one non-length code and the document still
+    fails exactly as before.
+
+    A rising REPORT_LENGTH_CONCEDED rate means the planner is sizing sections
+    above what the evidence can carry, not that generation is healthy.
+    """
+
+    if validation.valid:
+        return None
+    conceded_sections = {
+        section_id: codes
+        for section_id, codes in validation.section_errors.items()
+        if codes == [_SHORT_SECTION_CODE]
+    }
+    if set(conceded_sections) != set(validation.section_errors):
+        return None
+    if set(validation.document_errors) - {_SHORT_DOCUMENT_CODE}:
+        return None
+    if not conceded_sections and not validation.document_errors:
+        return None
+    section_warnings = {
+        section_id: list(codes)
+        for section_id, codes in validation.section_warnings.items()
+    }
+    for section_id, codes in conceded_sections.items():
+        section_warnings[section_id] = list(
+            dict.fromkeys([*section_warnings.get(section_id, []), *codes])
+        )
+    conceded = validation.model_copy(
+        update={
+            "valid": True,
+            "section_errors": {},
+            "document_errors": [],
+            "section_warnings": section_warnings,
+            "document_warnings": list(
+                dict.fromkeys(
+                    [
+                        *validation.document_warnings,
+                        *validation.document_errors,
+                    ]
+                )
+            ),
+        }
+    )
+    _LOGGER.warning(
+        "REPORT_LENGTH_CONCEDED %s",
+        json.dumps(
+            {
+                "conceded_document_codes": validation.document_errors,
+                "conceded_section_ids": sorted(conceded_sections),
+                "stage": stage,
+                "word_count": validation.word_count,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    return conceded
 
 
 def _sections_or_grounded_subset(
@@ -621,6 +704,12 @@ def _sections_or_grounded_subset(
             separators=(",", ":"),
         ),
     )
+    conceded = _concede_length_shortfall(
+        subset_validation,
+        stage=f"{stage}_grounded_subset",
+    )
+    if conceded is not None:
+        subset_validation = conceded
     if not subset_validation.valid:
         return sections, validation
     return subset_sections, subset_validation
@@ -768,6 +857,23 @@ def _repair_section_batch_until_valid(
             attempt_number=first_attempt_number + used,
         )
         used += 1
+        # Without this the last repair's own result is never reported: the
+        # batch diagnostic is emitted before each call, so an exhausted budget
+        # ends with the failing word counts and codes unlogged — exactly the
+        # numbers needed to tell a stalled writer from a wrong gate.
+        _log_document_diagnostic(
+            manifest=manifest,
+            event=(
+                "batch_repair_validated"
+                if sections is not None and validation.valid
+                else "batch_repair_rejected"
+            ),
+            plan=plan,
+            validation=validation,
+            draft=None,
+            sections=sections,
+            repair_section_ids=list(section_ids),
+        )
     if sections is None or not validation.valid:
         sections, validation = _sections_or_grounded_subset(
             sections,
@@ -778,6 +884,10 @@ def _repair_section_batch_until_valid(
             stage=stage,
             research_plan=research_plan,
         )
+    if sections is not None and not validation.valid:
+        conceded = _concede_length_shortfall(validation, stage=stage)
+        if conceded is not None:
+            validation = conceded
     return sections, validation, used
 
 
@@ -1052,5 +1162,12 @@ def generate_report_document(
             baseline_draft=baseline_draft,
         )
         if validation.valid:
+            return draft
+    if draft is not None:
+        conceded = _concede_length_shortfall(
+            validation,
+            stage="document_repair_exhausted",
+        )
+        if conceded is not None:
             return draft
     raise ReportDocumentGenerationError(validation)

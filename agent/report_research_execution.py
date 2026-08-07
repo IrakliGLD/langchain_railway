@@ -900,6 +900,23 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
     return items[:REPORT_MAX_EXHIBITS]
 
 
+class ReportTrackAnalysisUnusable(ValueError):
+    """One track's pipeline output cannot back report evidence.
+
+    Carries the track and the stable block reason so the rollout telemetry can
+    report which tracks fell back to deterministic evidence and why. The bare
+    ValueError it replaces recorded only its own type name, which left a report
+    degraded on two of four tracks with nothing to say which two (job cf47a2f6).
+    """
+
+    def __init__(self, track_id: str, reason: str) -> None:
+        super().__init__(
+            f"Track analysis pipeline context is not usable: {reason}."
+        )
+        self.track_id = track_id
+        self.reason = reason
+
+
 def execute_report_track_analysis(
     report_query: str,
     track: ReportResearchTrack,
@@ -922,10 +939,7 @@ def execute_report_track_analysis(
     )
     block_reason = report_pipeline_context_block_reason(context)
     if block_reason:
-        raise ValueError(
-            "Track analysis pipeline context is not usable: "
-            f"{block_reason}."
-        )
+        raise ReportTrackAnalysisUnusable(track.track_id, block_reason)
     manifest = build_report_evidence_manifest(context)
     # Statistics and curated knowledge are the analyzed findings the report
     # writers need most. Put them ahead of supporting raw tables so the packet

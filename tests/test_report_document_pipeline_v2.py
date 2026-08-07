@@ -1481,12 +1481,14 @@ def test_invalid_synthesis_batch_is_repaired():
     assert generated == valid_draft
 
 
-def test_analysis_section_fails_when_two_repairs_leave_a_stray_number():
+def test_analysis_section_ships_grounded_subset_when_a_stray_number_survives():
     """The production shape: repair does not converge on one stray figure.
 
     Job 33403df2 died with DERIVED_CLAIM_NOT_USED,UNGROUNDED_NUMERIC_CLAIM
     after its single repair call, and the reader got nothing. The verified
-    claims around the stray value are still publishable.
+    claims around the stray value are still publishable, so the salvage
+    publishes them — the stray value itself must not reach the reader, and the
+    shorter section it leaves behind is conceded, not failed.
     """
 
     (
@@ -1548,21 +1550,36 @@ def test_analysis_section_fails_when_two_repairs_leave_a_stray_number():
         repair_calls.append(list(section_ids))
         return batch(section_ids)
 
-    with pytest.raises(ReportDocumentGenerationError):
-        generate_report_document(
-            _QUERY,
-            document_plan,
-            research_plan,
-            manifest,
-            packets,
-            write_analysis_sections=write_analysis,
-            write_synthesis_sections=write_synthesis,
-            repair_sections=unconverged_repair,
-            allow_repair=True,
-            max_repair_attempts=2,
-        )
+    published = generate_report_document(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        write_analysis_sections=write_analysis,
+        write_synthesis_sections=write_synthesis,
+        repair_sections=unconverged_repair,
+        allow_repair=True,
+        max_repair_attempts=2,
+    )
 
     assert repair_calls == [[poisoned_id], [poisoned_id]]
+    assert all(
+        "987.6" not in paragraph.text
+        for section in published.generation_order_sections()
+        for paragraph in section.paragraphs
+    )
+    residual = validate_report_document(
+        published,
+        document_plan,
+        manifest,
+        research_plan,
+    )
+    assert set(residual.section_errors) <= {poisoned_id}
+    assert residual.section_errors.get(poisoned_id, []) in (
+        [],
+        ["WORD_COUNT_TOO_SHORT"],
+    )
 
 
 def test_batch_path_uses_two_budgeted_repairs_across_writer_batches():
@@ -1825,3 +1842,293 @@ def test_materialization_reports_a_numberless_analysis_section():
     # analysis track is exempt, which is why this is not every analysis id.
     assert flagged, validation.section_errors
     assert flagged <= set(analysis_ids)
+
+
+def _short_but_grounded_section(section, section_spec, manifest):
+    """Keep every claim and citation; trim the prose under the floor."""
+
+    minimum_words, _ = report_section_validation_word_bounds(
+        section_spec.target_words,
+        evidence_row_count=manifest.assigned_row_count(
+            section_spec.required_evidence_refs
+        ),
+    )
+    keep = max(12, (minimum_words - 8) // len(section.paragraphs))
+    trimmed = section.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={"text": " ".join(paragraph.text.split()[:keep])}
+                )
+                for paragraph in section.paragraphs
+            ]
+        }
+    )
+    assert count_section_words(trimmed.content_markdown) < minimum_words
+    return trimmed
+
+
+def test_document_ships_when_only_length_falls_short_after_repairs(caplog):
+    """A grounded report that is merely short must reach the reader.
+
+    REPORT_DOCUMENT_INVALID is not retryable, so failing a section that carries
+    every claim, cites every assigned ref, and lands under its target trades a
+    slightly thin report for no report at all — job cf47a2f6.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    spec_by_id = {
+        section.section_id: section for section in document_plan.sections
+    }
+    short_draft = valid_draft.model_copy(
+        update={
+            "sections": [
+                _short_but_grounded_section(
+                    section,
+                    spec_by_id[section.section_id],
+                    manifest,
+                )
+                for section in valid_draft.sections
+            ]
+        }
+    )
+    repair_calls = []
+
+    def stubborn_repair(*_args, section_ids, **_kwargs):
+        repair_calls.append(list(section_ids))
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                section
+                for section in short_draft.sections
+                if section.section_id in section_ids
+            ],
+        )
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportDocument"):
+        published = generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_document=lambda *_args: short_draft,
+            repair_sections=stubborn_repair,
+            max_repair_attempts=2,
+        )
+
+    assert published == short_draft
+    # The budget is still spent trying before anything is conceded.
+    assert len(repair_calls) == 2
+    conceded = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("REPORT_LENGTH_CONCEDED ")
+    ]
+    assert conceded, [record.message for record in caplog.records]
+    assert conceded[-1]["stage"] == "document_repair_exhausted"
+    assert conceded[-1]["conceded_section_ids"]
+    residual = validate_report_document(
+        published,
+        document_plan,
+        manifest,
+        research_plan,
+    )
+    assert {
+        code
+        for codes in residual.section_errors.values()
+        for code in codes
+    } == {"WORD_COUNT_TOO_SHORT"}
+
+
+def test_length_concession_never_rescues_an_ungrounded_document():
+    """One non-length code and the document fails exactly as before."""
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    spec_by_id = {
+        section.section_id: section for section in document_plan.sections
+    }
+    broken = valid_draft.model_copy(
+        update={
+            "sections": [
+                _numberless_section(
+                    _short_but_grounded_section(
+                        section,
+                        spec_by_id[section.section_id],
+                        manifest,
+                    )
+                )
+                for section in valid_draft.sections
+            ]
+        }
+    )
+
+    def stubborn_repair(*_args, section_ids, **_kwargs):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                section
+                for section in broken.sections
+                if section.section_id in section_ids
+            ],
+        )
+
+    with pytest.raises(ReportDocumentGenerationError):
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_document=lambda *_args: broken,
+            repair_sections=stubborn_repair,
+            max_repair_attempts=2,
+        )
+
+
+def test_numeric_finding_is_not_demanded_without_a_citable_coordinate():
+    """A gate no draft can pass is a deadlock, not a standard.
+
+    When a section's tables declare no unit on any numeric column there is no
+    coordinate a claim could cite: omitting the number fails this gate and
+    inventing one fails grounding, so both repairs go to a contradiction.
+    """
+    from agent import report_document_generation as generation
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    spec_by_id = {
+        section.section_id: section for section in document_plan.sections
+    }
+    flagged_id = next(
+        section_id
+        for section_id in spec_by_id
+        if generation._analysis_numeric_finding_missing(
+            _numberless_section(section_by_id[section_id]),
+            spec_by_id[section_id],
+            manifest,
+            research_plan,
+        )
+    )
+    numberless = _numberless_section(section_by_id[flagged_id])
+    stripped_manifest = manifest.model_copy(
+        update={
+            "items": [
+                item.model_copy(update={"unit_by_column": {}})
+                if item.kind is ReportEvidenceKind.TABLE
+                else item
+                for item in manifest.items
+            ]
+        }
+    )
+
+    assert generation.report_analysis_numeric_claim_requirement(
+        numberless,
+        spec_by_id[flagged_id],
+        stripped_manifest,
+        research_plan,
+    ) == (0, 0)
+    assert not generation._analysis_numeric_finding_missing(
+        numberless,
+        spec_by_id[flagged_id],
+        stripped_manifest,
+        research_plan,
+    )
+
+
+def test_exhausted_batch_repair_logs_the_result_it_could_not_fix(caplog):
+    """The last repair's own word counts must not be invisible.
+
+    The batch diagnostic is emitted before each call, so an exhausted budget
+    used to end with the failing counts unlogged — the numbers needed to tell a
+    stalled writer from an unreachable gate (job cf47a2f6).
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+
+    def batch(section_ids):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _numberless_section(section_by_id[section_id])
+                for section_id in section_ids
+            ],
+        )
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportDocument"):
+        with pytest.raises(ReportDocumentGenerationError):
+            generate_report_document(
+                _QUERY,
+                document_plan,
+                research_plan,
+                manifest,
+                packets,
+                write_analysis_sections=(
+                    lambda *_args, section_ids: batch(section_ids)
+                ),
+                write_synthesis_sections=(
+                    lambda *_args, analysis_sections, section_ids: batch(
+                        section_ids
+                    )
+                ),
+                repair_sections=(
+                    lambda *_args, section_ids, **_kwargs: batch(section_ids)
+                ),
+                max_repair_attempts=2,
+            )
+
+    diagnostics = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("REPORT_DOCUMENT_DIAGNOSTIC ")
+    ]
+    exhausted = [
+        payload
+        for payload in diagnostics
+        if payload["event"] == "batch_repair_rejected"
+    ]
+    assert exhausted, [payload["event"] for payload in diagnostics]
+    assert set(exhausted[-1]["section_word_counts"]) == set(analysis_ids)
+    assert exhausted[-1]["section_error_codes"]

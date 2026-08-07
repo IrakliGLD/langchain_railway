@@ -988,6 +988,75 @@ def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
     assert payload["failed_count"] == 1
     assert payload["fallback_count"] == 1
     assert "private-enabled-track-fragment" not in record
+    # Which track degraded, not just how many: a report running on fallback
+    # evidence for two of four tracks is otherwise indistinguishable from a
+    # healthy one at the document gate (job cf47a2f6).
+    assert payload["failed_tracks"] == [
+        {
+            "track_id": failed_track_id,
+            "error_type": "RuntimeError",
+            "reason": "unknown",
+        }
+    ]
+
+
+def test_track_analysis_failure_reports_the_block_reason(caplog):
+    """An unusable pipeline context must say what made it unusable."""
+
+    from agent.report_research_execution import ReportTrackAnalysisUnusable
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+    failed_track_id = research_plan.tracks[-1].track_id
+
+    def track_analyzer(_query, track, **_kwargs):
+        if track.track_id == failed_track_id:
+            raise ReportTrackAnalysisUnusable(
+                track.track_id,
+                "missing_derived_evidence",
+            )
+        return packet_by_track[track.track_id]
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
+            "enabled track analysis must not run global enrichment"
+        ),
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    processor(_lease(query=_V2_QUERY), _Control())
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["failed_tracks"] == [
+        {
+            "track_id": failed_track_id,
+            "error_type": "ReportTrackAnalysisUnusable",
+            "reason": "missing_derived_evidence",
+        }
+    ]
 
 
 def test_enabled_v2_resumes_document_plan_without_research_calls():

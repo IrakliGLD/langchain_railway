@@ -955,6 +955,103 @@ def build_ungrounded_claim_repair_hints(
     return hints
 
 
+# Bounded because the repair prompt raises when it exceeds its char budget: an
+# unbounded coordinate list would turn a repairable document into a hard
+# failure, the same trade the ungrounded-value hints make.
+_MAXIMUM_CLAIMABLE_HINT_SECTIONS = 6
+_MAXIMUM_CLAIMABLE_COORDINATES_PER_SECTION = 12
+
+
+def _claimable_direct_claim(
+    item: ReportEvidenceItem,
+    evidence_ref: str,
+    row_index: int,
+    column: str,
+) -> ReportDirectClaim | None:
+    """Render one cell the way a valid direct claim must render it.
+
+    A ratio column has to be claimed as a percentage and a percent column keeps
+    its sign, so a hint that simply echoed the stored number would advertise a
+    claim the validator rejects. The candidate is verified here before it is
+    offered, against the same function that will judge the writer's copy of it.
+    """
+
+    raw_facts = [
+        fact
+        for fact in _grounding_facts_from_value(item.rows[row_index].get(column))
+        if isinstance(fact, _NumericFact)
+    ]
+    evidence_unit = _normalize_unit(item.unit_by_column.get(column, ""))
+    if len(raw_facts) != 1 or not evidence_unit:
+        return None
+    fact = raw_facts[0]
+    if _is_ratio_column(item, column):
+        precision = max(0, fact.precision - 2)
+        display_value = f"{fact.value * Decimal(100):.{precision}f}%"
+        unit = "%"
+    elif evidence_unit == "%":
+        display_value = f"{fact.value:.{fact.precision}f}%"
+        unit = "%"
+    else:
+        display_value = f"{fact.value:.{fact.precision}f}"
+        unit = item.unit_by_column[column]
+    try:
+        claim = ReportDirectClaim(
+            evidence_ref=evidence_ref,
+            row_index=row_index,
+            column=column,
+            display_value=display_value,
+            unit=unit,
+        )
+    except Exception:
+        return None
+    if _verified_direct_fact(claim, {evidence_ref}, {evidence_ref: item}) is None:
+        return None
+    return claim
+
+
+def build_claimable_coordinate_hints(
+    section_specs: Sequence[Any],
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> list[dict[str, Any]]:
+    """Name the exact cells a section short of numeric findings may cite.
+
+    NUMERIC_FINDING_MISSING on its own tells a repairer that it owes a number
+    but not which numbers exist, so it either omits the claim again or invents
+    one and trades this code for UNGROUNDED_NUMERIC_CLAIM. Naming the citable
+    coordinates is the same contract that made derived claims repairable.
+    """
+
+    hints: list[dict[str, Any]] = []
+    for section_spec in list(section_specs)[:_MAXIMUM_CLAIMABLE_HINT_SECTIONS]:
+        coordinates: list[dict[str, Any]] = []
+        for evidence_ref in dict.fromkeys(section_spec.required_evidence_refs):
+            item = item_by_ref.get(evidence_ref)
+            if item is None:
+                continue
+            for row_index, column, _value in item.citable_numeric_coordinates():
+                claim = _claimable_direct_claim(
+                    item,
+                    evidence_ref,
+                    row_index,
+                    column,
+                )
+                if claim is None:
+                    continue
+                coordinates.append(claim.model_dump(mode="json"))
+                if len(coordinates) >= _MAXIMUM_CLAIMABLE_COORDINATES_PER_SECTION:
+                    break
+            if len(coordinates) >= _MAXIMUM_CLAIMABLE_COORDINATES_PER_SECTION:
+                break
+        hints.append(
+            {
+                "section_id": section_spec.section_id,
+                "claimable_coordinates": coordinates,
+            }
+        )
+    return hints
+
+
 def _surviving_paragraph_claims(
     paragraph: ReportSectionParagraph,
     text: str,

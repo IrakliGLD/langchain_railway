@@ -711,6 +711,11 @@ class ReportJobProcessor:
 
         completed: dict[str, ReportEvidencePacket] = {}
         failure_types: list[str] = []
+        # Which tracks fell back, and why. Without the pairing a degraded report
+        # is indistinguishable from a healthy one at the document gate: job
+        # cf47a2f6 lost two of four tracks and the telemetry said only
+        # "ValueError, ValueError".
+        failed_tracks: list[dict[str, str]] = []
         with ThreadPoolExecutor(
             max_workers=min(
                 self._max_research_workers,
@@ -728,6 +733,17 @@ class ReportJobProcessor:
                 except Exception as exc:
                     failure_types.append(
                         _diagnostic_identifier(type(exc).__name__)
+                    )
+                    failed_tracks.append(
+                        {
+                            "track_id": _diagnostic_identifier(track_id),
+                            "error_type": _diagnostic_identifier(
+                                type(exc).__name__
+                            ),
+                            "reason": _diagnostic_identifier(
+                                getattr(exc, "reason", "")
+                            ),
+                        }
                     )
 
         payload = {
@@ -760,6 +776,10 @@ class ReportJobProcessor:
                 )
             ),
             "failure_types": sorted(failure_types),
+            "failed_tracks": sorted(
+                failed_tracks,
+                key=lambda entry: entry["track_id"],
+            ),
         }
         _LOGGER.info(
             "REPORT_TRACK_ANALYSIS_%s %s",
@@ -828,6 +848,18 @@ class ReportJobProcessor:
                 "fallback_count": len(plan.tracks),
                 "failure_types": [
                     _diagnostic_identifier(type(exc).__name__)
+                ],
+                "failed_tracks": [
+                    {
+                        "track_id": _diagnostic_identifier(track.track_id),
+                        "error_type": _diagnostic_identifier(
+                            type(exc).__name__
+                        ),
+                        "reason": _diagnostic_identifier(
+                            getattr(exc, "reason", "")
+                        ),
+                    }
+                    for track in plan.tracks
                 ],
             }
             _LOGGER.info(

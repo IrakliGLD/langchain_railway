@@ -17,6 +17,8 @@ import core.llm as llm
 from agent.report_document_generation import (
     validate_report_document,
 )
+from agent.report_sections import count_section_words
+from contracts.report import report_section_validation_word_bounds
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentRepair,
@@ -137,9 +139,12 @@ def test_document_writer_uses_one_dedicated_report_call_without_fallback(
         in system[1].lower()
     )
     assert "require exactly two unique operands" in system[1].lower()
-    assert "word targets are recommendations" in system[1].lower()
-    assert "stop when the assigned evidence is exhausted" in system[1].lower()
+    # The gate rejects a section under its floor and REPORT_DOCUMENT_INVALID is
+    # not retryable, so the writer must not be told the floor is advisory.
+    assert "minimum_words is enforced" in system[1].lower()
+    assert "recommended_maximum_words is guidance" in system[1].lower()
     assert "never pad" in system[1].lower()
+    assert "word targets are recommendations" not in system[1].lower()
     assert "do not append a sources" in system[1].lower()
     assert "verify every section" not in system[1].lower()
     assert "prefer direct observations" in system[1].lower()
@@ -403,6 +408,11 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert "minimum_words" in system[1].lower()
     assert "word_count_too_long" in system[1].lower()
     assert "maximum_words" in system[1].lower()
+    # A repairer cannot count its own words, so the codes above are actionable
+    # only alongside the measured count and the deficit.
+    assert "words_to_add" in system[1].lower()
+    assert "do not estimate the length you produced" in system[1].lower()
+    assert "claimable_coordinates" in system[1].lower()
     assert "prefer direct observations" in system[1].lower()
     assert (
         "do not introduce new arithmetic unless"
@@ -424,7 +434,7 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     ungrounded_json = user[1].split(
         "UNGROUNDED_VALUE_REPAIR_HINTS:\n",
         1,
-    )[1].split("\n\nEVIDENCE_PACKET:", 1)[0]
+    )[1].split("\n\nCLAIMABLE_COORDINATES:", 1)[0]
     ungrounded_hints = json.loads(ungrounded_json)
     assert [hint["section_id"] for hint in ungrounded_hints] == ["prices"]
     stripped_paragraph = rejected.sections[0].paragraphs[0]
@@ -455,8 +465,10 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     repair_plan = json.loads(plan_json)
     assert (
         repair_plan["sections"][0]["recommended_maximum_words"]
-        > repair_plan["sections"][0]["recommended_minimum_words"]
+        > repair_plan["sections"][0]["minimum_words"]
     )
+    # The floor is enforced, so the payload must not label it a recommendation.
+    assert "recommended_minimum_words" not in repair_plan["sections"][0]
 
 
 def test_every_report_writer_prompt_carries_the_claim_contract(monkeypatch):
@@ -557,6 +569,176 @@ def _capture_repair_invocation(monkeypatch, *, attempt_number: int = 2):
         attempt_number=attempt_number,
     )
     return captured
+
+
+def _repair_prompt_block(prompt: str, header: str) -> str:
+    body = prompt.split(f"{header}:\n", 1)[1]
+    return body.split("\n\n", 1)[0]
+
+
+def test_repair_prompt_names_the_word_count_shortfall(monkeypatch):
+    """A repairer cannot count its own words, so the deficit must be given.
+
+    Job cf47a2f6 was told "at least 241" twice, produced 202 both times, and
+    lost the report to a non-retryable REPORT_DOCUMENT_INVALID. Naming the
+    measured count and the gap is the contract that made ungrounded values
+    repairable.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    section_id = draft.sections[0].section_id
+    payload = draft.model_dump(mode="json")
+    paragraph = payload["sections"][0]["paragraphs"][0]
+    paragraph["text"] = " ".join(paragraph["text"].split()[:40])
+    short_draft = ReportDocumentDraft.model_validate(payload)
+    validation = validate_report_document(
+        short_draft, document_plan, manifest, research_plan
+    )
+    captured = {}
+
+    def invoke_contract(**kwargs):
+        captured.update(kwargs)
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[draft.sections[0]],
+        )
+
+    monkeypatch.setattr(
+        llm, "_invoke_report_document_contract", invoke_contract
+    )
+    llm.llm_repair_report_document_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        short_draft,
+        validation,
+        section_ids=[section_id],
+    )
+
+    assert "WORD_COUNT_TOO_SHORT" in validation.section_errors[section_id]
+    errors = json.loads(
+        _repair_prompt_block(captured["prompt"], "VALIDATION_ERRORS")
+    )
+    context = errors["sections"][section_id]
+    minimum_words, maximum_words = report_section_validation_word_bounds(
+        next(
+            section
+            for section in document_plan.sections
+            if section.section_id == section_id
+        ).target_words,
+        evidence_row_count=manifest.assigned_row_count(
+            next(
+                section
+                for section in document_plan.sections
+                if section.section_id == section_id
+            ).required_evidence_refs
+        ),
+    )
+    assert context["word_count"] == count_section_words(
+        short_draft.sections[0].content_markdown
+    )
+    assert context["minimum_words"] == minimum_words
+    assert context["maximum_words"] == maximum_words
+    assert context["words_to_add"] == minimum_words - context["word_count"]
+    assert context["words_to_add"] > 0
+
+
+def test_repair_prompt_names_the_coordinates_a_numberless_section_may_cite(
+    monkeypatch,
+):
+    """NUMERIC_FINDING_MISSING alone leaves the repairer inventing a number.
+
+    Every listed coordinate is verified against the same function that judges
+    the writer's copy of it, so citing one cannot trade this code for
+    UNGROUNDED_NUMERIC_CLAIM.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    payload = draft.model_dump(mode="json")
+    for section_payload in payload["sections"]:
+        for paragraph in section_payload["paragraphs"]:
+            paragraph["direct_claims"] = []
+            paragraph["derived_claims"] = []
+            paragraph["text"] = " ".join(
+                word
+                for word in paragraph["text"].split()
+                if not any(character.isdigit() for character in word)
+            )
+    numberless = ReportDocumentDraft.model_validate(payload)
+    validation = validate_report_document(
+        numberless, document_plan, manifest, research_plan
+    )
+    flagged_ids = [
+        section_id
+        for section_id, codes in validation.section_errors.items()
+        if "NUMERIC_FINDING_MISSING" in codes
+    ]
+    assert flagged_ids, validation.section_errors
+    captured = {}
+
+    def invoke_contract(**kwargs):
+        captured.update(kwargs)
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                section
+                for section in draft.sections
+                if section.section_id in flagged_ids
+            ],
+        )
+
+    monkeypatch.setattr(
+        llm, "_invoke_report_document_contract", invoke_contract
+    )
+    llm.llm_repair_report_document_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        numberless,
+        validation,
+        section_ids=flagged_ids,
+    )
+
+    hints = json.loads(
+        _repair_prompt_block(captured["prompt"], "CLAIMABLE_COORDINATES")
+    )
+    assert [hint["section_id"] for hint in hints] == flagged_ids
+    item_by_ref = manifest.item_by_ref()
+    for hint in hints:
+        assert hint["claimable_coordinates"]
+        for coordinate in hint["claimable_coordinates"]:
+            item = item_by_ref[coordinate["evidence_ref"]]
+            assert coordinate["column"] in item.citable_numeric_columns()
+    errors = json.loads(
+        _repair_prompt_block(captured["prompt"], "VALIDATION_ERRORS")
+    )
+    for section_id in flagged_ids:
+        context = errors["sections"][section_id]
+        assert context["numeric_claim_count"] == 0
+        assert context["required_numeric_claims"] > 0
+        assert context["numeric_claims_to_add"] == (
+            context["required_numeric_claims"]
+        )
 
 
 def test_document_repair_attempts_use_distinct_provider_stages(monkeypatch):
