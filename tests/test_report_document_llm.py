@@ -378,6 +378,7 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
         rejected,
         validation,
         section_ids=["prices"],
+        attempt_number=3,
     )
 
     assert result == expected
@@ -386,7 +387,7 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert captured["projection_kwargs"]["observation_budget_chars"] == 6_000
     assert (
         captured["invoke_kwargs"]["attempt_stage"]
-        == "report_document_repair"
+        == "report_document_repair_attempt_3"
     )
     assert captured["structured_kwargs"] == {
         "method": "json_schema",
@@ -398,7 +399,10 @@ def test_document_repair_receives_only_rejected_sections_and_no_fallback(
     assert "only the rejected sections" in system[1].lower()
     assert "do not append a sources" in system[1].lower()
     assert "blocking validation errors" in system[1].lower()
-    assert "word_count_too_short" not in system[1].lower()
+    assert "word_count_too_short" in system[1].lower()
+    assert "minimum_words" in system[1].lower()
+    assert "word_count_too_long" in system[1].lower()
+    assert "maximum_words" in system[1].lower()
     assert "prefer direct observations" in system[1].lower()
     assert (
         "do not introduce new arithmetic unless"
@@ -516,7 +520,7 @@ def test_every_report_writer_prompt_carries_the_claim_contract(monkeypatch):
         assert llm._REPORT_CLAIM_CONTRACT_RULES in system
 
 
-def _capture_repair_invocation(monkeypatch):
+def _capture_repair_invocation(monkeypatch, *, attempt_number: int = 2):
     (
         research_plan,
         packets,
@@ -550,8 +554,17 @@ def _capture_repair_invocation(monkeypatch):
         draft,
         validation,
         section_ids=[draft.sections[0].section_id],
+        attempt_number=attempt_number,
     )
     return captured
+
+
+def test_document_repair_attempts_use_distinct_provider_stages(monkeypatch):
+    first = _capture_repair_invocation(monkeypatch, attempt_number=2)
+    second = _capture_repair_invocation(monkeypatch, attempt_number=3)
+
+    assert first["attempt_stage"] == "report_document_repair_attempt_2"
+    assert second["attempt_stage"] == "report_document_repair_attempt_3"
 
 
 def test_document_repair_resamples_when_the_model_accepts_temperature(
@@ -562,7 +575,7 @@ def test_document_repair_resamples_when_the_model_accepts_temperature(
     captured = _capture_repair_invocation(monkeypatch)
 
     assert captured["sampling_temperature"] == (
-        llm._repair_sampling_temperature(1)
+        llm._repair_sampling_temperature(2)
     )
     assert captured["use_cache"] is False
 

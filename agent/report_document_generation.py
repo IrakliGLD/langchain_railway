@@ -655,6 +655,7 @@ def _repair_section_batch(
     repair_sections: DocumentRepairer,
     *,
     section_ids: Sequence[str],
+    attempt_number: int,
 ) -> tuple[list[ReportSectionDraft] | None, ReportDocumentValidation]:
     """Spend one repair call on a rejected batch and re-validate the result.
 
@@ -691,6 +692,7 @@ def _repair_section_batch(
         raw_batch if sections is None else list(sections),
         validation,
         section_ids=invalid_ids,
+        attempt_number=attempt_number,
     )
     try:
         repair = (
@@ -738,6 +740,7 @@ def _repair_section_batch_until_valid(
     *,
     section_ids: Sequence[str],
     repair_attempts: int,
+    first_attempt_number: int,
     stage: str,
 ) -> tuple[
     list[ReportSectionDraft] | None,
@@ -762,6 +765,7 @@ def _repair_section_batch_until_valid(
             validation,
             repair_sections,
             section_ids=section_ids,
+            attempt_number=first_attempt_number + used,
         )
         used += 1
     if sections is None or not validation.valid:
@@ -795,11 +799,12 @@ def generate_report_document(
 
     if max_repair_attempts is not None and not 0 <= max_repair_attempts <= 2:
         raise ValueError("max_repair_attempts must be between 0 and 2.")
-    remaining_repairs = (
+    repair_attempt_budget = (
         (1 if allow_repair else 0)
         if max_repair_attempts is None
         else (max_repair_attempts if allow_repair else 0)
     )
+    remaining_repairs = repair_attempt_budget
 
     if (
         write_document is not None
@@ -868,6 +873,9 @@ def generate_report_document(
                     repair_sections,
                     section_ids=analysis_ids,
                     repair_attempts=remaining_repairs,
+                    first_attempt_number=(
+                        2 + repair_attempt_budget - remaining_repairs
+                    ),
                     stage="analysis_repair_exhausted",
                 )
             )
@@ -904,6 +912,9 @@ def generate_report_document(
                     repair_sections,
                     section_ids=synthesis_ids,
                     repair_attempts=remaining_repairs,
+                    first_attempt_number=(
+                        2 + repair_attempt_budget - remaining_repairs
+                    ),
                     stage="synthesis_repair_exhausted",
                 )
             )
@@ -995,6 +1006,9 @@ def generate_report_document(
             raw_draft if draft is None else draft,
             validation,
             section_ids=invalid_section_ids,
+            attempt_number=(
+                2 + repair_attempt_budget - remaining_repairs
+            ),
         )
         remaining_repairs -= 1
         try:

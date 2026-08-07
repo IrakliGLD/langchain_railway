@@ -869,6 +869,7 @@ def test_document_set_mismatch_repairs_the_complete_planned_set():
         _validation,
         *,
         section_ids,
+        attempt_number,
     ):
         repair_calls.append(list(section_ids))
         return ReportDocumentRepair(
@@ -924,6 +925,7 @@ def test_document_generation_repairs_only_invalid_sections_once():
         validation,
         *,
         section_ids,
+        attempt_number,
     ):
         repair_calls.append(
             (
@@ -1054,6 +1056,7 @@ def test_document_short_section_is_repaired_to_its_evidence_aware_floor():
         validation,
         *,
         section_ids,
+        attempt_number,
     ):
         repair_calls.append((validation, list(section_ids)))
         return ReportDocumentRepair(
@@ -1111,6 +1114,7 @@ def test_document_generation_repairs_a_schema_invalid_draft_once():
         validation,
         *,
         section_ids,
+        attempt_number,
     ):
         repair_calls.append((rejected, validation, list(section_ids)))
         return ReportDocumentRepair(
@@ -1201,9 +1205,11 @@ def test_document_generation_uses_a_second_repair_when_budgeted():
     payload["sections"][0]["paragraphs"][0]["direct_claims"] = []
     invalid_draft = ReportDocumentDraft.model_validate(payload)
     calls = []
+    attempt_numbers = []
 
-    def repair(*_args, section_ids, **_kwargs):
+    def repair(*_args, section_ids, **kwargs):
         calls.append(list(section_ids))
+        attempt_numbers.append(kwargs["attempt_number"])
         if len(calls) == 1:
             replacement = valid_draft.sections[0].model_copy(
                 update={"title": "Still invalid"}
@@ -1227,6 +1233,7 @@ def test_document_generation_uses_a_second_repair_when_budgeted():
     )
 
     assert calls == [["prices"], ["prices"]]
+    assert attempt_numbers == [2, 3]
     assert repaired == valid_draft
 
 
@@ -1591,9 +1598,11 @@ def test_batch_path_uses_two_budgeted_repairs_across_writer_batches():
         )
 
     repair_calls = []
+    attempt_numbers = []
 
-    def repair_sections(*_args, section_ids, **_kwargs):
+    def repair_sections(*_args, section_ids, **kwargs):
         repair_calls.append(list(section_ids))
+        attempt_numbers.append(kwargs["attempt_number"])
         # The two-call repair budget can repair analysis and synthesis once.
         return ReportDocumentRepair(
             contract_version="report-document-repair-v1",
@@ -1614,6 +1623,7 @@ def test_batch_path_uses_two_budgeted_repairs_across_writer_batches():
     )
 
     assert len(repair_calls) == 2
+    assert attempt_numbers == [2, 3]
     assert generated == valid_draft
 
 
@@ -1711,6 +1721,7 @@ def test_schema_invalid_analysis_batch_repairs_from_the_raw_payload():
         _validation,
         *,
         section_ids,
+        attempt_number,
     ):
         rejected_inputs.append(rejected)
         return ReportDocumentRepair(
