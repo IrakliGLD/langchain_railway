@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from agent.report_grounding import (
     build_evidence_grounding_index,
+    drop_unrendered_claims,
     normalize_repairable_derived_claims,
     select_grounded_paragraphs,
 )
@@ -401,6 +402,45 @@ def _document_from_sections(
     )
 
 
+def _without_free_unrendered_claims(
+    draft_section: ReportSectionDraft,
+    section_spec: Any,
+    manifest: ReportEvidenceManifest,
+    research_plan: ReportResearchPlan | None,
+) -> ReportSectionDraft:
+    """Sweep unused claim entries a repair call should never have to spend on.
+
+    A verified claim the prose never rendered is surplus metadata; code can
+    delete it for free, and doing so here keeps DIRECT_CLAIM_NOT_USED off the
+    repair prompt entirely — the same bargain
+    ``normalize_repairable_derived_claims`` already makes for derived displays.
+
+    Held back when the drop would take an analysis section under its numeric
+    floor. There the number is not surplus: the section owes it, so the writer
+    must render it rather than have the evidence of the omission swept away.
+    """
+
+    swept, dropped = drop_unrendered_claims(
+        draft_section,
+        manifest.item_by_ref(),
+    )
+    if not dropped:
+        return draft_section
+    if research_plan is not None and _analysis_numeric_finding_missing(
+        swept,
+        section_spec,
+        manifest,
+        research_plan,
+    ):
+        return draft_section
+    _LOGGER.info(
+        "REPORT_UNRENDERED_CLAIM_DROPPED section_id=%s count=%d",
+        draft_section.section_id,
+        dropped,
+    )
+    return swept
+
+
 def _materialize_section_batch(
     raw_batch: Any,
     plan: ReportDocumentPlan,
@@ -447,7 +487,6 @@ def _materialize_section_batch(
             draft_section,
             item_by_ref,
         )
-        normalized_sections.append(draft_section)
         if normalized_count:
             _LOGGER.info(
                 "REPORT_DERIVED_CLAIM_NORMALIZED section_id=%s count=%d",
@@ -455,6 +494,13 @@ def _materialize_section_batch(
                 normalized_count,
             )
         section_spec = plan_by_id[draft_section.section_id]
+        draft_section = _without_free_unrendered_claims(
+            draft_section,
+            section_spec,
+            manifest,
+            research_plan,
+        )
+        normalized_sections.append(draft_section)
         validation = validate_report_section(
             draft_section,
             section_spec,
@@ -643,6 +689,12 @@ def _sections_or_grounded_subset(
     raising costs them the whole report, and REPORT_DOCUMENT_INVALID is not
     retryable. Fails closed: a subset that still does not validate is returned
     as-is so the caller raises exactly as before.
+
+    Two kinds of surplus are swept: prose the evidence cannot support, and
+    verified claims the prose never rendered. The second was invisible here
+    until job 827556eb, whose synthesis batch failed on DIRECT_CLAIM_NOT_USED
+    alone — every sentence was grounded, so the sentence salvage found nothing
+    to drop and returned before it could delete the one unused claim entry.
     """
 
     if sections is None or validation.valid:
@@ -650,11 +702,14 @@ def _sections_or_grounded_subset(
     item_by_ref = manifest.item_by_ref()
     salvaged_sections: list[ReportSectionDraft] = []
     dropped_total = 0
+    dropped_claim_total = 0
     for section in sections:
         salvaged, dropped = select_grounded_paragraphs(section, item_by_ref)
+        salvaged, dropped_claims = drop_unrendered_claims(salvaged, item_by_ref)
         salvaged_sections.append(salvaged)
         dropped_total += dropped
-    if not dropped_total:
+        dropped_claim_total += dropped_claims
+    if not dropped_total and not dropped_claim_total:
         return sections, validation
     plan_by_id = {section.section_id: section for section in plan.sections}
     # A salvage that strips an analysis section of every number leaves prose
@@ -686,6 +741,7 @@ def _sections_or_grounded_subset(
         json.dumps(
             {
                 "applied": subset_validation.valid,
+                "dropped_claim_count": dropped_claim_total,
                 "dropped_sentence_count": dropped_total,
                 "recovered_section_ids": sorted(
                     set(section_ids) - set(subset_validation.section_errors)
@@ -875,6 +931,20 @@ def _repair_section_batch_until_valid(
             repair_section_ids=list(section_ids),
         )
     if sections is None or not validation.valid:
+        # A batch that reached the salvage without spending a call logged
+        # nothing at all: the in-loop diagnostic never ran. Job 827556eb spent
+        # both repairs on analysis and its synthesis batch then failed with no
+        # word counts, no section ids, and no codes recorded anywhere.
+        if not used:
+            _log_document_diagnostic(
+                manifest=manifest,
+                event="batch_repair_unbudgeted",
+                plan=plan,
+                validation=validation,
+                draft=None,
+                sections=sections,
+                repair_section_ids=[],
+            )
         sections, validation = _sections_or_grounded_subset(
             sections,
             validation,
