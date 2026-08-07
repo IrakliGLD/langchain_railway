@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 from copy import deepcopy
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")

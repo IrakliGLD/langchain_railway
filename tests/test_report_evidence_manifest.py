@@ -13,6 +13,7 @@ from agent.report_evidence import (
     build_report_evidence_manifest,
     build_report_manifest_from_items,
     make_report_narrative_evidence_item,
+    make_report_table_evidence_item,
 )
 from contracts.report_evidence import (
     REPORT_EVIDENCE_CONTENT_MAX_CHARS,
@@ -477,3 +478,70 @@ def test_curated_knowledge_failure_never_fails_a_report(monkeypatch):
             question_analysis_source="",
         )
     ) == []
+
+
+def _unitless_chart_table() -> ReportEvidenceItem:
+    """An analyzer chart frame: display column names carry no registry unit."""
+
+    item = make_report_table_evidence_item(
+        query="Explain the supply mix.",
+        title="Derived chart evidence 1",
+        source="derived_chart",
+        columns=["period", "value"],
+        rows=[
+            {"period": f"2026-0{index + 1}", "value": 100.0 + index}
+            for index in range(6)
+        ],
+    )
+    assert item is not None
+    return item
+
+
+def _claimable_table() -> ReportEvidenceItem:
+    item = make_report_table_evidence_item(
+        query="Explain the electricity price trend.",
+        title="Balancing prices",
+        source="tool",
+        columns=["period", "p_bal_gel"],
+        rows=[
+            {"period": "2026-01", "p_bal_gel": 120.5},
+            {"period": "2026-02", "p_bal_gel": 131.25},
+        ],
+    )
+    assert item is not None
+    return item
+
+
+def test_unit_less_numeric_columns_are_not_citable():
+    unitless = _unitless_chart_table()
+    claimable = _claimable_table()
+
+    assert unitless.citable_numeric_columns() == []
+    assert unitless.citable_numeric_coordinates() == []
+    assert claimable.citable_numeric_columns() == ["p_bal_gel"]
+    assert claimable.citable_numeric_coordinates() == [
+        (0, "p_bal_gel", 120.5),
+        (1, "p_bal_gel", 131.25),
+    ]
+
+
+def test_assigned_row_count_ignores_rows_no_claim_can_cite():
+    """A row the writer may not cite must not raise the prose floor.
+
+    Analyzer chart frames arrive as tables with undeclared units, so counting
+    their rows lifted a two-row section into the flat 0.9 floor tier and made
+    WORD_COUNT_TOO_SHORT unreachable on job cf47a2f6.
+    """
+
+    unitless = _unitless_chart_table()
+    claimable = _claimable_table()
+    manifest = build_report_manifest_from_items(
+        "Explain the electricity price trend.",
+        [claimable, unitless],
+    )
+
+    assert manifest.assigned_row_count([claimable.evidence_ref]) == 2
+    assert manifest.assigned_row_count([unitless.evidence_ref]) == 0
+    assert manifest.assigned_row_count(
+        [claimable.evidence_ref, unitless.evidence_ref]
+    ) == 2

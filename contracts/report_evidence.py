@@ -130,6 +130,44 @@ class ReportEvidenceItem(_StrictEvidenceModel):
                 raise ValueError("Narrative evidence cannot contain row counts.")
         return self
 
+    def citable_numeric_columns(self) -> List[str]:
+        """Return the numeric columns a claim can actually be verified against.
+
+        Single authority for "can a writer say a number from this table": a
+        numeric column with no declared unit can only be claimed under a
+        fabricated unit, which the grounding validator then rejects. Both the
+        prose floor and the numeric-finding gate scale on this, so neither can
+        demand output the other forbids.
+        """
+
+        if self.kind is not ReportEvidenceKind.TABLE:
+            return []
+        return [
+            column
+            for column in self.columns
+            if str(self.unit_by_column.get(column, "")).strip()
+            and any(
+                isinstance(row.get(column), (int, float))
+                and not isinstance(row.get(column), bool)
+                for row in self.rows
+            )
+        ]
+
+    def citable_numeric_coordinates(
+        self,
+    ) -> List[tuple[int, str, float]]:
+        """Return every ``(row_index, column, value)`` a claim may cite."""
+
+        columns = set(self.citable_numeric_columns())
+        return [
+            (row_index, column, float(value))
+            for row_index, row in enumerate(self.rows)
+            for column, value in row.items()
+            if column in columns
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ]
+
 
 class ReportEvidenceManifest(_StrictEvidenceModel):
     contract_version: str = Field(pattern=r"^report-evidence-manifest-v1$")
@@ -156,6 +194,14 @@ class ReportEvidenceManifest(_StrictEvidenceModel):
         Only tabular rows count: narrative items carry context a section can
         restate, but each row is one more period a writer can ground a claim
         against, which is what the prose floor should scale on.
+
+        A table whose numeric columns declare no unit grounds nothing — the
+        claim validator rejects every coordinate on it — so its rows raise the
+        prose floor while adding no prose the writer is allowed to write.
+        Analyzer chart frames arrive exactly like that (display column names
+        such as "value" match no metric in the unit registry), and on job
+        cf47a2f6 they lifted a two-row section from the 0.5 floor tier to 0.9
+        and made WORD_COUNT_TOO_SHORT unreachable.
         """
 
         item_by_ref = self.item_by_ref()
@@ -164,4 +210,5 @@ class ReportEvidenceManifest(_StrictEvidenceModel):
             for ref in dict.fromkeys(evidence_refs)
             if (item := item_by_ref.get(ref)) is not None
             and item.kind is ReportEvidenceKind.TABLE
+            and item.citable_numeric_columns()
         )
