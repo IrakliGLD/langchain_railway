@@ -1101,6 +1101,74 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
     ]
 
 
+def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):
+    """A report running on declared gaps must not look like a complete one.
+
+    ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE deliberately keeps tracks that could
+    not supply everything; an operator who cannot see which, and what they
+    owe, cannot tell the flag worked from the flag never being read.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+    gapped_track_id = research_plan.tracks[0].track_id
+
+    def track_analyzer(_query, track, **_kwargs):
+        from contracts.report_research import ReportTrackStatus
+
+        packet = packet_by_track[track.track_id]
+        if track.track_id != gapped_track_id:
+            return packet
+        return packet.model_copy(
+            update={
+                "gaps": ["MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE"],
+                "status": ReportTrackStatus.PARTIAL,
+            }
+        )
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
+            "enabled track analysis must not run global enrichment"
+        ),
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    processor(_lease(query=_V2_QUERY), _Control())
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["failed_tracks"] == []
+    assert payload["gapped_tracks"] == [
+        {
+            "track_id": gapped_track_id,
+            "gaps": ["MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE"],
+            "status": "partial",
+        }
+    ]
+
+
 def test_enabled_v2_resumes_document_plan_without_research_calls():
     (
         research_plan,

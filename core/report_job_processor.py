@@ -780,6 +780,27 @@ class ReportJobProcessor:
                 failed_tracks,
                 key=lambda entry: entry["track_id"],
             ),
+            # What each surviving track could not supply. Without this a report
+            # running on declared gaps is indistinguishable from one with
+            # nothing missing, which is exactly the state
+            # ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE creates on purpose.
+            "gapped_tracks": sorted(
+                (
+                    {
+                        "track_id": _diagnostic_identifier(track_id),
+                        "gaps": [
+                            _diagnostic_identifier(gap)
+                            for gap in packet.gaps[:12]
+                        ],
+                        "status": _diagnostic_identifier(
+                            packet.status.value
+                        ),
+                    }
+                    for track_id, packet in completed.items()
+                    if packet.gaps
+                ),
+                key=lambda entry: entry["track_id"],
+            ),
         }
         _LOGGER.info(
             "REPORT_TRACK_ANALYSIS_%s %s",
@@ -861,6 +882,7 @@ class ReportJobProcessor:
                     }
                     for track in plan.tracks
                 ],
+                "gapped_tracks": [],
             }
             _LOGGER.info(
                 "REPORT_TRACK_ANALYSIS_%s %s",

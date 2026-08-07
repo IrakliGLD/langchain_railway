@@ -19,6 +19,7 @@ from config import (
     DB_CONNECT_TIMEOUT_SECONDS,
     DB_POOL_TIMEOUT_SECONDS,
     DB_STATEMENT_TIMEOUT_MS,
+    ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE,
     REPORT_JOB_TIMEOUT_SECONDS,
     REPORT_MAX_GENERATIVE_CALLS,
     REPORT_PIPELINE_V2_MODE,
@@ -152,16 +153,21 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    # Every flag that changes report behaviour belongs on this line. An
+    # operator who sets one and cannot see it took effect is left reading
+    # outcomes that look identical to the flag never having been read at all.
     log.info(
         "Report worker started. section_workers=%s job_timeout_seconds=%s "
         "pipeline_v2_mode=%s generative_call_budget=%s "
-        "research_max_tracks=%s research_max_workers=%s",
+        "research_max_tracks=%s research_max_workers=%s "
+        "partial_track_evidence=%s",
         REPORT_SECTION_MAX_WORKERS,
         REPORT_JOB_TIMEOUT_SECONDS,
         REPORT_PIPELINE_V2_MODE,
         REPORT_MAX_GENERATIVE_CALLS,
         REPORT_RESEARCH_MAX_TRACKS,
         REPORT_RESEARCH_MAX_WORKERS,
+        "enabled" if ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE else "disabled",
     )
     try:
         worker.run_until_stopped(processor, stop_event=stop_event)
