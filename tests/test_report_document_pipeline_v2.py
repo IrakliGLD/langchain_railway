@@ -43,6 +43,7 @@ from contracts.report_document import (
     ReportEvidenceCapacity,
 )
 from contracts.report_evidence import ReportEvidenceKind
+from contracts.report_research import ReportEvidenceMode
 from contracts.report_sections import ReportSectionDraft
 from tests.test_report_evidence_gate_v2 import _QUERY, _plan, _ready_packets
 
@@ -337,6 +338,51 @@ def test_a_documented_context_section_is_not_sized_like_a_data_section():
     # Equal weights land within the one word an indivisible total leaves over.
     assert max(weighted[1][:3]) - min(weighted[1][:3]) <= 1
     assert all(words >= 40 for words in weighted[1])
+
+
+def test_a_knowledge_track_is_weighted_as_context_even_when_it_holds_numbers():
+    """A knowledge track still collects numeric tools for context.
+
+    Counting observations alone would size market_design_context like a price
+    section, which is the sizing that filled it with accounting caveats.
+    """
+
+    research_plan, packets, manifest, decisions, gate = _ready_components()
+    knowledge_ids = {
+        track.track_id
+        for track in research_plan.tracks
+        if track.evidence_mode is ReportEvidenceMode.KNOWLEDGE
+    }
+    assert knowledge_ids, [
+        track.evidence_mode for track in research_plan.tracks
+    ]
+
+    document_plan = build_report_document_plan(
+        _QUERY,
+        research_plan,
+        packets,
+        manifest,
+        gate,
+        decisions,
+    )
+
+    analysis = [
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+    context_sections = [
+        section
+        for section in analysis
+        if knowledge_ids.issuperset(section.track_ids)
+    ]
+    data_sections = [
+        section for section in analysis if section not in context_sections
+    ]
+    assert context_sections and data_sections
+    assert max(
+        section.target_words for section in context_sections
+    ) < min(section.target_words for section in data_sections)
 
 
 def test_word_weights_that_would_starve_a_section_fall_back_to_an_even_split():

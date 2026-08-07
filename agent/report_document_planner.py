@@ -25,6 +25,7 @@ from contracts.report_evidence import (
 from contracts.report_research import (
     ReportCoverageStatus,
     ReportEvidenceGate,
+    ReportEvidenceMode,
     ReportEvidencePacket,
     ReportResearchPlan,
     ReportTrackStatus,
@@ -273,16 +274,27 @@ def build_report_document_plan(
         )
     ]
     groups = _analysis_groups(completed_track_ids)
-    # Two shares for a group that carries verified numbers, one for a group
+    # Two shares for a group whose job is to report numbers, one for a group
     # that can only restate documented context. Deliberately coarse: the point
-    # is that a knowledge-only section stops being asked for as much prose as a
-    # data section, not that prose scales with row count.
+    # is that a knowledge section stops being asked for as much prose as a data
+    # section, not that prose scales with row count.
+    #
+    # Both signals are needed. A track that declares KNOWLEDGE evidence still
+    # collects numeric tools for context, so counting observations alone would
+    # size a market-design section like a price section — which is exactly what
+    # filled one with generic accounting caveats on job 5e6b0cf3. A track that
+    # declares otherwise but produced no numbers has nothing to report either.
     analysis_weights = [
         2
         if any(
-            packet_by_id[track_id].numeric_observation_count
+            track_id in packet_by_id
+            and packet_by_id[track_id].numeric_observation_count
+            and (
+                research_track_by_id[track_id].evidence_mode
+                is not ReportEvidenceMode.KNOWLEDGE
+            )
             for track_id in group
-            if track_id in packet_by_id
+            if track_id in research_track_by_id
         )
         else 1
         for group in groups
