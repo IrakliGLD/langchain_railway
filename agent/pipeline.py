@@ -78,6 +78,7 @@ from config import (
     ENABLE_HONEST_TERMINAL_OUTCOMES,
     ENABLE_QUESTION_ANALYZER_HINTS,
     ENABLE_QUESTION_ANALYZER_SHADOW,
+    ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE,
     ENABLE_TYPED_TOOLS,
     ENABLE_VECTOR_KNOWLEDGE_HINTS,
     ENABLE_VECTOR_KNOWLEDGE_SHADOW,
@@ -852,6 +853,18 @@ def _should_block_data_summary_for_missing_evidence(ctx: QueryContext) -> bool:
     if ctx.clarify_selection_override:
         return False
     if not ctx.missing_evidence_for_metrics:
+        return False
+    # Clarification is a question put to a user, and a report track has none:
+    # the run is one of several assembling a document nobody is watching. The
+    # branch below can only end that track in CLARIFICATION_REQUIRED, which the
+    # report treats as unusable and replaces with deterministic baseline
+    # evidence — discarding rows the track already fetched. Report mode carries
+    # the shortfall as a declared gap instead (see report_pipeline_context_gaps).
+    if (
+        ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE
+        and getattr(ctx, "answer_mode", AnswerMode.STANDARD.value)
+        == AnswerMode.REPORT.value
+    ):
         return False
     if not ctx.has_authoritative_question_analysis:
         return False

@@ -64,7 +64,7 @@ from contracts.question_analysis import (  # noqa: E402
     ToolName,
     VisualizationInfo,
 )
-from models import QueryContext  # noqa: E402
+from models import AnswerMode, QueryContext  # noqa: E402
 from utils.query_validation import validate_tool_relevance  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -676,5 +676,56 @@ class TestMissingEvidenceBlocking:
         qa = _make_qa(query_type=QueryType.COMPARISON, intent="compare prices")
         ctx = _make_ctx(qa=qa, semantic_locked=True)
         ctx.missing_evidence_for_metrics = ["mom_absolute_change"]
+
+        assert _should_block_data_summary_for_missing_evidence(ctx)
+
+    def test_report_mode_does_not_clarify_when_partial_evidence_is_enabled(
+        self,
+        monkeypatch,
+    ):
+        """A report track has no user to answer a clarification.
+
+        Blocking there can only end the track in CLARIFICATION_REQUIRED, which
+        the report treats as unusable and replaces with baseline evidence,
+        discarding rows the track already fetched (job 827556eb).
+        """
+        from agent import pipeline
+        from agent.pipeline import _should_block_data_summary_for_missing_evidence
+
+        monkeypatch.setattr(
+            pipeline,
+            "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+            True,
+        )
+        qa = _make_qa(query_type=QueryType.COMPARISON, intent="compare prices")
+        ctx = _make_ctx(qa=qa, semantic_locked=True)
+        ctx.missing_evidence_for_metrics = ["mom_absolute_change"]
+
+        ctx.answer_mode = AnswerMode.REPORT.value
+        assert not _should_block_data_summary_for_missing_evidence(ctx)
+
+        # The interactive paths, where clarification is a real option, keep the
+        # behaviour they have today.
+        for answer_mode in (AnswerMode.STANDARD.value, AnswerMode.BRIEF.value):
+            ctx.answer_mode = answer_mode
+            assert _should_block_data_summary_for_missing_evidence(ctx)
+
+    def test_report_mode_still_clarifies_while_the_flag_is_off(
+        self,
+        monkeypatch,
+    ):
+        """Default-off means today's behaviour is untouched."""
+        from agent import pipeline
+        from agent.pipeline import _should_block_data_summary_for_missing_evidence
+
+        monkeypatch.setattr(
+            pipeline,
+            "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+            False,
+        )
+        qa = _make_qa(query_type=QueryType.COMPARISON, intent="compare prices")
+        ctx = _make_ctx(qa=qa, semantic_locked=True)
+        ctx.missing_evidence_for_metrics = ["mom_absolute_change"]
+        ctx.answer_mode = AnswerMode.REPORT.value
 
         assert _should_block_data_summary_for_missing_evidence(ctx)

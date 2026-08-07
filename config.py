@@ -529,6 +529,17 @@ ENABLE_CONTRACT_CONTINUITY = os.getenv("ENABLE_CONTRACT_CONTINUITY", "false").lo
 # on (shadow); the retry is gated here. Default OFF — enablement criteria in
 # docs/active/query_pipeline_architecture.md §5.
 ENABLE_EVIDENCE_REANALYSIS = os.getenv("ENABLE_EVIDENCE_REANALYSIS", "false").lower() in ("1", "true", "yes", "on")
+# A report track whose derived metrics could not be computed currently ends in
+# CLARIFY, and report mode has no user to answer a clarification — so the
+# track's whole analysis is discarded for the thin deterministic baseline. Job
+# 827556eb lost supply_mix_trade that way after it had already fetched its rows,
+# computed its aggregates, and built its chart. With this on, report tracks keep
+# the evidence they did produce and carry the uncomputable metrics as a declared
+# gap instead. Default OFF: it moves coverage from READY to READY_WITH_GAPS more
+# often, which is honest but visible.
+ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE = os.getenv(
+    "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE", "false"
+).lower() in ("1", "true", "yes", "on")
 # F3: percentage gates are evaluated per trusted actor/session/request. A
 # value of 100 preserves the historical meaning of explicitly enabling the
 # master flag; operators can set 5/25/100 for a deterministic canary.

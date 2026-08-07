@@ -709,8 +709,8 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
     )
 
 
-def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
-    blocked = QueryContext(
+def _blocked_pipeline_context() -> QueryContext:
+    return QueryContext(
         query=_V2_QUERY,
         stats_hint="Observed mean balancing price was 141.0 GEL/MWh.",
         summary_domain_knowledge="The balancing market settles hourly.",
@@ -718,8 +718,21 @@ def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
         missing_evidence_for_metrics=["mom_percent_change"],
         answer_mode="report",
     )
+
+
+def test_global_narrative_enrichment_rejects_blocked_pipeline_context(
+    caplog,
+    monkeypatch,
+):
+    from agent import report_evidence
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        False,
+    )
     processor = ReportJobProcessor(
-        query_pipeline=lambda *_args, **_kwargs: blocked,
+        query_pipeline=lambda *_args, **_kwargs: _blocked_pipeline_context(),
     )
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
 
@@ -729,6 +742,35 @@ def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
 
     assert items == []
     assert "reason=missing_derived_evidence" in caplog.text
+
+
+def test_a_clarified_context_stays_blocked_under_partial_track_evidence(
+    caplog,
+    monkeypatch,
+):
+    """The flag reclassifies the reason, never the rejection.
+
+    An underived metric stops being a blocking reason, but a context that
+    clarified produced no answer at all and remains unusable.
+    """
+    from agent import report_evidence
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        True,
+    )
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: _blocked_pipeline_context(),
+    )
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+
+    items = processor._pipeline_narrative_items(
+        _lease(query=_V2_QUERY)
+    )
+
+    assert items == []
+    assert "reason=terminal_clarification_required" in caplog.text
 
 
 def test_track_analysis_shadow_is_parallel_isolated_and_does_not_change_output(

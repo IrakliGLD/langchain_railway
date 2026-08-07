@@ -16,6 +16,7 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+from agent import report_evidence
 from agent.report_research_execution import (
     DEFAULT_REPORT_COLLECTORS,
     ReportCollectorOutput,
@@ -35,6 +36,7 @@ from contracts.report_research import (
     ReportEvidencePacket,
     ReportResearchPlan,
     ReportResearchTrack,
+    ReportTrackStatus,
 )
 from contracts.vector_knowledge import (
     RetrievalStrategy,
@@ -224,7 +226,15 @@ def test_track_analysis_preserves_deterministic_derived_chart_evidence():
     assert candidate.series_fields == ["mom_pct"]
 
 
-def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence():
+def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        False,
+    )
+
     def query_pipeline(query, **_kwargs):
         return QueryContext(
             query=query,
@@ -242,6 +252,111 @@ def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence()
             _plan().tracks[0],
             query_pipeline=query_pipeline,
         )
+
+
+def _context_with_rows_and_a_missing_metric(query, **_kwargs):
+    """A track that fetched its rows but could not derive one metric."""
+
+    return QueryContext(
+        query=query,
+        cols=["period", "price_gel"],
+        rows=[["2026-04", 100.0], ["2026-05", 120.0]],
+        provenance_cols=["period", "price_gel"],
+        provenance_rows=[["2026-04", 100.0], ["2026-05", 120.0]],
+        provenance_refs=["query:track:prices"],
+        provenance_source="pipeline",
+        stats_hint="Mean observed price was 110 GEL/MWh.",
+        missing_evidence_for_metrics=["mom_percent_change"],
+        answer_mode="report",
+    )
+
+
+def test_partial_track_evidence_keeps_the_rows_and_declares_the_gap(
+    monkeypatch,
+):
+    """A metric that could not be derived must not discard fetched rows.
+
+    Job 827556eb lost supply_mix_trade after it had already fetched its rows,
+    computed aggregates over ten numeric columns, and built its chart, because
+    two MoM metrics were underived and report mode has no user to clarify with.
+    """
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        True,
+    )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _plan().tracks[0],
+        query_pipeline=_context_with_rows_and_a_missing_metric,
+    )
+
+    assert packet.items
+    assert packet.status is ReportTrackStatus.PARTIAL
+    assert "MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE" in packet.gaps
+
+
+def test_partial_track_evidence_still_rejects_an_unusable_context(monkeypatch):
+    """The flag concedes incompleteness, never usability."""
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        True,
+    )
+
+    def query_pipeline(query, **_kwargs):
+        context = _context_with_rows_and_a_missing_metric(query)
+        context.terminal_outcome = "clarification_required"
+        return context
+
+    with pytest.raises(ValueError, match="terminal_clarification_required"):
+        execute_report_track_analysis(
+            _QUERY,
+            _plan().tracks[0],
+            query_pipeline=query_pipeline,
+        )
+
+
+def test_a_declared_metric_gap_survives_the_baseline_merge(monkeypatch):
+    """The document can only declare a gap that reaches the merged packet.
+
+    EXPECTED_EXHIBIT_ gaps are stripped by the merge; this one must not be.
+    """
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        True,
+    )
+    track = _plan().tracks[0]
+    analysis = execute_report_track_analysis(
+        _QUERY,
+        track,
+        query_pipeline=_context_with_rows_and_a_missing_metric,
+    )
+    baseline = execute_report_track_analysis(
+        _QUERY,
+        track,
+        query_pipeline=lambda query, **_kwargs: QueryContext(
+            query=query,
+            cols=["period", "price_gel"],
+            rows=[["2026-03", 90.0]],
+            provenance_cols=["period", "price_gel"],
+            provenance_rows=[["2026-03", 90.0]],
+            provenance_refs=["query:baseline:prices"],
+            provenance_source="pipeline",
+            stats_hint="Mean observed price was 90 GEL/MWh.",
+            answer_mode="report",
+        ),
+    )
+
+    merged = merge_report_track_analysis_packet(track, baseline, analysis)
+
+    assert "MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE" in merged.gaps
+    assert merged.items
 
 
 def test_track_analysis_reserves_packet_capacity_for_analysis_and_knowledge():

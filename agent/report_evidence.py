@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Sequence
 
 from agent.metric_units import METRIC_UNITS
+from config import ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE
 from config_metrics.metric_units import metric_value_unit
 from contracts.report_evidence import (
     REPORT_EVIDENCE_CONTENT_MAX_CHARS,
@@ -409,10 +410,20 @@ def build_report_narrative_items(ctx: Any) -> list[ReportEvidenceItem]:
 
 
 def report_pipeline_context_block_reason(ctx: Any) -> str:
-    """Return a stable reason when pipeline output is unsafe for reports."""
+    """Return a stable reason when pipeline output is unsafe for reports.
+
+    Answers one question only: is this context usable at all? A metric the
+    pipeline could not derive does not make the rows it did fetch unusable, so
+    that shortfall is reported by :func:`report_pipeline_context_gaps` instead —
+    see ``ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE``. Conflating the two discarded
+    whole tracks that had working evidence (job 827556eb).
+    """
     if ctx is None:
         return "missing_context"
-    if list(getattr(ctx, "missing_evidence_for_metrics", None) or []):
+    if (
+        not ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE
+        and list(getattr(ctx, "missing_evidence_for_metrics", None) or [])
+    ):
         return "missing_derived_evidence"
     terminal_outcome = str(
         getattr(ctx, "terminal_outcome", "") or ""
@@ -423,6 +434,36 @@ def report_pipeline_context_block_reason(ctx: Any) -> str:
     }:
         return f"terminal_{re.sub(r'[^a-z0-9_]+', '_', terminal_outcome)[:48]}"
     return ""
+
+
+# Distinct from the EXPECTED_EXHIBIT_ prefix, which the track-analysis merge
+# strips: a derived-metric shortfall has to survive into the merged packet so
+# the document can still declare it.
+_MISSING_DERIVED_METRIC_GAP_PREFIX = "MISSING_DERIVED_METRIC_"
+_MAXIMUM_DERIVED_METRIC_GAPS = 8
+
+
+def report_pipeline_context_gaps(ctx: Any) -> list[str]:
+    """Return declared gap codes for evidence the pipeline could not derive.
+
+    Usable-but-incomplete, as opposed to the unusable contexts named by
+    :func:`report_pipeline_context_block_reason`. Each code names the metric so
+    the limitations section can state what the report could not compute rather
+    than the track being dropped and the absence going unmentioned.
+    """
+
+    if ctx is None:
+        return []
+    codes = [
+        _MISSING_DERIVED_METRIC_GAP_PREFIX
+        + re.sub(r"[^A-Z0-9_]+", "_", str(metric or "").upper())[:48]
+        for metric in list(
+            getattr(ctx, "missing_evidence_for_metrics", None) or []
+        )
+    ]
+    return list(dict.fromkeys(code for code in codes if code.strip("_")))[
+        :_MAXIMUM_DERIVED_METRIC_GAPS
+    ]
 
 
 def make_report_narrative_evidence_item(
