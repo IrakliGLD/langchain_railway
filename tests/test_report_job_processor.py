@@ -40,7 +40,10 @@ from contracts.report_jobs import ReportJobLease, ReportJobPhase
 from contracts.report_result import ReportResult, ReportResultV2
 from contracts.report_sections import ReportSectionDraft
 from core import report_job_processor
-from core.report_job_processor import ReportJobProcessor
+from core.report_job_processor import (
+    ReportJobProcessor,
+    _diagnostic_error_locations,
+)
 from core.report_job_worker import ReportJobFailure
 from models import QueryContext
 from tests.test_report_document_pipeline_v2 import (
@@ -1038,6 +1041,7 @@ def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
             "track_id": failed_track_id,
             "error_type": "RuntimeError",
             "reason": "unknown",
+            "invalid_fields": [],
         }
     ]
 
@@ -1097,8 +1101,35 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
             "track_id": failed_track_id,
             "error_type": "ReportTrackAnalysisUnusable",
             "reason": "missing_derived_evidence",
+            "invalid_fields": [],
         }
     ]
+
+
+def test_a_rejected_contract_names_the_field_that_rejected_the_track():
+    """"ValidationError, reason=unknown" leaves the cause to be guessed.
+
+    Job 5e6b0cf3 discarded supply_mix_and_flows that way, and the packet
+    contract that rejected it had to be inferred from the report's prose.
+    """
+    from pydantic import ValidationError
+
+    from contracts.report_research import ReportEvidencePacket
+
+    try:
+        ReportEvidencePacket(
+            contract_version="report-evidence-packet-v1",
+            track_id="prices",
+            status="complete",
+            gaps=["duplicate", "duplicate"],
+        )
+    except ValidationError as exc:
+        located = _diagnostic_error_locations(exc)
+    else:  # pragma: no cover - the contract must reject duplicates
+        raise AssertionError("duplicate gaps must not validate")
+
+    assert located == ["gaps"]
+    assert _diagnostic_error_locations(RuntimeError("boom")) == []
 
 
 def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):

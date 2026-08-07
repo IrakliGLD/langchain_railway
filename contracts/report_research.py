@@ -489,6 +489,13 @@ class ReportChartCandidate(_StrictResearchModel):
         return values
 
 
+# Named so producers can bound themselves against the same number the packet
+# enforces. A producer that counts to a literal of its own drifts, and the
+# consequence is a ValidationError that discards a whole track's evidence
+# (job 5e6b0cf3, supply_mix_and_flows).
+REPORT_PACKET_MAX_OBSERVATIONS = 32
+
+
 class ReportEvidencePacket(_StrictResearchModel):
     contract_version: Literal["report-evidence-packet-v1"]
     track_id: Identifier
@@ -498,7 +505,7 @@ class ReportEvidencePacket(_StrictResearchModel):
     items: List[ReportEvidenceItem] = Field(default_factory=list, max_length=12)
     observations: List[ReportEvidenceObservation] = Field(
         default_factory=list,
-        max_length=32,
+        max_length=REPORT_PACKET_MAX_OBSERVATIONS,
     )
     gaps: List[str] = Field(default_factory=list, max_length=12)
     chart_candidates: List[ReportChartCandidate] = Field(

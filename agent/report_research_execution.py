@@ -34,6 +34,7 @@ from contracts.report_evidence import (
     ReportKnowledgeEvidenceRole,
 )
 from contracts.report_research import (
+    REPORT_PACKET_MAX_OBSERVATIONS,
     ReportChartCandidate,
     ReportCollectorId,
     ReportEvidenceObservation,
@@ -417,6 +418,8 @@ def _numeric_observations(
     observations: list[ReportEvidenceObservation] = []
     requested_operations = _requested_metric_operations(requested_metrics)
     for item in items:
+        if len(observations) >= REPORT_PACKET_MAX_OBSERVATIONS:
+            return observations
         if item.kind is not ReportEvidenceKind.TABLE:
             observations.append(
                 ReportEvidenceObservation(
@@ -595,7 +598,7 @@ def _numeric_observations(
                         metric_values=metrics,
                     )
                 )
-                if len(observations) == 32:
+                if len(observations) >= REPORT_PACKET_MAX_OBSERVATIONS:
                     return observations
     return observations
 

@@ -209,6 +209,32 @@ def _diagnostic_identifier(value: str | None) -> str:
     return "unknown"
 
 
+def _diagnostic_error_locations(exc: Exception) -> list[str]:
+    """Name the schema fields a ValidationError rejected, never their values.
+
+    pydantic error locations are field names and indices from our own
+    contracts, so they carry no customer data — but the messages and inputs
+    beside them do, which is why only ``loc`` is read.
+    """
+
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return []
+    try:
+        raw = errors()
+    except Exception:
+        return []
+    located: list[str] = []
+    for entry in list(raw)[:8]:
+        location = ".".join(
+            str(part) for part in (entry or {}).get("loc", ()) if part != ""
+        )
+        candidate = _diagnostic_identifier(location)
+        if candidate not in located:
+            located.append(candidate)
+    return located
+
+
 def _diagnostic_error_codes(error_codes: list[str]) -> str:
     safe_codes = [
         code
@@ -743,6 +769,12 @@ class ReportJobProcessor:
                             "reason": _diagnostic_identifier(
                                 getattr(exc, "reason", "")
                             ),
+                            # A bare "ValidationError, reason=unknown" says a
+                            # track was discarded without saying which contract
+                            # rejected it, leaving the cause to be guessed from
+                            # the outcome (job 5e6b0cf3). Field locations are
+                            # schema names, never values.
+                            "invalid_fields": _diagnostic_error_locations(exc),
                         }
                     )
 
