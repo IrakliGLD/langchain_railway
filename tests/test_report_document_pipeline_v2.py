@@ -32,7 +32,7 @@ from agent.report_evidence_gate import evaluate_report_evidence
 from agent.report_research_execution import (
     consolidate_report_evidence_packets,
 )
-from agent.report_sections import count_section_words
+from agent.report_sections import count_section_words, validate_report_section
 from contracts.report import report_section_validation_word_bounds
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
@@ -1842,6 +1842,305 @@ def test_materialization_reports_a_numberless_analysis_section():
     # analysis track is exempt, which is why this is not every analysis id.
     assert flagged, validation.section_errors
     assert flagged <= set(analysis_ids)
+
+
+def _unrendered_direct_claim(section, section_spec, manifest):
+    """A coordinate that verifies but whose value the prose never renders."""
+    from agent.report_grounding import _claimable_direct_claim
+
+    item_by_ref = manifest.item_by_ref()
+    cited = {
+        (claim.evidence_ref, claim.row_index, claim.column)
+        for paragraph in section.paragraphs
+        for claim in paragraph.direct_claims
+    }
+    text = " ".join(paragraph.text for paragraph in section.paragraphs)
+    for evidence_ref in section_spec.required_evidence_refs:
+        item = item_by_ref.get(evidence_ref)
+        if item is None:
+            continue
+        for row_index, column, _value in item.citable_numeric_coordinates():
+            if (evidence_ref, row_index, column) in cited:
+                continue
+            claim = _claimable_direct_claim(
+                item,
+                evidence_ref,
+                row_index,
+                column,
+            )
+            if claim is None or claim.display_value in text:
+                continue
+            return claim
+    return None
+
+
+def _with_unrendered_claim(section, section_spec, manifest):
+    claim = _unrendered_direct_claim(section, section_spec, manifest)
+    assert claim is not None, section.section_id
+    first, *rest = section.paragraphs
+    return section.model_copy(
+        update={
+            "paragraphs": [
+                first.model_copy(
+                    update={"direct_claims": [*first.direct_claims, claim]}
+                ),
+                *rest,
+            ]
+        }
+    )
+
+
+def test_a_claim_the_prose_never_rendered_is_swept_not_repaired():
+    """Deleting surplus metadata costs nothing and needs no provider call.
+
+    Job 827556eb spent both repairs converging its analysis batch, and the
+    synthesis batch then failed on DIRECT_CLAIM_NOT_USED alone with no budget
+    left. The claim was correct about its coordinate and simply absent from the
+    prose, so code can drop it.
+    """
+    from agent import report_document_generation as generation
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    spec_by_id = {
+        section.section_id: section for section in document_plan.sections
+    }
+    # A synthesis section owes no numeric findings, so an unused claim there is
+    # pure surplus — the exact shape that sank job 827556eb.
+    synthesis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role is not ReportDocumentSectionRole.ANALYSIS
+        and _unrendered_direct_claim(
+            section_by_id[section.section_id],
+            section,
+            manifest,
+        )
+        is not None
+    ]
+    assert synthesis_ids
+    polluted = [
+        _with_unrendered_claim(
+            section_by_id[section_id],
+            spec_by_id[section_id],
+            manifest,
+        )
+        for section_id in synthesis_ids
+    ]
+    for section in polluted:
+        assert "DIRECT_CLAIM_NOT_USED" in validate_report_section(
+            section,
+            spec_by_id[section.section_id],
+            manifest,
+        ).error_codes
+
+    sections, validation = generation._materialize_section_batch(
+        ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=polluted,
+        ),
+        document_plan,
+        manifest,
+        section_ids=synthesis_ids,
+        research_plan=research_plan,
+    )
+
+    assert validation.valid, validation.section_errors
+    assert sections is not None
+    # The prose is untouched; only the surplus metadata entry is gone.
+    for swept, original in zip(sections, polluted, strict=True):
+        assert [
+            paragraph.text for paragraph in swept.paragraphs
+        ] == [paragraph.text for paragraph in original.paragraphs]
+        assert sum(
+            len(paragraph.direct_claims) for paragraph in swept.paragraphs
+        ) == sum(
+            len(paragraph.direct_claims) for paragraph in original.paragraphs
+        ) - 1
+
+
+def test_an_unrendered_claim_an_analysis_section_owes_is_not_swept():
+    """Below the numeric floor the number is owed, not surplus.
+
+    Sweeping it would trade DIRECT_CLAIM_NOT_USED for NUMERIC_FINDING_MISSING
+    and hide the fact that the writer has to render the value.
+    """
+    from agent import report_document_generation as generation
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    spec_by_id = {
+        section.section_id: section for section in document_plan.sections
+    }
+    owing_id = next(
+        section_id
+        for section_id, spec in spec_by_id.items()
+        if generation.report_analysis_numeric_claim_requirement(
+            section_by_id[section_id],
+            spec,
+            manifest,
+            research_plan,
+        )[1]
+        >= 2
+    )
+    single_claim = ReportSectionDraft.model_validate(
+        _draft_section(
+            spec_by_id[owing_id],
+            manifest,
+            max_numeric_claims=1,
+        )
+    )
+    polluted = _with_unrendered_claim(
+        single_claim,
+        spec_by_id[owing_id],
+        manifest,
+    )
+
+    kept = generation._without_free_unrendered_claims(
+        polluted,
+        spec_by_id[owing_id],
+        manifest,
+        research_plan,
+    )
+
+    assert kept == polluted
+    assert generation.report_analysis_numeric_claim_requirement(
+        polluted,
+        spec_by_id[owing_id],
+        manifest,
+        research_plan,
+    ) == (2, 2)
+
+
+def test_an_unverified_claim_is_never_swept():
+    """A wrong coordinate is a writer error the repair pass has to see."""
+    from agent.report_grounding import drop_unrendered_claims
+
+    (
+        _research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section = valid_draft.sections[0]
+    first, *rest = section.paragraphs
+    fabricated = first.direct_claims[0].model_copy(
+        update={"display_value": "999999", "unit": "GEL/MWh"}
+    )
+    polluted = section.model_copy(
+        update={
+            "paragraphs": [
+                first.model_copy(
+                    update={
+                        "direct_claims": [*first.direct_claims, fabricated]
+                    }
+                ),
+                *rest,
+            ]
+        }
+    )
+
+    swept, dropped = drop_unrendered_claims(polluted, manifest.item_by_ref())
+
+    assert dropped == 0
+    assert swept is polluted
+
+
+def test_a_batch_that_reaches_salvage_unbudgeted_still_logs_its_state(caplog):
+    """A give-up with no repair call must not be silent.
+
+    Job 827556eb's synthesis batch failed with zero budget, so the in-loop
+    diagnostic never ran and nothing recorded which section or code sank it.
+    """
+    from agent import report_document_generation as generation
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    analysis_ids = [
+        section.section_id
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+    broken = [
+        _numberless_section(section_by_id[section_id])
+        for section_id in analysis_ids
+    ]
+    _sections, validation = generation._materialize_section_batch(
+        ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=broken,
+        ),
+        document_plan,
+        manifest,
+        section_ids=analysis_ids,
+        research_plan=research_plan,
+    )
+    assert not validation.valid
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportDocument"):
+        _result, _validation, used = (
+            generation._repair_section_batch_until_valid(
+                _QUERY,
+                document_plan,
+                research_plan,
+                manifest,
+                packets,
+                broken,
+                None,
+                validation,
+                lambda *_args, **_kwargs: pytest.fail(
+                    "no repair may run without budget"
+                ),
+                section_ids=analysis_ids,
+                repair_attempts=0,
+                first_attempt_number=2,
+                stage="analysis_repair_exhausted",
+            )
+        )
+
+    assert used == 0
+    unbudgeted = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("REPORT_DOCUMENT_DIAGNOSTIC ")
+        and '"batch_repair_unbudgeted"' in record.message
+    ]
+    assert unbudgeted, [record.message for record in caplog.records]
+    assert set(unbudgeted[-1]["section_word_counts"]) == set(analysis_ids)
+    assert unbudgeted[-1]["section_error_codes"]
 
 
 def _short_but_grounded_section(section, section_spec, manifest):

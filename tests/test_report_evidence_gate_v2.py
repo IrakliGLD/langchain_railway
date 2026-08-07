@@ -24,6 +24,7 @@ from contracts.report_research import (
     ReportCollectorId,
     ReportEvidenceGate,
     ReportResearchPlan,
+    ReportTrackStatus,
 )
 from tests.test_report_research_contract import (
     _research_plan_payload,
@@ -209,6 +210,43 @@ def test_required_collector_failure_allows_only_explicit_gapped_writing():
     assert gate.status.value == "ready_with_gaps"
     assert "REQUIRED_TRACK_GAP" in gate.finding_codes
     assert "COLLECTOR_FAILURE" in gate.finding_codes
+
+
+def test_a_declared_metric_gap_degrades_coverage_but_still_reports():
+    """The safety property behind ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE.
+
+    Keeping a track whose derived metric could not be computed must move the
+    gate from READY to READY_WITH_GAPS and no further — a report that says what
+    it could not compute still reaches the reader, which discarding the track
+    did not.
+    """
+
+    packets = _ready_packets()
+    gapped = [
+        packet.model_copy(
+            update={
+                "gaps": [
+                    *packet.gaps,
+                    "MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE",
+                ],
+                "status": ReportTrackStatus.PARTIAL,
+            }
+        )
+        if index == 0
+        else packet
+        for index, packet in enumerate(packets)
+    ]
+    manifest = consolidate_report_evidence_packets(_QUERY, gapped)
+    decisions = build_report_research_exhibits(gapped, manifest)
+
+    gate = evaluate_report_evidence(
+        _plan(),
+        gapped,
+        chart_decisions=decisions,
+    )
+
+    assert gate.status.value == "ready_with_gaps"
+    assert gate.status.value != "failed"
 
 
 def test_gate_fails_when_no_required_track_has_substantive_evidence():

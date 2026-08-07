@@ -709,8 +709,8 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
     )
 
 
-def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
-    blocked = QueryContext(
+def _blocked_pipeline_context() -> QueryContext:
+    return QueryContext(
         query=_V2_QUERY,
         stats_hint="Observed mean balancing price was 141.0 GEL/MWh.",
         summary_domain_knowledge="The balancing market settles hourly.",
@@ -718,8 +718,21 @@ def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
         missing_evidence_for_metrics=["mom_percent_change"],
         answer_mode="report",
     )
+
+
+def test_global_narrative_enrichment_rejects_blocked_pipeline_context(
+    caplog,
+    monkeypatch,
+):
+    from agent import report_evidence
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        False,
+    )
     processor = ReportJobProcessor(
-        query_pipeline=lambda *_args, **_kwargs: blocked,
+        query_pipeline=lambda *_args, **_kwargs: _blocked_pipeline_context(),
     )
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
 
@@ -729,6 +742,35 @@ def test_global_narrative_enrichment_rejects_blocked_pipeline_context(caplog):
 
     assert items == []
     assert "reason=missing_derived_evidence" in caplog.text
+
+
+def test_a_clarified_context_stays_blocked_under_partial_track_evidence(
+    caplog,
+    monkeypatch,
+):
+    """The flag reclassifies the reason, never the rejection.
+
+    An underived metric stops being a blocking reason, but a context that
+    clarified produced no answer at all and remains unusable.
+    """
+    from agent import report_evidence
+
+    monkeypatch.setattr(
+        report_evidence,
+        "ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE",
+        True,
+    )
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: _blocked_pipeline_context(),
+    )
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+
+    items = processor._pipeline_narrative_items(
+        _lease(query=_V2_QUERY)
+    )
+
+    assert items == []
+    assert "reason=terminal_clarification_required" in caplog.text
 
 
 def test_track_analysis_shadow_is_parallel_isolated_and_does_not_change_output(
@@ -1055,6 +1097,74 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
             "track_id": failed_track_id,
             "error_type": "ReportTrackAnalysisUnusable",
             "reason": "missing_derived_evidence",
+        }
+    ]
+
+
+def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):
+    """A report running on declared gaps must not look like a complete one.
+
+    ENABLE_REPORT_PARTIAL_TRACK_EVIDENCE deliberately keeps tracks that could
+    not supply everything; an operator who cannot see which, and what they
+    owe, cannot tell the flag worked from the flag never being read.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+    gapped_track_id = research_plan.tracks[0].track_id
+
+    def track_analyzer(_query, track, **_kwargs):
+        from contracts.report_research import ReportTrackStatus
+
+        packet = packet_by_track[track.track_id]
+        if track.track_id != gapped_track_id:
+            return packet
+        return packet.model_copy(
+            update={
+                "gaps": ["MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE"],
+                "status": ReportTrackStatus.PARTIAL,
+            }
+        )
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
+            "enabled track analysis must not run global enrichment"
+        ),
+        pipeline_v2_mode="enabled",
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    processor(_lease(query=_V2_QUERY), _Control())
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
+    )
+    payload = json.loads(record.split(" ", 1)[1])
+    assert payload["failed_tracks"] == []
+    assert payload["gapped_tracks"] == [
+        {
+            "track_id": gapped_track_id,
+            "gaps": ["MISSING_DERIVED_METRIC_MOM_PERCENT_CHANGE"],
+            "status": "partial",
         }
     ]
 

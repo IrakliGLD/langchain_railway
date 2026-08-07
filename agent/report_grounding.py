@@ -616,6 +616,77 @@ def normalize_repairable_derived_claims(
     return draft.model_copy(update={"paragraphs": repaired_paragraphs}), repaired_count
 
 
+def drop_unrendered_claims(
+    draft: Any,
+    item_by_ref: Mapping[str, ReportEvidenceItem],
+) -> tuple[Any, int]:
+    """Delete verified claims whose value the prose never renders.
+
+    ``DIRECT_CLAIM_NOT_USED`` and ``DERIVED_CLAIM_NOT_USED`` mark a claim that
+    is correct about its coordinate but absent from every sentence. The reader
+    never sees claim metadata, and the validator adds an unused claim's facts to
+    no sentence, so deleting it is provably grounding-neutral — nothing that was
+    supported becomes unsupported. Keeping it costs the whole document, and
+    REPORT_DOCUMENT_INVALID is not retryable.
+
+    Unverified claims are left alone. Those are writer errors the repair pass
+    has to see, not surplus to sweep up. Callers must still re-validate: the
+    numeric-finding floor counts claims, so a section can owe numbers after a
+    drop.
+    """
+
+    dropped = 0
+    kept_paragraphs: list[ReportSectionParagraph] = []
+    for paragraph in draft.paragraphs:
+        paragraph_refs = set(paragraph.evidence_refs)
+        sentences = _paragraph_sentences(paragraph.text)
+        direct_claims: list[ReportDirectClaim] = []
+        for direct_claim in paragraph.direct_claims:
+            if (
+                _verified_direct_fact(
+                    direct_claim,
+                    paragraph_refs,
+                    item_by_ref,
+                )
+                is not None
+                and not any(
+                    _direct_claim_appears(direct_claim, sentence)
+                    for sentence in sentences
+                )
+            ):
+                dropped += 1
+                continue
+            direct_claims.append(direct_claim)
+        derived_claims: list[ReportDerivedClaim] = []
+        for derived_claim in paragraph.derived_claims:
+            if (
+                _verified_derived_fact(
+                    derived_claim,
+                    paragraph_refs,
+                    item_by_ref,
+                )
+                is not None
+                and not any(
+                    _derived_claim_appears(derived_claim, sentence)
+                    for sentence in sentences
+                )
+            ):
+                dropped += 1
+                continue
+            derived_claims.append(derived_claim)
+        kept_paragraphs.append(
+            paragraph.model_copy(
+                update={
+                    "direct_claims": direct_claims,
+                    "derived_claims": derived_claims,
+                }
+            )
+        )
+    if not dropped:
+        return draft, 0
+    return draft.model_copy(update={"paragraphs": kept_paragraphs}), dropped
+
+
 def build_derived_claim_repair_hints(
     sections: Sequence[Any],
     item_by_ref: Mapping[str, ReportEvidenceItem],

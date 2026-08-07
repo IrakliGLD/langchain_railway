@@ -19,6 +19,7 @@ from agent.report_evidence import (
     make_report_narrative_evidence_item,
     make_report_table_evidence_item,
     report_pipeline_context_block_reason,
+    report_pipeline_context_gaps,
 )
 from agent.router import extract_currency, extract_price_metric
 from agent.tools.composition_tools import get_balancing_composition
@@ -951,7 +952,14 @@ def execute_report_track_analysis(
         for item in manifest.items
         if item.kind is not ReportEvidenceKind.LIMITATION
     )
-    return _packet_from_items(track, items)
+    # A metric the pipeline could not derive is declared, not fatal. The packet
+    # keeps every row the track did fetch and drops to PARTIAL, which the
+    # evidence gate already treats as usable coverage.
+    return _packet_from_items(
+        track,
+        items,
+        gaps=report_pipeline_context_gaps(context),
+    )
 
 
 def merge_report_track_analysis_packet(
