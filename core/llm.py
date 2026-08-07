@@ -4840,14 +4840,17 @@ def llm_repair_report_document_sections(
     validation: ReportDocumentValidation,
     *,
     section_ids: list[str],
+    attempt_number: int = 2,
 ) -> ReportDocumentRepair | dict[str, Any]:
-    """Replace only rejected document sections in the single repair call.
+    """Replace only rejected document sections in one numbered repair attempt.
 
     ``draft`` is the whole rejected document, the rejected sections of one
     generation batch, or the raw payload a writer returned when it did not
     even parse.
     """
 
+    if not 2 <= attempt_number <= 3:
+        raise ValueError("attempt_number must be between 2 and 3.")
     requested_ids = list(dict.fromkeys(section_ids))
     known_ids = {section.section_id for section in plan.sections}
     if not requested_ids or not set(requested_ids).issubset(known_ids):
@@ -4935,8 +4938,12 @@ def llm_repair_report_document_sections(
         "Return one JSON object matching the repair schema exactly and include "
         "one replacement for every requested section, no others. Preserve exact "
         "section IDs and titles, scope, and evidence assignments. Correct only "
-        "the supplied blocking validation errors; length recommendations are "
-        "not repair requirements. Every section receives the union of applicable "
+        "the supplied blocking validation errors. WORD_COUNT_TOO_SHORT requires "
+        "at least minimum_words and WORD_COUNT_TOO_LONG requires no more than "
+        "maximum_words from REJECTED_SECTION_PLAN_AND_RECOMMENDED_WORD_TARGETS; "
+        "when neither code is present, treat the word targets as guidance and "
+        "do not pad or truncate a valid section. Every section receives the "
+        "union of applicable "
         "document and section errors. "
         "Do not delete a repairable analytical finding merely to satisfy "
         "grounding. Rebuild it from VERIFIED_DERIVED_REPAIR_HINTS, render the "
@@ -4991,11 +4998,13 @@ def llm_repair_report_document_sections(
         system=system,
         prompt=prompt,
         label="Report document repair",
-        attempt_stage="report_document_repair",
+        attempt_stage=f"report_document_repair_attempt_{attempt_number}",
         result_type=ReportDocumentRepair,
         structured_schema=_REPORT_DOCUMENT_REPAIR_SCHEMA,
         use_cache=False,
-        sampling_temperature=_report_document_repair_temperature(),
+        sampling_temperature=_report_document_repair_temperature(
+            attempt_number
+        ),
     )
 
 
@@ -5021,7 +5030,9 @@ def _repair_sampling_temperature(attempt_number: int) -> float:
     )
 
 
-def _report_document_repair_temperature() -> float | None:
+def _report_document_repair_temperature(
+    attempt_number: int = 2,
+) -> float | None:
     """Return the repair temperature, or None when the model rejects one.
 
     Reasoning models take reasoning_effort instead of temperature and error on
@@ -5032,7 +5043,7 @@ def _report_document_repair_temperature() -> float | None:
 
     if REPORT_REASONING_EFFORT:
         return None
-    return _repair_sampling_temperature(1)
+    return _repair_sampling_temperature(attempt_number)
 
 
 def _report_section_validation_rules(
