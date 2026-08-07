@@ -620,3 +620,94 @@ def test_intraday_timestamps_are_not_truncated():
     """A non-midnight component is real data, not padding."""
     values = ["2026-06-01T09:30:00", "2026-06-01T10:30:00"]
     assert _axis_values(values) == values
+
+
+def _long_frame_manifest() -> ReportEvidenceManifest:
+    """A frame keyed by two dimensions: one row per (period, technology)."""
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "type_tech", "share_tech"]
+    table["rows"] = [
+        {"period": period, "type_tech": technology, "share_tech": share}
+        for period, technology, share in (
+            ("2026-04", "hydro", 0.8143),
+            ("2026-04", "thermal", 0.1719),
+            ("2026-05", "hydro", 0.9898),
+            ("2026-05", "thermal", 0.0),
+        )
+    ]
+    table["unit_by_column"] = {"share_tech": "ratio"}
+    table["total_row_count"] = 4
+    return ReportEvidenceManifest.model_validate(payload)
+
+
+def _comparison_plan() -> ReportPlan:
+    payload = _plan_payload()
+    payload["charts"][0]["purpose"] = "comparison"
+    payload["charts"][0]["x_field"] = "period"
+    payload["charts"][0]["series_fields"] = ["share_tech"]
+    return ReportPlan.model_validate(payload)
+
+
+def test_a_two_dimensional_frame_is_pivoted_not_drawn_under_repeated_labels():
+    """Job 5e6b0cf3 drew eight bars under four repeated month labels.
+
+    The frame was keyed by (period, technology) and the axis took period, so
+    several bars shared a label and the technology separating them appeared
+    nowhere on the chart. The comparison the reader asked for is one bar group
+    per technology with a series per month.
+    """
+
+    decisions = build_report_charts(_comparison_plan(), _long_frame_manifest())
+
+    artifact = decisions[0].artifact
+    assert artifact is not None, decisions[0].reason_code
+    labels = [row["type_tech"] for row in artifact.data]
+    assert labels == sorted(set(labels)), labels
+    assert {"2026-04", "2026-05"}.issubset(set(artifact.metadata.series))
+    hydro = next(row for row in artifact.data if row["type_tech"] == "hydro")
+    assert hydro["2026-04"] == 0.8143
+    assert hydro["2026-05"] == 0.9898
+
+
+def test_a_unique_axis_is_still_charted_verbatim():
+    """The pivot must not disturb the one-row-per-label case."""
+
+    payload = _plan_payload()
+    payload["charts"][0]["purpose"] = "comparison"
+    payload["charts"][0]["x_field"] = "period"
+    payload["charts"][0]["series_fields"] = ["p_bal_gel"]
+    plan = ReportPlan.model_validate(payload)
+
+    decisions = build_report_charts(plan, _mixed_unit_manifest())
+
+    artifact = decisions[0].artifact
+    assert artifact is not None, decisions[0].reason_code
+    assert [row["period"] for row in artifact.data] == ["2026-01", "2026-02"]
+
+
+def test_an_unlabelable_comparison_is_omitted_rather_than_drawn():
+    """No category to pivot onto means no honest bar chart."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["period", "p_bal_gel"]
+    table["rows"] = [
+        {"period": "2026-04", "p_bal_gel": 155.6},
+        {"period": "2026-04", "p_bal_gel": 137.8},
+    ]
+    table["unit_by_column"] = {"p_bal_gel": "GEL/MWh"}
+    table["total_row_count"] = 2
+    manifest = ReportEvidenceManifest.model_validate(payload)
+    payload_plan = _plan_payload()
+    payload_plan["charts"][0]["purpose"] = "comparison"
+    payload_plan["charts"][0]["x_field"] = "period"
+    payload_plan["charts"][0]["series_fields"] = ["p_bal_gel"]
+
+    decisions = build_report_charts(
+        ReportPlan.model_validate(payload_plan),
+        manifest,
+    )
+
+    assert decisions[0].artifact is None
+    assert decisions[0].reason_code == "REPORT_CHART_AMBIGUOUS_CATEGORY_AXIS"

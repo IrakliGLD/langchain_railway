@@ -297,6 +297,77 @@ def test_word_targets_scale_with_evidence_capacity_without_padding():
         assert all(words >= 40 for words in analysis_words)
 
 
+def _full_capacity() -> ReportEvidenceCapacity:
+    return ReportEvidenceCapacity(
+        profile="full",
+        usable_track_count=4,
+        complete_track_count=3,
+        partial_track_count=1,
+        unavailable_track_count=0,
+        usable_exhibit_count=4,
+        validated_finding_count=10,
+    )
+
+
+def test_a_documented_context_section_is_not_sized_like_a_data_section():
+    """An even split is what fills a knowledge track with generic caveats.
+
+    Job 5e6b0cf3 gave market_design_context the same target as a track holding
+    sixty-one rows of prices; its floor then obliged the writer to reach that
+    length from market-design prose alone.
+    """
+
+    even = allocate_report_word_targets(
+        _full_capacity(),
+        analysis_count=4,
+        include_implications=True,
+    )
+    weighted = allocate_report_word_targets(
+        _full_capacity(),
+        analysis_count=4,
+        include_implications=True,
+        analysis_weights=[2, 2, 2, 1],
+    )
+
+    assert even[0] == weighted[0]
+    # The document budget is unchanged; only its distribution moves.
+    assert sum(weighted[1]) == sum(even[1])
+    assert weighted[1][3] < even[1][3]
+    assert weighted[1][0] > even[1][0]
+    # Equal weights land within the one word an indivisible total leaves over.
+    assert max(weighted[1][:3]) - min(weighted[1][:3]) <= 1
+    assert all(words >= 40 for words in weighted[1])
+
+
+def test_word_weights_that_would_starve_a_section_fall_back_to_an_even_split():
+    """A plan whose section drops under the schema minimum cannot validate."""
+
+    capacity = ReportEvidenceCapacity(
+        profile="compact",
+        usable_track_count=1,
+        complete_track_count=1,
+        partial_track_count=0,
+        unavailable_track_count=0,
+        usable_exhibit_count=1,
+        validated_finding_count=2,
+    )
+
+    even = allocate_report_word_targets(
+        capacity,
+        analysis_count=5,
+        include_implications=False,
+    )
+    weighted = allocate_report_word_targets(
+        capacity,
+        analysis_count=5,
+        include_implications=False,
+        analysis_weights=[8, 1, 1, 1, 1],
+    )
+
+    assert weighted[1] == even[1]
+    assert all(words >= 40 for words in weighted[1])
+
+
 def _draft_section(
     section,
     manifest,
