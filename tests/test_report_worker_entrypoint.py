@@ -114,14 +114,8 @@ def test_worker_runtime_wires_repository_processor_and_bounded_pool(monkeypatch)
     assert captured["engine_kwargs"]["max_overflow"] == 0
     assert captured["repository_kwargs"]["engine"] is engine
     assert captured["worker_kwargs"]["repository"] is repository
-    assert captured["processor_kwargs"]["max_section_workers"] == (
-        report_worker.REPORT_SECTION_MAX_WORKERS
-    )
     assert captured["processor_kwargs"]["job_timeout_seconds"] == (
         report_worker.REPORT_JOB_TIMEOUT_SECONDS
-    )
-    assert captured["processor_kwargs"]["pipeline_v2_mode"] == (
-        report_worker.REPORT_PIPELINE_V2_MODE
     )
     assert captured["processor_kwargs"]["max_generative_calls"] == (
         report_worker.REPORT_MAX_GENERATIVE_CALLS

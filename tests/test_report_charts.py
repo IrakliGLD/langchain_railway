@@ -16,8 +16,6 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import pytest
 
 from agent.report_charts import build_report_charts
-from agent.report_evaluation import evaluate_report_plan
-from agent.report_planner import ReportPlanEvidenceError, validate_report_plan_evidence
 from contracts.report import ReportPlan
 from contracts.report_evidence import ReportEvidenceManifest
 from tests.fixtures_report_manifest import _manifest, _plan_payload
@@ -74,7 +72,6 @@ def test_relationship_chart_requires_verified_explicit_numeric_axes():
         }
     )
     plan = ReportPlan.model_validate(payload)
-    validate_report_plan_evidence(plan, manifest)
 
     decision = build_report_charts(plan, manifest)[0]
 
@@ -83,49 +80,6 @@ def test_relationship_chart_requires_verified_explicit_numeric_axes():
     assert decision.artifact.type == "scatter"
     assert decision.artifact.metadata.x_axis == "price"
     assert decision.artifact.metadata.series == ["hydro_generation"]
-
-    invalid_payload = deepcopy(payload)
-    invalid_payload["charts"][0]["series_fields"] = ["invented_metric"]
-    with pytest.raises(ReportPlanEvidenceError, match="unknown chart fields"):
-        validate_report_plan_evidence(
-            ReportPlan.model_validate(invalid_payload),
-            manifest,
-        )
-
-
-def test_shadow_evaluation_is_content_free_and_blocks_required_chart_omission():
-    valid = evaluate_report_plan(
-        ReportPlan.model_validate(_plan_payload()),
-        _manifest(),
-    )
-
-    assert valid.contract_version == "report-evaluation-v1"
-    assert valid.ready_for_generation is True
-    assert valid.evidence_reference_coverage == 1.0
-    assert valid.required_chart_build_rate == 1.0
-    assert valid.findings == []
-    assert "120.0" not in valid.model_dump_json()
-
-    payload = deepcopy(_plan_payload())
-    payload["charts"][0]["purpose"] = "relationship"
-    invalid = evaluate_report_plan(ReportPlan.model_validate(payload), _manifest())
-
-    assert invalid.ready_for_generation is False
-    assert invalid.required_chart_build_rate == 0.0
-    assert "REQUIRED_CHART_OMITTED" in invalid.findings
-
-
-def test_shadow_evaluation_fails_closed_without_throwing_on_unknown_chart_evidence():
-    payload = deepcopy(_plan_payload())
-    payload["charts"][0]["evidence_refs"] = [
-        "evidence:table:" + "9" * 16
-    ]
-    invalid = evaluate_report_plan(ReportPlan.model_validate(payload), _manifest())
-
-    assert invalid.ready_for_generation is False
-    assert invalid.evidence_reference_coverage < 1.0
-    assert "PLAN_EVIDENCE_INVALID" in invalid.findings
-    assert "REQUIRED_CHART_OMITTED" in invalid.findings
 
 
 def test_chart_column_roles_expose_the_axis_types_the_builder_uses():

@@ -23,9 +23,7 @@ import pytest
 
 from agent import report_grounding
 from agent.report_charts import build_report_charts
-from agent.report_evaluation import evaluate_report_plan
 from agent.report_intent import build_report_planning_context
-from agent.report_planner import ReportPlanEvidenceError
 from agent.report_research_planner import plan_report_research
 from agent.report_sections import (
     ReportSectionGenerationError,
@@ -135,86 +133,6 @@ def _manifest_for_query(query: str):
     return type(_manifest()).model_validate(payload)
 
 
-def _processor(
-    *,
-    pipeline_calls: list | None = None,
-    generated: list | None = None,
-    planning_contexts: list | None = None,
-    evaluator=None,
-    chart_builder=None,
-    execution_scopes: list | None = None,
-    job_timeout_seconds: int | None = None,
-    research_planner=None,
-    research_executor=None,
-    manifest_consolidator=None,
-    research_exhibit_builder=None,
-    evidence_gate_evaluator=None,
-    pipeline_v2_mode: str = "disabled",
-    max_research_tracks: int = 4,
-    max_research_workers: int = 3,
-):
-    calls = pipeline_calls if pipeline_calls is not None else []
-    generated_ids = generated if generated is not None else []
-    received_contexts = (
-        planning_contexts
-        if planning_contexts is not None
-        else []
-    )
-
-    def pipeline(query, **kwargs):
-        calls.append((query, kwargs))
-        if execution_scopes is not None:
-            execution_scopes.append(current_request_execution_scope())
-        return _pipeline_context(query)
-
-    def sections(query, plan, manifest, **kwargs):
-        return generate_report_sections(
-            query,
-            plan,
-            manifest,
-            existing_drafts=kwargs["existing_drafts"],
-            generate_section=lambda _q, _p, section, _m: (
-                generated_ids.append(section.section_id) or _draft(section)
-            ),
-            progress_callback=kwargs["progress_callback"],
-            max_workers=kwargs["max_workers"],
-            grounding_index=kwargs.get("grounding_index"),
-        )
-
-    def planner(_query, _manifest_value, **kwargs):
-        received_contexts.append(kwargs["planning_context"])
-        return ReportPlan.model_validate(_plan_payload())
-
-    overrides = {}
-    if evaluator is not None:
-        overrides["evaluator"] = evaluator
-    if chart_builder is not None:
-        overrides["chart_builder"] = chart_builder
-    if job_timeout_seconds is not None:
-        overrides["job_timeout_seconds"] = job_timeout_seconds
-    if research_planner is not None:
-        overrides["research_planner"] = research_planner
-    if research_executor is not None:
-        overrides["research_executor"] = research_executor
-    if manifest_consolidator is not None:
-        overrides["manifest_consolidator"] = manifest_consolidator
-    if research_exhibit_builder is not None:
-        overrides["research_exhibit_builder"] = research_exhibit_builder
-    if evidence_gate_evaluator is not None:
-        overrides["evidence_gate_evaluator"] = evidence_gate_evaluator
-    return ReportJobProcessor(
-        query_pipeline=pipeline,
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=planner,
-        section_generator=sections,
-        max_section_workers=5,
-        pipeline_v2_mode=pipeline_v2_mode,
-        max_research_tracks=max_research_tracks,
-        max_research_workers=max_research_workers,
-        **overrides,
-    )
-
-
 def _v2_processor(
     *,
     pipeline_calls: list | None = None,
@@ -291,7 +209,7 @@ def test_checkpoint_contract_binds_manifest_plan_and_completed_sections():
         ReportGenerationCheckpoint.model_validate(payload)
 
 
-def test_legacy_processor_rejects_pre_manifest_v3_checkpoint_cleanly():
+def test_a_pre_manifest_checkpoint_is_rejected_cleanly():
     checkpoint = ReportGenerationCheckpoint.model_validate(
         {
             "contract_version": "report-generation-checkpoint-v3",
@@ -303,30 +221,10 @@ def test_legacy_processor_rejects_pre_manifest_v3_checkpoint_cleanly():
     lease = _lease(checkpoint=checkpoint.model_dump(mode="json"))
 
     with pytest.raises(ReportJobFailure) as exc_info:
-        _processor()(lease, _Control())
+        _v2_processor()(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_CHECKPOINT_INVALID"
     assert exc_info.value.retryable is False
-
-
-def test_checkpoint_payload_is_serialized_once_before_repository_boundary():
-    plan = ReportPlan.model_validate(_plan_payload())
-    planning_context = build_report_planning_context(
-        _pipeline_context("Explain the price trend.")
-    )
-
-    payload = ReportJobProcessor._checkpoint_payload(
-        _manifest(),
-        plan,
-        {},
-        planning_context=planning_context,
-    )
-
-    assert isinstance(payload, str)
-    checkpoint = ReportGenerationCheckpoint.model_validate(
-        json.loads(payload)
-    )
-    assert checkpoint.checkpoint_stage == "plan_ready"
 
 
 def test_checkpoint_v2_expresses_only_valid_evidence_and_plan_stages():
@@ -438,7 +336,6 @@ def test_report_attempt_logs_stage_aware_budget_telemetry(
         }
     )
     processor = ReportJobProcessor(
-        pipeline_v2_mode="shadow",
         max_generative_calls=3,
     )
     monkeypatch.setattr(report_job_processor, "metrics", metrics)
@@ -460,7 +357,6 @@ def test_report_attempt_logs_stage_aware_budget_telemetry(
     )
     payload = json.loads(record.split(" ", 1)[1])
     assert payload["outcome"] == "completed"
-    assert payload["pipeline_v2_mode"] == "shadow"
     assert payload["llm_calls"] == 2
     assert payload["generative_call_budget"] == 3
     assert payload["over_generative_call_budget"] is False
@@ -503,6 +399,7 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
         return draft
 
     processor = ReportJobProcessor(
+        track_analysis_mode="disabled",
         query_pipeline=lambda *_args, **_kwargs: record(
             "query_pipeline",
             SimpleNamespace(
@@ -511,13 +408,6 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
                 provenance_refs=["query:prices"],
             ),
         ),
-        planner=lambda *_args, **_kwargs: pytest.fail(
-            "enabled v2 must not invoke the legacy report planner"
-        ),
-        section_generator=lambda *_args, **_kwargs: pytest.fail(
-            "enabled v2 must not invoke per-section generation"
-        ),
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: record(
             "research_planner",
             research_plan,
@@ -682,7 +572,6 @@ def test_track_analysis_shadow_is_parallel_isolated_and_does_not_change_output(
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
     processor = ReportJobProcessor(
         query_pipeline=query_pipeline,
-        pipeline_v2_mode="enabled",
         track_analysis_mode="shadow",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -749,7 +638,6 @@ def test_track_analysis_shadow_infrastructure_failure_cannot_fail_report(
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
     processor = ReportJobProcessor(
         query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="shadow",
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
@@ -809,7 +697,6 @@ def test_track_analysis_enabled_uses_track_packets_without_global_broadcast(
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
     processor = ReportJobProcessor(
         query_pipeline=global_pipeline,
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -871,7 +758,6 @@ def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
         query_pipeline=lambda *_args, **_kwargs: pytest.fail(
             "enabled track analysis must not run global enrichment"
         ),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -948,7 +834,6 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
         query_pipeline=lambda *_args, **_kwargs: pytest.fail(
             "enabled track analysis must not run global enrichment"
         ),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -1042,7 +927,6 @@ def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):
         query_pipeline=lambda *_args, **_kwargs: pytest.fail(
             "enabled track analysis must not run global enrichment"
         ),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -1091,7 +975,6 @@ def test_enabled_v2_resumes_document_plan_without_research_calls():
     )
     generator_calls = []
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: pytest.fail(
             "resume must not re-plan research"
         ),
@@ -1141,7 +1024,6 @@ def test_enabled_v2_resumes_validated_draft_without_another_model_call():
         document_draft=draft,
     )
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: pytest.fail(
             "draft resume must not invoke a model"
         ),
@@ -1180,7 +1062,6 @@ def test_enabled_v2_two_call_budget_disables_document_repair():
         # Inert pipeline: narrative enrichment is not this test's subject,
         # and without an injection the processor would run the real one.
         query_pipeline=lambda *_args, **_kwargs: None,
-        pipeline_v2_mode="enabled",
         max_generative_calls=2,
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
@@ -1268,7 +1149,6 @@ def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
         )
 
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=invalid_planner,
     )
 
@@ -1289,7 +1169,6 @@ def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
 
 def test_enabled_v2_does_not_retry_ambiguous_research_planner_delivery():
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: (
             _ for _ in ()
         ).throw(
@@ -1322,7 +1201,6 @@ def test_enabled_v2_document_plan_validation_failure_is_typed_as_plan_invalid():
         # Inert pipeline: narrative enrichment is not this test's subject,
         # and without an injection the processor would run the real one.
         query_pipeline=lambda *_args, **_kwargs: None,
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
         manifest_consolidator=lambda *_args, **_kwargs: manifest,
@@ -1403,7 +1281,7 @@ def test_checkpoint_for_a_different_query_fails_closed():
     )
 
     with pytest.raises(ReportJobFailure) as exc_info:
-        _processor()(lease, _Control())
+        _v2_processor()(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_CHECKPOINT_INVALID"
     assert exc_info.value.retryable is False

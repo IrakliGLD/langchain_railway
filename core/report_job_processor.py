@@ -14,12 +14,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agent.report_assembly import ReportAssemblyError, assemble_report
 from agent.report_charts import (
     build_report_chart_requests,
-    build_report_charts,
     build_report_research_exhibits,
-    demote_unbuildable_required_charts,
 )
 from agent.report_document_assembly import (
     ReportDocumentAssemblyError,
@@ -30,19 +27,11 @@ from agent.report_document_generation import (
     generate_report_document,
 )
 from agent.report_document_planner import build_report_document_plan
-from agent.report_evaluation import evaluate_report_plan
 from agent.report_evidence import (
     build_report_evidence_manifest,
 )
 from agent.report_evidence_gate import evaluate_report_evidence
 from agent.report_grounding import build_evidence_grounding_index
-from agent.report_intent import build_report_planning_context
-from agent.report_planner import (
-    ReportPlanEvidenceError,
-    ReportPlanSemanticError,
-    plan_report,
-    validate_report_plan_semantics,
-)
 from agent.report_research_execution import (
     consolidate_report_evidence_packets,
     execute_report_research,
@@ -60,12 +49,10 @@ from agent.report_sections import (
 )
 from config import (
     REPORT_MAX_GENERATIVE_CALLS,
-    REPORT_PIPELINE_V2_MODE,
     REPORT_RESEARCH_MAX_TRACKS,
     REPORT_RESEARCH_MAX_WORKERS,
     REPORT_TRACK_ANALYSIS_MODE,
 )
-from contracts.report import ReportPlan, ReportPlanningContext
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
     ReportDocumentDraft,
@@ -100,12 +87,6 @@ from utils.request_deadline import (
 _LOGGER = logging.getLogger("Enai.ReportProcessor")
 
 QueryPipeline = Callable[..., Any]
-EvidenceBuilder = Callable[[Any], Any]
-Planner = Callable[..., Any]
-Evaluator = Callable[..., Any]
-ChartBuilder = Callable[[ReportPlan, ReportEvidenceManifest], Any]
-SectionGenerator = Callable[..., list[ReportSectionDraft]]
-Assembler = Callable[..., Any]
 ResearchPlanner = Callable[..., Any]
 ResearchExecutor = Callable[..., Any]
 TrackAnalyzer = Callable[..., Any]
@@ -266,15 +247,7 @@ class ReportJobProcessor:
         self,
         *,
         query_pipeline: QueryPipeline | None = None,
-        evidence_builder: EvidenceBuilder = build_report_evidence_manifest,
-        planner: Planner = plan_report,
-        evaluator: Evaluator = evaluate_report_plan,
-        chart_builder: ChartBuilder = build_report_charts,
-        section_generator: SectionGenerator = generate_report_sections,
-        assembler: Assembler = assemble_report,
-        max_section_workers: int = 4,
         job_timeout_seconds: int = 600,
-        pipeline_v2_mode: str = REPORT_PIPELINE_V2_MODE,
         max_generative_calls: int = REPORT_MAX_GENERATIVE_CALLS,
         research_planner: ResearchPlanner = plan_report_research,
         max_research_tracks: int = REPORT_RESEARCH_MAX_TRACKS,
@@ -300,17 +273,9 @@ class ReportJobProcessor:
             build_report_chart_requests
         ),
     ) -> None:
-        if not 1 <= max_section_workers <= 8:
-            raise ValueError(
-                "max_section_workers must be between 1 and 8."
-            )
         if not 1 <= job_timeout_seconds <= 3600:
             raise ValueError(
                 "job_timeout_seconds must be between 1 and 3600."
-            )
-        if pipeline_v2_mode not in {"disabled", "shadow", "enabled"}:
-            raise ValueError(
-                "pipeline_v2_mode must be disabled, shadow, or enabled."
             )
         if track_analysis_mode not in {"disabled", "shadow", "enabled"}:
             raise ValueError(
@@ -330,15 +295,7 @@ class ReportJobProcessor:
                 "max_research_tracks."
             )
         self._query_pipeline = query_pipeline
-        self._evidence_builder = evidence_builder
-        self._planner = planner
-        self._evaluator = evaluator
-        self._chart_builder = chart_builder
-        self._section_generator = section_generator
-        self._assembler = assembler
-        self._max_section_workers = max_section_workers
         self._job_timeout_seconds = job_timeout_seconds
-        self._pipeline_v2_mode = pipeline_v2_mode
         self._max_generative_calls = max_generative_calls
         self._research_planner = research_planner
         self._max_research_tracks = max_research_tracks
@@ -362,53 +319,6 @@ class ReportJobProcessor:
         expected_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
         if manifest.query_digest != expected_digest:
             raise _report_failure("REPORT_CHECKPOINT_INVALID")
-
-    @staticmethod
-    def _checkpoint_payload(
-        manifest: ReportEvidenceManifest,
-        plan: ReportPlan,
-        completed_by_id: dict[str, ReportSectionDraft],
-        *,
-        planning_context: ReportPlanningContext | None = None,
-    ) -> str:
-        checkpoint_fields: dict[str, Any] = {
-            "contract_version": (
-                "report-generation-checkpoint-v2"
-                if planning_context is not None
-                else "report-generation-checkpoint-v1"
-            ),
-            "manifest": manifest,
-            "plan": plan,
-            "completed_sections": [
-                completed_by_id[section.section_id]
-                for section in plan.sections
-                if section.section_id in completed_by_id
-            ],
-        }
-        if planning_context is not None:
-            checkpoint_fields.update(
-                {
-                    "checkpoint_stage": "plan_ready",
-                    "planning_context": planning_context,
-                }
-            )
-        checkpoint = ReportGenerationCheckpoint(**checkpoint_fields)
-        return checkpoint.durable_json()
-
-    @staticmethod
-    def _evidence_checkpoint_payload(
-        manifest: ReportEvidenceManifest,
-        planning_context: ReportPlanningContext,
-    ) -> str:
-        checkpoint = ReportGenerationCheckpoint(
-            contract_version="report-generation-checkpoint-v2",
-            checkpoint_stage="evidence_ready",
-            manifest=manifest,
-            planning_context=planning_context,
-            plan=None,
-            completed_sections=[],
-        )
-        return checkpoint.durable_json()
 
     @classmethod
     def _v3_checkpoint_payload(
@@ -520,7 +430,6 @@ class ReportJobProcessor:
                     report_stage_calls > self._max_generative_calls
                 ),
                 "report_stage_calls": report_stage_calls,
-                "pipeline_v2_mode": self._pipeline_v2_mode,
                 "prompt_tokens": max(
                     0,
                     int(usage.get("prompt_tokens", 0)),
