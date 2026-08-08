@@ -447,6 +447,48 @@ git commit -m "Let a caller supply the question analysis instead of paying for i
 
 ### Task 2.2: Map a research track to an analysis spec
 
+> **RE-PLANNED 2026-08-07 after reading the contracts — DO NOT EXECUTE AS WRITTEN.**
+>
+> The task assumed `requested_metrics` translates into
+> `analysis_requirements.derived_metrics`. It does not. The two are different
+> vocabularies:
+>
+> | a track's `requested_metrics` | the analyzer's `DerivedMetricName` |
+> |---|---|
+> | `average_price`, `minimum_price`, `maximum_price`, `percent_change`, `import_dependency_ratio`, `generation_mix` | `mom_absolute_change`, `mom_percent_change`, `yoy_absolute_change`, `yoy_percent_change`, `share_delta_mom`, `correlation_to_target`, `trend_slope`, … |
+>
+> They barely overlap, and the gap is not cosmetic. `percent_change` cannot say
+> whether it means month-on-month or year-on-year — **only the research
+> question text carries that**, which is exactly what the per-track analyzer
+> reads today ("how did it change from April 2026?" → `mom_*`). A mapping built
+> from `requested_metrics` and `evidence_mode` provably cannot reproduce it.
+>
+> Getting it wrong is not a test failure, it is silent report degradation:
+> emitting no derived metrics strips the MoM/YoY analysis, the why-context, and
+> the derived charts; emitting the wrong ones re-triggers
+> `missing_evidence_for_metrics`, the defect just fixed in Phase 0. And
+> `query_type`, `preferred_path`, and `answer_kind` all steer routing, which the
+> phased-audit rules say requires explicit disagreement review before cutover.
+>
+> **Corrected approach — contract first, then shadow:**
+>
+> - **Task 2.2a:** extend `ReportResearchTrack` with the analysis fields the
+>   planner is already positioned to decide (`query_type`, `preferred_path`,
+>   `answer_kind`, `derived_metrics`) and teach `llm_plan_report_research` to
+>   emit them. An LLM still makes the semantic call — once, for the whole
+>   report, in a call already being paid for — instead of four times from
+>   re-parsed prose.
+> - **Task 2.2b:** build `report_track_analysis_spec` over those fields, and run
+>   it in **shadow**: the nested analyzer still decides, the spec is computed
+>   alongside, and disagreements are logged
+>   (`REPORT_TRACK_SPEC_DISAGREEMENT`, naming field, planner value, analyzer
+>   value — enum values only, never query text).
+> - **Task 2.2c:** review the disagreements on real reports. Cut over only when
+>   they are understood, and keep the flag.
+>
+> This costs one extra deploy-and-observe cycle and removes the guesswork from
+> the step that decides what every report analyses.
+
 **Files:**
 - Create: `agent/report_track_specs.py`
 - Test: `tests/test_report_track_specs.py` (create)
