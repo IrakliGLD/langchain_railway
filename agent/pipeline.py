@@ -96,6 +96,7 @@ from contracts.question_analysis import (
     DerivedMetricRequest,
     KnowledgeTopicName,
     PreferredPath,
+    QuestionAnalysis,
     RenderStyle,
 )
 from contracts.report_evidence import ReportEvidenceKind
@@ -3039,6 +3040,7 @@ def _process_query_impl(
     actor_id: str = "",
     request_id: str = "",
     answer_mode: str = AnswerMode.STANDARD.value,
+    question_analysis: QuestionAnalysis | None = None,
 ) -> QueryContext:
     """Run the full query pipeline and return a populated QueryContext."""
     # Detect clarification-selection replies (e.g. "1", "option 2")
@@ -3142,7 +3144,30 @@ def _process_query_impl(
         return ctx
 
     # Stage 0.2: structured question analysis
-    if ENABLE_QUESTION_ANALYZER_SHADOW or ENABLE_QUESTION_ANALYZER_HINTS:
+    if question_analysis is not None:
+        # The caller already holds the structured intent. A report track used
+        # to serialize its planner's decision into a question and pay a second
+        # model call to parse it back — structured to prose to structured, once
+        # per track. Adopting it directly costs nothing and changes no stage
+        # downstream, all of which read ctx.question_analysis either way.
+        t_stage = time.time()
+        ctx.question_analysis = question_analysis
+        ctx.question_analysis_source = "injected"
+        _trace_stage(
+            "stage_0_2_question_analyzer",
+            t_stage,
+            mode="injected",
+            ok=True,
+            error=False,
+            query_type=(
+                question_analysis.classification.query_type.value
+            ),
+            preferred_path=(
+                question_analysis.routing.preferred_path.value
+            ),
+            confidence=question_analysis.classification.confidence,
+        )
+    elif ENABLE_QUESTION_ANALYZER_SHADOW or ENABLE_QUESTION_ANALYZER_HINTS:
         t_stage = time.time()
         analyzer_mode = "active" if ENABLE_QUESTION_ANALYZER_HINTS else "shadow"
         analyzer_stage = (
@@ -3403,6 +3428,7 @@ def process_query(
     actor_id: str = "",
     request_id: str = "",
     answer_mode: str = AnswerMode.STANDARD.value,
+    question_analysis: QuestionAnalysis | None = None,
 ) -> QueryContext:
     """Bind the trusted request identity/deadline around every deep I/O call."""
     with bind_request_execution_scope(
@@ -3420,4 +3446,5 @@ def process_query(
             actor_id=actor_id,
             request_id=request_id,
             answer_mode=answer_mode,
+            question_analysis=question_analysis,
         )

@@ -23,9 +23,7 @@ import pytest
 
 from agent import report_grounding
 from agent.report_charts import build_report_charts
-from agent.report_evaluation import evaluate_report_plan
 from agent.report_intent import build_report_planning_context
-from agent.report_planner import ReportPlanEvidenceError
 from agent.report_research_planner import plan_report_research
 from agent.report_sections import (
     ReportSectionGenerationError,
@@ -40,9 +38,13 @@ from contracts.report_jobs import ReportJobLease, ReportJobPhase
 from contracts.report_result import ReportResult, ReportResultV2
 from contracts.report_sections import ReportSectionDraft
 from core import report_job_processor
-from core.report_job_processor import ReportJobProcessor
+from core.report_job_processor import (
+    ReportJobProcessor,
+    _diagnostic_error_locations,
+)
 from core.report_job_worker import ReportJobFailure
 from models import QueryContext
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 from tests.test_report_document_pipeline_v2 import (
     _QUERY as _V2_QUERY,
 )
@@ -50,7 +52,6 @@ from tests.test_report_document_pipeline_v2 import (
     _document_components,
     _valid_document_draft,
 )
-from tests.test_report_planner import _manifest, _plan_payload
 from tests.test_report_research_contract import _research_plan_payload
 from tests.test_report_sections import _draft
 from utils.provider_attempts import (
@@ -132,31 +133,30 @@ def _manifest_for_query(query: str):
     return type(_manifest()).model_validate(payload)
 
 
-def _processor(
+def _v2_processor(
     *,
     pipeline_calls: list | None = None,
-    generated: list | None = None,
-    planning_contexts: list | None = None,
-    evaluator=None,
-    chart_builder=None,
     execution_scopes: list | None = None,
     job_timeout_seconds: int | None = None,
-    research_planner=None,
-    research_executor=None,
-    manifest_consolidator=None,
-    research_exhibit_builder=None,
-    evidence_gate_evaluator=None,
-    pipeline_v2_mode: str = "disabled",
-    max_research_tracks: int = 4,
-    max_research_workers: int = 3,
+    **overrides,
 ):
+    """A document-pipeline processor with the legacy factory's observability.
+
+    ``_processor`` above builds the retired path. These hooks — the nested
+    pipeline's call kwargs and the execution scope bound around an attempt —
+    guard behaviour that is shared, not legacy, so they follow the tests that
+    need them onto the surviving path rather than being deleted with it.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
     calls = pipeline_calls if pipeline_calls is not None else []
-    generated_ids = generated if generated is not None else []
-    received_contexts = (
-        planning_contexts
-        if planning_contexts is not None
-        else []
-    )
 
     def pipeline(query, **kwargs):
         calls.append((query, kwargs))
@@ -164,52 +164,26 @@ def _processor(
             execution_scopes.append(current_request_execution_scope())
         return _pipeline_context(query)
 
-    def sections(query, plan, manifest, **kwargs):
-        return generate_report_sections(
-            query,
-            plan,
-            manifest,
-            existing_drafts=kwargs["existing_drafts"],
-            generate_section=lambda _q, _p, section, _m: (
-                generated_ids.append(section.section_id) or _draft(section)
-            ),
-            progress_callback=kwargs["progress_callback"],
-            max_workers=kwargs["max_workers"],
-            grounding_index=kwargs.get("grounding_index"),
-        )
-
-    def planner(_query, _manifest_value, **kwargs):
-        received_contexts.append(kwargs["planning_context"])
-        return ReportPlan.model_validate(_plan_payload())
-
-    overrides = {}
-    if evaluator is not None:
-        overrides["evaluator"] = evaluator
-    if chart_builder is not None:
-        overrides["chart_builder"] = chart_builder
+    arguments = {
+        "query_pipeline": pipeline,
+        # Deliberately disabled: this is the mode that still runs the nested
+        # pipeline for report-wide narrative evidence, which is what the
+        # identity and deadline assertions observe.
+        "track_analysis_mode": "disabled",
+        "research_planner": lambda *_args, **_kwargs: research_plan,
+        "research_executor": lambda *_args, **_kwargs: packets,
+        "manifest_consolidator": lambda *_args, **_kwargs: manifest,
+        "research_exhibit_builder": lambda *_args, **_kwargs: decisions,
+        "evidence_gate_evaluator": lambda *_args, **_kwargs: gate,
+        "document_planner": lambda *_args, **_kwargs: document_plan,
+        "document_generator": lambda *_args, **_kwargs: (
+            _valid_document_draft(document_plan, manifest)
+        ),
+    }
     if job_timeout_seconds is not None:
-        overrides["job_timeout_seconds"] = job_timeout_seconds
-    if research_planner is not None:
-        overrides["research_planner"] = research_planner
-    if research_executor is not None:
-        overrides["research_executor"] = research_executor
-    if manifest_consolidator is not None:
-        overrides["manifest_consolidator"] = manifest_consolidator
-    if research_exhibit_builder is not None:
-        overrides["research_exhibit_builder"] = research_exhibit_builder
-    if evidence_gate_evaluator is not None:
-        overrides["evidence_gate_evaluator"] = evidence_gate_evaluator
-    return ReportJobProcessor(
-        query_pipeline=pipeline,
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=planner,
-        section_generator=sections,
-        max_section_workers=5,
-        pipeline_v2_mode=pipeline_v2_mode,
-        max_research_tracks=max_research_tracks,
-        max_research_workers=max_research_workers,
-        **overrides,
-    )
+        arguments["job_timeout_seconds"] = job_timeout_seconds
+    arguments.update(overrides)
+    return ReportJobProcessor(**arguments)
 
 
 def test_checkpoint_contract_binds_manifest_plan_and_completed_sections():
@@ -235,7 +209,7 @@ def test_checkpoint_contract_binds_manifest_plan_and_completed_sections():
         ReportGenerationCheckpoint.model_validate(payload)
 
 
-def test_legacy_processor_rejects_pre_manifest_v3_checkpoint_cleanly():
+def test_a_pre_manifest_checkpoint_is_rejected_cleanly():
     checkpoint = ReportGenerationCheckpoint.model_validate(
         {
             "contract_version": "report-generation-checkpoint-v3",
@@ -247,30 +221,10 @@ def test_legacy_processor_rejects_pre_manifest_v3_checkpoint_cleanly():
     lease = _lease(checkpoint=checkpoint.model_dump(mode="json"))
 
     with pytest.raises(ReportJobFailure) as exc_info:
-        _processor()(lease, _Control())
+        _v2_processor()(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_CHECKPOINT_INVALID"
     assert exc_info.value.retryable is False
-
-
-def test_checkpoint_payload_is_serialized_once_before_repository_boundary():
-    plan = ReportPlan.model_validate(_plan_payload())
-    planning_context = build_report_planning_context(
-        _pipeline_context("Explain the price trend.")
-    )
-
-    payload = ReportJobProcessor._checkpoint_payload(
-        _manifest(),
-        plan,
-        {},
-        planning_context=planning_context,
-    )
-
-    assert isinstance(payload, str)
-    checkpoint = ReportGenerationCheckpoint.model_validate(
-        json.loads(payload)
-    )
-    assert checkpoint.checkpoint_stage == "plan_ready"
 
 
 def test_checkpoint_v2_expresses_only_valid_evidence_and_plan_stages():
@@ -316,76 +270,18 @@ def test_checkpoint_v2_expresses_only_valid_evidence_and_plan_stages():
         )
 
 
-def test_fresh_job_runs_pipeline_parallel_sections_and_deterministic_assembly():
-    pipeline_calls: list = []
-    generated: list = []
-    planning_contexts: list = []
-    lease = _lease()
-    control = _Control()
-
-    raw_result = _processor(
-        pipeline_calls=pipeline_calls,
-        generated=generated,
-        planning_contexts=planning_contexts,
-    )(lease, control)
-    result = ReportResult.model_validate(raw_result)
-
-    assert result.contract_version == "report-result-v1"
-    assert [section.section_id for section in result.sections] == [
-        section["section_id"] for section in _plan_payload()["sections"]
-    ]
-    assert set(generated) == {
-        section["section_id"] for section in _plan_payload()["sections"]
-    }
-    assert len(pipeline_calls) == 1
-    pipeline_query, pipeline_kwargs = pipeline_calls[0]
-    assert pipeline_query == lease.query
-    assert pipeline_kwargs["trace_id"] == str(lease.job_id)
-    assert pipeline_kwargs["actor_id"] == str(lease.actor_user_id)
-    # Derived from the attempt identity, not equal to it: the nested pipeline
-    # needs its own provider-attempt namespace (see the narrative-identity
-    # tests), while still being traceable back to this attempt.
-    assert pipeline_kwargs["request_id"] == (
-        f"{lease.request_id}:attempt:{lease.attempt_count}:narrative"
-    )
-    assert pipeline_kwargs["request_deadline"].source == "report_job"
-    assert pipeline_kwargs["answer_mode"] == "report"
-    assert len(planning_contexts) == 1
-    assert planning_contexts[0].intent.value == "general"
-    assert planning_contexts[0].language_code == "en"
-    assert planning_contexts[0].requires_table is True
-    assert control.heartbeats[0][:2] == (ReportJobPhase.PLANNING, 10)
-    assert control.heartbeats[-1][:2] == (ReportJobPhase.ASSEMBLING, 90)
-    assert control.heartbeats[-1][2] is None
-    assert all(
-        earlier[1] <= later[1]
-        for earlier, later in zip(control.heartbeats, control.heartbeats[1:])
-    )
-    empty_generation_checkpoints = [
-        checkpoint
-        for phase, progress, checkpoint in control.heartbeats
-        if (
-            phase is ReportJobPhase.GENERATING_SECTIONS
-            and progress == 25
-            and checkpoint is not None
-            and checkpoint["completed_sections"] == []
-        )
-    ]
-    assert len(empty_generation_checkpoints) == 1
-
-
 def test_report_attempt_binds_identity_and_deadline_for_deep_calls():
-    lease = _lease()
+    lease = _lease(query=_V2_QUERY)
     scopes = []
     pipeline_calls = []
 
-    result = _processor(
+    result = _v2_processor(
         pipeline_calls=pipeline_calls,
         execution_scopes=scopes,
         job_timeout_seconds=120,
     )(lease, _Control())
 
-    ReportResult.model_validate(result)
+    ReportResultV2.model_validate(result)
     assert len(scopes) == 1
     scope = scopes[0]
     assert scope is not None
@@ -440,7 +336,6 @@ def test_report_attempt_logs_stage_aware_budget_telemetry(
         }
     )
     processor = ReportJobProcessor(
-        pipeline_v2_mode="shadow",
         max_generative_calls=3,
     )
     monkeypatch.setattr(report_job_processor, "metrics", metrics)
@@ -462,7 +357,6 @@ def test_report_attempt_logs_stage_aware_budget_telemetry(
     )
     payload = json.loads(record.split(" ", 1)[1])
     assert payload["outcome"] == "completed"
-    assert payload["pipeline_v2_mode"] == "shadow"
     assert payload["llm_calls"] == 2
     assert payload["generative_call_budget"] == 3
     assert payload["over_generative_call_budget"] is False
@@ -470,129 +364,6 @@ def test_report_attempt_logs_stage_aware_budget_telemetry(
         "report_research_planner",
         "report_document_writer",
     }
-
-
-def test_shadow_research_planner_runs_before_legacy_pipeline_without_cutover(
-    caplog,
-):
-    lease = _lease()
-    pipeline_calls = []
-    research_calls = []
-    execution_calls = []
-    consolidation_calls = []
-    gate_calls = []
-
-    def research_planner(query: str, *, max_tracks: int):
-        assert pipeline_calls == []
-        research_calls.append((query, max_tracks))
-        return _research_plan_payload(
-            query_digest=hashlib.sha256(query.encode("utf-8")).hexdigest()
-        )
-
-    def research_executor(query, plan, *, max_workers):
-        execution_calls.append((query, len(plan.tracks), max_workers))
-        return []
-
-    def manifest_consolidator(query, packets):
-        consolidation_calls.append((query, packets))
-        return _manifest_for_query(query)
-
-    def exhibit_builder(packets, manifest):
-        assert packets == []
-        assert manifest.query_digest == hashlib.sha256(
-            lease.query.encode("utf-8")
-        ).hexdigest()
-        return []
-
-    def gate_evaluator(plan, packets, *, chart_decisions):
-        gate_calls.append((len(plan.tracks), packets, chart_decisions))
-        return {
-            "contract_version": "report-evidence-gate-v1",
-            "query_digest": plan.query_digest,
-            "status": "ready",
-            "tracks": [
-                {
-                    "track_id": track.track_id,
-                    "required": track.required,
-                    "status": "complete",
-                    "evidence_item_count": 1,
-                    "numeric_observation_count": 0,
-                    "chart_candidate_count": 0,
-                    "finding_codes": [],
-                }
-                for track in plan.tracks
-            ],
-            "finding_codes": [],
-        }
-
-    caplog.set_level("INFO", logger="Enai.ReportProcessor")
-    result = _processor(
-        pipeline_calls=pipeline_calls,
-        research_planner=research_planner,
-        research_executor=research_executor,
-        manifest_consolidator=manifest_consolidator,
-        research_exhibit_builder=exhibit_builder,
-        evidence_gate_evaluator=gate_evaluator,
-        pipeline_v2_mode="shadow",
-        max_research_tracks=4,
-        max_research_workers=3,
-    )(lease, _Control())
-
-    assert result["contract_version"] == "report-result-v1"
-    assert research_calls == [(lease.query, 4)]
-    assert execution_calls == [(lease.query, 3, 3)]
-    assert consolidation_calls == [(lease.query, [])]
-    assert gate_calls == [(3, [], [])]
-    assert len(pipeline_calls) == 1
-    record = next(
-        item.message
-        for item in caplog.records
-        if item.message.startswith("REPORT_RESEARCH_PLAN_SHADOW ")
-    )
-    payload = json.loads(record.split(" ", 1)[1])
-    assert payload["outcome"] == "valid"
-    assert payload["track_count"] == 3
-    assert payload["packet_count"] == 0
-    assert payload["evidence_item_count"] == len(_manifest().items)
-    assert payload["coverage_status"] == "ready"
-    assert payload["built_chart_count"] == 0
-    assert "query" not in payload
-
-
-def test_shadow_research_failure_is_content_free_and_does_not_fail_legacy(
-    caplog,
-):
-    lease = _lease()
-
-    def unavailable_planner(*_args, **_kwargs):
-        raise RuntimeError("private-query-fragment")
-
-    caplog.set_level("INFO", logger="Enai.ReportProcessor")
-    result = _processor(
-        research_planner=unavailable_planner,
-        pipeline_v2_mode="shadow",
-    )(lease, _Control())
-
-    assert result["contract_version"] == "report-result-v1"
-    record = next(
-        item.message
-        for item in caplog.records
-        if item.message.startswith("REPORT_RESEARCH_PLAN_SHADOW ")
-    )
-    assert '"outcome":"failed"' in record
-    assert "private-query-fragment" not in record
-
-
-def test_disabled_pipeline_does_not_invoke_research_planner():
-    def unexpected_planner(*_args, **_kwargs):
-        raise AssertionError("disabled mode must not run v2 planning")
-
-    result = _processor(
-        research_planner=unexpected_planner,
-        pipeline_v2_mode="disabled",
-    )(_lease(), _Control())
-
-    assert result["contract_version"] == "report-result-v1"
 
 
 def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
@@ -628,6 +399,7 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
         return draft
 
     processor = ReportJobProcessor(
+        track_analysis_mode="disabled",
         query_pipeline=lambda *_args, **_kwargs: record(
             "query_pipeline",
             SimpleNamespace(
@@ -636,13 +408,6 @@ def test_enabled_v2_runs_without_legacy_analyzer_and_checkpoints_each_stage():
                 provenance_refs=["query:prices"],
             ),
         ),
-        planner=lambda *_args, **_kwargs: pytest.fail(
-            "enabled v2 must not invoke the legacy report planner"
-        ),
-        section_generator=lambda *_args, **_kwargs: pytest.fail(
-            "enabled v2 must not invoke per-section generation"
-        ),
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: record(
             "research_planner",
             research_plan,
@@ -807,7 +572,6 @@ def test_track_analysis_shadow_is_parallel_isolated_and_does_not_change_output(
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
     processor = ReportJobProcessor(
         query_pipeline=query_pipeline,
-        pipeline_v2_mode="enabled",
         track_analysis_mode="shadow",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -874,7 +638,6 @@ def test_track_analysis_shadow_infrastructure_failure_cannot_fail_report(
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
     processor = ReportJobProcessor(
         query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="shadow",
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
@@ -934,7 +697,6 @@ def test_track_analysis_enabled_uses_track_packets_without_global_broadcast(
     caplog.set_level("INFO", logger="Enai.ReportProcessor")
     processor = ReportJobProcessor(
         query_pipeline=global_pipeline,
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -996,7 +758,6 @@ def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
         query_pipeline=lambda *_args, **_kwargs: pytest.fail(
             "enabled track analysis must not run global enrichment"
         ),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -1038,6 +799,7 @@ def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
             "track_id": failed_track_id,
             "error_type": "RuntimeError",
             "reason": "unknown",
+            "invalid_fields": [],
         }
     ]
 
@@ -1072,7 +834,6 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
         query_pipeline=lambda *_args, **_kwargs: pytest.fail(
             "enabled track analysis must not run global enrichment"
         ),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -1097,8 +858,35 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
             "track_id": failed_track_id,
             "error_type": "ReportTrackAnalysisUnusable",
             "reason": "missing_derived_evidence",
+            "invalid_fields": [],
         }
     ]
+
+
+def test_a_rejected_contract_names_the_field_that_rejected_the_track():
+    """"ValidationError, reason=unknown" leaves the cause to be guessed.
+
+    Job 5e6b0cf3 discarded supply_mix_and_flows that way, and the packet
+    contract that rejected it had to be inferred from the report's prose.
+    """
+    from pydantic import ValidationError
+
+    from contracts.report_research import ReportEvidencePacket
+
+    try:
+        ReportEvidencePacket(
+            contract_version="report-evidence-packet-v1",
+            track_id="prices",
+            status="complete",
+            gaps=["duplicate", "duplicate"],
+        )
+    except ValidationError as exc:
+        located = _diagnostic_error_locations(exc)
+    else:  # pragma: no cover - the contract must reject duplicates
+        raise AssertionError("duplicate gaps must not validate")
+
+    assert located == ["gaps"]
+    assert _diagnostic_error_locations(RuntimeError("boom")) == []
 
 
 def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):
@@ -1139,7 +927,6 @@ def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):
         query_pipeline=lambda *_args, **_kwargs: pytest.fail(
             "enabled track analysis must not run global enrichment"
         ),
-        pipeline_v2_mode="enabled",
         track_analysis_mode="enabled",
         track_analyzer=track_analyzer,
         research_planner=lambda *_args, **_kwargs: research_plan,
@@ -1188,7 +975,6 @@ def test_enabled_v2_resumes_document_plan_without_research_calls():
     )
     generator_calls = []
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: pytest.fail(
             "resume must not re-plan research"
         ),
@@ -1238,7 +1024,6 @@ def test_enabled_v2_resumes_validated_draft_without_another_model_call():
         document_draft=draft,
     )
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: pytest.fail(
             "draft resume must not invoke a model"
         ),
@@ -1277,7 +1062,6 @@ def test_enabled_v2_two_call_budget_disables_document_repair():
         # Inert pipeline: narrative enrichment is not this test's subject,
         # and without an injection the processor would run the real one.
         query_pipeline=lambda *_args, **_kwargs: None,
-        pipeline_v2_mode="enabled",
         max_generative_calls=2,
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
@@ -1365,7 +1149,6 @@ def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
         )
 
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=invalid_planner,
     )
 
@@ -1386,7 +1169,6 @@ def test_enabled_v2_logs_safe_research_plan_schema_diagnostics(caplog):
 
 def test_enabled_v2_does_not_retry_ambiguous_research_planner_delivery():
     processor = ReportJobProcessor(
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: (
             _ for _ in ()
         ).throw(
@@ -1419,7 +1201,6 @@ def test_enabled_v2_document_plan_validation_failure_is_typed_as_plan_invalid():
         # Inert pipeline: narrative enrichment is not this test's subject,
         # and without an injection the processor would run the real one.
         query_pipeline=lambda *_args, **_kwargs: None,
-        pipeline_v2_mode="enabled",
         research_planner=lambda *_args, **_kwargs: research_plan,
         research_executor=lambda *_args, **_kwargs: packets,
         manifest_consolidator=lambda *_args, **_kwargs: manifest,
@@ -1467,9 +1248,13 @@ def test_report_attempt_finalizes_telemetry_when_execution_fails(monkeypatch):
 
 
 def test_report_deadline_exhaustion_has_a_typed_retry_policy():
-    lease = _lease()
-    processor = ReportJobProcessor(
-        query_pipeline=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    lease = _lease(query=_V2_QUERY)
+    # Thrown from the document generator, not the nested pipeline: narrative
+    # enrichment is deliberately defensive and swallows its own failures, so a
+    # deadline raised there would never reach the attempt-level mapping under
+    # test.
+    processor = _v2_processor(
+        document_generator=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RequestDeadlineExceeded("report_pipeline")
         ),
     )
@@ -1479,129 +1264,6 @@ def test_report_deadline_exhaustion_has_a_typed_retry_policy():
 
     assert exc_info.value.error_code == "REPORT_DEADLINE_EXCEEDED"
     assert exc_info.value.retryable is True
-
-
-def test_chart_decisions_are_built_once_and_shared_with_evaluation(
-    monkeypatch,
-):
-    chart_calls = []
-    monkeypatch.setattr(
-        "agent.report_evaluation.build_report_charts",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError(
-                "evaluation must reuse the processor's chart decisions"
-            )
-        ),
-    )
-
-    def chart_builder(plan, manifest):
-        chart_calls.append((plan.evidence_manifest_id, manifest.manifest_id))
-        return build_report_charts(plan, manifest)
-
-    def evaluator(plan, manifest, *, chart_decisions=None):
-        assert chart_decisions is not None
-        return evaluate_report_plan(
-            plan,
-            manifest,
-            chart_decisions=chart_decisions,
-        )
-
-    lease = _lease()
-    processor = _processor(
-        evaluator=evaluator,
-        chart_builder=chart_builder,
-    )
-
-    ReportResult.model_validate(processor(lease, _Control()))
-
-    assert chart_calls == [
-        (_manifest().manifest_id, _manifest().manifest_id),
-    ]
-
-
-def test_quantitative_report_without_table_evidence_is_not_retried():
-    lease = _lease()
-    control = _Control()
-    context = QueryContext(
-        query=lease.query,
-        summary_domain_knowledge="Prices are formed under the applicable market rules.",
-        answer_mode="report",
-    )
-    processor = ReportJobProcessor(
-        query_pipeline=lambda *_args, **_kwargs: context,
-        planner=lambda *_args, **_kwargs: pytest.fail(
-            "planner must not publish a quantitative report without table evidence"
-        ),
-    )
-
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, control)
-
-    assert exc_info.value.error_code == "REPORT_EVIDENCE_UNAVAILABLE"
-    assert exc_info.value.retryable is False
-
-
-def test_retry_resumes_valid_sections_without_repeating_pipeline_or_planner():
-    plan = ReportPlan.model_validate(_plan_payload())
-    resumed = ReportSectionDraft.model_validate(_draft(plan.sections[0]))
-    manifest_payload = _manifest().model_dump(mode="json")
-    manifest_payload["query_digest"] = hashlib.sha256(
-        b"Explain the price trend."
-    ).hexdigest()
-    checkpoint = ReportGenerationCheckpoint.model_validate(
-        {
-            "contract_version": "report-generation-checkpoint-v1",
-            "manifest": manifest_payload,
-            "plan": {
-                **_plan_payload(),
-                "evidence_manifest_id": manifest_payload["manifest_id"],
-            },
-            "completed_sections": [resumed.model_dump(mode="json")],
-        }
-    )
-    pipeline_calls: list = []
-    generated: list = []
-    lease = _lease(
-        checkpoint=checkpoint.model_dump(mode="json"),
-        phase="generating_sections",
-        progress_percent=37,
-    )
-    control = _Control()
-    processor = _processor(
-        pipeline_calls=pipeline_calls,
-        generated=generated,
-    )
-
-    result = ReportResult.model_validate(processor(lease, control))
-
-    assert result.sections[0].section_id == resumed.section_id
-    assert pipeline_calls == []
-    assert resumed.section_id not in generated
-    assert control.heartbeats[0][1] >= lease.progress_percent
-    assert control.heartbeats[0][2] is None
-
-
-def test_processor_reuses_one_grounding_index_for_generation_and_assembly(
-    monkeypatch,
-):
-    calls = Counter()
-    original = report_grounding._evidence_grounding_facts
-
-    def counted(item):
-        calls[item.evidence_ref] += 1
-        return original(item)
-
-    monkeypatch.setattr(
-        report_grounding,
-        "_evidence_grounding_facts",
-        counted,
-    )
-
-    _processor()(_lease(), _Control())
-
-    assert calls == Counter(
-        {item.evidence_ref: 1 for item in _manifest().items}
-    )
 
 
 def test_checkpoint_for_a_different_query_fails_closed():
@@ -1619,349 +1281,10 @@ def test_checkpoint_for_a_different_query_fails_closed():
     )
 
     with pytest.raises(ReportJobFailure) as exc_info:
-        _processor()(lease, _Control())
+        _v2_processor()(lease, _Control())
 
     assert exc_info.value.error_code == "REPORT_CHECKPOINT_INVALID"
     assert exc_info.value.retryable is False
-
-
-def test_irreparable_evidence_bound_plan_is_not_retried():
-    lease = _lease()
-
-    def pipeline(query, **_kwargs):
-        return _pipeline_context(query)
-
-    def invalid_planner(*_args, **_kwargs):
-        raise ReportPlanEvidenceError("Bounded planner validation failed.")
-
-    processor = ReportJobProcessor(
-        query_pipeline=pipeline,
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=invalid_planner,
-    )
-
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, _Control())
-
-    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
-    assert exc_info.value.retryable is False
-
-
-def test_schema_invalid_report_plan_is_not_retried_as_a_whole_job():
-    lease = _lease()
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ValueError("The model returned an invalid plan.")
-        ),
-    )
-
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, _Control())
-
-    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
-    assert exc_info.value.retryable is False
-
-
-def test_report_plan_cannot_override_processor_planning_semantics():
-    lease = _lease()
-    mismatched_payload = _plan_payload()
-    mismatched_payload["language_code"] = "ka"
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_args, **_kwargs: ReportPlan.model_validate(
-            mismatched_payload
-        ),
-    )
-
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, _Control())
-
-    assert exc_info.value.error_code == "REPORT_PLAN_INVALID"
-    assert exc_info.value.retryable is False
-
-
-def test_report_plan_provider_failure_respects_delivery_and_is_diagnosable(
-    caplog,
-):
-    lease = _lease()
-
-    def unavailable_planner(*_args, **_kwargs):
-        raise ProviderExecutionError(
-            "provider secret must not be logged",
-            provider="nvidia",
-            stage="report_planner",
-            disposition=ProviderDeliveryDisposition.TIMED_OUT,
-        )
-
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=unavailable_planner,
-    )
-
-    with caplog.at_level(logging.WARNING, logger="Enai.ReportProcessor"):
-        with pytest.raises(ReportJobFailure) as exc_info:
-            processor(lease, _Control())
-
-    assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
-    assert exc_info.value.retryable is False
-    assert f"job_id={lease.job_id}" in caplog.text
-    assert f"job_attempt={lease.attempt_count}" in caplog.text
-    assert "provider=nvidia" in caplog.text
-    assert "provider_stage=report_planner" in caplog.text
-    assert "provider_disposition=timed_out" in caplog.text
-    assert "provider secret" not in caplog.text
-
-
-def test_planner_failure_persists_evidence_ready_checkpoint_for_retry():
-    lease = _lease()
-    control = _Control()
-
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ProviderExecutionError(
-                "provider unavailable",
-                provider="nvidia",
-                stage="report_planner",
-                disposition=ProviderDeliveryDisposition.TIMED_OUT,
-            )
-        ),
-    )
-
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, control)
-
-    assert exc_info.value.error_code == "REPORT_PLAN_PROVIDER_FAILED"
-    checkpoint = control.heartbeats[-1][2]
-    assert checkpoint is not None
-    assert checkpoint["contract_version"] == (
-        "report-generation-checkpoint-v2"
-    )
-    assert checkpoint["checkpoint_stage"] == "evidence_ready"
-    assert checkpoint["plan"] is None
-
-
-def test_evidence_ready_retry_resumes_planning_without_pipeline():
-    query = "Explain the price trend."
-    planning_context = build_report_planning_context(
-        _pipeline_context(query)
-    )
-    checkpoint = ReportGenerationCheckpoint(
-        contract_version="report-generation-checkpoint-v2",
-        checkpoint_stage="evidence_ready",
-        manifest=_manifest_for_query(query),
-        planning_context=planning_context,
-        plan=None,
-        completed_sections=[],
-    )
-    pipeline_calls = []
-    received_contexts = []
-
-    result = _processor(
-        pipeline_calls=pipeline_calls,
-        planning_contexts=received_contexts,
-    )(
-        _lease(
-            checkpoint=checkpoint.model_dump(mode="json"),
-            phase="planning",
-            progress_percent=20,
-        ),
-        _Control(),
-    )
-
-    ReportResult.model_validate(result)
-    assert pipeline_calls == []
-    assert received_contexts == [planning_context]
-
-
-@pytest.mark.parametrize(
-    ("section_error_codes", "expected_code", "expected_retryable"),
-    [
-        (["UNGROUNDED_NUMERIC_CLAIM"], "REPORT_SECTION_INVALID", False),
-        (
-            ["SECTION_WRITE_PROVIDER_FAILED"],
-            "REPORT_SECTION_PROVIDER_FAILED",
-            True,
-        ),
-        (
-            ["SECTION_REPAIR_PROVIDER_FAILED"],
-            "REPORT_SECTION_PROVIDER_FAILED",
-            True,
-        ),
-    ],
-)
-def test_section_failure_retryability_distinguishes_validation_from_provider(
-    section_error_codes,
-    expected_code,
-    expected_retryable,
-):
-    lease = _lease()
-
-    def fail_sections(*_args, **_kwargs):
-        raise ReportSectionGenerationError(
-            "key_findings",
-            section_error_codes,
-        )
-
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_args, **_kwargs: ReportPlan.model_validate(_plan_payload()),
-        section_generator=fail_sections,
-    )
-
-    with pytest.raises(ReportJobFailure) as exc_info:
-        processor(lease, _Control())
-
-    assert exc_info.value.error_code == expected_code
-    assert exc_info.value.retryable is expected_retryable
-
-
-def test_unbuildable_required_chart_is_demoted_instead_of_killing_the_job():
-    def planner_with_unbuildable_required_chart(_query, _manifest_value, **_kwargs):
-        payload = _plan_payload()
-        payload["charts"][0]["purpose"] = "relationship"
-        return ReportPlan.model_validate(payload)
-
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=planner_with_unbuildable_required_chart,
-        section_generator=lambda query, plan, manifest, **kwargs: (
-            generate_report_sections(
-                query,
-                plan,
-                manifest,
-                existing_drafts=kwargs["existing_drafts"],
-                generate_section=lambda _q, _p, section, _m: _draft(section),
-                progress_callback=kwargs["progress_callback"],
-                max_workers=kwargs["max_workers"],
-            )
-        ),
-        max_section_workers=5,
-    )
-
-    result = processor(_lease(), _Control())
-
-    assert result["charts"] == []
-    assert result["omitted_charts"] == [
-        {
-            "chart_id": "price_trend",
-            "title": "Observed electricity price",
-            "reason_code": "REPORT_CHART_EXPLICIT_AXES_REQUIRED",
-        }
-    ]
-    assert [section["chart_refs"] for section in result["sections"]] == [
-        [] for _ in result["sections"]
-    ]
-
-
-def test_resume_demotes_a_required_chart_left_by_an_older_checkpoint():
-    payload = _plan_payload()
-    payload["charts"][0]["purpose"] = "relationship"
-    plan = ReportPlan.model_validate(payload)
-    manifest = _manifest_for_query("Explain the price trend.")
-    checkpoint = ReportGenerationCheckpoint(
-        contract_version="report-generation-checkpoint-v1",
-        manifest=manifest,
-        plan=plan,
-        completed_sections=[],
-    ).model_dump(mode="json")
-
-    processor = ReportJobProcessor(
-        query_pipeline=lambda query, **_kwargs: _pipeline_context(query),
-        evidence_builder=lambda ctx: _manifest_for_query(ctx.query),
-        planner=lambda *_a, **_k: pytest.fail("resume must not re-plan"),
-        section_generator=lambda query, plan_value, manifest_value, **kwargs: (
-            generate_report_sections(
-                query,
-                plan_value,
-                manifest_value,
-                existing_drafts=kwargs["existing_drafts"],
-                generate_section=lambda _q, _p, section, _m: _draft(section),
-                progress_callback=kwargs["progress_callback"],
-                max_workers=kwargs["max_workers"],
-            )
-        ),
-        max_section_workers=5,
-    )
-
-    control = _Control()
-    result = processor(
-        _lease(checkpoint=checkpoint, phase="generating_sections"),
-        control,
-    )
-
-    assert result["charts"] == []
-    assert control.heartbeats[0][2] is not None
-    assert [omission["chart_id"] for omission in result["omitted_charts"]] == [
-        "price_trend"
-    ]
-
-
-def test_oversized_checkpoint_is_reported_as_its_own_failure(monkeypatch):
-    from contracts.report_generation import ReportCheckpointTooLargeError
-
-    def _oversized(*_args, **_kwargs):
-        raise ReportCheckpointTooLargeError(
-            "Report generation checkpoint exceeds 1 MiB."
-        )
-
-    monkeypatch.setattr(
-        ReportJobProcessor,
-        "_checkpoint_payload",
-        staticmethod(_oversized),
-    )
-
-    with pytest.raises(ReportJobFailure) as excinfo:
-        _processor()(_lease(), _Control())
-
-    assert excinfo.value.error_code == "REPORT_CHECKPOINT_TOO_LARGE"
-    assert excinfo.value.retryable is False
-
-
-def test_projected_checkpoint_overflow_fails_before_section_calls(
-    monkeypatch,
-):
-    generated = []
-    monkeypatch.setattr(
-        ReportJobProcessor,
-        "_projected_final_checkpoint_size_bytes",
-        staticmethod(
-            lambda *_args, **_kwargs: (
-                REPORT_GENERATION_CHECKPOINT_MAX_BYTES + 1
-            )
-        ),
-        raising=False,
-    )
-
-    with pytest.raises(ReportJobFailure) as excinfo:
-        _processor(generated=generated)(_lease(), _Control())
-
-    assert excinfo.value.error_code == "REPORT_CHECKPOINT_TOO_LARGE"
-    assert generated == []
-
-
-def test_invalid_checkpoint_identity_is_not_reported_as_oversized(monkeypatch):
-    def _identity_failure(*_args, **_kwargs):
-        raise ValueError("Report checkpoint plan and manifest identity must match.")
-
-    monkeypatch.setattr(
-        ReportJobProcessor,
-        "_checkpoint_payload",
-        staticmethod(_identity_failure),
-    )
-
-    with pytest.raises(ReportJobFailure) as excinfo:
-        _processor()(_lease(), _Control())
-
-    assert excinfo.value.error_code == "REPORT_CHECKPOINT_INVALID"
-    assert excinfo.value.retryable is False
 
 
 def test_generative_budget_counts_generation_stages_not_enrichment():
@@ -2001,17 +1324,17 @@ def test_narrative_pipeline_runs_under_a_distinct_request_identity():
     with no HTTP call, and mistaken for a provider outage.
     """
 
-    lease = _lease()
+    lease = _lease(query=_V2_QUERY)
     pipeline_calls: list = []
     scopes: list = []
 
-    result = _processor(
+    result = _v2_processor(
         pipeline_calls=pipeline_calls,
         execution_scopes=scopes,
         job_timeout_seconds=120,
     )(lease, _Control())
 
-    ReportResult.model_validate(result)
+    ReportResultV2.model_validate(result)
     outer_request_id = scopes[0].request_id
     nested_request_id = pipeline_calls[0][1]["request_id"]
     assert outer_request_id
@@ -2067,3 +1390,89 @@ def test_report_and_narrative_identities_can_each_claim_one_embedding():
             )
     finally:
         reset_provider_attempts_for_tests()
+
+
+def test_every_attempt_runs_the_document_pipeline():
+    """One path: a lease reaches the document pipeline whatever the config says.
+
+    The processor used to choose between two pipelines on a mode flag. With the
+    retired path deleted there is nothing to choose, so a processor built
+    without a mode still runs the document pipeline rather than the planner.
+    """
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail(
+            "no legacy enrichment path remains"
+        ),
+        track_analysis_mode="enabled",
+        track_analyzer=lambda _query, track, **_kwargs: {
+            packet.track_id: packet for packet in packets
+        }[track.track_id],
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_args, **_kwargs: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    result = ReportResultV2.model_validate(
+        processor(_lease(query=_V2_QUERY), _Control())
+    )
+
+    assert result.contract_version == "report-result-v2"
+
+
+def test_the_surviving_checkpoint_builder_still_separates_too_large_from_invalid():
+    """The size cap follows the surviving builder.
+
+    Three legacy builders mapped ReportCheckpointTooLargeError to
+    REPORT_CHECKPOINT_TOO_LARGE and were deleted with the retired path. The
+    distinction matters operationally -- too-large is a sizing bug, invalid is
+    a contract bug, and they were separated deliberately -- so
+    _safe_v3_checkpoint_payload has to keep making it.
+
+    Driven through the builder's own failure modes rather than a manufactured
+    megabyte: the payload is capped at 1 MB while a manifest is capped at
+    768 KB, so no valid manifest can overflow a checkpoint on its own and any
+    fixture large enough would be rejected as invalid first -- testing the
+    fixture, not the mapping.
+    """
+    from contracts.report_generation import ReportCheckpointTooLargeError
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_args, **_kwargs: pytest.fail("not reached"),
+    )
+
+    def too_large(**_kwargs):
+        raise ReportCheckpointTooLargeError("checkpoint exceeds its limit")
+
+    def invalid(**_kwargs):
+        raise ValueError("checkpoint identity is wrong")
+
+    for build, expected in (
+        (too_large, "REPORT_CHECKPOINT_TOO_LARGE"),
+        (invalid, "REPORT_CHECKPOINT_INVALID"),
+    ):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                ReportJobProcessor,
+                "_v3_checkpoint_payload",
+                staticmethod(build),
+            )
+            with pytest.raises(ReportJobFailure) as failure:
+                processor._safe_v3_checkpoint_payload(
+                    checkpoint_stage="evidence_ready",
+                )
+        assert failure.value.error_code == expected
+        assert failure.value.retryable is False

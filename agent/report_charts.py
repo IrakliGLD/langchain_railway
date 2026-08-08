@@ -411,6 +411,68 @@ def _omitted(chart, code: str) -> ReportChartBuildDecision:
     return decision
 
 
+def _axis_is_unique(rows: list[dict[str, Any]], column: str) -> bool:
+    """Return whether one value of ``column`` labels exactly one row."""
+
+    labels = [str(row.get(column)) for row in rows]
+    return bool(labels) and len(labels) == len(set(labels))
+
+
+def _comparison_projection(
+    rows: list[dict[str, Any]],
+    *,
+    x_axis: str,
+    series: list[str],
+    categorical: list[str],
+    temporal: list[str],
+    units: dict[str, str],
+) -> tuple[list[dict[str, Any]] | None, list[str], dict[str, str]]:
+    """Return ``(rows, [x_axis, *series], units)`` a bar chart can label.
+
+    Passes a already-unique axis through untouched. A repeated axis means the
+    frame is keyed by more than one dimension, so it is pivoted to one row per
+    category with a series per period. Returns ``None`` rows when neither holds
+    — an unlabelable chart is worse than a declared missing one.
+    """
+
+    if _axis_is_unique(rows, x_axis):
+        return rows, [x_axis, *series], units
+    category = next(
+        (column for column in categorical if column != x_axis),
+        x_axis if x_axis in categorical else None,
+    )
+    period = next((column for column in temporal if column != category), None)
+    if category is None or period is None or len(series) != 1:
+        return None, [], {}
+    measure = series[0]
+    periods = list(
+        dict.fromkeys(
+            str(row.get(period))
+            for row in rows
+            if row.get(period) is not None
+        )
+    )
+    if not 2 <= len(periods) <= _MAXIMUM_CHART_SERIES:
+        return None, [], {}
+    pivoted: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        label = str(row.get(category))
+        value = row.get(measure)
+        if not _is_numeric(value):
+            continue
+        pivoted.setdefault(label, {category: label})[
+            str(row.get(period))
+        ] = value
+    if len(pivoted) < 2:
+        return None, [], {}
+    measure_unit = units.get(measure, "")
+    return (
+        list(pivoted.values()),
+        [category, *periods],
+        {name: measure_unit for name in periods},
+    )
+
+
 def _built(
     chart,
     *,
@@ -749,14 +811,34 @@ def build_report_chart_requests(
 
         x_axis = chart.x_field or ((categorical or temporal)[0] if (categorical or temporal) else None)
         if x_axis:
+            # A bar chart says "this value belongs to this label". When the
+            # axis column repeats, several bars carry the same label and the
+            # column that actually separates them appears nowhere: job
+            # 5e6b0cf3 drew eight bars under four repeated month labels for a
+            # frame keyed by (period, technology). Pivot that shape into one
+            # row per category with a series per period — the comparison the
+            # reader asked for, expressible in the existing contract.
+            plot_rows, plot_series, plot_units = _comparison_projection(
+                rows,
+                x_axis=x_axis,
+                series=requested_series[:_MAXIMUM_CHART_SERIES],
+                categorical=categorical,
+                temporal=temporal,
+                units=units,
+            )
+            if plot_rows is None:
+                decisions.append(
+                    _omitted(chart, "REPORT_CHART_AMBIGUOUS_CATEGORY_AXIS")
+                )
+                continue
             decisions.append(
                 _built(
                     chart,
                     chart_type=ReportChartType.BAR,
-                    data=rows,
-                    x_axis=x_axis,
-                    series=requested_series[:_MAXIMUM_CHART_SERIES],
-                    units=units,
+                    data=plot_rows,
+                    x_axis=plot_series[0],
+                    series=plot_series[1:],
+                    units=plot_units,
                 )
             )
             continue

@@ -125,15 +125,11 @@ REPORT_JOB_TIMEOUT_SECONDS = _read_bounded_int_env(
 )
 # Report research-track redesign rollout. Phase 0 only exposes and validates
 # the contract; disabled remains behaviorally identical to the legacy worker.
-REPORT_PIPELINE_V2_MODE = (
-    os.getenv("REPORT_PIPELINE_V2_MODE", "disabled").strip().lower()
-    or "disabled"
-)
 # Track-scoped analysis is the evidence path for an enabled document pipeline.
 # An explicit setting remains authoritative for rollback/shadow comparison;
 # otherwise enabling v2 also enables its analyzed per-track packets.
 _REPORT_TRACK_ANALYSIS_DEFAULT = (
-    "enabled" if REPORT_PIPELINE_V2_MODE == "enabled" else "disabled"
+    "enabled"
 )
 REPORT_TRACK_ANALYSIS_MODE = (
     os.getenv(
@@ -742,7 +738,6 @@ def validate_runtime_settings(
     report_fallback_model_type: str | None = None,
     report_fallback_model: str | None = None,
     report_reasoning_effort: str | None = None,
-    report_pipeline_v2_mode: str = "disabled",
     report_track_analysis_mode: str = "disabled",
     report_max_generative_calls: int = 3,
     report_research_max_tracks: int = 4,
@@ -767,11 +762,6 @@ def validate_runtime_settings(
     if plan_validation_mode not in {"warn", "enforce"}:
         raise RuntimeError(
             "Invalid ENAI_PLAN_VALIDATION_MODE. Expected one of: warn, enforce"
-        )
-    if report_pipeline_v2_mode not in {"disabled", "shadow", "enabled"}:
-        raise RuntimeError(
-            "Invalid REPORT_PIPELINE_V2_MODE. Expected one of: "
-            "disabled, shadow, enabled"
         )
     if report_track_analysis_mode not in {"disabled", "shadow", "enabled"}:
         raise RuntimeError(
@@ -1003,7 +993,6 @@ validate_runtime_settings(
     report_fallback_model_type=REPORT_FALLBACK_MODEL_TYPE,
     report_fallback_model=REPORT_FALLBACK_MODEL,
     report_reasoning_effort=REPORT_REASONING_EFFORT,
-    report_pipeline_v2_mode=REPORT_PIPELINE_V2_MODE,
     report_track_analysis_mode=REPORT_TRACK_ANALYSIS_MODE,
     report_max_generative_calls=REPORT_MAX_GENERATIVE_CALLS,
     report_research_max_tracks=REPORT_RESEARCH_MAX_TRACKS,

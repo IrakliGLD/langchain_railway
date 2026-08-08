@@ -81,10 +81,9 @@ def test_report_concurrency_and_deadline_controls_are_bounded():
     assert 1 <= REPORT_RESEARCH_MAX_WORKERS <= REPORT_RESEARCH_MAX_TRACKS
 
 
-def _report_pipeline_v2_with_env(**overrides) -> subprocess.CompletedProcess:
+def _report_settings_with_env(**overrides) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     for name in (
-        "REPORT_PIPELINE_V2_MODE",
         "REPORT_MAX_GENERATIVE_CALLS",
         "REPORT_RESEARCH_MAX_TRACKS",
         "REPORT_RESEARCH_MAX_WORKERS",
@@ -98,7 +97,7 @@ def _report_pipeline_v2_with_env(**overrides) -> subprocess.CompletedProcess:
             "-c",
             (
                 "import config; "
-                "print(config.REPORT_PIPELINE_V2_MODE, "
+                "print("
                 "config.REPORT_MAX_GENERATIVE_CALLS, "
                 "config.REPORT_RESEARCH_MAX_TRACKS, "
                 "config.REPORT_RESEARCH_MAX_WORKERS, "
@@ -113,58 +112,36 @@ def _report_pipeline_v2_with_env(**overrides) -> subprocess.CompletedProcess:
     )
 
 
-def test_report_pipeline_v2_defaults_are_disabled_and_bounded():
-    result = _report_pipeline_v2_with_env()
+def test_report_settings_defaults_are_bounded():
+    result = _report_settings_with_env()
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["disabled", "5", "4", "3", "disabled"]
-
-
-@pytest.mark.parametrize("mode", ["disabled", "shadow", "enabled"])
-def test_report_pipeline_v2_accepts_only_declared_rollout_modes(mode):
-    result = _report_pipeline_v2_with_env(REPORT_PIPELINE_V2_MODE=mode)
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split()[0] == mode
-
-
-def test_report_pipeline_v2_rejects_unknown_rollout_mode():
-    result = _report_pipeline_v2_with_env(REPORT_PIPELINE_V2_MODE="maybe")
-
-    assert result.returncode != 0
-    assert "REPORT_PIPELINE_V2_MODE" in result.stderr
+    # Track analysis is the evidence path of the only remaining pipeline, so
+    # it defaults on rather than deriving from a retired rollout flag.
+    assert result.stdout.split() == ["5", "4", "3", "enabled"]
 
 
 @pytest.mark.parametrize("mode", ["disabled", "shadow", "enabled"])
 def test_report_track_analysis_accepts_only_declared_rollout_modes(mode):
-    result = _report_pipeline_v2_with_env(REPORT_TRACK_ANALYSIS_MODE=mode)
+    result = _report_settings_with_env(REPORT_TRACK_ANALYSIS_MODE=mode)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.split()[-1] == mode
 
 
 def test_report_track_analysis_rejects_unknown_rollout_mode():
-    result = _report_pipeline_v2_with_env(REPORT_TRACK_ANALYSIS_MODE="maybe")
+    result = _report_settings_with_env(REPORT_TRACK_ANALYSIS_MODE="maybe")
 
     assert result.returncode != 0
     assert "REPORT_TRACK_ANALYSIS_MODE" in result.stderr
 
 
-def test_report_track_analysis_defaults_disabled():
-    assert REPORT_TRACK_ANALYSIS_MODE == "disabled"
-
-
-def test_enabled_report_pipeline_defaults_track_analysis_to_enabled():
-    result = _report_pipeline_v2_with_env(
-        REPORT_PIPELINE_V2_MODE="enabled",
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split()[-1] == "enabled"
+def test_report_track_analysis_defaults_enabled():
+    assert REPORT_TRACK_ANALYSIS_MODE == "enabled"
 
 
 def test_report_pipeline_v2_rejects_worker_count_above_track_count():
-    result = _report_pipeline_v2_with_env(
+    result = _report_settings_with_env(
         REPORT_RESEARCH_MAX_TRACKS="2",
         REPORT_RESEARCH_MAX_WORKERS="3",
     )

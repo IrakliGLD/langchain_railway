@@ -13,7 +13,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from agent.report_projection import projected_row_indices
 from contracts.report_evidence import ReportEvidenceManifest
-from tests.test_report_planner import _manifest
+from tests.fixtures_report_manifest import _manifest
 
 
 def _wide_table(row_count: int):

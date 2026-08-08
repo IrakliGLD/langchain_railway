@@ -35,7 +35,7 @@ from contracts.report import (
     report_section_validation_word_bounds,
 )
 from contracts.report_sections import ReportSectionDraft
-from tests.test_report_planner import _manifest, _plan_payload
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
     ProviderExecutionError,

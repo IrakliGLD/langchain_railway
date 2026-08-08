@@ -21,6 +21,7 @@ from agent.report_evidence import (
     report_pipeline_context_block_reason,
     report_pipeline_context_gaps,
 )
+from agent.report_track_specs import log_report_track_spec_disagreements
 from agent.router import extract_currency, extract_price_metric
 from agent.tools.composition_tools import get_balancing_composition
 from agent.tools.generation_tools import get_generation_mix
@@ -34,6 +35,7 @@ from contracts.report_evidence import (
     ReportKnowledgeEvidenceRole,
 )
 from contracts.report_research import (
+    REPORT_PACKET_MAX_OBSERVATIONS,
     ReportChartCandidate,
     ReportCollectorId,
     ReportEvidenceObservation,
@@ -417,6 +419,8 @@ def _numeric_observations(
     observations: list[ReportEvidenceObservation] = []
     requested_operations = _requested_metric_operations(requested_metrics)
     for item in items:
+        if len(observations) >= REPORT_PACKET_MAX_OBSERVATIONS:
+            return observations
         if item.kind is not ReportEvidenceKind.TABLE:
             observations.append(
                 ReportEvidenceObservation(
@@ -595,7 +599,7 @@ def _numeric_observations(
                         metric_values=metrics,
                     )
                 )
-                if len(observations) == 32:
+                if len(observations) >= REPORT_PACKET_MAX_OBSERVATIONS:
                     return observations
     return observations
 
@@ -937,6 +941,13 @@ def execute_report_track_analysis(
         request_id=request_id,
         request_deadline=request_deadline,
         answer_mode="report",
+    )
+    # Observe only: the analyzer's decision still stands. This records how far
+    # the planner's would have been from it, so the nested call can be removed
+    # on evidence rather than on hope.
+    log_report_track_spec_disagreements(
+        track,
+        getattr(context, "question_analysis", None),
     )
     block_reason = report_pipeline_context_block_reason(context)
     if block_reason:

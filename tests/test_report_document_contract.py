@@ -22,7 +22,7 @@ from contracts.report_research import (
     ReportResearchTrack,
 )
 from contracts.report_result import ReportResult, ReportResultV2
-from tests.test_report_planner import _manifest
+from tests.fixtures_report_manifest import _manifest
 from tests.test_report_research_contract import (
     _complete_packet_payload,
     _research_plan_payload,

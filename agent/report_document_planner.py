@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 
-from contracts.report import REPORT_MAX_EXHIBITS, ReportChartRequest
+from contracts.report import (
+    REPORT_MAX_EXHIBITS,
+    REPORT_SECTION_MIN_WORDS,
+    ReportChartRequest,
+)
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
     ReportDocumentPlan,
@@ -21,6 +25,7 @@ from contracts.report_evidence import (
 from contracts.report_research import (
     ReportCoverageStatus,
     ReportEvidenceGate,
+    ReportEvidenceMode,
     ReportEvidencePacket,
     ReportResearchPlan,
     ReportTrackStatus,
@@ -125,13 +130,44 @@ def assess_report_evidence_capacity(
     )
 
 
+def _weighted_word_split(total: int, weights: Sequence[int]) -> list[int]:
+    """Split ``total`` across ``weights`` exactly, largest remainder first."""
+
+    weight_total = sum(weights)
+    if weight_total <= 0:
+        base, remainder = divmod(total, len(weights))
+        return [
+            base + (1 if index < remainder else 0)
+            for index in range(len(weights))
+        ]
+    exact = [total * weight / weight_total for weight in weights]
+    allocated = [int(value) for value in exact]
+    for index in sorted(
+        range(len(exact)),
+        key=lambda position: (
+            -(exact[position] - allocated[position]),
+            position,
+        ),
+    )[: total - sum(allocated)]:
+        allocated[index] += 1
+    return allocated
+
+
 def allocate_report_word_targets(
     evidence_capacity: ReportEvidenceCapacity,
     *,
     analysis_count: int,
     include_implications: bool,
+    analysis_weights: Sequence[int] | None = None,
 ) -> tuple[int, list[int], int, int]:
-    """Allocate prose targets from evidence breadth, not report-mode padding."""
+    """Allocate prose targets from evidence breadth, not report-mode padding.
+
+    ``analysis_weights`` scales each analysis section to what its track can
+    actually say. An even split gave a documented-context track the same target
+    as one holding sixty-one rows of prices, and the section floor then obliged
+    the writer to reach it from market-design prose alone — which is how job
+    5e6b0cf3 filled a section with generic accounting caveats nobody asked for.
+    """
 
     profile = evidence_capacity.profile
     if profile is ReportDocumentProfile.COMPACT:
@@ -174,6 +210,13 @@ def allocate_report_word_targets(
         base + (1 if index < remainder else 0)
         for index in range(analysis_count)
     ]
+    if analysis_weights is not None and len(analysis_weights) == analysis_count:
+        weighted = _weighted_word_split(analysis_total, analysis_weights)
+        # A weight that starves a section below the schema minimum is worse
+        # than an even split: the section still has to exist, and the plan
+        # would not validate.
+        if min(weighted) >= REPORT_SECTION_MIN_WORDS:
+            analysis_words = weighted
     return (
         target_words,
         analysis_words,
@@ -231,6 +274,31 @@ def build_report_document_plan(
         )
     ]
     groups = _analysis_groups(completed_track_ids)
+    # Two shares for a group whose job is to report numbers, one for a group
+    # that can only restate documented context. Deliberately coarse: the point
+    # is that a knowledge section stops being asked for as much prose as a data
+    # section, not that prose scales with row count.
+    #
+    # Both signals are needed. A track that declares KNOWLEDGE evidence still
+    # collects numeric tools for context, so counting observations alone would
+    # size a market-design section like a price section — which is exactly what
+    # filled one with generic accounting caveats on job 5e6b0cf3. A track that
+    # declares otherwise but produced no numbers has nothing to report either.
+    analysis_weights = [
+        2
+        if any(
+            track_id in packet_by_id
+            and packet_by_id[track_id].numeric_observation_count
+            and (
+                research_track_by_id[track_id].evidence_mode
+                is not ReportEvidenceMode.KNOWLEDGE
+            )
+            for track_id in group
+            if track_id in research_track_by_id
+        )
+        else 1
+        for group in groups
+    ]
     evidence_capacity = assess_report_evidence_capacity(
         packets,
         gate,
@@ -246,6 +314,7 @@ def build_report_document_plan(
         evidence_capacity,
         analysis_count=len(groups),
         include_implications=include_implications,
+        analysis_weights=analysis_weights,
     )
     labels = _labels(research_plan.language_code)
     manifest_refs = set(manifest.item_by_ref())
@@ -349,9 +418,14 @@ def build_report_document_plan(
             raise ValueError(
                 "A usable analysis track has no manifest evidence."
             )
-        evidence_refs = list(
-            dict.fromkeys([*shared_narrative_refs, *track_refs])
-        )
+        # The section owes its own track's evidence and may cite the
+        # report-wide statistics and knowledge. Requiring the shared refs of
+        # every section is what obliged four sections to discuss the same
+        # passage; limitations still requires them, so nothing goes uncited.
+        shared_refs = [
+            ref for ref in shared_narrative_refs if ref not in track_refs
+        ]
+        evidence_refs = list(dict.fromkeys([*shared_refs, *track_refs]))
         all_analysis_refs.extend(evidence_refs)
         track_titles = [
             research_track_by_id[track_id].title for track_id in group
@@ -367,7 +441,8 @@ def build_report_document_plan(
                 ),
                 target_words=analysis_words[index],
                 track_ids=group,
-                required_evidence_refs=evidence_refs[:32],
+                required_evidence_refs=track_refs[:32],
+                optional_evidence_refs=shared_refs[:32],
                 chart_refs=chart_ids_by_section[section_id],
             )
         )
@@ -410,7 +485,12 @@ def build_report_document_plan(
             track_ids=[
                 track.track_id for track in research_plan.tracks
             ],
-            required_evidence_refs=limitation_refs[:32],
+            # The one section that owes the shared context: its job is to
+            # describe collection boundaries, and a manifest item no section
+            # is obliged to cite could go unused entirely.
+            required_evidence_refs=list(
+                dict.fromkeys([*limitation_refs, *shared_narrative_refs])
+            )[:32],
             chart_refs=[],
         )
     )

@@ -66,6 +66,10 @@ def _research_plan_payload(*, query_digest: str = "a" * 64) -> dict:
                     "percent_change",
                 ],
                 "expected_exhibits": ["trend"],
+                "analysis_query_type": "data_explanation",
+                "analysis_preferred_path": "tool",
+                "analysis_answer_kind": "timeseries",
+                "analysis_derived_metrics": ["mom_percent_change"],
             },
             {
                 "track_id": "security",
@@ -85,6 +89,10 @@ def _research_plan_payload(*, query_digest: str = "a" * 64) -> dict:
                     "generation_mix",
                 ],
                 "expected_exhibits": ["composition"],
+                "analysis_query_type": "comparison",
+                "analysis_preferred_path": "sql",
+                "analysis_answer_kind": "comparison",
+                "analysis_derived_metrics": [],
             },
             {
                 "track_id": "market_model",
@@ -98,6 +106,10 @@ def _research_plan_payload(*, query_digest: str = "a" * 64) -> dict:
                 ],
                 "requested_metrics": [],
                 "expected_exhibits": ["table"],
+                "analysis_query_type": "conceptual_definition",
+                "analysis_preferred_path": "knowledge",
+                "analysis_answer_kind": "knowledge",
+                "analysis_derived_metrics": [],
             },
         ],
     }
@@ -381,3 +393,65 @@ def test_requested_forecast_collector_survives_pruning():
         collector for track in pruned.tracks for collector in track.collector_ids
     }
     assert ReportCollectorId.FORECAST_ENGINE in collectors
+
+
+def test_a_track_states_how_its_own_evidence_should_be_analysed():
+    """The planner wrote the questions, so it owns the analysis decisions.
+
+    requested_metrics names what to measure; analysis_derived_metrics names
+    how to compare it over time. "percent_change" cannot distinguish
+    month-on-month from year-on-year, and only the research question says
+    which -- which is why re-deriving this per track from prose was lossy.
+    """
+
+    plan = ReportResearchPlan.model_validate(_research_plan_payload())
+    prices = next(
+        track for track in plan.tracks if track.track_id == "prices"
+    )
+    market_model = next(
+        track for track in plan.tracks if track.track_id == "market_model"
+    )
+
+    assert prices.analysis_query_type.value == "data_explanation"
+    assert prices.analysis_preferred_path.value == "tool"
+    assert prices.analysis_answer_kind.value == "timeseries"
+    assert [
+        metric.value for metric in prices.analysis_derived_metrics
+    ] == ["mom_percent_change"]
+    # The two vocabularies stay separate: a track asks for percent_change and
+    # says which comparison that means.
+    assert "percent_change" in prices.requested_metrics
+    assert market_model.analysis_preferred_path.value == "knowledge"
+    assert market_model.analysis_derived_metrics == []
+
+
+def test_a_persisted_plan_without_analysis_fields_still_validates():
+    """Checkpoints written before the fields exist must still resume.
+
+    The base contract carries defaults so an in-flight job is not failed by a
+    deploy; only the model-facing draft demands the decisions.
+    """
+
+    payload = _research_plan_payload()
+    for track in payload["tracks"]:
+        for field in (
+            "analysis_query_type",
+            "analysis_preferred_path",
+            "analysis_answer_kind",
+            "analysis_derived_metrics",
+        ):
+            track.pop(field, None)
+
+    plan = ReportResearchPlan.model_validate(payload)
+
+    assert plan.tracks[0].analysis_query_type.value == "data_retrieval"
+    assert plan.tracks[0].analysis_derived_metrics == []
+    with pytest.raises(ValidationError):
+        ReportResearchPlanDraft.model_validate(
+            {
+                "objective": payload["objective"],
+                "scope": payload["scope"],
+                "request_topics": payload["request_topics"],
+                "tracks": payload["tracks"],
+            }
+        )

@@ -359,6 +359,60 @@ def test_a_declared_metric_gap_survives_the_baseline_merge(monkeypatch):
     assert merged.items
 
 
+def test_observations_stay_inside_the_packet_contract_cap():
+    """Overflowing the cap costs the whole track, not a trimmed packet.
+
+    The cap was enforced only inside the table branch; a narrative item took
+    the ``continue`` above it and skipped the check, so a rich track could
+    build a packet its own contract rejects (job 5e6b0cf3).
+    """
+    from agent.report_evidence import make_report_narrative_evidence_item
+    from agent.report_research_execution import (
+        _numeric_observations,
+        _packet_from_items,
+    )
+    from contracts.report_research import REPORT_PACKET_MAX_OBSERVATIONS
+
+    wide_table = ReportEvidenceItem(
+        evidence_ref="evidence:table:" + "a" * 16,
+        kind=ReportEvidenceKind.TABLE,
+        title="Wide analytical table",
+        source="tool",
+        columns=["period", *[f"metric_{index}_gwh" for index in range(30)]],
+        rows=[
+            {
+                "period": f"2026-{month:02d}",
+                **{
+                    f"metric_{index}_gwh": float(index + month)
+                    for index in range(30)
+                },
+            }
+            for month in range(1, 4)
+        ],
+        unit_by_column={
+            f"metric_{index}_gwh": "GWh" for index in range(30)
+        },
+        total_row_count=3,
+        truncated=False,
+    )
+    narrative = [
+        make_report_narrative_evidence_item(
+            kind=ReportEvidenceKind.STATISTICS,
+            title=f"Computed statistics {index}",
+            source="derived",
+            content=f"Statistics payload {index}.",
+        )
+        for index in range(6)
+    ]
+
+    observations = _numeric_observations([wide_table, *narrative])
+
+    assert len(observations) <= REPORT_PACKET_MAX_OBSERVATIONS
+    # The packet is the authority; building one must not raise.
+    packet = _packet_from_items(_plan().tracks[0], [wide_table, *narrative])
+    assert packet.observations == observations[: len(packet.observations)]
+
+
 def test_track_analysis_reserves_packet_capacity_for_analysis_and_knowledge():
     supporting = {
         f"support_{index:02d}": {

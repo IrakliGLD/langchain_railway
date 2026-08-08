@@ -43,6 +43,7 @@ from contracts.report_document import (
     ReportEvidenceCapacity,
 )
 from contracts.report_evidence import ReportEvidenceKind
+from contracts.report_research import ReportEvidenceMode
 from contracts.report_sections import ReportSectionDraft
 from tests.test_report_evidence_gate_v2 import _QUERY, _plan, _ready_packets
 
@@ -147,8 +148,25 @@ def test_report_wide_narrative_evidence_is_assigned_to_analysis_sections():
     ]
     assert analysis_sections
     for section in analysis_sections:
-        assert statistics.evidence_ref in section.required_evidence_refs
-        assert knowledge.evidence_ref in section.required_evidence_refs
+        # Reachable by every analysis section...
+        citable = set(section.required_evidence_refs) | set(
+            section.optional_evidence_refs
+        )
+        assert statistics.evidence_ref in citable
+        assert knowledge.evidence_ref in citable
+        # ...but owed by none of them, or all four end up discussing the same
+        # passage to satisfy REQUIRED_EVIDENCE_NOT_USED.
+        assert statistics.evidence_ref not in section.required_evidence_refs
+        assert knowledge.evidence_ref not in section.required_evidence_refs
+
+    # Owed by exactly one section, so a manifest item cannot go uncited.
+    limitations = next(
+        section
+        for section in plan.sections
+        if section.role is ReportDocumentSectionRole.LIMITATIONS
+    )
+    assert statistics.evidence_ref in limitations.required_evidence_refs
+    assert knowledge.evidence_ref in limitations.required_evidence_refs
 
 
 def test_track_owned_narrative_evidence_is_not_broadcast_to_other_tracks():
@@ -295,6 +313,122 @@ def test_word_targets_scale_with_evidence_capacity_without_padding():
             sum(analysis_words) + implication_words + limitation_words
         )
         assert all(words >= 40 for words in analysis_words)
+
+
+def _full_capacity() -> ReportEvidenceCapacity:
+    return ReportEvidenceCapacity(
+        profile="full",
+        usable_track_count=4,
+        complete_track_count=3,
+        partial_track_count=1,
+        unavailable_track_count=0,
+        usable_exhibit_count=4,
+        validated_finding_count=10,
+    )
+
+
+def test_a_documented_context_section_is_not_sized_like_a_data_section():
+    """An even split is what fills a knowledge track with generic caveats.
+
+    Job 5e6b0cf3 gave market_design_context the same target as a track holding
+    sixty-one rows of prices; its floor then obliged the writer to reach that
+    length from market-design prose alone.
+    """
+
+    even = allocate_report_word_targets(
+        _full_capacity(),
+        analysis_count=4,
+        include_implications=True,
+    )
+    weighted = allocate_report_word_targets(
+        _full_capacity(),
+        analysis_count=4,
+        include_implications=True,
+        analysis_weights=[2, 2, 2, 1],
+    )
+
+    assert even[0] == weighted[0]
+    # The document budget is unchanged; only its distribution moves.
+    assert sum(weighted[1]) == sum(even[1])
+    assert weighted[1][3] < even[1][3]
+    assert weighted[1][0] > even[1][0]
+    # Equal weights land within the one word an indivisible total leaves over.
+    assert max(weighted[1][:3]) - min(weighted[1][:3]) <= 1
+    assert all(words >= 40 for words in weighted[1])
+
+
+def test_a_knowledge_track_is_weighted_as_context_even_when_it_holds_numbers():
+    """A knowledge track still collects numeric tools for context.
+
+    Counting observations alone would size market_design_context like a price
+    section, which is the sizing that filled it with accounting caveats.
+    """
+
+    research_plan, packets, manifest, decisions, gate = _ready_components()
+    knowledge_ids = {
+        track.track_id
+        for track in research_plan.tracks
+        if track.evidence_mode is ReportEvidenceMode.KNOWLEDGE
+    }
+    assert knowledge_ids, [
+        track.evidence_mode for track in research_plan.tracks
+    ]
+
+    document_plan = build_report_document_plan(
+        _QUERY,
+        research_plan,
+        packets,
+        manifest,
+        gate,
+        decisions,
+    )
+
+    analysis = [
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    ]
+    context_sections = [
+        section
+        for section in analysis
+        if knowledge_ids.issuperset(section.track_ids)
+    ]
+    data_sections = [
+        section for section in analysis if section not in context_sections
+    ]
+    assert context_sections and data_sections
+    assert max(
+        section.target_words for section in context_sections
+    ) < min(section.target_words for section in data_sections)
+
+
+def test_word_weights_that_would_starve_a_section_fall_back_to_an_even_split():
+    """A plan whose section drops under the schema minimum cannot validate."""
+
+    capacity = ReportEvidenceCapacity(
+        profile="compact",
+        usable_track_count=1,
+        complete_track_count=1,
+        partial_track_count=0,
+        unavailable_track_count=0,
+        usable_exhibit_count=1,
+        validated_finding_count=2,
+    )
+
+    even = allocate_report_word_targets(
+        capacity,
+        analysis_count=5,
+        include_implications=False,
+    )
+    weighted = allocate_report_word_targets(
+        capacity,
+        analysis_count=5,
+        include_implications=False,
+        analysis_weights=[8, 1, 1, 1, 1],
+    )
+
+    assert weighted[1] == even[1]
+    assert all(words >= 40 for words in weighted[1])
 
 
 def _draft_section(
@@ -2431,3 +2565,102 @@ def test_exhausted_batch_repair_logs_the_result_it_could_not_fix(caplog):
     assert exhausted, [payload["event"] for payload in diagnostics]
     assert set(exhausted[-1]["section_word_counts"]) == set(analysis_ids)
     assert exhausted[-1]["section_error_codes"]
+
+
+def test_optional_evidence_may_be_cited_without_being_owed():
+    """Shared context should reach every section, be owed by one.
+
+    required_evidence_refs is both the whitelist and the obligation, so the
+    only way to let sections share the report-wide statistics and knowledge is
+    to force all of them to write about it -- which is what produces the same
+    framing in four sections.
+    """
+
+    (
+        _research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    spec = next(
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+        and len(section.required_evidence_refs) > 1
+    )
+    shared_ref = spec.required_evidence_refs[0]
+    trimmed = spec.model_copy(
+        update={
+            "required_evidence_refs": spec.required_evidence_refs[1:],
+            "optional_evidence_refs": [shared_ref],
+        }
+    )
+    drafted = ReportSectionDraft.model_validate(
+        _draft_section(trimmed, manifest)
+    )
+    # Cite the optional ref alongside the required ones. Allowed but not owed
+    # is the whole point: today the citation is rejected outright, because one
+    # list serves as both whitelist and obligation.
+    citing = drafted.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={
+                        "evidence_refs": [
+                            *paragraph.evidence_refs,
+                            shared_ref,
+                        ]
+                    }
+                )
+                for paragraph in drafted.paragraphs
+            ]
+        }
+    )
+
+    citing_validation = validate_report_section(citing, trimmed, manifest)
+    silent_validation = validate_report_section(drafted, trimmed, manifest)
+
+    assert "EVIDENCE_REF_NOT_ALLOWED" not in citing_validation.error_codes
+    # And leaving it uncited is not an error either.
+    assert "REQUIRED_EVIDENCE_NOT_USED" not in silent_validation.error_codes
+
+
+def test_an_uncited_required_ref_is_still_reported():
+    """The obligation survives for the refs that keep it."""
+
+    (
+        _research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    spec = next(
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+        and len(section.required_evidence_refs) > 1
+    )
+    drafted = ReportSectionDraft.model_validate(_draft_section(spec, manifest))
+    # Cite one fewer ref than the section is obliged to use.
+    starved = drafted.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={
+                        "evidence_refs": spec.required_evidence_refs[:1],
+                        "direct_claims": [],
+                        "derived_claims": [],
+                    }
+                )
+                for paragraph in drafted.paragraphs
+            ]
+        }
+    )
+
+    validation = validate_report_section(starved, spec, manifest)
+
+    assert "REQUIRED_EVIDENCE_NOT_USED" in validation.error_codes
