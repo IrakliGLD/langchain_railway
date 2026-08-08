@@ -72,16 +72,37 @@ If it does not say `enabled`, **stop** — the rest of Phase 1 deletes the path 
 
 - [ ] **Step 2: Confirm no queued job carries a legacy checkpoint**
 
+The column is `state`, not `status` — the values come from
+`ReportJobState` in `contracts/report_jobs.py`: `queued`, `running`,
+`completed`, `failed`, `cancelled`. The table is reached through Postgres RPCs
+(`lease_report_job_v1`, `heartbeat_report_job_v1`), so its shape is not visible
+in the Python source; confirm the column names before relying on them:
+
 ```sql
-SELECT count(*) FROM report_jobs
-WHERE status IN ('queued', 'running')
-  AND checkpoint->>'contract_version' IN (
-    'report-generation-checkpoint-v1',
-    'report-generation-checkpoint-v2'
-  );
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'report_jobs'
+ORDER BY ordinal_position;
 ```
 
-Expected: `0`. If non-zero, wait for those jobs to finish or fail out, then re-check. Deleting the legacy path while one is in flight fails it permanently — `REPORT_CHECKPOINT_INVALID` is not retryable.
+Then group the active jobs by checkpoint version — this answers the drain
+question and shows what is actually there, rather than returning a bare count
+that hides a surprise:
+
+```sql
+SELECT state,
+       checkpoint->>'contract_version' AS checkpoint_version,
+       count(*)
+FROM report_jobs
+WHERE state IN ('queued', 'running')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+Expected: no row whose `checkpoint_version` is
+`report-generation-checkpoint-v1` or `-v2`. If one exists, wait for that job to
+finish or fail out, then re-check. Deleting the legacy path while one is in
+flight fails it permanently — `REPORT_CHECKPOINT_INVALID` is not retryable.
 
 - [ ] **Step 3: Record the baseline**
 
