@@ -831,6 +831,26 @@ def _build_historical_month_context(
     return result
 
 
+def _row_share_snapshot(row: Optional[pd.DataFrame]) -> dict[str, float]:
+    """Read the share columns out of one period row.
+
+    Single authority for "what were the shares in this period", so the current,
+    previous, and year-ago snapshots cannot drift apart.
+    """
+
+    snapshot: dict[str, float] = {}
+    if row is None or row.empty:
+        return snapshot
+    for col in [c for c in row.columns if c.startswith("share_")]:
+        val = row[col].iloc[0]
+        if pd.notna(val):
+            try:
+                snapshot[col] = float(val)
+            except (ValueError, TypeError):
+                pass
+    return snapshot
+
+
 def _build_requested_analysis_evidence(
     ctx: QueryContext,
     df: pd.DataFrame,
@@ -849,15 +869,16 @@ def _build_requested_analysis_evidence(
     # Build one shared metric context so each registry function sees the same resolved periods and snapshots.
     yoy_row = _find_yoy_row(df, time_col, current_ts)
     yoy_ts = pd.to_datetime(yoy_row[time_col].iloc[0], errors="coerce") if not yoy_row.empty else None
-    yoy_shares: dict[str, float] = {}
-    if not yoy_row.empty:
-        for col in [c for c in yoy_row.columns if c.startswith("share_")]:
-            val = yoy_row[col].iloc[0]
-            if pd.notna(val):
-                try:
-                    yoy_shares[col] = float(val)
-                except (ValueError, TypeError):
-                    pass
+    yoy_shares = _row_share_snapshot(yoy_row)
+    # A share metric cannot be computed without these. Only the balancing
+    # why-context path supplied them, so on job 40e55527 a plain composition
+    # track requested share_delta_mom three times, received nothing, and was
+    # declared PARTIAL over shares its own frame was carrying. A caller that
+    # resolved them its own way still wins.
+    if not cur_shares:
+        cur_shares = _row_share_snapshot(current_row)
+    if not prev_shares:
+        prev_shares = _row_share_snapshot(previous_row)
 
     mctx = MetricContext(
         df=df,

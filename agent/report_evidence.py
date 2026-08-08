@@ -156,12 +156,56 @@ def _normalize_table(
     return normalized_columns, normalized_rows, total, total > len(normalized_rows)
 
 
+# A parenthesised label suffix is a unit only when it is one the manifest
+# already speaks. "Balancing electricity price (GEL/MWh)" declares its unit;
+# "Hydro generation (Projected)" names a scenario, and reading that as a unit
+# would ask the writer to print the word beside every number it cites.
+_LABEL_DECLARED_UNITS = {
+    "%": "%",
+    "count": "count",
+    "gel": "GEL",
+    "gel/mwh": "GEL/MWh",
+    "gwh": "GWh",
+    "index": "index",
+    "kw": "kW",
+    "kwh": "kWh",
+    "mw": "MW",
+    "mwh": "MWh",
+    "percent": "%",
+    "rank": "rank",
+    "ratio": "ratio",
+    "share": "ratio",
+    "thousand mwh": "thousand MWh",
+    "usd": "USD",
+    "usd/mwh": "USD/MWh",
+}
+_LABEL_UNIT_SUFFIX_PATTERN = re.compile(r"(?P<name>.*?)\s*\((?P<unit>[^()]+)\)\s*")
+
+
 def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
     """Expose deterministic units already encoded by canonical column names."""
 
     units: dict[str, str] = {}
     for column in columns:
         normalized = str(column or "").strip().lower()
+        if not normalized:
+            continue
+        labelled = _LABEL_UNIT_SUFFIX_PATTERN.fullmatch(normalized)
+        if labelled is not None:
+            declared = _LABEL_DECLARED_UNITS.get(
+                " ".join(labelled.group("unit").split())
+            )
+            if declared is not None:
+                units[column] = declared
+                continue
+            normalized = labelled.group("name").strip()
+        # Chart frames rename canonical columns to display labels for the
+        # renderer ("share_import" → "Share Import"), and every lookup below is
+        # keyed by the canonical form. On job 40e55527 that renaming left nine
+        # evidence tables with no declared unit, so nothing in them could be
+        # cited and all four analysis sections came back NUMERIC_FINDING_MISSING.
+        # Restoring the canonical form is a no-op for names already canonical.
+        normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
         if not normalized:
             continue
         # A percent-scaled share must be resolved before the registry, whose
@@ -280,8 +324,15 @@ def make_report_table_evidence_item(
     provenance_refs: list[str] | None = None,
     max_rows: int = 100,
     max_columns: int = 24,
+    unit_by_column: dict[str, str] | None = None,
 ) -> ReportEvidenceItem | None:
-    """Create one bounded deterministic table item for report evidence."""
+    """Create one bounded deterministic table item for report evidence.
+
+    ``unit_by_column`` is for callers that know something the column names do
+    not say. A month-on-month percent frame keeps the labels of the levels it
+    was computed from, so inference would declare those levels' units and a
+    claim on a percent cell would read as a price.
+    """
 
     relevant_tokens = {
         match.group(0).casefold().replace("/", "-")
@@ -298,6 +349,14 @@ def make_report_table_evidence_item(
     )
     if not normalized_columns or not normalized_rows:
         return None
+    units = _inferred_unit_by_column(normalized_columns)
+    units.update(
+        {
+            column: unit
+            for column, unit in (unit_by_column or {}).items()
+            if column in normalized_columns and str(unit or "").strip()
+        }
+    )
     return _make_item(
         kind=ReportEvidenceKind.TABLE,
         title=title,
@@ -305,7 +364,7 @@ def make_report_table_evidence_item(
         provenance_refs=provenance_refs,
         columns=normalized_columns,
         rows=normalized_rows,
-        unit_by_column=_inferred_unit_by_column(normalized_columns),
+        unit_by_column=units,
         total_row_count=total_rows,
         truncated=truncated,
     )

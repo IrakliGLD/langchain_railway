@@ -2204,6 +2204,40 @@ def test_the_balancing_guardrail_reads_the_question_not_its_context():
     assert finalized.contract.routing.preferred_path.value == "knowledge"
 
 
+def test_the_balancing_guardrail_reads_the_subject_from_the_question():
+    """Movement language in the question is not enough — the subject counts too.
+
+    Job 40e55527, the run after the intent-token fix: a tariff track asking
+    which schedules applied and whether any *changed* still matched, because
+    two coverage bullets mentioned balancing rules and observed prices. It was
+    coerced to the balancing-price path and fetched prices and balancing
+    composition instead of tariffs.
+    """
+
+    track_query = (
+        "Which regulated tariff schedules applied in May 2026, and did any "
+        "tariff schedules change from April 2026?\n"
+        "Research track: Applicable tariffs and market-design context\n"
+        "Required coverage:\n"
+        "- How do the current transitional monthly balancing-market rules, "
+        "including the separation of ESCO buy-side and sell-side pricing, "
+        "contextualize the May 2026 findings?\n"
+        "- What evidence boundaries should be observed when interpreting "
+        "observed prices, balancing composition, generation, imports, "
+        "exports, and tariffs?\n"
+        "Report context: create a report about may 2026"
+    )
+
+    finalized = finalize_question_contract(
+        _knowledge_analysis(),
+        raw_query=track_query,
+        conversation_history=None,
+    )
+
+    assert not finalized.applied("balancing_month_explanation")
+    assert finalized.contract.routing.preferred_path.value == "knowledge"
+
+
 def test_the_balancing_guardrail_still_catches_a_real_movement_question():
     """The misroute it exists for is unaffected."""
 

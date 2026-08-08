@@ -2104,6 +2104,130 @@ def test_standalone_analysis_evidence_for_analyst_mode(monkeypatch):
     assert "DERIVED ANALYSIS EVIDENCE" in enriched.stats_hint
 
 
+def test_share_metrics_resolve_outside_the_why_context_path(monkeypatch):
+    """A composition question asks for share deltas without asking "why".
+
+    The share snapshots a share metric needs were supplied only by the
+    balancing why-context path. On job 40e55527 a plain composition track
+    requested share_delta_mom three times, every dispatch returned None
+    because the snapshots were empty, no analysis evidence was produced at
+    all, and the track was declared PARTIAL with
+    MISSING_DERIVED_METRIC_SHARE_DELTA_MOM — over shares its own frame held.
+    """
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    qa = QuestionAnalysis.model_validate(
+        {
+            "version": "question_analysis_v1",
+            "raw_query": "What was the composition of the balancing market in May 2026?",
+            "canonical_query_en": (
+                "What was the composition of the balancing market in May 2026?"
+            ),
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "comparison",
+                "analysis_mode": "analyst",
+                "intent": "balancing_composition",
+                "needs_clarification": False,
+                "confidence": 0.96,
+                "ambiguities": [],
+            },
+            "routing": {
+                "preferred_path": "tool",
+                "needs_sql": False,
+                "needs_knowledge": False,
+                "prefer_tool": True,
+            },
+            "knowledge": {"candidate_topics": []},
+            "tooling": {
+                "candidate_tools": [
+                    {"name": "get_balancing_composition", "score": 0.95}
+                ]
+            },
+            "sql_hints": {
+                "metric": "share_import",
+                "entities": [],
+                "aggregation": "monthly",
+                "dimensions": ["share"],
+                "period": {
+                    "kind": "range",
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-05-31",
+                    "granularity": "month",
+                    "raw_text": "April 2026 to May 2026",
+                },
+            },
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.5,
+            },
+            "analysis_requirements": {
+                # No driver analysis: this is the plain composition question,
+                # not the "why did the price move" one.
+                "needs_driver_analysis": False,
+                "needs_trend_context": False,
+                "needs_correlation_context": False,
+                "derived_metrics": [
+                    {"metric_name": "share_delta_mom", "metric": "share_import"},
+                ],
+            },
+        }
+    )
+
+    monkeypatch.setattr(analyzer, "ENGINE", _Engine())
+    monkeypatch.setattr(
+        analyzer, "_is_balancing_price_query", lambda *_args, **_kwargs: False
+    )
+
+    frame = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2026-04-01"), pd.Timestamp("2026-05-01")],
+            "share_import": [0.0942, 0.0680],
+        }
+    )
+    rows = [
+        (pd.Timestamp("2026-04-01"), 0.0942),
+        (pd.Timestamp("2026-05-01"), 0.0680),
+    ]
+    ctx = QueryContext(
+        query="What was the composition of the balancing market in May 2026?",
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        plan={"intent": "general"},
+        df=frame,
+        cols=["date", "share_import"],
+        rows=rows,
+        provenance_cols=["date", "share_import"],
+        provenance_rows=rows,
+        provenance_query_hash="composition-test-123",
+        provenance_source="tool",
+    )
+
+    enriched = analyzer.enrich(ctx)
+
+    share_records = [
+        item
+        for item in (enriched.analysis_evidence or [])
+        if item.get("derived_metric_name") == "share_delta_mom"
+    ]
+    assert share_records, "share_delta_mom produced no evidence"
+    assert share_records[0]["absolute_change"] == pytest.approx(-0.0262, abs=1e-6)
+
+
 def test_why_context_includes_yoy_signals(monkeypatch):
     """When data spans multiple years, _build_why_context populates YoY signals and notes."""
     # Nov 2022 (YoY reference), Oct 2023 (MoM reference), Nov 2023 (target)

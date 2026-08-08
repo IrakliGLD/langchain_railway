@@ -226,6 +226,104 @@ def test_track_analysis_preserves_deterministic_derived_chart_evidence():
     assert candidate.series_fields == ["mom_pct"]
 
 
+def _composition_track() -> ReportResearchTrack:
+    """The security track, asking for a month-on-month share comparison."""
+
+    payload = _plan().tracks[1].model_dump(mode="json")
+    payload["requested_metrics"] = ["share_delta_mom"]
+    payload["expected_exhibits"] = ["composition"]
+    return ReportResearchTrack.model_validate(payload)
+
+
+def _paired_panel_context(query: str) -> QueryContext:
+    """The two frames the analyzer emits for a month-on-month chart.
+
+    The change panel is built by renaming the levels it was computed from, so
+    both frames carry the same display labels and only the title and the
+    declared transform say which is which.
+    """
+
+    return QueryContext(
+        query=query,
+        cols=["date", "share_hydro", "share_thermal"],
+        rows=[["2026-04", 0.61, 0.39], ["2026-05", 0.72, 0.28]],
+        provenance_cols=["date", "share_hydro", "share_thermal"],
+        provenance_rows=[["2026-04", 0.61, 0.39], ["2026-05", 0.72, 0.28]],
+        provenance_refs=["query:track:generation"],
+        provenance_source="pipeline",
+        stats_hint="Hydro share rose over the month.",
+        chart_override_specs=[
+            {
+                "type": "line",
+                "data": [
+                    {"date": "2026-04", "Share Hydro": 0.61, "Share Thermal": 0.39},
+                    {"date": "2026-05", "Share Hydro": 0.72, "Share Thermal": 0.28},
+                ],
+                "metadata": {"title": "Observed Data", "role": "observed"},
+            },
+            {
+                "type": "bar",
+                "data": [
+                    {"date": "2026-05", "Share Hydro": 18.03, "Share Thermal": -28.21},
+                ],
+                "metadata": {
+                    "title": "MoM Change (%)",
+                    "role": "derived",
+                    "measureTransform": "mom_pct",
+                },
+            },
+        ],
+        answer_mode="report",
+    )
+
+
+def test_a_change_panel_declares_percent_not_the_unit_of_its_levels():
+    """Both frames carry the same labels; only one holds those labels' values.
+
+    Inference reads the labels, so without the builder saying otherwise the
+    month-on-month percentages would be declared as shares and a claim on
+    -28.21 would verify as a ratio.
+    """
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _composition_track(),
+        query_pipeline=lambda query, **_kwargs: _paired_panel_context(query),
+    )
+
+    units_by_title = {
+        item.title: item.unit_by_column
+        for item in packet.items
+        if item.kind is ReportEvidenceKind.TABLE
+    }
+    assert units_by_title["Observed Data"]["Share Hydro"] == "ratio"
+    assert units_by_title["MoM Change (%)"]["Share Hydro"] == "%"
+    assert "date" not in units_by_title["MoM Change (%)"]
+
+
+def test_a_composition_exhibit_is_drawn_from_levels_not_from_changes():
+    """"share_delta_mom" names a subject and a comparison.
+
+    On job 40e55527 the comparison words scored the change panel above the
+    levels it came from, and the balancing composition exhibit was built from a
+    single row of deltas, then omitted for having one category.
+    """
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _composition_track(),
+        query_pipeline=lambda query, **_kwargs: _paired_panel_context(query),
+    )
+
+    title_by_ref = {item.evidence_ref: item.title for item in packet.items}
+    composition = next(
+        candidate
+        for candidate in packet.chart_candidates
+        if candidate.purpose.value == "composition"
+    )
+    assert title_by_ref[composition.evidence_refs[0]] == "Observed Data"
+
+
 def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence(
     monkeypatch,
 ):
