@@ -12,7 +12,7 @@ from agent.report_assembly import ReportAssemblyError, assemble_report
 from agent.report_charts import build_report_charts
 from contracts.report import ReportIntent, ReportPlan, ReportSectionKind
 from contracts.report_sections import ReportSectionDraft
-from tests.test_report_planner import _manifest, _plan_payload
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 from tests.test_report_sections import _draft
 
 

@@ -12,7 +12,7 @@ from agent.report_charts import build_report_charts
 from contracts.report import ReportPlan
 from contracts.report_result import ReportResult
 from contracts.report_sections import ReportSectionDraft
-from tests.test_report_planner import _manifest, _plan_payload
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 from tests.test_report_sections import _draft
 
 

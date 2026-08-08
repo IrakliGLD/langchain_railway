@@ -23,7 +23,7 @@ from agent.report_sections import generate_report_sections
 from contracts.report import ReportPlan, report_section_prompt_word_bounds
 from contracts.report_sections import ReportSectionDraft
 from core.llm import _report_section_evidence_slice
-from tests.test_report_planner import TABLE_REF, _manifest, _plan_payload
+from tests.fixtures_report_manifest import TABLE_REF, _manifest, _plan_payload
 from tests.test_report_sections import _draft
 
 
@@ -724,7 +724,7 @@ def test_section_repair_resamples_instead_of_regenerating_the_same_draft(monkeyp
     candidate and on both repairs. At temperature 0 a repair re-emits the same
     text, so the extra provider calls cannot converge."""
 
-    from tests.test_report_planner import _manifest, _plan_payload
+    from tests.fixtures_report_manifest import _manifest, _plan_payload
 
     captured = []
 
@@ -759,7 +759,7 @@ def test_section_repair_resamples_instead_of_regenerating_the_same_draft(monkeyp
 
 
 def test_section_writer_keeps_deterministic_sampling(monkeypatch):
-    from tests.test_report_planner import _manifest, _plan_payload
+    from tests.fixtures_report_manifest import _manifest, _plan_payload
 
     captured = []
 

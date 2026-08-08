@@ -46,6 +46,7 @@ from core.report_job_processor import (
 )
 from core.report_job_worker import ReportJobFailure
 from models import QueryContext
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 from tests.test_report_document_pipeline_v2 import (
     _QUERY as _V2_QUERY,
 )
@@ -53,7 +54,6 @@ from tests.test_report_document_pipeline_v2 import (
     _document_components,
     _valid_document_draft,
 )
-from tests.test_report_planner import _manifest, _plan_payload
 from tests.test_report_research_contract import _research_plan_payload
 from tests.test_report_sections import _draft
 from utils.provider_attempts import (

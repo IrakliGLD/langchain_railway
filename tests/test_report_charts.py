@@ -20,7 +20,7 @@ from agent.report_evaluation import evaluate_report_plan
 from agent.report_planner import ReportPlanEvidenceError, validate_report_plan_evidence
 from contracts.report import ReportPlan
 from contracts.report_evidence import ReportEvidenceManifest
-from tests.test_report_planner import _manifest, _plan_payload
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 
 
 def test_trend_chart_is_built_deterministically_from_manifest_rows():

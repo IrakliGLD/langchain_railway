@@ -23,7 +23,7 @@ from contracts.report import (
     ReportPlanningContext,
     ReportSectionKind,
 )
-from tests.test_report_planner import _manifest, _plan_payload
+from tests.fixtures_report_manifest import _manifest, _plan_payload
 
 
 def test_report_planner_prompt_uses_structure_skill_and_evidence_catalog(monkeypatch):
