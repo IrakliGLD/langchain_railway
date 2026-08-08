@@ -14,6 +14,12 @@ from pydantic import (
     model_validator,
 )
 
+from contracts.question_analysis import (
+    AnswerKind,
+    DerivedMetricName,
+    PreferredPath,
+    QueryType,
+)
 from contracts.report import REPORT_MAX_EXHIBITS, ReportChartPurpose
 from contracts.report_evidence import (
     ReportEvidenceItem,
@@ -218,12 +224,26 @@ class ReportResearchTrack(_StrictResearchModel):
         default_factory=list,
         max_length=REPORT_MAX_EXHIBITS,
     )
+    # What the track's own analysis should conclude, decided here rather than
+    # re-derived per track by a second model reading this track serialized back
+    # into prose. Distinct from requested_metrics, which names what to measure:
+    # these name how to analyse it. "percent_change" cannot say whether it
+    # means month-on-month or year-on-year, and only whoever wrote the research
+    # question knows -- which is the planner.
+    analysis_query_type: QueryType = QueryType.DATA_RETRIEVAL
+    analysis_preferred_path: PreferredPath = PreferredPath.TOOL
+    analysis_answer_kind: AnswerKind | None = None
+    analysis_derived_metrics: List[DerivedMetricName] = Field(
+        default_factory=list,
+        max_length=8,
+    )
 
     @field_validator(
         "topic_ids",
         "collector_ids",
         "requested_metrics",
         "expected_exhibits",
+        "analysis_derived_metrics",
     )
     @classmethod
     def _require_unique_values(cls, values: list) -> list:
@@ -280,12 +300,21 @@ class ReportResearchTrack(_StrictResearchModel):
 
 
 class ReportResearchTrackDraft(ReportResearchTrack):
-    """Model-owned track fields without application defaults."""
+    """Model-owned track fields without application defaults.
+
+    Defaults are omitted so every field appears in the strict JSON schema's
+    ``required`` list and the model must state each decision rather than
+    inheriting one silently.
+    """
 
     requested_metrics: List[Identifier] = Field(max_length=16)
     expected_exhibits: List[ReportChartPurpose] = Field(
         max_length=REPORT_MAX_EXHIBITS,
     )
+    analysis_query_type: QueryType
+    analysis_preferred_path: PreferredPath
+    analysis_answer_kind: AnswerKind | None
+    analysis_derived_metrics: List[DerivedMetricName] = Field(max_length=8)
 
 
 class ReportResearchPlanDraft(_StrictResearchModel):
