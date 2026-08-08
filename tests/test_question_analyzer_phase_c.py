@@ -2160,3 +2160,60 @@ def test_analyzer_system_message_carries_current_date():
     message = _analyzer_system_message()
     assert f"Current date: {date.today().isoformat()}." in message
     assert "never assume an earlier 'today'" in message
+
+
+def _knowledge_analysis() -> QuestionAnalysis:
+    """An analyzer verdict of "this is a rules question", as the model gave it."""
+    from contracts.question_analysis import PreferredPath, QueryType
+    from tests.test_semantic_lock import _make_qa
+
+    return _make_qa(
+        query_type=QueryType.REGULATORY_PROCEDURE,
+        preferred_path=PreferredPath.KNOWLEDGE,
+        intent="explain how the balancing price is defined",
+    )
+
+
+def test_the_balancing_guardrail_reads_the_question_not_its_context():
+    """A track's coverage bullets describe neighbouring work, not its question.
+
+    On job 37567e5f a market-rules track asking how the balancing price is
+    *defined* was coerced into a data question, because a coverage bullet
+    mentioned "composition changes" and another mentioned May 2026. It then
+    fetched sixty-one rows of prices it had no use for, and its section filled
+    with generic caveats.
+    """
+
+    track_query = (
+        "How is the balancing price defined and formed under the current "
+        "transitional market model?\n"
+        "Research track: Current balancing-market rules and boundaries\n"
+        "Required coverage:\n"
+        "- Which market-design rules are needed to interpret observed "
+        "May 2026 price, volume, and composition changes?\n"
+        "Report context: create a report about may 2026"
+    )
+
+    finalized = finalize_question_contract(
+        _knowledge_analysis(),
+        raw_query=track_query,
+        conversation_history=None,
+    )
+
+    assert not finalized.applied("balancing_month_explanation")
+    assert finalized.contract.routing.preferred_path.value == "knowledge"
+
+
+def test_the_balancing_guardrail_still_catches_a_real_movement_question():
+    """The misroute it exists for is unaffected."""
+
+    finalized = finalize_question_contract(
+        _knowledge_analysis(),
+        raw_query=(
+            "Why did balancing electricity prices change in November 2024?"
+        ),
+        conversation_history=None,
+    )
+
+    assert finalized.applied("balancing_month_explanation")
+    assert finalized.contract.routing.preferred_path.value == "tool"
