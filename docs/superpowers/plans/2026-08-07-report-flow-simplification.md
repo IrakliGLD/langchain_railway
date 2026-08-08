@@ -72,26 +72,21 @@ If it does not say `enabled`, **stop** — the rest of Phase 1 deletes the path 
 
 - [ ] **Step 2: Confirm no queued job carries a legacy checkpoint**
 
-The column is `state`, not `status` — the values come from
-`ReportJobState` in `contracts/report_jobs.py`: `queued`, `running`,
-`completed`, `failed`, `cancelled`. The table is reached through Postgres RPCs
-(`lease_report_job_v1`, `heartbeat_report_job_v1`), so its shape is not visible
-in the Python source; confirm the column names before relying on them:
+`public.report_jobs` is reached only through Postgres RPCs
+(`lease_report_job_v1`, `heartbeat_report_job_v1`), so its shape appears
+nowhere in the Python source. Verified column names, 2026-08-07 — do not guess
+these:
 
-```sql
-SELECT column_name, data_type
-FROM information_schema.columns
-WHERE table_name = 'report_jobs'
-ORDER BY ordinal_position;
-```
-
-Then group the active jobs by checkpoint version — this answers the drain
-question and shows what is actually there, rather than returning a bare count
-that hides a surprise:
+| column | type | note |
+|---|---|---|
+| `state` | text | **not** `status`; values from `ReportJobState` — `queued`, `running`, `completed`, `failed`, `cancelled` |
+| `checkpoint_payload` | jsonb | **not** `checkpoint`; holds the `contract_version` this task cares about |
+| `contract_version` | text | the *job* contract, a different thing from the checkpoint's — do not read this one |
+| `phase`, `attempt_count`, `error_code`, `result_payload` | | |
 
 ```sql
 SELECT state,
-       checkpoint->>'contract_version' AS checkpoint_version,
+       checkpoint_payload->>'contract_version' AS checkpoint_version,
        count(*)
 FROM report_jobs
 WHERE state IN ('queued', 'running')
