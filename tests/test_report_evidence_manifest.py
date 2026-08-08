@@ -389,6 +389,51 @@ def test_emitted_share_columns_carry_the_unit_they_actually_hold():
     assert "period" not in units
 
 
+def test_display_labelled_columns_still_resolve_their_unit():
+    """Chart frames rename canonical columns before they become evidence.
+
+    On job 40e55527 nine evidence tables came back with columns like "Share
+    Import" and "Balancing electricity price (GEL/MWh)". Every lookup is keyed
+    by the canonical name, so none declared a unit, nothing in them could be
+    cited, and all four analysis sections failed NUMERIC_FINDING_MISSING.
+    """
+
+    from agent.report_evidence import _inferred_unit_by_column
+
+    units = _inferred_unit_by_column(
+        [
+            "date",
+            "Share Import",
+            "Share Regulated Hpp",
+            "Balancing electricity price (GEL/MWh)",
+            "Balancing electricity price (USD/MWh)",
+        ]
+    )
+
+    assert units["Share Import"] == "ratio"
+    assert units["Share Regulated Hpp"] == "ratio"
+    assert units["Balancing electricity price (GEL/MWh)"] == "GEL/MWh"
+    assert units["Balancing electricity price (USD/MWh)"] == "USD/MWh"
+    assert "date" not in units
+
+
+def test_a_parenthesised_label_suffix_is_not_read_as_a_unit():
+    """The forecast builder labels its projection "... (Projected)".
+
+    Declaring that as a unit would make every claim on the column require the
+    word beside the number, which no writer would produce.
+    """
+
+    from agent.report_evidence import _inferred_unit_by_column
+
+    units = _inferred_unit_by_column(
+        ["Hydro generation (Projected)", "Hydro generation (GWh)"]
+    )
+
+    assert units["Hydro generation (GWh)"] == "GWh"
+    assert units.get("Hydro generation (Projected)") != "Projected"
+
+
 def test_statistics_narrative_keeps_far_more_than_a_passage_sized_clip():
     """A 59 KB stats_hint must not be truncated to a passage's worth.
 

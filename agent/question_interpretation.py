@@ -762,6 +762,22 @@ def _leading_question(raw_query: str) -> str:
     return str(raw_query or "").splitlines()[0] if raw_query else ""
 
 
+def _question_asks_about(raw_query: str, tokens: tuple[str, ...]) -> bool:
+    """Match subject and intent language against the question, not its context.
+
+    Every positive condition a guardrail tests — what the question is about as
+    much as what it asks — has to come from the question itself. Job 40e55527
+    showed why the distinction is not only about intent words: a tariff track
+    asking which schedules applied, and whether any *changed*, was coerced onto
+    the balancing-price path because two coverage bullets mentioned balancing
+    rules and observed prices. It fetched prices and balancing composition
+    instead of tariffs, and its section was written from them.
+    """
+
+    leading = _leading_question(raw_query)
+    return any(token in leading for token in tokens)
+
+
 def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
     """Detect explicitly month-bounded balancing-price explanation questions.
 
@@ -772,17 +788,14 @@ def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
     query_lower = str(raw_query or "").lower()
     if not query_lower:
         return False
-    # The movement language has to be in the question. A period may legitimately
-    # appear anywhere, including a coverage bullet, so the date search below
-    # still reads the whole text.
-    if not any(
-        token in _leading_question(query_lower)
-        for token in _BALANCING_PRICE_EXPLANATION_TOKENS
-    ):
+    # Movement language and subject both have to be in the question. A period
+    # may legitimately appear anywhere, including a coverage bullet, so the date
+    # search below still reads the whole text.
+    if not _question_asks_about(query_lower, _BALANCING_PRICE_EXPLANATION_TOKENS):
         return False
-    if not any(token in query_lower for token in _BALANCING_PRICE_BALANCING_TOKENS):
+    if not _question_asks_about(query_lower, _BALANCING_PRICE_BALANCING_TOKENS):
         return False
-    if not any(token in query_lower for token in _BALANCING_PRICE_PRICE_TOKENS):
+    if not _question_asks_about(query_lower, _BALANCING_PRICE_PRICE_TOKENS):
         return False
 
     start_date, end_date = _extract_explicit_month_period(raw_query)
@@ -973,12 +986,14 @@ def _is_simple_balancing_price_forecast_query(
     query_lower = str(raw_query or "").lower()
     if not query_lower:
         return False
-    if not any(token in query_lower for token in _BALANCING_PRICE_FORECAST_TOKENS):
+    if not _question_asks_about(query_lower, _BALANCING_PRICE_FORECAST_TOKENS):
         return False
-    if not any(token in query_lower for token in _BALANCING_PRICE_BALANCING_TOKENS):
+    if not _question_asks_about(query_lower, _BALANCING_PRICE_BALANCING_TOKENS):
         return False
-    if not any(token in query_lower for token in _BALANCING_PRICE_PRICE_TOKENS):
+    if not _question_asks_about(query_lower, _BALANCING_PRICE_PRICE_TOKENS):
         return False
+    # The brake keeps reading everything: a conceptual signal anywhere is reason
+    # enough to leave the analyzer's own verdict standing.
     if any(token in query_lower for token in _BALANCING_PRICE_FORECAST_CONCEPTUAL_TOKENS):
         return False
 

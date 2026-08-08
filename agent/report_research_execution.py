@@ -615,6 +615,12 @@ def _chart_candidates(
     tables = [
         item for item in items if item.kind is ReportEvidenceKind.TABLE
     ]
+    # A requested metric names a subject and a comparison — "share_delta_mom"
+    # is the share, compared month over month. Only the subject should steer
+    # which table an exhibit is drawn from: on job 40e55527 the comparison words
+    # scored the month-on-month change panel above the levels it was computed
+    # from, and the balancing composition exhibit was built from a frame holding
+    # one row of deltas, then omitted for having a single category.
     requested_tokens = {
         token
         for metric in requested_metrics
@@ -622,10 +628,16 @@ def _chart_candidates(
         if token not in {
             "average",
             "change",
+            "delta",
+            "growth",
+            "index",
             "maximum",
             "minimum",
+            "mom",
             "percent",
+            "pct",
             "ratio",
+            "yoy",
         }
     }
 
@@ -883,11 +895,25 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
                 for column in row
             )
         )
-        metadata = spec.get("metadata")
-        title = (
-            str(metadata.get("title") or "").strip()
-            if isinstance(metadata, dict)
-            else ""
+        metadata = spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {}
+        title = str(metadata.get("title") or "").strip()
+        # A percent-change panel is built by renaming the levels it was computed
+        # from, so its columns still read "Balancing electricity price
+        # (GEL/MWh)" while holding month-on-month percentages. Only the builder
+        # knows that; the column names never will.
+        transform = str(metadata.get("measureTransform") or "").lower()
+        percent_units = (
+            {
+                column: "%"
+                for column in columns
+                if any(
+                    isinstance(row.get(column), Real)
+                    and not isinstance(row.get(column), bool)
+                    for row in rows
+                )
+            }
+            if any(token in transform for token in ("pct", "percent"))
+            else {}
         )
         item = make_report_table_evidence_item(
             query=str(getattr(context, "query", "") or ""),
@@ -899,6 +925,7 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
                 getattr(context, "provenance_refs", None) or []
             ),
             max_rows=200,
+            unit_by_column=percent_units,
         )
         if item is not None:
             items.append(item)
