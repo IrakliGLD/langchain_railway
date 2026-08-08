@@ -100,15 +100,22 @@ Run the May 2026 report and save the full log to `docs/evidence/`. Every later p
 - Consumes: nothing.
 - Produces: `ReportJobProcessor.__init__` no longer accepts `planner`, `evaluator`, `assembler`, or `chart_builder`.
 
-- [ ] **Step 1: Find every importer**
+- [x] **Step 1: Find every importer** — DONE 2026-08-07
 
 ```bash
 grep -rn "report_planner\|report_assembly\|report_evaluation" --include=*.py .
 ```
 
-Record the list. Several test modules import fixtures from `tests/test_report_planner.py` — notably `_manifest` and `_plan_payload`, used by `tests/test_report_charts.py` and `tests/test_report_job_processor.py`. Those fixtures must survive.
+**Actual finding, wider than estimated:** `tests/test_report_planner.py` is a
+fixture hub for **nine** modules, not two — `test_report_assembly`,
+`test_report_charts`, `test_report_document_contract`,
+`test_report_job_processor`, `test_report_plan_llm`, `test_report_projection`,
+`test_report_result`, `test_report_sections`, `test_report_section_llm`. The
+exported surface is `_manifest`, `_plan_payload`, **and `TABLE_REF`** (which
+this plan originally missed); `_manifest` and `_plan_payload` also close over
+`STATS_REF` and `LIMIT_REF`, so all five names move together.
 
-- [ ] **Step 2: Move the surviving fixtures before deleting their home**
+- [x] **Step 2: Move the surviving fixtures before deleting their home** — DONE (commit 1b79c8d)
 
 Create `tests/fixtures_report_manifest.py` containing `_manifest()` and `_plan_payload()` copied verbatim from `tests/test_report_planner.py`, then update the importers:
 
@@ -116,12 +123,12 @@ Create `tests/fixtures_report_manifest.py` containing `_manifest()` and `_plan_p
 from tests.fixtures_report_manifest import _manifest, _plan_payload
 ```
 
-- [ ] **Step 3: Run the suite to confirm the move is clean**
+- [x] **Step 3: Run the suite to confirm the move is clean** — DONE, 2501 passed
 
 Run: `python -m pytest tests/ -q`
 Expected: PASS, same count as before.
 
-- [ ] **Step 4: Commit the fixture move on its own**
+- [x] **Step 4: Commit the fixture move on its own** — DONE (commit 1b79c8d)
 
 ```bash
 git add tests/
@@ -221,6 +228,45 @@ git commit -m "Delete the legacy report attempt path and its shadow planner"
 ```
 
 ### Task 1.4: Delete the v1 chart builder and the v1 plan contract
+
+> **RE-PLANNED 2026-08-07 after Task 1.2 Step 1 — DO NOT EXECUTE AS WRITTEN.**
+>
+> Step 1 of Task 1.2 found coupling this task did not anticipate. `ReportPlan`
+> is not confined to the v1 orchestration path: it is the **test vehicle for
+> `agent/report_sections.py`**, whose `validate_report_section` is the live v2
+> grounding gate. `tests/test_report_sections.py` (600 lines) and
+> `tests/test_report_section_llm.py` both build `ReportPlan.model_validate(
+> _plan_payload())` to exercise it, and `tests/test_report_charts.py` does the
+> same for rendering behaviour that `build_report_research_exhibits` shares.
+>
+> Deleting the contract therefore means rewriting the safety net of the most
+> failure-prone code in the subsystem — the word bounds, grounding, and claim
+> validation that have broken four ways this month. That is not a deletion; it
+> is a test migration, and it must not ride along inside a phase whose stated
+> value is "zero behaviour change".
+>
+> **Split as follows:**
+>
+> - **Task 1.4a (in scope, safe):** delete the legacy *orchestration* only —
+>   `_run_legacy_bound_attempt`, `_run_shadow_research_planner`,
+>   `agent/report_planner.py`, `agent/report_assembly.py`,
+>   `agent/report_evaluation.py`, `llm_plan_report`, checkpoint versions v1/v2,
+>   `REPORT_PIPELINE_V2_MODE`. **Keep** `contracts/report.py::ReportPlan`,
+>   `agent/report_sections.py::generate_report_sections`, and
+>   `agent/report_charts.py::build_report_charts`. Delete only
+>   `tests/test_report_planner.py`, `tests/test_report_assembly.py`,
+>   `tests/test_report_plan_llm.py`, `tests/test_report_result.py`.
+>   Expected: about −900 lines, still no production behaviour change.
+>
+> - **Task 1.4b (deferred, own plan):** migrate `tests/test_report_sections.py`
+>   and `tests/test_report_charts.py` from `ReportPlan` to
+>   `ReportDocumentPlan`/`ReportDocumentSectionSpec`, then delete `ReportPlan`,
+>   `generate_report_sections`, and `build_report_charts`. Test-only risk, but
+>   it is the coverage that guards the live gate, so it deserves its own
+>   review rather than a footnote in a deletion phase.
+>
+> Cosmetically deleting a contract is worth far less than the coverage it would
+> put at risk. 1.4b is optional; 1.4a is not.
 
 **Files:**
 - Modify: `agent/report_charts.py:865` (`build_report_charts`)
