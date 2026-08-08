@@ -746,6 +746,22 @@ def _extract_explicit_month_period(raw_query: str) -> tuple[Optional[str], Optio
     return start_dt.isoformat(), full_end.isoformat()
 
 
+def _leading_question(raw_query: str) -> str:
+    """Return the question asked, without context appended beneath it.
+
+    A report track query carries its primary question on the first line and
+    then its research title, coverage bullets, and the originating report
+    request. Those lines describe the surrounding work, not the question, and
+    matching movement language inside them classifies a track by its
+    neighbours: on job 37567e5f a market-rules track asking how the balancing
+    price is *defined* matched on a bullet mentioning "composition changes"
+    and was coerced into a data question, sending it to fetch sixty-one rows
+    of prices it had no use for.
+    """
+
+    return str(raw_query or "").splitlines()[0] if raw_query else ""
+
+
 def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
     """Detect explicitly month-bounded balancing-price explanation questions.
 
@@ -756,7 +772,13 @@ def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:
     query_lower = str(raw_query or "").lower()
     if not query_lower:
         return False
-    if not any(token in query_lower for token in _BALANCING_PRICE_EXPLANATION_TOKENS):
+    # The movement language has to be in the question. A period may legitimately
+    # appear anywhere, including a coverage bullet, so the date search below
+    # still reads the whole text.
+    if not any(
+        token in _leading_question(query_lower)
+        for token in _BALANCING_PRICE_EXPLANATION_TOKENS
+    ):
         return False
     if not any(token in query_lower for token in _BALANCING_PRICE_BALANCING_TOKENS):
         return False
