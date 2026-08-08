@@ -148,8 +148,25 @@ def test_report_wide_narrative_evidence_is_assigned_to_analysis_sections():
     ]
     assert analysis_sections
     for section in analysis_sections:
-        assert statistics.evidence_ref in section.required_evidence_refs
-        assert knowledge.evidence_ref in section.required_evidence_refs
+        # Reachable by every analysis section...
+        citable = set(section.required_evidence_refs) | set(
+            section.optional_evidence_refs
+        )
+        assert statistics.evidence_ref in citable
+        assert knowledge.evidence_ref in citable
+        # ...but owed by none of them, or all four end up discussing the same
+        # passage to satisfy REQUIRED_EVIDENCE_NOT_USED.
+        assert statistics.evidence_ref not in section.required_evidence_refs
+        assert knowledge.evidence_ref not in section.required_evidence_refs
+
+    # Owed by exactly one section, so a manifest item cannot go uncited.
+    limitations = next(
+        section
+        for section in plan.sections
+        if section.role is ReportDocumentSectionRole.LIMITATIONS
+    )
+    assert statistics.evidence_ref in limitations.required_evidence_refs
+    assert knowledge.evidence_ref in limitations.required_evidence_refs
 
 
 def test_track_owned_narrative_evidence_is_not_broadcast_to_other_tracks():
@@ -2548,3 +2565,102 @@ def test_exhausted_batch_repair_logs_the_result_it_could_not_fix(caplog):
     assert exhausted, [payload["event"] for payload in diagnostics]
     assert set(exhausted[-1]["section_word_counts"]) == set(analysis_ids)
     assert exhausted[-1]["section_error_codes"]
+
+
+def test_optional_evidence_may_be_cited_without_being_owed():
+    """Shared context should reach every section, be owed by one.
+
+    required_evidence_refs is both the whitelist and the obligation, so the
+    only way to let sections share the report-wide statistics and knowledge is
+    to force all of them to write about it -- which is what produces the same
+    framing in four sections.
+    """
+
+    (
+        _research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    spec = next(
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+        and len(section.required_evidence_refs) > 1
+    )
+    shared_ref = spec.required_evidence_refs[0]
+    trimmed = spec.model_copy(
+        update={
+            "required_evidence_refs": spec.required_evidence_refs[1:],
+            "optional_evidence_refs": [shared_ref],
+        }
+    )
+    drafted = ReportSectionDraft.model_validate(
+        _draft_section(trimmed, manifest)
+    )
+    # Cite the optional ref alongside the required ones. Allowed but not owed
+    # is the whole point: today the citation is rejected outright, because one
+    # list serves as both whitelist and obligation.
+    citing = drafted.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={
+                        "evidence_refs": [
+                            *paragraph.evidence_refs,
+                            shared_ref,
+                        ]
+                    }
+                )
+                for paragraph in drafted.paragraphs
+            ]
+        }
+    )
+
+    citing_validation = validate_report_section(citing, trimmed, manifest)
+    silent_validation = validate_report_section(drafted, trimmed, manifest)
+
+    assert "EVIDENCE_REF_NOT_ALLOWED" not in citing_validation.error_codes
+    # And leaving it uncited is not an error either.
+    assert "REQUIRED_EVIDENCE_NOT_USED" not in silent_validation.error_codes
+
+
+def test_an_uncited_required_ref_is_still_reported():
+    """The obligation survives for the refs that keep it."""
+
+    (
+        _research_plan,
+        _packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    spec = next(
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+        and len(section.required_evidence_refs) > 1
+    )
+    drafted = ReportSectionDraft.model_validate(_draft_section(spec, manifest))
+    # Cite one fewer ref than the section is obliged to use.
+    starved = drafted.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={
+                        "evidence_refs": spec.required_evidence_refs[:1],
+                        "direct_claims": [],
+                        "derived_claims": [],
+                    }
+                )
+                for paragraph in drafted.paragraphs
+            ]
+        }
+    )
+
+    validation = validate_report_section(starved, spec, manifest)
+
+    assert "REQUIRED_EVIDENCE_NOT_USED" in validation.error_codes

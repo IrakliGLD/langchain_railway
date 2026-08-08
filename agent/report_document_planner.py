@@ -418,9 +418,14 @@ def build_report_document_plan(
             raise ValueError(
                 "A usable analysis track has no manifest evidence."
             )
-        evidence_refs = list(
-            dict.fromkeys([*shared_narrative_refs, *track_refs])
-        )
+        # The section owes its own track's evidence and may cite the
+        # report-wide statistics and knowledge. Requiring the shared refs of
+        # every section is what obliged four sections to discuss the same
+        # passage; limitations still requires them, so nothing goes uncited.
+        shared_refs = [
+            ref for ref in shared_narrative_refs if ref not in track_refs
+        ]
+        evidence_refs = list(dict.fromkeys([*shared_refs, *track_refs]))
         all_analysis_refs.extend(evidence_refs)
         track_titles = [
             research_track_by_id[track_id].title for track_id in group
@@ -436,7 +441,8 @@ def build_report_document_plan(
                 ),
                 target_words=analysis_words[index],
                 track_ids=group,
-                required_evidence_refs=evidence_refs[:32],
+                required_evidence_refs=track_refs[:32],
+                optional_evidence_refs=shared_refs[:32],
                 chart_refs=chart_ids_by_section[section_id],
             )
         )
@@ -479,7 +485,12 @@ def build_report_document_plan(
             track_ids=[
                 track.track_id for track in research_plan.tracks
             ],
-            required_evidence_refs=limitation_refs[:32],
+            # The one section that owes the shared context: its job is to
+            # describe collection boundaries, and a manifest item no section
+            # is obliged to cite could go unused entirely.
+            required_evidence_refs=list(
+                dict.fromkeys([*limitation_refs, *shared_narrative_refs])
+            )[:32],
             chart_refs=[],
         )
     )

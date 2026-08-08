@@ -82,6 +82,14 @@ class ReportDocumentSectionSpec(_StrictDocumentModel):
         min_length=1,
         max_length=32,
     )
+    # Evidence a section may cite but does not owe. Without this the same list
+    # is both whitelist and obligation, so report-wide statistics and knowledge
+    # can only be shared by requiring every analysis section to write about
+    # them — which is what puts the same framing in four sections.
+    optional_evidence_refs: List[EvidenceRef] = Field(
+        default_factory=list,
+        max_length=32,
+    )
     chart_refs: List[Identifier] = Field(
         default_factory=list,
         max_length=REPORT_MAX_EXHIBITS,
@@ -90,6 +98,7 @@ class ReportDocumentSectionSpec(_StrictDocumentModel):
     @field_validator(
         "track_ids",
         "required_evidence_refs",
+        "optional_evidence_refs",
         "chart_refs",
     )
     @classmethod

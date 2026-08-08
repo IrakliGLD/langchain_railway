@@ -186,7 +186,14 @@ def validate_report_section(
         errors.append("WORD_COUNT_TOO_LONG")
 
     item_by_ref = manifest.item_by_ref()
-    allowed_refs = set(section.required_evidence_refs)
+    # A section may cite its optional evidence and is not faulted for leaving
+    # it alone; only required refs carry the obligation. Conflating the two
+    # meant shared context could reach a section only by compelling it to
+    # write about it.
+    required_refs = set(section.required_evidence_refs)
+    allowed_refs = required_refs | set(
+        getattr(section, "optional_evidence_refs", None) or []
+    )
     if evidence_facts_by_ref is None:
         paragraph_refs = {
             ref
@@ -215,7 +222,7 @@ def validate_report_section(
             )
         )
 
-    if not allowed_refs.issubset(used_refs):
+    if not required_refs.issubset(used_refs):
         errors.append("REQUIRED_EVIDENCE_NOT_USED")
 
     errors = list(dict.fromkeys(errors))
