@@ -635,6 +635,97 @@ def test_the_selector_defaults_to_off():
     )
 
 
+# --- the routing-affinity key -----------------------------------------------
+
+def test_no_cache_key_is_sent_while_the_flag_is_off(monkeypatch):
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_PROMPT_CACHE_KEY", False)
+    for order in (
+        llm_core._ANALYZER_ORDER_LEGACY,
+        llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+    ):
+        assert llm_core._analyzer_prompt_cache_key(order) == ""
+
+
+def test_no_cache_key_under_the_legacy_order(monkeypatch):
+    """A shared key across a 28-character prefix routes calls together for nothing."""
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_PROMPT_CACHE_KEY", True)
+    assert llm_core._analyzer_prompt_cache_key(llm_core._ANALYZER_ORDER_LEGACY) == ""
+
+
+def test_the_cache_key_is_stable_and_derived_from_the_schema(monkeypatch):
+    """Adding a knowledge topic changes the header, so it must change the key.
+
+    The topic names live inside the schema via KnowledgeTopicName, so a digest
+    moves automatically where a hand-bumped version would be forgotten.
+    """
+    import hashlib
+
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_PROMPT_CACHE_KEY", True)
+    monkeypatch.setattr(llm_core, "_ANALYZER_SCHEMA_DIGEST", "")
+
+    key = llm_core._analyzer_prompt_cache_key(
+        llm_core._ANALYZER_ORDER_CONSTANTS_FIRST
+    )
+    expected = hashlib.sha256(
+        llm_core._compact_json(QuestionAnalysis.model_json_schema()).encode("utf-8")
+    ).hexdigest()[:12]
+
+    assert key == f"enai-analyzer-constants_first-{expected}"
+    assert key == llm_core._analyzer_prompt_cache_key(
+        llm_core._ANALYZER_ORDER_CONSTANTS_FIRST
+    ), "key must not vary between calls in a process"
+
+
+def test_the_key_reaches_openai_and_no_other_provider():
+    """It is an OpenAI argument; other providers would reject it."""
+    from core.provider_invocation import ProviderInvocationRuntime
+
+    kwargs = ProviderInvocationRuntime._invoke_kwargs(
+        "openai", 30.0, None, "enai-analyzer-x"
+    )
+    assert kwargs["prompt_cache_key"] == "enai-analyzer-x"
+
+    # Allow-listed, not deny-listed: an unknown provider gets nothing rather
+    # than inheriting an argument its SDK would reject.
+    for provider in ("gemini", "nvidia", "some_future_provider"):
+        kwargs = ProviderInvocationRuntime._invoke_kwargs(
+            provider, 30.0, None, "enai-analyzer-x"
+        )
+        assert "prompt_cache_key" not in kwargs, provider
+
+
+def test_no_key_means_no_argument_at_all():
+    """Every other stage must send exactly what it sent before."""
+    from core.provider_invocation import ProviderInvocationRuntime
+
+    for provider in ("openai", "gemini", "nvidia"):
+        kwargs = ProviderInvocationRuntime._invoke_kwargs(provider, 30.0, None, "")
+        assert "prompt_cache_key" not in kwargs, provider
+
+
+def test_the_key_does_not_leak_to_the_next_stage_on_the_thread(monkeypatch):
+    """Report tracks analyze on pooled threads; a leaked key would follow one."""
+    monkeypatch.setattr(llm_core, "ANALYZER_CONSTANTS_FIRST_MODE", "all")
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_PROMPT_CACHE_KEY", True)
+    seen: list[str] = []
+
+    def capture(*_args, **_kwargs):
+        seen.append(llm_core._LLM_PROMPT_CACHE_KEY.get())
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(llm_core, "_invoke_with_openai_fallback", capture)
+    monkeypatch.setattr(llm_core, "_cache_get_or_reserve", lambda _key: (None, None))
+
+    for _attempt in range(2):
+        try:
+            llm_core.llm_analyze_question("What was the balancing price in May 2026?")
+        except Exception:
+            pass
+
+    assert seen and all(key.startswith("enai-analyzer-") for key in seen)
+    assert llm_core._LLM_PROMPT_CACHE_KEY.get() == "", "key outlived the analyzer call"
+
+
 def regenerate() -> None:  # pragma: no cover - maintenance helper
     """Rewrite the legacy hash fixture. Never call this to make a test pass."""
     payload = {

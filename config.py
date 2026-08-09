@@ -622,6 +622,14 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS = max(
 # A boolean cannot express "on for report, off for Standard, and killable",
 # which is why this is a selector. Unknown values read as "off": an ordering
 # nobody asked for is the wrong way to fail.
+# Routing-affinity hint for the analyzer prompt, independent of the ordering
+# selector so the two effects stay separable when measured. Only meaningful
+# once the ordering is constants-first: OpenAI caches the longest matching
+# prefix automatically, and this key raises the odds of reaching a machine
+# that holds it. There is no cache-breakpoint control in this API.
+ENABLE_ANALYZER_PROMPT_CACHE_KEY = os.getenv(
+    "ENAI_ANALYZER_PROMPT_CACHE_KEY", "false"
+).strip().lower() in ("1", "true", "yes", "on")
 _ANALYZER_PROMPT_ORDER_MODES = ("off", "report", "all")
 ANALYZER_CONSTANTS_FIRST_MODE = (
     os.getenv("ENAI_ANALYZER_CONSTANTS_FIRST", "off").strip().lower() or "off"

@@ -45,6 +45,7 @@ from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_CONSTANTS_FIRST_MODE,
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
+    ENABLE_ANALYZER_PROMPT_CACHE_KEY,
     ENABLE_OPENAI_FALLBACK,
     ENABLE_SKILL_PROMPTS_PLANNER,
     ENABLE_SKILL_PROMPTS_SUMMARIZER,
@@ -495,6 +496,11 @@ def _effective_provider_timeout_seconds(provider: str, stage: str) -> float:
 
 
 _LLM_ATTEMPT_STAGE: ContextVar[str] = ContextVar("enai_llm_attempt_stage", default="llm")
+# Set only around the analyzer call. Threading a parameter through every hop
+# of the invocation chain would touch each stage for the benefit of one, so
+# this follows the attempt-stage pattern already used here: empty by default,
+# and no other stage can be affected by leaving it that way.
+_LLM_PROMPT_CACHE_KEY: ContextVar[str] = ContextVar("enai_llm_prompt_cache_key", default="")
 
 
 def _invoke_with_resilience(
@@ -517,6 +523,7 @@ def _invoke_with_resilience(
         timeout_seconds=timeout_seconds,
         breaker=breaker,
         sampling_temperature=sampling_temperature,
+        prompt_cache_key=_LLM_PROMPT_CACHE_KEY.get(),
     )
 
 
@@ -3150,6 +3157,31 @@ _ANALYZER_ORDER_LEGACY = "legacy"
 _ANALYZER_ORDER_CONSTANTS_FIRST = "constants_first"
 
 
+_ANALYZER_SCHEMA_DIGEST: str = ""
+
+
+def _analyzer_prompt_cache_key(order: str) -> str:
+    """Routing-affinity key for the analyzer's prompt prefix.
+
+    Digest-derived rather than hand-versioned: the schema carries the
+    KnowledgeTopicName enum, so adding a knowledge topic changes the header and
+    must change the key. A hand-bumped version would be forgotten exactly then.
+
+    Empty when the flag is off or the ordering is legacy — a shared key across
+    a 28-character prefix would route unrelated calls to one machine for no
+    gain, and pinning the two changes apart is what keeps their effects
+    separable.
+    """
+    global _ANALYZER_SCHEMA_DIGEST
+    if not ENABLE_ANALYZER_PROMPT_CACHE_KEY or order == _ANALYZER_ORDER_LEGACY:
+        return ""
+    if not _ANALYZER_SCHEMA_DIGEST:
+        _ANALYZER_SCHEMA_DIGEST = hashlib.sha256(
+            _compact_json(QuestionAnalysis.model_json_schema()).encode("utf-8")
+        ).hexdigest()[:12]
+    return f"enai-analyzer-{order}-{_ANALYZER_SCHEMA_DIGEST}"
+
+
 def _analyzer_prompt_order(report_profile: bool = False) -> str:
     """Resolve the prompt ordering for one analyzer call.
 
@@ -3728,6 +3760,9 @@ def llm_analyze_question(
     )
     if evidence_anomaly_note:
         analyzer_label += " reanalysis"
+    cache_key_token = _LLM_PROMPT_CACHE_KEY.set(
+        _analyzer_prompt_cache_key(prompt_order)
+    )
     try:
         message = _invoke_with_openai_fallback(
             lambda: get_llm_for_stage(
@@ -3760,6 +3795,11 @@ def llm_analyze_question(
     except Exception:
         _cache_cancel_in_flight(cache_input, cache_token)
         raise
+    finally:
+        # Reset even on the success path: report tracks run analyzers on pooled
+        # threads, and a leaked key would follow the thread into whatever stage
+        # it serves next.
+        _LLM_PROMPT_CACHE_KEY.reset(cache_key_token)
     return result
 
 
