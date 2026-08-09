@@ -74,32 +74,126 @@ the membership branch and gets a pie with shares and thousand MWh in the same
 whole. Standard's own adjacent code shows it never intended membership; it just
 never had to fix the shared function because it rarely reaches it.
 
-### The rule I will follow
+### Correcting this direction (self-review)
 
-**Do not tighten the shared rule to fix the report. Give the report the rules
-Standard already has.** Tightening `select_chart_type` would be a one-line fix
-that silently re-decides every Standard chart that falls through to it, and
-"rarely reaches it" is not "never reaches it".
+The first version of this section proposed extracting Standard's correctives
+into a shared function that both callers use. **That was wrong on the terms
+set for this work**, in four ways worth recording so the reasoning is not
+repeated.
 
-Order of work, each step gated on the one before:
+1. **"Extract into shared" edits Standard's call path.** The mandate is *no
+   impact on Standard*. A refactor proven byte-identical over a test suite is
+   evidence, not proof — it is only as good as the domain tested. Not touching
+   the file is strictly stronger than testing that touching it was harmless.
+2. **It converts a one-time risk into permanent coupling.** Once both callers
+   share a mutable rule, the next report-side tweak moves Standard silently.
+   That is the same "two masters, one authority" shape recorded in
+   [[project_report_repair_needs_named_offenders]], just inverted.
+3. **A hand-picked characterization matrix is theatre.** Choosing the cases
+   means characterizing what I already thought of, which is never the
+   combination that breaks. The input domain here is *finite* — six dimension
+   values, a small goal enum, two booleans, a handful of count boundaries — so
+   it can be enumerated exhaustively instead of sampled.
+4. **"Standard rarely reaches the shared selector" was a guess.** It is now
+   measured, and the precise statement is much more useful:
+   `_chart_type_for_visual_goal` returns non-`None` for *every* recognised
+   `visual_goal`, so **Standard reaches `select_chart_type` only when the
+   analyzer emitted no `visual_goal` at all.** For a composition goal Standard
+   returns `bar` when `dimensions != {"share"}` (`chart_pipeline.py:1565`) and
+   never pies a mixed set.
 
-1. **Characterize first.** Pin Standard's current chart-type decision across
-   the `(visual_goal, has_time, has_categories, dimensions, category_count)`
-   matrix, including the corrective pass. These tests must pass unchanged
-   before *and* after every later step. This is the regression net, and it is
-   written before anything moves.
-2. **Extract, do not edit.** Lift Standard's corrective rules into a shared,
-   named function that `chart_pipeline` then calls in place of its inline copy.
-   Pure refactor: Standard's output must be byte-identical, proven by step 1.
-3. **Then let the report call it.** The report gains the exactness test and the
-   price/xrate corrective. Standard's behaviour never changed — only its code
-   location did.
-4. **Report-only rules stay report-only.** `REPORT_CHART_INCOMPATIBLE_UNITS`
-   and the omission machinery have no Standard counterpart and belong in
-   `agent/report_charts.py`.
+The first version also skipped shadow mode, which the phased-audit workflow
+requires before any behaviour cutover.
 
-If a step cannot keep Standard byte-identical, stop and re-plan rather than
-accept the drift.
+### The general defect, stated without reference to pies
+
+> **The report re-decides a question Standard already answers, using a subset
+> of Standard's inputs and none of Standard's correctives.**
+
+Charting is one instance. The guardrails reading context instead of the
+question, the document plan re-deciding manifest membership, and the gate and
+assembler judging length independently were the same shape. A fix that only
+corrects the pie branch buys nothing against the next instance, so the
+deliverable is a **mechanism that makes report-vs-Standard divergence
+mechanically visible**, with the pie as its first application.
+
+### The rule
+
+**Where the report needs a decision Standard already makes, the report gets
+its own copy plus a machine-checked equivalence to Standard — never a shared
+mutable rule, and never an edit to Standard's path.**
+
+Duplication is normally a smell, and the audit checklist asks about it
+directly. It is the right trade here because the duplicate is *guarded by
+construction*: the equivalence test fails the moment the two diverge in either
+direction, which converts silent drift into a forced decision. It also leaves
+room for the report to diverge where it legitimately must — it has omission
+semantics (`REPORT_CHART_INCOMPATIBLE_UNITS`) that Standard has no counterpart
+for.
+
+Layering: **agree with Standard on what the shape wants, then apply the
+report's own admission gate on top.** Only the first half is equivalence-tested.
+
+---
+
+## Phased plan
+
+Hard constraint, checked at every phase: `git diff --stat` for
+`agent/chart_pipeline.py` and `visualization/chart_selector.py` must be
+**empty**. If a phase cannot hold that, stop and re-plan.
+
+### Phase 0 — Measure, assume nothing
+
+No production code. Answer, in writing, from the code and from one run:
+
+- Which inputs actually reach `select_chart_type` from Standard? (Static
+  answer: only `visual_goal is None`. Confirm no other caller.)
+- What does `preferred_chart_family` set in practice, and how often?
+- Does the report path have a `visual_goal` equivalent available at all?
+
+Deliverable: the answers, in this document. Gate: none.
+
+### Phase 1 — Freeze Standard mechanically
+
+Enumerate the **full product** of the finite input domain — powerset of the six
+`infer_dimension` values × the `visual_goal` enum plus `None` × `has_time` ×
+`has_categories` × category-count boundaries — and snapshot Standard's decision
+for every point into a golden file.
+
+Deliverable: `tests/test_chart_type_decision_golden.py` + golden JSON, passing
+against today's code with zero production changes. This is the regression net
+for every later phase and it must never be regenerated to make a test pass.
+
+### Phase 2 — Give the report its own decision module
+
+New report-only module encoding Standard's full chain for the composition
+question. `agent/chart_pipeline.py` and `visualization/chart_selector.py`:
+**zero diff**.
+
+Deliverable: the module, plus an equivalence test asserting it agrees with the
+Phase 1 golden at every point where the question is the same. Nothing calls it
+yet.
+
+### Phase 3 — Shadow
+
+The report computes both the current and the new chart type, **uses the
+current one**, and logs `REPORT_CHART_TYPE_DISAGREEMENT` with both answers and
+the inferred dimensions. Ship and observe one or two runs.
+
+Deliverable: disagreement cases reviewed individually — not just a count — the
+same discipline the routing cutover used.
+
+### Phase 4 — Cutover
+
+Switch the report to the new module once the disagreements are understood and
+each is an improvement. Phase 1 golden unchanged, Standard files still zero
+diff.
+
+### Phase 5 — Re-validate Tasks 1–3
+
+Re-run the premises below against post-cutover behaviour and delete whatever
+the intervening fixes already closed. Do not execute a task whose premise no
+longer reproduces.
 
 ### Tasks 1–3 need re-validating first
 
