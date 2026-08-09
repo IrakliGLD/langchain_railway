@@ -741,6 +741,87 @@ def test_repair_prompt_names_the_coordinates_a_numberless_section_may_cite(
         )
 
 
+def test_repair_prompt_names_the_required_evidence_a_section_skipped(
+    monkeypatch,
+):
+    """REQUIRED_EVIDENCE_NOT_USED alone leaves the repairer guessing the ref.
+
+    A section owes several refs, so the bare code says only that one of them
+    went uncited. Ungrounded values and missing numeric findings are already
+    named for the repairer; this code was the one left blind.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _,
+        _,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    spec = next(
+        section
+        for section in document_plan.sections
+        if len(section.required_evidence_refs) > 1
+    )
+    dropped_ref = spec.required_evidence_refs[-1]
+    kept_refs = list(spec.required_evidence_refs[:-1])
+    payload = draft.model_dump(mode="json")
+    for section_payload in payload["sections"]:
+        if section_payload["section_id"] != spec.section_id:
+            continue
+        for paragraph in section_payload["paragraphs"]:
+            paragraph["evidence_refs"] = kept_refs
+            paragraph["direct_claims"] = [
+                claim
+                for claim in paragraph["direct_claims"]
+                if claim["evidence_ref"] in set(kept_refs)
+            ]
+            paragraph["derived_claims"] = []
+    starved = ReportDocumentDraft.model_validate(payload)
+    validation = validate_report_document(
+        starved, document_plan, manifest, research_plan
+    )
+    assert "REQUIRED_EVIDENCE_NOT_USED" in validation.section_errors[
+        spec.section_id
+    ]
+    captured = {}
+
+    def invoke_contract(**kwargs):
+        captured.update(kwargs)
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                section
+                for section in draft.sections
+                if section.section_id == spec.section_id
+            ],
+        )
+
+    monkeypatch.setattr(
+        llm, "_invoke_report_document_contract", invoke_contract
+    )
+    llm.llm_repair_report_document_sections(
+        _QUERY,
+        document_plan,
+        research_plan,
+        manifest,
+        packets,
+        starved,
+        validation,
+        section_ids=[spec.section_id],
+    )
+
+    errors = json.loads(
+        _repair_prompt_block(captured["prompt"], "VALIDATION_ERRORS")
+    )
+    assert errors["sections"][spec.section_id][
+        "uncited_required_evidence_refs"
+    ] == [dropped_ref]
+    assert "uncited_required_evidence_refs" in captured["system"].lower()
+
+
 def test_document_repair_attempts_use_distinct_provider_stages(monkeypatch):
     first = _capture_repair_invocation(monkeypatch, attempt_number=2)
     second = _capture_repair_invocation(monkeypatch, attempt_number=3)

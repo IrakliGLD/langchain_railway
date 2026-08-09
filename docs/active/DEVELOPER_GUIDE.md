@@ -172,12 +172,23 @@ also defaults to `enabled`. Set `REPORT_TRACK_ANALYSIS_MODE=shadow` or
 always takes precedence over the derived default.
 
 Every blocking section error must reach the repairer as a named offender, not
-just a code. `DERIVED_CLAIM_INVALID` carries `VERIFIED_DERIVED_REPAIR_HINTS`
-and `UNGROUNDED_NUMERIC_CLAIM` carries `UNGROUNDED_VALUE_REPAIR_HINTS`, which
-lists the exact values a paragraph asserts that its evidence cannot support.
-Without them the repairer guesses which of its numbers offended, and a wrong
+just a code. `DERIVED_CLAIM_INVALID` carries `VERIFIED_DERIVED_REPAIR_HINTS`,
+`UNGROUNDED_NUMERIC_CLAIM` carries `UNGROUNDED_VALUE_REPAIR_HINTS`, which lists
+the exact values a paragraph asserts that its evidence cannot support,
+`NUMERIC_FINDING_MISSING` carries `CLAIMABLE_COORDINATES`, and
+`REQUIRED_EVIDENCE_NOT_USED` carries `uncited_required_evidence_refs`
+(`UNCITED_REQUIRED_EVIDENCE` on the single-section repair path). Without them
+the repairer guesses which of its numbers or assignments offended, and a wrong
 guess ends the job: `REPORT_DOCUMENT_INVALID` is not retryable. Add a hint
 alongside any new blocking code.
+
+The same offenders must reach the *log*, or a failed run cannot be diagnosed
+after the fact. `REPORT_DOCUMENT_DIAGNOSTIC` carries `uncited_required_refs`
+and `ungrounded_value_hints` beside `section_error_codes`, computed only for
+the sections actually carrying those codes.
+`agent.report_sections.uncited_required_evidence_refs` is the single authority
+behind the verdict, the prompt hint, and the log line, so the three cannot
+disagree.
 
 The section word floor scales with the rows a section can actually cite
 (`report_section_word_floor_ratio`), mirroring the document-level bounds. A

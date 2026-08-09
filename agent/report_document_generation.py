@@ -13,11 +13,16 @@ from pydantic import ValidationError
 
 from agent.report_grounding import (
     build_evidence_grounding_index,
+    build_ungrounded_claim_repair_hints,
     drop_unrendered_claims,
     normalize_repairable_derived_claims,
     select_grounded_paragraphs,
 )
-from agent.report_sections import count_section_words, validate_report_section
+from agent.report_sections import (
+    count_section_words,
+    uncited_required_evidence_refs,
+    validate_report_section,
+)
 from contracts.report import report_section_validation_word_bounds
 from contracts.report_document import (
     ReportDocumentDraft,
@@ -85,6 +90,42 @@ class ReportDocumentGenerationError(RuntimeError):
             "Report document failed validation: "
             + ",".join(dict.fromkeys(codes))
         )
+
+
+def _named_section_offenders(
+    plan: ReportDocumentPlan,
+    validation: ReportDocumentValidation,
+    section_by_id: dict[str, ReportSectionDraft],
+    manifest: ReportEvidenceManifest | None,
+) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Name the refs left uncited and the values left unbacked.
+
+    REQUIRED_EVIDENCE_NOT_USED and UNGROUNDED_NUMERIC_CLAIM each name a section
+    and nothing else, so a run that spends its whole repair budget on them
+    cannot be diagnosed from its log. Both offenders are derived from the same
+    functions the validator and the repair prompt use, and only for the
+    sections actually carrying the code, so a valid document pays nothing.
+    """
+
+    spec_by_id = {section.section_id: section for section in plan.sections}
+    item_by_ref = {} if manifest is None else manifest.item_by_ref()
+    uncited: dict[str, list[str]] = {}
+    ungrounded_sections: list[ReportSectionDraft] = []
+    for section_id, codes in validation.section_errors.items():
+        section = section_by_id.get(section_id)
+        if section is None:
+            continue
+        spec = spec_by_id.get(section_id)
+        if "REQUIRED_EVIDENCE_NOT_USED" in codes and spec is not None:
+            missing = uncited_required_evidence_refs(section, spec)
+            if missing:
+                uncited[section_id] = missing
+        if "UNGROUNDED_NUMERIC_CLAIM" in codes and item_by_ref:
+            ungrounded_sections.append(section)
+    return uncited, build_ungrounded_claim_repair_hints(
+        ungrounded_sections,
+        item_by_ref,
+    )
 
 
 def _log_document_diagnostic(
@@ -156,6 +197,12 @@ def _log_document_diagnostic(
         }
         for section in plan.sections
     }
+    uncited_required_refs, ungrounded_value_hints = _named_section_offenders(
+        plan,
+        validation,
+        section_by_id,
+        manifest,
+    )
     _LOGGER.info(
         "REPORT_DOCUMENT_DIAGNOSTIC %s",
         json.dumps(
@@ -181,6 +228,8 @@ def _log_document_diagnostic(
                 "section_warning_codes": validation.section_warnings,
                 "section_word_deltas": section_word_deltas,
                 "section_word_counts": section_word_counts,
+                "uncited_required_refs": uncited_required_refs,
+                "ungrounded_value_hints": ungrounded_value_hints,
                 "pre_normalization_role_section_ids": (
                     pre_normalization_role_section_ids or {}
                 ),

@@ -2724,3 +2724,188 @@ def test_an_invalid_section_batch_names_the_fields_that_rejected_it(caplog):
     assert logged, "the rejection was not reported"
     assert logged[0]["invalid_fields"], "no field was named"
     assert logged[0]["stage"] == "section_batch"
+
+
+def _starved_section(section, spec):
+    """Cite one fewer required ref than the section owes."""
+
+    kept = list(spec.required_evidence_refs[:-1])
+    return section.model_copy(
+        update={
+            "paragraphs": [
+                paragraph.model_copy(
+                    update={
+                        "evidence_refs": kept,
+                        "direct_claims": [
+                            claim
+                            for claim in paragraph.direct_claims
+                            if claim.evidence_ref in set(kept)
+                        ],
+                        "derived_claims": [],
+                    }
+                )
+                for paragraph in section.paragraphs
+            ]
+        }
+    )
+
+
+def _multi_ref_analysis_spec(document_plan):
+    return next(
+        section
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+        and len(section.required_evidence_refs) > 1
+    )
+
+
+def _repair_requested_diagnostics(records):
+    return [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in records
+        if record.getMessage().startswith("REPORT_DOCUMENT_DIAGNOSTIC ")
+        and json.loads(record.getMessage().split(" ", 1)[1])["event"]
+        == "batch_repair_requested"
+    ]
+
+
+def test_a_rejected_section_names_the_evidence_it_left_uncited(caplog):
+    """REQUIRED_EVIDENCE_NOT_USED names a section but not the offending ref.
+
+    A section owes several refs and the code says only that one of them went
+    uncited, so a production log cannot say which -- and neither can the
+    repairer, which is why the same code survives two repair calls.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _decisions,
+        _gate,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    spec = _multi_ref_analysis_spec(document_plan)
+    dropped_ref = spec.required_evidence_refs[-1]
+
+    def batch(section_ids, *, starve):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _starved_section(section_by_id[section_id], spec)
+                if starve and section_id == spec.section_id
+                else section_by_id[section_id]
+                for section_id in section_ids
+            ],
+        )
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportDocument"):
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=(
+                lambda *_args, section_ids: batch(section_ids, starve=True)
+            ),
+            write_synthesis_sections=(
+                lambda *_args, analysis_sections, section_ids: batch(
+                    section_ids, starve=False
+                )
+            ),
+            repair_sections=(
+                lambda *_args, section_ids, **_kwargs: batch(
+                    section_ids, starve=False
+                )
+            ),
+            allow_repair=True,
+        )
+
+    requested = _repair_requested_diagnostics(caplog.records)
+    assert requested, "the batch rejection was not reported"
+    assert "REQUIRED_EVIDENCE_NOT_USED" in requested[0]["section_error_codes"][
+        spec.section_id
+    ]
+    assert requested[0]["uncited_required_refs"] == {
+        spec.section_id: [dropped_ref]
+    }
+    # Each offender is derived only for the code that names it, so a section
+    # rejected for one reason does not pay a grounding pass for the other.
+    assert requested[0]["ungrounded_value_hints"] == []
+
+
+def test_a_rejected_section_names_the_values_it_left_ungrounded(caplog):
+    """UNGROUNDED_NUMERIC_CLAIM names a section but not the unbacked number.
+
+    The repair prompt already receives these values as
+    UNGROUNDED_VALUE_REPAIR_HINTS; the log does not, so a run that spends its
+    whole repair budget on this code cannot say whether the repairer was told
+    which numbers to fix.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        _decisions,
+        _gate,
+        document_plan,
+    ) = _document_components()
+    valid_draft = _valid_document_draft(document_plan, manifest)
+    section_by_id = {
+        section.section_id: section for section in valid_draft.sections
+    }
+    target_id = next(
+        section.section_id
+        for section in document_plan.sections
+        if section.role is ReportDocumentSectionRole.ANALYSIS
+    )
+
+    def batch(section_ids, *, strip):
+        return ReportDocumentRepair(
+            contract_version="report-document-repair-v1",
+            sections=[
+                _ungrounded_section(section_by_id[section_id])
+                if strip and section_id == target_id
+                else section_by_id[section_id]
+                for section_id in section_ids
+            ],
+        )
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportDocument"):
+        generate_report_document(
+            _QUERY,
+            document_plan,
+            research_plan,
+            manifest,
+            packets,
+            write_analysis_sections=(
+                lambda *_args, section_ids: batch(section_ids, strip=True)
+            ),
+            write_synthesis_sections=(
+                lambda *_args, analysis_sections, section_ids: batch(
+                    section_ids, strip=False
+                )
+            ),
+            repair_sections=(
+                lambda *_args, section_ids, **_kwargs: batch(
+                    section_ids, strip=False
+                )
+            ),
+            allow_repair=True,
+        )
+
+    requested = _repair_requested_diagnostics(caplog.records)
+    assert requested, "the batch rejection was not reported"
+    assert "UNGROUNDED_NUMERIC_CLAIM" in requested[0]["section_error_codes"][
+        target_id
+    ]
+    hints = requested[0]["ungrounded_value_hints"]
+    assert [hint["section_id"] for hint in hints] == [target_id]
+    assert hints[0]["ungrounded_values"], "no unbacked value was named"
+    assert requested[0]["uncited_required_refs"] == {}
