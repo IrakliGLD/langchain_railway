@@ -1224,7 +1224,11 @@ def test_document_short_section_is_repaired_to_its_evidence_aware_floor():
     ).valid
 
 
-def test_document_generation_repairs_a_schema_invalid_draft_once():
+def test_document_generation_repairs_a_schema_invalid_draft_once(caplog):
+    import json
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="Enai.ReportDocument")
     (
         research_plan,
         packets,
@@ -1275,6 +1279,17 @@ def test_document_generation_repairs_a_schema_invalid_draft_once():
     assert repair_calls[0][2] == [
         section.section_id for section in document_plan.sections
     ]
+    # The whole-document rejection has to name its offender too. Only the
+    # section-batch site is covered by its own test, and the two call sites
+    # pass different arguments.
+    whole_document = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_DOCUMENT_SCHEMA_INVALID ")
+    ]
+    assert whole_document, "the whole-document rejection was not reported"
+    assert whole_document[0]["stage"] == "whole_document"
+    assert whole_document[0]["invalid_fields"] == ["sections"]
 
 
 def test_document_generation_fails_after_one_invalid_repair():
@@ -2664,3 +2679,48 @@ def test_an_uncited_required_ref_is_still_reported():
     validation = validate_report_section(starved, spec, manifest)
 
     assert "REQUIRED_EVIDENCE_NOT_USED" in validation.error_codes
+
+
+def test_an_invalid_section_batch_names_the_fields_that_rejected_it(caplog):
+    """DOCUMENT_SCHEMA_INVALID with no locations is unfixable from a log.
+
+    Jobs 40e55527 and 5cb4d210 both discarded the analysis writer's whole
+    output one millisecond after it returned, then spent two repair calls
+    rebuilding it. The code caught ValidationError and dropped exc.errors(),
+    so three runs could not say whether the cause was a missing
+    contract_version, a duplicate paragraph, or a duplicate section id.
+    """
+
+    import json
+    import logging
+
+    from agent.report_document_generation import _materialize_section_batch
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        _decisions,
+        _gate,
+        document_plan,
+    ) = _document_components()
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportDocument"):
+        sections, validation = _materialize_section_batch(
+            {"contract_version": "report-document-repair-v1", "sections": [{}]},
+            document_plan,
+            manifest,
+            section_ids=[document_plan.sections[0].section_id],
+            research_plan=research_plan,
+        )
+
+    assert sections is None
+    assert validation.document_errors == ["DOCUMENT_SCHEMA_INVALID"]
+    logged = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_DOCUMENT_SCHEMA_INVALID ")
+    ]
+    assert logged, "the rejection was not reported"
+    assert logged[0]["invalid_fields"], "no field was named"
+    assert logged[0]["stage"] == "section_batch"
