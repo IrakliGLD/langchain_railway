@@ -309,6 +309,77 @@ From job `fbc46aa4`:
 If the run shows a disagreement neither prediction covers, that is the
 interesting case and it gets read before anything is cut over.
 
+### Phase 3 result — the shadow falsified the rule. **Cutover blocked.**
+
+Job `e4049b2d` produced the first disagreement, and it says the rule is right
+but the *input* is corrupt:
+
+```
+REPORT_CHART_TYPE_DISAGREEMENT {"applied":"bar","shadow":"line","category_count":1,
+ "columns":["Balancing electricity price (GEL/MWh)","Balancing electricity price (USD/MWh)",
+            "Price Deregulated Ren Gel","Price Deregulated Ren Usd",
+            "Share Deregulated Ren","Share Import","Share Regulated Hpp"],
+ "dimensions":["energy_qty","other","price_tariff"]}
+```
+
+Seven columns, three of them shares, and `share` is **not in the inferred set**.
+The report is passing `infer_dimension` **display labels** instead of column
+identifiers, and every single one is misclassified:
+
+| Passed | Inferred | Identifier | Correct |
+|---|---|---|---|
+| `Balancing electricity price (GEL/MWh)` | `energy_qty` | `p_bal_gel` | `price_tariff` |
+| `Share Deregulated Ren` | `other` | `share_deregulated_ren` | `share` |
+| `Share Import` | `other` | `share_import` | `share` |
+| `Price Deregulated Ren Gel` | `price_tariff` | `price_deregulated_ren_gel` | `price_tariff` |
+
+A balancing **price** is read as an energy quantity because its label ends in
+"MWh". Shares are read as "other" because the label is title-cased prose.
+
+**This is the actual root cause of the charting complaints**, and it subsumes
+the ones this plan was written against:
+
+- the mixed-unit pie — the `{"share"}` exactness test can never pass on a
+  dimension set that never contains `share`, and the membership test fires on
+  noise instead;
+- `REPORT_CHART_INCOMPATIBLE_UNITS` — `_axis_metadata` groups by
+  `(dimension, unit)`, so garbage dimensions manufacture spurious axis groups
+  and omit a chart that was fine;
+- **my own Phase 2 rule would have made this case worse.** It answered `line`
+  because it saw `price_tariff` and no `share` — a line chart of a
+  one-category snapshot. The shadow is the only reason that did not ship.
+
+**Where the labels come from.** `agent/report_research_execution._derived_chart_evidence_items`
+builds manifest tables from `chart_override_specs`, whose row keys are the
+chart's display labels. The code says so itself at line 957: *"its columns
+still read 'Balancing electricity price (GEL/MWh)'"* — and works around it
+**for units only**, via `declared_units`. That workaround was added earlier in
+this session; it patched the unit half of this exact problem and left the
+dimension half, which is precisely the partial fix that was supposed to be
+avoided. The spec keeps no record of the source identifiers
+(`metadata` holds only `title`, `xAxisTitle`, `yAxisTitle`, `axisMode`,
+`role`, `type`, `labels`, `data`), so they are gone by the time the report
+sees them.
+
+**Two candidate fixes, and the choice matters for the mandate:**
+
+- **A — preserve the mapping at the source.** `dispatch_derived_chart` emits a
+  label→identifier map in `metadata`. Correct and complete, but
+  `agent/derived_chart_builder.py` is **shared** with Standard. Purely
+  additive (Standard reads none of the new key), yet it breaks the zero-diff
+  rule this work has held for four phases.
+- **C — invert the labelling in the report.** `_field_label` is a pure
+  function over two finite dictionaries plus a title-case fallback, so it can
+  be inverted report-side and the inverse can be exhaustively tested against
+  both dictionaries. Report-only, zero diff to Standard, fragile only where a
+  label is ambiguous — which a test over the full dictionary can prove or
+  disprove up front.
+
+Recommendation: **C**, on the mandate. Establish the inverse and prove it total
+over `COLUMN_LABELS`/`DERIVED_LABELS` before using it; fall back to the label
+unchanged where inversion is not provably unique, so the worst case is today's
+behaviour.
+
 ### Phase 4 — Cutover
 
 Switch the report to the new module once the disagreements are understood and
