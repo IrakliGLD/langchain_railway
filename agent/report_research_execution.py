@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Any
 
+from agent.report_charts import chart_column_roles
 from agent.report_evidence import (
     build_report_evidence_manifest,
     build_report_manifest_from_items,
@@ -726,22 +727,28 @@ def _chart_candidates(
             key=lambda pair: (-table_score(pair[1], purpose), pair[0]),
         )
         for _table_index, item in ranked_tables:
-            numeric_fields = [
-                column
-                for column in item.columns
-                if any(
-                    isinstance(row.get(column), Real)
-                    and not isinstance(row.get(column), bool)
-                    for row in item.rows
-                )
-            ]
-            dimension_fields = [
-                column
-                for column in item.columns
-                if column not in numeric_fields
-            ]
+            # The builder's own axis typing, so the candidate cannot promise an
+            # exhibit the builder will refuse. A composition chart slices one
+            # whole by category, so a period column cannot be its axis; jobs
+            # 5cb4d210 and 106b043c both lost their balancing composition
+            # exhibit because the candidate offered the date it found first.
+            roles = chart_column_roles(item)
+            numeric_fields = roles["numeric"]
+            dimension_fields = [*roles["temporal"], *roles["categorical"]]
             if not numeric_fields:
                 continue
+            if purpose is ReportChartPurpose.COMPOSITION:
+                # The builder slices a composition by category when the table
+                # has one, and otherwise pivots the latest period's numeric
+                # columns into slices. Offer only a table one of those two
+                # branches accepts, and an axis it will agree with: jobs
+                # 5cb4d210 and 106b043c both lost their balancing composition
+                # exhibit because the candidate offered the date column of a
+                # table that also had a category column.
+                if roles["categorical"]:
+                    dimension_fields = roles["categorical"]
+                elif not (roles["temporal"] and len(numeric_fields) >= 2):
+                    continue
             preferred_x_tokens = (
                 ("type", "entity", "segment", "category")
                 if purpose is ReportChartPurpose.COMPOSITION
