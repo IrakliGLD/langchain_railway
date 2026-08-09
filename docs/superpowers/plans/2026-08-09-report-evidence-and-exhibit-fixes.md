@@ -1159,6 +1159,36 @@ only if that slice is rejected.
 
 ---
 
+## Follow-on work (2026-08-09, after job `fe331b3c`)
+
+**Item 2 — the knowledge-routing slice — is done** (`e248b8d`), and the run
+confirmed it: `planner_knowledge_track_ids=["documented_market_context"]`, three
+analyzer calls instead of four, no guardrail line, no 61-row price fetch, tokens
+89,379 → 74,287. It is no longer deferred; the paragraph above is kept for the
+reasoning that led to it.
+
+**Item 3 — the two repair calls — is open, and starts diagnostically**
+(`71f89c2`). `REQUIRED_EVIDENCE_NOT_USED` and `UNGROUNDED_NUMERIC_CLAIM` each
+named a section and nothing else, so five runs could not say which ref went
+uncited or which number went unbacked. `REPORT_DOCUMENT_DIAGNOSTIC` now carries
+`uncited_required_refs` and `ungrounded_value_hints`, and both repair prompts
+name the skipped assignments. **No repair-loop behaviour was changed** — the
+next deployed run names the offenders, and the fix follows from what it names.
+Every cause guessed at before it was named this session turned out wrong.
+
+**The window-expansion guardrail is fixed** (`d63d61a`). The `Applied quantity
+trend guardrail` line on `generation_and_cross_border_supply` was not a trend
+question: three guardrails matched their *positive* conditions against the whole
+track query, so the report context's "evolution" decided the route and the
+month was replaced by the full history. Positive conditions now read
+`_asked_question_surface`; negative brakes still read everything. Documented in
+`docs/active/query_pipeline_architecture.md` §3.2.
+
+**Still open:** the composition chart omitted for a fifth consecutive run —
+covered by `2026-08-09-report-charting-fixes.md`, deferred by the user.
+
+---
+
 ## Self-Review
 
 **Spec coverage.** The four items raised: wasted first writer call → Task 1

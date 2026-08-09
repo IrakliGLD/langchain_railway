@@ -165,6 +165,30 @@ def _log_section_diagnostic(
     )
 
 
+def uncited_required_evidence_refs(
+    draft: ReportSectionDraft,
+    section: ReportSectionSpec,
+) -> list[str]:
+    """Name the required refs a section draft never cited.
+
+    REQUIRED_EVIDENCE_NOT_USED names the section but not the ref, so neither a
+    log nor a repair prompt can say which of several assignments was skipped.
+    The check below is the only caller that decides the code, so the offender
+    list cannot drift from the verdict.
+    """
+
+    cited = {
+        ref
+        for paragraph in draft.paragraphs
+        for ref in paragraph.evidence_refs
+    }
+    return [
+        ref
+        for ref in dict.fromkeys(section.required_evidence_refs)
+        if ref not in cited
+    ]
+
+
 def validate_report_section(
     draft: ReportSectionDraft,
     section: ReportSectionSpec,
@@ -204,10 +228,8 @@ def validate_report_section(
             item_by_ref,
             allowed_refs & paragraph_refs,
         )
-    used_refs: set[str] = set()
     for paragraph in draft.paragraphs:
         paragraph_refs = set(paragraph.evidence_refs)
-        used_refs.update(paragraph_refs)
         if not paragraph_refs.issubset(allowed_refs):
             errors.append("EVIDENCE_REF_NOT_ALLOWED")
             continue
@@ -222,7 +244,7 @@ def validate_report_section(
             )
         )
 
-    if not required_refs.issubset(used_refs):
+    if uncited_required_evidence_refs(draft, section):
         errors.append("REQUIRED_EVIDENCE_NOT_USED")
 
     errors = list(dict.fromkeys(errors))

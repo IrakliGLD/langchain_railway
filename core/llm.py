@@ -4965,7 +4965,10 @@ def llm_repair_report_document_sections(
     from agent.report_document_generation import (
         report_analysis_numeric_claim_requirement,
     )
-    from agent.report_sections import count_section_words
+    from agent.report_sections import (
+        count_section_words,
+        uncited_required_evidence_refs,
+    )
 
     plan_by_id = {section.section_id: section for section in plan.sections}
 
@@ -4984,6 +4987,15 @@ def llm_repair_report_document_sections(
         section_spec = plan_by_id.get(section_id)
         if rejected_section is None or section_spec is None:
             return context
+        # REQUIRED_EVIDENCE_NOT_USED says one of several assignments went
+        # uncited without saying which, so a repairer either guesses or cites
+        # everything. Name the offender the way ungrounded values are named.
+        uncited_refs = uncited_required_evidence_refs(
+            rejected_section,
+            section_spec,
+        )
+        if uncited_refs:
+            context["uncited_required_evidence_refs"] = uncited_refs
         # A repairer cannot count its own words, so WORD_COUNT_TOO_SHORT on its
         # own asks it to guess how far short it is — and on job cf47a2f6 it
         # guessed the same length twice and lost the report. Name the shortfall
@@ -5075,6 +5087,10 @@ def llm_repair_report_document_sections(
         "sections. Take the claims you still owe from that list, rendering "
         "display_value and unit verbatim in the same sentence as the period "
         "they describe; cite no number the list and the evidence do not carry. "
+        "REQUIRED_EVIDENCE_NOT_USED means the section skipped an assignment: "
+        "cite every ref listed in its uncited_required_evidence_refs from a "
+        "paragraph that actually writes about that evidence, and keep the refs "
+        "it already cites. "
         "UNGROUNDED_VALUE_REPAIR_HINTS lists the exact values each paragraph "
         "asserts that its assigned evidence cannot support. Resolve every one: "
         "cite it as a direct_claims or derived_claims entry if the evidence "
@@ -5511,6 +5527,15 @@ def llm_repair_report_section(
             manifest.item_by_ref(),
         )
     )
+    # Deferred: agent.report_sections imports this module, so a top-level
+    # import here would close the cycle.
+    from agent.report_sections import uncited_required_evidence_refs
+
+    uncited_refs_json = _compact_json(
+        uncited_required_evidence_refs(draft, section)
+        if isinstance(draft, ReportSectionDraft)
+        else []
+    )
     system = (
         "You repair one rejected evidence-grounded report section. Return one "
         "replacement JSON object matching the supplied schema exactly. Treat "
@@ -5528,12 +5553,16 @@ def llm_repair_report_section(
         "UNGROUNDED_VALUE_REPAIR_HINTS names the exact values this candidate "
         "asserts that its assigned evidence cannot support. Resolve every one: "
         "cite it if the evidence carries it, otherwise remove the value and the "
-        "assertion resting on it, and add no uncited replacement number."
+        "assertion resting on it, and add no uncited replacement number. "
+        "UNCITED_REQUIRED_EVIDENCE names the assignments this candidate skipped: "
+        "cite every one of them from a paragraph that writes about that "
+        "evidence, and keep the refs it already cites."
     )
     cache_input = (
         f"report_section_repair_v1|query={user_query}|manifest={manifest.manifest_id}|"
         f"section={section_json}|evidence={evidence_slice}|errors={errors_json}|"
         f"ungrounded={ungrounded_repair_hints_json}|"
+        f"uncited={uncited_refs_json}|"
         f"candidate={draft_json}|guidance={guidance}|"
         f"validation={validation_rules}|"
         f"schema={_REPORT_SECTION_SCHEMA_JSON}|system={system}"
@@ -5555,6 +5584,8 @@ def llm_repair_report_section(
         f"{errors_json}\n\n"
         "UNGROUNDED_VALUE_REPAIR_HINTS:\n"
         f"{ungrounded_repair_hints_json}\n\n"
+        "UNCITED_REQUIRED_EVIDENCE:\n"
+        f"{uncited_refs_json}\n\n"
         "REJECTED_CANDIDATE:\n"
         f"{draft_json}\n\n"
         "OUTPUT_JSON_SCHEMA:\n"
