@@ -140,8 +140,54 @@ def _primary_query_surface(raw_query: str) -> str:
     return query_text
 
 
+def _leading_question(raw_query: str) -> str:
+    """Return the question asked, without context appended beneath it.
+
+    A report track query carries its primary question on the first line and
+    then its research title, coverage bullets, and the originating report
+    request. Those lines describe the surrounding work, not the question, and
+    matching movement language inside them classifies a track by its
+    neighbours: on job 37567e5f a market-rules track asking how the balancing
+    price is *defined* matched on a bullet mentioning "composition changes"
+    and was coerced into a data question, sending it to fetch sixty-one rows
+    of prices it had no use for.
+    """
+
+    return str(raw_query or "").splitlines()[0] if raw_query else ""
+
+
+def _asked_question_surface(raw_query: str) -> str:
+    """Return the lowercased text a guardrail may test a positive condition on.
+
+    The rule every guardrail below follows: what the question is about, and
+    what it asks for, are decided by the question; only the negative brakes
+    read the surrounding context, because a disqualifying mention anywhere is
+    still a reason to leave the analyzer's own routing alone.
+    """
+
+    return _leading_question(_primary_query_surface(raw_query)).lower()
+
+
+def _question_asks_about(raw_query: str, tokens: tuple[str, ...]) -> bool:
+    """Match subject and intent language against the question, not its context.
+
+    Every positive condition a guardrail tests — what the question is about as
+    much as what it asks — has to come from the question itself. Job 40e55527
+    showed why the distinction is not only about intent words: a tariff track
+    asking which schedules applied, and whether any *changed*, was coerced onto
+    the balancing-price path because two coverage bullets mentioned balancing
+    rules and observed prices. It fetched prices and balancing composition
+    instead of tariffs, and its section was written from them.
+    """
+
+    return _query_mentions_any(_asked_question_surface(raw_query), tokens)
+
+
 def _resolved_quantity_metric_from_query(raw_query: str) -> str | None:
-    query_lower = _primary_query_surface(raw_query).lower()
+    # The metric a guardrail routes to is a positive subject condition, so it
+    # comes from the question. Reading the context could resolve one metric
+    # from a coverage bullet while the question asked about another.
+    query_lower = _asked_question_surface(raw_query)
     if "energy security" in query_lower:
         return "energy_security"
     if "self-sufficiency" in query_lower:
@@ -214,12 +260,14 @@ def _is_technical_indicator_bundle_query(
         return False
     if _query_mentions_any(query_lower, _CORRELATION_QUERY_TOKENS):
         return False
-    if not _query_mentions_any(query_lower, _TECHNICAL_QUANTITY_CONCEPT_TOKENS):
+    # Positive conditions read the question; the brakes above read everything.
+    asked = _asked_question_surface(raw_query)
+    if not _query_mentions_any(asked, _TECHNICAL_QUANTITY_CONCEPT_TOKENS):
         return False
 
-    concept_hits = sum(token in query_lower for token in _TECHNICAL_QUANTITY_CONCEPT_TOKENS)
-    has_scope = _query_mentions_any(query_lower, _GEOGRAPHY_SCOPE_TOKENS)
-    has_exploration = _query_mentions_any(query_lower, _TECHNICAL_EXPLORATION_TOKENS)
+    concept_hits = sum(token in asked for token in _TECHNICAL_QUANTITY_CONCEPT_TOKENS)
+    has_scope = _query_mentions_any(asked, _GEOGRAPHY_SCOPE_TOKENS)
+    has_exploration = _query_mentions_any(asked, _TECHNICAL_EXPLORATION_TOKENS)
     return concept_hits >= 2 or (has_scope and has_exploration)
 
 
@@ -231,7 +279,10 @@ def _apply_technical_indicator_bundle_guardrail(
     if not _is_technical_indicator_bundle_query(qa, raw_query):
         return qa, False
 
-    primary_query = _primary_query_surface(raw_query)
+    # Carry the question forward, not the block beneath it: a guardrail that
+    # only fires on the question must not rewrite canonical_query_en into its
+    # research title, coverage bullets, and the whole report request.
+    primary_query = _leading_question(_primary_query_surface(raw_query))
     resolved_metric = _resolved_quantity_metric_from_query(primary_query) or "generation"
     payload = qa.model_dump(mode="json")
     payload["canonical_query_en"] = primary_query or payload.get("canonical_query_en") or raw_query
@@ -306,9 +357,14 @@ def _is_quantity_trend_query(raw_query: str) -> bool:
     query_lower = _primary_query_surface(raw_query).lower()
     if not query_lower:
         return False
-    if not _query_mentions_any(query_lower, _TREND_QUERY_TOKENS):
+    # Both the movement intent and the quantity subject have to be in the
+    # question. A month-bounded supply track whose report context mentions
+    # "evolution" is not a trend request, and treating it as one discards the
+    # month it asked about for the whole history.
+    asked = _asked_question_surface(raw_query)
+    if not _query_mentions_any(asked, _TREND_QUERY_TOKENS):
         return False
-    if not _query_mentions_any(query_lower, _TECHNICAL_QUANTITY_CONCEPT_TOKENS):
+    if not _query_mentions_any(asked, _TECHNICAL_QUANTITY_CONCEPT_TOKENS):
         return False
     if _query_mentions_any(query_lower, _PRICE_CONTEXT_TOKENS):
         return False
@@ -327,7 +383,10 @@ def _apply_quantity_trend_guardrail(
     if not _is_quantity_trend_query(raw_query):
         return qa, False
 
-    primary_query = _primary_query_surface(raw_query)
+    # Carry the question forward, not the block beneath it: a guardrail that
+    # only fires on the question must not rewrite canonical_query_en into its
+    # research title, coverage bullets, and the whole report request.
+    primary_query = _leading_question(_primary_query_surface(raw_query))
     resolved_metric = _resolved_quantity_metric_from_query(primary_query)
     if resolved_metric is None:
         return qa, False
@@ -427,7 +486,9 @@ def _apply_quantity_trend_guardrail(
 
 
 def _supported_pairwise_metrics(raw_query: str) -> list[str]:
-    query_lower = _primary_query_surface(raw_query).lower()
+    # The pair a correlation guardrail routes to is a positive subject
+    # condition, so it comes from the question and not its coverage bullets.
+    query_lower = _asked_question_surface(raw_query)
     metrics: list[str] = []
     if any(term in query_lower for term in ("balancing price", "balancing electricity price", "balancing electricity", "p_bal")):
         metrics.append("balancing")
@@ -456,8 +517,10 @@ def _supported_pairwise_metrics(raw_query: str) -> list[str]:
 
 
 def _is_supported_pairwise_correlation_query(raw_query: str) -> bool:
-    query_lower = _primary_query_surface(raw_query).lower()
-    if not _query_mentions_any(query_lower, _CORRELATION_QUERY_TOKENS):
+    if not _question_asks_about(
+        _primary_query_surface(raw_query).lower(),
+        _CORRELATION_QUERY_TOKENS,
+    ):
         return False
     return len(_supported_pairwise_metrics(raw_query)) >= 2
 
@@ -470,7 +533,10 @@ def _apply_pairwise_correlation_guardrail(
     if not _is_supported_pairwise_correlation_query(raw_query):
         return qa, False
 
-    primary_query = _primary_query_surface(raw_query)
+    # Carry the question forward, not the block beneath it: a guardrail that
+    # only fires on the question must not rewrite canonical_query_en into its
+    # research title, coverage bullets, and the whole report request.
+    primary_query = _leading_question(_primary_query_surface(raw_query))
     pair = _supported_pairwise_metrics(primary_query)
     if len(pair) < 2:
         return qa, False
@@ -744,38 +810,6 @@ def _extract_explicit_month_period(raw_query: str) -> tuple[Optional[str], Optio
         end_dt = date(year, last_month, monthrange(year, last_month)[1])
     full_end = date(end_dt.year, end_dt.month, monthrange(end_dt.year, end_dt.month)[1])
     return start_dt.isoformat(), full_end.isoformat()
-
-
-def _leading_question(raw_query: str) -> str:
-    """Return the question asked, without context appended beneath it.
-
-    A report track query carries its primary question on the first line and
-    then its research title, coverage bullets, and the originating report
-    request. Those lines describe the surrounding work, not the question, and
-    matching movement language inside them classifies a track by its
-    neighbours: on job 37567e5f a market-rules track asking how the balancing
-    price is *defined* matched on a bullet mentioning "composition changes"
-    and was coerced into a data question, sending it to fetch sixty-one rows
-    of prices it had no use for.
-    """
-
-    return str(raw_query or "").splitlines()[0] if raw_query else ""
-
-
-def _question_asks_about(raw_query: str, tokens: tuple[str, ...]) -> bool:
-    """Match subject and intent language against the question, not its context.
-
-    Every positive condition a guardrail tests — what the question is about as
-    much as what it asks — has to come from the question itself. Job 40e55527
-    showed why the distinction is not only about intent words: a tariff track
-    asking which schedules applied, and whether any *changed*, was coerced onto
-    the balancing-price path because two coverage bullets mentioned balancing
-    rules and observed prices. It fetched prices and balancing composition
-    instead of tariffs, and its section was written from them.
-    """
-
-    leading = _leading_question(raw_query)
-    return any(token in leading for token in tokens)
 
 
 def _is_month_specific_balancing_price_explanation(raw_query: str) -> bool:

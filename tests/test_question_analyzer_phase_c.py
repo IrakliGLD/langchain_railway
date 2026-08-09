@@ -642,6 +642,80 @@ def test_quantity_trend_guardrail_prefers_primary_query_over_selected_interpreta
     )
 
 
+def _report_track_query(primary: str, *, coverage: list[str], context: str) -> str:
+    """Build the exact shape build_report_track_analysis_query produces."""
+
+    parts = [primary, "Research track: Generation and cross-border supply"]
+    if coverage:
+        parts.extend(["Required coverage:", *(f"- {line}" for line in coverage)])
+    parts.append(f"Report context: {context}")
+    return "\n".join(parts)
+
+
+def test_quantity_trend_guardrail_ignores_movement_language_in_report_context():
+    """A month-bounded supply track is not a trend question.
+
+    The track query carries its research title, coverage bullets and the whole
+    report request beneath the question. Matching "evolution" inside those
+    lines classified a single-month question as a trend, which discards its
+    window and fetches the full history instead of the month asked about.
+    """
+
+    raw_query = _report_track_query(
+        "How much generation and imports were recorded in May 2026?",
+        coverage=["Which sources supplied the month's volumes?"],
+        context=(
+            "Analyse the evolution of the generation mix and cross-border "
+            "flows in May 2026."
+        ),
+    )
+    qa = _analytical_payload()
+
+    _guarded, changed = planner._apply_quantity_trend_guardrail(qa, raw_query)
+
+    assert changed is False
+
+
+def test_quantity_trend_guardrail_still_fires_when_the_track_asks_for_a_trend():
+    """Narrowing to the question must not disarm the guardrail itself."""
+
+    raw_query = _report_track_query(
+        "How did generation evolve between 2021 and 2026?",
+        coverage=["Break the series down by source."],
+        context="Analyse Georgian supply over the last five years.",
+    )
+    qa = _analytical_payload()
+
+    guarded, changed = planner._apply_quantity_trend_guardrail(qa, raw_query)
+
+    assert changed is True
+    assert guarded.canonical_query_en == (
+        "How did generation evolve between 2021 and 2026?"
+    )
+    assert guarded.tooling.candidate_tools[0].params_hint.metric == "generation"
+
+
+def test_technical_indicator_guardrail_ignores_concepts_in_report_context():
+    """A track's own question decides whether it wants the indicator bundle."""
+
+    raw_query = _report_track_query(
+        "What was import dependency in May 2026?",
+        coverage=["State the monthly ratio."],
+        context=(
+            "Describe energy security, generation and consumption in Georgia "
+            "for May 2026."
+        ),
+    )
+    qa = _conceptual_payload()
+
+    _guarded, changed = planner._apply_technical_indicator_bundle_guardrail(
+        qa,
+        raw_query,
+    )
+
+    assert changed is False
+
+
 def test_pairwise_correlation_guardrail_overrides_clarify_for_supported_metric_pair():
     raw_query = "What is the correlation between balancing price and demand?"
     qa = QuestionAnalysis.model_validate(
