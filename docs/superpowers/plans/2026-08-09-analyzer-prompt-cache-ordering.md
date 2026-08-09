@@ -237,6 +237,74 @@ Run from `D:\Enaiapp\langchain_railway` with the standard test env.
 Live gate, where noted: `python -m guardrails.redteam_gate` (≥ 0.92) and
 `evaluation/routing_golden_set.py`.
 
+**Status at 2026-08-09.** Phases 0–2 done and committed. Phase 3's harness and
+Phase 4's code are delivered, but their *runs* are blocked: this environment
+has no live model credentials and no deploy access. Everything mechanically
+possible is finished; what remains is three commands an operator runs.
+
+| Phase | State | Commit |
+|---|---|---|
+| 0 Measure | done — 8,721 tokens, gate passed | — |
+| 1 Pin legacy | done — 10 tests, mutation-checked | `ccfc2ed` |
+| 2 Implement, dark | done — selector defaults `off` | `dfe17f9` |
+| 3 Report-track eval | harness delivered, **run blocked** | `2541581` |
+| 4 Canary | code delivered, **run blocked** | `df532ea` |
+| 5 Standard decision | **blocked** (live golden) | — |
+| 6 Optional | not started | — |
+
+### Operator runbook for the blocked phases
+
+```bash
+# Phase 3 — needs the production env for the active MODEL_TYPE
+python evaluation/analyzer_prompt_order_pairs.py --repeats 3
+```
+
+Exit 0 means no stable routing disagreement and no schema-adherence
+regression. Investigate any `DIFFER` line individually; `noisy` lines are model
+variance, not blockers.
+
+```bash
+# Phase 4 — on the worker, only after Phase 3 is clean
+ENAI_ANALYZER_CONSTANTS_FIRST=report
+```
+
+Run **two reports inside the provider's cache TTL** — not two calls inside one
+report's fan-out, which are concurrent and race each other's writes. Read
+`cached_prompt_tokens` and `cache_write_tokens` off the
+`llm_response_telemetry` line for `stage=report_question_analyzer`. Then, and
+only then, add `ENAI_ANALYZER_PROMPT_CACHE_KEY=true` and repeat, so the
+reorder and the affinity hint stay separable.
+
+```bash
+# Phase 5 — after Phase 4 shows the mechanism works
+python evaluation/routing_golden_set.py
+ENAI_ANALYZER_CONSTANTS_FIRST=all python evaluation/routing_golden_set.py
+```
+
+### If schema adherence degrades — the fallback ladder
+
+Constants-first moves the schema and `CONTRACT_RULES`, the two
+highest-authority artifacts, out of the prompt's last position. Every
+recurring analyzer failure in production has been a schema violation
+(`83010f04`, `3b92f462`, `c7823cc9`), so this is the most likely way the
+change hurts. A regression does **not** mean reverting:
+
+| Header | Prefix | Rules position |
+|---|---:|---|
+| schema + guides + `CONTRACT_RULES` | 8,721 tokens | early |
+| schema + guides only | **~4,750 tokens** | back behind the question |
+
+Still 2.4× the decision gate. Phase 3 counts sanitizer repairs per arm
+precisely so this is decided on evidence rather than on feel.
+
+### A coupling worth knowing
+
+The knowledge topic stems are embedded in the header, via `KnowledgeTopicName`
+inside the schema. **Adding a knowledge topic rolls the analyzer prompt
+cache** — one cold prefix after each such release, not a per-request cost.
+This is why `prompt_cache_key` is derived from a schema digest rather than
+hand-versioned: the key then moves automatically exactly when the header does.
+
 ### Phase 0 — Measure the achievable prefix ✅ **DONE**
 
 Result above: 8,721 tokens post-budget worst case across 40 variants. Gate
