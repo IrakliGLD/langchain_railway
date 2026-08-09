@@ -665,3 +665,57 @@ def test_an_unlabelable_comparison_is_omitted_rather_than_drawn():
 
     assert decisions[0].artifact is None
     assert decisions[0].reason_code == "REPORT_CHART_AMBIGUOUS_CATEGORY_AXIS"
+
+
+def test_composition_type_shadows_the_report_rule_without_using_it(caplog):
+    """Phase 3: log the disagreement, change nothing.
+
+    The report answers the composition question with Standard's goal-less
+    fallback, which tests `"share" in dimensions`; Standard's own composition
+    rule tests `dimensions == {"share"}`. The gap is the pie that put shares
+    and thousand MWh in one whole. Shadow first: the new answer is computed and
+    reported, and the old one is still the one returned.
+    """
+
+    import json
+
+    from agent.report_charts import _composition_snapshot_type
+
+    mixed = ["share_hydro", "quantity_hydro"]
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        answer = _composition_snapshot_type(mixed, 4)
+
+    # The shadow must not move behaviour. This is the whole guarantee.
+    assert answer == "pie"
+
+    logged = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
+    ]
+    assert logged, "the disagreement was not reported"
+    assert logged[0]["applied"] == "pie"
+    assert logged[0]["shadow"] == "bar"
+    assert logged[0]["dimensions"] == ["energy_qty", "share"]
+    assert logged[0]["category_count"] == 4
+
+
+def test_composition_type_is_silent_when_the_two_rules_agree(caplog):
+    """A shadow line on every chart would drown the disagreements."""
+
+    import json
+
+    from agent.report_charts import _composition_snapshot_type
+
+    pure = ["share_hydro", "share_thermal", "share_wind"]
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        answer = _composition_snapshot_type(pure, 3)
+
+    assert answer == "pie"
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
+    ]

@@ -8,6 +8,7 @@ import math
 import re
 from typing import Any
 
+from agent.report_chart_rules import composition_chart_type
 from config import SUMMER_MONTHS, WINTER_MONTHS
 from context import COLUMN_LABELS, DERIVED_LABELS
 from contracts.report import ReportChartPurpose, ReportChartRequest, ReportPlan
@@ -292,14 +293,40 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
 
     The snapshot has already collapsed to one period, so it is asked as
     categories-without-time regardless of the source table's date column.
+
+    Shadow (Phase 3): ``select_chart_type`` is Standard's *goal-less* fallback,
+    reached only when the analyzer emits no ``visual_goal`` at all. The report
+    has a goal — ``ReportChartPurpose.COMPOSITION`` — and is entitled to the
+    rule Standard applies when it has one, which tests ``dimensions ==
+    {"share"}`` rather than membership. The two answers are compared here and
+    the disagreement is reported, but the answer returned is still the old one.
     """
 
-    return select_chart_type(
+    dimensions = {infer_dimension(column) for column in columns}
+    applied = select_chart_type(
         has_time=False,
         has_categories=True,
-        dimensions={infer_dimension(column) for column in columns},
+        dimensions=dimensions,
         category_count=category_count,
     )
+    shadow = composition_chart_type(dimensions, category_count)
+    if shadow != applied:
+        _LOGGER.info(
+            "REPORT_CHART_TYPE_DISAGREEMENT %s",
+            json.dumps(
+                {
+                    "applied": applied,
+                    "category_count": category_count,
+                    "columns": sorted(columns)[:8],
+                    "dimensions": sorted(dimensions),
+                    "shadow": shadow,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    return applied
 
 
 def _is_numeric(value: Any) -> bool:

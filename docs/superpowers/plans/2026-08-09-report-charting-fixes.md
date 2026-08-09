@@ -37,6 +37,310 @@ second. Each task moves one decision to the module that already owns it.
 
 ---
 
+## Direction: protecting Standard while fixing the report (2026-08-09, after job fbc46aa4)
+
+Standard's chart output is better than the report's, and the reason is now
+specific rather than a general impression. **The report leans on the one rule
+in the system that Standard treats as a last resort.**
+
+### The seam
+
+| Module | Used by | Rule for touching it |
+|---|---|---|
+| `agent/chart_pipeline.py` | Standard only (Stage 5, via `agent/pipeline.py`) | Refactor only. Never change its decisions. |
+| `agent/report_charts.py` | Report only | Free to change. Prefer every fix here. |
+| `visualization/chart_selector.py` | **Both** | Change only behind a characterization suite. |
+| `agent/derived_chart_builder.py` | **Both**, via `analyzer.enrich` in Stage 3 | Highest risk in the codebase. A boolean-dtype bug here once killed derived charts in *both* modes. |
+
+### Why Standard is better: it has three protections the report has none of
+
+Standard reaches the shared `select_chart_type` **last**
+(`chart_pipeline.py:1528`), after `preferred_chart_family` and
+`_chart_type_for_visual_goal`, and then applies a corrective pass. The report
+calls `select_chart_type` as its **only** authority
+(`report_charts.py:297`).
+
+The rules differ in exactly the way that produces the reported defect:
+
+| Where | Composition test | Effect |
+|---|---|---|
+| `chart_pipeline.py:1563` (Standard) | `dimensions == {"share"}` | Exact — a mixed set never pies |
+| `chart_pipeline.py:1536` (Standard) | `dimensions == {"share"}` | Exact |
+| `chart_pipeline.py:1542` (Standard) | price/xrate present and share absent → force `line` | A corrective the report never runs |
+| `chart_selector.py:242` (**shared**) | `"share" in dimensions` | **Membership** — a mixed set pies |
+
+So a report composition whose columns infer to `{"share", "energy_qty"}` takes
+the membership branch and gets a pie with shares and thousand MWh in the same
+whole. Standard's own adjacent code shows it never intended membership; it just
+never had to fix the shared function because it rarely reaches it.
+
+### Correcting this direction (self-review)
+
+The first version of this section proposed extracting Standard's correctives
+into a shared function that both callers use. **That was wrong on the terms
+set for this work**, in four ways worth recording so the reasoning is not
+repeated.
+
+1. **"Extract into shared" edits Standard's call path.** The mandate is *no
+   impact on Standard*. A refactor proven byte-identical over a test suite is
+   evidence, not proof — it is only as good as the domain tested. Not touching
+   the file is strictly stronger than testing that touching it was harmless.
+2. **It converts a one-time risk into permanent coupling.** Once both callers
+   share a mutable rule, the next report-side tweak moves Standard silently.
+   That is the same "two masters, one authority" shape recorded in
+   [[project_report_repair_needs_named_offenders]], just inverted.
+3. **A hand-picked characterization matrix is theatre.** Choosing the cases
+   means characterizing what I already thought of, which is never the
+   combination that breaks. The input domain here is *finite* — six dimension
+   values, a small goal enum, two booleans, a handful of count boundaries — so
+   it can be enumerated exhaustively instead of sampled.
+4. **"Standard rarely reaches the shared selector" was a guess.** It is now
+   measured, and the precise statement is much more useful:
+   `_chart_type_for_visual_goal` returns non-`None` for *every* recognised
+   `visual_goal`, so **Standard reaches `select_chart_type` only when the
+   analyzer emitted no `visual_goal` at all.** For a composition goal Standard
+   returns `bar` when `dimensions != {"share"}` (`chart_pipeline.py:1565`) and
+   never pies a mixed set.
+
+The first version also skipped shadow mode, which the phased-audit workflow
+requires before any behaviour cutover.
+
+### The general defect, stated without reference to pies
+
+> **The report re-decides a question Standard already answers, using a subset
+> of Standard's inputs and none of Standard's correctives.**
+
+Charting is one instance. The guardrails reading context instead of the
+question, the document plan re-deciding manifest membership, and the gate and
+assembler judging length independently were the same shape. A fix that only
+corrects the pie branch buys nothing against the next instance, so the
+deliverable is a **mechanism that makes report-vs-Standard divergence
+mechanically visible**, with the pie as its first application.
+
+### The rule
+
+**Where the report needs a decision Standard already makes, the report gets
+its own copy plus a machine-checked equivalence to Standard — never a shared
+mutable rule, and never an edit to Standard's path.**
+
+Duplication is normally a smell, and the audit checklist asks about it
+directly. It is the right trade here because the duplicate is *guarded by
+construction*: the equivalence test fails the moment the two diverge in either
+direction, which converts silent drift into a forced decision. It also leaves
+room for the report to diverge where it legitimately must — it has omission
+semantics (`REPORT_CHART_INCOMPATIBLE_UNITS`) that Standard has no counterpart
+for.
+
+Layering: **agree with Standard on what the shape wants, then apply the
+report's own admission gate on top.** Only the first half is equivalence-tested.
+
+---
+
+## Phased plan
+
+Hard constraint, checked at every phase: `git diff --stat` for
+`agent/chart_pipeline.py` and `visualization/chart_selector.py` must be
+**empty**. If a phase cannot hold that, stop and re-plan.
+
+### Phase 0 — Measure, assume nothing — **DONE**
+
+No production code changed. Answers, from the code:
+
+**Q1. Which inputs reach `select_chart_type` from Standard?**
+Exactly one combination: **`preferred_chart_family is None` and
+`visual_goal is None`.** Proven exhaustively rather than sampled —
+`_chart_type_for_visual_goal` returns non-`None` for every one of the seven
+`VisualGoal` members (`trend`/`relationship`→line, `composition`/
+`decomposition`→stackedbar|pie|bar, `ranking`→bar, `compare`→line|bar,
+`threshold_scan`→line|bar), so its `return None` is reachable only when the
+field is absent, and `visual_goal: Optional[VisualGoal] = None`
+(`contracts/question_analysis.py:475`) makes absence a real state.
+`preferred_chart_family` short-circuits earlier still (`chart_pipeline.py:1516`).
+
+**Q2. Callers of `select_chart_type`.** Exactly two:
+`chart_pipeline.py:1528` (Standard) and `report_charts.py:297` (report, via
+`_composition_snapshot_type`). `main.py:189` imports it but never calls it —
+ruff's `F401` is globally disabled for intentional re-exports, and nothing
+imports these four names back out of `main`. Not a caller.
+
+**Q3. How often does `preferred_chart_family` fire?** Not answerable from the
+code — it is analyzer output. Unresolved, and it does not block: when it is
+set, neither the goal rule nor the shared selector runs, so it can only
+*reduce* the population this work touches.
+
+**Q4. Does the report have a `visual_goal` equivalent?**
+**Yes, and this reframes the defect.** `ReportChartPurpose` (`contracts/report.py:338`)
+carries `TREND / COMPARISON / COMPOSITION / RELATIONSHIP / FORECAST / TABLE`,
+overlapping `VisualGoal` on four members. The report already branches on it —
+`if chart.purpose is ReportChartPurpose.COMPOSITION:` (`report_charts.py:701`).
+
+So the report is **not** missing the goal. It has it, routes on it, and then
+**discards it at the final step**: inside the composition branch it calls
+`_composition_snapshot_type`, which asks the goal-*less* `select_chart_type`
+the very question Standard answers with its goal-*aware* rule. The two differ
+only in exactness, which is precisely the reported defect:
+
+| For `has_time=False, has_categories=True` | Pure share set | Mixed set e.g. `{share, energy_qty}` |
+|---|---|---|
+| Standard goal rule (`chart_pipeline.py:1563`) | `pie` | **`bar`** |
+| Shared fallback (`chart_selector.py:242`) | `pie` | **`pie`** ← the mixed-unit pie |
+
+**Consequences for the plan.** The fix is smaller and safer than assumed: the
+report does not need Standard's whole chain, only the composition rule its own
+`purpose` already entitles it to. Both `_composition_snapshot_type` call sites
+benefit — the second (`report_charts.py:765`) already treats a non-`pie` answer
+as "chart the series over time as a line, which is what Standard renders for
+this shape", so a corrected rule makes that comment true instead of aspirational.
+
+**Risk note.** Phase 1's golden must still cover Standard's *whole* decision
+surface, not just the composition branch, because Phase 2's equivalence test is
+only as trustworthy as the golden behind it.
+
+### Phase 1 — Freeze Standard mechanically — **DONE**
+
+`tests/test_chart_type_decision_golden.py` + `tests/fixtures/chart_type_decision_golden.json`.
+**6,400 entries, zero production changes.** Two suites: a semantic one over the
+full powerset of the six `infer_dimension` values × eight goals (seven plus
+`None`) × `has_time` × `has_categories` × three category-count boundaries, and
+an override one holding the semantic core small so the short-circuit matrix
+(explicit group type, explicit user type, preferred family) is itself
+exhaustive. `_choose_chart_type` is the whole decision surface, so that is what
+is pinned.
+
+**Proven to discriminate, not assumed to.** Mutating the shared selector's
+`"share" in dimensions` to `dimensions == {"share"}`:
+
+- on the pie branch → 
+  `cats=1|dims=eiopsx|goal=-|n=8|time=0: pie → bar`, caught;
+- on the *stacked-bar* branch, which was mutated by accident first →
+  `cats=1|dims=eiopsx|goal=-|n=1|time=1: stackedbar → line`, also caught.
+
+The second is the argument for enumeration over curation: nobody would have
+hand-written a case for a six-dimension set with time and categories, and the
+net caught it anyway. Standard restored to an empty diff after both.
+
+**Audit finding, recorded and deliberately not acted on.** The golden documents
+that *Standard itself* answers `pie` for a fully mixed dimension set when
+`visual_goal` is absent (`cats=1|dims=eiopsx|goal=-|n=8|time=0 → pie`). The
+weak membership rule is therefore not purely a report problem — Standard is
+exposed to it too, just only on the no-goal fall-through Phase 0 identified.
+Fixing that is out of scope: the mandate is no impact on Standard, and this
+golden is exactly what would have to change to do it. Raise it as its own
+decision later, with its own evidence.
+
+### Phase 2 — Give the report its own decision module — **DONE**
+
+`agent/report_chart_rules.py` (report-only) + `tests/test_report_chart_rules.py`.
+Nothing imports the module yet — verified by grep, not by intent.
+`chart_pipeline.py` and `chart_selector.py`: **zero diff**.
+
+**Phase 1's open risk resolved first.** The golden pins `_choose_chart_type`
+only, so Phase 2 could not rely on it until the type decision was shown to be
+the actual lever. Confirmed at rest against real column names:
+
+| Columns | Inferred | Report answers today |
+|---|---|---|
+| `share_hydro, share_thermal, share_wind` | `{share}` | `pie` ✓ |
+| `share_hydro, quantity_hydro` | `{energy_qty, share}` | **`pie`** ← the defect |
+| `quantity_hydro, quantity_thermal` | `{energy_qty}` | `bar` ✓ |
+
+The mixed-unit pie reproduces without a production run. The category-axis
+branch is not at risk — `_chart_candidates` already narrows it to one series —
+so the exposure is the temporal-pivot branch (`report_charts.py:753`), where
+several numeric columns become slices of one whole and only the type decision
+stands between mixed units and a pie.
+
+**The rule, three lines, in Standard's order:** exact `{"share"}` under the
+category ceiling → `pie`; a continuous measure (`price_tariff`/`xrate`) with no
+share to anchor it → `line`, which is Standard's corrective pass and something
+the report never ran; everything else → `bar`.
+
+**Equivalence, and proof it discriminates.** The suite replays all 192 golden
+points that ask the report's question (64 dimension sets × 3 counts at
+`goal=composition, time=0, cats=1`) and asserts the copy matches Standard
+exactly. Because an equivalence test that cannot fail is worthless, all three
+rules were mutated and each was caught:
+
+| Mutation | Failures |
+|---|---|
+| `== {"share"}` → `"share" in` | 5 |
+| pie ceiling 8 → 9 | 6 |
+| drop the `line` corrective | 9 |
+
+A guard test also asserts the compared slice is neither empty nor trivial —
+Standard must answer all three of `pie`/`bar`/`line` across it, or agreeing
+with it would prove nothing.
+
+**Process note.** The mutation loop reverted with `git checkout`, which silently
+does nothing to an untracked file, so three mutations accumulated in the new
+module before the state was noticed and restored. Commit a new file before
+mutation-testing it.
+
+### Phase 3 — Shadow — **SHIPPED, awaiting a run**
+
+`_composition_snapshot_type` now computes both answers, logs
+`REPORT_CHART_TYPE_DISAGREEMENT` (applied, shadow, dimensions, columns,
+category_count) when they differ, and **returns the old answer unchanged**.
+Both call sites go through this one function, so a single seam covers the
+category-axis branch and the temporal-pivot branch. `chart_pipeline.py` and
+`chart_selector.py`: **zero diff**.
+
+**Phase 2's open risk resolved first.** The rule assumes the period has
+collapsed, so both call sites had to be confirmed as snapshot questions:
+`report_charts.py:709-721` filters to `latest_period` before asking, and
+`report_charts.py:754` pivots `rows[-1]`. Both single-period. `has_time=False`
+is correct.
+
+Two tests pin the shadow guarantee: a mixed set still returns `pie` while
+logging `shadow: "bar"`, and an agreeing set logs nothing — a line on every
+chart would drown the signal.
+
+**Predictions, recorded before the run so the review can falsify them.**
+From job `fbc46aa4`:
+
+- `generation_and_cross_border_flows_composition` — built `pie`, `series_count: 1`,
+  so its dimension set is almost certainly `{share}` alone. **Expect no
+  disagreement.**
+- `prices_and_balancing_composition` — logged `Chart type: bar (categorical
+  comparison, no time)`, so the type decision ran and found no `share`. If its
+  columns carry `price_tariff`, the corrective makes the shadow `line`.
+  **Expect one disagreement, `bar` → `line`.**
+
+If the run shows a disagreement neither prediction covers, that is the
+interesting case and it gets read before anything is cut over.
+
+### Phase 4 — Cutover
+
+Switch the report to the new module once the disagreements are understood and
+each is an improvement. Phase 1 golden unchanged, Standard files still zero
+diff.
+
+### Phase 5 — Re-validate Tasks 1–3
+
+Re-run the premises below against post-cutover behaviour and delete whatever
+the intervening fixes already closed. Do not execute a task whose premise no
+longer reproduces.
+
+### Tasks 1–3 need re-validating first
+
+Job `fbc46aa4` moved the ground under this plan, which was written from four
+earlier runs. It built **three of four** charts:
+
+- `generation_and_cross_border_flows_composition` — pie, 8 categories,
+  `series_count: 1`. The mixed-unit pie did **not** reproduce.
+- `regulated_tariffs_table` — built (it was omitted as
+  `REPORT_CHART_INCOMPATIBLE_EVIDENCE` the run before).
+- `prices_and_balancing_composition` — omitted `REPORT_CHART_INCOMPATIBLE_UNITS`,
+  which is the units guard working, not failing.
+- The composition omission Task 3 investigates now reports a *different* reason
+  code than the `REPORT_CHART_INSUFFICIENT_CATEGORIES` it was written against.
+
+So step 0 is to re-run the plan's premises against current behaviour and delete
+whatever the intervening fixes already closed. The membership-vs-equality gap
+above is real and provable at rest; the rest of the plan is not yet re-confirmed.
+
+---
+
 ## File Structure
 
 | File | Responsibility | Change |

@@ -22,6 +22,12 @@ REPORT_MAX_EXHIBITS = 4
 REPORT_SECTION_WORD_FLOOR_RATIO = 0.9
 REPORT_SECTION_PROMPT_WORD_CEILING_RATIO = 1.2
 REPORT_SECTION_VALIDATION_WORD_CEILING_RATIO = 1.35
+# The advertised ceiling sits 12.5% below the enforced one so a writer that
+# overshoots its instruction still passes. The floor had no such slack, and a
+# writer errs the same way against it: job fbc46aa4 was told 275 and wrote 266,
+# then 263 on repair, and the run's third generative call bought 13 words. Ask
+# for the margin, enforce the floor unchanged.
+REPORT_SECTION_PROMPT_WORD_FLOOR_MARGIN = 1.1
 REPORT_AGGREGATE_WORD_CEILING_RATIO = (
     REPORT_SECTION_VALIDATION_WORD_CEILING_RATIO
 )
@@ -70,10 +76,19 @@ def report_section_prompt_word_bounds(
     *,
     evidence_row_count: int | None = None,
 ) -> tuple[int, int]:
+    """Return the bounds a writer is told, which are not the ones enforced.
+
+    Both bounds are pulled inward from the enforced pair so that the writer's
+    own error, in either direction, still lands inside them.
+    """
+
+    enforced_minimum, _ = report_section_validation_word_bounds(
+        target_words,
+        evidence_row_count=evidence_row_count,
+    )
     return (
-        math.floor(
-            target_words
-            * report_section_word_floor_ratio(evidence_row_count)
+        math.ceil(
+            enforced_minimum * REPORT_SECTION_PROMPT_WORD_FLOOR_MARGIN
         ),
         math.ceil(
             target_words * REPORT_SECTION_PROMPT_WORD_CEILING_RATIO
