@@ -37,7 +37,10 @@ from contracts.report_research import (
     ReportResearchPlan,
 )
 from contracts.report_sections import ReportSectionDraft
-from utils.validation_diagnostics import validation_error_locations
+from utils.validation_diagnostics import (
+    validation_error_locations,
+    validation_error_rules,
+)
 
 DocumentWriter = Callable[..., Any]
 DocumentRepairer = Callable[..., Any]
@@ -513,6 +516,9 @@ def _log_schema_rejection(
             {
                 "expected_section_ids": list(section_ids),
                 "invalid_fields": validation_error_locations(exc),
+                # A model_validator rejection has no field path at all, so
+                # without this the payload names nothing.
+                "invalid_rules": validation_error_rules(exc),
                 "stage": stage,
             },
             ensure_ascii=True,

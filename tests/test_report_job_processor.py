@@ -967,6 +967,50 @@ def test_track_analysis_telemetry_names_the_gaps_a_kept_track_declares(caplog):
     ]
 
 
+def test_a_model_level_checkpoint_rejection_names_the_rule(caplog):
+    """An empty invalid_fields is what a model validator always produces.
+
+    Every identity rule on ReportGenerationCheckpoint lives in a
+    model_validator, and pydantic gives those an empty ``loc`` — so
+    REPORT_CHECKPOINT_INVALID has never been able to name anything. Job
+    e3f43e84 died at document_plan_ready with invalid_fields=[], the same
+    blind spot the named-offender work was supposed to have closed.
+    """
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        _decisions,
+        _gate,
+        document_plan,
+    ) = _document_components()
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportProcessor"):
+        with pytest.raises(ReportJobFailure):
+            ReportJobProcessor._safe_v3_checkpoint_payload(
+                checkpoint_stage="document_plan_ready",
+                research_plan=research_plan,
+                manifest=manifest,
+                # A document plan is required at this stage; omitting it trips
+                # a model-level rule and nothing else.
+                document_plan=None,
+            )
+
+    logged = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHECKPOINT_INVALID ")
+    ]
+    assert logged, "the rejection was not reported"
+    assert logged[0]["checkpoint_stage"] == "document_plan_ready"
+    assert logged[0]["invalid_rules"], "no rejected rule was named"
+    assert any(
+        "document plan" in rule.lower()
+        for rule in logged[0]["invalid_rules"]
+    ), logged[0]["invalid_rules"]
+
+
 def test_enabled_v2_resumes_document_plan_without_research_calls():
     (
         research_plan,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 from datetime import date, datetime
@@ -24,6 +25,8 @@ from contracts.report_evidence import (
 )
 from models import QueryContext
 from utils.coverage_sampling import coverage_priority_indices
+
+_LOGGER = logging.getLogger("Enai.ReportEvidence")
 
 _QUERY_PERIOD_PATTERN = re.compile(
     r"(?<!\w)\d{4}(?:[-/](?:[Qq][1-4]|\d{1,2})(?:[-/]\d{1,2})?)?(?!\w)"
@@ -576,6 +579,7 @@ def build_report_manifest_from_items(
     query_digest = hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
     unique_items: list[ReportEvidenceItem] = []
     seen_refs: set[str] = set()
+    oversized_refs: list[str] = []
     for item in items:
         if item.evidence_ref in seen_refs:
             continue
@@ -592,10 +596,29 @@ def build_report_manifest_from_items(
             len(candidate.model_dump_json().encode("utf-8"))
             > REPORT_EVIDENCE_MANIFEST_MAX_BYTES
         ):
+            oversized_refs.append(item.evidence_ref)
             continue
         unique_items = candidate_items
         if len(unique_items) == 32:
             break
+    if oversized_refs:
+        # A second, invisible way to lose evidence: this budget is spent
+        # first-come, so one wide table can starve everything after it and the
+        # item count alone never predicts it.
+        _LOGGER.warning(
+            "REPORT_MANIFEST_ITEM_OVERSIZED %s",
+            json.dumps(
+                {
+                    "dropped_evidence_refs": oversized_refs[:12],
+                    "dropped_item_count": len(oversized_refs),
+                    "kept_item_count": len(unique_items),
+                    "maximum_bytes": REPORT_EVIDENCE_MANIFEST_MAX_BYTES,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
     if not unique_items:
         raise ValueError("A report evidence manifest requires evidence items.")
     manifest_material = {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import re
@@ -1185,6 +1186,11 @@ def execute_report_research(
     ]
 
 
+# ReportEvidenceManifest holds at most 32 items and consolidation always
+# appends the limitation note, so packet evidence may fill only the rest.
+_MAXIMUM_CONSOLIDATED_EVIDENCE_ITEMS = 31
+
+
 def consolidate_report_evidence_packets(
     query: str,
     packets: Sequence[ReportEvidencePacket],
@@ -1206,16 +1212,57 @@ def consolidate_report_evidence_packets(
             continue
         seen_refs.add(item.evidence_ref)
         items.append(item)
-    for packet in packets:
-        for item in packet.items:
+    # Take one round from every packet before anyone takes seconds. The cap is
+    # smaller than what a full research plan carries -- a packet holds 12
+    # items, four tracks are allowed, and only 31 slots exist -- so filling in
+    # packet order spent them all on the earliest tracks and left a late one
+    # with nothing to write from (job e3f43e84 discarded 17 items that way).
+    # Each packet already orders its own evidence most-important-first, so a
+    # round takes each track's next-best item and the shortfall is shared.
+    dropped_by_track: dict[str, int] = {}
+    depth = 0
+    remaining = True
+    while remaining:
+        remaining = False
+        for packet in packets:
+            if depth >= len(packet.items):
+                continue
+            remaining = True
+            item = packet.items[depth]
             if item.evidence_ref in seen_refs:
+                continue
+            if len(items) >= _MAXIMUM_CONSOLIDATED_EVIDENCE_ITEMS:
+                # Keep counting rather than stop: which tracks lost how much is
+                # the whole point of the line below, and the kept set is
+                # already fixed.
+                dropped_by_track[packet.track_id] = (
+                    dropped_by_track.get(packet.track_id, 0) + 1
+                )
                 continue
             seen_refs.add(item.evidence_ref)
             items.append(item)
-            if len(items) == 31:
-                break
-        if len(items) == 31:
-            break
+        depth += 1
+    if dropped_by_track:
+        # A track can reach the writer with no table at all this way, which
+        # reads as a collector that returned nothing. Job e3f43e84 discarded
+        # 17 of 48 items in silence and then died at the checkpoint because a
+        # chart still pointed at one of them.
+        _LOGGER.warning(
+            "REPORT_MANIFEST_TRUNCATED %s",
+            json.dumps(
+                {
+                    "dropped_by_track": dropped_by_track,
+                    "dropped_item_count": sum(dropped_by_track.values()),
+                    "kept_item_count": len(items) + 1,
+                    "maximum_item_count": (
+                        _MAXIMUM_CONSOLIDATED_EVIDENCE_ITEMS
+                    ),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
     gap_codes = list(
         dict.fromkeys(
             gap

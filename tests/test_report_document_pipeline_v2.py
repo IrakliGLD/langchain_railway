@@ -2726,6 +2726,181 @@ def test_an_invalid_section_batch_names_the_fields_that_rejected_it(caplog):
     assert logged[0]["stage"] == "section_batch"
 
 
+def _overflowing_packets():
+    """Packets that together carry more evidence than the manifest holds."""
+
+    from contracts.report_research import ReportEvidencePacket
+
+    def padded(packet, tag):
+        payload = packet.model_dump(mode="json")
+        template = dict(payload["items"][0])
+        for index in range(12 - len(payload["items"])):
+            clone = dict(template)
+            clone["evidence_ref"] = f"evidence:table:{tag}{index:015x}"
+            clone["title"] = f"Filler {tag}{index}"
+            payload["items"].append(clone)
+        return ReportEvidencePacket.model_validate(payload)
+
+    packets = [
+        padded(packet, str(index))
+        for index, packet in enumerate(_ready_packets())
+    ]
+    assert sum(len(packet.items) for packet in packets) > 31
+    return packets
+
+
+def test_every_track_keeps_evidence_when_the_manifest_overflows():
+    """A cap smaller than the evidence must not be spent on the first tracks.
+
+    A packet holds 12 items, research_max_tracks is 4, and the manifest keeps
+    31 -- so three full tracks already overflow. Filling in packet order spent
+    every slot on the earliest tracks, and job e3f43e84 discarded 17 items
+    that way. Each track's own evidence is ordered most-important-first, so
+    taking one round at a time keeps every track's best.
+    """
+
+    packets = _overflowing_packets()
+
+    manifest = consolidate_report_evidence_packets(_QUERY, packets)
+
+    kept = set(manifest.item_by_ref())
+    kept_by_track = {
+        packet.track_id: sum(
+            item.evidence_ref in kept for item in packet.items
+        )
+        for packet in packets
+    }
+    assert all(kept_by_track.values()), kept_by_track
+    # No track may be starved while another is still taking seconds.
+    assert max(kept_by_track.values()) - min(kept_by_track.values()) <= 1, (
+        kept_by_track
+    )
+
+
+def test_dropping_evidence_at_the_manifest_cap_names_the_losing_tracks(caplog):
+    """Silently losing a third of the evidence is not a reportable state.
+
+    The manifest holds at most 32 items and consolidation reserves one for the
+    limitation note. Job e3f43e84 collected 48 and said nothing about the 17
+    it discarded, so a track that reached the writer with no table looked like
+    a collector that returned nothing.
+    """
+
+    from contracts.report_research import ReportEvidencePacket
+
+    packets = _ready_packets()
+
+    def padded(packet, tag):
+        payload = packet.model_dump(mode="json")
+        template = dict(payload["items"][0])
+        for index in range(12 - len(payload["items"])):
+            clone = dict(template)
+            clone["evidence_ref"] = f"evidence:table:{tag}{index:015x}"
+            clone["title"] = f"Filler {tag}{index}"
+            payload["items"].append(clone)
+        return ReportEvidencePacket.model_validate(payload)
+
+    overflowing = [
+        padded(packet, str(index)) for index, packet in enumerate(packets)
+    ]
+    assert sum(len(packet.items) for packet in overflowing) > 31
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportResearch"):
+        manifest = consolidate_report_evidence_packets(_QUERY, overflowing)
+
+    logged = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_MANIFEST_TRUNCATED ")
+    ]
+    assert logged, "the discarded evidence was not reported"
+    assert logged[0]["kept_item_count"] == len(manifest.items)
+    assert logged[0]["dropped_item_count"] > 0
+    assert logged[0]["dropped_by_track"], "no losing track was named"
+    assert sum(logged[0]["dropped_by_track"].values()) == (
+        logged[0]["dropped_item_count"]
+    )
+
+
+def test_a_chart_whose_evidence_missed_the_manifest_is_not_requested(caplog):
+    """The manifest is closed, so the plan may not point outside it.
+
+    consolidate_report_evidence_packets caps the manifest at 31 items and
+    stops at the packet where the cap lands, while chart requests are built
+    from packet.chart_candidates without consulting it. A track whose items
+    straddle that boundary keeps evidence -- so the planner's own
+    "no manifest evidence" guard stays quiet -- but loses the table its
+    exhibit points at. The checkpoint then rejects the plan with
+    "references unknown manifest evidence" and the job dies non-retryably:
+    job e3f43e84 failed at document_plan_ready carrying 48 evidence items.
+    """
+
+    from agent.report_evidence import build_report_manifest_from_items
+    from contracts.report_generation import ReportGenerationCheckpoint
+
+    research_plan, packets, manifest, decisions, gate = _ready_components()
+    candidate_by_id = {
+        candidate.chart_id: candidate
+        for packet in packets
+        for candidate in packet.chart_candidates
+    }
+    # Pick an exhibit whose track keeps other evidence, so only the chart's
+    # own table goes missing.
+    dropped_ref = next(
+        ref
+        for decision in decisions
+        for ref in candidate_by_id[decision.chart_id].evidence_refs
+        if any(
+            item.evidence_ref != ref
+            for packet in packets
+            for item in packet.items
+            if ref in {other.evidence_ref for other in packet.items}
+        )
+    )
+    trimmed = build_report_manifest_from_items(
+        _QUERY,
+        [item for item in manifest.items if item.evidence_ref != dropped_ref],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportDocumentPlan"):
+        plan = build_report_document_plan(
+            _QUERY,
+            research_plan,
+            packets,
+            trimmed,
+            gate,
+            decisions,
+        )
+
+    # Dropping an exhibit silently turns a missing figure into a mystery.
+    dropped = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_REQUEST_DROPPED ")
+    ]
+    assert dropped, "the dropped exhibit was not reported"
+    assert dropped[0]["missing_evidence_refs"] == [dropped_ref]
+
+    manifest_refs = set(trimmed.item_by_ref())
+    assert all(
+        set(chart.evidence_refs).issubset(manifest_refs)
+        for chart in plan.charts
+    ), [chart.chart_id for chart in plan.charts]
+    assert all(
+        chart_id in {chart.chart_id for chart in plan.charts}
+        for section in plan.sections
+        for chart_id in section.chart_refs
+    )
+    # The durable checkpoint is the authority that killed the job.
+    ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v3",
+        checkpoint_stage="document_plan_ready",
+        research_plan=research_plan,
+        manifest=trimmed,
+        document_plan=plan,
+    )
+
+
 def _starved_section(section, spec):
     """Cite one fewer required ref than the section owes."""
 
