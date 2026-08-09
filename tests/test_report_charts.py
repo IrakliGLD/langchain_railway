@@ -17,6 +17,7 @@ import pytest
 
 from agent.report_charts import build_report_charts
 from contracts.report import ReportPlan
+from contracts.report_charts import ReportChartType
 from contracts.report_evidence import ReportEvidenceManifest
 from tests.fixtures_report_manifest import _manifest, _plan_payload
 
@@ -667,48 +668,48 @@ def test_an_unlabelable_comparison_is_omitted_rather_than_drawn():
     assert decisions[0].reason_code == "REPORT_CHART_AMBIGUOUS_CATEGORY_AXIS"
 
 
-def test_composition_type_shadows_the_report_rule_without_using_it(caplog):
-    """Phase 3: log the disagreement, change nothing.
+def test_a_composition_of_shares_and_prices_is_not_a_pie(caplog):
+    """Cutover, and why it could not wait for its own commit.
 
-    The report answers the composition question with Standard's goal-less
-    fallback, which tests `"share" in dimensions`; Standard's own composition
-    rule tests `dimensions == {"share"}`. The gap is the pie that put shares
-    and thousand MWh in one whole. Shadow first: the new answer is computed and
-    reported, and the old one is still the one returned.
+    Recovering the identifiers made the dimension set truthful, and the *old*
+    membership rule answers pie for {price_tariff, share} the moment it can
+    see the share it was previously blind to. Shipping the label fix alone
+    would therefore have introduced the mixed-unit pie it exists to prevent:
+    before, the garbage dimensions produced a bar by accident. The rule and
+    the input have to land together.
     """
 
     import json
 
     from agent.report_charts import _composition_snapshot_type
 
-    mixed = ["share_hydro", "quantity_hydro"]
+    mixed = [
+        "Balancing electricity price (GEL/MWh)",
+        "Share Import",
+        "Share Regulated Hpp",
+    ]
 
     with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
-        answer = _composition_snapshot_type(mixed, 4)
+        answer = _composition_snapshot_type(mixed, 3)
 
-    # The shadow must not move behaviour. This is the whole guarantee.
-    assert answer == "pie"
-
+    assert answer == "bar"
     logged = [
         json.loads(record.getMessage().split(" ", 1)[1])
         for record in caplog.records
         if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
     ]
-    assert logged, "the disagreement was not reported"
-    assert logged[0]["applied"] == "pie"
-    assert logged[0]["shadow"] == "bar"
-    assert logged[0]["dimensions"] == ["energy_qty", "share"]
-    assert logged[0]["category_count"] == 4
+    assert logged, "the change from the previous rule was not reported"
+    assert logged[0]["applied"] == "bar"
+    assert logged[0]["previous"] == "pie"
+    assert logged[0]["dimensions"] == ["price_tariff", "share"]
 
 
-def test_composition_type_is_silent_when_the_two_rules_agree(caplog):
-    """A shadow line on every chart would drown the disagreements."""
-
-    import json
+def test_a_composition_of_pure_shares_is_still_a_pie(caplog):
+    """The cutover must not cost the compositions that already worked."""
 
     from agent.report_charts import _composition_snapshot_type
 
-    pure = ["share_hydro", "share_thermal", "share_wind"]
+    pure = ["Share Import", "Share Regulated Hpp", "Share Deregulated Ren"]
 
     with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
         answer = _composition_snapshot_type(pure, 3)
@@ -721,49 +722,188 @@ def test_composition_type_is_silent_when_the_two_rules_agree(caplog):
     ]
 
 
-def test_an_omitted_composition_names_the_shape_that_omitted_it(caplog):
-    """REPORT_CHART_INSUFFICIENT_CATEGORIES names a chart, not a cause.
+def test_a_labelled_price_and_share_chart_is_no_longer_omitted():
+    """The chart that did not render, pinned end to end.
 
-    Two different branches raise it -- a categorical table whose latest period
-    holds one row, and a wide table whose latest row pivots to one numeric
-    column -- and the log says "1 categories" either way. Job 4ea18b2b lost the
-    prices composition to it and the line cannot say which branch ran, so the
-    fix cannot be chosen. Name the branch and the shape.
+    Job e4049b2d omitted prices_balancing_analysis_composition as
+    REPORT_CHART_INCOMPATIBLE_UNITS. The evidence was fine: the dimensions
+    were not. Reading them off display labels produced three spurious groups
+    -- energy_qty for a price whose label ends in "MWh", "other" for each
+    share -- and _axis_metadata refuses more than two. With identifiers it is
+    two groups and a dual axis.
     """
 
-    import json
+    from agent.report_chart_rules import evidence_dimension
+    from agent.report_charts import _axis_metadata
+    from contracts.report_charts import ReportChartType
+
+    series = [
+        "Balancing electricity price (GEL/MWh)",
+        "Share Import",
+        "Share Regulated Hpp",
+    ]
+    units = {
+        "Balancing electricity price (GEL/MWh)": "GEL/MWh",
+        "Share Import": "%",
+        "Share Regulated Hpp": "%",
+    }
+
+    assert {evidence_dimension(name) for name in series} == {
+        "price_tariff",
+        "share",
+    }
+    resolved = _axis_metadata(ReportChartType.BAR, series, units)
+    assert resolved is not None, "the chart is still being omitted"
+    assert resolved[0] == "dual"
+
+
+def test_a_wide_mixed_composition_charts_over_time_instead_of_pieing():
+    """Task 1's premise, re-validated: the exactness rule already covers it.
+
+    A wide frame holding both shares and quantities used to reach the pie
+    branch. It now takes the not-parts-of-one-whole path and charts the series
+    over time, which is what Standard renders for this shape -- so the
+    per-slice dimension filter Task 1 proposed is unnecessary.
+    """
 
     payload = _manifest().model_dump(mode="json")
     table = payload["items"][0]
-    table["columns"] = ["type_tech", "share_tech"]
-    table["rows"] = [{"type_tech": "hydro", "share_tech": 1.0}]
-    table["unit_by_column"] = {"share_tech": "ratio"}
-    table["total_row_count"] = 1
-    manifest = ReportEvidenceManifest.model_validate(payload)
+    table["columns"] = ["date", "share_hydro", "quantity_hydro"]
+    table["rows"] = [
+        {"date": "2026-04", "share_hydro": 0.6, "quantity_hydro": 100.0},
+        {"date": "2026-05", "share_hydro": 0.8, "quantity_hydro": 120.0},
+    ]
+    table["unit_by_column"] = {
+        "share_hydro": "ratio",
+        "quantity_hydro": "thousand MWh",
+    }
+    table["total_row_count"] = 2
     plan_payload = _plan_payload()
-    plan_payload["charts"][0].update(
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )[0]
+
+    assert decision.status == "built"
+    assert decision.artifact.type.value != "pie"
+
+
+def _composition_manifest(values_by_component, *, periods=2):
+    """A wide, category-less composition frame -- the temporal-pivot shape."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    components = list(values_by_component)
+    table["columns"] = ["date", *components]
+    table["rows"] = [
         {
-            "purpose": "composition",
-            "x_field": "type_tech",
-            "series_fields": ["share_tech"],
+            "date": f"2026-{month:02d}",
+            **{name: value for name, value in values_by_component.items()},
         }
+        for month in range(4, 4 + periods)
+    ]
+    table["unit_by_column"] = {name: "ratio" for name in components}
+    table["total_row_count"] = periods
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+    return (
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
     )
+
+
+def _pie_slice_total(artifact):
+    return sum(
+        row["value"]
+        for row in artifact.data
+        if isinstance(row.get("value"), (int, float))
+    )
+
+
+def test_an_oversized_composition_still_pies_and_still_sums_to_the_whole():
+    """A composition question deserves a composition answer.
+
+    Eleven components used to render as a pie of eight summing to 0.727 --
+    part of a whole presented as the whole. Declining to a line chart would
+    fix the lie by answering a different question. Keep the pie, keep the
+    total: the largest components stay as slices and the tail becomes Other.
+    """
+
+    plan, manifest = _composition_manifest(
+        {f"share_c{index}": 1 / 11 for index in range(11)}
+    )
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.artifact.type is ReportChartType.PIE
+    assert len(decision.artifact.data) == 8
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+    assert decision.artifact.data[-1]["category"] == "Other"
+
+
+def test_a_pie_within_the_slice_budget_gains_no_other_slice():
+    """The rollup must not touch the compositions that already fit."""
+
+    plan, manifest = _composition_manifest(
+        {f"share_c{index}": 1 / 8 for index in range(8)}
+    )
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.artifact.type is ReportChartType.PIE
+    assert len(decision.artifact.data) == 8
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+    assert not any(
+        row["category"] == "Other" for row in decision.artifact.data
+    )
+
+
+def test_the_rolled_up_tail_is_the_smallest_components_and_is_reported(caplog):
+    """Rank by contribution, not by where the column sat in the SELECT."""
+
+    import json
+
+    # Declared smallest-first, so table order and importance disagree.
+    values = {f"share_c{index}": (index + 1) / 55 for index in range(10)}
+    plan, manifest = _composition_manifest(values)
 
     with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
-        decision = build_report_charts(
-            ReportPlan.model_validate(plan_payload),
-            manifest,
-        )[0]
+        decision = build_report_charts(plan, manifest)[0]
 
-    assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"
-    logged = next(
+    categories = [row["category"] for row in decision.artifact.data]
+    assert categories[-1] == "Other"
+    # The three smallest are rolled up; the largest all survive as slices.
+    assert "share_c0" not in categories
+    assert "share_c9" in categories and "share_c8" in categories
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+
+    rolled = [
         json.loads(record.getMessage().split(" ", 1)[1])
         for record in caplog.records
-        if record.getMessage().startswith("REPORT_CHART_DECISION ")
-        and json.loads(record.getMessage().split(" ", 1)[1])["chart_id"]
-        == decision.chart_id
-    )
-    assert logged["detail"]["branch"] == "category_axis"
-    assert logged["detail"]["category_count"] == 1
-    assert logged["detail"]["numeric_columns"] == ["share_tech"]
-    assert logged["detail"]["categorical_columns"] == ["type_tech"]
+        if record.getMessage().startswith("REPORT_CHART_SLICES_ROLLED_UP ")
+    ]
+    assert rolled, "the rolled-up components were not reported"
+    assert rolled[0]["rolled_up"] == ["share_c0", "share_c1", "share_c2"]
+    assert rolled[0]["slice_count"] == 8
+
+
+def test_a_mixed_composition_is_never_rolled_up_into_a_pie():
+    """The rollup fixes a count problem, and must not resurrect the unit one.
+
+    Shares plus a price are not parts of one whole at any size, so an Other
+    slice would make the lie tidier rather than fix it.
+    """
+
+    values = {f"share_c{index}": 1 / 11 for index in range(10)}
+    values["p_bal_gel"] = 137.0
+    plan, manifest = _composition_manifest(values)
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.artifact.type is not ReportChartType.PIE

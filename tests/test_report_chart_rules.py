@@ -123,3 +123,77 @@ def test_a_mixed_composition_is_not_a_pie():
 )
 def test_named_rules_hold(dimensions, count, expected):
     assert composition_chart_type(dimensions, count) == expected
+
+
+def test_the_label_inverse_is_total_over_every_known_label():
+    """The gate on using it at all: prove it round-trips before relying on it.
+
+    A partial inverse would silently mislabel whatever it missed, which is the
+    defect it exists to fix. 96 labels, no collisions, so every one must come
+    back exactly.
+    """
+
+    from agent.report_chart_rules import (
+        KNOWN_FIELD_LABELS,
+        evidence_column_identifier,
+        field_label,
+    )
+
+    wrong = {
+        identifier: evidence_column_identifier(field_label(identifier))
+        for identifier in KNOWN_FIELD_LABELS
+        if evidence_column_identifier(field_label(identifier)) != identifier
+    }
+
+    assert not wrong, wrong
+
+
+def test_a_label_the_report_never_produced_is_left_alone():
+    """Worst case must be today's behaviour, never something new."""
+
+    from agent.report_chart_rules import evidence_column_identifier
+
+    assert evidence_column_identifier("Some Unmapped Thing") == (
+        "some_unmapped_thing"
+    )
+    assert evidence_column_identifier("already_an_identifier") == (
+        "already_an_identifier"
+    )
+    assert evidence_column_identifier("") == ""
+
+
+def test_dimensions_are_inferred_from_identifiers_not_labels():
+    """Job e4049b2d: seven columns, three of them shares, no share inferred.
+
+    A balancing price read as an energy quantity because its label ends in
+    "MWh", and every share read as "other" because the label is title-cased
+    prose. The dimension set drives the chart type, the axis grouping and the
+    units check, so all three were deciding on noise.
+    """
+
+    from agent.report_chart_rules import evidence_dimension
+
+    assert evidence_dimension("Balancing electricity price (GEL/MWh)") == (
+        "price_tariff"
+    )
+    assert evidence_dimension("Share Import") == "share"
+    assert evidence_dimension("Share Deregulated Ren") == "share"
+    assert evidence_dimension("Price Deregulated Ren Gel") == "price_tariff"
+    # Identifiers must keep working unchanged -- most manifest tables carry
+    # real column names and must not be disturbed.
+    assert evidence_dimension("p_bal_gel") == "price_tariff"
+    assert evidence_dimension("share_import") == "share"
+
+
+def test_the_production_column_set_now_reads_as_a_share_composition():
+    """The whole set from the disagreement, end to end."""
+
+    from agent.report_chart_rules import evidence_dimension
+
+    columns = [
+        "Share Deregulated Ren",
+        "Share Import",
+        "Share Regulated Hpp",
+    ]
+
+    assert {evidence_dimension(column) for column in columns} == {"share"}
