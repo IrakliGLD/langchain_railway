@@ -719,3 +719,73 @@ def test_a_composition_of_pure_shares_is_still_a_pie(caplog):
         for record in caplog.records
         if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
     ]
+
+
+def test_a_labelled_price_and_share_chart_is_no_longer_omitted():
+    """The chart that did not render, pinned end to end.
+
+    Job e4049b2d omitted prices_balancing_analysis_composition as
+    REPORT_CHART_INCOMPATIBLE_UNITS. The evidence was fine: the dimensions
+    were not. Reading them off display labels produced three spurious groups
+    -- energy_qty for a price whose label ends in "MWh", "other" for each
+    share -- and _axis_metadata refuses more than two. With identifiers it is
+    two groups and a dual axis.
+    """
+
+    from agent.report_chart_rules import evidence_dimension
+    from agent.report_charts import _axis_metadata
+    from contracts.report_charts import ReportChartType
+
+    series = [
+        "Balancing electricity price (GEL/MWh)",
+        "Share Import",
+        "Share Regulated Hpp",
+    ]
+    units = {
+        "Balancing electricity price (GEL/MWh)": "GEL/MWh",
+        "Share Import": "%",
+        "Share Regulated Hpp": "%",
+    }
+
+    assert {evidence_dimension(name) for name in series} == {
+        "price_tariff",
+        "share",
+    }
+    resolved = _axis_metadata(ReportChartType.BAR, series, units)
+    assert resolved is not None, "the chart is still being omitted"
+    assert resolved[0] == "dual"
+
+
+def test_a_wide_mixed_composition_charts_over_time_instead_of_pieing():
+    """Task 1's premise, re-validated: the exactness rule already covers it.
+
+    A wide frame holding both shares and quantities used to reach the pie
+    branch. It now takes the not-parts-of-one-whole path and charts the series
+    over time, which is what Standard renders for this shape -- so the
+    per-slice dimension filter Task 1 proposed is unnecessary.
+    """
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "share_hydro", "quantity_hydro"]
+    table["rows"] = [
+        {"date": "2026-04", "share_hydro": 0.6, "quantity_hydro": 100.0},
+        {"date": "2026-05", "share_hydro": 0.8, "quantity_hydro": 120.0},
+    ]
+    table["unit_by_column"] = {
+        "share_hydro": "ratio",
+        "quantity_hydro": "thousand MWh",
+    }
+    table["total_row_count"] = 2
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )[0]
+
+    assert decision.status == "built"
+    assert decision.artifact.type.value != "pie"
