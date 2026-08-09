@@ -826,13 +826,13 @@ def _pie_slice_total(artifact):
     )
 
 
-def test_a_pie_never_shows_part_of_a_whole_as_the_whole():
-    """Truncate-then-classify let any composition through the category gate.
+def test_an_oversized_composition_still_pies_and_still_sums_to_the_whole():
+    """A composition question deserves a composition answer.
 
-    pivot_columns was cut to eight before the type was chosen, so
-    len(pivot_columns) could never exceed eight and the "few enough to read as
-    slices" test could never fail. Eleven components rendered as a pie of eight
-    summing to 0.727, presented as 100%.
+    Eleven components used to render as a pie of eight summing to 0.727 --
+    part of a whole presented as the whole. Declining to a line chart would
+    fix the lie by answering a different question. Keep the pie, keep the
+    total: the largest components stay as slices and the tail becomes Other.
     """
 
     plan, manifest = _composition_manifest(
@@ -841,14 +841,14 @@ def test_a_pie_never_shows_part_of_a_whole_as_the_whole():
 
     decision = build_report_charts(plan, manifest)[0]
 
-    assert decision.status == "built"
-    assert decision.artifact.type is not ReportChartType.PIE, (
-        "eleven components are too many to read as slices"
-    )
+    assert decision.artifact.type is ReportChartType.PIE
+    assert len(decision.artifact.data) == 8
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+    assert decision.artifact.data[-1]["category"] == "Other"
 
 
-def test_a_pie_within_the_slice_budget_is_still_complete():
-    """The gate must keep letting through the compositions that fit."""
+def test_a_pie_within_the_slice_budget_gains_no_other_slice():
+    """The rollup must not touch the compositions that already fit."""
 
     plan, manifest = _composition_manifest(
         {f"share_c{index}": 1 / 8 for index in range(8)}
@@ -857,16 +857,15 @@ def test_a_pie_within_the_slice_budget_is_still_complete():
     decision = build_report_charts(plan, manifest)[0]
 
     assert decision.artifact.type is ReportChartType.PIE
+    assert len(decision.artifact.data) == 8
     assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+    assert not any(
+        row["category"] == "Other" for row in decision.artifact.data
+    )
 
 
-def test_an_overflowing_composition_keeps_its_largest_components(caplog):
-    """`numeric[:8]` dropped by table order, not by importance.
-
-    Whichever components happened to be declared last were the ones lost, so a
-    dominant component could vanish because of column ordering. Rank by
-    contribution, and say what went.
-    """
+def test_the_rolled_up_tail_is_the_smallest_components_and_is_reported(caplog):
+    """Rank by contribution, not by where the column sat in the SELECT."""
 
     import json
 
@@ -877,17 +876,34 @@ def test_an_overflowing_composition_keeps_its_largest_components(caplog):
     with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
         decision = build_report_charts(plan, manifest)[0]
 
-    series = list(decision.artifact.metadata.series)
-    assert len(series) == 8
-    # The two smallest go, not the two declared last.
-    assert "share_c0" not in series and "share_c1" not in series
-    assert "share_c9" in series and "share_c8" in series
+    categories = [row["category"] for row in decision.artifact.data]
+    assert categories[-1] == "Other"
+    # The three smallest are rolled up; the largest all survive as slices.
+    assert "share_c0" not in categories
+    assert "share_c9" in categories and "share_c8" in categories
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
 
-    dropped = [
+    rolled = [
         json.loads(record.getMessage().split(" ", 1)[1])
         for record in caplog.records
-        if record.getMessage().startswith("REPORT_CHART_SERIES_DROPPED ")
+        if record.getMessage().startswith("REPORT_CHART_SLICES_ROLLED_UP ")
     ]
-    assert dropped, "the dropped components were not reported"
-    assert dropped[0]["dropped"] == ["share_c0", "share_c1"]
-    assert dropped[0]["kept_count"] == 8
+    assert rolled, "the rolled-up components were not reported"
+    assert rolled[0]["rolled_up"] == ["share_c0", "share_c1", "share_c2"]
+    assert rolled[0]["slice_count"] == 8
+
+
+def test_a_mixed_composition_is_never_rolled_up_into_a_pie():
+    """The rollup fixes a count problem, and must not resurrect the unit one.
+
+    Shares plus a price are not parts of one whole at any size, so an Other
+    slice would make the lie tidier rather than fix it.
+    """
+
+    values = {f"share_c{index}": 1 / 11 for index in range(10)}
+    values["p_bal_gel"] = 137.0
+    plan, manifest = _composition_manifest(values)
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.artifact.type is not ReportChartType.PIE

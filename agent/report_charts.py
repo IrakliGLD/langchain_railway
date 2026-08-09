@@ -10,6 +10,7 @@ from typing import Any
 
 from agent.report_chart_rules import (
     KNOWN_FIELD_LABELS,
+    MAXIMUM_PIE_CATEGORIES,
     composition_chart_type,
     evidence_dimension,
     field_label,
@@ -315,6 +316,26 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
     return applied
 
 
+def _ranked_by_contribution(
+    columns: list[str],
+    latest: dict[str, Any],
+) -> list[str]:
+    """Order components by their magnitude in the period being shown.
+
+    Table order is declaration accident — a dominant component could be lost
+    because of where it sat in the SELECT. This is the contribution ordering
+    Standard's own composition budget uses.
+    """
+
+    return sorted(
+        columns,
+        key=lambda column: (
+            -abs(float(latest.get(column) or 0.0)),
+            columns.index(column),
+        ),
+    )
+
+
 def _largest_contributors(
     chart,
     columns: list[str],
@@ -323,24 +344,14 @@ def _largest_contributors(
     """Trim a series list to the display budget, largest contributors first.
 
     ``metadata.series`` holds at most eight, so something has to go once a
-    frame carries more. Taking the first eight in table order dropped by
-    declaration accident — a dominant component could vanish because of where
-    it happened to sit in the SELECT. Rank by magnitude in the latest period,
-    which is the same contribution ordering Standard's composition budget uses,
-    and report what went so a thin chart is never a mystery.
+    frame carries more. A line chart claims no total, so dropping the smallest
+    is honest — but say what went, or a thin chart is a mystery.
     """
 
     if len(columns) <= _MAXIMUM_CHART_SERIES:
         return columns
-    ranked = sorted(
-        columns,
-        key=lambda column: (
-            -abs(float(latest.get(column) or 0.0)),
-            columns.index(column),
-        ),
-    )
-    kept = ranked[:_MAXIMUM_CHART_SERIES]
-    dropped = [column for column in columns if column not in set(kept)]
+    kept = set(_ranked_by_contribution(columns, latest)[:_MAXIMUM_CHART_SERIES])
+    dropped = [column for column in columns if column not in kept]
     _LOGGER.info(
         "REPORT_CHART_SERIES_DROPPED %s",
         json.dumps(
@@ -358,7 +369,64 @@ def _largest_contributors(
     )
     # Keep the frame's own column order among the survivors: the ranking picks
     # who stays, not how the chart reads.
-    return [column for column in columns if column in set(kept)]
+    return [column for column in columns if column in kept]
+
+
+def _composition_slices(
+    chart,
+    columns: list[str],
+    latest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return slices that always account for the whole composition.
+
+    Too many components to read is a display problem, not a reason to answer a
+    different question: a composition was asked for, so a composition is what
+    should come back. The largest stay as their own slices and the tail is
+    summed into ``Other``, which is what keeps the pie honest — eleven equal
+    components used to render as eight slices totalling 0.727.
+
+    An ``Other`` slice grounds nothing, and needs to ground nothing: chart data
+    never reaches the writer's prompt and nothing downstream reads it, so the
+    prose still cites manifest cells exclusively.
+    """
+
+    slices = [
+        {"category": column, "value": latest.get(column)}
+        for column in columns
+    ]
+    if len(slices) <= MAXIMUM_PIE_CATEGORIES:
+        return slices
+    kept = set(
+        _ranked_by_contribution(columns, latest)[: MAXIMUM_PIE_CATEGORIES - 1]
+    )
+    rolled_up = [column for column in columns if column not in kept]
+    _LOGGER.info(
+        "REPORT_CHART_SLICES_ROLLED_UP %s",
+        json.dumps(
+            {
+                "chart_id": chart.chart_id,
+                "rolled_up": rolled_up[:12],
+                "rolled_up_count": len(rolled_up),
+                "slice_count": MAXIMUM_PIE_CATEGORIES,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    return [
+        *(row for row in slices if row["category"] in kept),
+        {
+            "category": "Other",
+            "value": sum(
+                float(latest.get(column) or 0.0) for column in rolled_up
+            ),
+        },
+    ]
+
+
+def _is_numeric(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _is_numeric(value: Any) -> bool:
@@ -841,10 +909,21 @@ def build_report_chart_requests(
                         _omitted(chart, "REPORT_CHART_NO_NUMERIC_EVIDENCE")
                     )
                     continue
-                if _composition_snapshot_type(
+                snapshot_type = _composition_snapshot_type(
                     pivot_columns,
                     len(pivot_columns),
-                ) != "pie":
+                )
+                if snapshot_type != "pie" and _composition_snapshot_type(
+                    pivot_columns,
+                    MAXIMUM_PIE_CATEGORIES,
+                ) == "pie":
+                    # Parts of one whole, only too many of them to read. That
+                    # is a display problem, and the tail rolls into "Other"
+                    # rather than the reader getting a trend they did not ask
+                    # for. Asking the same rule with a count that fits is what
+                    # separates "too many" from "not a composition at all".
+                    snapshot_type = "pie"
+                if snapshot_type != "pie":
                     # Not parts of one whole. Chart the series over time
                     # instead, which is what Standard renders for this shape.
                     # A line is a readability budget rather than a claim about
@@ -887,10 +966,11 @@ def build_report_chart_requests(
                     _built(
                         chart,
                         chart_type=ReportChartType.PIE,
-                        data=[
-                            {"category": column, "value": latest.get(column)}
-                            for column in pivot_columns
-                        ],
+                        data=_composition_slices(
+                            chart,
+                            pivot_columns,
+                            latest,
+                        ),
                         x_axis="category",
                         series=["value"],
                         units={

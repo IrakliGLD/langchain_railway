@@ -106,7 +106,8 @@ def evidence_dimension(column: str) -> str:
 # visual_goal="composition", and the corrective pass that follows it. Kept as
 # named constants so the equivalence test failure points at a rule rather than
 # a magic number.
-_MAXIMUM_PIE_CATEGORIES = 8
+MAXIMUM_PIE_CATEGORIES = 8
+_MAXIMUM_PIE_CATEGORIES = MAXIMUM_PIE_CATEGORIES
 _CONTINUOUS_DIMENSIONS = frozenset({"price_tariff", "xrate"})
 
 
