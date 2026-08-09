@@ -53,6 +53,7 @@ from config import (
     REPORT_RESEARCH_MAX_WORKERS,
     REPORT_TRACK_ANALYSIS_MODE,
 )
+from contracts.question_analysis import PreferredPath
 from contracts.report_charts import ReportChartBuildDecision
 from contracts.report_document import (
     ReportDocumentDraft,
@@ -627,16 +628,48 @@ class ReportJobProcessor:
         # cf47a2f6 lost two of four tracks and the telemetry said only
         # "ValueError, ValueError".
         failed_tracks: list[dict[str, str]] = []
+        # The nested pipeline exists to fetch and analyse tabular evidence. A
+        # track the planner declared documented-knowledge has none to fetch, so
+        # the call can only misroute it: across jobs 40e55527, 5cb4d210,
+        # 106b043c, 70692961 and 26f3bbf6 the planner said `knowledge` and the
+        # analyzer chose `tool` every time, and on 26f3bbf6 that pulled 61 rows
+        # of prices and a 62 KB stats_hint into a question about documented
+        # mechanisms. Its deterministic packet is already the right evidence —
+        # but only skip when that packet actually carries some, so a thin
+        # baseline cannot turn a usable track into an empty one.
+        usable_baseline_ids = {
+            packet.track_id
+            for packet in baseline_packets
+            if packet.items
+        }
+        # Enabled mode only. Skipping in shadow would blind the very comparison
+        # shadow exists to collect, and the disagreement telemetry is what
+        # earned this cutover.
+        planner_knowledge_ids = [
+            track.track_id
+            for track in plan.tracks
+            if self._track_analysis_mode == "enabled"
+            and track.analysis_preferred_path is PreferredPath.KNOWLEDGE
+            and track.track_id in usable_baseline_ids
+        ]
+        analyzed_tracks = [
+            track
+            for track in plan.tracks
+            if track.track_id not in set(planner_knowledge_ids)
+        ]
         with ThreadPoolExecutor(
-            max_workers=min(
-                self._max_research_workers,
-                len(plan.tracks),
+            max_workers=max(
+                1,
+                min(
+                    self._max_research_workers,
+                    len(analyzed_tracks),
+                ),
             ),
             thread_name_prefix="report-track-analysis",
         ) as pool:
             futures = {
                 track.track_id: pool.submit(analyze, track)
-                for track in plan.tracks
+                for track in analyzed_tracks
             }
             for track_id, future in futures.items():
                 try:
@@ -687,11 +720,15 @@ class ReportJobProcessor:
             "fallback_count": sum(
                 1
                 for track in plan.tracks
-                if not (
+                if track.track_id not in set(planner_knowledge_ids)
+                and not (
                     completed.get(track.track_id)
                     and completed[track.track_id].items
                 )
             ),
+            # Deliberately not analysed, so not a degradation. Counting these
+            # as fallbacks would make a healthy report look half-failed.
+            "planner_knowledge_track_ids": sorted(planner_knowledge_ids),
             "failure_types": sorted(failure_types),
             "failed_tracks": sorted(
                 failed_tracks,
