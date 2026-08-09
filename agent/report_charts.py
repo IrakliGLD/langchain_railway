@@ -76,6 +76,7 @@ def _chart_decision_log(
     decision: ReportChartBuildDecision,
     *,
     chart_type: ReportChartType | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     artifact = decision.artifact
     _LOGGER.info(
@@ -87,6 +88,11 @@ def _chart_decision_log(
                     if artifact is not None
                     else ""
                 ),
+                # A reason code names the chart, not the cause. Two branches
+                # raise REPORT_CHART_INSUFFICIENT_CATEGORIES and the line read
+                # identically for both, so job 4ea18b2b could not say which one
+                # dropped its composition.
+                "detail": detail or {},
                 "chart_id": decision.chart_id,
                 "chart_type": (
                     chart_type.value if chart_type is not None else ""
@@ -426,7 +432,11 @@ def demote_unbuildable_required_charts(
     return ReportPlan.model_validate(payload), demoted_decisions
 
 
-def _omitted(chart, code: str) -> ReportChartBuildDecision:
+def _omitted(
+    chart,
+    code: str,
+    detail: dict[str, Any] | None = None,
+) -> ReportChartBuildDecision:
     decision = ReportChartBuildDecision(
         chart_id=chart.chart_id,
         required=chart.required,
@@ -434,7 +444,7 @@ def _omitted(chart, code: str) -> ReportChartBuildDecision:
         reason_code=code,
         artifact=None,
     )
-    _chart_decision_log(decision)
+    _chart_decision_log(decision, detail=detail)
     return decision
 
 
@@ -756,6 +766,16 @@ def build_report_chart_requests(
                         _omitted(
                             chart,
                             "REPORT_CHART_INSUFFICIENT_CATEGORIES",
+                            {
+                                "branch": "category_axis",
+                                "categorical_columns": categorical[:8],
+                                "category_count": len(composition_rows),
+                                "numeric_columns": numeric[:8],
+                                "row_count": len(rows),
+                                "series": snapshot_series,
+                                "temporal_columns": temporal[:4],
+                                "x_axis": x_axis,
+                            },
                         )
                     )
                     continue
@@ -811,6 +831,15 @@ def build_report_chart_requests(
                         _omitted(
                             chart,
                             "REPORT_CHART_INSUFFICIENT_CATEGORIES",
+                            {
+                                "branch": "temporal_pivot",
+                                "categorical_columns": categorical[:8],
+                                "category_count": len(pivot_columns),
+                                "numeric_columns": numeric[:8],
+                                "pivot_columns": pivot_columns,
+                                "row_count": len(rows),
+                                "temporal_columns": temporal[:4],
+                            },
                         )
                     )
                     continue

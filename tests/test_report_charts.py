@@ -719,3 +719,51 @@ def test_composition_type_is_silent_when_the_two_rules_agree(caplog):
         for record in caplog.records
         if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
     ]
+
+
+def test_an_omitted_composition_names_the_shape_that_omitted_it(caplog):
+    """REPORT_CHART_INSUFFICIENT_CATEGORIES names a chart, not a cause.
+
+    Two different branches raise it -- a categorical table whose latest period
+    holds one row, and a wide table whose latest row pivots to one numeric
+    column -- and the log says "1 categories" either way. Job 4ea18b2b lost the
+    prices composition to it and the line cannot say which branch ran, so the
+    fix cannot be chosen. Name the branch and the shape.
+    """
+
+    import json
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["type_tech", "share_tech"]
+    table["rows"] = [{"type_tech": "hydro", "share_tech": 1.0}]
+    table["unit_by_column"] = {"share_tech": "ratio"}
+    table["total_row_count"] = 1
+    manifest = ReportEvidenceManifest.model_validate(payload)
+    plan_payload = _plan_payload()
+    plan_payload["charts"][0].update(
+        {
+            "purpose": "composition",
+            "x_field": "type_tech",
+            "series_fields": ["share_tech"],
+        }
+    )
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        decision = build_report_charts(
+            ReportPlan.model_validate(plan_payload),
+            manifest,
+        )[0]
+
+    assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"
+    logged = next(
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_DECISION ")
+        and json.loads(record.getMessage().split(" ", 1)[1])["chart_id"]
+        == decision.chart_id
+    )
+    assert logged["detail"]["branch"] == "category_axis"
+    assert logged["detail"]["category_count"] == 1
+    assert logged["detail"]["numeric_columns"] == ["share_tech"]
+    assert logged["detail"]["categorical_columns"] == ["type_tech"]
