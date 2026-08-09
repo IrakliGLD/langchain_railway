@@ -2726,6 +2726,57 @@ def test_an_invalid_section_batch_names_the_fields_that_rejected_it(caplog):
     assert logged[0]["stage"] == "section_batch"
 
 
+def _overflowing_packets():
+    """Packets that together carry more evidence than the manifest holds."""
+
+    from contracts.report_research import ReportEvidencePacket
+
+    def padded(packet, tag):
+        payload = packet.model_dump(mode="json")
+        template = dict(payload["items"][0])
+        for index in range(12 - len(payload["items"])):
+            clone = dict(template)
+            clone["evidence_ref"] = f"evidence:table:{tag}{index:015x}"
+            clone["title"] = f"Filler {tag}{index}"
+            payload["items"].append(clone)
+        return ReportEvidencePacket.model_validate(payload)
+
+    packets = [
+        padded(packet, str(index))
+        for index, packet in enumerate(_ready_packets())
+    ]
+    assert sum(len(packet.items) for packet in packets) > 31
+    return packets
+
+
+def test_every_track_keeps_evidence_when_the_manifest_overflows():
+    """A cap smaller than the evidence must not be spent on the first tracks.
+
+    A packet holds 12 items, research_max_tracks is 4, and the manifest keeps
+    31 -- so three full tracks already overflow. Filling in packet order spent
+    every slot on the earliest tracks, and job e3f43e84 discarded 17 items
+    that way. Each track's own evidence is ordered most-important-first, so
+    taking one round at a time keeps every track's best.
+    """
+
+    packets = _overflowing_packets()
+
+    manifest = consolidate_report_evidence_packets(_QUERY, packets)
+
+    kept = set(manifest.item_by_ref())
+    kept_by_track = {
+        packet.track_id: sum(
+            item.evidence_ref in kept for item in packet.items
+        )
+        for packet in packets
+    }
+    assert all(kept_by_track.values()), kept_by_track
+    # No track may be starved while another is still taking seconds.
+    assert max(kept_by_track.values()) - min(kept_by_track.values()) <= 1, (
+        kept_by_track
+    )
+
+
 def test_dropping_evidence_at_the_manifest_cap_names_the_losing_tracks(caplog):
     """Silently losing a third of the evidence is not a reportable state.
 

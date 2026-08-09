@@ -1212,14 +1212,28 @@ def consolidate_report_evidence_packets(
             continue
         seen_refs.add(item.evidence_ref)
         items.append(item)
+    # Take one round from every packet before anyone takes seconds. The cap is
+    # smaller than what a full research plan carries -- a packet holds 12
+    # items, four tracks are allowed, and only 31 slots exist -- so filling in
+    # packet order spent them all on the earliest tracks and left a late one
+    # with nothing to write from (job e3f43e84 discarded 17 items that way).
+    # Each packet already orders its own evidence most-important-first, so a
+    # round takes each track's next-best item and the shortfall is shared.
     dropped_by_track: dict[str, int] = {}
-    for packet in packets:
-        for item in packet.items:
+    depth = 0
+    remaining = True
+    while remaining:
+        remaining = False
+        for packet in packets:
+            if depth >= len(packet.items):
+                continue
+            remaining = True
+            item = packet.items[depth]
             if item.evidence_ref in seen_refs:
                 continue
             if len(items) >= _MAXIMUM_CONSOLIDATED_EVIDENCE_ITEMS:
-                # Keep counting rather than break: which tracks lost how much
-                # is the whole point of the line below, and the kept set is
+                # Keep counting rather than stop: which tracks lost how much is
+                # the whole point of the line below, and the kept set is
                 # already fixed.
                 dropped_by_track[packet.track_id] = (
                     dropped_by_track.get(packet.track_id, 0) + 1
@@ -1227,6 +1241,7 @@ def consolidate_report_evidence_packets(
                 continue
             seen_refs.add(item.evidence_ref)
             items.append(item)
+        depth += 1
     if dropped_by_track:
         # A track can reach the writer with no table at all this way, which
         # reads as a collector that returned nothing. Job e3f43e84 discarded
