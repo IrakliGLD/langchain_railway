@@ -17,6 +17,7 @@ import pytest
 
 from agent.report_charts import build_report_charts
 from contracts.report import ReportPlan
+from contracts.report_charts import ReportChartType
 from contracts.report_evidence import ReportEvidenceManifest
 from tests.fixtures_report_manifest import _manifest, _plan_payload
 
@@ -789,3 +790,104 @@ def test_a_wide_mixed_composition_charts_over_time_instead_of_pieing():
 
     assert decision.status == "built"
     assert decision.artifact.type.value != "pie"
+
+
+def _composition_manifest(values_by_component, *, periods=2):
+    """A wide, category-less composition frame -- the temporal-pivot shape."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    components = list(values_by_component)
+    table["columns"] = ["date", *components]
+    table["rows"] = [
+        {
+            "date": f"2026-{month:02d}",
+            **{name: value for name, value in values_by_component.items()},
+        }
+        for month in range(4, 4 + periods)
+    ]
+    table["unit_by_column"] = {name: "ratio" for name in components}
+    table["total_row_count"] = periods
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+    return (
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )
+
+
+def _pie_slice_total(artifact):
+    return sum(
+        row["value"]
+        for row in artifact.data
+        if isinstance(row.get("value"), (int, float))
+    )
+
+
+def test_a_pie_never_shows_part_of_a_whole_as_the_whole():
+    """Truncate-then-classify let any composition through the category gate.
+
+    pivot_columns was cut to eight before the type was chosen, so
+    len(pivot_columns) could never exceed eight and the "few enough to read as
+    slices" test could never fail. Eleven components rendered as a pie of eight
+    summing to 0.727, presented as 100%.
+    """
+
+    plan, manifest = _composition_manifest(
+        {f"share_c{index}": 1 / 11 for index in range(11)}
+    )
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.status == "built"
+    assert decision.artifact.type is not ReportChartType.PIE, (
+        "eleven components are too many to read as slices"
+    )
+
+
+def test_a_pie_within_the_slice_budget_is_still_complete():
+    """The gate must keep letting through the compositions that fit."""
+
+    plan, manifest = _composition_manifest(
+        {f"share_c{index}": 1 / 8 for index in range(8)}
+    )
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.artifact.type is ReportChartType.PIE
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+
+
+def test_an_overflowing_composition_keeps_its_largest_components(caplog):
+    """`numeric[:8]` dropped by table order, not by importance.
+
+    Whichever components happened to be declared last were the ones lost, so a
+    dominant component could vanish because of column ordering. Rank by
+    contribution, and say what went.
+    """
+
+    import json
+
+    # Declared smallest-first, so table order and importance disagree.
+    values = {f"share_c{index}": (index + 1) / 55 for index in range(10)}
+    plan, manifest = _composition_manifest(values)
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        decision = build_report_charts(plan, manifest)[0]
+
+    series = list(decision.artifact.metadata.series)
+    assert len(series) == 8
+    # The two smallest go, not the two declared last.
+    assert "share_c0" not in series and "share_c1" not in series
+    assert "share_c9" in series and "share_c8" in series
+
+    dropped = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_SERIES_DROPPED ")
+    ]
+    assert dropped, "the dropped components were not reported"
+    assert dropped[0]["dropped"] == ["share_c0", "share_c1"]
+    assert dropped[0]["kept_count"] == 8

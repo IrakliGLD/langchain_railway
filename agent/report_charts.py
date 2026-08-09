@@ -315,6 +315,52 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
     return applied
 
 
+def _largest_contributors(
+    chart,
+    columns: list[str],
+    latest: dict[str, Any],
+) -> list[str]:
+    """Trim a series list to the display budget, largest contributors first.
+
+    ``metadata.series`` holds at most eight, so something has to go once a
+    frame carries more. Taking the first eight in table order dropped by
+    declaration accident — a dominant component could vanish because of where
+    it happened to sit in the SELECT. Rank by magnitude in the latest period,
+    which is the same contribution ordering Standard's composition budget uses,
+    and report what went so a thin chart is never a mystery.
+    """
+
+    if len(columns) <= _MAXIMUM_CHART_SERIES:
+        return columns
+    ranked = sorted(
+        columns,
+        key=lambda column: (
+            -abs(float(latest.get(column) or 0.0)),
+            columns.index(column),
+        ),
+    )
+    kept = ranked[:_MAXIMUM_CHART_SERIES]
+    dropped = [column for column in columns if column not in set(kept)]
+    _LOGGER.info(
+        "REPORT_CHART_SERIES_DROPPED %s",
+        json.dumps(
+            {
+                "chart_id": chart.chart_id,
+                "dropped": dropped[:12],
+                "dropped_count": len(dropped),
+                "kept_count": len(kept),
+                "reason": "series_budget",
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    # Keep the frame's own column order among the survivors: the ranking picks
+    # who stays, not how the chart reads.
+    return [column for column in columns if column in set(kept)]
+
+
 def _is_numeric(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -779,9 +825,15 @@ def build_report_chart_requests(
                 continue
             if temporal and len(numeric) >= 2:
                 latest = rows[-1]
+                # Every component, not the first eight. The slice budget used
+                # to be applied *before* the type was chosen, so
+                # ``len(pivot_columns)`` could never exceed the pie ceiling and
+                # the "few enough to read as slices" gate could never fail: an
+                # eleven-part composition rendered as eight slices summing to
+                # 0.727 and presented as the whole.
                 pivot_columns = [
                     column
-                    for column in numeric[:_MAXIMUM_CHART_SERIES]
+                    for column in numeric
                     if _is_numeric(latest.get(column))
                 ]
                 if not pivot_columns:
@@ -795,13 +847,21 @@ def build_report_chart_requests(
                 ) != "pie":
                     # Not parts of one whole. Chart the series over time
                     # instead, which is what Standard renders for this shape.
+                    # A line is a readability budget rather than a claim about
+                    # totals, so trimming is honest here — but it must drop the
+                    # least of the composition, not whatever the table happened
+                    # to declare last.
                     decisions.append(
                         _built(
                             chart,
                             chart_type=ReportChartType.LINE,
                             data=rows,
                             x_axis=temporal[0],
-                            series=pivot_columns,
+                            series=_largest_contributors(
+                                chart,
+                                pivot_columns,
+                                latest,
+                            ),
                             units=units,
                         )
                     )
