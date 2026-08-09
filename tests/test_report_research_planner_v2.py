@@ -352,8 +352,89 @@ def test_planning_topic_knowledge_survives_a_knowledge_failure(monkeypatch):
 
     monkeypatch.setattr(
         report_research_planner,
-        "infer_topic_matches",
+        "_direct_topic_matches",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("knowledge down")),
     )
 
     assert report_research_planner._planning_topic_knowledge("anything") == ""
+
+
+def _requested_topics(monkeypatch, query: str):
+    """Record which knowledge topics planning asks for, without the corpus.
+
+    The knowledge Markdown is loaded at worker boot and is absent here, so
+    asserting on file content would assert nothing. The defect is in topic
+    selection, which is what this reads.
+    """
+
+    from agent import report_research_planner
+
+    seen: dict = {}
+
+    def _capture(topics, **kwargs):
+        seen["topics"] = sorted(topics)
+        seen["fallback_query"] = kwargs.get("fallback_query", "")
+        return "knowledge-body"
+
+    monkeypatch.setattr(
+        report_research_planner, "get_knowledge_for_topics", _capture
+    )
+    report_research_planner._planning_topic_knowledge(query)
+    return seen
+
+
+def test_report_planning_does_not_fall_back_to_the_chat_default(monkeypatch):
+    """A broad report request matches no topic keyword.
+
+    infer_topic_matches then returns the chat default
+    {"balancing_price", "sql_examples"}, so the planner decomposing a
+    whole-market monthly report received balancing-price notes and SQL query
+    syntax -- and nothing about the tariffs, generation mix, cross-border
+    trade or market structure its own tracks went on to cover.
+    """
+
+    seen = _requested_topics(
+        monkeypatch,
+        "create a report about may 2026 - what happenned in this month, "
+        "what were changes in main areas",
+    )
+
+    assert "sql_examples" not in seen.get("topics", [])
+    assert seen.get("topics") in (None, []), (
+        "planning asked for a topic the request never named"
+    )
+
+
+def test_a_keyword_matched_topic_still_reaches_the_planner(monkeypatch):
+    """The fallback is the problem, not the lookup."""
+
+    seen = _requested_topics(monkeypatch, "report on regulated tariff levels")
+
+    assert "tariffs" in seen.get("topics", [])
+    assert "sql_examples" not in seen.get("topics", [])
+
+
+def test_the_planner_prompt_lists_the_knowledge_topics(monkeypatch):
+    """The planner cannot allocate a knowledge track for a topic it cannot see.
+
+    The analyzer already receives this catalog as UNTRUSTED_TOPIC_CATALOG; the
+    planner, which decides how many knowledge tracks a report gets, did not.
+    """
+
+    from core import llm
+
+    captured: dict = {}
+
+    def _capture(_client, _model, messages, **_kwargs):
+        captured["prompt"] = messages[-1][1]
+        raise RuntimeError("stop after prompt assembly")
+
+    monkeypatch.setattr(llm, "_invoke_with_openai_fallback", _capture)
+    with pytest.raises(RuntimeError):
+        llm.llm_plan_report_research(
+            "create a report about may 2026",
+            language_code="en",
+            max_tracks=4,
+        )
+
+    assert "KNOWLEDGE_TOPIC_CATALOG:" in captured["prompt"]

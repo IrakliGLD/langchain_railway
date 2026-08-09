@@ -699,7 +699,16 @@ def test_research_executes_unique_collectors_in_parallel_and_keeps_track_order()
         "security",
         "market_model",
     ]
-    assert all(packet.status.value == "complete" for packet in packets)
+    # The security track asks for a composition exhibit, and the only table it
+    # collected has one numeric column and no category — a shape the chart
+    # builder refuses outright. Declaring the gap is the honest outcome; the
+    # candidate used to promise the exhibit and have it dropped at build time.
+    assert [packet.status.value for packet in packets] == [
+        "complete",
+        "partial",
+        "complete",
+    ]
+    assert packets[1].gaps == ["EXPECTED_EXHIBIT_COMPOSITION_UNAVAILABLE"]
     assert packets[0].numeric_observation_count >= 4
 
 
@@ -1283,3 +1292,114 @@ def test_consolidation_accepts_closed_packet_contracts():
 
     manifest = consolidate_report_evidence_packets(_QUERY, [packet])
     assert manifest.items[0].evidence_ref == packet.items[0].evidence_ref
+
+
+def test_a_composition_exhibit_picks_an_axis_the_builder_accepts():
+    """A melted frame has both a period and a category column.
+
+    The candidate builder took the first dimension it found, which was the
+    date, and the chart builder then refused the exhibit because a composition
+    chart needs a categorical axis. Jobs 5cb4d210 and 106b043c both lost their
+    balancing composition chart to that disagreement.
+    """
+
+    from agent.report_charts import chart_column_roles
+
+    payload = _plan().tracks[1].model_dump(mode="json")
+    payload["expected_exhibits"] = ["composition"]
+    track = ReportResearchTrack.model_validate(payload)
+
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=["date", "share_hydro"],
+            rows=[["2026-05", 0.72]],
+            provenance_cols=["date", "share_hydro"],
+            provenance_rows=[["2026-05", 0.72]],
+            provenance_refs=["query:track:composition"],
+            provenance_source="pipeline",
+            stats_hint="Hydro dominated the mix.",
+            chart_override_specs=[
+                {
+                    "type": "stackedbar",
+                    "data": [
+                        {"date": "2026-05", "category": "Share Hydro", "value": 0.72},
+                        {"date": "2026-05", "category": "Share Thermal", "value": 0.28},
+                    ],
+                    "metadata": {
+                        "title": "Composition: focus periods",
+                        "yAxisTitle": "Share",
+                    },
+                }
+            ],
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        track,
+        query_pipeline=query_pipeline,
+    )
+
+    candidate = next(
+        entry
+        for entry in packet.chart_candidates
+        if entry.purpose.value == "composition"
+    )
+    item = {
+        entry.evidence_ref: entry for entry in packet.items
+    }[candidate.evidence_refs[0]]
+    # The rule the builder applies, asserted against what the candidate chose.
+    assert candidate.x_field in chart_column_roles(item)["categorical"]
+
+
+def test_a_long_form_frame_takes_its_unit_from_the_axis_it_declares():
+    """A melted composition frame calls its measure column "value".
+
+    Name inference has nothing to read, so jobs 40e55527, 5cb4d210 and
+    106b043c all shipped evidence tables whose numbers could not be cited.
+    The builder already knows what the column holds and writes it into
+    yAxisTitle -- which is where analyzer.py puts the resolved unit for
+    Standard's own charts.
+    """
+
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=["date", "share_hydro"],
+            rows=[["2026-04", 0.61], ["2026-05", 0.72]],
+            provenance_cols=["date", "share_hydro"],
+            provenance_rows=[["2026-04", 0.61], ["2026-05", 0.72]],
+            provenance_refs=["query:track:composition"],
+            provenance_source="pipeline",
+            stats_hint="Hydro share rose over the month.",
+            chart_override_specs=[
+                {
+                    "type": "stackedbar",
+                    "data": [
+                        {"date": "2026-05", "category": "Share Hydro", "value": 0.72},
+                        {"date": "2026-05", "category": "Share Thermal", "value": 0.28},
+                    ],
+                    "metadata": {
+                        "title": "Composition: focus periods",
+                        "yAxisTitle": "Share",
+                        "role": "component_primary",
+                    },
+                }
+            ],
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _plan().tracks[0],
+        query_pipeline=query_pipeline,
+    )
+
+    melted = next(
+        item
+        for item in packet.items
+        if item.kind is ReportEvidenceKind.TABLE and "value" in item.columns
+    )
+    assert melted.unit_by_column.get("value") == "ratio"
+    assert melted.citable_numeric_columns() == ["value"]

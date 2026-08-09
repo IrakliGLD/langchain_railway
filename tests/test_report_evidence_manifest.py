@@ -590,3 +590,23 @@ def test_assigned_row_count_ignores_rows_no_claim_can_cite():
     assert manifest.assigned_row_count(
         [claimable.evidence_ref, unitless.evidence_ref]
     ) == 2
+
+
+def test_a_unit_is_read_the_same_way_from_a_label_or_an_axis():
+    """A unit reaches the manifest as prose in two places.
+
+    A column label carries it in parentheses; a chart axis title carries it
+    either bare or in parentheses. One vocabulary answers both, so the
+    manifest cannot end up with two spellings of the same unit.
+    """
+
+    from agent.report_evidence import declared_unit_spelling
+
+    assert declared_unit_spelling("Share") == "ratio"
+    assert declared_unit_spelling("GEL/MWh") == "GEL/MWh"
+    assert declared_unit_spelling("Share of total (%)") == "%"
+    assert declared_unit_spelling("MoM change (%)") == "%"
+    # Not a unit: a scenario name, a scale, and an empty axis.
+    assert declared_unit_spelling("Index (base=100)") == ""
+    assert declared_unit_spelling("MoM change") == ""
+    assert declared_unit_spelling("") == ""

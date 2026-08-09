@@ -18,7 +18,7 @@ from contracts.report_research import (
     ReportResearchPlanAssessment,
     ReportResearchRequirement,
 )
-from knowledge import get_knowledge_for_topics, infer_topic_matches
+from knowledge import _direct_topic_matches, get_knowledge_for_topics
 from utils.language import resolve_answer_language
 
 ResearchPlanInvoker = Callable[..., Any]
@@ -206,11 +206,17 @@ def _planning_topic_knowledge(query: str) -> str:
     """
 
     try:
-        topics = infer_topic_matches(query)
-        knowledge = get_knowledge_for_topics(
-            sorted(topics),
-            fallback_query=query,
-        )
+        topics = _direct_topic_matches(query)
+        if not topics:
+            # infer_topic_matches falls back to {"balancing_price",
+            # "sql_examples"} — a default tuned for a single chat question. A
+            # broad report request matches no keyword, so the planner for a
+            # whole-market month received balancing-price notes and SQL query
+            # syntax while its own tracks covered tariffs, generation mix and
+            # market structure. KNOWLEDGE_TOPIC_CATALOG carries the breadth
+            # instead; sending two arbitrary files is worse than sending none.
+            return ""
+        knowledge = get_knowledge_for_topics(sorted(topics), fallback_query="")
     except Exception:  # pragma: no cover - defensive
         return ""
     text = str(knowledge or "").strip()

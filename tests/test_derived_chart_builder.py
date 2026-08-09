@@ -812,3 +812,33 @@ def test_mom_yoy_specs_apply_series_cap_to_observed_panel():
     assert len(labels) <= 5, f"observed spec exceeded cap: {len(labels)} labels"
     # balancing_price_gel must survive (it's the user's intent column).
     assert "balancing_price_gel" in labels
+
+
+def test_a_boolean_flag_is_never_charted_as_a_measurement():
+    """A coverage flag is not a quantity, and a percent change on one divides
+    by zero.
+
+    ``pd.api.types.is_numeric_dtype`` is True for bool dtype, so
+    ``known_price_coverage_ok`` was selected as a chart series on job
+    106b043c. pandas computed (True - False) / False, the whole
+    dispatch raised ZeroDivisionError, and the broad except discarded every
+    derived chart spec for that track. Both modes share this dispatch, so
+    Standard loses its chart to the same flag.
+    """
+
+    from agent.derived_chart_builder import _resolve_num_cols
+
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-04-01", periods=2, freq="MS"),
+            "p_bal_gel": [155.61, 137.86],
+            "known_price_coverage_ok": [False, True],
+        }
+    )
+
+    assert _resolve_num_cols(df, "date") == ["p_bal_gel"]
+
+    ctx = _make_ctx_with_qa(df, measure_transform="mom_pct")
+    result = dispatch_derived_chart(ctx)
+
+    assert result, "one boolean column discarded every derived chart spec"

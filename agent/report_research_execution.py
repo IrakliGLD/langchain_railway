@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Any
 
+from agent.report_charts import chart_column_roles
 from agent.report_evidence import (
     build_report_evidence_manifest,
     build_report_manifest_from_items,
     build_report_narrative_items,
+    declared_unit_spelling,
     make_report_narrative_evidence_item,
     make_report_table_evidence_item,
     report_pipeline_context_block_reason,
@@ -661,12 +663,12 @@ def _chart_candidates(
     tables = [
         item for item in items if item.kind is ReportEvidenceKind.TABLE
     ]
-    # A requested metric names a subject and a comparison — "share_delta_mom"
-    # is the share, compared month over month. Only the subject should steer
-    # which table an exhibit is drawn from: on job 40e55527 the comparison words
-    # scored the month-on-month change panel above the levels it was computed
-    # from, and the balancing composition exhibit was built from a frame holding
-    # one row of deltas, then omitted for having a single category.
+    # requested_metrics is free text the planner writes, not a closed catalog,
+    # so this list cannot be derived from one. It exists only to drop words
+    # that describe a comparison or an aggregation rather than a subject, and
+    # would otherwise match any column spelling them. Words naming a
+    # period-over-period transform are deliberately absent: they were matching
+    # chart titles, which ``table_score`` no longer reads.
     requested_tokens = {
         token
         for metric in requested_metrics
@@ -674,16 +676,10 @@ def _chart_candidates(
         if token not in {
             "average",
             "change",
-            "delta",
-            "growth",
-            "index",
             "maximum",
             "minimum",
-            "mom",
             "percent",
-            "pct",
             "ratio",
-            "yoy",
         }
     }
 
@@ -700,9 +696,13 @@ def _chart_candidates(
         dimension_fields = [
             column for column in item.columns if column not in numeric_fields
         ]
-        material = " ".join(
-            [item.title, item.source, *item.columns]
-        ).casefold()
+        # What the table holds, not the prose a chart builder labelled it
+        # with. An observed panel and the month-on-month panel computed from
+        # it carry the same source and the same columns, so on job 40e55527
+        # the title was the only discriminator — and "MoM Change (%)" matched
+        # the comparison words in a requested metric, scoring one row of
+        # deltas above the levels it came from.
+        material = " ".join([item.source, *item.columns]).casefold()
         score = sum(6 for token in requested_tokens if token in material)
         if purpose in {ReportChartPurpose.TREND, ReportChartPurpose.FORECAST}:
             score += 8 if any(
@@ -726,22 +726,28 @@ def _chart_candidates(
             key=lambda pair: (-table_score(pair[1], purpose), pair[0]),
         )
         for _table_index, item in ranked_tables:
-            numeric_fields = [
-                column
-                for column in item.columns
-                if any(
-                    isinstance(row.get(column), Real)
-                    and not isinstance(row.get(column), bool)
-                    for row in item.rows
-                )
-            ]
-            dimension_fields = [
-                column
-                for column in item.columns
-                if column not in numeric_fields
-            ]
+            # The builder's own axis typing, so the candidate cannot promise an
+            # exhibit the builder will refuse. A composition chart slices one
+            # whole by category, so a period column cannot be its axis; jobs
+            # 5cb4d210 and 106b043c both lost their balancing composition
+            # exhibit because the candidate offered the date it found first.
+            roles = chart_column_roles(item)
+            numeric_fields = roles["numeric"]
+            dimension_fields = [*roles["temporal"], *roles["categorical"]]
             if not numeric_fields:
                 continue
+            if purpose is ReportChartPurpose.COMPOSITION:
+                # The builder slices a composition by category when the table
+                # has one, and otherwise pivots the latest period's numeric
+                # columns into slices. Offer only a table one of those two
+                # branches accepts, and an axis it will agree with: jobs
+                # 5cb4d210 and 106b043c both lost their balancing composition
+                # exhibit because the candidate offered the date column of a
+                # table that also had a category column.
+                if roles["categorical"]:
+                    dimension_fields = roles["categorical"]
+                elif not (roles["temporal"] and len(numeric_fields) >= 2):
+                    continue
             preferred_x_tokens = (
                 ("type", "entity", "segment", "category")
                 if purpose is ReportChartPurpose.COMPOSITION
@@ -952,19 +958,29 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
         # (GEL/MWh)" while holding month-on-month percentages. Only the builder
         # knows that; the column names never will.
         transform = str(metadata.get("measureTransform") or "").lower()
-        percent_units = (
-            {
-                column: "%"
-                for column in columns
-                if any(
-                    isinstance(row.get(column), Real)
-                    and not isinstance(row.get(column), bool)
-                    for row in rows
-                )
-            }
-            if any(token in transform for token in ("pct", "percent"))
-            else {}
-        )
+        numeric_columns = [
+            column
+            for column in columns
+            if any(
+                isinstance(row.get(column), Real)
+                and not isinstance(row.get(column), bool)
+                for row in rows
+            )
+        ]
+        if any(token in transform for token in ("pct", "percent")):
+            # A percent-change panel keeps the labels of the levels it was
+            # computed from, so inference would declare those levels' units.
+            declared_units = {column: "%" for column in numeric_columns}
+        elif len(numeric_columns) == 1:
+            # A melted frame names its measure column "value" and puts what it
+            # measures on the axis instead — where analyzer.py already writes
+            # the resolved unit for Standard's own charts.
+            axis_unit = declared_unit_spelling(metadata.get("yAxisTitle", ""))
+            declared_units = (
+                {numeric_columns[0]: axis_unit} if axis_unit else {}
+            )
+        else:
+            declared_units = {}
         item = make_report_table_evidence_item(
             query=str(getattr(context, "query", "") or ""),
             title=title or f"Derived chart evidence {index + 1}",
@@ -975,7 +991,7 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
                 getattr(context, "provenance_refs", None) or []
             ),
             max_rows=200,
-            unit_by_column=percent_units,
+            unit_by_column=declared_units,
         )
         if item is not None:
             items.append(item)
