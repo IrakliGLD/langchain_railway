@@ -713,7 +713,13 @@ def test_track_analysis_enabled_uses_track_packets_without_global_broadcast(
     )
 
     assert result.contract_version == "report-result-v2"
-    assert sorted(analysis_calls) == sorted(packet_by_track)
+    # market_model is a planner-declared knowledge track: its deterministic
+    # packet is the right evidence, so the nested pipeline is not run for it.
+    assert sorted(analysis_calls) == sorted(
+        track.track_id
+        for track in research_plan.tracks
+        if track.analysis_preferred_path.value != "knowledge"
+    )
     assert consolidation["extra_items"] == []
     assert [packet.track_id for packet in consolidation["packets"]] == [
         track.track_id for track in research_plan.tracks
@@ -724,7 +730,8 @@ def test_track_analysis_enabled_uses_track_packets_without_global_broadcast(
         if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
     )
     payload = json.loads(record.split(" ", 1)[1])
-    assert payload["completed_count"] == len(research_plan.tracks)
+    assert payload["completed_count"] == len(research_plan.tracks) - 1
+    assert payload["planner_knowledge_track_ids"] == ["market_model"]
     assert payload["failed_count"] == 0
 
 
@@ -741,7 +748,9 @@ def test_track_analysis_enabled_falls_back_per_track_after_pipeline_failure(
     ) = _document_components()
     draft = _valid_document_draft(document_plan, manifest)
     packet_by_track = {packet.track_id: packet for packet in packets}
-    failed_track_id = research_plan.tracks[-1].track_id
+    # tracks[-1] is market_model, a planner-declared knowledge track that is
+    # deliberately not analysed; this test needs one that is.
+    failed_track_id = research_plan.tracks[0].track_id
     consolidated_packets = []
 
     def track_analyzer(_query, track, **_kwargs):
@@ -819,7 +828,9 @@ def test_track_analysis_failure_reports_the_block_reason(caplog):
     ) = _document_components()
     draft = _valid_document_draft(document_plan, manifest)
     packet_by_track = {packet.track_id: packet for packet in packets}
-    failed_track_id = research_plan.tracks[-1].track_id
+    # tracks[-1] is market_model, a planner-declared knowledge track that is
+    # deliberately not analysed; this test needs one that is.
+    failed_track_id = research_plan.tracks[0].track_id
 
     def track_analyzer(_query, track, **_kwargs):
         if track.track_id == failed_track_id:
@@ -1476,3 +1487,130 @@ def test_the_surviving_checkpoint_builder_still_separates_too_large_from_invalid
                 )
         assert failure.value.error_code == expected
         assert failure.value.retryable is False
+
+
+def test_a_planner_knowledge_track_is_not_sent_to_the_analysis_pipeline(caplog):
+    """A documented-knowledge track has no tabular evidence to fetch.
+
+    Across jobs 40e55527, 5cb4d210, 106b043c, 70692961 and 26f3bbf6 the planner
+    declared a track `knowledge` and the nested analyzer chose `tool` every
+    time. On 26f3bbf6 that pulled 61 rows of prices and a 62 KB stats_hint into
+    a question about documented mechanisms. Token guardrails cannot separate
+    "explain the mechanism" from "explain this month's movement"; the planner
+    already made the call.
+    """
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+
+    knowledge_track_id = research_plan.tracks[-1].track_id
+    payload = research_plan.model_dump(mode="json")
+    for track in payload["tracks"]:
+        if track["track_id"] == knowledge_track_id:
+            track["analysis_preferred_path"] = "knowledge"
+    from contracts.report_research import ReportResearchPlan
+
+    research_plan = ReportResearchPlan.model_validate(payload)
+
+    analysis_calls = []
+
+    def track_analyzer(_query, track, **_kwargs):
+        analysis_calls.append(track.track_id)
+        return packet_by_track[track.track_id]
+
+    caplog.set_level("INFO", logger="Enai.ReportProcessor")
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("enabled track analysis must not run globally")
+        ),
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: packets,
+        manifest_consolidator=lambda *_a, **_k: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    ReportResultV2.model_validate(processor(_lease(query=_V2_QUERY), _Control()))
+
+    assert knowledge_track_id not in analysis_calls
+    assert sorted(analysis_calls) == sorted(
+        track.track_id
+        for track in research_plan.tracks
+        if track.track_id != knowledge_track_id
+    )
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("REPORT_TRACK_ANALYSIS_ENABLED ")
+    )
+    telemetry = json.loads(record.split(" ", 1)[1])
+    # Deliberate, not degraded.
+    assert telemetry["planner_knowledge_track_ids"] == [knowledge_track_id]
+    assert telemetry["fallback_count"] == 0
+
+
+def test_a_knowledge_track_with_no_baseline_evidence_is_still_analysed():
+    """The skip must not turn a thin track into an empty one."""
+
+    (
+        research_plan,
+        packets,
+        manifest,
+        decisions,
+        gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+    packet_by_track = {packet.track_id: packet for packet in packets}
+
+    knowledge_track_id = research_plan.tracks[-1].track_id
+    payload = research_plan.model_dump(mode="json")
+    for track in payload["tracks"]:
+        if track["track_id"] == knowledge_track_id:
+            track["analysis_preferred_path"] = "knowledge"
+    from contracts.report_research import ReportResearchPlan
+
+    research_plan = ReportResearchPlan.model_validate(payload)
+
+    # That track's deterministic packet carries nothing, so skipping it would
+    # leave the report with no evidence for it at all.
+    emptied = [
+        packet
+        for packet in packets
+        if packet.track_id != knowledge_track_id
+    ]
+
+    analysis_calls = []
+
+    def track_analyzer(_query, track, **_kwargs):
+        analysis_calls.append(track.track_id)
+        return packet_by_track[track.track_id]
+
+    processor = ReportJobProcessor(
+        query_pipeline=lambda *_a, **_k: None,
+        track_analysis_mode="enabled",
+        track_analyzer=track_analyzer,
+        research_planner=lambda *_args, **_kwargs: research_plan,
+        research_executor=lambda *_args, **_kwargs: emptied,
+        manifest_consolidator=lambda *_a, **_k: manifest,
+        research_exhibit_builder=lambda *_args, **_kwargs: decisions,
+        evidence_gate_evaluator=lambda *_args, **_kwargs: gate,
+        document_planner=lambda *_args, **_kwargs: document_plan,
+        document_generator=lambda *_args, **_kwargs: draft,
+    )
+
+    ReportResultV2.model_validate(processor(_lease(query=_V2_QUERY), _Control()))
+
+    assert knowledge_track_id in analysis_calls
