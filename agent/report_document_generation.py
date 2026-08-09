@@ -32,6 +32,7 @@ from contracts.report_research import (
     ReportResearchPlan,
 )
 from contracts.report_sections import ReportSectionDraft
+from utils.validation_diagnostics import validation_error_locations
 
 DocumentWriter = Callable[..., Any]
 DocumentRepairer = Callable[..., Any]
@@ -441,6 +442,37 @@ def _without_free_unrendered_claims(
     return swept
 
 
+def _log_schema_rejection(
+    exc: Exception,
+    *,
+    stage: str,
+    section_ids: Sequence[str],
+) -> None:
+    """Record which fields invalidated a model payload.
+
+    ``DOCUMENT_SCHEMA_INVALID`` was the only blocking code with no named
+    offender. Jobs 40e55527 and 5cb4d210 both discarded the analysis writer's
+    entire output one millisecond after it returned and spent two of five
+    generative calls rebuilding it, and neither log could say whether the
+    cause was a missing contract_version, a duplicate paragraph, or a
+    duplicate section id.
+    """
+
+    _LOGGER.warning(
+        "REPORT_DOCUMENT_SCHEMA_INVALID %s",
+        json.dumps(
+            {
+                "expected_section_ids": list(section_ids),
+                "invalid_fields": validation_error_locations(exc),
+                "stage": stage,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
 def _materialize_section_batch(
     raw_batch: Any,
     plan: ReportDocumentPlan,
@@ -456,7 +488,8 @@ def _materialize_section_batch(
             if isinstance(raw_batch, ReportDocumentRepair)
             else ReportDocumentRepair.model_validate(raw_batch)
         )
-    except ValidationError:
+    except ValidationError as exc:
+        _log_schema_rejection(exc, stage="section_batch", section_ids=expected_ids)
         return None, ReportDocumentValidation(
             contract_version="report-document-validation-v1",
             valid=False,
@@ -1113,7 +1146,12 @@ def generate_report_document(
             if isinstance(raw_draft, ReportDocumentDraft)
             else ReportDocumentDraft.model_validate(raw_draft)
         )
-    except ValidationError:
+    except ValidationError as exc:
+        _log_schema_rejection(
+            exc,
+            stage="whole_document",
+            section_ids=[section.section_id for section in plan.sections],
+        )
         draft = None
         validation = ReportDocumentValidation(
             contract_version="report-document-validation-v1",

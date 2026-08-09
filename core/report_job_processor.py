@@ -83,6 +83,7 @@ from utils.request_deadline import (
     cap_request_deadline,
     current_request_execution_scope,
 )
+from utils.validation_diagnostics import validation_error_locations
 
 _LOGGER = logging.getLogger("Enai.ReportProcessor")
 
@@ -193,23 +194,13 @@ def _diagnostic_identifier(value: str | None) -> str:
 def _diagnostic_error_locations(exc: Exception) -> list[str]:
     """Name the schema fields a ValidationError rejected, never their values.
 
-    pydantic error locations are field names and indices from our own
-    contracts, so they carry no customer data — but the messages and inputs
-    beside them do, which is why only ``loc`` is read.
+    Sanitised through ``_diagnostic_identifier`` because this line is emitted
+    on the job's own failure telemetry, where the identifier vocabulary is
+    fixed.
     """
 
-    errors = getattr(exc, "errors", None)
-    if not callable(errors):
-        return []
-    try:
-        raw = errors()
-    except Exception:
-        return []
     located: list[str] = []
-    for entry in list(raw)[:8]:
-        location = ".".join(
-            str(part) for part in (entry or {}).get("loc", ()) if part != ""
-        )
+    for location in validation_error_locations(exc):
         candidate = _diagnostic_identifier(location)
         if candidate not in located:
             located.append(candidate)
