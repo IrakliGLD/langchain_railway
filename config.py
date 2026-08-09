@@ -611,6 +611,23 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS = max(
     1500,
     int(os.getenv("SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", str(PROMPT_BUDGET_MAX_CHARS))),
 )
+# Analyzer prompt ordering (2026-08-09). The shipped prompt opens with the
+# user question and appends the output schema after every block, so two
+# unrelated questions share a 28-character prefix and ~8,700 tokens of schema,
+# guides and rules sit behind the one variable element -- uncacheable by
+# construction. "constants first" puts them in front instead.
+#   off    — the shipped order, everywhere.
+#   report — constants-first for report-profile analyzer calls only.
+#   all    — constants-first everywhere, including Standard.
+# A boolean cannot express "on for report, off for Standard, and killable",
+# which is why this is a selector. Unknown values read as "off": an ordering
+# nobody asked for is the wrong way to fail.
+_ANALYZER_PROMPT_ORDER_MODES = ("off", "report", "all")
+ANALYZER_CONSTANTS_FIRST_MODE = (
+    os.getenv("ENAI_ANALYZER_CONSTANTS_FIRST", "off").strip().lower() or "off"
+)
+if ANALYZER_CONSTANTS_FIRST_MODE not in _ANALYZER_PROMPT_ORDER_MODES:
+    ANALYZER_CONSTANTS_FIRST_MODE = "off"
 FAST_MODE_ANALYZER_BUDGET = max(1500, int(os.getenv("FAST_MODE_ANALYZER_BUDGET", "20000")))
 FAST_MODE_SUMMARIZER_BUDGET = max(1500, int(os.getenv("FAST_MODE_SUMMARIZER_BUDGET", "15000")))
 ROUTER_ENABLE_SEMANTIC_FALLBACK = os.getenv("ROUTER_ENABLE_SEMANTIC_FALLBACK", "true").lower() in ("1", "true", "yes", "on")

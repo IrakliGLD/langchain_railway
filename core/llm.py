@@ -43,6 +43,7 @@ from agent.report_grounding import (
 )
 from agent.report_projection import projected_row_indices
 from config import (
+    ANALYZER_CONSTANTS_FIRST_MODE,
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
     ENABLE_OPENAI_FALLBACK,
     ENABLE_SKILL_PROMPTS_PLANNER,
@@ -206,6 +207,7 @@ def _is_fast_pipeline_mode() -> bool:
 from contracts.summary import SummaryEnvelope  # noqa: F401 — re-export surface
 from core.llm_runtime import (  # noqa: F401 — re-export surface
     LLMResponseCache,
+    _extract_cache_write_tokens,
     _extract_cached_prompt_tokens,
     _extract_token_usage,
     _to_int,
@@ -384,6 +386,10 @@ def _log_usage_for_message(
         message = message["raw"]
     prompt_tokens, completion_tokens, total_tokens = _extract_token_usage(message)
     cached_prompt_tokens = _extract_cached_prompt_tokens(message)
+    # Reads alone cannot establish a saving: the write that produced them is
+    # priced differently. Logged beside the read so the two are always
+    # comparable in one line.
+    cache_write_tokens = _extract_cache_write_tokens(message)
     estimated_cost = _estimate_cost_usd(
         prompt_tokens,
         completion_tokens,
@@ -407,7 +413,7 @@ def _log_usage_for_message(
     finish_reason, provider_reported_limit = _response_diagnostics(message)
     log.info(
         "llm_response_telemetry provider=%s model=%s stage=%s "
-        "prompt_tokens=%d cached_prompt_tokens=%d "
+        "prompt_tokens=%d cached_prompt_tokens=%d cache_write_tokens=%d "
         "completion_tokens=%d total_tokens=%d "
         "finish_reason=%s configured_output_token_limit=%s "
         "effective_output_token_limit=%s provider_reported_output_token_limit=%s",
@@ -416,6 +422,7 @@ def _log_usage_for_message(
         _content_free_log_value(attempt_stage),
         prompt_tokens,
         cached_prompt_tokens,
+        cache_write_tokens,
         completion_tokens,
         total_tokens,
         finish_reason,
@@ -3120,6 +3127,41 @@ _ANALYZER_PINNED_HEAD = [
     "CONTRACT_ANSWER_KIND_GUIDE",
 ]
 _ANALYZER_PINNED_TAIL = ["CONTRACT_RULES"]
+# Constants-first ordering (2026-08-09). The never-truncated contract blocks
+# lead, so two unrelated questions share them byte for byte; the question and
+# its trusted context follow, keeping the previous-contract block adjacent to
+# the question it qualifies. The remaining catalogs keep their per-family
+# order behind that, and the tail is empty because CONTRACT_RULES moved up.
+#
+# Only blocks that appear in NEITHER truncation priority list may sit in the
+# header: one length difference in an early block breaks the shared prefix at
+# that point, which is the whole exercise. `tests/test_analyzer_prompt_order.py`
+# asserts the disjointness.
+_ANALYZER_CONSTANTS_FIRST_HEAD = [
+    "CONTRACT_QUERY_TYPE_GUIDE",
+    "CONTRACT_ANSWER_KIND_GUIDE",
+    "CONTRACT_RULES",
+    "UNTRUSTED_USER_QUESTION",
+    _ANALYZER_BLOCK_EVIDENCE_ANOMALY,
+    _ANALYZER_BLOCK_PREVIOUS_CONTRACT,
+]
+_ANALYZER_CONSTANTS_FIRST_TAIL: list[str] = []
+_ANALYZER_ORDER_LEGACY = "legacy"
+_ANALYZER_ORDER_CONSTANTS_FIRST = "constants_first"
+
+
+def _analyzer_prompt_order(report_profile: bool = False) -> str:
+    """Resolve the prompt ordering for one analyzer call.
+
+    Report and Standard share one code path deliberately. A report-only prompt
+    would fork the analyzer into two orderings that drift apart, which is the
+    failure mode this ordering work exists to remove; the selector gives the
+    same protection without the fork.
+    """
+    mode = ANALYZER_CONSTANTS_FIRST_MODE
+    if mode == "all" or (mode == "report" and report_profile):
+        return _ANALYZER_ORDER_CONSTANTS_FIRST
+    return _ANALYZER_ORDER_LEGACY
 _ANALYZER_RULE_BLOCK_SEASON = "RULE_SEASON_GUIDANCE"
 _ANALYZER_RULE_BLOCK_SCENARIO = "RULE_SCENARIO_GUIDANCE"
 _ANALYZER_RULE_BLOCK_CHART = "RULE_CHART_GUIDANCE"
@@ -3170,6 +3212,7 @@ def _build_analyzer_prompt_blocks(
     prompt_context: Optional[_AnalyzerPromptContext] = None,
     previous_contract: str = "",
     evidence_anomaly_note: str = "",
+    order: str = _ANALYZER_ORDER_LEGACY,
 ) -> list[tuple[str, str]]:
     """Assemble ordered analyzer prompt blocks.
 
@@ -3309,7 +3352,14 @@ def _build_analyzer_prompt_blocks(
         middle_order = _ANALYZER_BLOCK_ORDER_DATA
     middle_order = _promote_history_to_front(middle_order, prompt_context.prompt_profile)
 
-    for name in _ANALYZER_PINNED_HEAD + middle_order + _ANALYZER_PINNED_TAIL:
+    if order == _ANALYZER_ORDER_CONSTANTS_FIRST:
+        pinned_head = _ANALYZER_CONSTANTS_FIRST_HEAD
+        pinned_tail = _ANALYZER_CONSTANTS_FIRST_TAIL
+    else:
+        pinned_head = _ANALYZER_PINNED_HEAD
+        pinned_tail = _ANALYZER_PINNED_TAIL
+
+    for name in pinned_head + middle_order + pinned_tail:
         if name in block_map and name not in ordered_names:
             ordered_names.append(name)
     for name, _body in included_blocks:
@@ -3321,14 +3371,29 @@ def _build_analyzer_prompt_blocks(
 def _render_analyzer_prompt(
     blocks: list[tuple[str, str]],
     schema_hint: dict,
+    *,
+    order: str = _ANALYZER_ORDER_LEGACY,
 ) -> str:
-    """Render analyzer prompt from assembled blocks."""
-    sections = []
+    """Render analyzer prompt from assembled blocks.
+
+    The schema is the single largest constant in the prompt, so reordering the
+    blocks without moving it would leave ~15,000 characters behind the
+    question. Under ``constants_first`` it leads instead — as raw text ahead of
+    the first tagged section, never between two of them: the emergency budget
+    fallback rebuilds the prompt from prefix + tagged sections + suffix and
+    discards anything untagged in between.
+    """
+    schema_section = (
+        f"Respond with JSON exactly matching this schema:\n{_compact_json(schema_hint)}"
+    )
+    constants_first = order == _ANALYZER_ORDER_CONSTANTS_FIRST
+    sections = [schema_section] if constants_first else []
     for section_name, content in blocks:
         if content is None:
             continue
         sections.append(f"{section_name}:\n<<<{content}>>>")
-    sections.append(f"Respond with JSON exactly matching this schema:\n{_compact_json(schema_hint)}")
+    if not constants_first:
+        sections.append(schema_section)
     return "\n\n".join(sections)
 
 
@@ -3362,24 +3427,35 @@ def _render_legacy_analyzer_prompt(user_query: str, history_str: str, schema_hin
 def build_question_analyzer_prompt_validation_artifacts(
     user_query: str,
     conversation_history: Optional[list] = None,
+    *,
+    report_profile: bool = False,
 ) -> dict:
-    """Build comparable current-vs-legacy analyzer prompt artifacts for shadow validation."""
+    """Build comparable current-vs-legacy analyzer prompt artifacts for shadow validation.
+
+    ``report_profile`` is taken so the artifact describes the prompt this call
+    would really send. Without it the trace would report the legacy block order
+    while a report ran the constants-first one — a debug artifact that lies
+    about the thing being debugged.
+    """
     prompt_context = _build_analyzer_prompt_context(user_query, conversation_history)
     schema_hint = QuestionAnalysis.model_json_schema()
+    prompt_order = _analyzer_prompt_order(report_profile)
     blocks = _build_analyzer_prompt_blocks(
         user_query,
         prompt_context.history_str,
         prompt_context.effective_pre_type,
         prompt_context.prompt_profile,
         prompt_context=prompt_context,
+        order=prompt_order,
     )
-    current_prompt = _render_analyzer_prompt(blocks, schema_hint)
+    current_prompt = _render_analyzer_prompt(blocks, schema_hint, order=prompt_order)
     legacy_prompt = _render_legacy_analyzer_prompt(user_query, prompt_context.history_str, schema_hint)
     return {
         "current_pre_type": prompt_context.current_pre_type,
         "effective_pre_type": prompt_context.effective_pre_type,
         "prompt_profile": prompt_context.prompt_profile,
         "prompt_family": prompt_context.prompt_family,
+        "prompt_order": prompt_order,
         "current_block_names": [name for name, _body in blocks],
         "current_prompt_chars": len(current_prompt),
         "legacy_prompt_chars": len(legacy_prompt),
@@ -3580,6 +3656,15 @@ def llm_analyze_question(
         if report_profile
         else ""
     )
+    # Block order participates in the key: an analysis produced under one
+    # ordering must never be served under the other, or an A/B is not an A/B.
+    # Appended only when non-legacy, so the shipped keys stay untouched.
+    prompt_order = _analyzer_prompt_order(report_profile)
+    prompt_order_identity = (
+        f"|order={prompt_order}"
+        if prompt_order != _ANALYZER_ORDER_LEGACY
+        else ""
+    )
     cache_input = (
         f"question_analysis_v7|pm={PIPELINE_MODE}|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
@@ -3591,6 +3676,7 @@ def llm_analyze_question(
         f"anom={evidence_anomaly_note}|"
         f"sys={system}"
         f"{report_cache_identity}"
+        f"{prompt_order_identity}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
@@ -3607,8 +3693,9 @@ def llm_analyze_question(
         prompt_context=prompt_context,
         previous_contract=previous_contract,
         evidence_anomaly_note=evidence_anomaly_note,
+        order=prompt_order,
     )
-    prompt = _render_analyzer_prompt(blocks, schema_hint)
+    prompt = _render_analyzer_prompt(blocks, schema_hint, order=prompt_order)
     truncation_priority = _select_analyzer_truncation_priority(
         user_query,
         pre_type,

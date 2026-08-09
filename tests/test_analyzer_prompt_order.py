@@ -388,6 +388,253 @@ def test_most_of_the_matrix_truncates_under_the_default_budget():
     )
 
 
+# --- constants-first ordering ----------------------------------------------
+
+def render_constants_first_case(
+    query: str,
+    history: list | None,
+    previous_contract: str,
+    anomaly: str,
+) -> tuple[str, str, list[str]]:
+    """Same as :func:`render_legacy_case`, under the constants-first order."""
+    schema_hint = QuestionAnalysis.model_json_schema()
+    prompt_context = llm_core._build_analyzer_prompt_context(query, history)
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        query,
+        prompt_context.history_str,
+        prompt_context.effective_pre_type,
+        prompt_context.prompt_profile,
+        prompt_context=prompt_context,
+        previous_contract=previous_contract,
+        evidence_anomaly_note=anomaly,
+        order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+    )
+    prompt = llm_core._render_analyzer_prompt(
+        blocks, schema_hint, order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST
+    )
+    priority = llm_core._select_analyzer_truncation_priority(
+        query,
+        prompt_context.effective_pre_type,
+        prompt_context.prompt_profile,
+        prompt_context=prompt_context,
+    )
+    budgeted = llm_core._enforce_prompt_budget(
+        prompt,
+        label="question_analysis",
+        budget_override=DEFAULT_ANALYZER_BUDGET_CHARS,
+        truncation_priority=priority,
+    )
+    return prompt, budgeted, priority
+
+
+def _constants_first_prompts() -> dict[str, str]:
+    return {
+        case_id: render_constants_first_case(
+            query, history, previous_contract, anomaly
+        )[1]
+        for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX
+    }
+
+
+def test_reordering_moves_blocks_without_changing_any_of_them():
+    """A reorder must not become a rewrite.
+
+    Set equality on block name to body, so a block that quietly loses content
+    or gains an edit fails here rather than in production.
+    """
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        prompt_context = llm_core._build_analyzer_prompt_context(query, history)
+        arguments = dict(
+            prompt_context=prompt_context,
+            previous_contract=previous_contract,
+            evidence_anomaly_note=anomaly,
+        )
+        legacy = llm_core._build_analyzer_prompt_blocks(
+            query,
+            prompt_context.history_str,
+            prompt_context.effective_pre_type,
+            prompt_context.prompt_profile,
+            **arguments,
+        )
+        reordered = llm_core._build_analyzer_prompt_blocks(
+            query,
+            prompt_context.history_str,
+            prompt_context.effective_pre_type,
+            prompt_context.prompt_profile,
+            order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+            **arguments,
+        )
+        assert dict(legacy) == dict(reordered), case_id
+        assert [name for name, _ in legacy] != [
+            name for name, _ in reordered
+        ], f"{case_id}: order did not actually change"
+
+
+def test_the_schema_leads_and_the_question_follows_the_contract_blocks():
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        prompt, _budgeted, _priority = render_constants_first_case(
+            query, history, previous_contract, anomaly
+        )
+        assert prompt.startswith("Respond with JSON exactly matching this schema:"), case_id
+        for name in (
+            "CONTRACT_QUERY_TYPE_GUIDE",
+            "CONTRACT_ANSWER_KIND_GUIDE",
+            "CONTRACT_RULES",
+        ):
+            assert prompt.index(f"{name}:\n<<<") < prompt.index(
+                "UNTRUSTED_USER_QUESTION:\n<<<"
+            ), f"{case_id}: {name} must precede the question"
+
+
+def test_the_previous_contract_still_directly_follows_the_question():
+    """``tests/test_contract_continuity.py`` pins this for the legacy order.
+
+    The block is only interpretable next to the question it qualifies, so the
+    adjacency has to survive the reorder.
+    """
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        "and for 2023?",
+        "",
+        "single_value",
+        "default",
+        previous_contract='{"top_tool":"get_prices"}',
+        order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+    )
+    names = [name for name, _ in blocks]
+    question = names.index("UNTRUSTED_USER_QUESTION")
+    assert names[question + 1] == llm_core._ANALYZER_BLOCK_PREVIOUS_CONTRACT
+
+
+def test_the_constant_prefix_survives_the_budget():
+    """The measurement the whole plan turns on.
+
+    Post-budget, across every family and context combination, including the
+    longest report-track composite the report path can produce. Truncation
+    fires in most of these; the header has to be untouched by it.
+    """
+    shared = common_prefix_length(list(_constants_first_prompts().values()))
+    assert shared >= 30_000, (
+        f"constants-first prefix collapsed to {shared} chars; a block whose "
+        "length varies has moved into the header"
+    )
+
+
+def test_the_header_is_identical_across_prompt_families():
+    """Families select different blocks, so the header must precede that."""
+    by_family: dict[str, list[str]] = {}
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        family = llm_core._build_analyzer_prompt_context(query, history).prompt_family
+        by_family.setdefault(family, []).append(
+            render_constants_first_case(query, history, previous_contract, anomaly)[1]
+        )
+    header_lengths = {
+        family: common_prefix_length(prompts)
+        for family, prompts in by_family.items()
+    }
+    cross_family = common_prefix_length(
+        [prompts[0] for prompts in by_family.values()]
+    )
+    assert cross_family >= 30_000, (
+        f"header differs between families ({cross_family} chars shared, "
+        f"within-family {header_lengths})"
+    )
+
+
+def test_constants_first_keeps_every_label_and_delimiter():
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        prompt_context = llm_core._build_analyzer_prompt_context(query, history)
+        blocks = llm_core._build_analyzer_prompt_blocks(
+            query,
+            prompt_context.history_str,
+            prompt_context.effective_pre_type,
+            prompt_context.prompt_profile,
+            prompt_context=prompt_context,
+            previous_contract=previous_contract,
+            evidence_anomaly_note=anomaly,
+            order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+        )
+        prompt = llm_core._render_analyzer_prompt(
+            blocks,
+            QuestionAnalysis.model_json_schema(),
+            order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+        )
+        for name, body in blocks:
+            assert f"{name}:\n<<<{body}>>>" in prompt, f"{case_id}: {name}"
+
+
+def test_the_schema_is_prefix_text_not_interstitial():
+    """The emergency fallback keeps the prefix and drops untagged interstitials.
+
+    Placing the schema first is only safe because nothing tagged precedes it.
+    """
+    prompt, _budgeted, priority = render_constants_first_case(
+        *_QUERIES["scenario"], "", ""
+    )
+    schema_text = llm_core._compact_json(QuestionAnalysis.model_json_schema())
+    first_tagged = prompt.index("CONTRACT_QUERY_TYPE_GUIDE:\n<<<")
+    assert prompt.index(schema_text) < first_tagged
+
+    trimmed = llm_core._enforce_prompt_budget(
+        prompt,
+        label="question_analysis",
+        budget_override=5_000,
+        truncation_priority=priority,
+    )
+    assert schema_text in trimmed
+    assert "UNTRUSTED_USER_QUESTION:\n<<<" in trimmed
+
+
+# --- the selector ------------------------------------------------------------
+
+def test_standard_is_untouched_while_the_selector_is_off(monkeypatch):
+    """The mandate. Off means byte-identical, not merely equivalent."""
+    for mode in ("off", "report"):
+        monkeypatch.setattr(llm_core, "ANALYZER_CONSTANTS_FIRST_MODE", mode)
+        assert llm_core._analyzer_prompt_order(report_profile=False) == (
+            llm_core._ANALYZER_ORDER_LEGACY
+        ), mode
+
+
+def test_report_opts_in_before_standard_does(monkeypatch):
+    monkeypatch.setattr(llm_core, "ANALYZER_CONSTANTS_FIRST_MODE", "report")
+    assert llm_core._analyzer_prompt_order(report_profile=True) == (
+        llm_core._ANALYZER_ORDER_CONSTANTS_FIRST
+    )
+
+
+def test_all_covers_both_modes(monkeypatch):
+    monkeypatch.setattr(llm_core, "ANALYZER_CONSTANTS_FIRST_MODE", "all")
+    for report_profile in (False, True):
+        assert llm_core._analyzer_prompt_order(report_profile) == (
+            llm_core._ANALYZER_ORDER_CONSTANTS_FIRST
+        )
+
+
+def test_an_unknown_selector_value_reads_as_off(monkeypatch):
+    """An ordering nobody asked for is the wrong way to fail."""
+    monkeypatch.setenv("ENAI_ANALYZER_CONSTANTS_FIRST", "yes-please")
+    import importlib
+
+    import config
+
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.ANALYZER_CONSTANTS_FIRST_MODE == "off"
+    finally:
+        monkeypatch.delenv("ENAI_ANALYZER_CONSTANTS_FIRST", raising=False)
+        importlib.reload(config)
+
+
+def test_the_selector_defaults_to_off():
+    """Phase 2 ships dark."""
+    import config
+
+    assert config.ANALYZER_CONSTANTS_FIRST_MODE == "off"
+    assert llm_core._analyzer_prompt_order(report_profile=True) == (
+        llm_core._ANALYZER_ORDER_LEGACY
+    )
+
+
 def regenerate() -> None:  # pragma: no cover - maintenance helper
     """Rewrite the legacy hash fixture. Never call this to make a test pass."""
     payload = {
