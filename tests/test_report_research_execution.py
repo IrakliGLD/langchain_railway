@@ -324,6 +324,79 @@ def test_a_composition_exhibit_is_drawn_from_levels_not_from_changes():
     assert title_by_ref[composition.evidence_refs[0]] == "Observed Data"
 
 
+def test_a_trend_exhibit_keeps_only_what_two_axes_can_carry():
+    """An enriched balancing frame carries three kinds of number at once.
+
+    On job 5cb4d210 the trend candidate took the top numeric columns of such a
+    frame — prices in GEL/MWh, prices in USD/MWh, and shares as ratios — and
+    the builder omitted the whole exhibit as REPORT_CHART_INCOMPATIBLE_UNITS.
+    The reader got no chart rather than the prices the track was about.
+    """
+
+    from agent.report_charts import _axis_metadata
+    from contracts.report_charts import ReportChartType
+
+    payload = _plan().tracks[0].model_dump(mode="json")
+    payload["requested_metrics"] = ["average_price"]
+    payload["expected_exhibits"] = ["trend"]
+    track = ReportResearchTrack.model_validate(payload)
+
+    rows = [
+        {
+            "date": "2026-04",
+            "p_bal_gel": 155.61,
+            "p_bal_usd": 57.80,
+            "share_import": 0.0942,
+            "share_thermal_ppa": 0.2419,
+        },
+        {
+            "date": "2026-05",
+            "p_bal_gel": 137.86,
+            "p_bal_usd": 51.65,
+            "share_import": 0.0680,
+            "share_thermal_ppa": 0.0,
+        },
+    ]
+
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=list(rows[0]),
+            rows=[list(row.values()) for row in rows],
+            provenance_cols=list(rows[0]),
+            provenance_rows=[list(row.values()) for row in rows],
+            provenance_refs=["query:track:balancing"],
+            provenance_source="pipeline",
+            stats_hint="The balancing price fell over the month.",
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        track,
+        query_pipeline=query_pipeline,
+    )
+
+    candidate = next(
+        item
+        for item in packet.chart_candidates
+        if item.purpose.value == "trend"
+    )
+    item = {
+        entry.evidence_ref: entry for entry in packet.items
+    }[candidate.evidence_refs[0]]
+    assert candidate.series_fields, "trend exhibit lost every series"
+    # The rule the builder applies, asserted against what the candidate chose.
+    assert (
+        _axis_metadata(
+            ReportChartType.LINE,
+            list(candidate.series_fields),
+            item.unit_by_column,
+        )
+        is not None
+    )
+
+
 def test_track_analysis_rejects_pipeline_context_with_missing_derived_evidence(
     monkeypatch,
 ):

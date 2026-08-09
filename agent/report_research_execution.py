@@ -60,6 +60,7 @@ from utils.request_deadline import (
     bind_request_execution_scope_snapshot,
     current_request_execution_scope,
 )
+from visualization.chart_selector import infer_dimension
 
 _LOGGER = logging.getLogger("Enai.ReportResearch")
 
@@ -604,6 +605,51 @@ def _numeric_observations(
     return observations
 
 
+# A line or bar exhibit has a left axis and at most a right one, so at most two
+# (dimension, unit) groups can share it — the rule ``_axis_metadata`` enforces
+# when it builds. The other purposes are unaffected: a table legitimately shows
+# many units, a pie and a scatter have one axis apiece.
+_DUAL_AXIS_CHART_PURPOSES = frozenset(
+    {
+        ReportChartPurpose.COMPARISON,
+        ReportChartPurpose.FORECAST,
+        ReportChartPurpose.TREND,
+    }
+)
+
+
+def _plottable_series(
+    ranked_columns: list[str],
+    *,
+    purpose: ReportChartPurpose,
+    unit_by_column: Mapping[str, str],
+) -> list[str]:
+    """Drop series a two-axis chart cannot honestly carry.
+
+    Taking the highest-ranked numeric columns of a twenty-eight-column enriched
+    frame mixed GEL/MWh, USD/MWh and ratios on job 5cb4d210. The builder refused
+    the whole exhibit as incompatible, so the reader got nothing rather than the
+    prices the track was about. Selecting here keeps the ranking's own priority:
+    whatever the most relevant columns measure in becomes the chart's axes.
+    """
+
+    if purpose not in _DUAL_AXIS_CHART_PURPOSES:
+        return ranked_columns
+    plottable: list[str] = []
+    axes: list[tuple[str, str]] = []
+    for column in ranked_columns:
+        axis = (
+            infer_dimension(column),
+            str(unit_by_column.get(column, "")).strip(),
+        )
+        if axis not in axes:
+            if len(axes) >= 2:
+                continue
+            axes.append(axis)
+        plottable.append(column)
+    return plottable
+
+
 def _chart_candidates(
     track_id: str,
     purposes: Sequence[ReportChartPurpose],
@@ -712,17 +758,21 @@ def _chart_candidates(
                 ),
                 dimension_fields[0] if dimension_fields else None,
             )
-            series_fields = sorted(
-                [
-                column for column in numeric_fields if column != x_field
-                ],
-                key=lambda column: (
-                    -sum(token in column.casefold() for token in requested_tokens),
-                    "share" not in column.casefold()
-                    if purpose is ReportChartPurpose.COMPOSITION
-                    else False,
-                    numeric_fields.index(column),
+            series_fields = _plottable_series(
+                sorted(
+                    [
+                    column for column in numeric_fields if column != x_field
+                    ],
+                    key=lambda column: (
+                        -sum(token in column.casefold() for token in requested_tokens),
+                        "share" not in column.casefold()
+                        if purpose is ReportChartPurpose.COMPOSITION
+                        else False,
+                        numeric_fields.index(column),
+                    ),
                 ),
+                purpose=purpose,
+                unit_by_column=item.unit_by_column,
             )[:8]
             if purpose is ReportChartPurpose.COMPOSITION:
                 has_category_axis = x_field is not None and any(
