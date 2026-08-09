@@ -2490,3 +2490,80 @@ def test_thin_evidence_section_is_not_rejected_for_being_short():
 
     assert "WORD_COUNT_TOO_SHORT" not in validation.error_codes
     assert validation.valid is True
+
+
+def test_a_year_keeps_its_temporal_relief_beside_a_magnitude():
+    """One magnitude in the sentence used to strip the year's relief too.
+
+    The temporal allowance was gated on *every* claim in the sentence being
+    temporal, so "Coverage spans 138 monthly observations through 2026"
+    flagged 2026 as an ungrounded numeric claim alongside the 138. Job
+    c3138586 spent a repair call clearing exactly that on its limitations
+    section. A year is a period reference regardless of what sits beside it.
+    """
+
+    from agent.report_grounding import (
+        _grounding_facts_from_text,
+        _render_grounding_fact,
+        _unsupported_sentence_claims,
+    )
+
+    table_facts = _grounding_facts_from_text("2021-01 2026-05")
+
+    flagged = {
+        _render_grounding_fact(claim)
+        for claim in _unsupported_sentence_claims(
+            "Coverage spans 138 monthly observations through 2026.",
+            set(),
+            table_facts,
+        )
+    }
+
+    assert "2026" not in flagged, "the year is a period, not a magnitude"
+    assert "138" in flagged, "the magnitude is still uncited"
+
+
+def test_a_year_absent_from_the_evidence_is_still_flagged():
+    """Relief comes from the evidence's own periods, not from being a year."""
+
+    from agent.report_grounding import (
+        _grounding_facts_from_text,
+        _render_grounding_fact,
+        _unsupported_sentence_claims,
+    )
+
+    table_facts = _grounding_facts_from_text("2021-01 2022-05")
+
+    flagged = {
+        _render_grounding_fact(claim)
+        for claim in _unsupported_sentence_claims(
+            "Coverage spans 138 monthly observations through 2026.",
+            set(),
+            table_facts,
+        )
+    }
+
+    assert "2026" in flagged
+
+
+def test_computed_arithmetic_is_still_ungrounded():
+    """The relief must not reach the values the writer actually computed."""
+
+    from agent.report_grounding import (
+        _grounding_facts_from_text,
+        _render_grounding_fact,
+        _unsupported_sentence_claims,
+    )
+
+    table_facts = _grounding_facts_from_text("2026-05")
+
+    flagged = {
+        _render_grounding_fact(claim)
+        for claim in _unsupported_sentence_claims(
+            "The balancing price rose 18.5296% in 2026.",
+            set(),
+            table_facts,
+        )
+    }
+
+    assert "18.5296%" in flagged

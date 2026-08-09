@@ -283,6 +283,16 @@ def _claim_is_year_reference(claim: _NumericFact) -> bool:
     )
 
 
+def _is_year_reference(claim: _GroundingFact) -> bool:
+    """Return whether a claim is a bare year rather than a dated period."""
+
+    if isinstance(claim, _YearFact):
+        return True
+    if isinstance(claim, _NumericFact):
+        return _claim_is_year_reference(claim)
+    return False
+
+
 def _is_temporal_claim(claim: _GroundingFact) -> bool:
     """Return whether a claim names a period rather than asserting a magnitude."""
 
@@ -951,14 +961,28 @@ def _unsupported_sentence_claims(
     """Return the facts a sentence asserts that its evidence cannot support."""
 
     claims = _grounding_facts_from_text(sentence)
+    temporal_support = supported_facts | _temporal_evidence_facts(table_facts)
     if claims and all(_is_temporal_claim(claim) for claim in claims):
-        supported_facts = supported_facts | _temporal_evidence_facts(
-            table_facts
-        )
+        supported_facts = temporal_support
     return [
         claim
         for claim in claims
-        if not _grounding_claim_is_supported(claim, supported_facts)
+        if not _grounding_claim_is_supported(
+            claim,
+            # A bare year is a period reference whatever sits beside it. The
+            # sentence-level allowance above required *every* claim to be
+            # temporal, so "Coverage spans 138 monthly observations through
+            # 2026" flagged the year as a magnitude because the 138 shared the
+            # sentence — job c3138586 spent a repair call clearing exactly
+            # that. A full *period* is deliberately not given the same
+            # latitude: "in 2026-01 the price was X" binds X to a row, and
+            # relaxing it would stop catching a value cited against the wrong
+            # one. Relief still comes only from periods the evidence carries,
+            # so a year the data never mentions is flagged as before.
+            temporal_support
+            if _is_year_reference(claim)
+            else supported_facts,
+        )
     ]
 
 
