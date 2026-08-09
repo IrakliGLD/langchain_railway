@@ -37,6 +37,90 @@ second. Each task moves one decision to the module that already owns it.
 
 ---
 
+## Direction: protecting Standard while fixing the report (2026-08-09, after job fbc46aa4)
+
+Standard's chart output is better than the report's, and the reason is now
+specific rather than a general impression. **The report leans on the one rule
+in the system that Standard treats as a last resort.**
+
+### The seam
+
+| Module | Used by | Rule for touching it |
+|---|---|---|
+| `agent/chart_pipeline.py` | Standard only (Stage 5, via `agent/pipeline.py`) | Refactor only. Never change its decisions. |
+| `agent/report_charts.py` | Report only | Free to change. Prefer every fix here. |
+| `visualization/chart_selector.py` | **Both** | Change only behind a characterization suite. |
+| `agent/derived_chart_builder.py` | **Both**, via `analyzer.enrich` in Stage 3 | Highest risk in the codebase. A boolean-dtype bug here once killed derived charts in *both* modes. |
+
+### Why Standard is better: it has three protections the report has none of
+
+Standard reaches the shared `select_chart_type` **last**
+(`chart_pipeline.py:1528`), after `preferred_chart_family` and
+`_chart_type_for_visual_goal`, and then applies a corrective pass. The report
+calls `select_chart_type` as its **only** authority
+(`report_charts.py:297`).
+
+The rules differ in exactly the way that produces the reported defect:
+
+| Where | Composition test | Effect |
+|---|---|---|
+| `chart_pipeline.py:1563` (Standard) | `dimensions == {"share"}` | Exact — a mixed set never pies |
+| `chart_pipeline.py:1536` (Standard) | `dimensions == {"share"}` | Exact |
+| `chart_pipeline.py:1542` (Standard) | price/xrate present and share absent → force `line` | A corrective the report never runs |
+| `chart_selector.py:242` (**shared**) | `"share" in dimensions` | **Membership** — a mixed set pies |
+
+So a report composition whose columns infer to `{"share", "energy_qty"}` takes
+the membership branch and gets a pie with shares and thousand MWh in the same
+whole. Standard's own adjacent code shows it never intended membership; it just
+never had to fix the shared function because it rarely reaches it.
+
+### The rule I will follow
+
+**Do not tighten the shared rule to fix the report. Give the report the rules
+Standard already has.** Tightening `select_chart_type` would be a one-line fix
+that silently re-decides every Standard chart that falls through to it, and
+"rarely reaches it" is not "never reaches it".
+
+Order of work, each step gated on the one before:
+
+1. **Characterize first.** Pin Standard's current chart-type decision across
+   the `(visual_goal, has_time, has_categories, dimensions, category_count)`
+   matrix, including the corrective pass. These tests must pass unchanged
+   before *and* after every later step. This is the regression net, and it is
+   written before anything moves.
+2. **Extract, do not edit.** Lift Standard's corrective rules into a shared,
+   named function that `chart_pipeline` then calls in place of its inline copy.
+   Pure refactor: Standard's output must be byte-identical, proven by step 1.
+3. **Then let the report call it.** The report gains the exactness test and the
+   price/xrate corrective. Standard's behaviour never changed — only its code
+   location did.
+4. **Report-only rules stay report-only.** `REPORT_CHART_INCOMPATIBLE_UNITS`
+   and the omission machinery have no Standard counterpart and belong in
+   `agent/report_charts.py`.
+
+If a step cannot keep Standard byte-identical, stop and re-plan rather than
+accept the drift.
+
+### Tasks 1–3 need re-validating first
+
+Job `fbc46aa4` moved the ground under this plan, which was written from four
+earlier runs. It built **three of four** charts:
+
+- `generation_and_cross_border_flows_composition` — pie, 8 categories,
+  `series_count: 1`. The mixed-unit pie did **not** reproduce.
+- `regulated_tariffs_table` — built (it was omitted as
+  `REPORT_CHART_INCOMPATIBLE_EVIDENCE` the run before).
+- `prices_and_balancing_composition` — omitted `REPORT_CHART_INCOMPATIBLE_UNITS`,
+  which is the units guard working, not failing.
+- The composition omission Task 3 investigates now reports a *different* reason
+  code than the `REPORT_CHART_INSUFFICIENT_CATEGORIES` it was written against.
+
+So step 0 is to re-run the plan's premises against current behaviour and delete
+whatever the intervening fixes already closed. The membership-vs-equality gap
+above is real and provable at rest; the rest of the plan is not yet re-confirmed.
+
+---
+
 ## File Structure
 
 | File | Responsibility | Change |
