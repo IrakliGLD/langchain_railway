@@ -276,14 +276,38 @@ does nothing to an untracked file, so three mutations accumulated in the new
 module before the state was noticed and restored. Commit a new file before
 mutation-testing it.
 
-### Phase 3 — Shadow
+### Phase 3 — Shadow — **SHIPPED, awaiting a run**
 
-The report computes both the current and the new chart type, **uses the
-current one**, and logs `REPORT_CHART_TYPE_DISAGREEMENT` with both answers and
-the inferred dimensions. Ship and observe one or two runs.
+`_composition_snapshot_type` now computes both answers, logs
+`REPORT_CHART_TYPE_DISAGREEMENT` (applied, shadow, dimensions, columns,
+category_count) when they differ, and **returns the old answer unchanged**.
+Both call sites go through this one function, so a single seam covers the
+category-axis branch and the temporal-pivot branch. `chart_pipeline.py` and
+`chart_selector.py`: **zero diff**.
 
-Deliverable: disagreement cases reviewed individually — not just a count — the
-same discipline the routing cutover used.
+**Phase 2's open risk resolved first.** The rule assumes the period has
+collapsed, so both call sites had to be confirmed as snapshot questions:
+`report_charts.py:709-721` filters to `latest_period` before asking, and
+`report_charts.py:754` pivots `rows[-1]`. Both single-period. `has_time=False`
+is correct.
+
+Two tests pin the shadow guarantee: a mixed set still returns `pie` while
+logging `shadow: "bar"`, and an agreeing set logs nothing — a line on every
+chart would drown the signal.
+
+**Predictions, recorded before the run so the review can falsify them.**
+From job `fbc46aa4`:
+
+- `generation_and_cross_border_flows_composition` — built `pie`, `series_count: 1`,
+  so its dimension set is almost certainly `{share}` alone. **Expect no
+  disagreement.**
+- `prices_and_balancing_composition` — logged `Chart type: bar (categorical
+  comparison, no time)`, so the type decision ran and found no `share`. If its
+  columns carry `price_tariff`, the corrective makes the shadow `line`.
+  **Expect one disagreement, `bar` → `line`.**
+
+If the run shows a disagreement neither prediction covers, that is the
+interesting case and it gets read before anything is cut over.
 
 ### Phase 4 — Cutover
 
