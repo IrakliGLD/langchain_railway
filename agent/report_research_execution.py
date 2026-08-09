@@ -663,12 +663,12 @@ def _chart_candidates(
     tables = [
         item for item in items if item.kind is ReportEvidenceKind.TABLE
     ]
-    # A requested metric names a subject and a comparison — "share_delta_mom"
-    # is the share, compared month over month. Only the subject should steer
-    # which table an exhibit is drawn from: on job 40e55527 the comparison words
-    # scored the month-on-month change panel above the levels it was computed
-    # from, and the balancing composition exhibit was built from a frame holding
-    # one row of deltas, then omitted for having a single category.
+    # requested_metrics is free text the planner writes, not a closed catalog,
+    # so this list cannot be derived from one. It exists only to drop words
+    # that describe a comparison or an aggregation rather than a subject, and
+    # would otherwise match any column spelling them. Words naming a
+    # period-over-period transform are deliberately absent: they were matching
+    # chart titles, which ``table_score`` no longer reads.
     requested_tokens = {
         token
         for metric in requested_metrics
@@ -676,16 +676,10 @@ def _chart_candidates(
         if token not in {
             "average",
             "change",
-            "delta",
-            "growth",
-            "index",
             "maximum",
             "minimum",
-            "mom",
             "percent",
-            "pct",
             "ratio",
-            "yoy",
         }
     }
 
@@ -702,9 +696,13 @@ def _chart_candidates(
         dimension_fields = [
             column for column in item.columns if column not in numeric_fields
         ]
-        material = " ".join(
-            [item.title, item.source, *item.columns]
-        ).casefold()
+        # What the table holds, not the prose a chart builder labelled it
+        # with. An observed panel and the month-on-month panel computed from
+        # it carry the same source and the same columns, so on job 40e55527
+        # the title was the only discriminator — and "MoM Change (%)" matched
+        # the comparison words in a requested metric, scoring one row of
+        # deltas above the levels it came from.
+        material = " ".join([item.source, *item.columns]).casefold()
         score = sum(6 for token in requested_tokens if token in material)
         if purpose in {ReportChartPurpose.TREND, ReportChartPurpose.FORECAST}:
             score += 8 if any(
