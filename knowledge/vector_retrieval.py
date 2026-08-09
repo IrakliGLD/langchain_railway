@@ -195,6 +195,13 @@ class PackedVectorPrompt:
     prompt: str
     headers: list[str]
     truncated: bool
+    # ``truncated`` is set by three different events -- a primary match
+    # that did not fit, a cited reference that did not, an adjacent
+    # sibling that did not -- and only the first discards a top-ranked
+    # semantic match. Counting them apart separates real knowledge loss
+    # from the context bleed the packer deprioritises on purpose.
+    dropped_primary_count: int = 0
+    dropped_expansion_count: int = 0
 
 
 def _extract_bridge_topics(
@@ -1143,6 +1150,8 @@ def pack_vector_knowledge_for_prompt(
     total_chars = len(parts[0])
     headers: list[str] = []
     truncated = False
+    dropped_primary = 0
+    dropped_expansion = 0
     next_index = 1
     for chunk in bundle.chunks:
         header = _format_chunk_header(chunk, index=next_index)
@@ -1150,6 +1159,7 @@ def pack_vector_knowledge_for_prompt(
         entry = f"{header}\n{body}"
         if total_chars + len(entry) + 2 > max_chars:
             truncated = True
+            dropped_primary = len(bundle.chunks) - len(headers)
             break
         parts.append(entry)
         headers.append(header)
@@ -1162,13 +1172,14 @@ def pack_vector_knowledge_for_prompt(
         so smaller later entries still get a chance to fit. Mutates the
         outer ``parts``, ``headers``, ``total_chars``, ``next_index``,
         ``truncated`` via nonlocal."""
-        nonlocal total_chars, next_index, truncated
+        nonlocal total_chars, next_index, truncated, dropped_expansion
         for chunk in chunks_to_pack:
             header = _format_chunk_header(chunk, index=next_index, tag=tag)
             body = chunk.text_content.strip()
             entry = f"{header}\n{body}"
             if total_chars + len(entry) + 2 > max_chars:
                 truncated = True
+                dropped_expansion += 1
                 continue
             parts.append(entry)
             headers.append(header)
@@ -1195,6 +1206,8 @@ def pack_vector_knowledge_for_prompt(
         prompt="\n\n".join(parts),
         headers=headers,
         truncated=truncated,
+        dropped_primary_count=dropped_primary,
+        dropped_expansion_count=dropped_expansion,
     )
 
 

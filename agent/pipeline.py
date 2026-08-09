@@ -2652,6 +2652,19 @@ def _run_vector_knowledge_stage(
             packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
             packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
             packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
+            # packed_truncated alone cannot say whether knowledge was lost:
+            # a skipped adjacent sibling and a dropped top-ranked match both
+            # set it. Only the first is a reason to revisit the budget.
+            dropped_primary_chunks=(
+                packed_vector_knowledge.dropped_primary_count
+                if packed_vector_knowledge is not None
+                else 0
+            ),
+            dropped_expansion_chunks=(
+                packed_vector_knowledge.dropped_expansion_count
+                if packed_vector_knowledge is not None
+                else 0
+            ),
             outcome=bundle.outcome.value,
             failure_stage=(
                 bundle.failure.stage.value
