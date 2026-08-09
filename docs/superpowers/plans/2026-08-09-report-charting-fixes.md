@@ -142,16 +142,59 @@ Hard constraint, checked at every phase: `git diff --stat` for
 `agent/chart_pipeline.py` and `visualization/chart_selector.py` must be
 **empty**. If a phase cannot hold that, stop and re-plan.
 
-### Phase 0 — Measure, assume nothing
+### Phase 0 — Measure, assume nothing — **DONE**
 
-No production code. Answer, in writing, from the code and from one run:
+No production code changed. Answers, from the code:
 
-- Which inputs actually reach `select_chart_type` from Standard? (Static
-  answer: only `visual_goal is None`. Confirm no other caller.)
-- What does `preferred_chart_family` set in practice, and how often?
-- Does the report path have a `visual_goal` equivalent available at all?
+**Q1. Which inputs reach `select_chart_type` from Standard?**
+Exactly one combination: **`preferred_chart_family is None` and
+`visual_goal is None`.** Proven exhaustively rather than sampled —
+`_chart_type_for_visual_goal` returns non-`None` for every one of the seven
+`VisualGoal` members (`trend`/`relationship`→line, `composition`/
+`decomposition`→stackedbar|pie|bar, `ranking`→bar, `compare`→line|bar,
+`threshold_scan`→line|bar), so its `return None` is reachable only when the
+field is absent, and `visual_goal: Optional[VisualGoal] = None`
+(`contracts/question_analysis.py:475`) makes absence a real state.
+`preferred_chart_family` short-circuits earlier still (`chart_pipeline.py:1516`).
 
-Deliverable: the answers, in this document. Gate: none.
+**Q2. Callers of `select_chart_type`.** Exactly two:
+`chart_pipeline.py:1528` (Standard) and `report_charts.py:297` (report, via
+`_composition_snapshot_type`). `main.py:189` imports it but never calls it —
+ruff's `F401` is globally disabled for intentional re-exports, and nothing
+imports these four names back out of `main`. Not a caller.
+
+**Q3. How often does `preferred_chart_family` fire?** Not answerable from the
+code — it is analyzer output. Unresolved, and it does not block: when it is
+set, neither the goal rule nor the shared selector runs, so it can only
+*reduce* the population this work touches.
+
+**Q4. Does the report have a `visual_goal` equivalent?**
+**Yes, and this reframes the defect.** `ReportChartPurpose` (`contracts/report.py:338`)
+carries `TREND / COMPARISON / COMPOSITION / RELATIONSHIP / FORECAST / TABLE`,
+overlapping `VisualGoal` on four members. The report already branches on it —
+`if chart.purpose is ReportChartPurpose.COMPOSITION:` (`report_charts.py:701`).
+
+So the report is **not** missing the goal. It has it, routes on it, and then
+**discards it at the final step**: inside the composition branch it calls
+`_composition_snapshot_type`, which asks the goal-*less* `select_chart_type`
+the very question Standard answers with its goal-*aware* rule. The two differ
+only in exactness, which is precisely the reported defect:
+
+| For `has_time=False, has_categories=True` | Pure share set | Mixed set e.g. `{share, energy_qty}` |
+|---|---|---|
+| Standard goal rule (`chart_pipeline.py:1563`) | `pie` | **`bar`** |
+| Shared fallback (`chart_selector.py:242`) | `pie` | **`pie`** ← the mixed-unit pie |
+
+**Consequences for the plan.** The fix is smaller and safer than assumed: the
+report does not need Standard's whole chain, only the composition rule its own
+`purpose` already entitles it to. Both `_composition_snapshot_type` call sites
+benefit — the second (`report_charts.py:765`) already treats a non-`pie` answer
+as "chart the series over time as a line, which is what Standard renders for
+this shape", so a corrected rule makes that comment true instead of aspirational.
+
+**Risk note.** Phase 1's golden must still cover Standard's *whole* decision
+surface, not just the composition branch, because Phase 2's equivalence test is
+only as trustworthy as the golden behind it.
 
 ### Phase 1 — Freeze Standard mechanically
 
