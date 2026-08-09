@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from copy import deepcopy
+from types import SimpleNamespace
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
@@ -1078,3 +1079,54 @@ def test_a_one_valued_category_with_nothing_to_pivot_still_omits():
 
     assert decision.status == "omitted"
     assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"
+
+
+def test_trimming_a_mixed_frame_keeps_both_kinds_of_series():
+    """Job b3153071: five shares dropped, every quantity kept.
+
+    _largest_contributors ranked by magnitude in the latest period, so
+    quantities measured in thousands always outranked shares measured in
+    0..1 -- the ranking was comparing incompatible units. quantity_thermal
+    survived being dropped only because it happened to be zero that month.
+    Rank within a dimension, then take from each in turn.
+    """
+
+    from agent.report_charts import _largest_contributors
+
+    columns = [
+        *(f"quantity_c{index}" for index in range(6)),
+        *(f"share_c{index}" for index in range(6)),
+    ]
+    latest = {
+        **{f"quantity_c{index}": 1000.0 * (index + 1) for index in range(6)},
+        **{f"share_c{index}": 0.1 * (index + 1) for index in range(6)},
+    }
+
+    kept = _largest_contributors(
+        SimpleNamespace(chart_id="mixed_trend"), columns, latest
+    )
+
+    assert len(kept) == 8
+    quantities = [name for name in kept if name.startswith("quantity_")]
+    shares = [name for name in kept if name.startswith("share_")]
+    assert len(quantities) == 4 and len(shares) == 4, kept
+    # Within each kind the largest survive.
+    assert "quantity_c5" in kept and "quantity_c0" not in kept
+    assert "share_c5" in kept and "share_c0" not in kept
+
+
+def test_trimming_a_single_dimension_frame_is_pure_contribution_order():
+    """One kind of measure is directly comparable; nothing changes there."""
+
+    from agent.report_charts import _largest_contributors
+
+    columns = [f"share_c{index}" for index in range(10)]
+    latest = {name: 0.01 * (index + 1) for index, name in enumerate(columns)}
+
+    kept = _largest_contributors(
+        SimpleNamespace(chart_id="share_trend"), columns, latest
+    )
+
+    assert len(kept) == 8
+    assert "share_c0" not in kept and "share_c1" not in kept
+    assert "share_c9" in kept

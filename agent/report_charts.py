@@ -370,7 +370,27 @@ def _largest_contributors(
 
     if len(columns) <= _MAXIMUM_CHART_SERIES:
         return columns
-    kept = set(_ranked_by_contribution(columns, latest)[:_MAXIMUM_CHART_SERIES])
+    # Rank *within* a dimension and then take from each in turn. Contribution
+    # is only meaningful between comparable measures: ranking a quantity in
+    # thousands against a share in 0..1 makes every quantity outrank every
+    # share, and on job b3153071 that dropped five shares and kept every
+    # quantity — one of which survived only because it happened to be zero.
+    by_dimension: dict[str, list[str]] = {}
+    for column in columns:
+        by_dimension.setdefault(evidence_dimension(column), []).append(column)
+    ranked = {
+        dimension: _ranked_by_contribution(members, latest)
+        for dimension, members in by_dimension.items()
+    }
+    kept: set[str] = set()
+    for depth in range(max(len(members) for members in ranked.values())):
+        for members in ranked.values():
+            if len(kept) >= _MAXIMUM_CHART_SERIES:
+                break
+            if depth < len(members):
+                kept.add(members[depth])
+        if len(kept) >= _MAXIMUM_CHART_SERIES:
+            break
     dropped = [column for column in columns if column not in kept]
     _LOGGER.info(
         "REPORT_CHART_SERIES_DROPPED %s",
