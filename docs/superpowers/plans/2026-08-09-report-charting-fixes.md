@@ -196,16 +196,37 @@ this shape", so a corrected rule makes that comment true instead of aspirational
 surface, not just the composition branch, because Phase 2's equivalence test is
 only as trustworthy as the golden behind it.
 
-### Phase 1 — Freeze Standard mechanically
+### Phase 1 — Freeze Standard mechanically — **DONE**
 
-Enumerate the **full product** of the finite input domain — powerset of the six
-`infer_dimension` values × the `visual_goal` enum plus `None` × `has_time` ×
-`has_categories` × category-count boundaries — and snapshot Standard's decision
-for every point into a golden file.
+`tests/test_chart_type_decision_golden.py` + `tests/fixtures/chart_type_decision_golden.json`.
+**6,400 entries, zero production changes.** Two suites: a semantic one over the
+full powerset of the six `infer_dimension` values × eight goals (seven plus
+`None`) × `has_time` × `has_categories` × three category-count boundaries, and
+an override one holding the semantic core small so the short-circuit matrix
+(explicit group type, explicit user type, preferred family) is itself
+exhaustive. `_choose_chart_type` is the whole decision surface, so that is what
+is pinned.
 
-Deliverable: `tests/test_chart_type_decision_golden.py` + golden JSON, passing
-against today's code with zero production changes. This is the regression net
-for every later phase and it must never be regenerated to make a test pass.
+**Proven to discriminate, not assumed to.** Mutating the shared selector's
+`"share" in dimensions` to `dimensions == {"share"}`:
+
+- on the pie branch → 
+  `cats=1|dims=eiopsx|goal=-|n=8|time=0: pie → bar`, caught;
+- on the *stacked-bar* branch, which was mutated by accident first →
+  `cats=1|dims=eiopsx|goal=-|n=1|time=1: stackedbar → line`, also caught.
+
+The second is the argument for enumeration over curation: nobody would have
+hand-written a case for a six-dimension set with time and categories, and the
+net caught it anyway. Standard restored to an empty diff after both.
+
+**Audit finding, recorded and deliberately not acted on.** The golden documents
+that *Standard itself* answers `pie` for a fully mixed dimension set when
+`visual_goal` is absent (`cats=1|dims=eiopsx|goal=-|n=8|time=0 → pie`). The
+weak membership rule is therefore not purely a report problem — Standard is
+exposed to it too, just only on the no-goal fall-through Phase 0 identified.
+Fixing that is out of scope: the mandate is no impact on Standard, and this
+golden is exactly what would have to change to do it. Raise it as its own
+decision later, with its own evidence.
 
 ### Phase 2 — Give the report its own decision module
 
