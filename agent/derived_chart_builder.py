@@ -256,13 +256,23 @@ _NON_METRIC_COLS: frozenset = frozenset({"is_forecast", "xrate"})
 
 def _resolve_num_cols(df: pd.DataFrame, time_key: Optional[str]) -> List[str]:
     """Return numeric columns in ``df``, excluding the time key, bare
-    year/month integer columns, internal scratch columns, and known
-    non-metric reference columns (``is_forecast``, ``xrate``)."""
+    year/month integer columns, internal scratch columns, boolean flags, and
+    known non-metric reference columns (``is_forecast``, ``xrate``).
+
+    A boolean is a flag, not a measurement, and ``is_numeric_dtype`` is True
+    for bool dtype. On job 106b043c ``known_price_coverage_ok`` reached the
+    month-on-month builder, pandas evaluated (True - False) / False, and the
+    ZeroDivisionError discarded every derived chart spec for the track. The
+    rest of the codebase already draws this line as ``isinstance(value, Real)
+    and not isinstance(value, bool)``; excluding the dtype keeps a future flag
+    column off a chart without adding its name to ``_NON_METRIC_COLS``.
+    """
     return [
         col
         for col in df.columns
         if col != time_key
         and pd.api.types.is_numeric_dtype(df[col])
+        and not pd.api.types.is_bool_dtype(df[col])
         and not re.search(r"\b(month|year)\b", col.lower())
         and not str(col).startswith("__")
         and str(col).lower() not in _NON_METRIC_COLS
