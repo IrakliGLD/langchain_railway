@@ -1187,6 +1187,35 @@ month was replaced by the full history. Positive conditions now read
 **Still open:** the composition chart omitted for a fifth consecutive run —
 covered by `2026-08-09-report-charting-fixes.md`, deferred by the user.
 
+### The evidence caps do not fit each other (open, deliberately not fixed)
+
+`ReportEvidencePacket.items` holds up to **12**, `research_max_tracks` is
+**4**, and `ReportEvidenceManifest.items` holds **32** with one slot always
+spent on the limitation note — so consolidation keeps **31**. Three
+well-populated tracks (36) already overflow; four (48) overflow badly. Job
+`e3f43e84` discarded 17 items.
+
+Consolidation fills the manifest in packet order, so the overflow falls
+entirely on the **last** tracks: an early track keeps all twelve items while a
+late one can reach the writer with none. That is the root cause of the
+`document_plan_ready` crash — the crash itself is fixed (the plan no longer
+references dropped evidence, `d68f030`) and the loss is now named by
+`REPORT_MANIFEST_TRUNCATED`, but the allocation is still first-come.
+
+Not fixed here because every candidate remedy changes which evidence reaches
+the writer:
+
+- **round-robin across packets** — fairest, every track keeps a proportional
+  share, but reorders the manifest and so changes exhibit selection and
+  `required_evidence_refs` for every report;
+- **per-track quota of `31 // track_count`** — simpler, same reordering risk,
+  and wastes slots when a track has fewer items;
+- **raise the manifest cap** — moves the prompt-budget problem downstream into
+  the writer, which is where it was tuned away from.
+
+This needs its own pass with before/after evidence-selection review, the same
+way the routing changes did.
+
 ---
 
 ## Self-Review

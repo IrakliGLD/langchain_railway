@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 from collections.abc import Sequence
 
 from contracts.report import (
@@ -30,6 +32,8 @@ from contracts.report_research import (
     ReportResearchPlan,
     ReportTrackStatus,
 )
+
+_LOGGER = logging.getLogger("Enai.ReportDocumentPlan")
 
 _ROLE_LABELS = {
     "en": {
@@ -362,7 +366,26 @@ def build_report_document_plan(
         # references evidence outside the manifest, and the checkpoint code is
         # not retryable. Such an exhibit could never be built either -- the
         # builder reads the same manifest.
-        if not set(candidate.evidence_refs).issubset(manifest_refs):
+        missing_refs = [
+            ref
+            for ref in candidate.evidence_refs
+            if ref not in manifest_refs
+        ]
+        if missing_refs:
+            _LOGGER.warning(
+                "REPORT_CHART_REQUEST_DROPPED %s",
+                json.dumps(
+                    {
+                        "chart_id": candidate.chart_id,
+                        "missing_evidence_refs": missing_refs,
+                        "section_id": section_id,
+                        "track_id": track_id,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
             continue
         charts.append(
             ReportChartRequest(

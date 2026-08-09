@@ -2726,7 +2726,52 @@ def test_an_invalid_section_batch_names_the_fields_that_rejected_it(caplog):
     assert logged[0]["stage"] == "section_batch"
 
 
-def test_a_chart_whose_evidence_missed_the_manifest_is_not_requested():
+def test_dropping_evidence_at_the_manifest_cap_names_the_losing_tracks(caplog):
+    """Silently losing a third of the evidence is not a reportable state.
+
+    The manifest holds at most 32 items and consolidation reserves one for the
+    limitation note. Job e3f43e84 collected 48 and said nothing about the 17
+    it discarded, so a track that reached the writer with no table looked like
+    a collector that returned nothing.
+    """
+
+    from contracts.report_research import ReportEvidencePacket
+
+    packets = _ready_packets()
+
+    def padded(packet, tag):
+        payload = packet.model_dump(mode="json")
+        template = dict(payload["items"][0])
+        for index in range(12 - len(payload["items"])):
+            clone = dict(template)
+            clone["evidence_ref"] = f"evidence:table:{tag}{index:015x}"
+            clone["title"] = f"Filler {tag}{index}"
+            payload["items"].append(clone)
+        return ReportEvidencePacket.model_validate(payload)
+
+    overflowing = [
+        padded(packet, str(index)) for index, packet in enumerate(packets)
+    ]
+    assert sum(len(packet.items) for packet in overflowing) > 31
+
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportResearch"):
+        manifest = consolidate_report_evidence_packets(_QUERY, overflowing)
+
+    logged = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_MANIFEST_TRUNCATED ")
+    ]
+    assert logged, "the discarded evidence was not reported"
+    assert logged[0]["kept_item_count"] == len(manifest.items)
+    assert logged[0]["dropped_item_count"] > 0
+    assert logged[0]["dropped_by_track"], "no losing track was named"
+    assert sum(logged[0]["dropped_by_track"].values()) == (
+        logged[0]["dropped_item_count"]
+    )
+
+
+def test_a_chart_whose_evidence_missed_the_manifest_is_not_requested(caplog):
     """The manifest is closed, so the plan may not point outside it.
 
     consolidate_report_evidence_packets caps the manifest at 31 items and
@@ -2766,14 +2811,24 @@ def test_a_chart_whose_evidence_missed_the_manifest_is_not_requested():
         [item for item in manifest.items if item.evidence_ref != dropped_ref],
     )
 
-    plan = build_report_document_plan(
-        _QUERY,
-        research_plan,
-        packets,
-        trimmed,
-        gate,
-        decisions,
-    )
+    with caplog.at_level(logging.WARNING, logger="Enai.ReportDocumentPlan"):
+        plan = build_report_document_plan(
+            _QUERY,
+            research_plan,
+            packets,
+            trimmed,
+            gate,
+            decisions,
+        )
+
+    # Dropping an exhibit silently turns a missing figure into a mystery.
+    dropped = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_REQUEST_DROPPED ")
+    ]
+    assert dropped, "the dropped exhibit was not reported"
+    assert dropped[0]["missing_evidence_refs"] == [dropped_ref]
 
     manifest_refs = set(trimmed.item_by_ref())
     assert all(
