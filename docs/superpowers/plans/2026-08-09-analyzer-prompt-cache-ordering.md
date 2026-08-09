@@ -4,18 +4,22 @@
 > the next phase until the current one is planned, implemented, audited
 > independently, and its findings fixed.
 
-**Goal:** Make the analyzer's ~10,000 tokens of constant prompt content
-cacheable by moving it ahead of the one variable thing in the prompt, without
-changing Standard's routing until evidence says it is safe.
+**Goal:** Make the analyzer's ~8,700 tokens of constant prompt content
+cacheable by moving it ahead of the variable content, without changing
+Standard's routing until evidence says it is safe.
 
 **Tech Stack:** Python 3.11 (container) / 3.14 (local), pydantic v2, pytest,
-OpenAI `/v1/responses` via `gpt-5.6-terra`.
+`langchain-openai==1.3.5` / `openai==2.46.0`.
+
+**Revision 2 (2026-08-09).** Rewritten after review. Phase 0 is now **executed,
+not proposed** — its numbers are below. Six review items are adopted, three are
+qualified or rejected with reasons in *Review disposition*.
 
 ---
 
 ## The issue
 
-A report job spends 64,000–78,000 prompt tokens and caches **1.5–6%** of them.
+A report job spends 64,000–78,000 prompt tokens and caches **1.5–6%**.
 Measured per stage across six production jobs:
 
 | Stage | Prompt tokens | `cached_prompt_tokens` |
@@ -26,169 +30,350 @@ Measured per stage across six production jobs:
 | synthesis writer | 18–27 k | 0, always |
 | document repair | 3–17 k | 1,204 |
 
-The parallel-fan-out explanation given earlier was **incomplete** — it does not
-explain the writers, which run sequentially. Measuring the prompts at rest
-found the actual cause, and it is different for the two stages.
+The analyzer prompt opens with `UNTRUSTED_USER_QUESTION`
+(`_ANALYZER_PINNED_HEAD`, `core/llm.py:3115`), and the renderer appends the
+output schema *after every block* (`_render_analyzer_prompt`,
+`core/llm.py:3331`). So the one variable element leads, the largest constant
+trails, and everything constant in between is unreachable by a prefix cache.
 
-**Analyzer — the whole win, and the real defect.** Building the same prompt for
-two unrelated questions and diffing:
+Measured across 40 prompt variants (9 query profiles × 4 context combinations,
+`scratchpad/probe_header.py`):
 
 ```
-system     866 chars — identical            (~216 tokens)
-user    40,491 chars — identical prefix = 28 characters
+worst-case pairwise common prefix, today:   28 chars  (~7 tokens)
 ```
 
-Twenty-eight characters. The prompt opens with `UNTRUSTED_USER_QUESTION`, so
-the single variable element leads and roughly **10,000 tokens of schema,
-catalogs, filter guide and rule blocks sit behind it**, uncacheable by
-construction. Four analyzer calls per report ⇒ **~40 k tokens per job** that no
-amount of cache warming can reach. Standard pays the same shape once per query,
-at much higher volume.
+Four analyzer calls per report ⇒ **~40 k tokens per job** uncacheable by
+construction. Standard pays the same shape once per query, at higher volume.
 
-This is the opposite of the convention the codebase already states, in
-`core/llm.py` at the document writer: *"Constants first: prefix caching only
-pays off ahead of per-request content."* The analyzer never got that treatment.
+This inverts a convention the codebase already states, in `core/llm.py` at the
+document writer: *"Constants first: prefix caching only pays off ahead of
+per-request content."* The analyzer never got it.
 
-**Writer — small, and separately explained.** Its constant lead is ~810 tokens
-of `prompt` plus 578 of `system`. Observed caches elsewhere are 1,204 and
-1,673, so the writer most likely sits just under the provider's minimum. Even
-if fixed, the ceiling is 6–9% of a 15–23 k prompt. **Out of scope here.**
+### A second finding, from Phase 0
 
-**Cold containers.** Job `177e6bb0` cached 0 on every call; its container was
-two minutes old. Whatever is built, the first job per container gets nothing.
-This caps the realised benefit and is not fixable from the prompt side.
+`ANALYZER_PROMPT_BUDGET_MAX_CHARS` defaults to 45,000 with a 10% safety margin
+⇒ **40,500 effective**. Full analyzer prompts measure 39,209–49,581 chars.
+**36 of the 40 matrix cases exceed the budget and are truncated today.**
+
+Two consequences. First, the truncation interaction is load-bearing, not an
+edge case — any ordering change has to be proven against post-budget text, and
+Phase 0 was run that way. Second, the analyzer is shedding catalog content on
+almost every call. That is a real problem and it is **not** this plan's
+problem; recorded in *Out of scope*.
+
+---
+
+## Phase 0 — executed. Decision gate: **PASS**
+
+Component sizes, current code:
+
+| Component | Chars |
+|---|---|
+| output schema (`QuestionAnalysis.model_json_schema`) | 15,490 |
+| `CONTRACT_RULES` (`_ANALYZER_CORE_RULES`) | 15,835 |
+| `CONTRACT_ANSWER_KIND_GUIDE` | 2,130 |
+| `CONTRACT_QUERY_TYPE_GUIDE` | 1,258 |
+| **guaranteed header, rendered** | **34,886** |
+| system message (identical across queries) | 866 |
+
+None of the four header blocks appears in `_ANALYZER_TRUNCATION_DATA` or
+`_ANALYZER_TRUNCATION_KNOWLEDGE` (`core/llm.py:3466`, `:3478`), and
+`tests/test_question_analyzer_phase_c.py:1718` already asserts that
+disjointness. They cannot be dropped.
+
+Simulating the proposed order over the same 40 variants, **after** applying the
+real budget:
+
+```
+worst-case pairwise common prefix, today:         28 chars  (~7 tokens)
+worst-case pairwise common prefix, proposed:  34,886 chars  (~8,721 tokens)
+schema intact at head in all 40 cases:        True
+question block present in all 40 cases:       True
+```
+
+The matrix covered scalar, comparison, threshold, explanation, forecast,
+scenario, knowledge, clarify (with history), a realistic report-track composite
+and a maximum-length report-track composite; each crossed with
+±`TRUSTED_PREVIOUS_CONTRACT` and ±`TRUSTED_EVIDENCE_ANOMALY`. Truncation fired
+in 36 of the 40 and the header survived every one, because the header is
+family-invariant and section-aware truncation edits eligible section *content*
+in place without moving earlier sections.
+
+**8,721 tokens against a 2,000-token stop condition. Gate passes.** Proceed.
 
 ---
 
 ## The fix
 
-Reorder the analyzer prompt so never-truncated constants come first and the
-untrusted question comes last. **One code path for both modes**, behind a
-single env flag, defaulting **on for report** and **off for Standard**.
+Render the analyzer prompt as:
 
-### Why this shape and not a report-only prompt
+```
+1. output schema            ← raw text, BEFORE the first tagged section
+2. CONTRACT_QUERY_TYPE_GUIDE
+3. CONTRACT_ANSWER_KIND_GUIDE
+4. CONTRACT_RULES
+——— everything above is byte-identical across queries ———
+5. UNTRUSTED_USER_QUESTION
+6. TRUSTED_EVIDENCE_ANOMALY / TRUSTED_PREVIOUS_CONTRACT  (when present)
+7. remaining blocks, existing relative order per prompt family
+```
 
-A report-only reorder forks the analyzer prompt into two orderings. Every later
-edit then has to be reasoned about twice, and they drift. That is the exact
-failure this session has been removing — the guardrail reading the wrong text,
-the label map without its inverse, the gate and assembler judging length
-independently. Creating a fresh instance of it to avoid touching Standard is a
-bad trade. A flag gives the same protection without the fork: Standard's prompt
-is byte-identical while the flag is off.
+One code path for both modes, selected by one env variable. Standard's prompt
+is byte-identical to today's while the selector is `off`.
 
-### The constraint that shapes the ordering
+### Why the schema goes in the prefix, not into a tagged block
 
-The analyzer prompt has section-aware truncation
-(`_ANALYZER_TRUNCATION_DATA` / `_ANALYZER_TRUNCATION_KNOWLEDGE`) that drops
-blocks when over budget. **A droppable block placed early defeats the whole
-exercise**: one truncation difference between two calls breaks the shared
-prefix at that point. The order must therefore be
+`_protected_section_fallback_truncate` (`core/prompt_budget.py:155`)
+reconstructs the prompt from three parts: text before the first tagged section,
+the surviving tagged sections, and text after the last one. **Untagged text
+placed between tagged sections is silently discarded.** So the schema cannot
+simply be moved "up"; it has to be either the prefix or a tagged block.
 
-1. blocks that are never truncation candidates (schema, non-listed rule blocks),
-2. truncation candidates in reverse-priority order — most-likely-dropped last,
-3. `UNTRUSTED_USER_QUESTION`, delimited and labelled exactly as today.
+Both work — `_SECTION_CONTENT_RE` accepts a `CONTRACT_\w+` tag, so a
+`CONTRACT_OUTPUT_SCHEMA` block would be matched and protected. Prefix wins on
+one criterion: the schema text stays **byte-identical** to today
+(`Respond with JSON exactly matching this schema:\n{…}`), so the only change
+the model sees is position. A tagged block would also rewrite the wording, and
+three tests pin that sentinel string surviving truncation
+(`tests/test_question_analyzer_phase_c.py:1731`, `:1756`, `:1776`).
 
-`UNTRUSTED_USER_QUESTION` is not in either truncation list, so it can never be
-dropped; moving it last does not risk losing it.
+### Why the stable-header variant, not question-last
+
+An earlier draft put the question absolutely last and reversed the truncation
+candidates behind it. Phase 0 says the stable header alone already reaches
+8,721 tokens — 86% of the effective budget. The aggressive variant's marginal
+gain is small, and it moves the question past every catalog, which is a much
+larger recency change. **Take the measured 8,721 tokens; leave the tail
+ordering alone.** Revisit only if telemetry says the remainder matters.
+
+### Why one flagged code path, not a report-only prompt
+
+A report-only reorder forks the analyzer prompt into two orderings that drift.
+That is the exact failure this session has been removing — the guardrail
+reading the wrong text, the label map without its inverse, the gate and
+assembler judging length independently. A selector gives the same protection
+without the fork.
 
 ### Injection safety
 
-Unchanged. The defence is the `<<<…>>>` delimiters plus the system
-instruction to treat the question as untrusted content, not the block's
-position. Labels and delimiters move with the block.
+Unchanged. The defence is the `<<<…>>>` delimiters plus the system instruction
+to treat `UNTRUSTED_*` blocks as untrusted data
+(`_analyzer_system_message`, `core/llm.py:3522`), not the block's position.
+Labels and delimiters move with the block. The system message already names
+`CONTRACT_*` and `RULE_*` as authoritative, which is now *more* consistent with
+the layout, not less.
 
 ---
 
-## What cannot be done here, and why it matters
+## Review disposition
 
-The charting work was safe because chart-type selection is a deterministic
-function over an enumerable domain: 6,400 points frozen exhaustively, then
-mutation-tested. **That technique does not transfer.** The analyzer is an LLM
-over unbounded natural language; there is no golden to freeze.
+### Adopted
 
-The net that exists:
+| # | Item | Verified at |
+|---|---|---|
+| 1 | The schema must move too, or 15,490 chars stay behind the question | `core/llm.py:3331` |
+| 2 | Untagged interstitial text is dropped by the emergency fallback ⇒ schema goes in the prefix | `core/prompt_budget.py:155-181` |
+| 3 | The question is not the only variation source; Phase 0 must be a matrix over families, context blocks, lengths, and post-budget text | `core/llm.py:3239-3318`, `:3466-3489` |
+| 4 | Prefer the stable header; defer question-last | Phase 0 measurement above |
+| 5 | Flag cannot be boolean — use `off｜report｜all`, default `off` | — |
+| 6 | Prompt-order identity must enter the application response-cache key | `core/llm.py:3583` |
+| 7 | Report analyzers run concurrently, so intra-fan-out cache hits are not the thing to validate | `core/report_job_processor.py:667` |
+| 8 | "Cold container" was the wrong boundary — the response cache is process-local, provider caching is not | — |
+| 9 | Measure cache **writes**, not only reads | `core/llm_runtime.py:77-117` |
+| 10 | The 18-case Standard golden does not exercise report-track prompt shape | `agent/report_research_execution.py:903` |
 
-| Asset | Size |
-|---|---|
-| `evaluation/routing_golden_set.py` + `.json` | **18 cases**, live LLM, runnable before/after |
-| `tests/test_routing_regressions.py` | 5 offline tests |
-| `guardrails.redteam_gate` | safety, not routing quality |
+Item 10 is the strongest of the set. Report-track analyzer input is a composite
+— first question, then `Research track:`, `Required coverage:` bullets, and
+`Report context:` — and that shape has **already** caused four routing misroutes
+this quarter, fixed by making positive routing conditions read only the leading
+question. A prompt-order change is exactly the kind of edit that could disturb
+it again, and the Standard golden would not see it.
 
-Eighteen live cases for the pipeline's semantic centre is thin. The flag exists
-precisely because the evidence is weaker than it was for charting.
+### Adopted with correction
+
+**"Use GPT-5.6's explicit caching controls … an explicit breakpoint after the
+stable header."** `prompt_cache_key` is real and supported —
+`langchain_openai/chat_models/base.py:3347` documents it as an invoke kwarg,
+and `:4151`/`:4205` surface `cache_creation` alongside `cache_read` in
+`input_token_details`. Both are adopted.
+
+But **there is no cache-breakpoint parameter in this stack.** Breakpoints are
+Anthropic's mechanism. OpenAI prompt caching is automatic over the longest
+matching prefix; `prompt_cache_key` is a *routing-affinity* hint that raises
+the odds of landing on a machine that holds the prefix. It is worth setting
+precisely because of item 7 — a concurrent fan-out of four analyzer calls is
+the worst case for machine affinity — but the plan should not promise a
+control the API does not expose. "Breakpoint" is dropped from the wording;
+`prompt_cache_key` stays.
+
+### Not adopted as fact
+
+**Pricing: cache writes at 1.25× input, cached reads at 0.1×, and a 30-minute
+minimum TTL.** I cannot verify provider pricing or TTL offline, and a 1.25×
+write surcharge is characteristic of Anthropic's *explicit* caching rather than
+OpenAI's automatic caching, which historically carries no write surcharge. The
+numbers are not going into the plan as given.
+
+The **conclusion** drawn from them is adopted in full and does not depend on
+them: `cached_prompt_tokens > 0` alone does not prove a saving, so Phase 4
+records reads, writes, latency and total prompt tokens, and confirms the
+current published rates at the time it runs before computing any cost claim.
+
+**Routine gate reduced to `pytest tests/ --ignore=tests/security -q`.** That is
+the repo's documented targeted suite, but since 2026-07-19 the targeted and
+full suites both run in ~30 s, so dropping `tests/security` buys nothing and
+loses coverage. Every phase runs the **full** suite plus `ruff`. The real
+distinction the review is reaching for is *live-model* gates — the routing
+golden and the redteam gate — and those are scheduled only at the phases that
+change prompt text or flip a selector.
 
 ---
 
 ## Phases
 
-Gate for every phase: `python -m pytest tests/ -q`, `ruff check .`,
-`python -m guardrails.redteam_gate` (≥ 0.92). Env values per the repo's
-standard test set.
+Offline gate, every phase: `python -m pytest tests/ -q` · `ruff check .`
+Run from `D:\Enaiapp\langchain_railway` with the standard test env.
+Live gate, where noted: `python -m guardrails.redteam_gate` (≥ 0.92) and
+`evaluation/routing_golden_set.py`.
 
-### Phase 0 — Measure the achievable prefix. **Decision gate.**
+### Phase 0 — Measure the achievable prefix ✅ **DONE**
 
-No production code. For both prompt profiles:
-
-- enumerate which blocks are truncation-eligible and which are never dropped;
-- build the prompt for two unrelated questions under the *proposed* order and
-  measure the identical prefix, in tokens;
-- repeat with one question long enough to trigger truncation, to confirm the
-  prefix survives a truncation difference.
-
-**Stop condition:** if the achievable constant prefix is under ~2,000 tokens,
-the win does not justify touching Stage 0.2 — record the number and stop.
+Result above: 8,721 tokens post-budget worst case across 40 variants. Gate
+passes. Probes live in the session scratchpad; Phase 1 re-establishes the
+measurement as a repository test.
 
 ### Phase 1 — Pin what can be pinned
 
-- A test that the reordered prompt contains **the same blocks with the same
-  content** as today (set equality on block name → body), so the reorder cannot
-  silently drop or alter content.
-- A test that `UNTRUSTED_USER_QUESTION` is present, delimited, and last.
-- Record a baseline run of the 18-case routing golden for later comparison.
+No production behaviour change.
+
+- **Legacy prompt hash.** Snapshot the rendered prompt for a fixed matrix of
+  queries and assert byte equality. This is the mandate — "no impact on
+  Standard" — expressed as an assertion instead of a promise, and it must exist
+  *before* Phase 2 so it can fail.
+- **Block-set equivalence.** Assert the reordered prompt contains the same
+  block names with the same bodies as the legacy one — set equality on
+  name → body, **including the schema text**, which the review correctly noted
+  a name→body comparison would otherwise miss.
+- **Delimiter and label preservation** for every block.
+- **Stable-header purity:** assert the first 34,886 chars are identical for two
+  unrelated queries, and that no header block appears in either truncation
+  priority list.
+- **Truncation survival:** rebuild the Phase 0 matrix as a test — worst-case
+  post-budget common prefix ≥ 30,000 chars, and both `_section_aware_truncate`
+  and `_protected_section_fallback_truncate` preserve the header intact.
+- Record a baseline run of the 18-case routing golden. *(live)*
 
 ### Phase 2 — Implement behind `ENAI_ANALYZER_CONSTANTS_FIRST`
 
-Report profile defaults on; Standard defaults off. A test asserts the Standard
-prompt is **byte-identical** to today's when the flag is off — that is the
-mandate, expressed as an assertion rather than a promise.
+Validated selector, not a boolean:
 
-### Phase 3 — Observe reports
+```python
+_ANALYZER_ORDER_MODES = ("off", "report", "all")
 
-One or two runs. Expect `cached_prompt_tokens > 0` on
-`report_question_analyzer` for the second and later calls in a warm container.
-If it stays 0, Phase 0's model of the provider's caching is wrong and the plan
-is re-opened rather than patched.
+def _analyzer_prompt_order(report_profile: bool) -> str:
+    """'legacy' or 'constants_first' for this call."""
+    mode = (os.getenv("ENAI_ANALYZER_CONSTANTS_FIRST", "off") or "off").strip().lower()
+    if mode not in _ANALYZER_ORDER_MODES:
+        log.warning("Unknown ENAI_ANALYZER_CONSTANTS_FIRST=%r; using 'off'", mode)
+        mode = "off"
+    if mode == "all" or (mode == "report" and report_profile):
+        return "constants_first"
+    return "legacy"
+```
 
-### Phase 4 — The Standard decision
+Resolved once in `llm_analyze_question` and threaded as a keyword into
+`_build_analyzer_prompt_blocks` and `_render_analyzer_prompt`, both defaulting
+to `"legacy"` so every existing caller and test is untouched.
 
-Run the 18-case golden with the flag off, then on. Diff the routing decisions
-and **review each disagreement individually**, not as a pass rate. Flip
-Standard only if there is no regression. A reorder that changes nothing is the
-expected outcome; a reorder that *improves* Standard is plausible, since
-instructions nearer the end tend to be followed more closely.
+Also in this phase:
 
-### Phase 5 — Optional
+- **Cache identity.** Append `|order={order}` to `cache_input`
+  (`core/llm.py:3583`), so a cached analysis produced under one ordering is
+  never served under the other. Without this, an A/B is not an A/B.
+- **Cache-write telemetry.** Extend `_extract_cached_prompt_tokens`'
+  neighbourhood in `core/llm_runtime.py` with a sibling that reads
+  `cache_creation` / `cache_creation_input_tokens`, and log both alongside the
+  existing read count.
+- `tests/test_contract_continuity.py:113` pins
+  `names[0] == "UNTRUSTED_USER_QUESTION"` and the previous-contract block
+  second. It passes unchanged with the selector off; add the
+  constants-first counterpart asserting the previous-contract block still
+  directly follows the question.
 
-The writer's ~810-token prefix. Small, report-side, safe; do it only if
-Phase 3 shows the mechanism works.
+Default stays `off` on deploy. This phase ships dark.
+
+### Phase 3 — Report-track semantic evaluation
+
+Before any activation. Paired legacy/constants-first analysis over sanitized
+real report-track queries — the `Research track:` / `Required coverage:` /
+`Report context:` composite shape, not Standard's one-liners.
+
+Compare routing decisions field by field. **Repeat every changed case** before
+attributing it to prompt order; the model is nondeterministic and a single-run
+difference proves nothing. *(live)*
+
+Nothing activates until this is clean.
+
+### Phase 4 — Report canary
+
+Set `ENAI_ANALYZER_CONSTANTS_FIRST=report` on the worker. Run **at least two
+reports inside the provider's cache TTL** — not two calls inside one report's
+fan-out, which are concurrent and racing each other's writes.
+
+Record per analyzer call: prompt tokens, cache reads, cache writes, latency.
+Confirm the current published cache read/write rates at the time of the run,
+then compute the saving. If reads stay 0 across warm repeats, the caching model
+is wrong and the plan re-opens rather than gets patched.
+
+Add `prompt_cache_key` in this phase, not before: a stable versioned key
+(`f"analyzer-{order}-{schema_digest}"`) threaded through
+`ProviderInvocation.invoke` (`core/provider_invocation.py:95`), set only for
+the analyzer stage and only for OpenAI-family providers. Measuring the reorder
+first and the affinity hint second keeps the two effects separable.
+*(live)*
+
+### Phase 5 — The Standard decision
+
+Run the 18-case golden with the selector `off`, then `all`. Diff the routing
+decisions and **review each disagreement individually**, not as a pass rate;
+re-run changed cases as in Phase 3. Flip to `all` only if there is no
+regression. *(live)*
+
+A reorder that changes nothing is the expected outcome; one that *improves*
+Standard is plausible, since instructions nearer the end tend to be followed
+more closely.
+
+### Phase 6 — Optional
+
+Question-last / reverse-tail ordering, and the writer's ~810-token prefix. Only
+if Phase 4 telemetry says the remaining uncached share is worth another
+behaviour change.
 
 ---
 
 ## Risks
 
-- **Thin eval.** 18 live cases cannot prove no regression across unbounded
-  natural language. The flag, not the eval, is the safety mechanism.
-- **Recency effects.** Moving the question from first to last changes what the
+- **Thin eval.** 18 live Standard cases plus a hand-built report-track set
+  cannot prove no regression across unbounded natural language. **The selector,
+  not the eval, is the safety mechanism.**
+- **Recency effects.** Moving the question from first to fifth changes what the
   model attends to most. This is a behaviour change, not a refactor.
-- **Cold containers** cap realised benefit; the first job per container gains
-  nothing regardless.
-- **Provider caching rules are assumed, not documented here.** Phase 3 is what
-  confirms them; Phase 0's estimate could be wrong in either direction.
+- **Report-track shape is already fragile.** Four misroutes this quarter traced
+  to how that composite is read. Phase 3 exists for this and gates activation.
+- **Provider caching rules are assumed.** Phase 4 confirms them; Phase 0's
+  estimate is of the *prefix*, which is measured, not of the *cache*, which is
+  not.
+- **`prompt_cache_key` touches a shared invocation path.** Scope it to the
+  analyzer stage so Standard's other stages are untouched even at `all`.
 
-## Explicitly out of scope
+## Out of scope
 
-The writer's short prefix (Phase 5, optional); the repair loop's
-writer-computed arithmetic (`18.5296%`, `6.4393217`) which is a writer
-behaviour, not a caching one; and the chart row sampling, which was examined
-and deliberately left alone because the sampler protects the min, max and
-largest-swing rows the writer needs to cite.
+- **The analyzer is over budget on 36 of 40 profiles** and truncating catalogs
+  on nearly every call. Found during Phase 0, unrelated to caching, and
+  probably more consequential than caching. Record it; do not fix it here.
+- The writer's short prefix (Phase 6, optional).
+- The repair loop's writer-computed arithmetic (`18.5296%`, `6.4393217`) —
+  a writer behaviour, not a caching one.
+- Chart row sampling — examined and deliberately left alone, because the
+  sampler protects the min, max and largest-swing rows the writer cites.
