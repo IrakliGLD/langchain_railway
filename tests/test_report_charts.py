@@ -972,3 +972,109 @@ def test_an_incompatible_units_omission_names_the_axis_groups(caplog):
         "xrate",
         "quantity_hydro",
     ]
+
+
+def _wide_composition_with_single_valued_category():
+    """The production shape: 8 share columns beside a one-valued category.
+
+    get_balancing_composition returns a wide frame -- one row per month, one
+    column per component -- plus a `segment` column that carries the same
+    value on every row.
+    """
+
+    shares = {
+        "share_import": 0.0912,
+        "share_deregulated_ren": 0.1438,
+        "share_regulated_hpp": 0.0,
+        "share_regulated_new_tpp": 0.0074,
+        "share_regulated_old_tpp": 0.0039,
+        "share_renewable_ppa": 0.7468,
+        "share_thermal_ppa": 0.0,
+        "share_cfd_scheme": 0.0069,
+    }
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "segment", *shares]
+    table["rows"] = [
+        {"date": "2026-04", "segment": "balancing", **shares},
+        {"date": "2026-05", "segment": "balancing", **shares},
+    ]
+    table["unit_by_column"] = {name: "ratio" for name in shares}
+    table["total_row_count"] = 2
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+    return (
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )
+
+
+def test_a_one_valued_category_falls_through_to_the_components():
+    """The composition omitted in every run since 26f3bbf6.
+
+    The frame is wide -- the composition lives in eight share *columns* -- but
+    a `segment` column holding one repeated value sends it down the
+    category-axis branch, which pivots on segment, finds one category and
+    omits. The components were in numeric_columns the whole time.
+    """
+
+    plan, manifest = _wide_composition_with_single_valued_category()
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.status == "built", decision.reason_code
+    assert decision.artifact.type is ReportChartType.PIE
+    assert len(decision.artifact.data) == 8
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+
+
+def test_a_real_category_axis_is_still_preferred(caplog):
+    """Falling through must not cost the compositions that have categories."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "type_tech", "share_tech"]
+    table["rows"] = [
+        {"date": "2026-05", "type_tech": "hydro", "share_tech": 0.7},
+        {"date": "2026-05", "type_tech": "thermal", "share_tech": 0.3},
+    ]
+    table["unit_by_column"] = {"share_tech": "ratio"}
+    table["total_row_count"] = 2
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": ["share_tech"]})
+    chart["x_field"] = "type_tech"
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )[0]
+
+    assert decision.status == "built"
+    assert decision.artifact.type is ReportChartType.PIE
+    assert decision.artifact.metadata.x_axis == "type_tech"
+
+
+def test_a_one_valued_category_with_nothing_to_pivot_still_omits():
+    """Fall-through is not a licence to build something out of nothing."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "segment", "share_only"]
+    table["rows"] = [{"date": "2026-05", "segment": "balancing", "share_only": 1.0}]
+    table["unit_by_column"] = {"share_only": "ratio"}
+    table["total_row_count"] = 1
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )[0]
+
+    assert decision.status == "omitted"
+    assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"

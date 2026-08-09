@@ -316,6 +316,26 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
     return applied
 
 
+def _latest_period_rows(
+    rows: list[dict[str, Any]],
+    temporal: list[str],
+) -> list[dict[str, Any]]:
+    """Collapse a frame to the most recent period it carries."""
+
+    if not temporal:
+        return rows
+    time_column = temporal[0]
+    periods = [
+        str(row.get(time_column))
+        for row in rows
+        if row.get(time_column) is not None
+    ]
+    if not periods:
+        return rows
+    latest = max(periods)
+    return [row for row in rows if str(row.get(time_column)) == latest]
+
+
 def _ranked_by_contribution(
     columns: list[str],
     latest: dict[str, Any],
@@ -861,26 +881,26 @@ def build_report_chart_requests(
             continue
 
         if chart.purpose is ReportChartPurpose.COMPOSITION:
-            if categorical:
+            composition_rows = _latest_period_rows(rows, temporal)
+            # A single category is not a composition — but the frame may still
+            # hold one. get_balancing_composition returns eight share *columns*
+            # beside a `segment` column carrying the same value on every row,
+            # so the category axis collapses to one slice while the components
+            # sit unused in ``numeric``. That omitted the balancing composition
+            # in every run from 26f3bbf6 onward. Where the components can be
+            # pivoted, prefer them over nothing; the category axis still wins
+            # whenever it actually has categories.
+            pivot_available = bool(temporal) and len(numeric) >= 2
+            use_category_axis = bool(categorical) and not (
+                pivot_available and len(composition_rows) < 2
+            )
+            if use_category_axis:
                 x_axis = chart.x_field or categorical[0]
                 if x_axis not in categorical:
                     decisions.append(
                         _omitted(chart, "REPORT_CHART_CATEGORY_REQUIRED")
                     )
                     continue
-                composition_rows = rows
-                if temporal:
-                    time_column = temporal[0]
-                    latest_period = max(
-                        str(row.get(time_column))
-                        for row in rows
-                        if row.get(time_column) is not None
-                    )
-                    composition_rows = [
-                        row
-                        for row in rows
-                        if str(row.get(time_column)) == latest_period
-                    ]
                 snapshot_series = (chart.series_fields or [numeric[0]])[:_MAXIMUM_CHART_SERIES]
                 snapshot_type = _composition_snapshot_type(
                     snapshot_series,
