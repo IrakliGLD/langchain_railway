@@ -907,3 +907,68 @@ def test_a_mixed_composition_is_never_rolled_up_into_a_pie():
     decision = build_report_charts(plan, manifest)[0]
 
     assert decision.artifact.type is not ReportChartType.PIE
+
+
+def test_a_built_chart_says_what_it_actually_depicts(caplog):
+    """series_count=8 does not say which eight, or in what units.
+
+    Every production log so far reports a built chart as a count. Reading a
+    line like {"chart_type":"line","series_count":8} it is impossible to say
+    whether the chart is eight prices, eight shares, or a mix that should
+    never have shared an axis.
+    """
+
+    import json
+
+    plan = ReportPlan.model_validate(_plan_payload())
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        decision = build_report_charts(plan, _manifest())[0]
+
+    logged = next(
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_DECISION ")
+    )
+    assert decision.status == "built"
+    assert logged["detail"]["series"] == ["price"]
+    assert logged["detail"]["x_axis"] == "period"
+    assert logged["detail"]["dimensions"] == {"price": "price_tariff"}
+    assert logged["detail"]["units"] == {"price": "GEL/MWh"}
+    assert logged["detail"]["row_count"] == 2
+
+
+def test_an_incompatible_units_omission_names_the_axis_groups(caplog):
+    """The one omission that kept hiding why a chart did not render.
+
+    _axis_metadata refuses more than two (dimension, unit) groups, and the log
+    said only INCOMPATIBLE_UNITS -- not which groups, so a spurious third from
+    a mis-inferred dimension looked identical to a genuine one.
+    """
+
+    import json
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        decisions = build_report_charts(
+            _composition_plan(),
+            _mixed_unit_manifest(),
+        )
+
+    assert decisions[0].reason_code == "REPORT_CHART_INCOMPATIBLE_UNITS"
+    logged = next(
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_DECISION ")
+        and json.loads(record.getMessage().split(" ", 1)[1])["reason_code"]
+        == "REPORT_CHART_INCOMPATIBLE_UNITS"
+    )
+    assert logged["detail"]["axis_groups"] == [
+        ["price_tariff", "GEL/MWh"],
+        ["xrate", "GEL/USD"],
+        ["energy_qty", "MWh"],
+    ]
+    assert logged["detail"]["series"] == [
+        "p_bal_gel",
+        "xrate",
+        "quantity_hydro",
+    ]

@@ -616,7 +616,25 @@ def _built(
 ) -> ReportChartBuildDecision:
     axis_metadata = _axis_metadata(chart_type, series, units)
     if axis_metadata is None:
-        return _omitted(chart, "REPORT_CHART_INCOMPATIBLE_UNITS")
+        # More than two (dimension, unit) groups. Naming them separates a
+        # genuine three-unit frame from a spurious third group produced by a
+        # mis-inferred dimension, which read identically before.
+        return _omitted(
+            chart,
+            "REPORT_CHART_INCOMPATIBLE_UNITS",
+            {
+                "axis_groups": sorted(
+                    {
+                        (evidence_dimension(name), units.get(name, ""))
+                        for name in series
+                    },
+                    key=lambda group: [
+                        evidence_dimension(name) for name in series
+                    ].index(group[0]),
+                ),
+                "series": series[:8],
+            },
+        )
     axis_mode, axis_by_series, dimension_by_series = axis_metadata
     # Project rows onto the declared axis and series. metadata.series caps the
     # legend, but passing rows through verbatim let the payload carry every
@@ -686,7 +704,20 @@ def _built(
         reason_code="",
         artifact=artifact,
     )
-    _chart_decision_log(decision, chart_type=chart_type)
+    # A built chart used to log only a count. "series_count": 8 cannot say
+    # whether the eight are prices, shares, or a mix that should never have
+    # shared an axis, so no production log could tell what was depicted.
+    _chart_decision_log(
+        decision,
+        chart_type=chart_type,
+        detail={
+            "dimensions": dimension_by_series,
+            "row_count": len(projected_data),
+            "series": series[:8],
+            "units": artifact.metadata.unit_by_series,
+            "x_axis": x_axis,
+        },
+    )
     return decision
 
 
