@@ -39,6 +39,9 @@ from agent.evidence_derivation import (
 from agent.evidence_derivation import (
     requested_derived_metric_names as _requested_derived_metric_names,
 )
+from agent.evidence_derivation import (
+    unresolvable_requested_metrics as _unresolvable_requested_metrics,
+)
 from agent.fixture_candidates import log_fixture_candidate
 from agent.p4_rollout import (
     GATE_EVIDENCE_FINALIZATION,
@@ -3349,6 +3352,10 @@ def _process_query_impl(
         "evidence_readiness",
         requested_derived_metrics=list(ctx.requested_derived_metrics or []),
         missing_evidence_for_metrics=list(ctx.missing_evidence_for_metrics or []),
+        # Excused from the shortfall above, so it has to stay visible here:
+        # a metric naming no column the frame holds is an analyzer error, not
+        # evidence the collectors failed to fetch.
+        unresolvable_requested_metrics=_unresolvable_requested_metrics(ctx),
     )
 
     if stages.run_terminal(

@@ -27,6 +27,45 @@ def requested_derived_metric_names(ctx: QueryContext) -> list[str]:
     return names
 
 
+def _requested_metric_columns(ctx: QueryContext) -> dict[str, set[str]]:
+    """Map each requested derived metric to the columns it applies to."""
+    if not ctx.has_authoritative_question_analysis:
+        return {}
+
+    columns: dict[str, set[str]] = {}
+    for metric in ctx.question_analysis.analysis_requirements.derived_metrics or []:
+        name = getattr(metric.metric_name, "value", str(metric.metric_name or "")).strip()
+        column = str(getattr(metric, "metric", "") or "").strip()
+        if not name or not column:
+            continue
+        columns.setdefault(name, set()).add(column)
+    return columns
+
+
+def unresolvable_requested_metrics(ctx: QueryContext) -> list[str]:
+    """Return requested metrics naming no column the fetched frame holds.
+
+    Distinct from a shortfall: nothing was lost, the request could not be read
+    against the evidence that was collected. On job 106b043c the analyzer asked
+    a generation-mix track for changes over balancing-composition columns, and
+    conflating the two cost a track that had fetched everything it was asked
+    for -- in Standard, where a comparison in this state is answered with a
+    clarification, it costs the whole answer.
+
+    A metric may name several columns; one present column makes it readable.
+    """
+    # A pandas Index has no truth value, so it cannot be defaulted with ``or``.
+    columns = getattr(getattr(ctx, "df", None), "columns", None)
+    available = set(columns) if columns is not None else set()
+    if not available:
+        return []
+    return [
+        name
+        for name, wanted in _requested_metric_columns(ctx).items()
+        if not (wanted & available)
+    ]
+
+
 def missing_requested_evidence(ctx: QueryContext) -> list[str]:
     """Return requested derived metrics that Stage 3 did not materialize."""
     requested = list(ctx.requested_derived_metrics or [])
@@ -38,7 +77,12 @@ def missing_requested_evidence(ctx: QueryContext) -> list[str]:
         for record in (ctx.analysis_evidence or [])
         if str(record.get("derived_metric_name") or "").strip()
     }
-    return [name for name in requested if name not in evidence_names]
+    unresolvable = set(unresolvable_requested_metrics(ctx))
+    return [
+        name
+        for name in requested
+        if name not in evidence_names and name not in unresolvable
+    ]
 
 
 def derive_evidence(ctx: QueryContext) -> QueryContext:
