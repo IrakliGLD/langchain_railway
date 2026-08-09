@@ -355,6 +355,15 @@ def build_report_document_plan(
         section_id = track_to_section.get(track_id)
         if section_id is None:
             continue
+        # The manifest is the closed set of citable evidence, and the item cap
+        # in consolidate_report_evidence_packets can drop a table a candidate
+        # still points at. Requesting it anyway costs the whole job: the
+        # durable checkpoint and the assembler both reject a plan that
+        # references evidence outside the manifest, and the checkpoint code is
+        # not retryable. Such an exhibit could never be built either -- the
+        # builder reads the same manifest.
+        if not set(candidate.evidence_refs).issubset(manifest_refs):
+            continue
         charts.append(
             ReportChartRequest(
                 chart_id=candidate.chart_id,

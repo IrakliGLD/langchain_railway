@@ -84,7 +84,10 @@ from utils.request_deadline import (
     cap_request_deadline,
     current_request_execution_scope,
 )
-from utils.validation_diagnostics import validation_error_locations
+from utils.validation_diagnostics import (
+    validation_error_locations,
+    validation_error_rules,
+)
 
 _LOGGER = logging.getLogger("Enai.ReportProcessor")
 
@@ -214,8 +217,9 @@ def _log_report_stage_rejection(exc: Exception, *, stage: str) -> None:
     Three separate stages caught an exception and raised a bare error code:
     the document gate, the checkpoint builder, and the assembler. Job
     2c69f914 and job 6c01bd62 each failed non-retryably with nothing to fix
-    from. Only ``loc`` is read — the messages and inputs beside it are the
-    rejected values.
+    from. The ``input`` beside each error is the rejected value and is never
+    read; a rule with no field path is named by its own message, or a
+    model-validator rejection reports nothing at all.
     """
 
     _LOGGER.warning(
@@ -223,6 +227,7 @@ def _log_report_stage_rejection(exc: Exception, *, stage: str) -> None:
         json.dumps(
             {
                 "invalid_fields": _diagnostic_error_locations(exc),
+                "invalid_rules": validation_error_rules(exc),
                 "reason": type(exc).__name__,
                 "stage": _diagnostic_identifier(stage),
             },
@@ -370,9 +375,10 @@ class ReportJobProcessor:
             raise _report_failure("REPORT_CHECKPOINT_TOO_LARGE") from exc
         except (ValidationError, ValueError) as exc:
             # Job 2c69f914 failed here non-retryably with nothing to say which
-            # field was rejected — the same blind spot DOCUMENT_SCHEMA_INVALID
-            # had. Only ``loc`` is read; the messages and inputs beside it are
-            # the rejected values.
+            # field was rejected. Naming the field was not enough: every
+            # identity rule on this contract is a model_validator, and pydantic
+            # gives those an empty ``loc``, so job e3f43e84 still reported
+            # invalid_fields=[]. The rule's own message is the offender there.
             _LOGGER.warning(
                 "REPORT_CHECKPOINT_INVALID %s",
                 json.dumps(
@@ -381,6 +387,7 @@ class ReportJobProcessor:
                             str(kwargs.get("checkpoint_stage") or "")
                         ),
                         "invalid_fields": _diagnostic_error_locations(exc),
+                        "invalid_rules": validation_error_rules(exc),
                         "reason": type(exc).__name__,
                     },
                     ensure_ascii=True,

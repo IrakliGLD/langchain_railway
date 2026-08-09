@@ -2726,6 +2726,75 @@ def test_an_invalid_section_batch_names_the_fields_that_rejected_it(caplog):
     assert logged[0]["stage"] == "section_batch"
 
 
+def test_a_chart_whose_evidence_missed_the_manifest_is_not_requested():
+    """The manifest is closed, so the plan may not point outside it.
+
+    consolidate_report_evidence_packets caps the manifest at 31 items and
+    stops at the packet where the cap lands, while chart requests are built
+    from packet.chart_candidates without consulting it. A track whose items
+    straddle that boundary keeps evidence -- so the planner's own
+    "no manifest evidence" guard stays quiet -- but loses the table its
+    exhibit points at. The checkpoint then rejects the plan with
+    "references unknown manifest evidence" and the job dies non-retryably:
+    job e3f43e84 failed at document_plan_ready carrying 48 evidence items.
+    """
+
+    from agent.report_evidence import build_report_manifest_from_items
+    from contracts.report_generation import ReportGenerationCheckpoint
+
+    research_plan, packets, manifest, decisions, gate = _ready_components()
+    candidate_by_id = {
+        candidate.chart_id: candidate
+        for packet in packets
+        for candidate in packet.chart_candidates
+    }
+    # Pick an exhibit whose track keeps other evidence, so only the chart's
+    # own table goes missing.
+    dropped_ref = next(
+        ref
+        for decision in decisions
+        for ref in candidate_by_id[decision.chart_id].evidence_refs
+        if any(
+            item.evidence_ref != ref
+            for packet in packets
+            for item in packet.items
+            if ref in {other.evidence_ref for other in packet.items}
+        )
+    )
+    trimmed = build_report_manifest_from_items(
+        _QUERY,
+        [item for item in manifest.items if item.evidence_ref != dropped_ref],
+    )
+
+    plan = build_report_document_plan(
+        _QUERY,
+        research_plan,
+        packets,
+        trimmed,
+        gate,
+        decisions,
+    )
+
+    manifest_refs = set(trimmed.item_by_ref())
+    assert all(
+        set(chart.evidence_refs).issubset(manifest_refs)
+        for chart in plan.charts
+    ), [chart.chart_id for chart in plan.charts]
+    assert all(
+        chart_id in {chart.chart_id for chart in plan.charts}
+        for section in plan.sections
+        for chart_id in section.chart_refs
+    )
+    # The durable checkpoint is the authority that killed the job.
+    ReportGenerationCheckpoint(
+        contract_version="report-generation-checkpoint-v3",
+        checkpoint_stage="document_plan_ready",
+        research_plan=research_plan,
+        manifest=trimmed,
+        document_plan=plan,
+    )
+
+
 def _starved_section(section, spec):
     """Cite one fewer required ref than the section owes."""
 
