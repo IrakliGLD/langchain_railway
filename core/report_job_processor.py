@@ -343,6 +343,25 @@ class ReportJobProcessor:
         except ReportCheckpointTooLargeError as exc:
             raise _report_failure("REPORT_CHECKPOINT_TOO_LARGE") from exc
         except (ValidationError, ValueError) as exc:
+            # Job 2c69f914 failed here non-retryably with nothing to say which
+            # field was rejected — the same blind spot DOCUMENT_SCHEMA_INVALID
+            # had. Only ``loc`` is read; the messages and inputs beside it are
+            # the rejected values.
+            _LOGGER.warning(
+                "REPORT_CHECKPOINT_INVALID %s",
+                json.dumps(
+                    {
+                        "checkpoint_stage": _diagnostic_identifier(
+                            str(kwargs.get("checkpoint_stage") or "")
+                        ),
+                        "invalid_fields": _diagnostic_error_locations(exc),
+                        "reason": type(exc).__name__,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
             raise _report_failure("REPORT_CHECKPOINT_INVALID") from exc
 
     @staticmethod
