@@ -1,0 +1,407 @@
+"""Byte-exact pins on the analyzer prompt, ahead of the cache-ordering change.
+
+The analyzer prompt opens with ``UNTRUSTED_USER_QUESTION`` and appends the
+output schema after every block, so the only constant-to-constant prefix two
+unrelated questions share is 28 characters -- roughly seven tokens. Every one
+of the ~10,000 constant tokens behind the question is unreachable by a prefix
+cache.
+
+The plan (``docs/superpowers/plans/2026-08-09-analyzer-prompt-cache-ordering.md``)
+moves the constants in front. That is a behaviour change to the pipeline's
+semantic centre, guarded by a selector rather than by an exhaustive golden --
+the analyzer is an LLM over unbounded language and there is no golden to
+freeze. What CAN be frozen is the legacy prompt itself, so "Standard is
+byte-identical while the selector is off" is an assertion rather than a
+promise. This module is that assertion, and the matrix it defines is reused by
+the constants-first tests.
+"""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+
+# Ensure config validation passes before importing modules that depend on config.
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+os.environ.setdefault("NVIDIA_API_KEY", "test-nvidia-key")
+
+import core.llm as llm_core  # noqa: E402
+from contracts.question_analysis import QuestionAnalysis  # noqa: E402
+
+# The production default. Pinned literally so a developer with
+# ANALYZER_PROMPT_BUDGET_MAX_CHARS exported cannot silently change what these
+# tests measure.
+DEFAULT_ANALYZER_BUDGET_CHARS = 45_000
+
+_FIXTURE = Path(__file__).parent / "fixtures" / "analyzer_prompt_legacy_hashes.json"
+
+_HISTORY = [
+    {"role": "user", "content": "What was the balancing price in April 2026?"},
+    {"role": "assistant", "content": "It was 178.4 GEL/MWh."},
+]
+_PREVIOUS_CONTRACT = '{"top_tool":"get_prices","period":"2025"}'
+_ANOMALY = "Evidence returned 2 rows; expected at least 12."
+
+# One query per prompt family and per shape that changes block selection:
+# scalar, comparison, threshold (filter guide), explanation, forecast,
+# scenario, knowledge, a follow-up needing history, and the report-track
+# composite in both a realistic and a maximum-length form. Report-track shape
+# is deliberately present: it is what four routing misroutes traced to, and the
+# Standard routing golden does not contain it.
+_QUERIES: dict[str, tuple[str, list | None]] = {
+    "scalar": ("What was the balancing price in May 2026?", None),
+    "comparison": (
+        "Compare deregulated and balancing prices in 2025 vs 2024.", None),
+    "threshold": (
+        "Which months in 2025 had a balancing price above 200 GEL/MWh?", None),
+    "explanation": ("Why did the balancing price rise in July 2025?", None),
+    "forecast": ("Forecast the balancing price for the next six months.", None),
+    "scenario": ("What if hydro generation dropped 20% next winter?", None),
+    "knowledge": (
+        "What is the balancing market and how is its price set?", None),
+    "clarify": ("and for last year?", _HISTORY),
+    "report_track": (
+        "How did the generation mix shift between 2023 and 2025?\n"
+        "Research track: Generation mix and cross-border trade\n"
+        "Required coverage:\n"
+        "- What share did hydro, thermal and wind each contribute?\n"
+        "- How did import and export volumes change over the same period?\n"
+        "Report context: Prepare an analytical report on the Georgian "
+        "electricity market covering 2023-2025.",
+        None,
+    ),
+    # build_report_track_analysis_query bounds the primary question at 600
+    # chars, the title at 160 and each coverage bullet at 300, so this is the
+    # longest input the report path can hand the analyzer.
+    "report_track_long": (
+        "How did the generation mix shift between 2023 and 2025? " + "x" * 543
+        + "\nResearch track: " + "y" * 160
+        + "\nRequired coverage:\n"
+        + "\n".join(f"- {'z' * 300}" for _ in range(5)),
+        None,
+    ),
+}
+
+_CONTEXTS: dict[str, tuple[str, str]] = {
+    "": ("", ""),
+    "+prev": (_PREVIOUS_CONTRACT, ""),
+    "+anom": ("", _ANOMALY),
+    "+prev+anom": (_PREVIOUS_CONTRACT, _ANOMALY),
+}
+
+
+def _matrix() -> list[tuple[str, str, list | None, str, str]]:
+    """(case_id, query, history, previous_contract, evidence_anomaly_note)."""
+    return [
+        (f"{query_id}{context_id}", query, history, previous_contract, anomaly)
+        for query_id, (query, history) in _QUERIES.items()
+        for context_id, (previous_contract, anomaly) in _CONTEXTS.items()
+    ]
+
+
+ANALYZER_PROMPT_MATRIX = _matrix()
+
+
+def render_legacy_case(
+    query: str,
+    history: list | None,
+    previous_contract: str,
+    anomaly: str,
+) -> tuple[str, str, list[str]]:
+    """Render one matrix case exactly as ``llm_analyze_question`` does today.
+
+    Returns ``(prompt, budgeted_prompt, truncation_priority)``.
+    """
+    schema_hint = QuestionAnalysis.model_json_schema()
+    prompt_context = llm_core._build_analyzer_prompt_context(query, history)
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        query,
+        prompt_context.history_str,
+        prompt_context.effective_pre_type,
+        prompt_context.prompt_profile,
+        prompt_context=prompt_context,
+        previous_contract=previous_contract,
+        evidence_anomaly_note=anomaly,
+    )
+    prompt = llm_core._render_analyzer_prompt(blocks, schema_hint)
+    priority = llm_core._select_analyzer_truncation_priority(
+        query,
+        prompt_context.effective_pre_type,
+        prompt_context.prompt_profile,
+        prompt_context=prompt_context,
+    )
+    budgeted = llm_core._enforce_prompt_budget(
+        prompt,
+        label="question_analysis",
+        budget_override=DEFAULT_ANALYZER_BUDGET_CHARS,
+        truncation_priority=priority,
+    )
+    return prompt, budgeted, priority
+
+
+def common_prefix_length(texts: list[str]) -> int:
+    """Longest prefix shared by every string in ``texts``.
+
+    The common prefix of a set equals the common prefix of its lexicographic
+    minimum and maximum, so this stays linear instead of quadratic in the
+    number of cases.
+    """
+    if not texts:
+        return 0
+    low, high = min(texts), max(texts)
+    limit = min(len(low), len(high))
+    index = 0
+    while index < limit and low[index] == high[index]:
+        index += 1
+    return index
+
+
+def _budgeted_prompts() -> dict[str, str]:
+    return {
+        case_id: render_legacy_case(query, history, previous_contract, anomaly)[1]
+        for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX
+    }
+
+
+# --- the pin ---------------------------------------------------------------
+
+def test_legacy_analyzer_prompt_is_byte_stable():
+    """The mandate -- "no impact on Standard" -- as an assertion.
+
+    Regenerate deliberately, never reflexively, when the contract or a catalog
+    legitimately changes:
+
+        python -c "import tests.test_analyzer_prompt_order as t; t.regenerate()"
+    """
+    expected = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    actual = {
+        case_id: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        for case_id, prompt in _budgeted_prompts().items()
+    }
+
+    assert set(actual) == set(expected["hashes"]), (
+        "matrix membership changed; regenerate the fixture only if the new "
+        "matrix is intended"
+    )
+    drifted = sorted(
+        case_id
+        for case_id, digest in actual.items()
+        if expected["hashes"][case_id] != digest
+    )
+    assert not drifted, (
+        f"legacy analyzer prompt changed for {drifted}. If the selector is "
+        "off, Standard's prompt must be byte-identical to what shipped. When "
+        "the contract or a catalog changed on purpose, regenerate with: "
+        'python -c "import tests.test_analyzer_prompt_order as t; t.regenerate()"'
+    )
+
+
+def test_matrix_covers_every_prompt_family():
+    """A narrowed matrix would weaken every other test here silently."""
+    families = {
+        llm_core._build_analyzer_prompt_context(query, history).prompt_family
+        for _case_id, query, history, _prev, _anom in ANALYZER_PROMPT_MATRIX
+    }
+    assert families == {
+        "data",
+        "data_explanation",
+        "forecast_scenario",
+        "knowledge",
+    }, families
+
+
+# --- what the reorder is going to change -----------------------------------
+
+def test_todays_cacheable_prefix_is_negligible():
+    """28 characters. This is the defect the plan exists to fix."""
+    shared = common_prefix_length(list(_budgeted_prompts().values()))
+    assert shared < 200, (
+        f"expected a negligible shared prefix today, measured {shared}"
+    )
+
+
+def test_the_output_schema_trails_every_block_today():
+    """Moving only the question would leave 15k characters behind it.
+
+    ``_render_analyzer_prompt`` appends the schema after the last block, so the
+    single largest constant is the last thing in the prompt. Phase 2 has to
+    move this too, and this test is what notices if it does not.
+    """
+    schema_text = llm_core._compact_json(QuestionAnalysis.model_json_schema())
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        prompt, _budgeted, _priority = render_legacy_case(
+            query, history, previous_contract, anomaly
+        )
+        assert prompt.startswith("UNTRUSTED_USER_QUESTION:\n<<<"), case_id
+        assert prompt.endswith(schema_text), case_id
+
+
+# --- invariants the reorder depends on -------------------------------------
+
+def test_header_blocks_are_never_truncation_candidates():
+    """The constants-first header is only stable if it cannot be dropped.
+
+    ``tests/test_question_analyzer_phase_c.py`` already asserts CONTRACT_* tags
+    are disjoint from the truncation lists. This states the same requirement
+    from the caching side, naming the exact blocks the header will contain, so
+    adding one of them to a priority list fails here with the reason.
+    """
+    header_blocks = {
+        "CONTRACT_QUERY_TYPE_GUIDE",
+        "CONTRACT_ANSWER_KIND_GUIDE",
+        "CONTRACT_RULES",
+    }
+    for profile in (
+        llm_core._ANALYZER_TRUNCATION_DATA,
+        llm_core._ANALYZER_TRUNCATION_KNOWLEDGE,
+    ):
+        assert header_blocks.isdisjoint(profile), (
+            "a header block became truncation-eligible; the constants-first "
+            "prefix breaks at the first block whose length varies"
+        )
+
+
+def test_every_block_keeps_its_label_and_delimiters():
+    """Injection defence is the delimiters plus the system message, not order.
+
+    The reorder moves blocks; it must never move a label away from its body.
+    """
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        prompt_context = llm_core._build_analyzer_prompt_context(query, history)
+        blocks = llm_core._build_analyzer_prompt_blocks(
+            query,
+            prompt_context.history_str,
+            prompt_context.effective_pre_type,
+            prompt_context.prompt_profile,
+            prompt_context=prompt_context,
+            previous_contract=previous_contract,
+            evidence_anomaly_note=anomaly,
+        )
+        prompt = llm_core._render_analyzer_prompt(
+            blocks, QuestionAnalysis.model_json_schema()
+        )
+        for name, body in blocks:
+            assert f"{name}:\n<<<{body}>>>" in prompt, f"{case_id}: {name}"
+
+
+def test_the_untrusted_question_survives_every_budget_path():
+    """It is in neither truncation list, so no budget pressure can drop it."""
+    for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX:
+        _prompt, budgeted, _priority = render_legacy_case(
+            query, history, previous_contract, anomaly
+        )
+        assert "UNTRUSTED_USER_QUESTION:\n<<<" in budgeted, case_id
+
+
+def test_the_emergency_fallback_keeps_the_schema():
+    """No matrix case reaches the emergency path, so exercise it deliberately.
+
+    All 40 cases are handled by ``_section_aware_truncate``. The path that
+    matters for the reorder is the other one: when section-aware truncation
+    cannot free enough room it raises, and ``_protected_section_fallback_truncate``
+    rebuilds the prompt from prefix + surviving tagged sections + suffix.
+    """
+    query, history = _QUERIES["scenario"]
+    schema_text = llm_core._compact_json(QuestionAnalysis.model_json_schema())
+    prompt_context = llm_core._build_analyzer_prompt_context(query, history)
+    blocks = llm_core._build_analyzer_prompt_blocks(
+        query,
+        prompt_context.history_str,
+        prompt_context.effective_pre_type,
+        prompt_context.prompt_profile,
+        prompt_context=prompt_context,
+    )
+    prompt = llm_core._render_analyzer_prompt(
+        blocks, QuestionAnalysis.model_json_schema()
+    )
+    priority = llm_core._select_analyzer_truncation_priority(
+        query,
+        prompt_context.effective_pre_type,
+        prompt_context.prompt_profile,
+        prompt_context=prompt_context,
+    )
+
+    # A budget no amount of eligible truncation can satisfy.
+    trimmed = llm_core._enforce_prompt_budget(
+        prompt,
+        label="question_analysis",
+        budget_override=5_000,
+        truncation_priority=priority,
+    )
+
+    assert schema_text in trimmed
+    assert "UNTRUSTED_USER_QUESTION:\n<<<" in trimmed
+
+
+def test_untagged_text_between_sections_is_discarded_by_the_fallback():
+    """The constraint that decides where the schema may be placed.
+
+    ``_protected_section_fallback_truncate`` reconstructs from the text before
+    the first tagged section, the surviving tagged sections, and the text after
+    the last one. Anything untagged in between is dropped. So the reordered
+    prompt may put the raw schema in the prefix, but never between two blocks.
+    """
+    from core.prompt_budget import _protected_section_fallback_truncate
+
+    prompt = "\n\n".join(
+        [
+            "PREFIX KEEPS THIS",
+            "CONTRACT_RULES:\n<<<rules body>>>",
+            "INTERSTITIAL LOSES THIS",
+            "UNTRUSTED_USER_QUESTION:\n<<<the question>>>",
+            "SUFFIX KEEPS THIS",
+        ]
+    )
+
+    rebuilt = _protected_section_fallback_truncate(
+        prompt, 10, "probe", ["UNTRUSTED_CONVERSATION_HISTORY"]
+    )
+
+    assert "PREFIX KEEPS THIS" in rebuilt
+    assert "SUFFIX KEEPS THIS" in rebuilt
+    assert "CONTRACT_RULES:\n<<<rules body>>>" in rebuilt
+    assert "INTERSTITIAL LOSES THIS" not in rebuilt
+
+
+def test_most_of_the_matrix_truncates_under_the_default_budget():
+    """Truncation is the norm here, not an edge case.
+
+    36 of 40 profiles exceed the 40,500-char effective budget today, so the
+    analyzer routes with a shortened tool catalog on almost every call. That is
+    a separate defect from caching -- recorded here so raising the budget shows
+    up as a deliberate, visible change rather than a quiet one.
+    """
+    truncated = [
+        case_id
+        for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX
+        if len(render_legacy_case(query, history, previous_contract, anomaly)[0])
+        > int(DEFAULT_ANALYZER_BUDGET_CHARS * 0.90)
+    ]
+    assert len(truncated) == 36, (
+        f"{len(truncated)} of {len(ANALYZER_PROMPT_MATRIX)} cases truncate; "
+        "update this count deliberately when the analyzer budget changes"
+    )
+
+
+def regenerate() -> None:  # pragma: no cover - maintenance helper
+    """Rewrite the legacy hash fixture. Never call this to make a test pass."""
+    payload = {
+        "note": (
+            "SHA-256 of the budgeted analyzer prompt per matrix case. "
+            "Regenerate only when the contract or a catalog legitimately "
+            "changes; a diff here means Standard's prompt moved."
+        ),
+        "budget_chars": DEFAULT_ANALYZER_BUDGET_CHARS,
+        "hashes": {
+            case_id: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            for case_id, prompt in sorted(_budgeted_prompts().items())
+        },
+    }
+    _FIXTURE.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
