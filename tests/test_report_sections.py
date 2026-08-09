@@ -2443,6 +2443,31 @@ def test_section_prompt_word_floor_scales_down_with_thin_table_evidence():
     assert thin_minimum >= REPORT_SECTION_MIN_WORDS
 
 
+def test_the_advertised_word_floor_leaves_the_writer_room_to_undershoot():
+    """The ceiling has slack in the direction a writer errs; the floor had none.
+
+    A writer is told minimum_words and lands a few percent under it: job
+    fbc46aa4 wrote 266 and then 263 against a floor of 275, and the third
+    generative call of the run bought 13 words. The advertised ceiling already
+    sits 12.5% below the enforced one for exactly this reason. The enforced
+    floor does not move -- nothing that passes today may start failing.
+    """
+
+    for target, rows in ((120, None), (345, 24), (345, 2)):
+        advertised, _ = report_section_prompt_word_bounds(
+            target,
+            evidence_row_count=rows,
+        )
+        enforced, ceiling = report_section_validation_word_bounds(
+            target,
+            evidence_row_count=rows,
+        )
+        assert advertised > enforced, (target, rows)
+        # A margin that reached the ceiling would just trade one code for the
+        # other.
+        assert advertised < ceiling, (target, rows)
+
+
 def test_thin_evidence_section_is_not_rejected_for_being_short():
     """The end-to-end effect: a grounded short section stops failing length."""
 

@@ -18,7 +18,10 @@ from agent.report_document_generation import (
     validate_report_document,
 )
 from agent.report_sections import count_section_words
-from contracts.report import report_section_validation_word_bounds
+from contracts.report import (
+    report_section_prompt_word_bounds,
+    report_section_validation_word_bounds,
+)
 from contracts.report_document import (
     ReportDocumentDraft,
     ReportDocumentRepair,
@@ -649,8 +652,29 @@ def test_repair_prompt_names_the_word_count_shortfall(monkeypatch):
     )
     assert context["minimum_words"] == minimum_words
     assert context["maximum_words"] == maximum_words
-    assert context["words_to_add"] == minimum_words - context["word_count"]
-    assert context["words_to_add"] > 0
+    # The bounds stay honest -- they are the ones the gate applies -- but the
+    # ask carries the same margin the writer's advertised floor does. A repair
+    # clearing a grounding code deletes the sentences carrying the offending
+    # values, so asking for the bare shortfall lands it short again.
+    assert context["words_to_add"] > minimum_words - context["word_count"]
+    assert context["words_to_add"] == (
+        report_section_prompt_word_bounds(
+            next(
+                section
+                for section in document_plan.sections
+                if section.section_id == section_id
+            ).target_words,
+            evidence_row_count=manifest.assigned_row_count(
+                next(
+                    section
+                    for section in document_plan.sections
+                    if section.section_id == section_id
+                ).required_evidence_refs
+            ),
+        )[0]
+        - context["word_count"]
+    )
+    assert context["word_count"] + context["words_to_add"] <= maximum_words
 
 
 def test_repair_prompt_names_the_coordinates_a_numberless_section_may_cite(

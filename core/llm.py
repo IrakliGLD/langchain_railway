@@ -5011,12 +5011,24 @@ def llm_repair_report_document_sections(
                 manifest,
             ),
         )
+        # Ask for the margin, not the bare shortfall. A repair clearing
+        # UNGROUNDED_NUMERIC_CLAIM removes the sentences carrying the offending
+        # values, so it arrives shorter than it started: on job fbc46aa4 this
+        # section was told to add 9 words and came back 3 words down, and the
+        # run spent its last generative call on the difference.
+        target_words_floor = report_section_prompt_word_bounds(
+            section_spec.target_words,
+            evidence_row_count=_section_evidence_row_count(
+                section_spec,
+                manifest,
+            ),
+        )[0]
         context.update(
             {
                 "word_count": word_count,
                 "minimum_words": minimum_words,
                 "maximum_words": maximum_words,
-                "words_to_add": max(0, minimum_words - word_count),
+                "words_to_add": max(0, target_words_floor - word_count),
             }
         )
         made, required = report_analysis_numeric_claim_requirement(
