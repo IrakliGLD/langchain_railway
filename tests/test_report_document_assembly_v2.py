@@ -116,3 +116,68 @@ def test_document_assembly_discloses_an_expected_exhibit_omission():
         for section in result.sections
         for chart_ref in section.chart_refs
     }
+
+
+def test_a_conceded_length_shortfall_still_assembles():
+    """The gate ships a short document deliberately; assembly must agree.
+
+    _concede_length_shortfall downgrades a pure length shortfall to a warning
+    so the reader gets a usable report instead of a non-retryable failure. The
+    concession lived only in the gate's validation object, and the assembler
+    re-validated the draft from scratch and reached the opposite verdict — so
+    every conceded document died at assembly. Jobs 6c01bd62 (one conceded
+    section) and 70692961 (four, a Georgian report whose prose is far shorter
+    than the English-calibrated bounds) both failed exactly there.
+    """
+
+    import pytest
+
+    from agent.report_document_assembly import (
+        ReportDocumentAssemblyError,
+        assemble_report_document,
+    )
+    from agent.report_document_generation import validate_report_document
+    from contracts.report import REPORT_SECTION_MAX_WORDS
+
+    (
+        research_plan,
+        _packets,
+        manifest,
+        decisions,
+        _gate,
+        document_plan,
+    ) = _document_components()
+    draft = _valid_document_draft(document_plan, manifest)
+
+    # Raise the bounds instead of damaging the prose, so the only complaint
+    # the gate can raise is length and grounding stays intact.
+    document_plan = document_plan.model_copy(
+        update={
+            "sections": [
+                section.model_copy(
+                    update={"target_words": REPORT_SECTION_MAX_WORDS}
+                )
+                for section in document_plan.sections
+            ]
+        }
+    )
+    validation = validate_report_document(
+        draft, document_plan, manifest, research_plan
+    )
+    assert not validation.valid, "the bounds must be high enough to complain"
+    assert not [
+        code
+        for codes in validation.section_errors.values()
+        for code in codes
+        if code != "WORD_COUNT_TOO_SHORT"
+    ], "this fixture must isolate length, not grounding"
+
+    result = assemble_report_document(
+        document_plan,
+        research_plan,
+        manifest,
+        draft,
+        decisions,
+    )
+
+    assert isinstance(result, ReportResultV2)
