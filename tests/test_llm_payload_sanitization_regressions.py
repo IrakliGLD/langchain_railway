@@ -165,3 +165,91 @@ def test_candidate_topics_within_the_cap_keep_their_given_order():
         "balancing_price",
         "market_structure",
     ]
+
+
+def test_an_overlong_advisory_hint_is_dropped_not_fatal():
+    """Job 3b92f462: one prose string cost a track its whole analysis.
+
+    The analyzer wrote "generation volumes, generation by technology, import
+    volumes, export volumes" into sql_hints.metric, a 64-character identifier
+    field. Pydantic rejected the document, generation_mix_and_trade fell to
+    heuristic routing with analyzer_available=false, and the track reached the
+    writer with two rows and no derived metrics.
+
+    The sanitizer already drops unknown enum members and over-long lists for
+    exactly this reason. Length limits were the case it never covered.
+    """
+
+    payload = {
+        "sql_hints": {
+            "metric": (
+                "generation volumes, generation by technology, "
+                "import volumes, export volumes"
+            ),
+            "entities": [],
+        }
+    }
+
+    sanitized = _sanitize_question_analysis_payload(payload)
+
+    assert "metric" not in sanitized["sql_hints"]
+
+
+def test_a_required_overlong_string_is_truncated_rather_than_dropped():
+    """Dropping a required field would fail validation just as hard."""
+
+    payload = {
+        "canonical_query_en": "x" * 2500,
+        "classification": {"intent": "y" * 600},
+    }
+
+    sanitized = _sanitize_question_analysis_payload(payload)
+
+    assert len(sanitized["canonical_query_en"]) == 2000
+    assert len(sanitized["classification"]["intent"]) == 512
+
+
+def test_overlong_strings_are_handled_wherever_the_contract_limits_them():
+    """Schema-driven, so a new limited field cannot quietly go uncovered."""
+
+    payload = {
+        "tooling": {
+            "candidate_tools": [
+                {
+                    "name": "get_prices",
+                    "score": 0.9,
+                    "reason": "r" * 400,
+                    "params_hint": {"granularity": "g" * 40},
+                }
+            ]
+        },
+        # A period with coercible dates survives the existing normalization,
+        # so its over-long raw_text reaches the length rule.
+        "sql_hints": {
+            "period": {
+                "kind": "range",
+                "start_date": "2026-01-01",
+                "end_date": "2026-05-31",
+                "raw_text": "p" * 200,
+            }
+        },
+    }
+
+    sanitized = _sanitize_question_analysis_payload(payload)
+
+    tool = sanitized["tooling"]["candidate_tools"][0]
+    assert "reason" not in tool
+    assert "granularity" not in tool["params_hint"]
+    assert "raw_text" not in sanitized["sql_hints"]["period"]
+
+
+def test_strings_within_their_limit_are_untouched():
+    payload = {
+        "canonical_query_en": "What were prices in May 2026?",
+        "sql_hints": {"metric": "balancing"},
+    }
+
+    sanitized = _sanitize_question_analysis_payload(payload)
+
+    assert sanitized["canonical_query_en"] == "What were prices in May 2026?"
+    assert sanitized["sql_hints"]["metric"] == "balancing"

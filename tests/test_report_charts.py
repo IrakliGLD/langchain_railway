@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from copy import deepcopy
+from types import SimpleNamespace
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
@@ -907,3 +908,225 @@ def test_a_mixed_composition_is_never_rolled_up_into_a_pie():
     decision = build_report_charts(plan, manifest)[0]
 
     assert decision.artifact.type is not ReportChartType.PIE
+
+
+def test_a_built_chart_says_what_it_actually_depicts(caplog):
+    """series_count=8 does not say which eight, or in what units.
+
+    Every production log so far reports a built chart as a count. Reading a
+    line like {"chart_type":"line","series_count":8} it is impossible to say
+    whether the chart is eight prices, eight shares, or a mix that should
+    never have shared an axis.
+    """
+
+    import json
+
+    plan = ReportPlan.model_validate(_plan_payload())
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        decision = build_report_charts(plan, _manifest())[0]
+
+    logged = next(
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_DECISION ")
+    )
+    assert decision.status == "built"
+    assert logged["detail"]["series"] == ["price"]
+    assert logged["detail"]["x_axis"] == "period"
+    assert logged["detail"]["dimensions"] == {"price": "price_tariff"}
+    assert logged["detail"]["units"] == {"price": "GEL/MWh"}
+    assert logged["detail"]["row_count"] == 2
+
+
+def test_an_incompatible_units_omission_names_the_axis_groups(caplog):
+    """The one omission that kept hiding why a chart did not render.
+
+    _axis_metadata refuses more than two (dimension, unit) groups, and the log
+    said only INCOMPATIBLE_UNITS -- not which groups, so a spurious third from
+    a mis-inferred dimension looked identical to a genuine one.
+    """
+
+    import json
+
+    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
+        decisions = build_report_charts(
+            _composition_plan(),
+            _mixed_unit_manifest(),
+        )
+
+    assert decisions[0].reason_code == "REPORT_CHART_INCOMPATIBLE_UNITS"
+    logged = next(
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith("REPORT_CHART_DECISION ")
+        and json.loads(record.getMessage().split(" ", 1)[1])["reason_code"]
+        == "REPORT_CHART_INCOMPATIBLE_UNITS"
+    )
+    assert logged["detail"]["axis_groups"] == [
+        ["price_tariff", "GEL/MWh"],
+        ["xrate", "GEL/USD"],
+        ["energy_qty", "MWh"],
+    ]
+    assert logged["detail"]["series"] == [
+        "p_bal_gel",
+        "xrate",
+        "quantity_hydro",
+    ]
+
+
+def _wide_composition_with_single_valued_category():
+    """The production shape: 8 share columns beside a one-valued category.
+
+    get_balancing_composition returns a wide frame -- one row per month, one
+    column per component -- plus a `segment` column that carries the same
+    value on every row.
+    """
+
+    shares = {
+        "share_import": 0.0912,
+        "share_deregulated_ren": 0.1438,
+        "share_regulated_hpp": 0.0,
+        "share_regulated_new_tpp": 0.0074,
+        "share_regulated_old_tpp": 0.0039,
+        "share_renewable_ppa": 0.7468,
+        "share_thermal_ppa": 0.0,
+        "share_cfd_scheme": 0.0069,
+    }
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "segment", *shares]
+    table["rows"] = [
+        {"date": "2026-04", "segment": "balancing", **shares},
+        {"date": "2026-05", "segment": "balancing", **shares},
+    ]
+    table["unit_by_column"] = {name: "ratio" for name in shares}
+    table["total_row_count"] = 2
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+    return (
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )
+
+
+def test_a_one_valued_category_falls_through_to_the_components():
+    """The composition omitted in every run since 26f3bbf6.
+
+    The frame is wide -- the composition lives in eight share *columns* -- but
+    a `segment` column holding one repeated value sends it down the
+    category-axis branch, which pivots on segment, finds one category and
+    omits. The components were in numeric_columns the whole time.
+    """
+
+    plan, manifest = _wide_composition_with_single_valued_category()
+
+    decision = build_report_charts(plan, manifest)[0]
+
+    assert decision.status == "built", decision.reason_code
+    assert decision.artifact.type is ReportChartType.PIE
+    assert len(decision.artifact.data) == 8
+    assert _pie_slice_total(decision.artifact) == pytest.approx(1.0)
+
+
+def test_a_real_category_axis_is_still_preferred(caplog):
+    """Falling through must not cost the compositions that have categories."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "type_tech", "share_tech"]
+    table["rows"] = [
+        {"date": "2026-05", "type_tech": "hydro", "share_tech": 0.7},
+        {"date": "2026-05", "type_tech": "thermal", "share_tech": 0.3},
+    ]
+    table["unit_by_column"] = {"share_tech": "ratio"}
+    table["total_row_count"] = 2
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": ["share_tech"]})
+    chart["x_field"] = "type_tech"
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )[0]
+
+    assert decision.status == "built"
+    assert decision.artifact.type is ReportChartType.PIE
+    assert decision.artifact.metadata.x_axis == "type_tech"
+
+
+def test_a_one_valued_category_with_nothing_to_pivot_still_omits():
+    """Fall-through is not a licence to build something out of nothing."""
+
+    payload = _manifest().model_dump(mode="json")
+    table = payload["items"][0]
+    table["columns"] = ["date", "segment", "share_only"]
+    table["rows"] = [{"date": "2026-05", "segment": "balancing", "share_only": 1.0}]
+    table["unit_by_column"] = {"share_only": "ratio"}
+    table["total_row_count"] = 1
+    plan_payload = _plan_payload()
+    chart = plan_payload["charts"][0]
+    chart.update({"purpose": "composition", "series_fields": []})
+    chart.pop("x_field", None)
+
+    decision = build_report_charts(
+        ReportPlan.model_validate(plan_payload),
+        ReportEvidenceManifest.model_validate(payload),
+    )[0]
+
+    assert decision.status == "omitted"
+    assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"
+
+
+def test_trimming_a_mixed_frame_keeps_both_kinds_of_series():
+    """Job b3153071: five shares dropped, every quantity kept.
+
+    _largest_contributors ranked by magnitude in the latest period, so
+    quantities measured in thousands always outranked shares measured in
+    0..1 -- the ranking was comparing incompatible units. quantity_thermal
+    survived being dropped only because it happened to be zero that month.
+    Rank within a dimension, then take from each in turn.
+    """
+
+    from agent.report_charts import _largest_contributors
+
+    columns = [
+        *(f"quantity_c{index}" for index in range(6)),
+        *(f"share_c{index}" for index in range(6)),
+    ]
+    latest = {
+        **{f"quantity_c{index}": 1000.0 * (index + 1) for index in range(6)},
+        **{f"share_c{index}": 0.1 * (index + 1) for index in range(6)},
+    }
+
+    kept = _largest_contributors(
+        SimpleNamespace(chart_id="mixed_trend"), columns, latest
+    )
+
+    assert len(kept) == 8
+    quantities = [name for name in kept if name.startswith("quantity_")]
+    shares = [name for name in kept if name.startswith("share_")]
+    assert len(quantities) == 4 and len(shares) == 4, kept
+    # Within each kind the largest survive.
+    assert "quantity_c5" in kept and "quantity_c0" not in kept
+    assert "share_c5" in kept and "share_c0" not in kept
+
+
+def test_trimming_a_single_dimension_frame_is_pure_contribution_order():
+    """One kind of measure is directly comparable; nothing changes there."""
+
+    from agent.report_charts import _largest_contributors
+
+    columns = [f"share_c{index}" for index in range(10)]
+    latest = {name: 0.01 * (index + 1) for index, name in enumerate(columns)}
+
+    kept = _largest_contributors(
+        SimpleNamespace(chart_id="share_trend"), columns, latest
+    )
+
+    assert len(kept) == 8
+    assert "share_c0" not in kept and "share_c1" not in kept
+    assert "share_c9" in kept

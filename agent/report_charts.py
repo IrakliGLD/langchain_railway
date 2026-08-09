@@ -316,6 +316,26 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
     return applied
 
 
+def _latest_period_rows(
+    rows: list[dict[str, Any]],
+    temporal: list[str],
+) -> list[dict[str, Any]]:
+    """Collapse a frame to the most recent period it carries."""
+
+    if not temporal:
+        return rows
+    time_column = temporal[0]
+    periods = [
+        str(row.get(time_column))
+        for row in rows
+        if row.get(time_column) is not None
+    ]
+    if not periods:
+        return rows
+    latest = max(periods)
+    return [row for row in rows if str(row.get(time_column)) == latest]
+
+
 def _ranked_by_contribution(
     columns: list[str],
     latest: dict[str, Any],
@@ -350,7 +370,27 @@ def _largest_contributors(
 
     if len(columns) <= _MAXIMUM_CHART_SERIES:
         return columns
-    kept = set(_ranked_by_contribution(columns, latest)[:_MAXIMUM_CHART_SERIES])
+    # Rank *within* a dimension and then take from each in turn. Contribution
+    # is only meaningful between comparable measures: ranking a quantity in
+    # thousands against a share in 0..1 makes every quantity outrank every
+    # share, and on job b3153071 that dropped five shares and kept every
+    # quantity — one of which survived only because it happened to be zero.
+    by_dimension: dict[str, list[str]] = {}
+    for column in columns:
+        by_dimension.setdefault(evidence_dimension(column), []).append(column)
+    ranked = {
+        dimension: _ranked_by_contribution(members, latest)
+        for dimension, members in by_dimension.items()
+    }
+    kept: set[str] = set()
+    for depth in range(max(len(members) for members in ranked.values())):
+        for members in ranked.values():
+            if len(kept) >= _MAXIMUM_CHART_SERIES:
+                break
+            if depth < len(members):
+                kept.add(members[depth])
+        if len(kept) >= _MAXIMUM_CHART_SERIES:
+            break
     dropped = [column for column in columns if column not in kept]
     _LOGGER.info(
         "REPORT_CHART_SERIES_DROPPED %s",
@@ -616,7 +656,25 @@ def _built(
 ) -> ReportChartBuildDecision:
     axis_metadata = _axis_metadata(chart_type, series, units)
     if axis_metadata is None:
-        return _omitted(chart, "REPORT_CHART_INCOMPATIBLE_UNITS")
+        # More than two (dimension, unit) groups. Naming them separates a
+        # genuine three-unit frame from a spurious third group produced by a
+        # mis-inferred dimension, which read identically before.
+        return _omitted(
+            chart,
+            "REPORT_CHART_INCOMPATIBLE_UNITS",
+            {
+                "axis_groups": sorted(
+                    {
+                        (evidence_dimension(name), units.get(name, ""))
+                        for name in series
+                    },
+                    key=lambda group: [
+                        evidence_dimension(name) for name in series
+                    ].index(group[0]),
+                ),
+                "series": series[:8],
+            },
+        )
     axis_mode, axis_by_series, dimension_by_series = axis_metadata
     # Project rows onto the declared axis and series. metadata.series caps the
     # legend, but passing rows through verbatim let the payload carry every
@@ -686,7 +744,20 @@ def _built(
         reason_code="",
         artifact=artifact,
     )
-    _chart_decision_log(decision, chart_type=chart_type)
+    # A built chart used to log only a count. "series_count": 8 cannot say
+    # whether the eight are prices, shares, or a mix that should never have
+    # shared an axis, so no production log could tell what was depicted.
+    _chart_decision_log(
+        decision,
+        chart_type=chart_type,
+        detail={
+            "dimensions": dimension_by_series,
+            "row_count": len(projected_data),
+            "series": series[:8],
+            "units": artifact.metadata.unit_by_series,
+            "x_axis": x_axis,
+        },
+    )
     return decision
 
 
@@ -830,26 +901,26 @@ def build_report_chart_requests(
             continue
 
         if chart.purpose is ReportChartPurpose.COMPOSITION:
-            if categorical:
+            composition_rows = _latest_period_rows(rows, temporal)
+            # A single category is not a composition — but the frame may still
+            # hold one. get_balancing_composition returns eight share *columns*
+            # beside a `segment` column carrying the same value on every row,
+            # so the category axis collapses to one slice while the components
+            # sit unused in ``numeric``. That omitted the balancing composition
+            # in every run from 26f3bbf6 onward. Where the components can be
+            # pivoted, prefer them over nothing; the category axis still wins
+            # whenever it actually has categories.
+            pivot_available = bool(temporal) and len(numeric) >= 2
+            use_category_axis = bool(categorical) and not (
+                pivot_available and len(composition_rows) < 2
+            )
+            if use_category_axis:
                 x_axis = chart.x_field or categorical[0]
                 if x_axis not in categorical:
                     decisions.append(
                         _omitted(chart, "REPORT_CHART_CATEGORY_REQUIRED")
                     )
                     continue
-                composition_rows = rows
-                if temporal:
-                    time_column = temporal[0]
-                    latest_period = max(
-                        str(row.get(time_column))
-                        for row in rows
-                        if row.get(time_column) is not None
-                    )
-                    composition_rows = [
-                        row
-                        for row in rows
-                        if str(row.get(time_column)) == latest_period
-                    ]
                 snapshot_series = (chart.series_fields or [numeric[0]])[:_MAXIMUM_CHART_SERIES]
                 snapshot_type = _composition_snapshot_type(
                     snapshot_series,

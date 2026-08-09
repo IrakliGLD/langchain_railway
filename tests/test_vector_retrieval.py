@@ -2588,3 +2588,77 @@ def test_failure_provider_context_tolerates_unattributed_errors():
     from knowledge.vector_retrieval import _failure_provider_context
 
     assert _failure_provider_context(TimeoutError("slow")) == "unattributed"
+
+
+def _packing_chunk(index: int, size: int) -> VectorChunkRecord:
+    return VectorChunkRecord(
+        id=f"chunk-{index}",
+        document_id="doc-1",
+        document_title="Doc",
+        source_key="doc",
+        section_title=f"Section {index}",
+        text_content="X" * size,
+    )
+
+
+def test_packing_separates_a_lost_primary_from_a_skipped_expansion():
+    """`truncated` alone cannot say whether high-signal knowledge was lost.
+
+    Three different events set it: a primary semantic match that did not fit,
+    a cited reference that did not fit, and an adjacent sibling that did not
+    fit. The first discards a top-ranked match; the last is context bleed the
+    packer deliberately deprioritises. Every production log so far reported
+    all three as `packed_truncated: true`, so job c3138586 packing four of
+    nine chunks read the same as one skipping a sibling.
+    """
+
+    bundle = VectorKnowledgeBundle(
+        query="q",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=3,
+        chunk_count=3,
+        chunks=[_packing_chunk(index, 200) for index in range(3)],
+    )
+
+    packed = pack_vector_knowledge_for_prompt(bundle, max_chars=400)
+
+    assert packed.truncated is True
+    assert packed.dropped_primary_count == 2
+    assert packed.dropped_expansion_count == 0
+
+
+def test_a_skipped_expansion_is_not_reported_as_lost_knowledge():
+    """Every primary fits; only a sibling is skipped. Not the same failure."""
+
+    bundle = VectorKnowledgeBundle(
+        query="q",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=1,
+        chunk_count=1,
+        chunks=[_packing_chunk(0, 100)],
+        adjacent_chunks=[_packing_chunk(9, 5000)],
+    )
+
+    packed = pack_vector_knowledge_for_prompt(bundle, max_chars=400)
+
+    assert packed.dropped_primary_count == 0
+    assert packed.dropped_expansion_count >= 0
+
+
+def test_a_fully_packed_bundle_reports_no_loss():
+    bundle = VectorKnowledgeBundle(
+        query="q",
+        retrieval_mode=VectorKnowledgeMode.active,
+        strategy=RetrievalStrategy.hybrid,
+        top_k=2,
+        chunk_count=2,
+        chunks=[_packing_chunk(index, 50) for index in range(2)],
+    )
+
+    packed = pack_vector_knowledge_for_prompt(bundle, max_chars=9000)
+
+    assert packed.truncated is False
+    assert packed.dropped_primary_count == 0
+    assert packed.dropped_expansion_count == 0

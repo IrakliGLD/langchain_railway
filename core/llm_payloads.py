@@ -291,12 +291,101 @@ def _coerce_null_lists_from_schema(value, schema: dict | None):
     return value
 
 
+# Sentinel: a nullable over-long field is removed, not nulled, matching the
+# convention the period normalization already uses.
+_DROP = object()
+
+
+def _fit_overlong_strings_to_schema(value, schema: dict | None, *, required: bool = True):
+    """Make an over-long string fit the contract instead of failing it.
+
+    Same policy as the unknown-topic and over-long-list rules above, applied to
+    the case they never covered. On job 3b92f462 the analyzer wrote
+    "generation volumes, generation by technology, import volumes, export
+    volumes" into ``sql_hints.metric`` — a 64-character identifier — and the
+    whole QuestionAnalysis was rejected. ``generation_mix_and_trade`` fell to
+    heuristic routing with ``analyzer_available=false`` and reached the writer
+    with two rows and no derived metrics, for one unusable advisory hint.
+
+    A nullable field is dropped rather than truncated: a 64-character prefix of
+    a prose list is not a metric name, and a wrong hint is worse than none. A
+    required one is truncated, because dropping it fails validation just as
+    hard. Driven off the schema so a newly limited field cannot go uncovered.
+    """
+
+    node = _resolve_schema_node(schema)
+    if not isinstance(node, dict):
+        return value
+
+    if "anyOf" in node:
+        options = [_resolve_schema_node(option) for option in node["anyOf"]]
+        nullable = any(
+            isinstance(option, dict) and option.get("type") == "null"
+            for option in options
+        )
+        for option in options:
+            if not isinstance(option, dict) or option.get("type") == "null":
+                continue
+            fitted = _fit_overlong_strings_to_schema(
+                value,
+                option,
+                required=required and not nullable,
+            )
+            if fitted is not value:
+                return fitted
+        return value
+
+    node_type = node.get("type")
+    if node_type == "string" and isinstance(value, str):
+        limit = node.get("maxLength")
+        if limit is not None and len(value) > limit:
+            log.warning(
+                "Sanitized over-long analyzer string: %d > %d characters, %s",
+                len(value),
+                limit,
+                "truncated" if required else "dropped",
+            )
+            # ``_DROP`` rather than None so the caller removes the key, which
+            # is the convention the period normalization below already uses.
+            return value[:limit] if required else _DROP
+        return value
+
+    if node_type == "object" and isinstance(value, dict):
+        properties = node.get("properties", {})
+        mandatory = set(node.get("required", []))
+        for key, child_schema in properties.items():
+            if key not in value:
+                continue
+            fitted = _fit_overlong_strings_to_schema(
+                value.get(key),
+                child_schema,
+                required=key in mandatory,
+            )
+            if fitted is _DROP:
+                value.pop(key, None)
+            else:
+                value[key] = fitted
+        return value
+
+    if node_type == "array" and isinstance(value, list):
+        item_schema = node.get("items")
+        if item_schema is None:
+            return value
+        return [
+            _fit_overlong_strings_to_schema(item, item_schema)
+            for item in value
+        ]
+
+    return value
+
+
 def _sanitize_question_analysis_payload(payload: dict) -> dict:
     """Best-effort cleanup for question-analysis payloads before model validation."""
     if not isinstance(payload, dict):
         return payload
 
     payload = _coerce_null_lists_from_schema(payload, _QUESTION_ANALYSIS_SCHEMA)
+    payload = _fit_overlong_strings_to_schema(payload, _QUESTION_ANALYSIS_SCHEMA)
 
     def _pop_dict(source: dict, key: str) -> dict | None:
         value = source.pop(key, None)
