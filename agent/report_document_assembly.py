@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from agent.report_document_generation import validate_report_document
+from agent.report_document_generation import (
+    _concede_length_shortfall,
+    validate_report_document,
+)
 from agent.report_sections import count_section_words
 from contracts.report_charts import (
     ReportChartArtifact,
@@ -43,6 +46,17 @@ def assemble_report_document(
         manifest,
         research_plan,
     )
+    if not validation.valid:
+        # The gate reached this document only by deciding a pure length
+        # shortfall is shippable, and said so with REPORT_LENGTH_CONCEDED.
+        # That decision lived in its validation object, not in the draft, so
+        # re-validating here from scratch reached the opposite verdict and
+        # failed the report anyway — every conceded document died at assembly
+        # (jobs 6c01bd62 and 70692961). One authority decides length now.
+        validation = (
+            _concede_length_shortfall(validation, stage="document_assembly")
+            or validation
+        )
     if not validation.valid:
         raise ReportDocumentAssemblyError(
             "Report document is no longer valid at assembly."
