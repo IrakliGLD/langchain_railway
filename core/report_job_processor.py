@@ -207,6 +207,31 @@ def _diagnostic_error_locations(exc: Exception) -> list[str]:
     return located
 
 
+def _log_report_stage_rejection(exc: Exception, *, stage: str) -> None:
+    """Name what a blocking report stage rejected, never the values.
+
+    Three separate stages caught an exception and raised a bare error code:
+    the document gate, the checkpoint builder, and the assembler. Job
+    2c69f914 and job 6c01bd62 each failed non-retryably with nothing to fix
+    from. Only ``loc`` is read — the messages and inputs beside it are the
+    rejected values.
+    """
+
+    _LOGGER.warning(
+        "REPORT_STAGE_REJECTED %s",
+        json.dumps(
+            {
+                "invalid_fields": _diagnostic_error_locations(exc),
+                "reason": type(exc).__name__,
+                "stage": _diagnostic_identifier(stage),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
 def _diagnostic_error_codes(error_codes: list[str]) -> str:
     safe_codes = [
         code
@@ -1210,6 +1235,7 @@ class ReportJobProcessor:
             ValidationError,
             ValueError,
         ) as exc:
+            _log_report_stage_rejection(exc, stage="document_assembly")
             raise _report_failure("REPORT_ASSEMBLY_INVALID") from exc
         return result.model_dump(mode="json")
 
