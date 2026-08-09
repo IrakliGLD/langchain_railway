@@ -228,15 +228,53 @@ Fixing that is out of scope: the mandate is no impact on Standard, and this
 golden is exactly what would have to change to do it. Raise it as its own
 decision later, with its own evidence.
 
-### Phase 2 — Give the report its own decision module
+### Phase 2 — Give the report its own decision module — **DONE**
 
-New report-only module encoding Standard's full chain for the composition
-question. `agent/chart_pipeline.py` and `visualization/chart_selector.py`:
-**zero diff**.
+`agent/report_chart_rules.py` (report-only) + `tests/test_report_chart_rules.py`.
+Nothing imports the module yet — verified by grep, not by intent.
+`chart_pipeline.py` and `chart_selector.py`: **zero diff**.
 
-Deliverable: the module, plus an equivalence test asserting it agrees with the
-Phase 1 golden at every point where the question is the same. Nothing calls it
-yet.
+**Phase 1's open risk resolved first.** The golden pins `_choose_chart_type`
+only, so Phase 2 could not rely on it until the type decision was shown to be
+the actual lever. Confirmed at rest against real column names:
+
+| Columns | Inferred | Report answers today |
+|---|---|---|
+| `share_hydro, share_thermal, share_wind` | `{share}` | `pie` ✓ |
+| `share_hydro, quantity_hydro` | `{energy_qty, share}` | **`pie`** ← the defect |
+| `quantity_hydro, quantity_thermal` | `{energy_qty}` | `bar` ✓ |
+
+The mixed-unit pie reproduces without a production run. The category-axis
+branch is not at risk — `_chart_candidates` already narrows it to one series —
+so the exposure is the temporal-pivot branch (`report_charts.py:753`), where
+several numeric columns become slices of one whole and only the type decision
+stands between mixed units and a pie.
+
+**The rule, three lines, in Standard's order:** exact `{"share"}` under the
+category ceiling → `pie`; a continuous measure (`price_tariff`/`xrate`) with no
+share to anchor it → `line`, which is Standard's corrective pass and something
+the report never ran; everything else → `bar`.
+
+**Equivalence, and proof it discriminates.** The suite replays all 192 golden
+points that ask the report's question (64 dimension sets × 3 counts at
+`goal=composition, time=0, cats=1`) and asserts the copy matches Standard
+exactly. Because an equivalence test that cannot fail is worthless, all three
+rules were mutated and each was caught:
+
+| Mutation | Failures |
+|---|---|
+| `== {"share"}` → `"share" in` | 5 |
+| pie ceiling 8 → 9 | 6 |
+| drop the `line` corrective | 9 |
+
+A guard test also asserts the compared slice is neither empty nor trivial —
+Standard must answer all three of `pie`/`bar`/`line` across it, or agreeing
+with it would prove nothing.
+
+**Process note.** The mutation loop reverted with `git checkout`, which silently
+does nothing to an untracked file, so three mutations accumulated in the new
+module before the state was noticed and restored. Commit a new file before
+mutation-testing it.
 
 ### Phase 3 — Shadow
 
