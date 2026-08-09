@@ -17,6 +17,7 @@ from agent.report_evidence import (
     build_report_evidence_manifest,
     build_report_manifest_from_items,
     build_report_narrative_items,
+    declared_unit_spelling,
     make_report_narrative_evidence_item,
     make_report_table_evidence_item,
     report_pipeline_context_block_reason,
@@ -959,19 +960,29 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
         # (GEL/MWh)" while holding month-on-month percentages. Only the builder
         # knows that; the column names never will.
         transform = str(metadata.get("measureTransform") or "").lower()
-        percent_units = (
-            {
-                column: "%"
-                for column in columns
-                if any(
-                    isinstance(row.get(column), Real)
-                    and not isinstance(row.get(column), bool)
-                    for row in rows
-                )
-            }
-            if any(token in transform for token in ("pct", "percent"))
-            else {}
-        )
+        numeric_columns = [
+            column
+            for column in columns
+            if any(
+                isinstance(row.get(column), Real)
+                and not isinstance(row.get(column), bool)
+                for row in rows
+            )
+        ]
+        if any(token in transform for token in ("pct", "percent")):
+            # A percent-change panel keeps the labels of the levels it was
+            # computed from, so inference would declare those levels' units.
+            declared_units = {column: "%" for column in numeric_columns}
+        elif len(numeric_columns) == 1:
+            # A melted frame names its measure column "value" and puts what it
+            # measures on the axis instead — where analyzer.py already writes
+            # the resolved unit for Standard's own charts.
+            axis_unit = declared_unit_spelling(metadata.get("yAxisTitle", ""))
+            declared_units = (
+                {numeric_columns[0]: axis_unit} if axis_unit else {}
+            )
+        else:
+            declared_units = {}
         item = make_report_table_evidence_item(
             query=str(getattr(context, "query", "") or ""),
             title=title or f"Derived chart evidence {index + 1}",
@@ -982,7 +993,7 @@ def _derived_chart_evidence_items(context: Any) -> list[ReportEvidenceItem]:
                 getattr(context, "provenance_refs", None) or []
             ),
             max_rows=200,
-            unit_by_column=percent_units,
+            unit_by_column=declared_units,
         )
         if item is not None:
             items.append(item)

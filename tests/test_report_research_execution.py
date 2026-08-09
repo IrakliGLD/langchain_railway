@@ -1351,3 +1351,55 @@ def test_a_composition_exhibit_picks_an_axis_the_builder_accepts():
     }[candidate.evidence_refs[0]]
     # The rule the builder applies, asserted against what the candidate chose.
     assert candidate.x_field in chart_column_roles(item)["categorical"]
+
+
+def test_a_long_form_frame_takes_its_unit_from_the_axis_it_declares():
+    """A melted composition frame calls its measure column "value".
+
+    Name inference has nothing to read, so jobs 40e55527, 5cb4d210 and
+    106b043c all shipped evidence tables whose numbers could not be cited.
+    The builder already knows what the column holds and writes it into
+    yAxisTitle -- which is where analyzer.py puts the resolved unit for
+    Standard's own charts.
+    """
+
+    def query_pipeline(query, **_kwargs):
+        return QueryContext(
+            query=query,
+            cols=["date", "share_hydro"],
+            rows=[["2026-04", 0.61], ["2026-05", 0.72]],
+            provenance_cols=["date", "share_hydro"],
+            provenance_rows=[["2026-04", 0.61], ["2026-05", 0.72]],
+            provenance_refs=["query:track:composition"],
+            provenance_source="pipeline",
+            stats_hint="Hydro share rose over the month.",
+            chart_override_specs=[
+                {
+                    "type": "stackedbar",
+                    "data": [
+                        {"date": "2026-05", "category": "Share Hydro", "value": 0.72},
+                        {"date": "2026-05", "category": "Share Thermal", "value": 0.28},
+                    ],
+                    "metadata": {
+                        "title": "Composition: focus periods",
+                        "yAxisTitle": "Share",
+                        "role": "component_primary",
+                    },
+                }
+            ],
+            answer_mode="report",
+        )
+
+    packet = execute_report_track_analysis(
+        _QUERY,
+        _plan().tracks[0],
+        query_pipeline=query_pipeline,
+    )
+
+    melted = next(
+        item
+        for item in packet.items
+        if item.kind is ReportEvidenceKind.TABLE and "value" in item.columns
+    )
+    assert melted.unit_by_column.get("value") == "ratio"
+    assert melted.citable_numeric_columns() == ["value"]

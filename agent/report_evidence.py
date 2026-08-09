@@ -182,6 +182,29 @@ _LABEL_DECLARED_UNITS = {
 _LABEL_UNIT_SUFFIX_PATTERN = re.compile(r"(?P<name>.*?)\s*\((?P<unit>[^()]+)\)\s*")
 
 
+def declared_unit_spelling(label: str) -> str:
+    """Return the manifest's spelling of a unit named in prose, or "".
+
+    A unit reaches us as prose in two places: a column label's parenthesised
+    suffix ("Balancing electricity price (GEL/MWh)") and a chart's axis title,
+    which ``analyzer.py`` sets from the resolved unit and the frame builders
+    write as "Share" or "MoM change (%)". Both resolve through one table, so
+    the manifest cannot end up holding two spellings of the same unit.
+    """
+
+    text = " ".join(str(label or "").lower().split())
+    if not text:
+        return ""
+    parenthesised = _LABEL_UNIT_SUFFIX_PATTERN.fullmatch(text)
+    if parenthesised is not None:
+        declared = _LABEL_DECLARED_UNITS.get(
+            " ".join(parenthesised.group("unit").split())
+        )
+        if declared:
+            return declared
+    return _LABEL_DECLARED_UNITS.get(text, "")
+
+
 def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
     """Expose deterministic units already encoded by canonical column names."""
 
@@ -192,10 +215,8 @@ def _inferred_unit_by_column(columns: Sequence[str]) -> dict[str, str]:
             continue
         labelled = _LABEL_UNIT_SUFFIX_PATTERN.fullmatch(normalized)
         if labelled is not None:
-            declared = _LABEL_DECLARED_UNITS.get(
-                " ".join(labelled.group("unit").split())
-            )
-            if declared is not None:
+            declared = declared_unit_spelling(labelled.group("unit"))
+            if declared:
                 units[column] = declared
                 continue
             normalized = labelled.group("name").strip()
