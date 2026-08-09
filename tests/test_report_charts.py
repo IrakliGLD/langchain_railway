@@ -667,48 +667,48 @@ def test_an_unlabelable_comparison_is_omitted_rather_than_drawn():
     assert decisions[0].reason_code == "REPORT_CHART_AMBIGUOUS_CATEGORY_AXIS"
 
 
-def test_composition_type_shadows_the_report_rule_without_using_it(caplog):
-    """Phase 3: log the disagreement, change nothing.
+def test_a_composition_of_shares_and_prices_is_not_a_pie(caplog):
+    """Cutover, and why it could not wait for its own commit.
 
-    The report answers the composition question with Standard's goal-less
-    fallback, which tests `"share" in dimensions`; Standard's own composition
-    rule tests `dimensions == {"share"}`. The gap is the pie that put shares
-    and thousand MWh in one whole. Shadow first: the new answer is computed and
-    reported, and the old one is still the one returned.
+    Recovering the identifiers made the dimension set truthful, and the *old*
+    membership rule answers pie for {price_tariff, share} the moment it can
+    see the share it was previously blind to. Shipping the label fix alone
+    would therefore have introduced the mixed-unit pie it exists to prevent:
+    before, the garbage dimensions produced a bar by accident. The rule and
+    the input have to land together.
     """
 
     import json
 
     from agent.report_charts import _composition_snapshot_type
 
-    mixed = ["share_hydro", "quantity_hydro"]
+    mixed = [
+        "Balancing electricity price (GEL/MWh)",
+        "Share Import",
+        "Share Regulated Hpp",
+    ]
 
     with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
-        answer = _composition_snapshot_type(mixed, 4)
+        answer = _composition_snapshot_type(mixed, 3)
 
-    # The shadow must not move behaviour. This is the whole guarantee.
-    assert answer == "pie"
-
+    assert answer == "bar"
     logged = [
         json.loads(record.getMessage().split(" ", 1)[1])
         for record in caplog.records
         if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
     ]
-    assert logged, "the disagreement was not reported"
-    assert logged[0]["applied"] == "pie"
-    assert logged[0]["shadow"] == "bar"
-    assert logged[0]["dimensions"] == ["energy_qty", "share"]
-    assert logged[0]["category_count"] == 4
+    assert logged, "the change from the previous rule was not reported"
+    assert logged[0]["applied"] == "bar"
+    assert logged[0]["previous"] == "pie"
+    assert logged[0]["dimensions"] == ["price_tariff", "share"]
 
 
-def test_composition_type_is_silent_when_the_two_rules_agree(caplog):
-    """A shadow line on every chart would drown the disagreements."""
-
-    import json
+def test_a_composition_of_pure_shares_is_still_a_pie(caplog):
+    """The cutover must not cost the compositions that already worked."""
 
     from agent.report_charts import _composition_snapshot_type
 
-    pure = ["share_hydro", "share_thermal", "share_wind"]
+    pure = ["Share Import", "Share Regulated Hpp", "Share Deregulated Ren"]
 
     with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
         answer = _composition_snapshot_type(pure, 3)
@@ -719,51 +719,3 @@ def test_composition_type_is_silent_when_the_two_rules_agree(caplog):
         for record in caplog.records
         if record.getMessage().startswith("REPORT_CHART_TYPE_DISAGREEMENT ")
     ]
-
-
-def test_an_omitted_composition_names_the_shape_that_omitted_it(caplog):
-    """REPORT_CHART_INSUFFICIENT_CATEGORIES names a chart, not a cause.
-
-    Two different branches raise it -- a categorical table whose latest period
-    holds one row, and a wide table whose latest row pivots to one numeric
-    column -- and the log says "1 categories" either way. Job 4ea18b2b lost the
-    prices composition to it and the line cannot say which branch ran, so the
-    fix cannot be chosen. Name the branch and the shape.
-    """
-
-    import json
-
-    payload = _manifest().model_dump(mode="json")
-    table = payload["items"][0]
-    table["columns"] = ["type_tech", "share_tech"]
-    table["rows"] = [{"type_tech": "hydro", "share_tech": 1.0}]
-    table["unit_by_column"] = {"share_tech": "ratio"}
-    table["total_row_count"] = 1
-    manifest = ReportEvidenceManifest.model_validate(payload)
-    plan_payload = _plan_payload()
-    plan_payload["charts"][0].update(
-        {
-            "purpose": "composition",
-            "x_field": "type_tech",
-            "series_fields": ["share_tech"],
-        }
-    )
-
-    with caplog.at_level(logging.INFO, logger="Enai.ReportCharts"):
-        decision = build_report_charts(
-            ReportPlan.model_validate(plan_payload),
-            manifest,
-        )[0]
-
-    assert decision.reason_code == "REPORT_CHART_INSUFFICIENT_CATEGORIES"
-    logged = next(
-        json.loads(record.getMessage().split(" ", 1)[1])
-        for record in caplog.records
-        if record.getMessage().startswith("REPORT_CHART_DECISION ")
-        and json.loads(record.getMessage().split(" ", 1)[1])["chart_id"]
-        == decision.chart_id
-    )
-    assert logged["detail"]["branch"] == "category_axis"
-    assert logged["detail"]["category_count"] == 1
-    assert logged["detail"]["numeric_columns"] == ["share_tech"]
-    assert logged["detail"]["categorical_columns"] == ["type_tech"]

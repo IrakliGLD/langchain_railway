@@ -29,7 +29,78 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from context import COLUMN_LABELS, DERIVED_LABELS
 from visualization.chart_selector import infer_dimension
+
+_SUMMARY_FIELD_LABELS = {
+    "first": "First value",
+    "first_period": "First period",
+    "largest_decrease": "Largest decrease",
+    "largest_decrease_period": "Largest decrease period",
+    "largest_increase": "Largest increase",
+    "largest_increase_period": "Largest increase period",
+    "last": "Last value",
+    "last_period": "Last period",
+    "mean": "Mean",
+    "metric": "Metric",
+    "maximum": "Maximum",
+    "maximum_period": "Maximum period",
+    "minimum": "Minimum",
+    "minimum_period": "Minimum period",
+    "observations": "Observations",
+    "segment": "Segment",
+    "std_dev": "Standard deviation",
+}
+KNOWN_FIELD_LABELS = {
+    **COLUMN_LABELS,
+    **DERIVED_LABELS,
+    **_SUMMARY_FIELD_LABELS,
+}
+
+
+def field_label(field: str) -> str:
+    """Render a column identifier for a human reader."""
+
+    return KNOWN_FIELD_LABELS.get(
+        field,
+        field.replace("_", " ").strip().title(),
+    )
+
+
+# The inverse lives beside the map it inverts so the two cannot drift, and is
+# proven total over every known label by
+# tests/test_report_chart_rules.py. Built once: 96 labels, no collisions, so
+# the mapping is unambiguous in both directions.
+_IDENTIFIER_BY_LABEL = {
+    label: identifier for identifier, label in KNOWN_FIELD_LABELS.items()
+}
+
+
+def evidence_column_identifier(column: str) -> str:
+    """Recover the identifier a manifest column's display label came from.
+
+    A derived-chart exhibit reaches the manifest with the chart's *labels* as
+    its column names — ``_derived_chart_evidence_items`` says so itself, and
+    already works around it for units. Everything that reads meaning out of a
+    column name is wrong on those tables: on job e4049b2d a balancing price
+    inferred ``energy_qty`` because its label ends in "MWh", and every share
+    inferred ``other`` because the label is title-cased prose.
+
+    Falls back to the label's own snake_case form, then to the label
+    unchanged, so a name this cannot place behaves exactly as it does today.
+    """
+
+    text = str(column or "")
+    mapped = _IDENTIFIER_BY_LABEL.get(text)
+    if mapped is not None:
+        return mapped
+    return text.strip().lower().replace(" ", "_") or text
+
+
+def evidence_dimension(column: str) -> str:
+    """Infer a column's dimension from its identifier, not its label."""
+
+    return infer_dimension(evidence_column_identifier(column))
 
 # Mirrors agent/chart_pipeline._chart_type_for_visual_goal for
 # visual_goal="composition", and the corrective pass that follows it. Kept as

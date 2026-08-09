@@ -380,7 +380,42 @@ over `COLUMN_LABELS`/`DERIVED_LABELS` before using it; fall back to the label
 unchanged where inversion is not provably unique, so the worst case is today's
 behaviour.
 
-### Phase 4 — Cutover
+### Phase 3b + 4 — Label inverse and cutover, shipped together — **DONE**
+
+Option **C**. `agent/report_chart_rules` now owns the label map *and* its
+inverse, so the two cannot drift, and `report_charts` imports rather than
+keeping a second copy.
+
+**The inverse was proven before it was used**, as its own gated step: 96 known
+labels, **zero collisions**, and a test asserts
+`evidence_column_identifier(field_label(x)) == x` for every one. Unknown text
+falls back to its snake_case form and then to itself, so anything the inverse
+cannot place behaves exactly as it does today.
+
+All three report dimension-inference sites now read the identifier:
+`_axis_metadata`, `_composition_snapshot_type`, and `_plottable_series`.
+
+**Why the cutover could not wait for its own commit.** Recovering the
+identifiers makes the dimension set truthful — and the *old* membership rule
+answers `pie` for `{price_tariff, share}` the moment it can see the share it
+was previously blind to:
+
+| | dimensions seen | old rule | new rule |
+|---|---|---|---|
+| before the inverse | `{energy_qty, other, price_tariff}` | `bar` (by accident) | `line` (wrong) |
+| after the inverse | `{price_tariff, share}` | **`pie`** (the defect) | `bar` (correct) |
+
+Shipping the label fix alone would have *introduced* the mixed-unit pie it
+exists to prevent, because the garbage dimensions had been suppressing it by
+accident. The two land together or not at all. A test pins exactly this, and a
+second pins that a pure-share composition is still a pie — the cutover must not
+cost the compositions that already worked.
+
+`REPORT_CHART_TYPE_DISAGREEMENT` is kept, with `applied`/`previous` swapped, so
+the effect of the change stays visible in production rather than going dark at
+cutover.
+
+### Phase 4 — Cutover (superseded, folded into 3b above)
 
 Switch the report to the new module once the disagreements are understood and
 each is an improvement. Phase 1 golden unchanged, Standard files still zero

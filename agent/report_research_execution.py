@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Any
 
+from agent.report_chart_rules import evidence_dimension
 from agent.report_charts import chart_column_roles
 from agent.report_evidence import (
     build_report_evidence_manifest,
@@ -63,7 +64,6 @@ from utils.request_deadline import (
     bind_request_execution_scope_snapshot,
     current_request_execution_scope,
 )
-from visualization.chart_selector import infer_dimension
 
 _LOGGER = logging.getLogger("Enai.ReportResearch")
 
@@ -642,7 +642,7 @@ def _plottable_series(
     axes: list[tuple[str, str]] = []
     for column in ranked_columns:
         axis = (
-            infer_dimension(column),
+            evidence_dimension(column),
             str(unit_by_column.get(column, "")).strip(),
         )
         if axis not in axes:

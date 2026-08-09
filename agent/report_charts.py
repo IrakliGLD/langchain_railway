@@ -8,7 +8,12 @@ import math
 import re
 from typing import Any
 
-from agent.report_chart_rules import composition_chart_type
+from agent.report_chart_rules import (
+    KNOWN_FIELD_LABELS,
+    composition_chart_type,
+    evidence_dimension,
+    field_label,
+)
 from config import SUMMER_MONTHS, WINTER_MONTHS
 from context import COLUMN_LABELS, DERIVED_LABELS
 from contracts.report import ReportChartPurpose, ReportChartRequest, ReportPlan
@@ -39,37 +44,10 @@ _TABLE_SUMMARY_ROW_THRESHOLD = 6
 # emitted more would fail contract validation rather than render.
 _MAXIMUM_CHART_SERIES = 8
 _LOGGER = logging.getLogger("Enai.ReportCharts")
-_SUMMARY_FIELD_LABELS = {
-    "first": "First value",
-    "first_period": "First period",
-    "largest_decrease": "Largest decrease",
-    "largest_decrease_period": "Largest decrease period",
-    "largest_increase": "Largest increase",
-    "largest_increase_period": "Largest increase period",
-    "last": "Last value",
-    "last_period": "Last period",
-    "mean": "Mean",
-    "metric": "Metric",
-    "maximum": "Maximum",
-    "maximum_period": "Maximum period",
-    "minimum": "Minimum",
-    "minimum_period": "Minimum period",
-    "observations": "Observations",
-    "segment": "Segment",
-    "std_dev": "Standard deviation",
-}
-_KNOWN_FIELD_LABELS = {
-    **COLUMN_LABELS,
-    **DERIVED_LABELS,
-    **_SUMMARY_FIELD_LABELS,
-}
-
-
-def _field_label(field: str) -> str:
-    return _KNOWN_FIELD_LABELS.get(
-        field,
-        field.replace("_", " ").strip().title(),
-    )
+# The label map and its inverse live together in report_chart_rules so the
+# two cannot drift; a stale inverse would mislabel exactly the columns it
+# exists to recover.
+_field_label = field_label
 
 
 def _chart_decision_log(
@@ -116,7 +94,7 @@ def _axis_metadata(
     series: list[str],
     units: dict[str, str],
 ) -> tuple[str, dict[str, str], dict[str, str]] | None:
-    dimensions = {name: infer_dimension(name) for name in series}
+    dimensions = {name: evidence_dimension(name) for name in series}
     if chart_type not in {ReportChartType.LINE, ReportChartType.BAR}:
         return "single", {}, dimensions
     groups: list[tuple[str, str]] = []
@@ -300,23 +278,25 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
     The snapshot has already collapsed to one period, so it is asked as
     categories-without-time regardless of the source table's date column.
 
-    Shadow (Phase 3): ``select_chart_type`` is Standard's *goal-less* fallback,
-    reached only when the analyzer emits no ``visual_goal`` at all. The report
-    has a goal — ``ReportChartPurpose.COMPOSITION`` — and is entitled to the
-    rule Standard applies when it has one, which tests ``dimensions ==
-    {"share"}`` rather than membership. The two answers are compared here and
-    the disagreement is reported, but the answer returned is still the old one.
+    ``select_chart_type`` is Standard's *goal-less* fallback, reached only when
+    the analyzer emits no ``visual_goal`` at all, and its pie branch tests
+    ``"share" in dimensions``. The report has a goal —
+    ``ReportChartPurpose.COMPOSITION`` — and is entitled to the rule Standard
+    applies when it has one, which tests ``dimensions == {"share"}``. That
+    exactness is what keeps prices out of a pie of shares. The previous answer
+    is still computed, and reported whenever it differs, so the effect of the
+    change stays visible in production.
     """
 
-    dimensions = {infer_dimension(column) for column in columns}
-    applied = select_chart_type(
+    dimensions = {evidence_dimension(column) for column in columns}
+    previous = select_chart_type(
         has_time=False,
         has_categories=True,
         dimensions=dimensions,
         category_count=category_count,
     )
-    shadow = composition_chart_type(dimensions, category_count)
-    if shadow != applied:
+    applied = composition_chart_type(dimensions, category_count)
+    if previous != applied:
         _LOGGER.info(
             "REPORT_CHART_TYPE_DISAGREEMENT %s",
             json.dumps(
@@ -325,7 +305,7 @@ def _composition_snapshot_type(columns: list[str], category_count: int) -> str:
                     "category_count": category_count,
                     "columns": sorted(columns)[:8],
                     "dimensions": sorted(dimensions),
-                    "shadow": shadow,
+                    "previous": previous,
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -560,7 +540,7 @@ def _built(
         value: _field_label(value)
         for row in projected_data
         for value in row.values()
-        if isinstance(value, str) and value in _KNOWN_FIELD_LABELS
+        if isinstance(value, str) and value in KNOWN_FIELD_LABELS
     }
     artifact = ReportChartArtifact(
         chart_id=chart.chart_id,
