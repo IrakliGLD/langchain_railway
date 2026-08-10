@@ -190,35 +190,23 @@ this quarter, fixed by making positive routing conditions read only the leading
 question. A prompt-order change is exactly the kind of edit that could disturb
 it again, and the Standard golden would not see it.
 
-### Adopted with correction
+### Verified GPT-5.6 cache controls
 
-**"Use GPT-5.6's explicit caching controls … an explicit breakpoint after the
-stable header."** `prompt_cache_key` is real and supported —
-`langchain_openai/chat_models/base.py:3347` documents it as an invoke kwarg,
-and `:4151`/`:4205` surface `cache_creation` alongside `cache_read` in
-`input_token_details`. Both are adopted.
+GPT-5.6 caches exact prefixes at cache breakpoints and does not fall back to the
+longest matching unmarked prefix. Because the analyzer was sent as one user
+message, its implicit breakpoint included the changing question and report
+context. That explains the observed `cached_tokens=0` plus repeated full-prompt
+writes despite an 8,721-token common prefix.
 
-But **there is no cache-breakpoint parameter in this stack.** Breakpoints are
-Anthropic's mechanism. OpenAI prompt caching is automatic over the longest
-matching prefix; `prompt_cache_key` is a *routing-affinity* hint that raises
-the odds of landing on a machine that holds the prefix. It is worth setting
-precisely because of item 7 — a concurrent fan-out of four analyzer calls is
-the worst case for machine affinity — but the plan should not promise a
-control the API does not expose. "Breakpoint" is dropped from the wording;
-`prompt_cache_key` stays.
+The supported fix is an explicit `prompt_cache_breakpoint` after the stable
+header, the same `prompt_cache_key` on matching calls, and request-wide
+`prompt_cache_options={"mode": "explicit", "ttl": "30m"}`. The pinned
+`langchain-openai==1.3.5` preserves the breakpoint on text content blocks and
+forwards both request arguments. OpenAI documents these GPT-5.6 semantics in
+the [prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching).
 
-### Not adopted as fact
-
-**Pricing: cache writes at 1.25× input, cached reads at 0.1×, and a 30-minute
-minimum TTL.** I cannot verify provider pricing or TTL offline, and a 1.25×
-write surcharge is characteristic of Anthropic's *explicit* caching rather than
-OpenAI's automatic caching, which historically carries no write surcharge. The
-numbers are not going into the plan as given.
-
-The **conclusion** drawn from them is adopted in full and does not depend on
-them: `cached_prompt_tokens > 0` alone does not prove a saving, so Phase 4
-records reads, writes, latency and total prompt tokens, and confirms the
-current published rates at the time it runs before computing any cost claim.
+GPT-5.6 cache writes cost 1.25× the uncached input rate, so Phase 4 records
+reads, writes, latency, and total prompt tokens before making a savings claim.
 
 **Routine gate reduced to `pytest tests/ --ignore=tests/security -q`.** That is
 the repo's documented targeted suite, but since 2026-07-19 the targeted and
@@ -266,14 +254,15 @@ variance, not blockers.
 ```bash
 # Phase 4 — on the worker, only after Phase 3 is clean
 ENAI_ANALYZER_CONSTANTS_FIRST=report
+ENAI_ANALYZER_EXPLICIT_PROMPT_CACHE=true
 ```
 
 Run **two reports inside the provider's cache TTL** — not two calls inside one
 report's fan-out, which are concurrent and race each other's writes. Read
 `cached_prompt_tokens` and `cache_write_tokens` off the
-`llm_response_telemetry` line for `stage=report_question_analyzer`. Then, and
-only then, add `ENAI_ANALYZER_PROMPT_CACHE_KEY=true` and repeat, so the
-reorder and the affinity hint stay separable.
+`llm_response_telemetry` line for `stage=report_question_analyzer`. The explicit
+cache flag implies the stable schema-derived key; the standalone
+`ENAI_ANALYZER_PROMPT_CACHE_KEY` flag may remain off.
 
 ```bash
 # Phase 5 — after Phase 4 shows the mechanism works
@@ -385,21 +374,22 @@ Nothing activates until this is clean.
 
 ### Phase 4 — Report canary
 
-Set `ENAI_ANALYZER_CONSTANTS_FIRST=report` on the worker. Run **at least two
-reports inside the provider's cache TTL** — not two calls inside one report's
+Set `ENAI_ANALYZER_CONSTANTS_FIRST=report` and
+`ENAI_ANALYZER_EXPLICIT_PROMPT_CACHE=true` on the worker. Run **at least two
+reports inside the 30-minute minimum TTL** — not two calls inside one report's
 fan-out, which are concurrent and racing each other's writes.
 
 Record per analyzer call: prompt tokens, cache reads, cache writes, latency.
-Confirm the current published cache read/write rates at the time of the run,
-then compute the saving. If reads stay 0 across warm repeats, the caching model
-is wrong and the plan re-opens rather than gets patched.
+Confirm identical `stable_prefix_sha256` values, then compute the saving from
+the published read/write rates. The first sequential request should write the
+stable prefix; a later request with the same hash and key should read it while
+leaving the dynamic suffix uncached. If explicit mode still reads 0, capture
+the hashes and telemetry for a provider support case.
 
-Add `prompt_cache_key` in this phase, not before: a stable versioned key
-(`f"analyzer-{order}-{schema_digest}"`) threaded through
-`ProviderInvocation.invoke` (`core/provider_invocation.py:95`), set only for
-the analyzer stage and only for OpenAI-family providers. Measuring the reorder
-first and the affinity hint second keeps the two effects separable.
-*(live)*
+The stable schema-derived key and explicit options are scoped to the analyzer
+stage and allow-listed to OpenAI. Older OpenAI models and all other providers
+retain their historical invocation shape. *(implemented dark; provider canary
+pending)*
 
 ### Phase 5 — The Standard decision
 
@@ -429,11 +419,11 @@ behaviour change.
   model attends to most. This is a behaviour change, not a refactor.
 - **Report-track shape is already fragile.** Four misroutes this quarter traced
   to how that composite is read. Phase 3 exists for this and gates activation.
-- **Provider caching rules are assumed.** Phase 4 confirms them; Phase 0's
-  estimate is of the *prefix*, which is measured, not of the *cache*, which is
-  not.
-- **`prompt_cache_key` touches a shared invocation path.** Scope it to the
-  analyzer stage so Standard's other stages are untouched even at `all`.
+- **Provider cache reuse remains empirical.** The breakpoint behavior is
+  documented and the serialized request is tested, but Phase 4 must still
+  confirm provider reads in production.
+- **Prompt-cache controls touch a shared invocation path.** Context-local scope
+  and the OpenAI allow-list keep other stages and providers untouched.
 
 ## Out of scope
 

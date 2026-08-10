@@ -45,6 +45,7 @@ from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_CONSTANTS_FIRST_MODE,
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
+    ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE,
     ENABLE_ANALYZER_PROMPT_CACHE_KEY,
     ENABLE_OPENAI_FALLBACK,
     ENABLE_SKILL_PROMPTS_PLANNER,
@@ -501,6 +502,9 @@ _LLM_ATTEMPT_STAGE: ContextVar[str] = ContextVar("enai_llm_attempt_stage", defau
 # this follows the attempt-stage pattern already used here: empty by default,
 # and no other stage can be affected by leaving it that way.
 _LLM_PROMPT_CACHE_KEY: ContextVar[str] = ContextVar("enai_llm_prompt_cache_key", default="")
+_LLM_PROMPT_CACHE_OPTIONS: ContextVar[dict[str, str] | None] = ContextVar(
+    "enai_llm_prompt_cache_options", default=None
+)
 
 
 def _invoke_with_resilience(
@@ -524,6 +528,7 @@ def _invoke_with_resilience(
         breaker=breaker,
         sampling_temperature=sampling_temperature,
         prompt_cache_key=_LLM_PROMPT_CACHE_KEY.get(),
+        prompt_cache_options=_LLM_PROMPT_CACHE_OPTIONS.get(),
     )
 
 
@@ -3160,20 +3165,36 @@ _ANALYZER_ORDER_CONSTANTS_FIRST = "constants_first"
 _ANALYZER_SCHEMA_DIGEST: str = ""
 
 
-def _analyzer_prompt_cache_key(order: str) -> str:
+def _analyzer_explicit_prompt_cache_enabled(order: str, model_name: str) -> bool:
+    """Whether this call can use GPT-5.6 explicit prompt-cache controls."""
+    normalized_model = str(model_name or "").strip().lower()
+    supports_explicit_cache = normalized_model == "gpt-5.6" or normalized_model.startswith(
+        "gpt-5.6-"
+    )
+    return bool(
+        ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE
+        and order == _ANALYZER_ORDER_CONSTANTS_FIRST
+        and _provider_from_model_name(model_name) == "openai"
+        and supports_explicit_cache
+    )
+
+
+def _analyzer_prompt_cache_key(order: str, model_name: str = "") -> str:
     """Routing-affinity key for the analyzer's prompt prefix.
 
     Digest-derived rather than hand-versioned: the schema carries the
     KnowledgeTopicName enum, so adding a knowledge topic changes the header and
     must change the key. A hand-bumped version would be forgotten exactly then.
 
-    Empty when the flag is off or the ordering is legacy — a shared key across
-    a 28-character prefix would route unrelated calls to one machine for no
-    gain, and pinning the two changes apart is what keeps their effects
-    separable.
+    Explicit caching requires the same key on calls that share the marked
+    prefix, so its flag implies the key even when the standalone affinity flag
+    is off. Legacy ordering never receives a key.
     """
     global _ANALYZER_SCHEMA_DIGEST
-    if not ENABLE_ANALYZER_PROMPT_CACHE_KEY or order == _ANALYZER_ORDER_LEGACY:
+    explicit_cache = _analyzer_explicit_prompt_cache_enabled(order, model_name)
+    if order == _ANALYZER_ORDER_LEGACY or not (
+        ENABLE_ANALYZER_PROMPT_CACHE_KEY or explicit_cache
+    ):
         return ""
     if not _ANALYZER_SCHEMA_DIGEST:
         _ANALYZER_SCHEMA_DIGEST = hashlib.sha256(
@@ -3429,6 +3450,44 @@ def _render_analyzer_prompt(
     return "\n\n".join(sections)
 
 
+def _build_analyzer_invocation_messages(
+    system: str,
+    prompt: str,
+    *,
+    order: str,
+    explicit_cache: bool,
+) -> tuple[list[tuple[str, object]], str]:
+    """Build provider messages and mark the stable constants-first prefix."""
+    if not explicit_cache:
+        return [("system", system), ("user", prompt)], ""
+    if order != _ANALYZER_ORDER_CONSTANTS_FIRST:
+        raise ValueError("Explicit analyzer prompt caching requires constants-first ordering")
+
+    dynamic_marker = "\n\nUNTRUSTED_USER_QUESTION:\n<<<"
+    dynamic_marker_index = prompt.find(dynamic_marker)
+    if dynamic_marker_index < 0:
+        raise ValueError("Constants-first analyzer prompt has no user-question boundary")
+
+    split_at = dynamic_marker_index + len("\n\n")
+    stable_prefix = prompt[:split_at]
+    dynamic_suffix = prompt[split_at:]
+
+    return [
+        ("system", system),
+        (
+            "user",
+            [
+                {
+                    "type": "text",
+                    "text": stable_prefix,
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                },
+                {"type": "text", "text": dynamic_suffix},
+            ],
+        ),
+    ], stable_prefix
+
+
 def _render_legacy_analyzer_prompt(user_query: str, history_str: str, schema_hint: dict) -> str:
     """Render the pre-Phase-C analyzer prompt shape for shadow comparison only."""
     legacy_rules = "\n".join(
@@ -3682,6 +3741,11 @@ def llm_analyze_question(
         if report_profile
         else ""
     )
+    primary_model_name = (
+        report_model_name
+        if report_profile
+        else ROUTER_MODEL or get_primary_model_name()
+    )
     report_cache_identity = (
         f"|profile=report:{REPORT_MODEL_TYPE or _active_provider_key()}:"
         f"{report_model_name}"
@@ -3692,11 +3756,15 @@ def llm_analyze_question(
     # ordering must never be served under the other, or an A/B is not an A/B.
     # Appended only when non-legacy, so the shipped keys stay untouched.
     prompt_order = _analyzer_prompt_order(report_profile)
+    explicit_prompt_cache = _analyzer_explicit_prompt_cache_enabled(
+        prompt_order, primary_model_name
+    )
     prompt_order_identity = (
         f"|order={prompt_order}"
         if prompt_order != _ANALYZER_ORDER_LEGACY
         else ""
     )
+    prompt_cache_identity = "|prompt_cache=explicit" if explicit_prompt_cache else ""
     cache_input = (
         f"question_analysis_v7|pm={PIPELINE_MODE}|{user_query}|{history_str}|"
         f"{_compact_json(schema_hint)}|"
@@ -3709,6 +3777,7 @@ def llm_analyze_question(
         f"sys={system}"
         f"{report_cache_identity}"
         f"{prompt_order_identity}"
+        f"{prompt_cache_identity}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
@@ -3748,11 +3817,24 @@ def llm_analyze_question(
             router_thinking_budget = 512
         else:
             router_thinking_budget = min(router_thinking_budget, 512)
-    primary_model_name = (
-        report_model_name
-        if report_profile
-        else ROUTER_MODEL or get_primary_model_name()
+    prompt_cache_key = _analyzer_prompt_cache_key(prompt_order, primary_model_name)
+    messages, stable_cache_prefix = _build_analyzer_invocation_messages(
+        system,
+        prompt,
+        order=prompt_order,
+        explicit_cache=explicit_prompt_cache,
     )
+    prompt_cache_options = (
+        {"mode": "explicit", "ttl": "30m"}
+        if explicit_prompt_cache
+        else None
+    )
+    stable_prefix_digest = (
+        hashlib.sha256(stable_cache_prefix.encode("utf-8")).hexdigest()[:12]
+        if stable_cache_prefix
+        else "none"
+    )
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
     analyzer_label = (
         "Report question analyzer"
         if report_profile
@@ -3765,16 +3847,19 @@ def llm_analyze_question(
     # on but the prefix did not match", and those have opposite fixes.
     log.info(
         "analyzer_prompt_profile order=%s report_profile=%s selector=%s "
-        "prompt_chars=%d cache_key=%s",
+        "prompt_chars=%d cache_key=%s cache_mode=%s "
+        "stable_prefix_sha256=%s prompt_sha256=%s",
         prompt_order,
         report_profile,
         ANALYZER_CONSTANTS_FIRST_MODE,
         len(prompt),
-        "set" if _analyzer_prompt_cache_key(prompt_order) else "none",
+        "set" if prompt_cache_key else "none",
+        "explicit" if explicit_prompt_cache else "implicit",
+        stable_prefix_digest,
+        prompt_digest,
     )
-    cache_key_token = _LLM_PROMPT_CACHE_KEY.set(
-        _analyzer_prompt_cache_key(prompt_order)
-    )
+    cache_key_token = _LLM_PROMPT_CACHE_KEY.set(prompt_cache_key)
+    cache_options_token = _LLM_PROMPT_CACHE_OPTIONS.set(prompt_cache_options)
     try:
         message = _invoke_with_openai_fallback(
             lambda: get_llm_for_stage(
@@ -3784,7 +3869,7 @@ def llm_analyze_question(
                 report_profile=report_profile,
             ),
             primary_model_name,
-            [("system", system), ("user", prompt)],
+            messages,
             llm_start=llm_start,
             label=analyzer_label,
             **(
@@ -3811,6 +3896,7 @@ def llm_analyze_question(
         # Reset even on the success path: report tracks run analyzers on pooled
         # threads, and a leaked key would follow the thread into whatever stage
         # it serves next.
+        _LLM_PROMPT_CACHE_OPTIONS.reset(cache_options_token)
         _LLM_PROMPT_CACHE_KEY.reset(cache_key_token)
     return result
 

@@ -624,11 +624,16 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS = max(
 # nobody asked for is the wrong way to fail.
 # Routing-affinity hint for the analyzer prompt, independent of the ordering
 # selector so the two effects stay separable when measured. Only meaningful
-# once the ordering is constants-first: OpenAI caches the longest matching
-# prefix automatically, and this key raises the odds of reaching a machine
-# that holds it. There is no cache-breakpoint control in this API.
+# once the ordering is constants-first.
 ENABLE_ANALYZER_PROMPT_CACHE_KEY = os.getenv(
     "ENAI_ANALYZER_PROMPT_CACHE_KEY", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+# GPT-5.6 requires an exact prefix at a cache breakpoint and does not fall back
+# to the longest unmarked common prefix. This ships dark independently of the
+# ordering canary; when enabled, the analyzer adds a breakpoint after its
+# stable constants and uses request-wide explicit cache mode.
+ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE = os.getenv(
+    "ENAI_ANALYZER_EXPLICIT_PROMPT_CACHE", "false"
 ).strip().lower() in ("1", "true", "yes", "on")
 _ANALYZER_PROMPT_ORDER_MODES = ("off", "report", "all")
 ANALYZER_CONSTANTS_FIRST_MODE = (
