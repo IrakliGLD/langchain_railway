@@ -705,6 +705,7 @@ def analyze_question(ctx: QueryContext, *, source: str) -> QueryContext:
         prompt_validation = build_question_analyzer_prompt_validation_artifacts(
             ctx.query,
             ctx.conversation_history,
+            report_profile=ctx.answer_mode == AnswerMode.REPORT.value,
         )
 
     try:

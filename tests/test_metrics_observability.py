@@ -347,6 +347,45 @@ def test_cached_prompt_tokens_are_extracted_from_both_provider_shapes():
     assert _extract_cached_prompt_tokens(unreported) == 0
 
 
+def test_cache_write_tokens_are_extracted_alongside_reads():
+    """A read alone cannot establish a saving; the write is priced differently.
+
+    ``langchain-openai`` reports the write as ``input_token_details.cache_creation``
+    (chat_models/base.py); Anthropic uses ``cache_creation_input_tokens``.
+    """
+
+    from core.llm_runtime import (
+        _extract_cache_write_tokens,
+        _extract_cached_prompt_tokens,
+    )
+
+    openai_shape = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 11_076,
+            "input_token_details": {"cache_read": 0, "cache_creation": 8_704},
+        },
+        response_metadata={},
+    )
+    anthropic_shape = SimpleNamespace(
+        usage_metadata={"cache_creation_input_tokens": 1_024},
+        response_metadata={},
+    )
+    read_not_write = SimpleNamespace(
+        usage_metadata={},
+        response_metadata={
+            "token_usage": {"prompt_tokens_details": {"cached_tokens": 8_704}}
+        },
+    )
+
+    assert _extract_cache_write_tokens(openai_shape) == 8_704
+    assert _extract_cache_write_tokens(anthropic_shape) == 1_024
+    # A hit reports a read and no write. Reporting the read as a write would
+    # make every cached call look like it paid the write price.
+    assert _extract_cache_write_tokens(read_not_write) == 0
+    assert _extract_cached_prompt_tokens(read_not_write) == 8_704
+    assert _extract_cached_prompt_tokens(anthropic_shape) == 0
+
+
 def test_cached_prompt_tokens_are_priced_at_the_cached_rate(monkeypatch):
     monkeypatch.setattr(llm, "OPENAI_INPUT_COST_PER_1K_USD", 1.0)
     monkeypatch.setattr(llm, "OPENAI_OUTPUT_COST_PER_1K_USD", 0.0)

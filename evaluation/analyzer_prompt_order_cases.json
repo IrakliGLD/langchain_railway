@@ -1,0 +1,65 @@
+{
+  "note": "Report-track analyzer inputs for the prompt-order paired eval. Each query mirrors what agent/report_research_execution.py build_report_track_analysis_query hands the analyzer: leading question, 'Research track:' title, 'Required coverage:' bullets, then 'Report context:'. Bounds applied by that builder are 600 / 160 / 300 / 1000 characters respectively. There is no expected value here on purpose -- the eval compares the two orderings against each other, not against a ground truth.",
+  "cases": [
+    {
+      "id": "t01",
+      "track": "price_formation",
+      "note": "Scalar-leaning lead question inside an analytical track.",
+      "query": "What was the average balancing electricity price in 2025?\nResearch track: Balancing price formation and volatility\nRequired coverage:\n- How did the monthly balancing price move through 2025?\n- Which months showed the largest deviation from the annual average?\n- How did the 2025 average compare with 2024?\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on price formation, generation mix and cross-border trade."
+    },
+    {
+      "id": "t02",
+      "track": "generation_mix",
+      "note": "Composition question; the leading line asks for shares.",
+      "query": "How did the generation mix shift between 2023 and 2025?\nResearch track: Generation mix and technology shares\nRequired coverage:\n- What share did hydro, thermal and wind each contribute in every year?\n- Did the seasonal pattern of hydro output change?\n- How did total generation change over the period?\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on price formation, generation mix and cross-border trade."
+    },
+    {
+      "id": "t03",
+      "track": "cross_border_trade",
+      "note": "Two metrics in the lead question; a classic dual-axis candidate.",
+      "query": "How did import and export volumes develop between 2023 and 2025?\nResearch track: Cross-border trade flows\nRequired coverage:\n- Which counterparty countries dominated imports and exports?\n- Was Georgia a net importer or net exporter in each year?\n- How did trade volumes correlate with domestic generation?\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on price formation, generation mix and cross-border trade."
+    },
+    {
+      "id": "t04",
+      "track": "explanation",
+      "note": "Why-question lead: drives needs_driver_analysis and explanation answer kind.",
+      "query": "Why did the balancing price rise sharply in the second half of 2025?\nResearch track: Drivers of the 2025 price increase\nRequired coverage:\n- What happened to hydro generation over the same months?\n- Did import volumes or import prices change materially?\n- How did the exchange rate move against the US dollar?\nReport context: Prepare an analytical report explaining the 2025 movement in Georgian electricity prices for a commercial off-taker."
+    },
+    {
+      "id": "t05",
+      "track": "market_design",
+      "note": "Conceptual lead, no numeric metric; should route to knowledge.",
+      "query": "How is the Georgian balancing market organised and who sets the price?\nResearch track: Market design and regulatory framework\nRequired coverage:\n- What role does ESCO play in balancing settlement?\n- How do direct contracts and PPAs interact with the balancing market?\n- What changed with the transition to the organised electricity market?\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on market design and price formation."
+    },
+    {
+      "id": "t06",
+      "track": "forecast",
+      "note": "Forward-looking lead; the forecast_scenario prompt family.",
+      "query": "What is the outlook for the balancing price over the next twelve months?\nResearch track: Price outlook and sensitivity\nRequired coverage:\n- What trend do the last twenty-four months of prices imply?\n- How sensitive is the projection to the GEL/USD exchange rate?\n- Which assumptions would most change the result?\nReport context: Prepare a forward-looking analytical report on Georgian electricity prices for a commercial off-taker."
+    },
+    {
+      "id": "t07",
+      "track": "tariffs",
+      "note": "Regulated-side lead; distinct catalog needs from the wholesale tracks.",
+      "query": "How did regulated tariffs change for the distribution companies between 2023 and 2025?\nResearch track: Regulated tariffs and end-user prices\nRequired coverage:\n- Which tariff categories changed and by how much?\n- How did regulated tariffs compare with deregulated market prices?\n- What proportion of consumption remained on regulated supply?\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on tariffs and end-user prices."
+    },
+    {
+      "id": "t08",
+      "track": "currency",
+      "note": "Correlation lead across two dimensions with different units.",
+      "query": "How did the GEL/USD exchange rate affect electricity prices between 2023 and 2025?\nResearch track: Currency influence on price formation\nRequired coverage:\n- How closely did the balancing price in GEL track the exchange rate?\n- Did the price in USD terms behave differently from the price in GEL?\n- Which periods showed the widest divergence?\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on price formation and currency effects."
+    },
+    {
+      "id": "t09",
+      "track": "maximum_length",
+      "note": "Every field at the builder's bound, so truncation behaviour is exercised.",
+      "query": "How did the composition of Georgian electricity generation, imports and exports change between 2023 and 2025, and what does that imply for the balancing price paid by commercial off-takers who buy on the deregulated market rather than under a long-term power purchase agreement or a contract for difference, taking into account seasonal hydrology, thermal availability, the commissioning of new wind capacity, the cost of imported electricity from neighbouring systems, and the movement of the national currency against the US dollar over the same period?\nResearch track: Integrated view of generation, trade, currency and price formation across the period\nRequired coverage:\n- What share of total supply came from hydro, thermal, wind and imports in each year of the period, measured in gigawatt hours and as a percentage of the total, and how did that composition change from one year to the next?\n- How did the monthly balancing price move in both GEL and USD terms, and which months showed the largest month-on-month and year-on-year changes in each currency across the whole period under review?\n- What relationship, if any, is observable between the share of imported electricity in total supply and the balancing price, and does that relationship hold in every season or only in the low-hydrology months?\nReport context: Prepare a comprehensive analytical report on the Georgian electricity market covering the period from January 2023 to December 2025, aimed at a commercial off-taker evaluating whether to procure on the deregulated market or to enter a long-term power purchase agreement, with emphasis on price formation, the generation mix, cross-border trade, regulated tariffs and the influence of the exchange rate."
+    },
+    {
+      "id": "t10",
+      "track": "single_coverage",
+      "note": "Only one research question, so no 'Required coverage:' block is emitted.",
+      "query": "What were the monthly deregulated market prices in 2025?\nResearch track: Deregulated market price series\nReport context: Prepare an analytical report on the Georgian electricity market covering 2023-2025, with emphasis on price formation."
+    }
+  ]
+}

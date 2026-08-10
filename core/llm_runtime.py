@@ -85,6 +85,40 @@ def _extract_cached_prompt_tokens(message) -> int:
     when a provider does not tell us.
     """
 
+    return _first_reported_token_count(
+        message,
+        (
+            "cached_tokens",
+            "cache_read",
+            "cache_read_input_tokens",
+            "cached_content_token_count",
+        ),
+    )
+
+
+def _extract_cache_write_tokens(message) -> int:
+    """Best-effort extraction of the share of the prompt written to cache.
+
+    A cache read and a cache write are priced differently, so ``cached_tokens
+    > 0`` on its own does not establish a saving — the write that produced it
+    has to be counted too. ``langchain-openai`` surfaces this as
+    ``input_token_details.cache_creation``; Anthropic reports
+    ``cache_creation_input_tokens``. Unreported reads as 0, same honest
+    ambiguity as the read side.
+    """
+
+    return _first_reported_token_count(
+        message,
+        (
+            "cache_creation",
+            "cache_creation_input_tokens",
+        ),
+    )
+
+
+def _usage_dicts(message) -> list[dict]:
+    """Every dict on a provider message that might carry token counters."""
+
     candidates: list[dict] = []
     usage_metadata = getattr(message, "usage_metadata", None)
     if isinstance(usage_metadata, dict):
@@ -104,13 +138,12 @@ def _extract_cached_prompt_tokens(message) -> int:
         details = response_metadata.get("usage_metadata")
         if isinstance(details, dict):
             candidates.append(details)
-    for source in candidates:
-        for field in (
-            "cached_tokens",
-            "cache_read",
-            "cache_read_input_tokens",
-            "cached_content_token_count",
-        ):
+    return candidates
+
+
+def _first_reported_token_count(message, fields: tuple[str, ...]) -> int:
+    for source in _usage_dicts(message):
+        for field in fields:
             value = _to_int(source.get(field))
             if value > 0:
                 return value
