@@ -20,9 +20,8 @@ class CircuitBreaker(Protocol):
     def record_failure(self) -> None: ...
 
 
-# Providers whose SDK accepts ``prompt_cache_key``. langchain-openai documents
-# it as an invoke kwarg; nothing else here does.
-_PROMPT_CACHE_KEY_PROVIDERS = frozenset({"openai"})
+# Providers whose SDK accepts OpenAI prompt-cache request controls.
+_PROMPT_CACHE_CONTROL_PROVIDERS = frozenset({"openai"})
 
 
 class ProviderInvocationRuntime:
@@ -49,12 +48,13 @@ class ProviderInvocationRuntime:
         timeout_seconds: float,
         sampling_temperature: float | None = None,
         prompt_cache_key: str = "",
-    ) -> dict[str, float | int | str]:
+        prompt_cache_options: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         if provider == "gemini":
             # langchain-google-genai accepts timeout in seconds and converts it
             # to the google-genai HTTP millisecond value internally. The wrapper
             # also counts the first attempt, so one attempt disables SDK retries.
-            kwargs: dict[str, float | int | str] = {
+            kwargs: dict[str, Any] = {
                 "timeout": max(0.001, float(timeout_seconds)),
                 "max_retries": 1,
             }
@@ -62,13 +62,12 @@ class ProviderInvocationRuntime:
             kwargs = {"timeout": timeout_seconds}
         if sampling_temperature is not None:
             kwargs["temperature"] = float(sampling_temperature)
-        # OpenAI-only routing affinity: same key, better odds of landing on a
-        # machine that already holds the prefix. It is a hint, not a cache
-        # breakpoint — this API has no such control. Allow-listed rather than
-        # deny-listed, so a provider added later cannot inherit an argument its
-        # SDK would reject.
-        if prompt_cache_key and provider in _PROMPT_CACHE_KEY_PROVIDERS:
+        # Allow-listed rather than deny-listed, so a provider added later cannot
+        # inherit OpenAI request arguments its SDK would reject.
+        if prompt_cache_key and provider in _PROMPT_CACHE_CONTROL_PROVIDERS:
             kwargs["prompt_cache_key"] = prompt_cache_key
+        if prompt_cache_options and provider in _PROMPT_CACHE_CONTROL_PROVIDERS:
+            kwargs["prompt_cache_options"] = dict(prompt_cache_options)
         return kwargs
 
     @staticmethod
@@ -93,6 +92,7 @@ class ProviderInvocationRuntime:
         breaker: CircuitBreaker,
         sampling_temperature: float | None = None,
         prompt_cache_key: str = "",
+        prompt_cache_options: dict[str, str] | None = None,
     ) -> Any:
         allowed, reason = breaker.allow_request()
         if not allowed:
@@ -107,7 +107,11 @@ class ProviderInvocationRuntime:
         token = self._claim_attempt(provider, stage)
         try:
             kwargs = self._invoke_kwargs(
-                provider, timeout_seconds, sampling_temperature, prompt_cache_key
+                provider,
+                timeout_seconds,
+                sampling_temperature,
+                prompt_cache_key,
+                prompt_cache_options,
             )
             message = (
                 llm.invoke(messages, **kwargs) if self._accepts_invoke_kwargs(llm.invoke) else llm.invoke(messages)

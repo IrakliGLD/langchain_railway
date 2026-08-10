@@ -640,6 +640,113 @@ def test_the_selector_defaults_to_off():
     )
 
 
+# --- the explicit cache breakpoint ------------------------------------------
+
+def test_explicit_prompt_cache_defaults_to_off():
+    import config
+
+    assert config.ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE is False
+
+
+def test_explicit_prompt_cache_is_limited_to_constants_first_gpt_5_6(monkeypatch):
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE", True)
+
+    assert llm_core._analyzer_explicit_prompt_cache_enabled(
+        llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+        "gpt-5.6-terra",
+    )
+    assert not llm_core._analyzer_explicit_prompt_cache_enabled(
+        llm_core._ANALYZER_ORDER_LEGACY,
+        "gpt-5.6-terra",
+    )
+    for model_name in ("gpt-5.5", "gpt-4o", "gemini-2.5-flash"):
+        assert not llm_core._analyzer_explicit_prompt_cache_enabled(
+            llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+            model_name,
+        )
+
+
+def test_explicit_cache_marks_only_the_stable_prefix_without_changing_text():
+    blocks = [
+        ("CONTRACT_QUERY_TYPE_GUIDE", "types"),
+        ("CONTRACT_ANSWER_KIND_GUIDE", "answers"),
+        ("CONTRACT_RULES", "rules"),
+        ("UNTRUSTED_USER_QUESTION", "What changed?"),
+        ("UNTRUSTED_TOOL_CATALOG", "dynamic catalog"),
+    ]
+    prompt = llm_core._render_analyzer_prompt(
+        blocks,
+        {"type": "object"},
+        order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+    )
+
+    messages, stable_prefix = llm_core._build_analyzer_invocation_messages(
+        "system rules",
+        prompt,
+        order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+        explicit_cache=True,
+    )
+
+    assert messages[0] == ("system", "system rules")
+    content = messages[1][1]
+    assert content == [
+        {
+            "type": "text",
+            "text": stable_prefix,
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        },
+        {"type": "text", "text": content[1]["text"]},
+    ]
+    assert "CONTRACT_RULES:\n<<<rules>>>" in stable_prefix
+    assert "UNTRUSTED_USER_QUESTION" not in stable_prefix
+    assert content[1]["text"].startswith("UNTRUSTED_USER_QUESTION:\n<<<What changed?>>>")
+    assert stable_prefix + content[1]["text"] == prompt
+
+
+def test_disabled_explicit_cache_preserves_the_historical_message_shape():
+    messages, stable_prefix = llm_core._build_analyzer_invocation_messages(
+        "system rules",
+        "complete prompt",
+        order=llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+        explicit_cache=False,
+    )
+
+    assert messages == [("system", "system rules"), ("user", "complete prompt")]
+    assert stable_prefix == ""
+
+
+def test_langchain_serializes_the_explicit_breakpoint_and_request_policy():
+    from langchain_openai import ChatOpenAI
+
+    messages = [
+        ("system", "system rules"),
+        (
+            "user",
+            [
+                {
+                    "type": "text",
+                    "text": "stable prefix",
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                },
+                {"type": "text", "text": "dynamic suffix"},
+            ],
+        ),
+    ]
+    client = ChatOpenAI(model="gpt-5.6-terra", api_key="test")
+
+    payload = client._get_request_payload(
+        messages,
+        prompt_cache_key="enai-analyzer-test",
+        prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+    )
+
+    assert payload["prompt_cache_key"] == "enai-analyzer-test"
+    assert payload["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    assert payload["messages"][1]["content"][0]["prompt_cache_breakpoint"] == {
+        "mode": "explicit"
+    }
+
+
 # --- the routing-affinity key -----------------------------------------------
 
 def test_no_cache_key_is_sent_while_the_flag_is_off(monkeypatch):
@@ -681,6 +788,18 @@ def test_the_cache_key_is_stable_and_derived_from_the_schema(monkeypatch):
     ), "key must not vary between calls in a process"
 
 
+def test_explicit_cache_enables_its_required_cache_key(monkeypatch):
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_PROMPT_CACHE_KEY", False)
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE", True)
+
+    key = llm_core._analyzer_prompt_cache_key(
+        llm_core._ANALYZER_ORDER_CONSTANTS_FIRST,
+        "gpt-5.6-terra",
+    )
+
+    assert key.startswith("enai-analyzer-constants_first-")
+
+
 def test_the_key_reaches_openai_and_no_other_provider():
     """It is an OpenAI argument; other providers would reject it."""
     from core.provider_invocation import ProviderInvocationRuntime
@@ -699,6 +818,22 @@ def test_the_key_reaches_openai_and_no_other_provider():
         assert "prompt_cache_key" not in kwargs, provider
 
 
+def test_explicit_cache_options_reach_openai_and_no_other_provider():
+    from core.provider_invocation import ProviderInvocationRuntime
+
+    options = {"mode": "explicit", "ttl": "30m"}
+    kwargs = ProviderInvocationRuntime._invoke_kwargs(
+        "openai", 30.0, None, "enai-analyzer-x", options
+    )
+    assert kwargs["prompt_cache_options"] == options
+
+    for provider in ("gemini", "nvidia", "some_future_provider"):
+        kwargs = ProviderInvocationRuntime._invoke_kwargs(
+            provider, 30.0, None, "enai-analyzer-x", options
+        )
+        assert "prompt_cache_options" not in kwargs, provider
+
+
 def test_no_key_means_no_argument_at_all():
     """Every other stage must send exactly what it sent before."""
     from core.provider_invocation import ProviderInvocationRuntime
@@ -706,20 +841,34 @@ def test_no_key_means_no_argument_at_all():
     for provider in ("openai", "gemini", "nvidia"):
         kwargs = ProviderInvocationRuntime._invoke_kwargs(provider, 30.0, None, "")
         assert "prompt_cache_key" not in kwargs, provider
+        assert "prompt_cache_options" not in kwargs, provider
 
 
-def test_the_key_does_not_leak_to_the_next_stage_on_the_thread(monkeypatch):
-    """Report tracks analyze on pooled threads; a leaked key would follow one."""
+def test_prompt_cache_controls_do_not_leak_to_the_next_stage_on_the_thread(monkeypatch):
+    """Report tracks analyze on pooled threads; leaked controls would follow one."""
     monkeypatch.setattr(llm_core, "ANALYZER_CONSTANTS_FIRST_MODE", "all")
     monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_PROMPT_CACHE_KEY", True)
-    seen: list[str] = []
+    monkeypatch.setattr(llm_core, "ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE", True)
+    monkeypatch.setattr(llm_core, "ROUTER_MODEL", "gpt-5.6-terra")
+    seen: list[tuple[str, dict[str, str] | None]] = []
+    cache_inputs: list[str] = []
 
     def capture(*_args, **_kwargs):
-        seen.append(llm_core._LLM_PROMPT_CACHE_KEY.get())
+        seen.append(
+            (
+                llm_core._LLM_PROMPT_CACHE_KEY.get(),
+                llm_core._LLM_PROMPT_CACHE_OPTIONS.get(),
+            )
+        )
         raise RuntimeError("stop after capture")
 
     monkeypatch.setattr(llm_core, "_invoke_with_openai_fallback", capture)
-    monkeypatch.setattr(llm_core, "_cache_get_or_reserve", lambda _key: (None, None))
+
+    def capture_cache_input(key: str):
+        cache_inputs.append(key)
+        return None, None
+
+    monkeypatch.setattr(llm_core, "_cache_get_or_reserve", capture_cache_input)
 
     for _attempt in range(2):
         try:
@@ -727,8 +876,11 @@ def test_the_key_does_not_leak_to_the_next_stage_on_the_thread(monkeypatch):
         except Exception:
             pass
 
-    assert seen and all(key.startswith("enai-analyzer-") for key in seen)
+    assert seen and all(key.startswith("enai-analyzer-") for key, _options in seen)
+    assert all(options == {"mode": "explicit", "ttl": "30m"} for _key, options in seen)
+    assert cache_inputs and all("|prompt_cache=explicit" in key for key in cache_inputs)
     assert llm_core._LLM_PROMPT_CACHE_KEY.get() == "", "key outlived the analyzer call"
+    assert llm_core._LLM_PROMPT_CACHE_OPTIONS.get() is None, "options outlived the analyzer call"
 
 
 def regenerate() -> None:  # pragma: no cover - maintenance helper
