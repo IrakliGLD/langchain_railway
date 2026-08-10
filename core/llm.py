@@ -3760,6 +3760,18 @@ def llm_analyze_question(
     )
     if evidence_anomaly_note:
         analyzer_label += " reanalysis"
+    # Which ordering actually reached the provider. Without this, a cached
+    # share of 0 is ambiguous between "the reorder is off" and "the reorder is
+    # on but the prefix did not match", and those have opposite fixes.
+    log.info(
+        "analyzer_prompt_profile order=%s report_profile=%s selector=%s "
+        "prompt_chars=%d cache_key=%s",
+        prompt_order,
+        report_profile,
+        ANALYZER_CONSTANTS_FIRST_MODE,
+        len(prompt),
+        "set" if _analyzer_prompt_cache_key(prompt_order) else "none",
+    )
     cache_key_token = _LLM_PROMPT_CACHE_KEY.set(
         _analyzer_prompt_cache_key(prompt_order)
     )
