@@ -369,12 +369,17 @@ def test_untagged_text_between_sections_is_discarded_by_the_fallback():
 
 
 def test_most_of_the_matrix_truncates_under_the_default_budget():
-    """Truncation is the norm here, not an edge case.
+    """The DEFAULT budget truncates; production's configured budget does not.
 
-    36 of 40 profiles exceed the 40,500-char effective budget today, so the
-    analyzer routes with a shortened tool catalog on almost every call. That is
-    a separate defect from caching -- recorded here so raising the budget shows
-    up as a deliberate, visible change rather than a quiet one.
+    36 of 40 profiles exceed the 40,500-char effective budget implied by the
+    45,000 default. Production sets ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000
+    (effective 63,900) and the largest prompt the report path can build is
+    ~50,000 chars, so **0 of 40 truncate as deployed**.
+
+    Both facts matter. A deployment that leaves the default in place routes
+    with a shortened tool catalog, so the default is worth pinning. And the
+    constants-first prefix measures 34,886 chars at either budget -- truncation
+    was never what bounded it; per-family block selection is.
     """
     truncated = [
         case_id

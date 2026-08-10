@@ -437,9 +437,14 @@ behaviour change.
 
 ## Out of scope
 
-- **The analyzer is over budget on 36 of 40 profiles** and truncating catalogs
-  on nearly every call. Found during Phase 0, unrelated to caching, and
-  probably more consequential than caching. Record it; do not fix it here.
+- ~~The analyzer is over budget on 36 of 40 profiles.~~ **Withdrawn
+  2026-08-10.** That measurement used the 45,000 default. Production sets
+  `ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000` (effective 63,900) and the largest
+  prompt the report path can build is ~50,000 chars, so **0 of 40 truncate as
+  deployed**. There is no analyzer truncation to fix. The constants-first
+  prefix measures 34,886 chars at either budget, so nothing else in this plan
+  changes: truncation never bounded the prefix — per-family block selection
+  does.
 - The writer's short prefix (Phase 6, optional).
 - The repair loop's writer-computed arithmetic (`18.5296%`, `6.4393217`) —
   a writer behaviour, not a caching one.
