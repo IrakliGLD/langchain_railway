@@ -93,10 +93,12 @@ from config import (
     REPORT_TIMEOUT_SECONDS,
     REQUEST_CLEANUP_ALLOWANCE_MS,
     ROUTER_MODEL,
+    ROUTER_REASONING_EFFORT,
     ROUTER_THINKING_BUDGET,
     SESSION_HISTORY_MAX_TURNS,
     SUMMARIZER_MODEL,
     SUMMARIZER_PROMPT_BUDGET_MAX_CHARS,
+    SUMMARIZER_REASONING_EFFORT,
 )
 from context import DB_SCHEMA_DOC
 from contracts.question_analysis import (
@@ -379,6 +381,7 @@ def _log_usage_for_message(
     attempt_stage: str = "",
     configured_output_token_limit: int | None = None,
     effective_output_token_limit: int | None = None,
+    configured_reasoning_effort: str | None = None,
 ):
     if (
         isinstance(message, dict)
@@ -400,6 +403,24 @@ def _log_usage_for_message(
     )
     provider = _provider_from_model_name(model_name)
     if (
+        configured_reasoning_effort is None
+        and str(attempt_stage or "").startswith(_REPORT_STAGE_PREFIX)
+    ):
+        configured_reasoning_effort = REPORT_REASONING_EFFORT
+    configured_reasoning_effort_label = (
+        configured_reasoning_effort or "provider_default"
+    )
+    if provider == "openai":
+        effective_reasoning_effort = configured_reasoning_effort_label
+    elif (
+        provider == "gemini"
+        and configured_reasoning_effort
+        and str(attempt_stage or "").startswith(_REPORT_STAGE_PREFIX)
+    ):
+        effective_reasoning_effort = configured_reasoning_effort
+    else:
+        effective_reasoning_effort = "not_applicable"
+    if (
         REPORT_MODEL_TYPE
         and REPORT_MODEL
         and model_name == REPORT_MODEL
@@ -418,7 +439,8 @@ def _log_usage_for_message(
         "prompt_tokens=%d cached_prompt_tokens=%d cache_write_tokens=%d "
         "completion_tokens=%d total_tokens=%d "
         "finish_reason=%s configured_output_token_limit=%s "
-        "effective_output_token_limit=%s provider_reported_output_token_limit=%s",
+        "effective_output_token_limit=%s provider_reported_output_token_limit=%s "
+        "configured_reasoning_effort=%s effective_reasoning_effort=%s",
         provider,
         _content_free_log_value(model_name),
         _content_free_log_value(attempt_stage),
@@ -437,6 +459,8 @@ def _log_usage_for_message(
         provider_reported_limit
         if provider_reported_limit is not None
         else "unreported",
+        _content_free_log_value(configured_reasoning_effort_label),
+        _content_free_log_value(effective_reasoning_effort),
     )
     metrics.log_llm_usage(
         model_name=model_name,
@@ -786,6 +810,7 @@ def _fallback_to_openai(
     label: str,
     attempt_stage: str | None = None,
     allow_openai_fallback: bool = True,
+    configured_reasoning_effort: str | None = None,
 ):
     """Use OpenAI after pre-send rejection OR a locally-enforced timeout.
 
@@ -809,7 +834,11 @@ def _fallback_to_openai(
         raise primary_exc
     _wait_before_safe_fallback(stage)
     try:
-        fallback_llm = make_openai()
+        fallback_llm = (
+            make_openai(reasoning_effort=configured_reasoning_effort)
+            if configured_reasoning_effort
+            else make_openai()
+        )
     except Exception as factory_exc:
         metrics.log_error()
         raise _record_pre_send_failure("openai", stage, factory_exc) from factory_exc
@@ -823,6 +852,7 @@ def _fallback_to_openai(
         message,
         model_name=OPENAI_MODEL,
         attempt_stage=stage,
+        configured_reasoning_effort=configured_reasoning_effort,
     )
     metrics.log_llm_call(time.time() - llm_start)
     return message
@@ -887,6 +917,7 @@ def _invoke_with_openai_fallback(
     sampling_temperature: float | None = None,
     allow_openai_fallback: bool = True,
     report_fallback: bool = False,
+    configured_reasoning_effort: str | None = None,
 ):
     """Invoke once, falling back only when the first provider rejected delivery."""
     stage = attempt_stage or _attempt_stage(label)
@@ -913,6 +944,7 @@ def _invoke_with_openai_fallback(
             label=label,
             attempt_stage=stage,
             allow_openai_fallback=allow_openai_fallback,
+            configured_reasoning_effort=configured_reasoning_effort,
         )
     try:
         message = (
@@ -945,11 +977,13 @@ def _invoke_with_openai_fallback(
             label=label,
             attempt_stage=stage,
             allow_openai_fallback=allow_openai_fallback,
+            configured_reasoning_effort=configured_reasoning_effort,
         )
     _log_usage_for_message(
         message,
         model_name=primary_model_name,
         attempt_stage=stage,
+        configured_reasoning_effort=configured_reasoning_effort,
     )
     metrics.log_llm_call(time.time() - llm_start)
     return message
@@ -963,6 +997,7 @@ def get_llm_for_stage(
     stage_model: Optional[str] = None,
     *,
     thinking_budget: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
     max_retries: Optional[int] = None,
     report_profile: bool = False,
 ):
@@ -977,6 +1012,10 @@ def get_llm_for_stage(
     silently ignore the parameter).  A separate cached instance is created so
     the cap never leaks to other callers of the same model.
 
+    When *reasoning_effort* is provided on an OpenAI-primary deployment, the
+    returned client is cached by effort so stage settings cannot leak across
+    the router and summarizer. Other providers ignore this OpenAI-only knob.
+
     When *max_retries* is provided a dedicated instance with that retry limit
     is cached separately.  Use ``max_retries=1`` for the summarizer so that
     504 DeadlineExceeded errors reach our application-level retry loop
@@ -988,6 +1027,9 @@ def get_llm_for_stage(
     """
     if report_profile and REPORT_MODEL_TYPE and REPORT_MODEL:
         return make_report()
+
+    if MODEL_TYPE == "openai" and reasoning_effort:
+        return make_openai(reasoning_effort=reasoning_effort)
 
     needs_dedicated = thinking_budget is not None or max_retries is not None
 
@@ -1956,7 +1998,8 @@ def llm_summarize(
     vector_knowledge = str(vector_knowledge or "")
     cache_input = (
         f"summary_text_v2|{user_query}|{data_preview}|{stats_hint}|"
-        f"{lang_instruction}|{history_str}|{domain_knowledge}|{vector_knowledge}"
+        f"{lang_instruction}|{history_str}|{domain_knowledge}|{vector_knowledge}|"
+        f"re={SUMMARIZER_REASONING_EFFORT or 'provider_default'}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
     if cached_response:
@@ -2397,11 +2440,16 @@ SYSTEM_GUIDANCE (authoritative rules):
     primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
     try:
         message = _invoke_with_openai_fallback(
-            lambda: get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1),
+            lambda: get_llm_for_stage(
+                SUMMARIZER_MODEL,
+                reasoning_effort=SUMMARIZER_REASONING_EFFORT,
+                max_retries=1,
+            ),
             primary_model_name,
             [("system", system), ("user", prompt)],
             llm_start=llm_start,
             label="Summarize",
+            configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
         )
         out = message.content.strip()
         # Phase 1 Optimization: Cache the response for future identical requests
@@ -3746,6 +3794,11 @@ def llm_analyze_question(
         if report_profile
         else ROUTER_MODEL or get_primary_model_name()
     )
+    analyzer_reasoning_effort = (
+        REPORT_REASONING_EFFORT
+        if report_profile
+        else ROUTER_REASONING_EFFORT
+    )
     report_cache_identity = (
         f"|profile=report:{REPORT_MODEL_TYPE or _active_provider_key()}:"
         f"{report_model_name}"
@@ -3774,7 +3827,8 @@ def llm_analyze_question(
         f"{_ANSWER_KIND_GUIDE_JSON}|"
         f"prev={previous_contract}|"
         f"anom={evidence_anomaly_note}|"
-        f"sys={system}"
+        f"sys={system}|"
+        f"re={analyzer_reasoning_effort or 'provider_default'}"
         f"{report_cache_identity}"
         f"{prompt_order_identity}"
         f"{prompt_cache_identity}"
@@ -3865,6 +3919,7 @@ def llm_analyze_question(
             lambda: get_llm_for_stage(
                 ROUTER_MODEL,
                 thinking_budget=router_thinking_budget,
+                reasoning_effort=analyzer_reasoning_effort,
                 max_retries=1,
                 report_profile=report_profile,
             ),
@@ -3872,6 +3927,7 @@ def llm_analyze_question(
             messages,
             llm_start=llm_start,
             label=analyzer_label,
+            configured_reasoning_effort=analyzer_reasoning_effort,
             **(
                 {
                     "attempt_stage": "report_question_analyzer",
@@ -5939,7 +5995,7 @@ def _summarizer_stats_priority(label: str) -> int:
     return 10
 
 
-def _compact_summarizer_statistics(stats_hint: str, *, max_chars: int = 18000) -> str:
+def _compact_summarizer_statistics(stats_hint: str, *, max_chars: int = 36000) -> str:
     """Pack complete evidence blocks by semantic priority before prompt assembly."""
 
     text = str(stats_hint or "")
@@ -6084,7 +6140,8 @@ def llm_summarize_structured(
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|eak={effective_answer_kind_key}|"
         f"vk={vk_doc_types}|sh={skill_hash}|"
-        f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}"
+        f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}|"
+        f"re={SUMMARIZER_REASONING_EFFORT or 'provider_default'}"
     )
     cached_response, cache_token = _cache_get_or_reserve(cache_input)
     request_scope = current_request_execution_scope()
@@ -6511,7 +6568,11 @@ Citation format rules:
     llm_start = time.time()
     primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
     try:
-        llm = get_llm_for_stage(SUMMARIZER_MODEL, max_retries=1)
+        llm = get_llm_for_stage(
+            SUMMARIZER_MODEL,
+            reasoning_effort=SUMMARIZER_REASONING_EFFORT,
+            max_retries=1,
+        )
         if ENABLE_TRACE_DEBUG_ARTIFACTS:
             log.info(
                 "LLM prompt composition: system=%d chars, user=%d chars, "
@@ -6531,6 +6592,7 @@ Citation format rules:
             message,
             model_name=primary_model_name,
             attempt_stage="structured_summarize",
+            configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
         )
         metrics.log_llm_call(time.time() - llm_start)
     except Exception as primary_exc:
@@ -6540,6 +6602,7 @@ Citation format rules:
             primary_exc,
             llm_start=llm_start,
             label="structured_summarize",
+            configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
         )
     raw_output = message.content.strip()
 

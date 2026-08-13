@@ -399,6 +399,7 @@ class LLMResponseCache:
 
 _gemini_llm = None
 _openai_llm = None
+_openai_reasoning_llms: dict[tuple[str, str, float | None], ChatOpenAI] = {}
 _nvidia_llm = None
 _qwen_llm = None
 _report_llm = None
@@ -428,8 +429,11 @@ def get_gemini() -> ChatGoogleGenerativeAI:
     return _gemini_llm
 
 
-def get_openai() -> ChatOpenAI:
+def get_openai(*, reasoning_effort: str | None = None) -> ChatOpenAI:
     """Get cached OpenAI LLM instance (singleton pattern).
+
+    A configured reasoning effort uses a dedicated cache entry so router and
+    summarizer clients with different effort levels cannot be mixed.
 
     Raises:
         RuntimeError: If OPENAI_API_KEY is not configured
@@ -437,6 +441,30 @@ def get_openai() -> ChatOpenAI:
     global _openai_llm
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set (fallback needed)")
+    if reasoning_effort:
+        cache_key = (OPENAI_MODEL, reasoning_effort, OPENAI_TIMEOUT_SECONDS)
+        cached = _openai_reasoning_llms.get(cache_key)
+        if cached is not None:
+            return cached
+        client_kwargs = dict(
+            model=OPENAI_MODEL,
+            openai_api_key=OPENAI_API_KEY,
+            reasoning_effort=reasoning_effort,
+            max_retries=0,  # application owns the only safe fallback
+        )
+        if OPENAI_TIMEOUT_SECONDS:
+            client_kwargs["request_timeout"] = OPENAI_TIMEOUT_SECONDS
+        client = ChatOpenAI(**client_kwargs)
+        _openai_reasoning_llms[cache_key] = client
+        log.info(
+            "OpenAI reasoning LLM instance cached "
+            "(model=%s timeout=%s max_retries=%s reasoning_effort=%s)",
+            OPENAI_MODEL,
+            OPENAI_TIMEOUT_SECONDS or "request-deadline-bound",
+            client_kwargs["max_retries"],
+            reasoning_effort,
+        )
+        return client
     if _openai_llm is None:
         client_kwargs = dict(
             model=OPENAI_MODEL,

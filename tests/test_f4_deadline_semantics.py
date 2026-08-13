@@ -203,6 +203,43 @@ def test_local_timeout_falls_back_to_openai(monkeypatch):
     assert result.content == "fallback ok"
 
 
+def test_local_timeout_fallback_preserves_stage_reasoning_effort(monkeypatch):
+    captured = {}
+
+    class _Primary:
+        def invoke(self, _messages, **_kwargs):
+            raise TimeoutError("client timeout elapsed")
+
+    class _Fallback:
+        def invoke(self, _messages, **_kwargs):
+            return SimpleNamespace(content="fallback ok")
+
+    def _make_openai(**kwargs):
+        captured.update(kwargs)
+        return _Fallback()
+
+    monkeypatch.setattr(llm_core, "get_llm_breaker", lambda _provider: _Breaker())
+    monkeypatch.setattr(llm_core, "_should_fallback_to_openai", lambda: True)
+    monkeypatch.setattr(llm_core, "make_openai", _make_openai)
+
+    with bind_request_execution_scope(
+        deadline=_deadline(),
+        request_id="req-timeout-effort",
+        actor_id="actor-3",
+    ):
+        result = llm_core._invoke_with_openai_fallback(
+            lambda: _Primary(),
+            "gemini-2.5-flash",
+            [("user", "not recorded")],
+            llm_start=time.time(),
+            label="question analyzer",
+            configured_reasoning_effort="high",
+        )
+
+    assert result.content == "fallback ok"
+    assert captured == {"reasoning_effort": "high"}
+
+
 @pytest.mark.parametrize("status_code", [400, 401, 403, 422])
 def test_permanent_provider_failures_are_never_retried(monkeypatch, status_code):
     fallback_calls = []

@@ -119,6 +119,52 @@ def test_nvidia_factory_requires_key(monkeypatch):
         llm_runtime.get_nvidia()
 
 
+def test_openai_reasoning_effort_uses_cache_safe_stage_clients(monkeypatch):
+    captured = []
+
+    class _FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            captured.append(kwargs)
+
+    monkeypatch.setattr(llm_runtime, "ChatOpenAI", _FakeChatOpenAI)
+    monkeypatch.setattr(llm_runtime, "OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(llm_runtime, "OPENAI_MODEL", "gpt-5.6-terra")
+    monkeypatch.setattr(llm_runtime, "_openai_reasoning_llms", {}, raising=False)
+
+    medium = llm_runtime.get_openai(reasoning_effort="medium")
+    high = llm_runtime.get_openai(reasoning_effort="high")
+    medium_again = llm_runtime.get_openai(reasoning_effort="medium")
+
+    assert medium is medium_again
+    assert medium is not high
+    assert len(captured) == 2
+    assert captured[0]["reasoning_effort"] == "medium"
+    assert captured[1]["reasoning_effort"] == "high"
+    assert captured[0]["max_retries"] == 0
+    assert "temperature" not in captured[0]
+
+
+def test_openai_stage_resolver_forwards_reasoning_effort(monkeypatch):
+    captured = {}
+    client = object()
+
+    def _make_openai(**kwargs):
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(llm, "MODEL_TYPE", "openai")
+    monkeypatch.setattr(llm, "make_openai", _make_openai)
+
+    result = llm.get_llm_for_stage(
+        max_retries=1,
+        reasoning_effort="high",
+    )
+
+    assert result is client
+    assert captured == {"reasoning_effort": "high"}
+
+
 def test_report_openai_factory_uses_dedicated_worker_profile(monkeypatch):
     captured = {}
 
