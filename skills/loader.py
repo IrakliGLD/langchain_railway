@@ -148,6 +148,21 @@ def get_focus_guidance(focus: str, skill: str = "answer-composer") -> str:
 
     # Always include unconditional rules
     always_section = _extract_section(full_text, "## Always")
+    seasonal_marker = "### Seasonal-adjusted trend analysis"
+    seasonal_start = always_section.find(seasonal_marker)
+    if seasonal_start >= 0:
+        # Seasonal guidance is loaded separately, and only when computed
+        # seasonal evidence is present. Keeping it in the unconditional block
+        # duplicated thousands of characters on every summarizer call.
+        data_availability_start = always_section.find("### Data availability", seasonal_start)
+        if data_availability_start >= 0:
+            always_section = (
+                always_section[:seasonal_start].rstrip()
+                + "\n\n"
+                + always_section[data_availability_start:].lstrip()
+            )
+        else:
+            always_section = always_section[:seasonal_start].rstrip()
 
     # Add focus-specific section
     section_header = _FOCUS_TO_CATALOG_SECTION.get(focus, "")

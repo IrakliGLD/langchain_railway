@@ -6,8 +6,9 @@ and a simple keyword-to-file mapping for context selection.
 """
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 log = logging.getLogger("Enai")
 
@@ -371,6 +372,174 @@ def infer_topic_matches(user_query: str = "") -> Set[str]:
     definition_patterns = ["what is", "what are", "define", "explain"]
     is_conceptual = any(pattern in query_lower for pattern in definition_patterns)
     return {"general_definitions"} if is_conceptual else {"balancing_price", "sql_examples"}
+
+
+_MARKDOWN_HEADING_RE = re.compile(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*$")
+_SEARCH_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_SECTION_SEARCH_STOPWORDS = {
+    "about", "after", "also", "and", "are", "before", "but", "can",
+    "did", "does", "during", "explain", "for", "from", "have", "how",
+    "into", "market", "not", "price", "that", "the", "their", "then",
+    "this", "under", "what", "when", "where", "which", "why", "with",
+}
+
+
+def _search_terms(text: str) -> Set[str]:
+    """Return small, language-agnostic lexemes for deterministic section ranking."""
+
+    terms: Set[str] = set()
+    for raw in _SEARCH_TOKEN_RE.findall(str(text or "").casefold()):
+        if raw in _SECTION_SEARCH_STOPWORDS or len(raw) < 2:
+            continue
+        # A short prefix safely joins common English inflections (drive/drivers,
+        # form/formation) while retaining digits and non-Latin search terms.
+        terms.add(raw[:4] if len(raw) >= 5 else raw)
+    return terms
+
+
+def _markdown_sections(content: str) -> List[Tuple[int, str, str, str]]:
+    """Split Markdown at heading boundaries and retain each section's path."""
+
+    text = str(content or "")
+    matches = list(_MARKDOWN_HEADING_RE.finditer(text))
+    if not matches:
+        return [(0, "", "", text.strip())] if text.strip() else []
+
+    sections: List[Tuple[int, str, str, str]] = []
+    stack: List[Tuple[int, str]] = []
+    prefix = text[: matches[0].start()].strip()
+    if prefix:
+        sections.append((0, "", "", prefix))
+    for index, match in enumerate(matches):
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        stack.append((level, title))
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        section_text = text[match.start():end].strip()
+        sections.append((match.start(), " > ".join(item[1] for item in stack), title, section_text))
+    return sections
+
+
+def _normalized_overlap_text(text: str) -> str:
+    return " ".join(str(text or "").casefold().split())
+
+
+def _remove_exact_overlap(section: str, exclude_text: str) -> Tuple[str, int]:
+    """Remove paragraph-sized verbatim overlap while preserving local context."""
+
+    exclude_normalized = _normalized_overlap_text(exclude_text)
+    if not exclude_normalized:
+        return section, 0
+
+    kept: List[str] = []
+    removed = 0
+    for block in re.split(r"\n[ \t]*\n", str(section or "")):
+        block = block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        heading = lines[0] if lines and _MARKDOWN_HEADING_RE.fullmatch(lines[0]) else ""
+        body = "\n".join(lines[1:]).strip() if heading else block
+        normalized_body = _normalized_overlap_text(body)
+        if len(normalized_body) >= 80 and normalized_body in exclude_normalized:
+            removed += 1
+            if heading:
+                kept.append(heading)
+            continue
+        kept.append(block)
+    compacted = "\n\n".join(kept).strip()
+    # A heading with no remaining body adds no complementary evidence.
+    if compacted and len(compacted.splitlines()) == 1 and _MARKDOWN_HEADING_RE.fullmatch(compacted):
+        return "", removed
+    return compacted, removed
+
+
+def _section_score(path: str, title: str, section: str, query_terms: Set[str]) -> int:
+    if not query_terms:
+        return 1
+    heading_terms = _search_terms(f"{path} {title}")
+    body_terms = _search_terms(section)
+    heading_hits = len(query_terms & heading_terms)
+    body_hits = len(query_terms & body_terms)
+    return heading_hits * 12 + body_hits * 2
+
+
+def compact_knowledge_json(
+    knowledge_json: str,
+    *,
+    query: str,
+    max_chars: Optional[int] = None,
+    exclude_text: str = "",
+) -> str:
+    """Select relevant Markdown sections and remove exact cross-source overlap.
+
+    The JSON topic keys remain the source-identity contract. Compaction acts only
+    when a budget or exclusion corpus is supplied; legacy callers otherwise get
+    the byte-identical payload.
+    """
+
+    raw = str(knowledge_json or "")
+    if max_chars is None and not exclude_text:
+        return raw
+    if max_chars is not None and len(raw) <= int(max_chars) and not exclude_text:
+        return raw
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(payload, dict):
+        return raw
+
+    budget = max(256, int(max_chars)) if max_chars is not None else max(256, len(raw))
+    query_terms = _search_terms(query)
+    candidates: List[Tuple[int, int, str, str]] = []
+    overlap_blocks_removed = 0
+    for stem, content in payload.items():
+        if not isinstance(content, str):
+            continue
+        for position, path, title, section in _markdown_sections(content):
+            section, removed = _remove_exact_overlap(section, exclude_text)
+            overlap_blocks_removed += removed
+            if not section:
+                continue
+            score = _section_score(path, title, section, query_terms)
+            candidates.append((score, -position, str(stem), section))
+
+    # Highest-relevance sections pack first; source keys keep provenance visible.
+    candidates.sort(reverse=True)
+    selected: Dict[str, List[Tuple[int, str]]] = {}
+    for _score, negative_position, stem, section in candidates:
+        position = -negative_position
+        trial = {
+            key: "\n\n".join(text for _position, text in sorted(parts))
+            for key, parts in selected.items()
+        }
+        trial.setdefault(stem, "")
+        trial_sections = list(selected.get(stem, [])) + [(position, section)]
+        trial[stem] = "\n\n".join(text for _position, text in sorted(trial_sections))
+        encoded = json.dumps(trial, indent=2, ensure_ascii=False)
+        if len(encoded) <= budget:
+            selected.setdefault(stem, []).append((position, section))
+
+    result_payload = {
+        stem: "\n\n".join(text for _position, text in sorted(parts))
+        for stem, parts in selected.items()
+        if parts
+    }
+    result = json.dumps(result_payload, indent=2, ensure_ascii=False)
+    log.info(
+        "Knowledge compaction: input_chars=%d output_chars=%d selected_sources=%d "
+        "selected_sections=%d overlap_blocks_removed=%d budget=%d",
+        len(raw),
+        len(result),
+        len(result_payload),
+        sum(len(parts) for parts in selected.values()),
+        overlap_blocks_removed,
+        budget,
+    )
+    return result
 
 
 def _truncate_brief_source(content: str, budget: int) -> str:

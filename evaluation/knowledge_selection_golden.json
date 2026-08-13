@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "description": "Evidence-anchor corpus for deterministic domain-knowledge compaction.",
+  "cases": [
+    {
+      "id": "surplus_price_mechanism",
+      "query": "Why did the balancing price not fall during surplus?",
+      "topics": ["balancing_price"],
+      "max_chars": 20000,
+      "must_include": [
+        "Why the Balancing Price Does NOT Fall During Surplus",
+        "Why no producer has an incentive to sell cheap"
+      ]
+    },
+    {
+      "id": "balancing_article_14",
+      "query": "Explain Article 14 balancing settlement rules",
+      "topics": ["balancing_price", "market_structure"],
+      "max_chars": 20000,
+      "must_include": [
+        "Article 14",
+        "Disambiguation rules + completeness"
+      ]
+    },
+    {
+      "id": "balancing_price_drivers",
+      "query": "What drives balancing price changes?",
+      "topics": ["balancing_price", "currency_influence"],
+      "max_chars": 20000,
+      "must_include": [
+        "Market Composition (Most Important)",
+        "For Price Explanation"
+      ]
+    },
+    {
+      "id": "exchange_rate_mechanism",
+      "query": "How does exchange rate affect balancing price?",
+      "topics": ["currency_influence", "balancing_price"],
+      "max_chars": 20000,
+      "must_include": [
+        "Exchange Rate",
+        "Mechanism of Exchange Rate Impact"
+      ]
+    },
+    {
+      "id": "direct_contract_registration",
+      "query": "What is the direct contract registration rule?",
+      "topics": ["direct_contracts"],
+      "max_chars": 12000,
+      "must_include": [
+        "Registration Rule",
+        "Contract Content"
+      ]
+    }
+  ]
+}

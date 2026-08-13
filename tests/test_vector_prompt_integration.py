@@ -38,7 +38,7 @@ class _DummyEngine:
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
 import core.llm as llm_core  # noqa: E402
-from agent import planner, summarizer  # noqa: E402
+from agent import pipeline, planner, summarizer  # noqa: E402
 from contracts.question_analysis import QuestionAnalysis  # noqa: E402
 from contracts.vector_knowledge import (  # noqa: E402
     RetrievalStrategy,
@@ -118,6 +118,24 @@ def _regulatory_payload():
     return payload
 
 
+def test_vector_prompt_allocation_is_route_aware_and_analyzer_driven():
+    regulatory_ctx = QueryContext(
+        query="Who is eligible?",
+        question_analysis=QuestionAnalysis.model_validate(_regulatory_payload()),
+        question_analysis_source="llm_active",
+    )
+    knowledge_ctx = QueryContext(
+        query="What is GENEX?",
+        question_analysis=QuestionAnalysis.model_validate(_analysis_payload()),
+        question_analysis_source="llm_active",
+    )
+    data_ctx = QueryContext(query="Show the latest price")
+
+    assert pipeline._select_vector_prompt_max_chars(regulatory_ctx) == 30000
+    assert pipeline._select_vector_prompt_max_chars(knowledge_ctx) == 24000
+    assert pipeline._select_vector_prompt_max_chars(data_ctx) == 9000
+
+
 def test_planner_passes_active_vector_prompt(monkeypatch):
     captured = {}
 
@@ -162,6 +180,88 @@ def test_conceptual_summary_passes_active_vector_prompt(monkeypatch):
 
     assert out.summary == "GENEX answer"
     assert "EXTERNAL_SOURCE_PASSAGES" in captured["vector_knowledge"]
+
+
+def test_regulatory_list_summary_renders_one_visible_bullet_per_claim(monkeypatch):
+    payload = _regulatory_payload()
+    payload["answer_kind"] = "list"
+    claims = [
+        "Licensed producers may participate.",
+        "Registered suppliers may participate.",
+        "Eligible traders may participate.",
+    ]
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: '{"market_structure":"participant rules"}',
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: SummaryEnvelope(
+            answer="Prose that accidentally merges all three source items.",
+            claims=claims,
+            citations=["external_source_passages"],
+            confidence=0.92,
+        ),
+    )
+    ctx = QueryContext(
+        query=payload["raw_query"],
+        question_analysis=QuestionAnalysis.model_validate(payload),
+        question_analysis_source="llm_active",
+    )
+
+    out = summarizer.answer_conceptual(ctx)
+
+    assert out.summary.splitlines() == [f"- {claim}" for claim in claims]
+    assert out.summary_claims == claims
+
+
+def test_conceptual_summary_compacts_peer_domain_against_active_vector(monkeypatch):
+    captured = {}
+    duplicate = (
+        "Official settlement rules require registered participants to submit schedules "
+        "before the gate closes for the relevant trading interval."
+    )
+    complement = (
+        "Curated context explains how late schedule changes increase operational "
+        "imbalance exposure after registration."
+    )
+    domain_payload = json.dumps(
+        {
+            "market_structure": (
+                "# Market Structure\n\n## Scheduling and Registration\n"
+                f"{duplicate}\n\n{complement}\n\n## Archive\n"
+                + ("Unrelated archive details. " * 1000)
+            )
+        }
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: domain_payload,
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **kwargs: captured.update(kwargs) or SummaryEnvelope(
+            answer="Scheduling answer",
+            claims=[],
+            citations=["external_source_passages", "domain_knowledge"],
+            confidence=0.9,
+        ),
+    )
+    ctx = QueryContext(query="Explain participant scheduling and registration")
+    ctx.vector_knowledge = _vector_bundle()
+    ctx.vector_knowledge_source = "vector_active"
+    ctx.vector_knowledge_prompt = f"EXTERNAL_SOURCE_PASSAGES:\n[1] Market Rules\n{duplicate}"
+
+    summarizer.answer_conceptual(ctx)
+
+    selected = captured["domain_knowledge"]
+    assert len(selected) <= 12000
+    assert duplicate not in selected
+    assert complement in selected
 
 
 def test_conceptual_summary_uses_vector_as_primary_evidence(monkeypatch):

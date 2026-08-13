@@ -466,6 +466,8 @@ def _query_requests_correlation(qa: QuestionAnalysis, raw_query: str) -> bool:
 
 def _query_requests_trend(qa: QuestionAnalysis, raw_query: str) -> bool:
     """Return True when the request explicitly asks for a trend/trendline."""
+    if qa.analysis_requirements.needs_trend_context:
+        return True
     query_lower = _primary_query_surface(raw_query).lower()
     if _query_mentions_any(query_lower, _TREND_QUERY_TOKENS):
         return True
