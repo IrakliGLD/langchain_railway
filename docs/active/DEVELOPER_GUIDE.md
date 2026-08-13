@@ -111,6 +111,21 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=...       # structured-summarizer-only overri
 
 See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) §3.2 / §3.9. Summarizer prompts routinely hit 90–110k chars in deep mode because `DOMAIN_KNOWLEDGE` + `EXTERNAL_SOURCE_PASSAGES` expand; analyzer prompts do not. Raising `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` independently is the right knob for that.
 
+For an OpenAI GPT-5.6 Terra primary model, Standard mode also supports
+independent reasoning-effort controls:
+
+```bash
+ROUTER_REASONING_EFFORT=medium
+SUMMARIZER_REASONING_EFFORT=high
+```
+
+Both are optional and retain the provider default when unset. Supported Terra
+values are `none`, `low`, `medium`, `high`, `xhigh`, and `max`; invalid values
+fail startup validation. Changing either value also changes the corresponding
+response-cache identity, so a newly configured effort cannot serve a response
+created under an earlier level. The effective setting is recorded in
+`llm_response_telemetry` without logging prompt or response content.
+
 ## Dedicated Report Model
 
 Set the dedicated profile on the `enai-report-worker` Railway service. The web

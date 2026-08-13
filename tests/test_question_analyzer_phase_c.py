@@ -1916,7 +1916,9 @@ def test_llm_analyze_question_fast_mode_uses_budget_override_and_capped_thinking
     monkeypatch.setattr(llm_core, "PIPELINE_MODE", "fast")
     monkeypatch.setattr(llm_core, "FAST_MODE_ANALYZER_BUDGET", 2222)
     monkeypatch.setattr(llm_core, "ROUTER_THINKING_BUDGET", 4096)
-    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "ROUTER_REASONING_EFFORT", "high", raising=False)
+    cache = _DummyCache()
+    monkeypatch.setattr(llm_core, "llm_cache", cache)
     monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
 
@@ -1930,6 +1932,7 @@ def test_llm_analyze_question_fast_mode_uses_budget_override_and_capped_thinking
 
     def _capture_llm(*_args, **kwargs):
         captured["thinking_budget"] = kwargs.get("thinking_budget")
+        captured["reasoning_effort"] = kwargs.get("reasoning_effort")
         return object()
 
     def _capture_invoke(_llm, _messages, _model_name):
@@ -1944,6 +1947,8 @@ def test_llm_analyze_question_fast_mode_uses_budget_override_and_capped_thinking
     assert captured["label"] == "question_analysis"
     assert captured["budget_override"] == 2222
     assert captured["thinking_budget"] == 512
+    assert captured["reasoning_effort"] == "high"
+    assert "|re=high" in next(iter(cache._store))
 
 
 def test_llm_analyze_question_deep_mode_uses_analyzer_prompt_budget(monkeypatch):
@@ -1987,7 +1992,9 @@ def test_llm_summarize_structured_deep_mode_uses_summarizer_prompt_budget(monkey
     """
     monkeypatch.setattr(llm_core, "PIPELINE_MODE", "deep")
     monkeypatch.setattr(llm_core, "SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", 77777)
-    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "SUMMARIZER_REASONING_EFFORT", "high", raising=False)
+    cache = _DummyCache()
+    monkeypatch.setattr(llm_core, "llm_cache", cache)
     monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
 
@@ -2007,8 +2014,12 @@ def test_llm_summarize_structured_deep_mode_uses_summarizer_prompt_budget(monkey
     def _capture_invoke(_llm, _messages, _model_name):
         return _DummyMessageJSON()
 
+    def _capture_llm(*_args, **kwargs):
+        captured["reasoning_effort"] = kwargs.get("reasoning_effort")
+        return object()
+
     monkeypatch.setattr(llm_core, "_enforce_prompt_budget", _capture_budget)
-    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_a, **_k: object())
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", _capture_llm)
     monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
 
     llm_core.llm_summarize_structured(
@@ -2024,6 +2035,8 @@ def test_llm_summarize_structured_deep_mode_uses_summarizer_prompt_budget(monkey
         "Summarizer must respect SUMMARIZER_PROMPT_BUDGET_MAX_CHARS in deep mode "
         "(Phase 2.b per-stage budget split)"
     )
+    assert captured["reasoning_effort"] == "high"
+    assert "|re=high" in next(iter(cache._store))
 
 
 def test_planner_uses_analyzer_trend_requirement_without_rederiving_keywords():
@@ -2157,6 +2170,8 @@ def test_structured_summarizer_compacts_stats_and_preview_before_prompt_budget(
         + json.dumps({"anchor": "causal-required", "padding": "c" * 9000})
         + "\n\n--- CORRELATION MATRIX ---\n"
         + json.dumps({"anchor": "correlation-required", "padding": "r" * 7000})
+        + "\n\n--- DERIVED ANALYSIS EVIDENCE (TOP 12) ---\n"
+        + json.dumps({"anchor": "derived-required", "padding": "d" * 12000})
         + "\n\n--- LOW PRIORITY ARCHIVE ---\n"
         + ("archive " * 4000)
     )
@@ -2179,10 +2194,11 @@ def test_structured_summarizer_compacts_stats_and_preview_before_prompt_budget(
     )
     stats_chars = int(pre_census.split("statistics_chars=", 1)[1].split()[0])
     preview_chars = int(pre_census.split("data_preview_chars=", 1)[1].split()[0])
-    assert stats_chars <= 18000
+    assert 18000 < stats_chars <= 36000
     assert preview_chars <= 12000
     assert "causal-required" in captured["prompt"]
     assert "correlation-required" in captured["prompt"]
+    assert "derived-required" in captured["prompt"]
     assert "LOW PRIORITY ARCHIVE" not in captured["prompt"]
 
 

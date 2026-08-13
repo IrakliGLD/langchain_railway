@@ -213,6 +213,40 @@ def test_structured_output_telemetry_uses_the_raw_response(
     assert captured["total_tokens"] == 113
 
 
+def test_openai_telemetry_reports_configured_and_effective_reasoning_effort(
+    caplog,
+    monkeypatch,
+):
+    from core import llm
+
+    class _Message:
+        content = "not logged"
+        usage_metadata = {
+            "input_tokens": 50,
+            "output_tokens": 10,
+            "total_tokens": 60,
+        }
+        response_metadata = {"finish_reason": "stop"}
+
+    monkeypatch.setattr(llm.metrics, "log_llm_usage", lambda **_kwargs: None)
+    caplog.set_level("INFO", logger="Enai")
+
+    llm._log_usage_for_message(
+        _Message(),
+        model_name="gpt-5.6-terra",
+        attempt_stage="structured_summarize",
+        configured_reasoning_effort="high",
+    )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("llm_response_telemetry ")
+    )
+    assert "configured_reasoning_effort=high" in record
+    assert "effective_reasoning_effort=high" in record
+
+
 def test_report_response_log_uses_the_dedicated_output_limit(caplog, monkeypatch):
     from core import llm
 

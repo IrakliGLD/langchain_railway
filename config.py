@@ -409,6 +409,16 @@ ROUTER_MODEL = os.getenv("ROUTER_MODEL", "").strip() or None
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip() or None
 SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "").strip() or None
 
+# OpenAI reasoning effort is independent for the two Standard-mode stages.
+# Leave either unset to preserve the selected model's provider default. GPT-5.6
+# Terra accepts: none, low, medium, high, xhigh, max.
+ROUTER_REASONING_EFFORT = (
+    os.getenv("ROUTER_REASONING_EFFORT", "").strip().lower() or None
+)
+SUMMARIZER_REASONING_EFFORT = (
+    os.getenv("SUMMARIZER_REASONING_EFFORT", "").strip().lower() or None
+)
+
 # Thinking-budget cap for the router/question-analyzer stage.
 # Limits thinking tokens on Gemini 2.5 models to prevent latency spirals.
 # Default 1024 (lowered from 2048, 2026-07-07): classification rarely needs
@@ -777,6 +787,8 @@ def validate_runtime_settings(
     report_fallback_model_type: str | None = None,
     report_fallback_model: str | None = None,
     report_reasoning_effort: str | None = None,
+    router_reasoning_effort: str | None = None,
+    summarizer_reasoning_effort: str | None = None,
     report_track_analysis_mode: str = "disabled",
     report_max_generative_calls: int = 3,
     report_research_max_tracks: int = 4,
@@ -985,6 +997,26 @@ def validate_runtime_settings(
                 f"REPORT_FALLBACK_MODEL_TYPE={report_fallback_model_type} but "
                 f"{key_name} is missing"
             )
+    valid_standard_reasoning_efforts = {
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+    for setting_name, reasoning_effort in (
+        ("ROUTER_REASONING_EFFORT", router_reasoning_effort),
+        ("SUMMARIZER_REASONING_EFFORT", summarizer_reasoning_effort),
+    ):
+        if (
+            reasoning_effort
+            and reasoning_effort not in valid_standard_reasoning_efforts
+        ):
+            raise RuntimeError(
+                f"Invalid {setting_name}. Expected one of: "
+                "none, low, medium, high, xhigh, max"
+            )
     valid_reasoning_efforts = {
         "none",
         "minimal",
@@ -1032,6 +1064,8 @@ validate_runtime_settings(
     report_fallback_model_type=REPORT_FALLBACK_MODEL_TYPE,
     report_fallback_model=REPORT_FALLBACK_MODEL,
     report_reasoning_effort=REPORT_REASONING_EFFORT,
+    router_reasoning_effort=ROUTER_REASONING_EFFORT,
+    summarizer_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
     report_track_analysis_mode=REPORT_TRACK_ANALYSIS_MODE,
     report_max_generative_calls=REPORT_MAX_GENERATIVE_CALLS,
     report_research_max_tracks=REPORT_RESEARCH_MAX_TRACKS,

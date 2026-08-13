@@ -342,6 +342,64 @@ def test_report_model_without_report_provider_fails_closed():
     assert "REPORT_MODEL requires REPORT_MODEL_TYPE" in result.stderr
 
 
+def _standard_reasoning_effort_with_env(**overrides) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    for name in (
+        "ROUTER_REASONING_EFFORT",
+        "SUMMARIZER_REASONING_EFFORT",
+    ):
+        env.pop(name, None)
+    env.update(overrides)
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import config; "
+                "print(config.ROUTER_REASONING_EFFORT, "
+                "config.SUMMARIZER_REASONING_EFFORT)"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_standard_reasoning_effort_is_provider_default_when_unset():
+    result = _standard_reasoning_effort_with_env()
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["None", "None"]
+
+
+def test_standard_reasoning_effort_reads_independent_stage_settings():
+    result = _standard_reasoning_effort_with_env(
+        ROUTER_REASONING_EFFORT="medium",
+        SUMMARIZER_REASONING_EFFORT="high",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["medium", "high"]
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("ROUTER_REASONING_EFFORT", "minimal"),
+        ("SUMMARIZER_REASONING_EFFORT", "extreme"),
+    ],
+)
+def test_standard_reasoning_effort_rejects_unsupported_terra_levels(name, value):
+    result = _standard_reasoning_effort_with_env(**{name: value})
+
+    assert result.returncode != 0
+    assert name in result.stderr
+    assert "none, low, medium, high, xhigh, max" in result.stderr
+
+
 def _config_with_env(**overrides) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env.update(overrides)
