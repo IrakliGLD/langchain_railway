@@ -3470,8 +3470,6 @@ def _build_why_context(ctx: QueryContext) -> None:
             regulated_plant_sales_block["current_period"] = _format_regulated_plant_sales_records(current_plants)
         if not previous_plants.empty:
             regulated_plant_sales_block["previous_period"] = _format_regulated_plant_sales_records(previous_plants)
-        if regulated_plant_sales_block:
-            why_ctx["regulated_plant_sales"] = regulated_plant_sales_block
 
     share_cols = [c for c in df.columns if c.startswith("share_")]
     cur_shares: dict[str, float] = {}
@@ -3662,8 +3660,6 @@ def _build_why_context(ctx: QueryContext) -> None:
         if not analysis_evidence_df.empty
         else []
     )
-    if ctx.analysis_evidence:
-        why_ctx["derived_evidence"] = ctx.analysis_evidence
     component_pressure_summary = _build_component_pressure_summary(
         cur_row,
         prev_row,

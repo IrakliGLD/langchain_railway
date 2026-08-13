@@ -5844,6 +5844,180 @@ def llm_repair_report_section(
     )
 
 
+_SUMMARIZER_CENSUS_SECTION_NAMES = (
+    "UNTRUSTED_USER_QUESTION",
+    "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
+    "UNTRUSTED_DOMAIN_KNOWLEDGE",
+    "UNTRUSTED_STATISTICS",
+    "UNTRUSTED_DATA_PREVIEW",
+    "UNTRUSTED_CONVERSATION_HISTORY",
+)
+_SUMMARIZER_CENSUS_SECTION_RE = re.compile(
+    r"((?:UNTRUSTED)_\w+):\n<<<(.*?)>>>", re.DOTALL,
+)
+_SUMMARIZER_GUIDANCE_PREFIX = "SYSTEM_GUIDANCE (authoritative rules):\n"
+_SUMMARIZER_GUIDANCE_SUFFIX = "Respond with JSON exactly matching this schema:\n"
+
+
+def _summarizer_prompt_census(prompt: str) -> dict[str, int]:
+    """Return content-free prompt section sizes for operational tuning."""
+
+    section_lengths = {name: 0 for name in _SUMMARIZER_CENSUS_SECTION_NAMES}
+    for match in _SUMMARIZER_CENSUS_SECTION_RE.finditer(str(prompt or "")):
+        name = match.group(1)
+        if name in section_lengths:
+            section_lengths[name] = len(match.group(2))
+
+    guidance_chars = 0
+    guidance_start = prompt.find(_SUMMARIZER_GUIDANCE_PREFIX)
+    if guidance_start >= 0:
+        content_start = guidance_start + len(_SUMMARIZER_GUIDANCE_PREFIX)
+        guidance_end = prompt.find(_SUMMARIZER_GUIDANCE_SUFFIX, content_start)
+        if guidance_end >= 0:
+            guidance_chars = guidance_end - content_start
+
+    named_content_chars = sum(section_lengths.values()) + guidance_chars
+    return {
+        "user_question_chars": section_lengths["UNTRUSTED_USER_QUESTION"],
+        "external_source_passages_chars": section_lengths[
+            "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES"
+        ],
+        "domain_knowledge_chars": section_lengths["UNTRUSTED_DOMAIN_KNOWLEDGE"],
+        "statistics_chars": section_lengths["UNTRUSTED_STATISTICS"],
+        "data_preview_chars": section_lengths["UNTRUSTED_DATA_PREVIEW"],
+        "conversation_history_chars": section_lengths[
+            "UNTRUSTED_CONVERSATION_HISTORY"
+        ],
+        "guidance_chars": guidance_chars,
+        "fixed_overhead_chars": max(0, len(prompt) - named_content_chars),
+        "total_chars": len(prompt),
+    }
+
+
+def _log_summarizer_prompt_census(prompt: str, *, phase: str) -> None:
+    census = _summarizer_prompt_census(prompt)
+    log.info(
+        "summarizer_prompt_census phase=%s "
+        "user_question_chars=%d external_source_passages_chars=%d "
+        "domain_knowledge_chars=%d statistics_chars=%d data_preview_chars=%d "
+        "conversation_history_chars=%d guidance_chars=%d fixed_overhead_chars=%d "
+        "total_chars=%d",
+        phase,
+        census["user_question_chars"],
+        census["external_source_passages_chars"],
+        census["domain_knowledge_chars"],
+        census["statistics_chars"],
+        census["data_preview_chars"],
+        census["conversation_history_chars"],
+        census["guidance_chars"],
+        census["fixed_overhead_chars"],
+        census["total_chars"],
+    )
+
+
+_SUMMARIZER_STATS_SECTION_RE = re.compile(r"(?m)^--- ([^-\n].*?) ---[ \t]*$")
+_SUMMARIZER_STATS_SECTION_PRIORITY = {
+    "CAUSAL CONTEXT": 100,
+    "COMPONENT PRESSURE SUMMARY": 95,
+    "REGULATED PLANT SALES": 90,
+    "DERIVED ANALYSIS EVIDENCE": 85,
+    "CORRELATION MATRIX": 80,
+    "SERIES LEVELS": 75,
+    "SCENARIO": 70,
+    "FORECAST NOTE": 70,
+    "TRENDLINE FORECASTS": 70,
+    "SEASONAL-ADJUSTED TREND ANALYSIS": 65,
+    "COLUMN AGGREGATES": 25,
+}
+
+
+def _summarizer_stats_priority(label: str) -> int:
+    normalized = str(label or "").strip().upper()
+    for prefix, priority in _SUMMARIZER_STATS_SECTION_PRIORITY.items():
+        if normalized.startswith(prefix):
+            return priority
+    return 10
+
+
+def _compact_summarizer_statistics(stats_hint: str, *, max_chars: int = 18000) -> str:
+    """Pack complete evidence blocks by semantic priority before prompt assembly."""
+
+    text = str(stats_hint or "")
+    if len(text) <= max_chars:
+        return text
+    matches = list(_SUMMARIZER_STATS_SECTION_RE.finditer(text))
+    if not matches:
+        return _truncate_text(text, max_chars)
+
+    blocks: list[tuple[int, int, str]] = []
+    prefix = text[: matches[0].start()].strip()
+    if prefix:
+        blocks.append((110, -1, prefix))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[match.start():end].strip()
+        blocks.append((_summarizer_stats_priority(match.group(1)), index, block))
+
+    selected: list[tuple[int, str]] = []
+    omitted: list[str] = []
+    for _priority, order, block in sorted(blocks, key=lambda item: (-item[0], item[1])):
+        trial = "\n\n".join(part for _position, part in sorted(selected + [(order, block)]))
+        if len(trial) <= max_chars:
+            selected.append((order, block))
+        else:
+            header = block.splitlines()[0][:120]
+            omitted.append(header)
+
+    if not selected:
+        compacted = _truncate_text(text, max_chars)
+    else:
+        compacted = "\n\n".join(part for _position, part in sorted(selected))
+    log.info(
+        "Summarizer statistics compacted: input_chars=%d output_chars=%d omitted_blocks=%d",
+        len(text),
+        len(compacted),
+        len(omitted),
+    )
+    return compacted
+
+
+def _compact_summarizer_preview(data_preview: str, *, max_chars: int = 12000) -> str:
+    """Bound a line-oriented preview while retaining its schema and range endpoints."""
+
+    text = str(data_preview or "")
+    if len(text) <= max_chars:
+        return text
+    lines = text.splitlines()
+    if len(lines) < 4:
+        return _truncate_text(text, max_chars)
+
+    marker = "...[middle preview rows omitted]..."
+    header = lines[0]
+    head: list[str] = []
+    tail: list[str] = []
+    used = len(header) + len(marker) + 4
+    head_budget = int(max_chars * 0.62)
+    for line in lines[1:]:
+        if used + len(line) + 1 > head_budget:
+            break
+        head.append(line)
+        used += len(line) + 1
+    for line in reversed(lines[1 + len(head):]):
+        if used + len(line) + 1 > max_chars:
+            break
+        tail.append(line)
+        used += len(line) + 1
+    compacted = "\n".join([header, *head, marker, *reversed(tail)])
+    log.info(
+        "Summarizer preview compacted: input_chars=%d output_chars=%d input_rows=%d output_rows=%d",
+        len(text),
+        len(compacted),
+        max(0, len(lines) - 1),
+        len(head) + len(tail),
+    )
+    return compacted
+
+
 def llm_summarize_structured(
     user_query: str,
     data_preview: str,
@@ -5864,6 +6038,8 @@ def llm_summarize_structured(
 ) -> SummaryEnvelope:
     """Generate strict JSON summary for guardrail validation."""
     effective_data_preview = "" if resolution_policy == "clarify" else data_preview
+    effective_data_preview = _compact_summarizer_preview(effective_data_preview)
+    stats_hint = _compact_summarizer_statistics(stats_hint)
     history_str = _format_conversation_history_for_prompt(conversation_history)
     domain_knowledge = str(domain_knowledge or "")
     vector_knowledge = str(vector_knowledge or "")
@@ -6175,6 +6351,21 @@ def llm_summarize_structured(
                 "- If the evidence supports Jan-vs-Feb or prior-vs-current wording, make that comparison explicit in the first paragraph."
             )
 
+        _effective_list_kind = (
+            effective_answer_kind == AnswerKind.LIST
+            or (
+                question_analysis is not None
+                and question_analysis.answer_kind == AnswerKind.LIST
+            )
+        )
+        if _effective_list_kind:
+            guidance_parts.append(
+                "ATOMIC LIST CONTRACT:\n"
+                "- Put exactly one grounded source item in each claims[] entry.\n"
+                "- Render exactly one visible bullet or numbered line for each claims[] entry.\n"
+                "- Never merge two enumerated source items into one claim or visible line."
+            )
+
         # Scenario citation instruction (conditional on scenario evidence in stats)
         if stats_hint and '"record_type": "scenario"' in stats_hint:
             guidance_parts.append(
@@ -6248,6 +6439,19 @@ def llm_summarize_structured(
                 "- Do not answer as a single-period narrative when month-over-month or year-over-year evidence is provided.\n"
                 "- Use only comparison values grounded in UNTRUSTED_STATISTICS or UNTRUSTED_DATA_PREVIEW.\n"
             )
+        _effective_list_kind = (
+            effective_answer_kind == AnswerKind.LIST
+            or (
+                question_analysis is not None
+                and question_analysis.answer_kind == AnswerKind.LIST
+            )
+        )
+        if _effective_list_kind:
+            skill_guidance += (
+                "ATOMIC LIST CONTRACT:\n"
+                "- Put one grounded source item in each claims[] entry and one visible line per claim.\n"
+                "- Do not merge enumerated source items.\n"
+            )
     schema_hint = {
         "answer": "string",
         "claims": ["string"],
@@ -6288,6 +6492,7 @@ Citation format rules:
 
 {lang_instruction}
 """
+    _log_summarizer_prompt_census(prompt, phase="pre_budget")
     _trunc_priority = _select_summarizer_truncation_priority(
         question_analysis=question_analysis,
         effective_answer_kind=effective_answer_kind,
@@ -6301,6 +6506,7 @@ Citation format rules:
         budget_override=_summary_budget,
         truncation_priority=_trunc_priority,
     )
+    _log_summarizer_prompt_census(prompt, phase="post_budget")
 
     llm_start = time.time()
     primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()

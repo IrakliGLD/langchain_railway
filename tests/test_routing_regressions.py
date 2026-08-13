@@ -193,6 +193,19 @@ class TestLegalListCrossCheckException:
             "regression of commit 59e3b61"
         )
 
+    def test_non_enumerative_regulatory_procedure_remains_knowledge(self):
+        qa = _make_qa(
+            raw_query="Explain how exchange registration works.",
+            query_type="regulatory_procedure",
+            answer_kind="knowledge",
+            confidence=0.95,
+        )
+        ctx = _make_ctx(qa)
+
+        _cross_check_answer_kind(ctx)
+
+        assert qa.answer_kind == AnswerKind.KNOWLEDGE
+
     def test_conceptual_definition_list_survives_cross_check(self):
         """Same exception applies to conceptual_definition queries — the
         analyzer can mis-route an eligibility question as conceptual but

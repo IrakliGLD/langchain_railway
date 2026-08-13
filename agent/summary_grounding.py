@@ -24,6 +24,7 @@ _NUMBER_PATTERN = re.compile(
     r"(?<![\d.])-?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
     r"(?:[eE][+-]?\d+)?%?"
 )
+_ORDERED_LIST_MARKER_PATTERN = re.compile(r"(?m)^[ \t]*\d+[.)][ \t]+")
 
 _MAX_NORMALIZED_NUMBER_TOKEN_CHARS = 128
 
@@ -142,8 +143,12 @@ def _normalize_number_token(raw_token: str) -> Optional[str]:
 
 
 def _extract_number_tokens(text: str) -> Set[str]:
+    # Markdown/plain-text ordinals are presentation syntax, not factual values.
+    # Strip only the unambiguous line-start form so quantities such as ``1 MW``,
+    # decimals, years, and article numbers remain subject to grounding.
+    source = _ORDERED_LIST_MARKER_PATTERN.sub("", text or "")
     tokens: Set[str] = set()
-    for match in _NUMBER_PATTERN.finditer(text or ""):
+    for match in _NUMBER_PATTERN.finditer(source):
         normalized = _normalize_number_token(match.group(0))
         if not normalized:
             continue

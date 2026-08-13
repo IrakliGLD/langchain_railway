@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import pandas as pd
+
 from agent.shape_requirements import get_requirement
 from contracts.evidence_frames import (
     CanonicalFrame,
@@ -64,6 +66,61 @@ def validate_evidence(
 
     # EXPLANATION, SCENARIO, KNOWLEDGE, CLARIFY — no structural requirements.
     return None
+
+
+def validate_analysis_requirements(ctx) -> list[str]:
+    """Validate analyzer-requested analytical context after Stage 3 enrichment.
+
+    This is deliberately diagnostic-only. It gives operators a structured
+    disagreement signal before any future enforcement decision changes answers.
+    """
+
+    if not getattr(ctx, "has_authoritative_question_analysis", False):
+        return []
+    analysis = ctx.question_analysis
+    if analysis is None:
+        return []
+    requirements = analysis.analysis_requirements
+    gaps: list[str] = []
+    frame = getattr(ctx, "df", None)
+    columns = list(getattr(frame, "columns", []))
+
+    if requirements.needs_trend_context:
+        time_col = next(
+            (
+                column
+                for column in columns
+                if any(token in str(column).lower() for token in ("date", "month", "year", "period"))
+            ),
+            None,
+        )
+        period_count = 0
+        if time_col is not None and frame is not None and not frame.empty:
+            periods = pd.to_datetime(frame[time_col], errors="coerce").dropna()
+            period_count = int(periods.nunique())
+        if period_count < 2:
+            gaps.append("trend_context_missing")
+
+    if requirements.needs_driver_analysis:
+        has_driver_columns = any(
+            str(column).lower().startswith(("share_", "contribution_", "tariff_"))
+            or str(column).lower() == "xrate"
+            for column in columns
+        )
+        has_driver_artifact = bool(getattr(ctx, "analysis_evidence", None)) or (
+            "CAUSAL CONTEXT" in str(getattr(ctx, "stats_hint", "") or "")
+        )
+        if not has_driver_columns and not has_driver_artifact:
+            gaps.append("driver_context_missing")
+
+    if requirements.needs_correlation_context:
+        has_correlations = bool(getattr(ctx, "correlation_results", None)) or (
+            "CORRELATION MATRIX" in str(getattr(ctx, "stats_hint", "") or "")
+        )
+        if not has_correlations:
+            gaps.append("correlation_context_missing")
+
+    return gaps
 
 
 def _validate_scalar(frame: CanonicalFrame) -> EvidenceGap | None:

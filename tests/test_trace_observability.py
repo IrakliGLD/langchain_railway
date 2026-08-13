@@ -183,7 +183,14 @@ def test_summarizer_logs_pre_gate_and_provenance_failure(monkeypatch, caplog):
     payloads = _parse_trace_payloads(caplog.records)
     pre_gate = next(p for p in payloads if p["event"] == "pre_gate")
     gate = next(p for p in payloads if p["event"] == "provenance_gate")
+    boundary = next(p for p in payloads if p["event"] == "answer_boundary")
 
     assert pre_gate["extra"]["summary_source"] == "structured_summary"
     assert gate["extra"]["gate_passed"] is False
+    assert boundary["stage"] == "stage_4_summarize_data"
+    assert boundary["extra"]["model_answer_chars"] == len(
+        "Balancing price was 999.0 GEL/MWh."
+    )
+    assert boundary["extra"]["shipped_answer_chars"] == len(ctx.summary)
+    assert boundary["extra"]["summary_source"] == "citation_gate_fallback"
     assert ctx.summary_source == "citation_gate_fallback"

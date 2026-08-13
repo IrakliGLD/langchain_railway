@@ -1499,6 +1499,19 @@ def ask_post(
             )
         session_id = session_turn.session_id
         bound_history = session_turn.history
+        log.info(
+            "Session continuity: auth_mode=%s actor_assertion_verified=%s "
+            "authoritative_session=%s session_token_supplied=%s reused_session=%s "
+            "history_turns=%d caller_history_supplied=%s continuity_available=%s",
+            caller.auth_mode,
+            caller.actor_assertion_verified,
+            bool(caller.actor_assertion_verified and caller.session_id),
+            bool(x_session_token),
+            session_turn.reused_existing_session,
+            len(bound_history),
+            bool(q.conversation_history),
+            session_turn.continuity_available,
+        )
         blocked_history_turns = (
             session_turn.blocked_stored_turns + session_turn.blocked_caller_turns
         )

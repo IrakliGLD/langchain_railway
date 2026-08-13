@@ -42,6 +42,7 @@ from agent.evidence_derivation import (
 from agent.evidence_derivation import (
     unresolvable_requested_metrics as _unresolvable_requested_metrics,
 )
+from agent.evidence_validator import validate_analysis_requirements
 from agent.fixture_candidates import log_fixture_candidate
 from agent.p4_rollout import (
     GATE_EVIDENCE_FINALIZATION,
@@ -92,6 +93,10 @@ from config import (
     PIPELINE_MODE,
     PLAN_VALIDATION_ENFORCE_PERCENT,
     PLAN_VALIDATION_MODE,
+    VECTOR_KNOWLEDGE_MAX_CHARS,
+    VECTOR_KNOWLEDGE_MAX_CHARS_EXPLANATION,
+    VECTOR_KNOWLEDGE_MAX_CHARS_KNOWLEDGE,
+    VECTOR_KNOWLEDGE_MAX_CHARS_REGULATORY,
 )
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
@@ -2579,6 +2584,28 @@ def _apply_response_mode(ctx: QueryContext) -> None:
     )
 
 
+def _select_vector_prompt_max_chars(ctx: QueryContext) -> int:
+    """Allocate retrieval context from the authoritative semantic route."""
+
+    if not ctx.has_authoritative_question_analysis:
+        return VECTOR_KNOWLEDGE_MAX_CHARS
+    analysis = ctx.question_analysis
+    query_type = analysis.classification.query_type.value
+    if query_type == "regulatory_procedure":
+        return VECTOR_KNOWLEDGE_MAX_CHARS_REGULATORY
+    if (
+        analysis.answer_kind == AnswerKind.KNOWLEDGE
+        or query_type == "conceptual_definition"
+    ):
+        return VECTOR_KNOWLEDGE_MAX_CHARS_KNOWLEDGE
+    if (
+        analysis.answer_kind == AnswerKind.EXPLANATION
+        and analysis.routing.needs_knowledge
+    ):
+        return VECTOR_KNOWLEDGE_MAX_CHARS_EXPLANATION
+    return VECTOR_KNOWLEDGE_MAX_CHARS
+
+
 def _run_vector_knowledge_stage(
     ctx: QueryContext, _retrieval_tier: "VectorRetrievalTier", routing_query: str
 ) -> None:
@@ -2621,8 +2648,9 @@ def _run_vector_knowledge_stage(
             bundle.error if bundle.unavailable else ""
         )
 
+        vector_prompt_max_chars = _select_vector_prompt_max_chars(ctx)
         packed_vector_knowledge = (
-            pack_vector_knowledge_for_prompt(bundle)
+            pack_vector_knowledge_for_prompt(bundle, max_chars=vector_prompt_max_chars)
             if not bundle.unavailable
             else None
         )
@@ -2652,6 +2680,18 @@ def _run_vector_knowledge_stage(
             packed_chunk_count=(len(packed_vector_knowledge.headers) if packed_vector_knowledge is not None else 0),
             packed_sections=(packed_vector_knowledge.headers[:3] if packed_vector_knowledge is not None else []),
             packed_truncated=(packed_vector_knowledge.truncated if packed_vector_knowledge is not None else False),
+            packed_prompt_chars=(
+                len(packed_vector_knowledge.prompt)
+                if packed_vector_knowledge is not None
+                else 0
+            ),
+            packed_prompt_max_chars=vector_prompt_max_chars,
+            primary_chunk_count=len(bundle.chunks),
+            packed_primary_chunk_count=(
+                len(bundle.chunks) - packed_vector_knowledge.dropped_primary_count
+                if packed_vector_knowledge is not None
+                else 0
+            ),
             # packed_truncated alone cannot say whether knowledge was lost:
             # a skipped adjacent sibling and a dropped top-ranked match both
             # set it. Only the first is a reason to revisit the budget.
@@ -3358,6 +3398,7 @@ def _process_query_impl(
     evidence_finalizer.safe_finalize(ctx, stage="stage_3_enriched")
 
     ctx.missing_evidence_for_metrics = _missing_requested_evidence(ctx)
+    analysis_readiness_gaps = validate_analysis_requirements(ctx)
     trace_detail(
         log,
         ctx,
@@ -3369,7 +3410,13 @@ def _process_query_impl(
         # a metric naming no column the frame holds is an analyzer error, not
         # evidence the collectors failed to fetch.
         unresolvable_requested_metrics=_unresolvable_requested_metrics(ctx),
+        analysis_readiness_gaps=analysis_readiness_gaps,
     )
+    if analysis_readiness_gaps:
+        log.warning(
+            "Post-enrichment analysis requirements incomplete (log-only): %s",
+            analysis_readiness_gaps,
+        )
 
     if stages.run_terminal(
         "stage_4_missing_evidence_answer",

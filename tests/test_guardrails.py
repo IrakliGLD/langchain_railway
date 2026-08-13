@@ -101,6 +101,39 @@ def test_conceptual_answer_uses_filtered_domain_knowledge_for_genex(monkeypatch)
     assert out.summary_provenance_gate_reason == "not_applicable_conceptual"
 
 
+def test_conceptual_answer_logs_model_and_shipped_lengths(monkeypatch, caplog):
+    answer = "A complete conceptual answer."
+    monkeypatch.setattr(
+        summarizer,
+        "get_relevant_domain_knowledge",
+        lambda *_args, **_kwargs: '{"market_structure": "context"}',
+    )
+    monkeypatch.setattr(
+        summarizer,
+        "llm_summarize_structured",
+        lambda *_args, **_kwargs: SummaryEnvelope(
+            answer=answer,
+            claims=[answer],
+            citations=["domain_knowledge"],
+            confidence=0.9,
+        ),
+    )
+    caplog.set_level(logging.INFO, logger="Enai")
+
+    ctx = QueryContext(query="What is GENEX?", trace_id="trace-conceptual")
+    out = summarizer.answer_conceptual(ctx)
+
+    boundary = next(
+        record.getMessage()
+        for record in caplog.records
+        if '"event": "answer_boundary"' in record.getMessage()
+    )
+    assert '"stage": "stage_4_conceptual_summary"' in boundary
+    assert f'"model_answer_chars": {len(answer)}' in boundary
+    assert f'"shipped_answer_chars": {len(out.summary)}' in boundary
+    assert answer not in boundary
+
+
 def test_conceptual_answer_flags_retrieval_failure_instead_of_claiming_absence(monkeypatch):
     """When vector retrieval errored, the conceptual prompt must tell the model
     NOT to claim the info is absent (prod traces d62c2134 / b0aef6fd)."""
@@ -470,6 +503,39 @@ def test_grounding_tokenization_retains_single_digit_and_scientific_values():
     assert "1000000000" in tokens
     assert "0.5" in tokens
     assert "-0.5" in tokens
+
+
+def test_grounding_tokenization_ignores_line_start_ordered_list_markers():
+    tokens = summarizer._extract_number_tokens(
+        "1. First finding\n2) Second finding\n   3. Third finding"
+    )
+
+    assert tokens == set()
+
+
+def test_grounding_tokenization_preserves_numbers_outside_list_marker_syntax():
+    tokens = summarizer._extract_number_tokens(
+        "Capacity is 1 MW, change is 2.5%, year is 2025, and Article 14 applies."
+    )
+
+    assert tokens == {"1", "2.5", "2025", "14"}
+
+
+def test_numbered_answer_is_grounded_when_only_list_ordinals_are_absent_from_evidence():
+    answer = "1. Price was 100 GEL/MWh.\n2) Volume was 200 MWh.\n3. Total was 300 GEL."
+    ctx = QueryContext(
+        query="Summarize the results",
+        preview="price volume total\n100 200 300",
+        stats_hint="Price: 100; volume: 200; total: 300",
+    )
+    envelope = SummaryEnvelope(
+        answer=answer,
+        claims=answer.splitlines(),
+        citations=["statistics"],
+        confidence=0.9,
+    )
+
+    assert summarizer._is_summary_grounded(envelope, ctx) is True
 
 
 @pytest.mark.parametrize(
@@ -2689,6 +2755,12 @@ def test_why_context_adds_regulated_plant_sales_block(monkeypatch):
     assert block["current_period"][0]["plant"] == "enguri hpp"
     assert block["current_period"][1]["plant"] == "vardnili cascade"
     assert block["previous_period"][0]["plant"] == "mtkvari"
+
+    causal_start = hint.index("{", hint.index("CAUSAL CONTEXT"))
+    decoder = json.JSONDecoder()
+    causal, _end = decoder.raw_decode(hint[causal_start:])
+    assert "regulated_plant_sales" not in causal
+    assert "derived_evidence" not in causal
 
 
 # ---------------------------------------------------------------------------
@@ -6702,6 +6774,17 @@ def test_get_focus_guidance_supports_trade():
     assert guidance.strip()
     assert "import" in normalized
     assert "export" in normalized
+
+
+def test_focus_guidance_defers_seasonal_subsection_to_conditional_loader():
+    from skills.loader import get_focus_guidance, get_seasonal_trend_guidance
+
+    focus_guidance = get_focus_guidance("balancing")
+
+    assert "Stay focused" in focus_guidance
+    assert "Focus: Balancing" in focus_guidance
+    assert "Seasonal-adjusted trend analysis" not in focus_guidance
+    assert "Seasonal-adjusted trend analysis" in get_seasonal_trend_guidance()
 
 
 def test_is_conceptual_question_detects_regulation_procedure_queries():

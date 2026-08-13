@@ -620,7 +620,7 @@ def test_ask_publishes_strict_additive_v2_without_changing_v1(monkeypatch):
     _clear_rate_limit_buckets()
 
 
-def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatch):
+def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatch, caplog):
     request_id = "req-p3-signed-context"
     issued_at = int(time.time())
     captured = {}
@@ -664,6 +664,7 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     monkeypatch.setattr(main_module.session_runtime, "begin_turn", _capture_session_turn)
     monkeypatch.setattr(main_module, "process_query", _capture_pipeline)
     _clear_rate_limit_buckets()
+    caplog.set_level("INFO", logger="Enai")
 
     response = TestClient(main_module.app).post(
         "/ask",
@@ -695,6 +696,15 @@ def test_ask_verifies_edge_actor_context_and_uses_actor_bound_session(monkeypatc
     assert captured["pipeline"]["trace_id"].startswith("span-")
     assert captured["pipeline"]["trace_id"] != request_id
     assert response.json()["chart_metadata"]["request_id"] == request_id
+    continuity_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Session continuity:")
+    )
+    assert "actor_assertion_verified=True" in continuity_log
+    assert "authoritative_session=True" in continuity_log
+    assert "session_token_supplied=False" in continuity_log
+    assert "history_turns=0" in continuity_log
     _clear_rate_limit_buckets()
 
 
@@ -1471,7 +1481,7 @@ class TestTypedToolRowContract:
         assert list(df.columns) == cols
 
 
-def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
+def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch, caplog):
     _install_successful_ask_mocks(monkeypatch)
     # Override the already-captured config constants so the test is deterministic
     # regardless of shell env or module import ordering.
@@ -1480,6 +1490,7 @@ def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
     monkeypatch.setattr(main_module, "EVALUATE_ADMIN_SECRET", "test-evaluate-key")
 
     client = TestClient(main_module.app)
+    caplog.set_level("INFO", logger="Enai")
 
     ok = client.post(
         "/ask",
@@ -1489,6 +1500,14 @@ def test_ask_uses_gateway_secret_and_not_evaluate_secret(monkeypatch):
     assert ok.status_code == 200
     assert ok.json()["answer"] == "ok"
     assert ok.headers.get("X-Session-Token")
+    continuity_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Session continuity:")
+    )
+    assert "actor_assertion_verified=False" in continuity_log
+    assert "authoritative_session=False" in continuity_log
+    assert "session_token_supplied=False" in continuity_log
 
     unauthorized = client.post(
         "/ask",

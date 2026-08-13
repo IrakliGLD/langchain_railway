@@ -72,7 +72,7 @@ from core.llm import (
     llm_summarize,
     llm_summarize_structured,
 )
-from knowledge import get_brief_knowledge_for_query
+from knowledge import compact_knowledge_json, get_brief_knowledge_for_query
 from models import GroundingPolicy, QueryContext, ResolutionPolicy, TerminalOutcome
 from utils.language import (
     get_evidence_unavailable_message,
@@ -404,6 +404,36 @@ def _extract_vector_preferred_topics(ctx: QueryContext) -> Optional[List[str]]:
         return None
     preferred = list(ctx.vector_knowledge.filters.preferred_topics or [])
     return preferred[:5] or None
+
+
+_VISIBLE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+
+
+def _enforce_atomic_conceptual_list(ctx: QueryContext) -> None:
+    """Render one visible bullet for every structured LIST claim."""
+
+    if not ctx.has_authoritative_question_analysis:
+        return
+    if ctx.question_analysis.answer_kind != AnswerKind.LIST:
+        return
+    items: List[str] = []
+    for claim in ctx.summary_claims or []:
+        item = _VISIBLE_LIST_PREFIX_RE.sub("", str(claim or "")).strip()
+        item = strip_inline_citation_markers(scrub_schema_mentions(item))
+        if item:
+            items.append(item)
+    if not items:
+        log.warning("Atomic list contract could not render: structured response contained no claims")
+        return
+    ctx.summary_claims = items
+    ctx.summary = "\n".join(f"- {item}" for item in items)
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_conceptual_summary",
+        "atomic_list_rendered",
+        item_count=len(items),
+    )
 
 
 # Topic and policy helpers decide how much non-tabular evidence Stage 4 may rely on.
@@ -800,6 +830,12 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             use_cache=False,
             preferred_topics=domain_background_topics if vector_evidence_active else preferred_topics,
         )
+        domain_knowledge = compact_knowledge_json(
+            domain_knowledge,
+            query=routing_query,
+            max_chars=12000 if vector_evidence_active else 24000,
+            exclude_text=ctx.vector_knowledge_prompt if vector_evidence_active else "",
+        )
     if analyzer_active and preferred_topics:
         log.info("Using active question-analyzer topics for conceptual answer: %s", preferred_topics)
     if vector_evidence_active and vector_preferred_topics:
@@ -910,26 +946,6 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
 
     vector_knowledge = ctx.vector_knowledge_prompt if vector_evidence_active and PIPELINE_MODE != "fast" else ""
     domain_knowledge_for_summary = domain_knowledge
-    if vector_evidence_active:
-        # When vector evidence is present, the inline domain-knowledge layer
-        # is treated as a "peer source" and capped to avoid prompt bloat.
-        # Default 12000 chars; configurable via env so deployments with
-        # expanded inline knowledge (e.g. detailed Articles-13/14/36 rule
-        # sets in balancing_price.md) can lift the cap without a code change.
-        # See 2026-05-15 trace 1b132a9b: at 12000 cap, sections F (LLM
-        # disambiguation rules + mandatory completeness checklist) got
-        # truncated, producing a shallow answer despite full retrieval.
-        _dk_cap_raw = os.getenv("DOMAIN_KNOWLEDGE_MAX_CHARS_WITH_VECTOR", "12000").strip()
-        try:
-            _dk_cap = max(1000, int(_dk_cap_raw))
-        except ValueError:
-            _dk_cap = 12000
-        if len(domain_knowledge_for_summary) > _dk_cap:
-            domain_knowledge_for_summary = domain_knowledge_for_summary[:_dk_cap]
-            log.info(
-                "Capped domain_knowledge to %d chars (synthesizing with vector evidence)",
-                _dk_cap,
-            )
     ctx.summary_domain_knowledge = domain_knowledge_for_summary
     # Diagnostic: log prompt composition BEFORE the LLM call so we can correlate
     # input volume / shape with output quality.  Critical for debugging
@@ -949,6 +965,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             else "none"
         ),
     )
+    model_answer_chars = 0
     try:
         answer_mode_kwargs = (
             {"answer_mode": ctx.answer_mode}
@@ -969,6 +986,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             response_mode=ctx.response_mode,
             **answer_mode_kwargs,
         )
+        model_answer_chars = len(envelope.answer or "")
         ctx.summary = envelope.answer
         ctx.summary_source = "structured_conceptual_summary"
         ctx.summary_claims = list(envelope.claims)
@@ -1011,6 +1029,7 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
             domain_knowledge=domain_knowledge,
             vector_knowledge=vector_knowledge,
         )
+        model_answer_chars = len(ctx.summary or "")
         ctx.summary_source = "legacy_conceptual_text_fallback"
         ctx.summary_claims = []
         ctx.summary_citations = ["legacy_text_fallback"]
@@ -1020,8 +1039,18 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         ctx.summary_provenance_gate_passed = True
         ctx.summary_provenance_gate_reason = "not_applicable_conceptual"
     ctx.summary = strip_inline_citation_markers(scrub_schema_mentions(ctx.summary))
+    _enforce_atomic_conceptual_list(ctx)
     if apply_answer_mode_policy(ctx) and ctx.summary_claims:
         ctx.summary_claims = _derive_claims_from_text(ctx.summary)
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_conceptual_summary",
+        "answer_boundary",
+        model_answer_chars=model_answer_chars,
+        shipped_answer_chars=len(ctx.summary or ""),
+        summary_source=ctx.summary_source,
+    )
     log.info("✅ Conceptual answer generated")
     return ctx
 
@@ -1907,6 +1936,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     """
     # Choose the strongest deterministic answer path first, then fall back to LLM summarization.
     grounding_guardrail_triggered = False
+    model_answer_chars = 0
     ctx.summary_source = ""
     ctx.grounding_policy = ""
     ctx.summary_domain_knowledge = ""
@@ -2002,6 +2032,17 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
             domain_knowledge = get_relevant_domain_knowledge(
                 routing_query, use_cache=False, preferred_topics=preferred_topics,
             )
+            vector_active = bool(
+                ctx.vector_knowledge is not None
+                and ctx.vector_knowledge_source == "vector_active"
+                and ctx.vector_knowledge_prompt
+            )
+            domain_knowledge = compact_knowledge_json(
+                domain_knowledge,
+                query=routing_query,
+                max_chars=12000 if vector_active else 20000,
+                exclude_text=ctx.vector_knowledge_prompt if vector_active else "",
+            )
             if preferred_topics:
                 log.info("Using merged topics for data summary domain knowledge: %s", preferred_topics)
         ctx.summary_domain_knowledge = domain_knowledge
@@ -2040,6 +2081,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 comparison_focus=comparison_focus,
                 **answer_mode_kwargs,
             )
+            model_answer_chars = len(envelope.answer or "")
             if not _is_summary_grounded(envelope, ctx):
                 grounding_guardrail_triggered = True
                 metrics.log_summary_grounding_failure()
@@ -2133,6 +2175,7 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
                 domain_knowledge=domain_knowledge,
                 vector_knowledge=vector_knowledge,
             )
+            model_answer_chars = len(ctx.summary or "")
             ctx.summary_source = "legacy_text_fallback"
             ctx.summary_claims = _derive_claims_from_text(ctx.summary)
             ctx.summary_citations = ["legacy_text_fallback"]
@@ -2191,4 +2234,13 @@ def summarize_data(ctx: QueryContext) -> QueryContext:
     )
     _attach_claim_provenance(ctx)
     _enforce_provenance_gate(ctx)
+    trace_detail(
+        log,
+        ctx,
+        "stage_4_summarize_data",
+        "answer_boundary",
+        model_answer_chars=model_answer_chars,
+        shipped_answer_chars=len(ctx.summary or ""),
+        summary_source=ctx.summary_source,
+    )
     return ctx

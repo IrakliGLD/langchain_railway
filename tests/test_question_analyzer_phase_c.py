@@ -42,6 +42,7 @@ class _DummyEngine:
 sqlalchemy.create_engine = lambda *args, **kwargs: _DummyEngine()  # type: ignore[assignment]
 
 from agent import analyzer, planner, summarizer  # noqa: E402
+from agent.evidence_validator import validate_analysis_requirements  # noqa: E402
 from agent.question_interpretation import finalize_question_contract  # noqa: E402
 from contracts.question_analysis import AnswerKind, QuestionAnalysis, RenderStyle  # noqa: E402
 from core import llm as llm_core  # noqa: E402
@@ -2023,6 +2024,166 @@ def test_llm_summarize_structured_deep_mode_uses_summarizer_prompt_budget(monkey
         "Summarizer must respect SUMMARIZER_PROMPT_BUDGET_MAX_CHARS in deep mode "
         "(Phase 2.b per-stage budget split)"
     )
+
+
+def test_planner_uses_analyzer_trend_requirement_without_rederiving_keywords():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["analysis_requirements"]["needs_trend_context"] = True
+    qa = QuestionAnalysis.model_validate(payload)
+
+    assert planner._query_requests_trend(qa, "Total generation in 2022") is True
+
+
+def test_post_enrichment_analysis_requirement_validation_is_structured_and_log_only():
+    payload = _analytical_payload().model_dump(mode="json")
+    payload["analysis_requirements"]["needs_trend_context"] = True
+    payload["analysis_requirements"]["derived_metrics"] = []
+    qa = QuestionAnalysis.model_validate(payload)
+    ctx = QueryContext(
+        query=qa.raw_query,
+        question_analysis=qa,
+        question_analysis_source="llm_active",
+        df=pd.DataFrame({"date": [pd.Timestamp("2024-01-01")], "p_bal_gel": [100.0]}),
+        stats_hint="Rows: 1",
+    )
+
+    assert set(validate_analysis_requirements(ctx)) == {
+        "trend_context_missing",
+        "driver_context_missing",
+        "correlation_context_missing",
+    }
+
+    ctx.df = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-02-01")],
+            "p_bal_gel": [100.0, 110.0],
+            "share_import": [0.1, 0.2],
+        }
+    )
+    ctx.stats_hint = "--- CAUSAL CONTEXT ---\nobserved driver changes"
+    ctx.correlation_results = {"p_bal_gel": {"share_import": 0.8}}
+
+    assert validate_analysis_requirements(ctx) == []
+
+
+def test_structured_summarizer_logs_content_free_prompt_section_census(
+    monkeypatch,
+    caplog,
+):
+    """Prompt tuning needs per-section sizes before and after enforcement."""
+
+    monkeypatch.setattr(llm_core, "PIPELINE_MODE", "deep")
+    monkeypatch.setattr(llm_core, "SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", 3000)
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    class _DummyMessageJSON:
+        content = '{"answer":"ok","claims":[],"citations":["statistics"],"confidence":0.9}'
+        response_metadata = {}
+
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        llm_core,
+        "_invoke_with_resilience",
+        lambda *_a, **_k: _DummyMessageJSON(),
+    )
+    caplog.set_level("INFO", logger="Enai")
+
+    llm_core.llm_summarize_structured(
+        user_query="private user question",
+        data_preview="private preview " * 100,
+        stats_hint="private statistics " * 100,
+        conversation_history=[
+            {"question": "private prior question", "answer": "private prior answer"}
+        ],
+        domain_knowledge="private domain " * 100,
+        vector_knowledge="private vector " * 100,
+        lang_instruction="Respond in English.",
+    )
+
+    census = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("summarizer_prompt_census ")
+    ]
+    assert len(census) == 2
+    assert "phase=pre_budget" in census[0]
+    assert "phase=post_budget" in census[1]
+    for field in (
+        "user_question_chars=",
+        "external_source_passages_chars=",
+        "domain_knowledge_chars=",
+        "statistics_chars=",
+        "data_preview_chars=",
+        "conversation_history_chars=",
+        "guidance_chars=",
+        "fixed_overhead_chars=",
+        "total_chars=",
+    ):
+        assert field in census[0]
+        assert field in census[1]
+    joined = "\n".join(census)
+    assert "private user question" not in joined
+    assert "private prior answer" not in joined
+
+
+def test_structured_summarizer_compacts_stats_and_preview_before_prompt_budget(
+    monkeypatch,
+    caplog,
+):
+    captured = {}
+    monkeypatch.setattr(llm_core, "PIPELINE_MODE", "deep")
+    monkeypatch.setattr(llm_core, "SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", 200000)
+    monkeypatch.setattr(llm_core, "llm_cache", _DummyCache())
+    monkeypatch.setattr(llm_core, "_log_usage_for_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(llm_core.metrics, "log_llm_call", lambda *_args, **_kwargs: None)
+
+    class _DummyMessageJSON:
+        content = '{"answer":"ok","claims":[],"citations":["statistics"],"confidence":0.9}'
+        response_metadata = {}
+
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_a, **_k: object())
+
+    def _capture_invoke(_llm, messages, _model_name, **_kwargs):
+        captured["prompt"] = messages[-1][1]
+        return _DummyMessageJSON()
+
+    monkeypatch.setattr(llm_core, "_invoke_with_resilience", _capture_invoke)
+    caplog.set_level("INFO", logger="Enai")
+    stats = (
+        "Rows: 200\n"
+        "\n--- CAUSAL CONTEXT ---\n"
+        + json.dumps({"anchor": "causal-required", "padding": "c" * 9000})
+        + "\n\n--- CORRELATION MATRIX ---\n"
+        + json.dumps({"anchor": "correlation-required", "padding": "r" * 7000})
+        + "\n\n--- LOW PRIORITY ARCHIVE ---\n"
+        + ("archive " * 4000)
+    )
+    preview = "date,value,driver\n" + "\n".join(
+        f"2024-{(index % 12) + 1:02d},123.4,{('x' * 120)}" for index in range(200)
+    )
+
+    llm_core.llm_summarize_structured(
+        user_query="Why did balancing price change in November 2021?",
+        data_preview=preview,
+        stats_hint=stats,
+        question_analysis=_analytical_payload(),
+        lang_instruction="Respond in English.",
+    )
+
+    pre_census = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("summarizer_prompt_census phase=pre_budget")
+    )
+    stats_chars = int(pre_census.split("statistics_chars=", 1)[1].split()[0])
+    preview_chars = int(pre_census.split("data_preview_chars=", 1)[1].split()[0])
+    assert stats_chars <= 18000
+    assert preview_chars <= 12000
+    assert "causal-required" in captured["prompt"]
+    assert "correlation-required" in captured["prompt"]
+    assert "LOW PRIORITY ARCHIVE" not in captured["prompt"]
 
 
 def test_classify_query_type_monthly_year_returns_trend():
