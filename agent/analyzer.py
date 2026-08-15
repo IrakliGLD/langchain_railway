@@ -3140,6 +3140,10 @@ def _series_growth(group, col: str, time_col) -> str:
     last = float(values.iloc[-1])
     if first == 0:
         return ""
+    if first == last:
+        # No movement to report. A flat regulated tariff printing "+0.0% cagr"
+        # is noise, and these lines are repeated once per series.
+        return ""
 
     total_change_pct = (last / first - 1.0) * 100.0
 
@@ -3147,7 +3151,7 @@ def _series_growth(group, col: str, time_col) -> str:
     # CAGR extrapolates noise into a headline figure.
     import pandas as _pd
 
-    detail = f", change_first_to_last={total_change_pct:+.1f}%"
+    detail = f" change_first_to_last={total_change_pct:+.1f}%"
     try:
         start = _pd.to_datetime(ordered[time_col].iloc[0])
         end = _pd.to_datetime(ordered[time_col].iloc[-1])
@@ -3157,7 +3161,7 @@ def _series_growth(group, col: str, time_col) -> str:
 
     if years >= 1.0 and first > 0 and last > 0:
         cagr_pct = ((last / first) ** (1.0 / years) - 1.0) * 100.0
-        detail += f", cagr={cagr_pct:+.1f}%/yr over {years:.1f}yr"
+        detail += f" cagr={cagr_pct:+.1f}%/yr({years:.1f}yr)"
     return detail
 
 
@@ -3228,15 +3232,24 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
 
     def _describe(values, col: str) -> str:
         """One aggregate line body for a numeric series."""
+        # A series that never moves is fully described by its one value.
+        # Regulated tariffs hold flat between revisions, so this is common and
+        # the four-statistic form is pure repetition.
+        if values.min() == values.max():
+            return f"constant {values.min():.4f} over {len(values)} periods"
+
         # Never expose a SUM for intensive (per-unit) columns like prices — a
         # summed per-MWh price is meaningless and gets misread as a level.
+        # Space-separated rather than comma-separated: at 16 series x 8 value
+        # columns the separators alone cost a kilobyte of a prompt that runs
+        # near its budget on exactly these questions.
         body = (
-            f"mean={values.mean():.4f}, min={values.min():.4f}, "
-            f"max={values.max():.4f}, count={len(values)}"
+            f"mean={values.mean():.4f} min={values.min():.4f} "
+            f"max={values.max():.4f} n={len(values)}"
         )
         if is_intensive_metric(col):
             return body
-        return f"sum={values.sum():.4f}, " + body
+        return f"sum={values.sum():.4f} " + body
 
     lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
 

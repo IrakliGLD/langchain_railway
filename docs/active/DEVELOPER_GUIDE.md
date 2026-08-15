@@ -111,6 +111,21 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=...       # structured-summarizer-only overri
 
 See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) §3.2 / §3.9. Summarizer prompts routinely hit 90–110k chars in deep mode because `DOMAIN_KNOWLEDGE` + `EXTERNAL_SOURCE_PASSAGES` expand; analyzer prompts do not. Raising `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` independently is the right knob for that.
 
+**Deployment note (2026-08-15).** Production sets `ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000`, so the analyzer does not truncate (observed 45,644 chars against a 63,900 effective budget). `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` is still unset, leaving the 45,000 default and a 40,500 effective budget — and retail end-user questions now exceed it:
+
+| Retail shape | statistics | projected prompt | vs 40,500 |
+|---|---|---|---|
+| 4 value columns (price + 3 components) | ~6,500 | ~46,000 | over by ~5,500 |
+| 8 value columns (adds VAT + wholesale benchmark) | ~10,800 | ~50,300 | over by ~9,800 |
+
+The growth is per-series statistics, which exist precisely so the model quotes grounded numbers instead of deriving ungrounded ones. Truncating them defeats that; and the `_TRUNCATION_PRIORITY_DATA` order sheds `EXTERNAL_SOURCE_PASSAGES` first, which on retail questions is where the tariff-stack explanation lives. Set:
+
+```bash
+SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=70000     # effective 63,000; matches the analyzer override
+```
+
+Prompts only grow to what is actually assembled, so this raises the ceiling rather than the cost: the measured worst case above is ~50,300 chars (~18,000 tokens).
+
 For an OpenAI GPT-5.6 Terra primary model, Standard mode also supports
 independent reasoning-effort controls:
 
