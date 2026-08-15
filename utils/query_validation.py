@@ -632,6 +632,11 @@ def validate_tool_relevance(
     tool_topics = {
         "get_prices": {"price", "balancing", "exchange_rate", "forecast", "trend", "correlation"},
         "get_tariffs": {"tariff", "price"},
+        # Retail end-user prices. Shares "tariff"/"price" with get_tariffs
+        # because a retail question uses the same vocabulary; the evidence
+        # planner has already decided WHICH tariff tool by then, so relevance
+        # only has to confirm the query is about tariffs at all.
+        "get_end_user_prices": {"tariff", "price", "end_user_tariff"},
         "get_generation_mix": {
             "generation",
             "demand",

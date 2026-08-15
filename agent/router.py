@@ -118,6 +118,35 @@ _SEMANTIC_TOOL_TERMS: Dict[str, Set[str]] = {
 }
 
 
+# Retail markers for the semantic-fallback path.
+#
+# Score tuning is the wrong instrument here: ``_semantic_score`` divides by the
+# term count, so a richer term set scores LOWER, and hyphenated words such as
+# "end-user" never match because ``_tokenize_words`` splits on the hyphen.
+# Answer "is this a retail question?" deterministically instead -- the same way
+# ``evidence_planner._is_retail_tariff_question`` does on the analyzer path --
+# and redirect. Substring matching is intentional: these phrases do not occur
+# in generation-side tariff questions.
+_RETAIL_TARIFF_MARKERS = frozenset({
+    "end-user", "end user", "retail tariff", "retail price",
+    # Bare "household"/"consumer" as substrings, so plurals and looser phrasing
+    # ("tariffs for households") are covered. Neither word occurs in a
+    # generation-side plant-tariff question, and the redirect only fires when
+    # get_tariffs already won, so the blast radius is retail wording only.
+    "household", "consumer",
+    "distribution tariff", "transmission tariff", "supply tariff",
+    "network tariff", "universal service", "public service provider",
+    "telasi", "telmico", "energo-pro georgia", "ep georgia supply",
+    "per kwh", "gel/kwh", "electricity bill",
+})
+
+
+def looks_like_retail_tariff_question(query_lower: str) -> bool:
+    """True when the wording is about end-user/network tariffs, not plant ones."""
+    lowered = (query_lower or "").lower()
+    return any(marker in lowered for marker in _RETAIL_TARIFF_MARKERS)
+
+
 # Lightweight semantic scoring helps recover from keyword misses without using an LLM.
 def _tokenize_words(query_lower: str) -> Set[str]:
     return set(re.findall(r"[a-zA-Z_]+", query_lower))
@@ -149,6 +178,14 @@ def _build_semantic_invocation(
 ) -> Optional[ToolInvocation]:
     # Use the same parameter extractors as the direct router so fallback behavior stays deterministic.
     has_balancing = any(t in query_lower for t in ["balancing", "p_bal", "balance market", "balancing electricity"])
+
+    # A retail question scores on get_tariffs' terms ("tariff", "regulated",
+    # "gnerc"), so without this redirect the fallback path reproduces the
+    # wrong-view bug the evidence-planner guard fixes on the analyzer path.
+    # Must precede the get_tariffs branch below, which returns immediately.
+    if tool_name == "get_tariffs" and looks_like_retail_tariff_question(query_lower):
+        tool_name = "get_end_user_prices"
+
     if tool_name == "get_tariffs":
         entities = extract_tariff_entities(query_lower)
         currency = extract_currency(query_lower)
@@ -164,6 +201,24 @@ def _build_semantic_invocation(
             },
             confidence=min(0.95, max(0.65, score)),
             reason=f"Semantic fallback matched tariff intent (score={score:.2f})",
+        )
+
+    if tool_name == "get_end_user_prices":
+        # Supplier and category are deliberately left unset: the fallback path
+        # has no analyzer output to resolve them from, and widening to all
+        # suppliers/categories is safe where guessing one is not.
+        return ToolInvocation(
+            name="get_end_user_prices",
+            params={
+                "start_date": start_date,
+                "end_date": end_date,
+                "include_vat": "vat" in query_lower,
+                "include_wholesale_benchmark": any(
+                    term in query_lower for term in ("wholesale", "balancing", "market price")
+                ),
+            },
+            confidence=min(0.95, max(0.65, score)),
+            reason=f"Semantic fallback matched end-user price intent (score={score:.2f})",
         )
 
     if tool_name == "get_balancing_composition":
