@@ -371,15 +371,22 @@ def test_untagged_text_between_sections_is_discarded_by_the_fallback():
 def test_most_of_the_matrix_truncates_under_the_default_budget():
     """The DEFAULT budget truncates; production's configured budget does not.
 
-    36 of 40 profiles exceed the 40,500-char effective budget implied by the
-    45,000 default. Production sets ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000
-    (effective 63,900) and the largest prompt the report path can build is
-    ~50,000 chars, so **0 of 40 truncate as deployed**.
+    ALL 40 profiles now exceed the 40,500-char effective budget implied by the
+    45,000 default -- it was 36 of 40 before the catalogs gained
+    ``example_questions`` (2026-08-15, +2,489 chars). Production sets
+    ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000 (effective 63,900) and the largest
+    prompt measures 53,795 chars, so **0 of 40 truncate as deployed**.
 
-    Both facts matter. A deployment that leaves the default in place routes
-    with a shortened tool catalog, so the default is worth pinning. And the
-    constants-first prefix measures 34,886 chars at either budget -- truncation
-    was never what bounded it; per-family block selection is.
+    The move from 36 to 40 sharpens the warning rather than weakening it. A
+    deployment that leaves the default in place used to route most questions
+    with a shortened catalog; it now does so for EVERY question, and
+    ``UNTRUSTED_TOPIC_CATALOG`` / ``UNTRUSTED_TOOL_CATALOG`` are among the
+    sections dropped -- which is precisely the routing information the
+    examples were added to supply. The default is worth pinning for that
+    reason; the deployed override is what makes the examples reach the model.
+
+    And the constants-first prefix measures 34,886 chars at either budget --
+    truncation was never what bounded it; per-family block selection is.
     """
     truncated = [
         case_id
@@ -387,9 +394,28 @@ def test_most_of_the_matrix_truncates_under_the_default_budget():
         if len(render_legacy_case(query, history, previous_contract, anomaly)[0])
         > int(DEFAULT_ANALYZER_BUDGET_CHARS * 0.90)
     ]
-    assert len(truncated) == 36, (
+    assert len(truncated) == 40, (
         f"{len(truncated)} of {len(ANALYZER_PROMPT_MATRIX)} cases truncate; "
         "update this count deliberately when the analyzer budget changes"
+    )
+
+
+def test_the_deployed_budget_still_fits_every_profile():
+    """The examples only help if they survive to the model.
+
+    Growing the catalogs is safe exactly as long as the deployed budget covers
+    the largest prompt. If this fails, the added routing examples are being
+    truncated away on some question family and the growth must be paid back.
+    """
+    deployed_effective = int(71_000 * 0.90)
+    oversized = {
+        case_id: size
+        for case_id, query, history, previous_contract, anomaly in ANALYZER_PROMPT_MATRIX
+        if (size := len(render_legacy_case(query, history, previous_contract, anomaly)[0]))
+        > deployed_effective
+    }
+    assert not oversized, (
+        f"these profiles exceed the deployed budget {deployed_effective}: {oversized}"
     )
 
 

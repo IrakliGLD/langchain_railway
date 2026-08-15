@@ -569,11 +569,72 @@ def adapt_balancing_composition(
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+_RETAIL_METRIC_COLUMNS = (
+    "final_price_net_gel_kwh",
+    "total_gross_gel_kwh",
+    "transmission_tariff_gel_kwh",
+    "distribution_tariff_gel_kwh",
+    "supply_tariff_gel_kwh",
+    "wholesale_benchmark_gel_kwh",
+)
+
+
+def adapt_end_user_prices(
+    df: pd.DataFrame,
+    provenance_refs: Optional[List[str]] = None,
+    filter_cond: Optional[FilterCondition] = None,
+) -> ObservationFrame:
+    """Convert get_end_user_prices output into an ObservationFrame.
+
+    Without this, evidence finalization was skipped on every retail request --
+    logged only as "No frame adapter for tool get_end_user_prices". That is
+    what assembles multi-tool evidence, so the end-user-versus-wholesale
+    comparison had nothing to assemble.
+
+    Values canonicalise through ``retail_price.gel`` (GEL/kWh -> tetri/kWh),
+    the same canonical unit wholesale prices reach from GEL/MWh, so the two
+    sides of that comparison are directly comparable rather than a factor of
+    1000 apart.
+
+    The entity is the supplier/category series, because a retail price only
+    means something with both named.
+    """
+    rows: list[dict] = []
+    prov = provenance_refs or []
+
+    for _, raw_row in df.iterrows():
+        period = str(raw_row.get("date", ""))
+        entity_id = str(raw_row.get("category", "") or "")
+        entity_label = str(
+            raw_row.get("series_label") or raw_row.get("category_label") or entity_id
+        )
+        for col in _RETAIL_METRIC_COLUMNS:
+            if col not in df.columns:
+                continue
+            val = raw_row.get(col)
+            if pd.isna(val):
+                continue
+            canonical_value, canonical_unit = _canonical_value("retail_price.gel", val)
+            rows.append({
+                "period": period,
+                "entity_id": entity_id,
+                "entity_label": entity_label,
+                "metric": col,
+                "value": canonical_value,
+                "unit": canonical_unit,
+                "_unit_contract": "retail_price.gel",
+            })
+
+    rows = _apply_filter(rows, filter_cond)
+    return ObservationFrame(rows=rows, provenance_refs=prov)
+
+
 _TOOL_ADAPTERS = {
     "get_prices": adapt_prices,
     "get_tariffs": adapt_tariffs,
     "get_generation_mix": adapt_generation_mix,
     "get_balancing_composition": adapt_balancing_composition,
+    "get_end_user_prices": adapt_end_user_prices,
 }
 
 
