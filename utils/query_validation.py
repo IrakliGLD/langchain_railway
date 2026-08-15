@@ -361,6 +361,17 @@ def extract_sql_topics(sql: str) -> Set[str]:
         'trade_derived_entities': {'trade', 'balancing', 'bilateral'},
         'monthly_cpi_mv': {'cpi', 'inflation'},
         'entities_mv': {'entity'},
+        # Plant Analytics views.
+        'trade_by_ownership': {'generation', 'ownership'},
+        'ownership_concentration': {'generation', 'ownership', 'concentration'},
+        'by_capacity': {'generation', 'quantity', 'capacity'},
+        'by_commissioning': {'generation', 'quantity', 'commissioning'},
+        'capacity_factor': {'generation', 'capacity', 'capacity_factor'},
+        # Network & Supply view. Deliberately NOT tagged 'tariff': that topic
+        # means generation-side regulated tariffs elsewhere in this module, and
+        # conflating the two would let a retail query satisfy a generation-tariff
+        # evidence requirement.
+        'demand_tariff_mv': {'price', 'end_user_tariff'},
     }
 
     # Column → topic mapping

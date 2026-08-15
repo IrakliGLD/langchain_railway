@@ -388,6 +388,7 @@
         "cross_border_capacity",
         "exchange_transition",
         "tariffs",
+        "network_supply_tariffs",
         "cfd_ppa",
         "currency_influence",
         "seasonal_patterns",

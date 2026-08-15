@@ -158,8 +158,17 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "tariffs",
-        "concepts": ["regulated tariff", "GNERC", "Enguri", "Gardabani", "cost-plus"],
-        "use_for": "Tariff entities, tariff logic, and regulated pricing questions.",
+        "concepts": ["regulated tariff", "GNERC", "Enguri", "Gardabani", "cost-plus",
+                      "guaranteed capacity fee"],
+        "use_for": "GENERATION-side tariffs: what a regulated plant is paid (GEL/MWh), tariff entities, cost-plus logic. For network tariffs or the end-user price, use network_supply_tariffs.",
+    },
+    {
+        "name": "network_supply_tariffs",
+        "concepts": ["end-user tariff", "retail tariff", "distribution tariff",
+                      "transmission tariff", "supply tariff", "universal service",
+                      "public service", "telasi", "telmico", "voltage level",
+                      "consumption band"],
+        "use_for": "RETAIL-side tariffs: the regulated end-user price (GEL/kWh) and its distribution/supply/transmission components, consumption bands, voltage levels, and the guaranteed capacity fee pass-through. For what a plant is paid, use tariffs.",
     },
     {
         "name": "cfd_ppa",

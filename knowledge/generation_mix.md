@@ -97,6 +97,53 @@ Materialized view: `trade_by_ownership`
   - market concentration assessment
   - dependency on specific companies/groups
   - linking generation structure with tariff and support schemes
+- Ownership values are stored exactly as listed above. **`GIG` is uppercase**; every other
+  value is lowercase. Equality filters are case-sensitive.
+
+### Concentration Metrics
+Materialized view: `ownership_concentration` — one row per month.
+
+- `hhi` — Herfindahl-Hirschman index of generation ownership
+- `owner_count` — number of distinct owners generating that month
+- `top1_share`, `top3_share`, `top5_share` — share of generation held by the largest N owners
+- `total_generation` — the denominator those shares are computed against
+
+Use this view directly for concentration questions rather than recomputing shares from
+`trade_by_ownership`; the published values are the authoritative ones.
+
+---
+
+## 3b. Fleet Structure (Capacity Bands, Age, Capacity Factor)
+
+Generation can also be cut by plant size, plant age, and utilisation.
+
+| View | Cut | Columns |
+| ---- | --- | ------- |
+| `by_capacity` | installed-capacity band | `date, entity, segment, quantity, facility_count` |
+| `by_commissioning` | commissioning cohort | `date, entity, segment, quantity` |
+| `capacity_factor` | technology × capacity band | `date, technology, capacity_category, capacity_category_order, segment, facility_count, generation_mwh, installed_capacity_mw, hours_in_month, capacity_factor, capacity_factor_percent` |
+
+### Vocabularies
+- **Capacity bands (MW)** — `by_capacity.entity` and `capacity_factor.capacity_category` use the
+  *same* eight values: `<=5`, `6-10`, `11-20`, `21-50`, `51-100`, `101-200`, `201-500`,
+  `more than 500`.
+- **Commissioning cohorts** — `by_commissioning.entity`: `<=1990`, `1991-2000`, `2001-2010`,
+  `2011-2020`, `after 2020`.
+- **Technologies** — `capacity_factor.technology`: `hpp` (hydro), `tpp` (thermal), `wpp` (wind),
+  `solar`.
+
+### Usage Rules
+- **`segment` currently holds only `'total'`** in all four fleet views and in
+  `ownership_concentration`. Do not apply the `trade_derived_entities` `'balancing'` filter
+  here — it matches nothing and silently returns an empty result.
+- **`capacity_factor` and `capacity_factor_percent` are the same quantity at two scales:** the
+  first is a ratio in 0–1, the second is that value ×100. Choose one. Multiplying
+  `capacity_factor_percent` by 100 again produces a value 100× too large.
+- **Technology × capacity band is sparse.** Not every pair exists in every month (there is no
+  500 MW solar). Do not assume a complete grid, and do not read a missing pair as zero.
+- `by_capacity` carries both `quantity` (generation) and `facility_count` (number of plants).
+  These answer different questions — "how much do large plants generate" versus "how many large
+  plants are there" — and `facility_count` is a stock, so it should not be summed across months.
 
 ---
 

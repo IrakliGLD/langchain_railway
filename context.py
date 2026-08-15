@@ -52,7 +52,55 @@ COLUMN_LABELS = {
     "sector": "Energy Balance Sector",
     "energy_source": "Energy Source",
     "volume_tj": "Energy Volume (TJ)",
+
+    # by_capacity / by_commissioning / capacity_factor
+    "facility_count": "Facility Count",
+    "technology": "Technology",
+    "capacity_category": "Installed Capacity Band",
+    "capacity_category_order": "Capacity Band Sort Order",
+    "generation_mwh": "Generation (MWh)",
+    "installed_capacity_mw": "Installed Capacity (MW)",
+    "hours_in_month": "Hours in Month",
+    "capacity_factor": "Capacity Factor (ratio 0-1)",
+    "capacity_factor_percent": "Capacity Factor (%)",
+
+    # ownership_concentration
+    "total_generation": "Total Generation (thousand MWh)",
+    "owner_count": "Number of Owners",
+    "hhi": "Herfindahl-Hirschman Index",
+    "top1_share": "Top 1 Owner Share",
+    "top3_share": "Top 3 Owner Share",
+    "top5_share": "Top 5 Owner Share",
+
+    # demand_tariff_mv
+    "company": "Tariff Company",
+    "activity": "Tariff Activity",
+    "volate": "Voltage Level",
+    "level_1_cat": "Consumer Class",
+    "level_2_cat": "Consumer Sub-Class",
+    "value": "Tariff Component (GEL/kWh)",
 }
+
+# --- Columns excluded from scrub_schema_mentions ---
+# These keys MUST stay in COLUMN_LABELS: readiness and display read that dict,
+# and tests/test_context.py requires every DB_SCHEMA_DICT column to have a
+# label.  They MUST NOT be substituted into narrative text, because each is an
+# ordinary English word and the substitution is a case-insensitive
+# ``\b{key}\b`` replacement over the LLM's prose.
+#
+# This is the same failure already documented for VALUE_LABELS below: a bare
+# common-English key mangles ordinary sentences.  Concretely, without this set
+# "the value of imports rose" becomes "the Tariff Component (GEL/kWh) of
+# imports rose", and "wind technology" becomes "wind Technology".
+#
+# Identifier-shaped keys (snake_case with an underscore, acronyms like HPP,
+# hyphenated codes) never occur in natural prose and stay scrubbed.
+SCRUB_EXEMPT_COLUMNS = frozenset({
+    "value",
+    "activity",
+    "company",
+    "technology",
+})
 
 # ----------------------------------------------------------
 # DERIVED_LABELS — for LLM-generated / computed columns
@@ -124,6 +172,12 @@ VIEW_LABELS = {
     "monthly_cpi_mv": "Monthly Consumer Price Index",
     "dates_mv": "Date Reference",
     "mv_balancing_trade_with_tariff": "Balancing Tariffs by Entity",
+    "trade_by_ownership": "Generation by Owner Group",
+    "ownership_concentration": "Generation Ownership Concentration",
+    "by_capacity": "Generation by Installed Capacity Band",
+    "by_commissioning": "Generation by Commissioning Cohort",
+    "capacity_factor": "Capacity Factor by Technology and Band",
+    "demand_tariff_mv": "Regulated End-User Tariff Components",
 }
 
 # --- Demand/Supply classification for type_tech ---
@@ -222,6 +276,44 @@ DB_SCHEMA_DICT = {
             "columns": ["month", "entity", "entity_code", "tariff_gel", "balancing_quantity"],
             "desc": "Balancing Market Tariffs by Entity (monthly regulated tariff with balancing quantity per entity)",
         },
+        "trade_by_ownership": {
+            "columns": ["date", "ownership", "quantity"],
+            "desc": "Monthly Generation by Owner Group",
+        },
+        "ownership_concentration": {
+            "columns": [
+                "date", "segment", "total_generation", "owner_count",
+                "hhi", "top1_share", "top3_share", "top5_share",
+            ],
+            "desc": "Monthly Generation Ownership Concentration (HHI and top-N shares)",
+        },
+        "by_capacity": {
+            "columns": ["date", "entity", "segment", "quantity", "facility_count"],
+            "desc": "Monthly Generation and Facility Count by Installed Capacity Band",
+        },
+        "by_commissioning": {
+            "columns": ["date", "entity", "segment", "quantity"],
+            "desc": "Monthly Generation by Commissioning Cohort",
+        },
+        "capacity_factor": {
+            "columns": [
+                "date", "technology", "capacity_category", "capacity_category_order",
+                "segment", "facility_count", "generation_mwh", "installed_capacity_mw",
+                "hours_in_month", "capacity_factor", "capacity_factor_percent",
+            ],
+            "desc": "Monthly Capacity Factor by Technology and Installed Capacity Band",
+        },
+        # ``demand_tariff_id`` exists on the view but is deliberately omitted: it
+        # is NULL on every calculated row, so it is useless as a join key.
+        # REQUIRED_SCHEMA_COLUMNS checks required-subset-of-reflected, so leaving
+        # a real column out is safe.
+        "demand_tariff_mv": {
+            "columns": [
+                "date", "company", "activity", "volate",
+                "level_1_cat", "level_2_cat", "value",
+            ],
+            "desc": "Regulated End-User Tariff Components (distribution, supply, transmission; GEL/kWh)",
+        },
     },
     "rules": {
 
@@ -243,6 +335,12 @@ DB_SCHEMA_DOC = """
 - tech_quantity_view(date, type_tech, quantity_tech)
 - trade_derived_entities(date, entity, segment, quantity)
 - energy_balance_long_mv(year, sector, energy_source, volume_tj)
+- trade_by_ownership(date, ownership, quantity)
+- ownership_concentration(date, segment, total_generation, owner_count, hhi, top1_share, top3_share, top5_share)
+- by_capacity(date, entity, segment, quantity, facility_count)
+- by_commissioning(date, entity, segment, quantity)
+- capacity_factor(date, technology, capacity_category, capacity_category_order, segment, facility_count, generation_mwh, installed_capacity_mw, hours_in_month, capacity_factor, capacity_factor_percent)
+- demand_tariff_mv(date, company, activity, volate, level_1_cat, level_2_cat, value)
 
 **CRITICAL: Exact column values (case-sensitive, including spaces/hyphens):**
 
@@ -269,9 +367,52 @@ mv_balancing_trade_with_tariff notes:
 - tariff_gel = regulated tariff for that entity; balancing_quantity = energy sold on balancing
 - JOIN to other views: mv_balancing_trade_with_tariff.month = price_with_usd.date (cross-column join)
 
+**Plant-fleet views (by_capacity, by_commissioning, capacity_factor, ownership_concentration, trade_by_ownership):**
+
+- by_capacity.entity AND capacity_factor.capacity_category share ONE installed-capacity band
+  vocabulary (MW): '<=5', '6-10', '11-20', '21-50', '51-100', '101-200', '201-500', 'more than 500'
+- by_commissioning.entity (commissioning cohort): '<=1990', '1991-2000', '2001-2010', '2011-2020', 'after 2020'
+- capacity_factor.technology: 'hpp' (hydro), 'tpp' (thermal), 'wpp' (wind), 'solar'
+  * technology × capacity band is SPARSE — not every pair exists in every month. Do not assume a full grid.
+- trade_by_ownership.ownership (exact case — 'GIG' is uppercase, all others lowercase):
+  'energo-pro group', 'georgian water and power jcs', 'GIG', 'inter-rao', 'other', 'state', 'vartsikhe 2005 jsc'
+- `segment` in these five views currently holds exactly ONE value, 'total'. Do NOT reuse the
+  trade_derived_entities 'balancing' filter here — it matches nothing and returns an empty result.
+- capacity_factor carries the SAME quantity at two scales: `capacity_factor` is a ratio in 0..1,
+  `capacity_factor_percent` is that value ×100. Pick one. Never multiply capacity_factor_percent by 100.
+- ownership_concentration is one row per month: `hhi` is the Herfindahl-Hirschman index,
+  `top1_share`/`top3_share`/`top5_share` are ownership shares of generation.
+
+**demand_tariff_mv — regulated END-USER tariff components (GEL/kWh, NOT GEL/MWh):**
+
+- company: 'telasi', 'epg' (distribution) | 'telmico', 'eps' (supply) | 'gse' (transmission)
+- activity: 'distribution', 'universal', 'public', 'transmission', 'final_price', 'solr'
+- volate (voltage level, stored verbatim): '', '220/380', '3.3-6-10', '35-110'
+- level_1_cat: '', 'com' (commercial), 'hh' (household)
+- level_2_cat: '', 'cat1' (<=101 kWh), 'cat2' (101-301 kWh), 'cat3' (>301 kWh), 'other', 'small'
+- Blank dimensions are EMPTY STRINGS (''), never NULL. Filter with = '' — IS NULL matches nothing.
+
+The end-user price is the SUM of three components for one (date, supplier, category):
+  1. distribution — the supplier's distributor: 'telmico'->'telasi', 'eps'->'epg'
+  2. supply       — the supplier itself; activity 'universal' (households / small commercial)
+                    or 'public' (public-service commercial)
+  3. transmission — company='gse', activity='transmission', volate/level_1_cat/level_2_cat all ''
+'final_price' rows are the publisher's own pre-summed total — use them to CROSS-CHECK a computed
+sum, not to build one. 'solr' (supplier of last resort) is not part of the end-user price.
+
+USABLE RANGE: rows run to 2030-12-01, but a complete end-user price exists only where final_price
+rows exist. Distribution tariffs are published years ahead of the supply and transmission rows they
+must combine with, so MAX(date) on this view is misleading. For end-user price questions bound the
+window with (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price').
+
 **Units & Conversions:**
 - Quantities in thousand MWh (multiply ×1000 for MWh)
 - *_usd fields = *_gel / xrate
+- THREE scales now coexist — never mix them in one expression:
+  * thousand MWh — quantity / quantity_tech (trade, tech, and plant-fleet views)
+  * MWh and MW   — capacity_factor.generation_mwh, capacity_factor.installed_capacity_mw
+  * GEL/kWh      — demand_tariff_mv.value (every other price and tariff is GEL/MWh)
+- demand_tariff_mv in USD/kWh = value / xrate (join price_with_usd on date)
 
 **Granularity:**
 - Monthly for all except energy_balance_long_mv (yearly)
@@ -296,6 +437,10 @@ mv_balancing_trade_with_tariff notes:
   * For balancing composition analysis, always filter: date >= '2020-01-01'
 - mv_balancing_trade_with_tariff: complete from **2020** onwards (derived from trade + tariff_gen)
   * NULL for a regulated group in a month means that group had no balancing sales — do NOT treat as 0
+- trade_by_ownership, ownership_concentration, by_capacity, by_commissioning, capacity_factor:
+  complete from **2020-01** onwards
+- demand_tariff_mv: from **2021-07** onwards; complete end-user prices only through the latest
+  final_price month (see USABLE RANGE above) — later rows are distribution-only
 """
 
 # --- Join Map ---
@@ -309,6 +454,12 @@ DB_JOINS = {
     "monthly_cpi_mv": {"join_on": "date", "related_to": ["price_with_usd"]},
     "dates_mv": {"join_on": "date", "related_to": ["price_with_usd", "tariff_with_usd", "tech_quantity_view", "trade_derived_entities", "monthly_cpi_mv"]},
     "mv_balancing_trade_with_tariff": {"join_on": "month", "related_to": ["price_with_usd"], "join_note": "month = price_with_usd.date (different column names)"},
+    "trade_by_ownership": {"join_on": "date", "related_to": ["price_with_usd", "ownership_concentration"]},
+    "ownership_concentration": {"join_on": "date", "related_to": ["price_with_usd", "trade_by_ownership"]},
+    "by_capacity": {"join_on": "date", "related_to": ["price_with_usd", "capacity_factor"], "join_note": "by_capacity.entity shares the 8-band vocabulary with capacity_factor.capacity_category"},
+    "by_commissioning": {"join_on": "date", "related_to": ["price_with_usd"]},
+    "capacity_factor": {"join_on": "date", "related_to": ["price_with_usd", "by_capacity"], "join_note": "capacity_factor.capacity_category shares the 8-band vocabulary with by_capacity.entity"},
+    "demand_tariff_mv": {"join_on": "date", "related_to": ["price_with_usd"], "join_note": "join price_with_usd on date for xrate; value is GEL/kWh, so USD/kWh = value / xrate"},
 }
 
 # --- Output scrubber ---
@@ -319,6 +470,8 @@ def scrub_schema_mentions(text: str) -> str:
     for col, label in DERIVED_LABELS.items():
         text = re.sub(rf"\b{re.escape(col)}\b", label, text, flags=re.IGNORECASE)
     for col, label in COLUMN_LABELS.items():
+        if col in SCRUB_EXEMPT_COLUMNS:
+            continue
         text = re.sub(rf"\b{re.escape(col)}\b", label, text, flags=re.IGNORECASE)
     for tbl, label in VIEW_LABELS.items():
         text = re.sub(rf"\b{re.escape(tbl)}\b", label, text, flags=re.IGNORECASE)
