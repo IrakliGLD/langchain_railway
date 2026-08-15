@@ -100,6 +100,56 @@ def test_growth_is_measured_in_time_order_not_row_order():
     assert "+25.0%" in forward
 
 
+def test_each_component_share_of_the_final_price_is_precomputed():
+    """"Distribution is 37% of the bill" is the natural thing to say about a
+    stack, and the model says it whether or not the number exists in the
+    corpus. On 2026-08-15 the same six tokens (37, 48, 74, 86, 111, 124) were
+    rejected by strict-numeric grounding on two consecutive runs, gutting a
+    2,571-character answer down to 537.
+    """
+    from agent.analyzer import _append_column_aggregates
+
+    rows = []
+    for month in range(1, 13):
+        rows.append(
+            {
+                "date": pd.Timestamp(f"2026-{month:02d}-01"),
+                "supplier": "telmico",
+                "category": "220/380|hh|cat2",
+                "transmission_tariff_gel_kwh": 0.010,
+                "distribution_tariff_gel_kwh": 0.040,
+                "supply_tariff_gel_kwh": 0.050,
+                "final_price_net_gel_kwh": 0.100,
+            }
+        )
+    df = pd.DataFrame(rows)
+    ctx = QueryContext(query="t", df=df, cols=list(df.columns))
+    _append_column_aggregates(ctx)
+
+    hint = ctx.stats_hint
+    assert "share of final price" in hint, hint[:400]
+    # 0.040 / 0.100 = 40%, 0.050 / 0.100 = 50%, 0.010 / 0.100 = 10%
+    assert "distribution=40.0%" in hint, hint[:400]
+    assert "supply=50.0%" in hint, hint[:400]
+    assert "transmission=10.0%" in hint, hint[:400]
+
+
+def test_a_frame_without_a_component_stack_gets_no_share_line():
+    from agent.analyzer import _append_column_aggregates
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-01-01", "2026-02-01"]),
+            "entity": ["a", "b"],
+            "p_bal_gel": [100.0, 120.0],
+        }
+    )
+    ctx = QueryContext(query="t", df=df, cols=list(df.columns))
+    _append_column_aggregates(ctx)
+
+    assert "share of final price" not in ctx.stats_hint
+
+
 def test_the_retail_rules_reference_exists_and_states_the_stack():
     from skills.loader import load_reference
 
