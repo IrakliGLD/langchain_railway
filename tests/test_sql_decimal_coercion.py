@@ -58,3 +58,68 @@ def test_decimal_value_column_is_numeric_after_sql_execution():
     assert "value" in df.select_dtypes(include="number").columns, (
         "Decimal column still invisible to select_dtypes(include='number')"
     )
+
+
+def test_raw_decimal_frame_is_invisible_to_numeric_selection():
+    """Pins the defect itself, so the tests above cannot silently stop testing it.
+
+    If pandas ever starts treating Decimal as numeric, this fails and the
+    coercion can be reconsidered -- rather than the regression tests quietly
+    passing for a different reason.
+    """
+    raw = make_demand_tariff_frame()
+
+    assert raw["value"].dtype == object
+    assert raw.select_dtypes(include="number").columns.tolist() == []
+
+
+def test_column_aggregates_reach_stats_hint_only_after_coercion():
+    """stats_hint must carry aggregates, not just the row count.
+
+    Production symptom: stats_hint_len=9, which is exactly len("Rows: 528").
+    With no statistics the model computes its own figures and the
+    strict_numeric grounding gate then rejects every one of them.
+    """
+    from agent.analyzer import _append_column_aggregates
+    from core.query_executor import coerce_result_frame
+    from models import QueryContext
+
+    raw_ctx = QueryContext(query="household tariff dynamics")
+    raw_ctx.df = make_demand_tariff_frame(rows=12)
+    raw_ctx.stats_hint = "Rows: 12"
+    _append_column_aggregates(raw_ctx)
+    assert raw_ctx.stats_hint == "Rows: 12", (
+        "expected the raw Decimal frame to contribute no aggregates"
+    )
+
+    coerced_ctx = QueryContext(query="household tariff dynamics")
+    coerced_ctx.df = coerce_result_frame(make_demand_tariff_frame(rows=12))
+    coerced_ctx.stats_hint = "Rows: 12"
+    _append_column_aggregates(coerced_ctx)
+
+    assert "Column Aggregates" in coerced_ctx.stats_hint
+    assert len(coerced_ctx.stats_hint) > len("Rows: 12")
+
+
+def test_grounding_aggregate_tokens_appear_only_after_coercion():
+    """agent/summary_grounding.py has the same select_dtypes dependency.
+
+    Without numeric dtypes it contributes no aggregate tokens, so an answer
+    citing a mean or a max cannot match the corpus and the gate strips it.
+    """
+    from agent.summary_grounding import _add_aggregate_tokens
+    from core.query_executor import coerce_result_frame
+    from models import QueryContext
+
+    raw_ctx = QueryContext(query="household tariff dynamics")
+    raw_ctx.df = make_demand_tariff_frame(rows=12)
+    raw_tokens: set[str] = set()
+    _add_aggregate_tokens(raw_tokens, raw_ctx)
+    assert raw_tokens == set(), "expected no aggregate tokens from a raw Decimal frame"
+
+    coerced_ctx = QueryContext(query="household tariff dynamics")
+    coerced_ctx.df = coerce_result_frame(make_demand_tariff_frame(rows=12))
+    coerced_tokens: set[str] = set()
+    _add_aggregate_tokens(coerced_tokens, coerced_ctx)
+
+    assert coerced_tokens, "no aggregate tokens produced for a coerced frame"
