@@ -201,6 +201,21 @@ def _build_sql(
 
     A category's three components are looked up with that category's OWN keys.
     Components are never mixed across categories.
+
+    Two binding rules govern the SQL below, both learned the hard way:
+
+    1. SELECT-position parameters are wrapped in ``CAST(:name AS text)``.
+       psycopg 3 binds server-side, so a bare parameter there has no inferable
+       type and Postgres raises "could not determine data type of parameter".
+       The ``::`` shorthand does NOT work: SQLAlchemy's bind regex has a
+       negative lookahead for a colon, so it would not recognise the parameter
+       at all and the literal text would reach Postgres as a syntax error.
+
+    2. No SQL comment may contain a colon followed by a word. SQLAlchemy scans
+       the entire string, comments included, so such prose becomes a real bind
+       parameter that nothing supplies a value for -- raising StatementError
+       before the query ever reaches the server. This paragraph lives in the
+       docstring rather than in the emitted SQL for exactly that reason.
     """
     branches = []
     for index, supplier in enumerate(suppliers):
@@ -221,14 +236,6 @@ def _build_sql(
                 f"""
     SELECT
         d.date,
-        -- Explicit casts: psycopg 3 binds server-side, so a bare parameter in
-        -- the SELECT list has no inferable type and Postgres raises
-        -- "could not determine data type of parameter".
-        --
-        -- CAST(...), never the ':name::text' shorthand: SQLAlchemy's bind
-        -- regex has a negative lookahead for ':', so ':name::text' is not
-        -- recognised as a parameter at all and the literal ':name' reaches
-        -- Postgres as a syntax error.
         CAST(:supplier_{tag} AS text)   AS supplier,
         CAST(:cat_id_{tag} AS text)     AS category,
         CAST(:cat_label_{tag} AS text)  AS category_label,
