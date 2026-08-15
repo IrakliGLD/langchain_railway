@@ -296,8 +296,16 @@ def infer_dimension(col: str) -> str:
 
 
 def unit_for_price(cols_: List[str]) -> str:
-    has_gel = any("_gel" in c.lower() for c in cols_)
-    has_usd = any("_usd" in c.lower() for c in cols_)
+    # Retail tariffs are stored per kWh while every wholesale price in this
+    # system is per MWh -- a factor of 1000. Checked first because "_gel_kwh"
+    # also contains "_gel", and mislabelling the axis invites exactly the
+    # scale confusion the retail tool exists to prevent.
+    lowered = [c.lower() for c in cols_]
+    if lowered and all("_gel_kwh" in c for c in lowered):
+        return "GEL/kWh"
+
+    has_gel = any("_gel" in c for c in lowered)
+    has_usd = any("_usd" in c for c in lowered)
     if has_gel and has_usd:
         return "currency/MWh"
     if has_gel:
@@ -681,6 +689,11 @@ def _prepare_chart_source(
         "market",
         "trade",
         "fuel",
+        # Company identifiers. Without these, "supplier" fell through to the
+        # numeric coercion below and every company name became NaN, collapsing
+        # sixteen supplier/category series into eight.
+        "supplier",
+        "company",
     ]
     for col in cols:
         if col == time_key or col not in df.columns:
@@ -694,9 +707,19 @@ def _prepare_chart_source(
             df[col] = df[col].astype(str).replace("nan", None)
             continue
         try:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            converted = pd.to_numeric(df[col], errors="coerce")
         except Exception:
-            pass
+            continue
+        # The hint list above is a name heuristic, and it fails in the
+        # destructive direction: an unlisted text column is coerced to all-NaN
+        # and the series it identifies disappears from the chart entirely.
+        # Coercion that leaves nothing behind is data loss, not conversion, so
+        # keep such columns categorical regardless of what they are called.
+        if converted.notna().any() or not df[col].notna().any():
+            df[col] = converted
+        else:
+            log.info("Kept column '%s' categorical: numeric coercion erased every value", col)
+            df[col] = df[col].astype(str).replace("nan", None)
 
     categorical_cols = [
         col
@@ -766,11 +789,74 @@ def _apply_legacy_chart_suppression(
     return True
 
 
+def _retail_chart_groups(ctx: QueryContext) -> Optional[List[Dict[str, Any]]]:
+    """Deterministic charts for a regulated end-user price frame.
+
+    Returns None when the frame is not retail, leaving every other question on
+    the planner path.
+
+    Built from the frame rather than from planner suggestions because the
+    planner emitted four chart_groups carrying the SAME single metric for one
+    question on 2026-08-15 -- four near-identical panels where the reader
+    wanted one comparison across categories. The frame already states exactly
+    how many series exist, so the decision does not need to be inferred.
+    """
+    from agent.tools.end_user_price_tools import (
+        COMPONENT_COLUMNS,
+        SERIES_COLUMNS,
+        headline_price_column,
+        is_retail_price_frame,
+    )
+
+    df = ctx.df
+    if df is None or df.empty or not is_retail_price_frame(df.columns):
+        return None
+
+    headline = headline_price_column(df.columns)
+    groups: List[Dict[str, Any]] = [
+        {
+            "metrics": [headline],
+            "type": "line",
+            "title": "Final end-user price by supply company and customer category",
+            "source": "retail",
+        }
+    ]
+
+    # The stack is a part-to-whole only within ONE company and ONE category.
+    # Stacking sixteen different stacks on a single axis is not a composition,
+    # it is a pile.
+    series_count = df.groupby(list(SERIES_COLUMNS), dropna=False).ngroups
+    if series_count == 1:
+        groups.append(
+            {
+                "metrics": list(COMPONENT_COLUMNS),
+                "type": "stackedbar",
+                "title": "What the price is made of: transmission, distribution, supply",
+                "source": "retail",
+                # Exempts this group from the price-tariff force-to-line rule:
+                # these three genuinely sum to the total above them.
+                "_component_composition": True,
+            }
+        )
+
+    log.info(
+        "Retail chart groups: charts=%d series=%d headline=%s",
+        len(groups),
+        series_count,
+        headline,
+    )
+    return groups
+
+
 def _resolve_chart_groups(
     ctx: QueryContext,
     num_cols: List[str],
     visualization: Optional[Any],
 ) -> List[Dict[str, Any]]:
+    retail_groups = _retail_chart_groups(ctx)
+    if retail_groups is not None:
+        return retail_groups
+
     planned_groups = ctx.plan.get("chart_groups", [])
     groups: List[Dict[str, Any]] = []
 
@@ -1539,7 +1625,15 @@ def _choose_chart_type(
     ):
         chart_type = "stackedbar"
 
-    if ("price_tariff" in dimensions or "xrate" in dimensions) and "share" not in dimensions:
+    if (
+        ("price_tariff" in dimensions or "xrate" in dimensions)
+        and "share" not in dimensions
+        # A price stack is the one case where tariff columns are a genuine
+        # part-to-whole: transmission + distribution + supply IS the total on
+        # the same row. Forcing it to a line would draw three overlapping
+        # levels and hide the composition the reader asked for.
+        and not group.get("_component_composition")
+    ):
         if chart_type in {"bar", "stackedbar", "pie"}:
             log.info("Forced chart_type to 'line': price/xrate must be line (was %s)", chart_type)
             chart_type = "line"

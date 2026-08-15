@@ -111,6 +111,19 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=...       # structured-summarizer-only overri
 
 See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) §3.2 / §3.9. Summarizer prompts routinely hit 90–110k chars in deep mode because `DOMAIN_KNOWLEDGE` + `EXTERNAL_SOURCE_PASSAGES` expand; analyzer prompts do not. Raising `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` independently is the right knob for that.
 
+**Deployment note (2026-08-15).** Production sets `ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000` and `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=100000`. **Neither stage truncates**: observed analyzer prompts run 43,308–45,644 against a 63,900 effective budget, and summarizer prompts 33,117–39,924 against 90,000, with `summarizer_prompt_census` reporting `pre_budget == post_budget` on every call. Do not reach for the prompt budget when diagnosing missing context here — check the caps below first, which apply *before* the budget and are what actually bound the payload.
+
+### Caps that bind before the prompt budget
+
+| Cap | Value | Configurable | Notes |
+|---|---|---|---|
+| Data preview rows | `PREVIEW_MAX_ROWS` (1200) | yes | Head slice with **no tail preservation**. Was a hardcoded 200. |
+| Data preview chars | `PREVIEW_MAX_CHARS` (30,000) | yes | Drops middle rows, keeps first and last. |
+| Vector knowledge pack | `VECTOR_KNOWLEDGE_MAX_CHARS*` | yes | Per tier; `packed_truncated` in the trace shows when it bites. |
+| Knowledge compaction | 12,000 / 24,000 | **no** — hardcoded in `agent/summarizer.py` | Conceptual path only. |
+
+The preview row cap is the one that mattered. It slices `rows[:max_rows]` *before* the character budget, so an arbitrary row count governed instead of the character budget — and the character cap's progressive truncation, which exists so the model sees **both ends** of the date range, never engaged (previews reached ~8,000 of an 18,000 cap). On a 1,056-row retail frame the model received the first 200 rows and no tail: for a series running 2021-01 → 2026-06 it could see nothing past **2022-01**, which is why growth figures came back ungrounded. Raising the row cap lets the character budget bind and truncate intelligently: 200 rows → 792, last visible date 2022-01 → 2026-06, preview 7,016 → 27,592 chars, total prompt ~59,500 of 90,000.
+
 For an OpenAI GPT-5.6 Terra primary model, Standard mode also supports
 independent reasoning-effort controls:
 

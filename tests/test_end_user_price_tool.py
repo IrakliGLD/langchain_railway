@@ -438,11 +438,90 @@ def test_every_parameter_actually_binds_through_sqlalchemy(monkeypatch):
         f"raise a Postgres syntax error: {sorted(set(leftover))}"
     )
 
-    intended = set(captured["params"])
-    assert intended <= set(text(captured["sql"])._bindparams), (
-        "parameters passed but never declared in the SQL: "
-        f"{sorted(intended - set(text(captured['sql'])._bindparams))}"
-    )
+
+def test_the_statement_can_actually_be_bound(monkeypatch):
+    """The binding must round-trip in BOTH directions.
+
+    Asserting only "every value passed is declared" misses the reverse and
+    more dangerous case: a name DECLARED in the SQL that nothing passes a
+    value for. SQLAlchemy then raises StatementError before reaching the
+    server, so there is no SQLSTATE and the log says only
+    "type=StatementError" -- which is exactly what happened in production on
+    2026-08-15.
+
+    The source was prose: SQLAlchemy scans the WHOLE string including
+    comments, so a comment mentioning ':name::text' contributed two phantom
+    parameters -- ':nam' (the regex backtracks when the greedy ':name' fails
+    its lookahead) and ':name' from a second mention. A comment explaining
+    the bind-parameter trap re-created the bind-parameter trap.
+
+    construct_params is the check that matters: it is what the driver calls,
+    and it raises on exactly this.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.dialects import postgresql
+
+    for kwargs in (
+        {},
+        {"include_vat": True},
+        {"include_wholesale_benchmark": True},
+        {"supplier": "telmico", "category": "220/380|hh|cat2"},
+        {"start_date": "2024-01-01", "end_date": "2024-12-31"},
+    ):
+        captured = _capture_sql(monkeypatch, **kwargs)
+        statement = text(captured["sql"])
+        declared = set(statement._bindparams)
+        passed = set(captured["params"])
+
+        assert declared == passed, (
+            f"bind parameters do not round-trip for {kwargs}: "
+            f"declared but never passed={sorted(declared - passed)}, "
+            f"passed but not declared={sorted(passed - declared)}"
+        )
+
+        compiled = statement.compile(dialect=postgresql.psycopg.dialect())
+        compiled.construct_params(captured["params"])
+
+
+def test_the_generated_sql_parses_as_postgres(monkeypatch):
+    """Syntax check without a database.
+
+    The statement is assembled by string concatenation across sixteen UNION
+    branches with conditional date fragments, so a future edit can produce
+    something that binds cleanly and still will not parse. sqlglot is already
+    a dependency; parsing costs nothing and fails loudly.
+    """
+    import sqlglot
+
+    for kwargs in (
+        {},
+        {"include_wholesale_benchmark": True},
+        {"start_date": "2024-01-01"},
+        {"end_date": "2024-12-31"},
+        {"start_date": "2024-01-01", "end_date": "2024-12-31"},
+        {"supplier": "eps", "category": "35-110|com|other"},
+    ):
+        captured = _capture_sql(monkeypatch, **kwargs)
+        sqlglot.parse_one(captured["sql"], dialect="postgres")
+
+
+def test_no_emitted_sql_comment_mentions_a_bind_parameter(monkeypatch):
+    """Keep the prose out of the payload.
+
+    Any ':word' inside a SQL comment becomes a real bind parameter, so the
+    explanation of why casts are written a certain way belongs in the Python
+    docstring, never in the SQL the driver receives.
+    """
+    import re
+
+    captured = _capture_sql(monkeypatch, include_wholesale_benchmark=True)
+
+    offenders = [
+        comment
+        for comment in re.findall(r"--[^\n]*", captured["sql"])
+        if re.search(r"(?<![:\w]):\w", comment)
+    ]
+    assert not offenders, f"SQL comments introduce phantom bind parameters: {offenders}"
 
 
 def test_select_position_parameters_are_explicitly_cast(monkeypatch):

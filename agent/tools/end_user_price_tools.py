@@ -124,6 +124,44 @@ WHOLESALE_COMPARISON_MARKERS: Tuple[str, ...] = (
 )
 
 
+#: Components in tariff order: the stack a customer's bill is built from.
+COMPONENT_COLUMNS: Tuple[str, ...] = (
+    "transmission_tariff_gel_kwh",
+    "distribution_tariff_gel_kwh",
+    "supply_tariff_gel_kwh",
+)
+
+#: The published total, net of VAT, and its gross twin when VAT was requested.
+NET_TOTAL_COLUMN = "final_price_net_gel_kwh"
+GROSS_TOTAL_COLUMN = "total_gross_gel_kwh"
+
+#: Columns that identify which series a row belongs to.
+SERIES_COLUMNS: Tuple[str, ...] = ("supplier", "category")
+
+
+def is_retail_price_frame(columns) -> bool:
+    """Whether a result frame came from ``get_end_user_prices``.
+
+    Identified by shape rather than by provenance so it also holds for a frame
+    rebuilt downstream. Requires the series keys AND the published total: a
+    frame carrying components alone cannot be charted as a price stack.
+    """
+    # set(columns) directly: a pandas Index has no usable truth value, so the
+    # customary ``columns or ()`` guard raises instead of defaulting.
+    present = set(columns) if columns is not None else set()
+    return (
+        set(SERIES_COLUMNS) <= present
+        and NET_TOTAL_COLUMN in present
+        and set(COMPONENT_COLUMNS) <= present
+    )
+
+
+def headline_price_column(columns) -> str:
+    """The column an answer should lead with: gross when VAT was requested."""
+    present = set(columns) if columns is not None else set()
+    return GROSS_TOTAL_COLUMN if GROSS_TOTAL_COLUMN in present else NET_TOTAL_COLUMN
+
+
 def resolve_scope(text: str) -> Tuple[Optional[str], Optional[str]]:
     """Best-effort ``(supplier, category)`` from free text.
 
@@ -201,6 +239,21 @@ def _build_sql(
 
     A category's three components are looked up with that category's OWN keys.
     Components are never mixed across categories.
+
+    Two binding rules govern the SQL below, both learned the hard way:
+
+    1. SELECT-position parameters are wrapped in ``CAST(:name AS text)``.
+       psycopg 3 binds server-side, so a bare parameter there has no inferable
+       type and Postgres raises "could not determine data type of parameter".
+       The ``::`` shorthand does NOT work: SQLAlchemy's bind regex has a
+       negative lookahead for a colon, so it would not recognise the parameter
+       at all and the literal text would reach Postgres as a syntax error.
+
+    2. No SQL comment may contain a colon followed by a word. SQLAlchemy scans
+       the entire string, comments included, so such prose becomes a real bind
+       parameter that nothing supplies a value for -- raising StatementError
+       before the query ever reaches the server. This paragraph lives in the
+       docstring rather than in the emitted SQL for exactly that reason.
     """
     branches = []
     for index, supplier in enumerate(suppliers):
@@ -221,14 +274,6 @@ def _build_sql(
                 f"""
     SELECT
         d.date,
-        -- Explicit casts: psycopg 3 binds server-side, so a bare parameter in
-        -- the SELECT list has no inferable type and Postgres raises
-        -- "could not determine data type of parameter".
-        --
-        -- CAST(...), never the ':name::text' shorthand: SQLAlchemy's bind
-        -- regex has a negative lookahead for ':', so ':name::text' is not
-        -- recognised as a parameter at all and the literal ':name' reaches
-        -- Postgres as a syntax error.
         CAST(:supplier_{tag} AS text)   AS supplier,
         CAST(:cat_id_{tag} AS text)     AS category,
         CAST(:cat_label_{tag} AS text)  AS category_label,

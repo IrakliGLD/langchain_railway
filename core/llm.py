@@ -6445,6 +6445,20 @@ def llm_summarize_structured(
                 "- Explain what the scenario means in plain language."
             )
 
+        # Retail tariff rules (conditional on a retail frame being present).
+        #
+        # Deliberately carried in GUIDANCE rather than left to retrieved
+        # passages. The DATA truncation profile sheds
+        # UNTRUSTED_EXTERNAL_SOURCE_PASSAGES before statistics, so on exactly
+        # the questions where per-series statistics grow -- retail ones -- the
+        # retrieved explanation of the tariff stack is the first thing cut.
+        # Guidance is not in any truncation profile, so ~2 KB here is worth
+        # more than 18 KB of passages that may not survive.
+        if "final_price_net_gel_kwh" in (stats_hint or ""):
+            _retail_rules = load_reference("energy-analyst", "retail-tariff-rules.md")
+            if _retail_rules:
+                guidance_parts.append(f"RETAIL TARIFF RULES:\n{_retail_rules}")
+
         # Energy-analyst domain knowledge (conditional on energy-domain focus).
         # Phase D: deterministic render_style skips this — the generic renderer
         # owns formatting on that path and never reads skill prose.

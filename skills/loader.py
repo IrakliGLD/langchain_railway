@@ -269,6 +269,7 @@ _EXPECTED_FILES: list[tuple[str, str]] = [
     ("energy-analyst", "seasonal-rules.md"),
     ("energy-analyst", "confidentiality-rules.md"),
     ("energy-analyst", "domain-focus-index.md"),
+    ("energy-analyst", "retail-tariff-rules.md"),
     # sql-planner
     ("sql-planner", "plan-schema.md"),
     ("sql-planner", "chart-strategy-rules.md"),

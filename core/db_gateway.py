@@ -72,6 +72,31 @@ def _sqlstate(error: BaseException) -> str | None:
     return None
 
 
+#: SQLAlchemy errors raised before the driver is reached carry no SQLSTATE, so
+#: the log line degenerates to a bare class name. These messages are generated
+#: by SQLAlchemy itself and name a bind parameter, not its value, so the first
+#: line is safe to log; anything after it may quote the statement or its
+#: parameters and is dropped.
+_PRE_DRIVER_ERROR_NAMES = frozenset({"StatementError", "InvalidRequestError", "ArgumentError"})
+
+
+def _safe_error_detail(error: BaseException) -> str:
+    """A short, value-free reason for errors that never reached the driver.
+
+    "type=StatementError" with no SQLSTATE cost three production questions to
+    diagnose on 2026-08-15: the real cause was "A value is required for bind
+    parameter 'name'", which names the defect outright.
+    """
+    if type(error).__name__ not in _PRE_DRIVER_ERROR_NAMES:
+        return ""
+    if getattr(error, "orig", None) is not None:
+        # A DBAPI error underneath means the driver WAS reached; its message
+        # can echo parameter values, so fall back to the SQLSTATE path.
+        return ""
+    first_line = str(error).strip().splitlines()[0] if str(error).strip() else ""
+    return first_line[:200]
+
+
 def is_transient_database_error(error: BaseException) -> bool:
     """Classify only infrastructure/retryable failures as breaker failures."""
     state = _sqlstate(error)
@@ -194,10 +219,13 @@ def database_connection(
                     if isinstance(error, SQLAlchemyError):
                         log.info(
                             "Non-transient database operation error: "
-                            "operation=%s type=%s sqlstate=%s",
+                            "operation=%s type=%s sqlstate=%s%s",
                             operation,
                             type(error).__name__,
                             _sqlstate(error) or "unknown",
+                            f" detail={_safe_error_detail(error)}"
+                            if _safe_error_detail(error)
+                            else "",
                         )
                 raise
             else:

@@ -607,6 +607,17 @@ ENABLE_VECTOR_KNOWLEDGE_HINTS = os.getenv("ENABLE_VECTOR_KNOWLEDGE_HINTS", "true
 TRACE_TEXT_MAX_CHARS = max(120, int(os.getenv("TRACE_TEXT_MAX_CHARS", "800")))
 TRACE_MAX_LIST_ITEMS = max(1, int(os.getenv("TRACE_MAX_LIST_ITEMS", "8")))
 PROMPT_BUDGET_MAX_CHARS = max(1500, int(os.getenv("PROMPT_BUDGET_MAX_CHARS", "45000")))
+# Data-preview caps (2026-08-15). The row cap was a hardcoded 200 applied
+# BEFORE the character cap, so an arbitrary row count governed the preview
+# instead of the character budget -- and the character cap's head+tail
+# truncation, which exists so the model sees BOTH ENDS of the date range, never
+# engaged (observed previews reached ~8,000 of an 18,000 char cap). A
+# 1,056-row retail frame therefore arrived as its first 200 rows with no tail
+# at all, and a model asked about a five-year trend could see about one year.
+# Raising the row cap lets the character budget bind, which truncates
+# intelligently.
+PREVIEW_MAX_ROWS = _read_bounded_int_env("PREVIEW_MAX_ROWS", 1200, 20, 20_000)
+PREVIEW_MAX_CHARS = _read_bounded_int_env("PREVIEW_MAX_CHARS", 30_000, 2_000, 120_000)
 # Per-stage prompt budgets (Phase 2.b, 2026-05-13).  Both default to the
 # legacy single-knob PROMPT_BUDGET_MAX_CHARS so existing deployments keep
 # their current behaviour; operators raise SUMMARIZER_PROMPT_BUDGET_MAX_CHARS
