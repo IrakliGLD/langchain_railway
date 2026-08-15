@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.system_quantities import normalize_period_series_with_granularity
-from config import SUMMER_MONTHS
+from config import PREVIEW_MAX_CHARS, PREVIEW_MAX_ROWS, SUMMER_MONTHS
 
 log = logging.getLogger("Enai")
 
@@ -54,8 +54,8 @@ def is_intensive_metric(col: str) -> bool:
 def rows_to_preview(
     rows: List[Tuple],
     cols: List[str],
-    max_rows: int = 200,
-    max_preview_chars: int = 18_000,
+    max_rows: int | None = None,
+    max_preview_chars: int | None = None,
 ) -> str:
     """
     Convert query results to compact CSV preview for LLM consumption.
@@ -63,16 +63,23 @@ def rows_to_preview(
     Args:
         rows: List of tuples containing query results
         cols: List of column names
-        max_rows: Maximum number of rows to include in preview
+        max_rows: Maximum rows before the character budget applies. Defaults to
+            ``PREVIEW_MAX_ROWS``. This is a head slice with no tail
+            preservation, so it should stay high enough that the character cap
+            below is what actually binds.
         max_preview_chars: Soft cap on output size; if exceeded, middle rows
             are progressively dropped while preserving the first and last rows
-            so the LLM sees the full date range.
+            so the LLM sees the full date range. Defaults to
+            ``PREVIEW_MAX_CHARS``.
 
     Returns:
         CSV-formatted string (header + data rows)
     """
     if not rows:
         return "No rows returned."
+
+    max_rows = PREVIEW_MAX_ROWS if max_rows is None else max_rows
+    max_preview_chars = PREVIEW_MAX_CHARS if max_preview_chars is None else max_preview_chars
 
     df = pd.DataFrame(rows[:max_rows], columns=cols)
 

@@ -111,20 +111,18 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=...       # structured-summarizer-only overri
 
 See [`query_pipeline_architecture.md`](query_pipeline_architecture.md) §3.2 / §3.9. Summarizer prompts routinely hit 90–110k chars in deep mode because `DOMAIN_KNOWLEDGE` + `EXTERNAL_SOURCE_PASSAGES` expand; analyzer prompts do not. Raising `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` independently is the right knob for that.
 
-**Deployment note (2026-08-15).** Production sets `ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000`, so the analyzer does not truncate (observed 45,644 chars against a 63,900 effective budget). `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS` is still unset, leaving the 45,000 default and a 40,500 effective budget — and retail end-user questions now exceed it:
+**Deployment note (2026-08-15).** Production sets `ANALYZER_PROMPT_BUDGET_MAX_CHARS=71000` and `SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=100000`. **Neither stage truncates**: observed analyzer prompts run 43,308–45,644 against a 63,900 effective budget, and summarizer prompts 33,117–39,924 against 90,000, with `summarizer_prompt_census` reporting `pre_budget == post_budget` on every call. Do not reach for the prompt budget when diagnosing missing context here — check the caps below first, which apply *before* the budget and are what actually bound the payload.
 
-| Retail shape | statistics | projected prompt | vs 40,500 |
+### Caps that bind before the prompt budget
+
+| Cap | Value | Configurable | Notes |
 |---|---|---|---|
-| 4 value columns (price + 3 components) | ~6,500 | ~46,000 | over by ~5,500 |
-| 8 value columns (adds VAT + wholesale benchmark) | ~10,800 | ~50,300 | over by ~9,800 |
+| Data preview rows | `PREVIEW_MAX_ROWS` (1200) | yes | Head slice with **no tail preservation**. Was a hardcoded 200. |
+| Data preview chars | `PREVIEW_MAX_CHARS` (30,000) | yes | Drops middle rows, keeps first and last. |
+| Vector knowledge pack | `VECTOR_KNOWLEDGE_MAX_CHARS*` | yes | Per tier; `packed_truncated` in the trace shows when it bites. |
+| Knowledge compaction | 12,000 / 24,000 | **no** — hardcoded in `agent/summarizer.py` | Conceptual path only. |
 
-The growth is per-series statistics, which exist precisely so the model quotes grounded numbers instead of deriving ungrounded ones. Truncating them defeats that; and the `_TRUNCATION_PRIORITY_DATA` order sheds `EXTERNAL_SOURCE_PASSAGES` first, which on retail questions is where the tariff-stack explanation lives. Set:
-
-```bash
-SUMMARIZER_PROMPT_BUDGET_MAX_CHARS=70000     # effective 63,000; matches the analyzer override
-```
-
-Prompts only grow to what is actually assembled, so this raises the ceiling rather than the cost: the measured worst case above is ~50,300 chars (~18,000 tokens).
+The preview row cap is the one that mattered. It slices `rows[:max_rows]` *before* the character budget, so an arbitrary row count governed instead of the character budget — and the character cap's progressive truncation, which exists so the model sees **both ends** of the date range, never engaged (previews reached ~8,000 of an 18,000 cap). On a 1,056-row retail frame the model received the first 200 rows and no tail: for a series running 2021-01 → 2026-06 it could see nothing past **2022-01**, which is why growth figures came back ungrounded. Raising the row cap lets the character budget bind and truncate intelligently: 200 rows → 792, last visible date 2022-01 → 2026-06, preview 7,016 → 27,592 chars, total prompt ~59,500 of 90,000.
 
 For an OpenAI GPT-5.6 Terra primary model, Standard mode also supports
 independent reasoning-effort controls:
