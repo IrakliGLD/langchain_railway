@@ -790,6 +790,7 @@
       "enum": [
         "get_prices",
         "get_tariffs",
+        "get_end_user_prices",
         "get_generation_mix",
         "get_balancing_composition"
       ],

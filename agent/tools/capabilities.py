@@ -13,6 +13,7 @@ _DEFAULT_MULTI_PERIOD_TOOLS = frozenset(
     {
         ToolName.GET_PRICES.value,
         ToolName.GET_TARIFFS.value,
+        ToolName.GET_END_USER_PRICES.value,
         ToolName.GET_GENERATION_MIX.value,
         ToolName.GET_BALANCING_COMPOSITION.value,
     }
