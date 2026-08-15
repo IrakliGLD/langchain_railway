@@ -236,7 +236,7 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "name": "get_tariffs",
         "concepts": ["regulated tariffs", "GNERC", "Enguri", "Gardabani", "cost-plus"],
         "use_for": "Tariff lookups and tariff comparisons.",
-        "avoid_for": "Balancing price questions, conceptual definitions, generation mix questions, and policy/status questions about liberalization or deregulation.",
+        "avoid_for": "Balancing price questions, conceptual definitions, generation mix questions, policy/status questions about liberalization or deregulation, and end-user/retail/distribution/transmission/supply tariffs (those are network_supply_tariffs, served from demand_tariff_mv).",
         "main_params": ["entities", "currency", "start_date", "end_date"],
         "combined_with": [
             {"tool": "get_prices", "when": "comparing tariffs against market prices"},

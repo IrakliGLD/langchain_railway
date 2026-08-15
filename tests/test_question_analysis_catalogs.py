@@ -7,6 +7,7 @@ from contracts.question_analysis import KnowledgeTopicName
 from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_ANSWER_KIND_GUIDE,
     QUESTION_ANALYSIS_QUERY_TYPE_GUIDE,
+    QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
 
@@ -40,6 +41,17 @@ def test_query_type_guide_distinguishes_historical_trend_from_forecast():
 
     assert "trend summaries" in data_retrieval
     assert "not forecast" in forecast
+
+
+def test_generation_tariff_tool_warns_against_retail_questions():
+    """The evidence-planner guard is a backstop, not the only defence.
+
+    Steering the analyzer away from get_tariffs for retail questions means the
+    wrong tool is usually never proposed, rather than proposed and suppressed.
+    """
+    entry = _entry(QUESTION_ANALYSIS_TOOL_CATALOG, "get_tariffs")
+
+    assert "end-user" in entry["avoid_for"].lower()
 
 
 class TestTopicRegistryAlignment:
