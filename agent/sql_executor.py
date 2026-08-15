@@ -234,7 +234,13 @@ def fetch_balancing_share_panel(conn) -> pd.DataFrame:
     result = conn.execute(text(BALANCING_SHARE_PIVOT_SQL))
     rows = result.fetchall()
     cols = list(result.keys())
-    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    # Share ratios are PostgreSQL numeric; without coercion they reach
+    # ctx.df as object dtype and every numeric consumer skips them.
+    from core.query_executor import coerce_result_frame
+
+    return coerce_result_frame(pd.DataFrame(rows, columns=cols))
 
 
 def ensure_share_dataframe(

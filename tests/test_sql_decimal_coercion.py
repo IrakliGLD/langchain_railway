@@ -101,6 +101,35 @@ def test_column_aggregates_reach_stats_hint_only_after_coercion():
     assert len(coerced_ctx.stats_hint) > len("Rows: 12")
 
 
+def test_every_sql_result_frame_boundary_coerces():
+    """Tripwire: a new SQL-rows-to-DataFrame site must coerce Decimal columns.
+
+    There are four such boundaries, not one. Missing any of them reintroduces
+    the defect for whichever path uses it -- and a tool selecting a raw
+    ``numeric`` column is the most likely next case.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    boundaries = [
+        root / "core" / "query_executor.py",
+        root / "agent" / "tools" / "common.py",
+        root / "agent" / "sql_executor.py",
+    ]
+
+    offenders = []
+    for path in boundaries:
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"pd\.DataFrame\(rows", line) and "coerce_result_frame" not in line:
+                offenders.append(f"{path.name}:{line_number}: {line.strip()}")
+
+    assert not offenders, (
+        "SQL result frames built without coerce_result_frame:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 def test_grounding_aggregate_tokens_appear_only_after_coercion():
     """agent/summary_grounding.py has the same select_dtypes dependency.
 
