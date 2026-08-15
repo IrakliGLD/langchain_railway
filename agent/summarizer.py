@@ -586,25 +586,34 @@ def _build_clarification_options(ctx: QueryContext) -> List[str]:
             options.append(option)
 
     if clarify_reason == "end_user_scope_unspecified":
-        # Both axes in every option: the final price differs by supply company
+        # Show the vocabulary rather than asking the reader to supply it.
+        # "the user does not know the categories you are suggesting to
+        # compared by, tell what are options" -- 2026-08-15. Every option
+        # names both axes, because the final price differs by supply company
         # AND by customer category, so naming one still leaves the comparison
-        # undetermined. Company names are given as the user knows them --
-        # supplier plus the distribution network it supplies on.
+        # undetermined.
         _add(
-            "Tbilisi: Telmico supply on the Telasi network. Say which customer "
-            "category -- household (up to 101 kWh, 101-301 kWh, or above 301 kWh), "
-            "small commercial, or commercial at 220/380 V, 3.3-6-10 kV or 35-110 kV."
+            "Pick a COMPANY: "
+            "(a) Telmico — supplies in Tbilisi, on the Telasi network; "
+            "(b) EPS (EP Georgia Supply) — supplies outside Tbilisi, on the "
+            "Energo-Pro Georgia (EPG) network; or (c) both, side by side."
         )
         _add(
-            "Outside Tbilisi: EP Georgia Supply (EPS) on the Energo-Pro Georgia "
-            "(EPG) network. Same customer categories as above."
+            "Pick a CATEGORY — households, by monthly consumption: "
+            "up to 101 kWh, 101-301 kWh, or above 301 kWh (all at 220/380 V); "
+            "or households at 3.3-6-10 kV."
         )
         _add(
-            "Both supply companies side by side, for one named customer category "
-            "-- tell me which category and I will compare each against the "
-            "balancing price plus the guaranteed capacity fee."
+            "Or a commercial CATEGORY: small commercial at 220/380 V "
+            "(universal supply); commercial at 220/380 V, at 3.3-6-10 kV, or "
+            "at 35-110 kV (public supply)."
         )
-        return options[:3]
+        _add(
+            'Example of a fully specified request: "Telmico, 3.3-6-10 kV, '
+            'commercial (public supply)" — I will then compare that price '
+            "against the balancing price plus the guaranteed capacity fee."
+        )
+        return options[:4]
 
     if clarify_reason == "request_not_supported_as_phrased":
         _add("Restate the request as a direct data retrieval or calculation with the exact entity groups, periods, and formula you want.")

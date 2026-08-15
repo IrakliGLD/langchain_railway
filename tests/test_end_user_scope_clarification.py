@@ -25,7 +25,8 @@ from models import QueryContext, ResolutionPolicy  # noqa: E402
 
 
 def _ctx(canonical: str, *, topics=("network_supply_tariffs",), query_type="ambiguous",
-         preferred_path="knowledge") -> QueryContext:
+         preferred_path="knowledge", scores=None) -> QueryContext:
+    scores = scores or tuple(0.9 for _ in topics)
     payload = {
         "version": "question_analysis_v1",
         "raw_query": canonical,
@@ -48,7 +49,7 @@ def _ctx(canonical: str, *, topics=("network_supply_tariffs",), query_type="ambi
         },
         "knowledge": {
             "candidate_topics": [
-                {"name": t, "score": 0.9} for t in topics
+                {"name": t, "score": s} for t, s in zip(topics, scores)
             ]
         },
         "tooling": {"candidate_tools": []},
@@ -135,13 +136,91 @@ def test_a_non_retail_comparison_is_untouched():
     assert _derive_resolution_policy(ctx) == ResolutionPolicy.ANSWER
 
 
+def test_the_analyzer_own_clarify_signal_is_honoured():
+    """The keyword match failed in production; the analyzer had already decided.
+
+    2026-08-15 15:54: query_type=ambiguous, preferred_path=knowledge,
+    answer_kind=clarify, confidence 0.95, network_supply_tariffs among the
+    candidate topics -- and resolution_policy still came out ANSWER, so a
+    theoretical essay shipped instead of a question. When the analyzer has
+    read the Georgian question and concluded it is ambiguous, matching English
+    keywords against its canonicalisation is a worse signal than the
+    conclusion itself.
+    """
+    from agent.pipeline import _derive_resolution_policy
+
+    # Wording deliberately free of retail and comparison markers: only the
+    # analyzer's own verdict is available to act on.
+    ctx = _ctx(
+        "Assess how the regulated position compares against market outcomes",
+        query_type="ambiguous",
+        preferred_path="knowledge",
+    )
+    assert _derive_resolution_policy(ctx) == ResolutionPolicy.CLARIFY
+    assert ctx.clarify_reason == "end_user_scope_unspecified"
+
+
+def test_the_analyzer_clarify_signal_needs_the_retail_topic():
+    """An ambiguous question about something else keeps its existing path."""
+    from agent.pipeline import _derive_resolution_policy
+
+    ctx = _ctx(
+        "Assess how the regulated position compares against market outcomes",
+        topics=("market_structure",),
+        query_type="ambiguous",
+        preferred_path="knowledge",
+    )
+    assert _derive_resolution_policy(ctx) == ResolutionPolicy.ANSWER
+
+
+def test_a_fully_scoped_ambiguous_retail_question_is_still_answered():
+    """Scope present means there is nothing left to ask."""
+    from agent.pipeline import _derive_resolution_policy
+
+    ctx = _ctx(
+        "Telmico household cat2 regulated position against market outcomes",
+        query_type="ambiguous",
+        preferred_path="knowledge",
+    )
+    assert _derive_resolution_policy(ctx) == ResolutionPolicy.ANSWER
+
+
+def test_the_options_name_selectable_values_not_prose():
+    """"the user does not know the categories you are suggesting to compared
+    by, tell what are options. e.g. telmico, 3-6-10 kw, public supply"."""
+    from agent.summarizer import _build_clarification_options
+
+    ctx = _ctx(_COMPARISON)
+    ctx.clarify_reason = "end_user_scope_unspecified"
+    options = "\n".join(_build_clarification_options(ctx))
+    lowered = options.lower()
+
+    # The user's own example must be expressible from what is offered.
+    assert "telmico" in lowered
+    assert "3.3-6-10" in lowered, "voltage levels must appear as the view stores them"
+    assert "public" in lowered and "universal" in lowered, "supply activity must be named"
+    # Consumption bands, so a household customer can identify themselves.
+    assert "101" in lowered and "301" in lowered
+    # And the high-voltage commercial band.
+    assert "35-110" in lowered
+
+
 def test_a_wholesale_question_carrying_the_retail_topic_is_not_asked_to_clarify():
     """The analyzer offers several candidate topics, so the retail topic can
     ride along on a purely wholesale question. Asking that user to pick a
-    household consumption band would be nonsense."""
+    household consumption band would be nonsense.
+
+    The discriminator is the analyzer's own ranking: here balancing_price
+    outranks the trailing retail topic, whereas the production comparison put
+    network_supply_tariffs first.
+    """
     from agent.pipeline import _derive_resolution_policy
 
-    ctx = _ctx("What drives the balancing price?")
+    ctx = _ctx(
+        "What drives the balancing price?",
+        topics=("balancing_price", "network_supply_tariffs"),
+        scores=(0.95, 0.4),
+    )
     assert _derive_resolution_policy(ctx) == ResolutionPolicy.ANSWER
 
 

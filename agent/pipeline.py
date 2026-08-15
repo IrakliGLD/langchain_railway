@@ -115,6 +115,7 @@ from contracts.question_analysis import (
     DerivedMetricRequest,
     KnowledgeTopicName,
     PreferredPath,
+    QueryType,
     QuestionAnalysis,
     RenderStyle,
 )
@@ -446,33 +447,69 @@ def _needs_end_user_scope_clarification(ctx: QueryContext) -> bool:
     domain owner rejected on 2026-08-15. Both axes must be pinned before the
     comparison means anything.
 
-    Deliberately narrow: only the benchmark COMPARISON asks. A plain trend or
+    Deliberately narrow: only an unscoped COMPARISON asks. A plain trend or
     level question shows every category side by side instead (see
     ``_append_column_aggregates``), which is the same anti-mixing rule
     expressed as breadth rather than as a question.
+
+    Two independent triggers, because the keyword one alone failed in
+    production on 2026-08-15:
+
+    * the analyzer itself concluded the question is ambiguous, or
+    * the canonicalised question reads as a retail-vs-wholesale comparison.
+
+    Either way the scope must actually be missing before we ask.
     """
     if not ctx.has_authoritative_question_analysis:
         return False
 
-    topics = {
-        candidate.name.value
-        for candidate in (ctx.question_analysis.knowledge.candidate_topics or [])
-    }
+    analysis = ctx.question_analysis
+    candidates = list(analysis.knowledge.candidate_topics or [])
+    topics = {candidate.name.value for candidate in candidates}
     if KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value not in topics:
         return False
 
+    # The analyzer ranks its candidates. On 2026-08-15 the retail comparison
+    # put network_supply_tariffs FIRST, ahead of market_structure and
+    # pso_trading; a genuinely wholesale question ranks balancing_price first
+    # and carries the retail topic only as a trailing possibility. That
+    # ranking is the discriminator for the ambiguity trigger below -- without
+    # it, any ambiguous question that merely brushes retail would be asked to
+    # pick a household consumption band.
+    top_topic = max(
+        candidates,
+        key=lambda candidate: getattr(candidate, "score", 0.0) or 0.0,
+        default=None,
+    )
+    retail_is_primary = (
+        top_topic is not None
+        and top_topic.name.value == KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value
+    )
+
     # The analyzer's English canonicalization, so a Georgian or Russian
     # question is read the same as an English one.
-    question = ctx.resolved_query or ctx.question_analysis.canonical_query_en or ctx.query
+    question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
     lowered = question.lower()
 
-    # Topic alone is too loose: "what drives the balancing price" can carry the
-    # retail topic as a candidate, and asking that user to pick a household
-    # consumption band would be nonsense. Require retail wording as well, so
-    # the gate fires only on a genuine retail-vs-wholesale comparison.
-    if not looks_like_retail_tariff_question(lowered):
-        return False
-    if not asks_for_wholesale_comparison(lowered):
+    # Trigger 1: the analyzer read the question in its original language and
+    # concluded it is ambiguous. That verdict beats matching English keywords
+    # against its own paraphrase -- on 2026-08-15 it returned
+    # query_type=ambiguous with confidence 0.95 while the keyword match below
+    # found nothing, and a theoretical essay shipped instead of a question.
+    analyzer_says_ambiguous = retail_is_primary and (
+        analysis.classification.query_type == QueryType.AMBIGUOUS
+        or analysis.answer_kind == AnswerKind.CLARIFY
+    )
+
+    # Trigger 2: the wording is a retail-vs-wholesale comparison. Topic alone
+    # is too loose -- "what drives the balancing price" can carry the retail
+    # topic as a candidate, and asking that user to pick a household
+    # consumption band would be nonsense.
+    reads_as_comparison = looks_like_retail_tariff_question(lowered) and (
+        asks_for_wholesale_comparison(lowered)
+    )
+
+    if not (analyzer_says_ambiguous or reads_as_comparison):
         return False
 
     supplier, category = resolve_end_user_scope(question)
