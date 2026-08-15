@@ -152,3 +152,36 @@ def test_grounding_aggregate_tokens_appear_only_after_coercion():
     _add_aggregate_tokens(coerced_tokens, coerced_ctx)
 
     assert coerced_tokens, "no aggregate tokens produced for a coerced frame"
+
+
+def test_result_frames_log_their_dimension_cardinality(caplog):
+    """Diagnostic: distinguish "complete category set" from "failed to narrow".
+
+    Requests 2 and 4 of the 2026-08-15 trace each returned exactly 528 rows for
+    different questions. 528 is 66 months x 8 series -- which is either a
+    complete category set (legitimate) or a query that never narrowed. Row
+    count alone cannot tell them apart; per-dimension distinct counts can.
+    """
+    import logging
+
+    from agent.sql_executor import log_result_frame_shape
+
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        log_result_frame_shape(make_demand_tariff_frame(rows=12), table="demand_tariff_mv")
+
+    assert "distinct_company=1" in caplog.text
+    assert "distinct_level_2_cat=1" in caplog.text
+    assert "rows=12" in caplog.text
+
+
+def test_result_frame_shape_is_silent_for_an_empty_frame(caplog):
+    import logging
+
+    import pandas as pd
+
+    from agent.sql_executor import log_result_frame_shape
+
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        log_result_frame_shape(pd.DataFrame(), table="demand_tariff_mv")
+
+    assert "result_frame_shape" not in caplog.text

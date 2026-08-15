@@ -229,6 +229,44 @@ def build_trade_share_cte(original_sql: str) -> str:
     return cte + rewritten
 
 
+_SHAPE_DIMENSIONS = (
+    "company",
+    "activity",
+    "volate",
+    "level_1_cat",
+    "level_2_cat",
+    "entity",
+    "technology",
+    "ownership",
+    "segment",
+)
+
+
+def log_result_frame_shape(df: pd.DataFrame, table: str = "") -> None:
+    """Log per-dimension cardinality of a SQL result frame.
+
+    Row count alone cannot distinguish a complete category set from a query
+    that failed to narrow: the 2026-08-15 trace returned exactly 528 rows for
+    two different questions, and 528 is 66 months x 8 series either way.
+    Distinct counts per dimension tell them apart, so the question can be
+    settled with evidence instead of a guess.
+    """
+    if df is None or df.empty:
+        return
+    parts = [
+        f"distinct_{column}={df[column].nunique()}"
+        for column in _SHAPE_DIMENSIONS
+        if column in df.columns
+    ]
+    if parts:
+        log.info(
+            "result_frame_shape table=%s rows=%d %s",
+            table or "unknown",
+            len(df),
+            " ".join(parts),
+        )
+
+
 def fetch_balancing_share_panel(conn) -> pd.DataFrame:
     """Return a DataFrame with monthly balancing share ratios for each entity group."""
     result = conn.execute(text(BALANCING_SHARE_PIVOT_SQL))
@@ -443,6 +481,7 @@ def validate_and_execute(ctx: QueryContext) -> QueryContext:
         ctx.df = df
         ctx.cols = list(df.columns)
         ctx.rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
+        log_result_frame_shape(df, table=", ".join(_extract_sql_tables(safe_sql)))
         trace_detail(
             log,
             ctx,
