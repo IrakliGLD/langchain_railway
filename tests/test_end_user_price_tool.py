@@ -27,10 +27,10 @@ def _stub_rows(**overrides):
         "supplier": "telmico",
         "category": "220/380|hh|cat2",
         "category_label": "Household cat 2, 101-301 kWh (220/380)",
-        "distribution": 0.0812,
-        "supply": 0.1104,
-        "transmission": 0.0067,
-        "final_price_net": 0.1983,
+        "distribution_tariff_gel_kwh": 0.0812,
+        "supply_tariff_gel_kwh": 0.1104,
+        "transmission_tariff_gel_kwh": 0.0067,
+        "final_price_net_gel_kwh": 0.1983,
     }
     row.update(overrides)
 
@@ -81,6 +81,7 @@ def test_transmission_row_is_national_and_classless():
     from agent.tools.end_user_price_tools import TRANSMISSION_ROW
 
     assert TRANSMISSION_ROW["company"] == "gse"
+    # The MV's activity VALUE, not a result-frame column name.
     assert TRANSMISSION_ROW["activity"] == "transmission"
     assert TRANSMISSION_ROW["volate"] == ""
     assert TRANSMISSION_ROW["level_1_cat"] == ""
@@ -105,8 +106,8 @@ def test_tool_returns_components_and_the_published_net_total(monkeypatch):
         supplier="telmico", category="220/380|hh|cat2"
     )
 
-    assert "final_price_net" in cols
-    assert {"distribution", "supply", "transmission"} <= set(cols)
+    assert "final_price_net_gel_kwh" in cols
+    assert {"distribution_tariff_gel_kwh", "supply_tariff_gel_kwh", "transmission_tariff_gel_kwh"} <= set(cols)
     assert "final_price" in captured["sql"]
     # Only the requested supplier/category is bound.
     assert captured["params"]["supplier_0_0"] == "telmico"
@@ -120,11 +121,11 @@ def test_vat_is_added_only_when_requested(monkeypatch):
     monkeypatch.setattr(tool_module, "run_text_query", _stub_rows())
 
     _, cols_net, _ = tool_module.get_end_user_prices(include_vat=False)
-    assert "total_gross" not in cols_net
+    assert "total_gross_gel_kwh" not in cols_net
 
     df, cols_gross, _ = tool_module.get_end_user_prices(include_vat=True)
-    assert {"vat", "total_gross"} <= set(cols_gross)
-    assert round(float(df["total_gross"].iloc[0]), 4) == round(0.1983 * 1.18, 4)
+    assert {"vat_gel_kwh", "total_gross_gel_kwh"} <= set(cols_gross)
+    assert round(float(df["total_gross_gel_kwh"].iloc[0]), 4) == round(0.1983 * 1.18, 4)
 
 
 def test_wholesale_benchmark_adds_the_capacity_charge_and_converts_down(monkeypatch):
@@ -168,7 +169,7 @@ def test_a_partial_stack_is_excluded(monkeypatch):
     monkeypatch.setattr(tool_module, "run_text_query", fake_run)
     tool_module.get_end_user_prices()
 
-    for component in ("distribution", "supply", "transmission", "final_price_net"):
+    for component in ("distribution_tariff_gel_kwh", "supply_tariff_gel_kwh", "transmission_tariff_gel_kwh", "final_price_net_gel_kwh"):
         assert f"s.{component} IS NOT NULL" in captured["sql"]
 
 
@@ -362,6 +363,88 @@ def test_wholesale_wording_requests_the_benchmark_column():
     assert params["include_wholesale_benchmark"] is True
 
 
+def _capture_sql(monkeypatch, **kwargs):
+    """Run the tool against a stub and hand back the SQL and params it built."""
+    import agent.tools.end_user_price_tools as tool_module
+
+    captured = {}
+
+    def fake_run(sql, params=None):
+        captured["sql"] = sql
+        captured["params"] = params or {}
+        return _stub_rows()(sql, params)
+
+    monkeypatch.setattr(tool_module, "run_text_query", fake_run)
+    tool_module.get_end_user_prices(**kwargs)
+    return captured
+
+
+def test_no_value_column_is_classified_as_a_summable_quantity(monkeypatch):
+    """Every value column is GEL/kWh -- a per-unit tariff, never a volume.
+
+    ``is_intensive_metric`` reads column names, and "supply" is in its
+    EXTENSIVE token list because elsewhere it means supplied volume. A column
+    named bare ``supply`` therefore gets a ``sum=`` in stats_hint: a per-kWh
+    tariff added up across months, which is exactly the meaningless figure the
+    aggregate rules exist to suppress. The unit suffix is what prevents it.
+    """
+    import agent.tools.end_user_price_tools as tool_module
+    from analysis.stats import is_intensive_metric
+
+    monkeypatch.setattr(tool_module, "run_text_query", _stub_rows())
+    _, cols, _ = tool_module.get_end_user_prices(include_vat=True)
+    value_columns = [c for c in cols if c.endswith("_gel_kwh")]
+
+    assert value_columns, f"no unit-carrying value columns in {cols}"
+    not_intensive = [c for c in value_columns if not is_intensive_metric(c)]
+    assert not not_intensive, (
+        "these per-kWh columns would be SUMMED across months in stats_hint: "
+        f"{not_intensive}"
+    )
+
+
+def test_every_parameter_actually_binds_through_sqlalchemy(monkeypatch):
+    """The SQL must survive ``text()``, not merely look well-formed.
+
+    SQLAlchemy's bind regex carries a negative lookahead for ':', so
+    ``:supplier::text`` is NOT recognised as a parameter -- the literal text
+    ``:supplier`` is shipped to Postgres, which fails at the colon. That is a
+    ProgrammingError at execution time and invisible to any test that only
+    inspects the SQL string, which is how it reached production on
+    2026-08-15: the tool raised, the pipeline fell back to LLM-authored SQL,
+    and the answer averaged across suppliers and categories.
+
+    Use ``CAST(:name AS text)``: parsed by SQLAlchemy AND typed for psycopg 3's
+    server-side binding.
+    """
+    import re
+
+    from sqlalchemy import text
+    from sqlalchemy.dialects import postgresql
+
+    captured = _capture_sql(monkeypatch, include_wholesale_benchmark=True)
+
+    compiled = str(text(captured["sql"]).compile(dialect=postgresql.psycopg.dialect()))
+
+    # Checking the name set is not enough: a name used in both SELECT and WHERE
+    # position registers as "bound" off the WHERE occurrence while its SELECT
+    # occurrence stays literal. Only the compiled string proves every site was
+    # substituted. Line comments are stripped first -- a ':name' written inside
+    # one is prose, not a parameter reference.
+    executable = re.sub(r"--[^\n]*", "", compiled)
+    leftover = re.findall(r"(?<![:\w]):(\w+)", executable)
+    assert not leftover, (
+        "parameter references survived compilation as literal text and will "
+        f"raise a Postgres syntax error: {sorted(set(leftover))}"
+    )
+
+    intended = set(captured["params"])
+    assert intended <= set(text(captured["sql"])._bindparams), (
+        "parameters passed but never declared in the SQL: "
+        f"{sorted(intended - set(text(captured['sql'])._bindparams))}"
+    )
+
+
 def test_select_position_parameters_are_explicitly_cast(monkeypatch):
     """psycopg 3 binds server-side, so a bare parameter in the SELECT list has
     no inferable type and Postgres raises "could not determine data type of
@@ -370,21 +453,12 @@ def test_select_position_parameters_are_explicitly_cast(monkeypatch):
     """
     import re
 
-    import agent.tools.end_user_price_tools as tool_module
+    captured = _capture_sql(monkeypatch, include_wholesale_benchmark=True)
 
-    captured = {}
-
-    def fake_run(sql, params=None):
-        captured["sql"] = sql
-        return _stub_rows()(sql, params)
-
-    monkeypatch.setattr(tool_module, "run_text_query", fake_run)
-    tool_module.get_end_user_prices(include_wholesale_benchmark=True)
-
-    # Every ":param AS alias" in the SELECT list must carry a cast. The
-    # negative lookbehind skips the "::text" cast itself, whose second colon
-    # would otherwise read as a parameter named "text".
-    uncast = re.findall(r"(?<!:):(\w+)\s+AS\s", captured["sql"])
+    # A parameter reaching an output alias directly carries no inferable type.
+    # CAST(:name AS ...) is the only accepted form -- see the test above for
+    # why the ``::`` shorthand cannot be used here.
+    uncast = re.findall(r"(?<!:):(\w+)\s+AS\s+\w+\s*,?\s*$", captured["sql"], re.MULTILINE)
     assert not uncast, f"SELECT-position parameters without an explicit cast: {uncast}"
 
 
@@ -410,5 +484,5 @@ def test_resolved_params_dispatch_cleanly_through_the_registry(monkeypatch):
 
     df, cols, rows = execute_tool(ToolInvocation(name="get_end_user_prices", params=params))
 
-    assert "final_price_net" in cols
-    assert "total_gross" in cols, "include_vat was resolved but not honoured"
+    assert "final_price_net_gel_kwh" in cols
+    assert "total_gross_gel_kwh" in cols, "include_vat was resolved but not honoured"

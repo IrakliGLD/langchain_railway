@@ -3088,6 +3088,58 @@ def _prepare_timeseries_rows(
     return df, t_series_col, current_ts, cur_row, previous_ts, prev_row
 
 
+#: Above this many series, per-series aggregates would crowd out the rest of
+#: stats_hint, so the frame is described instead of enumerated.
+_MAX_ENUMERATED_SERIES = 12
+
+#: Time columns split a series along its own axis rather than into separate
+#: series, so they are never series keys.
+_TIME_COLUMN_NAMES = frozenset(
+    {"date", "day", "week", "month", "quarter", "year", "period", "time", "timestamp"}
+)
+
+
+def _series_key_columns(df, numeric_cols) -> tuple:
+    """Columns that split ``df`` into series which must not be pooled.
+
+    Returns ``(columns, series_count)``; an empty column list means the frame
+    is a single series and pooled aggregates are legitimate.
+
+    Redundant labels are dropped: ``category_label`` mirrors ``category``
+    one-for-one, so adding it multiplies nothing and only lengthens the scope
+    prefix. A column is kept only when it actually increases the series count.
+    """
+    import pandas as _pd
+
+    candidates = []
+    for col in df.columns:
+        if col in numeric_cols:
+            continue
+        values = df[col]
+        if _pd.api.types.is_datetime64_any_dtype(values) or _pd.api.types.is_numeric_dtype(
+            values
+        ):
+            continue
+        name = str(col).lower()
+        if name in _TIME_COLUMN_NAMES or name == "id" or name.endswith("_id"):
+            continue
+        distinct = values.nunique(dropna=False)
+        if distinct <= 1:
+            continue
+        candidates.append((col, distinct))
+
+    selected: list = []
+    series_count = 1
+    for col, _distinct in sorted(candidates, key=lambda item: -item[1]):
+        trial = selected + [col]
+        trial_count = df.groupby(trial, dropna=False).ngroups
+        if trial_count > series_count:
+            selected = trial
+            series_count = trial_count
+
+    return selected, series_count
+
+
 def _append_column_aggregates(ctx: QueryContext) -> None:
     """Append numeric column aggregates to stats_hint.
 
@@ -3108,27 +3160,74 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
 
     from analysis.stats import is_intensive_metric
     from context import COLUMN_LABELS
-    lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
-    for col in numeric_cols:
-        series = ctx.df[col].dropna()
-        if series.empty:
-            continue
-        label = COLUMN_LABELS.get(col, col)
+
+    series_cols, series_count = _series_key_columns(ctx.df, numeric_cols)
+
+    def _describe(values, col: str) -> str:
+        """One aggregate line body for a numeric series."""
         # Never expose a SUM for intensive (per-unit) columns like prices — a
         # summed per-MWh price is meaningless and gets misread as a level.
+        body = (
+            f"mean={values.mean():.4f}, min={values.min():.4f}, "
+            f"max={values.max():.4f}, count={len(values)}"
+        )
         if is_intensive_metric(col):
-            lines.append(
-                f"{label}: mean={series.mean():.4f}, "
-                f"min={series.min():.4f}, max={series.max():.4f}, count={len(series)}"
-            )
+            return body
+        return f"sum={values.sum():.4f}, " + body
+
+    lines = [f"\n--- Column Aggregates ({len(ctx.df)} rows) ---"]
+
+    if not series_cols:
+        for col in numeric_cols:
+            values = ctx.df[col].dropna()
+            if values.empty:
+                continue
+            lines.append(f"{COLUMN_LABELS.get(col, col)}: {_describe(values, col)}")
+    else:
+        # The frame holds several distinct series. Pooling them produces a
+        # figure that matches no series -- an "average tariff" across two
+        # suppliers and eight customer categories is not a price anyone pays,
+        # and stats_hint feeds the grounding corpus, so the answer quotes it
+        # as though it were a level.
+        dimensions = "/".join(str(c) for c in series_cols)
+        lines.append(
+            f"Frame holds {series_count} distinct series by {dimensions}. "
+            "Figures below are per series; do not average across them."
+        )
+        if series_count <= _MAX_ENUMERATED_SERIES:
+            for keys, group in ctx.df.groupby(series_cols, dropna=False, sort=True):
+                if not isinstance(keys, tuple):
+                    keys = (keys,)
+                scope = ", ".join(f"{c}={k}" for c, k in zip(series_cols, keys))
+                for col in numeric_cols:
+                    values = group[col].dropna()
+                    if values.empty:
+                        continue
+                    label = COLUMN_LABELS.get(col, col)
+                    lines.append(f"{label} [{scope}]: {_describe(values, col)}")
         else:
-            lines.append(
-                f"{label}: sum={series.sum():.4f}, mean={series.mean():.4f}, "
-                f"min={series.min():.4f}, max={series.max():.4f}, count={len(series)}"
-            )
+            # Too many series to enumerate is still not a licence to pool them.
+            for col in numeric_cols:
+                values = ctx.df[col].dropna()
+                if values.empty:
+                    continue
+                label = COLUMN_LABELS.get(col, col)
+                lines.append(
+                    f"{label}: spans {series_count} series; no pooled average is "
+                    f"reported. Range across all series: min={values.min():.4f}, "
+                    f"max={values.max():.4f}, count={len(values)}. Quote per-series "
+                    "values from the data preview."
+                )
+
     if len(lines) > 1:
         ctx.stats_hint += "\n".join(lines)
-        log.info("Added column aggregates to stats_hint for %d numeric columns", len(numeric_cols))
+        log.info(
+            "Added column aggregates to stats_hint for %d numeric columns "
+            "(series=%d by %s)",
+            len(numeric_cols),
+            series_count,
+            "/".join(str(c) for c in series_cols) or "none",
+        )
 
 
 def _add_correlation_target_levels(ctx: QueryContext) -> None:

@@ -165,28 +165,33 @@ def _build_sql(
         -- Explicit casts: psycopg 3 binds server-side, so a bare parameter in
         -- the SELECT list has no inferable type and Postgres raises
         -- "could not determine data type of parameter".
-        :supplier_{tag}::text   AS supplier,
-        :cat_id_{tag}::text     AS category,
-        :cat_label_{tag}::text  AS category_label,
+        --
+        -- CAST(...), never the ':name::text' shorthand: SQLAlchemy's bind
+        -- regex has a negative lookahead for ':', so ':name::text' is not
+        -- recognised as a parameter at all and the literal ':name' reaches
+        -- Postgres as a syntax error.
+        CAST(:supplier_{tag} AS text)   AS supplier,
+        CAST(:cat_id_{tag} AS text)     AS category,
+        CAST(:cat_label_{tag} AS text)  AS category_label,
         MAX(d.value) FILTER (
             WHERE d.company = :distributor_{tag} AND d.activity = 'distribution'
               AND d.volate = :volate_{tag} AND d.level_1_cat = :l1_{tag}
               AND d.level_2_cat = :dist_l2_{tag}
-        ) AS distribution,
+        ) AS distribution_tariff_gel_kwh,
         MAX(d.value) FILTER (
             WHERE d.company = :supplier_{tag} AND d.activity = :supply_activity_{tag}
               AND d.volate = :volate_{tag} AND d.level_1_cat = :l1_{tag}
               AND d.level_2_cat = :supply_l2_{tag}
-        ) AS supply,
+        ) AS supply_tariff_gel_kwh,
         MAX(d.value) FILTER (
             WHERE d.company = 'gse' AND d.activity = 'transmission'
               AND d.volate = '' AND d.level_1_cat = '' AND d.level_2_cat = ''
-        ) AS transmission,
+        ) AS transmission_tariff_gel_kwh,
         MAX(d.value) FILTER (
             WHERE d.company = :supplier_{tag} AND d.activity = 'final_price'
               AND d.volate = :volate_{tag} AND d.level_1_cat = :l1_{tag}
               AND d.level_2_cat = :final_l2_{tag}
-        ) AS final_price_net
+        ) AS final_price_net_gel_kwh
     FROM demand_tariff_mv d
     WHERE TRUE
       {"AND d.date >= :start_date" if start_date else ""}
@@ -206,8 +211,10 @@ def _build_sql(
         # rather than bound -- one less untyped parameter for the server to
         # infer, and it reads as the unit conversion it is.
         benchmark_select = (
-            f",\n    (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH} AS wholesale_benchmark"
-            f",\n    s.final_price_net - (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH} AS spread"
+            f",\n    (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH}"
+            " AS wholesale_benchmark_gel_kwh"
+            f",\n    s.final_price_net_gel_kwh - (p.p_bal_gel + p.p_gcap_gel)"
+            f" / {KWH_PER_MWH} AS spread_gel_kwh"
         )
         benchmark_join = "\nLEFT JOIN price_with_usd p ON p.date = s.date"
 
@@ -217,12 +224,13 @@ WITH stacked AS ({union}
 )
 SELECT
     s.date, s.supplier, s.category, s.category_label,
-    s.distribution, s.supply, s.transmission, s.final_price_net{benchmark_select}
+    s.distribution_tariff_gel_kwh, s.supply_tariff_gel_kwh,
+    s.transmission_tariff_gel_kwh, s.final_price_net_gel_kwh{benchmark_select}
 FROM stacked s{benchmark_join}
-WHERE s.distribution IS NOT NULL
-  AND s.supply IS NOT NULL
-  AND s.transmission IS NOT NULL
-  AND s.final_price_net IS NOT NULL
+WHERE s.distribution_tariff_gel_kwh IS NOT NULL
+  AND s.supply_tariff_gel_kwh IS NOT NULL
+  AND s.transmission_tariff_gel_kwh IS NOT NULL
+  AND s.final_price_net_gel_kwh IS NOT NULL
 ORDER BY s.date {direction}, s.supplier, s.category
 LIMIT :row_limit
 """
@@ -246,9 +254,14 @@ def get_end_user_prices(
     published total are present -- a partial stack is worse than an absent one,
     and this mirrors the view's own INNER JOIN.
 
-    ``final_price_net`` is NET of VAT.  With ``include_vat`` the gross figure is
-    returned as well, so the answer can quote a real column rather than
-    computing a number that appears in no row.
+    ``final_price_net_gel_kwh`` is NET of VAT.  With ``include_vat`` the gross
+    figure is returned as well, so the answer can quote a real column rather
+    than computing a number that appears in no row.
+
+    Every value column carries its unit in its name. That is not decoration:
+    the wholesale benchmark is GEL/MWh at source and these are GEL/kWh, and
+    ``supply`` on its own is classified as a volume by ``is_intensive_metric``,
+    which would license summing a per-kWh tariff across months.
     """
     if str(currency or "gel").lower() != "gel":
         raise ValueError(
@@ -280,13 +293,13 @@ def get_end_user_prices(
 
     df, cols, rows = run_text_query(sql, params)
 
-    if include_vat and not df.empty and "final_price_net" in df.columns:
+    if include_vat and not df.empty and "final_price_net_gel_kwh" in df.columns:
         # Computed here rather than in SQL so the arithmetic is visible and
         # testable, and so the gross figure exists as a real column in the
         # frame -- otherwise the grounding gate strips it from the answer.
         df = df.copy()
-        df["vat"] = df["final_price_net"] * VAT_RATE
-        df["total_gross"] = df["final_price_net"] * (1 + VAT_RATE)
+        df["vat_gel_kwh"] = df["final_price_net_gel_kwh"] * VAT_RATE
+        df["total_gross_gel_kwh"] = df["final_price_net_gel_kwh"] * (1 + VAT_RATE)
         cols = list(df.columns)
         rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
 

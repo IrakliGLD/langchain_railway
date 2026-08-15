@@ -79,6 +79,23 @@ COLUMN_LABELS = {
     "level_1_cat": "Consumer Class",
     "level_2_cat": "Consumer Sub-Class",
     "value": "Tariff Component (GEL/kWh)",
+
+    # get_end_user_prices output frame. Each name carries its unit: these are
+    # GEL/kWh while wholesale prices are GEL/MWh, and a bare "supply" reads as
+    # a volume to is_intensive_metric, licensing a summed per-kWh tariff.
+    "supplier": "Supply Company",
+    # Distinct labels: these are two different columns (the machine key and
+    # its human string), and the label -> identifier inverse must round-trip.
+    "category": "End-User Category Code",
+    "category_label": "End-User Category",
+    "distribution_tariff_gel_kwh": "Distribution tariff (GEL/kWh)",
+    "supply_tariff_gel_kwh": "Supply tariff, incl. guaranteed capacity fee (GEL/kWh)",
+    "transmission_tariff_gel_kwh": "Transmission tariff (GEL/kWh)",
+    "final_price_net_gel_kwh": "Final end-user price, net of VAT (GEL/kWh)",
+    "vat_gel_kwh": "VAT at 18% (GEL/kWh)",
+    "total_gross_gel_kwh": "Final end-user price, incl. VAT (GEL/kWh)",
+    "wholesale_benchmark_gel_kwh": "Balancing + guaranteed capacity, rebased (GEL/kWh)",
+    "spread_gel_kwh": "Retail-to-wholesale spread (GEL/kWh)",
 }
 
 # --- Columns excluded from scrub_schema_mentions ---
@@ -100,6 +117,8 @@ SCRUB_EXEMPT_COLUMNS = frozenset({
     "activity",
     "company",
     "technology",
+    "supplier",
+    "category",
 })
 
 # ----------------------------------------------------------

@@ -239,6 +239,9 @@ _SHAPE_DIMENSIONS = (
     "technology",
     "ownership",
     "segment",
+    # get_end_user_prices pivots the retail stack into these two.
+    "supplier",
+    "category",
 )
 
 

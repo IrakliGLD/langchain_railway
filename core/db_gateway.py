@@ -193,9 +193,11 @@ def database_connection(
                     db_circuit_breaker.record_success()
                     if isinstance(error, SQLAlchemyError):
                         log.info(
-                            "Non-transient database operation error: operation=%s type=%s",
+                            "Non-transient database operation error: "
+                            "operation=%s type=%s sqlstate=%s",
                             operation,
                             type(error).__name__,
+                            _sqlstate(error) or "unknown",
                         )
                 raise
             else:
