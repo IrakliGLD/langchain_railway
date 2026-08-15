@@ -816,6 +816,165 @@ ORDER BY year;
 # COMBINED EXAMPLES STRING FOR PROMPT
 # =============================================================================
 
+# =============================================================================
+# CATEGORY 11: REGULATED END-USER PRICE (demand_tariff_mv)
+# =============================================================================
+
+END_USER_PRICE_EXAMPLES = """
+EXAMPLE 11.1 - End-User Price Composition:
+Query: "What is the regulated end-user electricity price for a Telmico household using 200 kWh?"
+Plan:
+{
+  "intent": "composition",
+  "target": "end_user_price",
+  "period": "latest"
+}
+---SQL---
+-- 101-301 kWh band = 'cat2'. Components: distribution (telasi, the distributor
+-- paired with supplier telmico), supply (telmico, 'universal' for households),
+-- and transmission (gse, all category columns blank).
+-- Blank dimensions are EMPTY STRINGS, never NULL.
+SELECT
+    d.date,
+    SUM(d.value) FILTER (WHERE d.activity = 'distribution')  AS distribution_gel_kwh,
+    SUM(d.value) FILTER (WHERE d.activity = 'universal')     AS supply_gel_kwh,
+    SUM(d.value) FILTER (WHERE d.activity = 'transmission')  AS transmission_gel_kwh,
+    SUM(d.value) FILTER (WHERE d.activity <> 'final_price')  AS total_gel_kwh,
+    MAX(d.value) FILTER (WHERE d.activity = 'final_price')   AS published_total_gel_kwh
+FROM demand_tariff_mv d
+WHERE d.date = (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
+  AND (
+        (d.company = 'telasi'  AND d.activity = 'distribution'
+           AND d.volate = '220/380' AND d.level_1_cat = 'hh' AND d.level_2_cat = 'cat2')
+     OR (d.company = 'telmico' AND d.activity = 'universal'
+           AND d.volate = '220/380' AND d.level_1_cat = 'hh' AND d.level_2_cat = 'cat2')
+     OR (d.company = 'gse'     AND d.activity = 'transmission'
+           AND d.volate = '' AND d.level_1_cat = '' AND d.level_2_cat = '')
+     OR (d.company = 'telmico' AND d.activity = 'final_price'
+           AND d.volate = '220/380' AND d.level_1_cat = 'hh' AND d.level_2_cat = 'cat2')
+  )
+GROUP BY d.date;
+
+EXAMPLE 11.2 - End-User Price Trend, One Component:
+Query: "How has the distribution tariff changed for Tbilisi households since 2022?"
+Plan:
+{
+  "intent": "timeseries",
+  "target": "distribution_tariff",
+  "period": "2022-present"
+}
+---SQL---
+-- telasi is the Tbilisi distribution network. Bound the window by the last
+-- final_price month: distribution tariffs alone are published years further ahead.
+SELECT date, level_2_cat AS consumption_band, value AS distribution_gel_kwh
+FROM demand_tariff_mv
+WHERE company = 'telasi'
+  AND activity = 'distribution'
+  AND level_1_cat = 'hh'
+  AND volate = '220/380'
+  AND date >= '2022-01-01'
+  AND date <= (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
+ORDER BY date, level_2_cat;
+
+EXAMPLE 11.3 - Compare Suppliers, Same Category:
+Query: "Compare the final end-user price between Telmico and EPS for households"
+Plan:
+{
+  "intent": "comparison",
+  "target": "end_user_price_by_supplier",
+  "period": "latest"
+}
+---SQL---
+-- final_price rows are the regulator's published totals; use them directly for
+-- a supplier comparison rather than re-summing components.
+SELECT date, company AS supplier, level_2_cat AS consumption_band, value AS final_price_gel_kwh
+FROM demand_tariff_mv
+WHERE activity = 'final_price'
+  AND level_1_cat = 'hh'
+  AND volate = '220/380'
+  AND date = (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
+ORDER BY consumption_band, supplier;
+"""
+
+# =============================================================================
+# CATEGORY 12: PLANT FLEET (by_capacity, by_commissioning, capacity_factor)
+# =============================================================================
+
+PLANT_FLEET_EXAMPLES = """
+EXAMPLE 12.1 - Generation by Plant Size Band:
+Query: "How much electricity did large plants generate compared with small ones in 2025?"
+Plan:
+{
+  "intent": "composition",
+  "target": "generation_by_capacity_band",
+  "period": "2025"
+}
+---SQL---
+-- entity holds the installed-capacity band. segment is 'total' only in this view;
+-- do NOT apply the trade_derived_entities 'balancing' filter here.
+SELECT entity AS capacity_band, SUM(quantity) AS total_quantity_thousand_mwh
+FROM by_capacity
+WHERE date >= '2025-01-01' AND date < '2026-01-01'
+GROUP BY entity
+ORDER BY total_quantity_thousand_mwh DESC;
+
+EXAMPLE 12.2 - Capacity Factor by Technology:
+Query: "What is the capacity factor of wind versus solar plants?"
+Plan:
+{
+  "intent": "comparison",
+  "target": "capacity_factor_by_technology",
+  "period": "latest_year"
+}
+---SQL---
+-- capacity_factor is a RATIO (0-1); capacity_factor_percent is the same value x100.
+-- Never multiply capacity_factor_percent by 100 again.
+-- Weight by generation rather than averaging the ratio, so large bands dominate correctly.
+SELECT
+    technology,
+    SUM(generation_mwh)                                          AS generation_mwh,
+    SUM(installed_capacity_mw * hours_in_month)                  AS potential_mwh,
+    ROUND(
+        SUM(generation_mwh) / NULLIF(SUM(installed_capacity_mw * hours_in_month), 0) * 100,
+        2
+    )                                                            AS capacity_factor_percent
+FROM capacity_factor
+WHERE technology IN ('wpp', 'solar')
+  AND date >= '2025-01-01'
+GROUP BY technology
+ORDER BY technology;
+
+EXAMPLE 12.3 - Fleet Count by Size Band:
+Query: "How many power plants are there in each size category?"
+Plan:
+{
+  "intent": "list",
+  "target": "facility_count_by_capacity_band",
+  "period": "latest"
+}
+---SQL---
+-- facility_count is a STOCK, not a flow: take the latest month, never SUM across months.
+SELECT entity AS capacity_band, facility_count
+FROM by_capacity
+WHERE date = (SELECT MAX(date) FROM by_capacity)
+ORDER BY facility_count DESC;
+
+EXAMPLE 12.4 - Generation by Plant Age:
+Query: "How much generation comes from plants commissioned after 2020?"
+Plan:
+{
+  "intent": "composition",
+  "target": "generation_by_commissioning_cohort",
+  "period": "latest_year"
+}
+---SQL---
+SELECT entity AS commissioning_cohort, SUM(quantity) AS total_quantity_thousand_mwh
+FROM by_commissioning
+WHERE date >= '2025-01-01'
+GROUP BY entity
+ORDER BY commissioning_cohort;
+"""
+
 ALL_EXAMPLES = f"""
 {ENERGY_SECURITY_EXAMPLES}
 
@@ -836,6 +995,10 @@ ALL_EXAMPLES = f"""
 {EXCHANGE_RATE_EXAMPLES}
 
 {SEASONAL_EXAMPLES}
+
+{END_USER_PRICE_EXAMPLES}
+
+{PLANT_FLEET_EXAMPLES}
 """
 
 # =============================================================================
@@ -858,7 +1021,16 @@ def get_relevant_examples(user_query: str, max_categories: int = 2) -> str:
     """
     query_lower = user_query.lower()
 
-    # Category detection with keywords
+    # Category detection with keywords.
+    #
+    # ORDER IS PRIORITY: matches are collected in this dict's order and then
+    # sliced with ``matched[:max_categories]``, so an earlier category wins a
+    # scarce slot.  The two most specific categories are listed before the
+    # generic ones they overlap with:
+    #   * end_user_price before tariff   -- "distribution tariff" contains "tariff"
+    #   * plant_fleet    before generation -- "capacity factor" contains "capacity"
+    # Without that ordering a retail-tariff question would be answered with
+    # generation-side tariff examples pointing at the wrong view.
     category_keywords = {
         "energy_security": ["energy security", "უსაფრთხოება", "import dependence",
                            "დამოკიდებულება", "self-sufficiency", "vulnerability",
@@ -866,19 +1038,34 @@ def get_relevant_examples(user_query: str, max_categories: int = 2) -> str:
         "balancing_price": ["balancing price", "საბალანსო ფასი", "price driver",
                            "why price", "რატომ გაიზარდა", "ფასის ზრდა", "p_bal",
                            "price increase", "price decrease"],
+        "end_user_price": ["end-user", "end user", "retail tariff", "retail price",
+                          "consumer tariff", "consumer price", "household tariff",
+                          "distribution tariff", "transmission tariff", "supply tariff",
+                          "network tariff", "universal service", "final price",
+                          "per kwh", "gel/kwh", "telasi", "telmico", "electricity bill",
+                          "საბოლოო მომხმარებელი", "конечный потребитель"],
         "tariff": ["tariff", "ტარიფი", "regulated", "enguri", "gardabani",
                   "gnerc approval"],
         "demand": ["demand", "consumption", "მოთხოვნა", "growth"],
+        "plant_fleet": ["capacity factor", "capacity band", "plant size", "size band",
+                       "installed capacity", "commissioning", "plant age",
+                       "facility count", "how many plants", "number of plants",
+                       "fleet", "hhi", "concentration"],
         "generation": ["generation", "გენერაცია", "produce", "capacity", "mix"],
         "seasonal": ["seasonal", "summer", "winter", "სეზონური", "ზაფხულ", "ზამთარ"]
     }
 
-    # Category example mapping
+    # Category example mapping.
+    # INVARIANT: every key in category_keywords MUST appear here, or the category
+    # is detected and then silently dropped.  Pinned by
+    # tests/test_sql_example_selector.py::test_every_detected_category_is_loadable.
     category_examples_map = {
         "energy_security": ENERGY_SECURITY_EXAMPLES,
         "balancing_price": BALANCING_PRICE_EXAMPLES,
+        "end_user_price": END_USER_PRICE_EXAMPLES,
         "tariff": TARIFF_EXAMPLES,
         "demand": DEMAND_EXAMPLES,
+        "plant_fleet": PLANT_FLEET_EXAMPLES,
         "generation": GENERATION_EXAMPLES,
         "seasonal": SEASONAL_EXAMPLES
     }

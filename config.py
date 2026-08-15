@@ -1094,6 +1094,14 @@ STATIC_ALLOWED_TABLES = {
     "monthly_cpi_mv",
     "energy_balance_long_mv",
     "mv_balancing_trade_with_tariff",
+    # Plant Analytics views (shared with the dashboard's Plant Analytics tab).
+    "trade_by_ownership",
+    "ownership_concentration",
+    "by_capacity",
+    "by_commissioning",
+    "capacity_factor",
+    # Network & Supply view (regulated end-user tariff components, GEL/kWh).
+    "demand_tariff_mv",
 }
 
 ALLOWED_TABLES = set(STATIC_ALLOWED_TABLES)

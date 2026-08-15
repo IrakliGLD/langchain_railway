@@ -160,7 +160,9 @@ from models import (
 )
 from utils import session_memory as session_memory_repository
 from utils.auth import CallerContext, authenticate_request
+from utils.cors_config import parse_allowed_origins
 from utils.language import detect_language, get_language_instruction
+from utils.logging_config import configure_application_logging
 
 # Phase 2: Core modules
 from utils.metrics import metrics
@@ -194,7 +196,7 @@ from visualization.chart_selector import detect_column_types, infer_dimension, s
 # Boot + Config
 # -----------------------------
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+configure_application_logging()
 log = logging.getLogger("Enai")
 log.addFilter(PrivacyLogFilter())
 
@@ -295,9 +297,13 @@ span_id_var: ContextVar[str] = ContextVar("span_id", default="")
 
 # CORS Configuration: Parse allowed origins from environment
 # Default to localhost for development if not specified
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS if origin.strip()]  # Clean up whitespace
-log.info(f"🔒 CORS: Allowed origins: {ALLOWED_ORIGINS}")
+ALLOWED_ORIGINS = parse_allowed_origins(
+    os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    )
+)
+log.info("🔒 CORS: allowed_origin_count=%d", len(ALLOWED_ORIGINS))
 
 # Note: Metrics, config variables, and other extracted code now imported from modules
 # See imports section above for: config.py, models.py, utils.metrics, core.*, analysis.*, visualization.*

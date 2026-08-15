@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from agent.scenario_contract import ground_scenario_request
 from agent.shape_requirements import get_requirement
+from agent.tools.capabilities import defaults_to_multi_period
 from contracts.question_analysis import (
     _SCENARIO_METRIC_NAMES,
     AnswerKind,
@@ -98,9 +99,9 @@ def validate_plan_against_answer_kind(
       an inherently multi-entity tool, OR a primary step whose date range
       spans more than one period (e.g. "Jan vs Feb" fetched as a single
       get_prices call with start_date=2025-01-01, end_date=2025-02-28).
-    - TIMESERIES → primary step has a non-degenerate date range
-      (start_date + end_date, AND start_date != end_date so the series
-      contains more than a single point).
+    - TIMESERIES → primary step has either a declared multi-period tool
+      default or a non-degenerate date range (start_date + end_date, AND
+      start_date != end_date so the series contains more than one point).
     - FORECAST → primary step has a date range (historical basis for
       trendline extrapolation).
     - SCENARIO → analysis_requirements contains at least one scenario-family
@@ -126,6 +127,7 @@ def validate_plan_against_answer_kind(
     primary = steps[0]
     primary_params = primary.get("params") or {}
     primary_tool = primary.get("tool_name", "")
+    primary_defaults_to_multi_period = defaults_to_multi_period(primary_tool)
 
     if answer_kind == AnswerKind.COMPARISON:
         has_multi_source = len(steps) >= 2
@@ -183,9 +185,14 @@ def validate_plan_against_answer_kind(
         start_date = primary_params.get("start_date")
         end_date = primary_params.get("end_date")
         has_date_range = bool(start_date and end_date)
-        if requirement.requires_date_range and not has_date_range:
-            # Warn only: tools default to a recent-history window (DESC +
-            # LIMIT), which legitimately yields a renderable series.
+        if (
+            requirement.requires_date_range
+            and not has_date_range
+            and not primary_defaults_to_multi_period
+        ):
+            # Warn only: execution or post-execution repair may still produce
+            # a renderable series, but this tool has no declared historical
+            # default that proves it at plan time.
             result.add(
                 "timeseries_missing_range",
                 SEVERITY_WARN,
@@ -196,7 +203,11 @@ def validate_plan_against_answer_kind(
                 "lacks date range. query=%.80s",
                 raw_query,
             )
-        elif requirement.requires_multi_period_range and start_date == end_date:
+        elif (
+            requirement.requires_multi_period_range
+            and has_date_range
+            and start_date == end_date
+        ):
             # A single-point "range" is a SCALAR, not a TIMESERIES — flag it
             # so downstream callers know the answer kind may be mis-shaped.
             result.add(
@@ -404,18 +415,19 @@ def _cross_check_visualization(
         getattr(visualization, "time_grain", None), "value", None
     )
 
-    # Determine whether any step has a date range — a proxy for "will return
-    # time-series rows".  At planning time we only have params; the actual
-    # column types are unknown until execution.
-    def _has_date_params(step: Dict[str, Any]) -> bool:
+    # Determine whether any step has either explicit temporal params or a
+    # declared historical default. At planning time the actual frame is not
+    # available, so typed tool capability is the only deterministic substitute.
+    def _can_supply_time_series(step: Dict[str, Any]) -> bool:
         params = step.get("params") or {}
-        return bool(params.get("start_date") or params.get("end_date"))
+        has_date_params = bool(params.get("start_date") or params.get("end_date"))
+        return has_date_params or defaults_to_multi_period(step.get("tool_name", ""))
 
-    any_date_params = any(_has_date_params(step) for step in steps)
+    any_time_series_evidence = any(_can_supply_time_series(step) for step in steps)
 
     # --- Check 1: chart requested but no time-series evidence ---
     _CHART_PRESENTATIONS = {"chart", "chart_plus_table"}
-    if primary_presentation in _CHART_PRESENTATIONS and not any_date_params:
+    if primary_presentation in _CHART_PRESENTATIONS and not any_time_series_evidence:
         log.warning(
             "Visualization cross-check: primary_presentation=%s but no evidence "
             "step has date params — result will be tabular, not time-series. "
@@ -426,7 +438,7 @@ def _cross_check_visualization(
 
     # --- Check 2: trend/relationship visual_goal with no time axis ---
     _TEMPORAL_GOALS = {"trend", "relationship"}
-    if visual_goal in _TEMPORAL_GOALS and not any_date_params:
+    if visual_goal in _TEMPORAL_GOALS and not any_time_series_evidence:
         log.warning(
             "Visualization cross-check: visual_goal=%s requires a time axis "
             "but no evidence step has date params. Single-point data cannot "

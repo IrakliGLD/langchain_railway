@@ -32,7 +32,13 @@ Runtime source of truth: [contracts/question_analysis_catalogs.py](../../../cont
 
 ## tariffs
 
-- Use for: regulated tariffs, tariff entities, cost-plus tariff logic
+- Use for: GENERATION-side tariffs — what a regulated plant is paid (GEL/MWh), tariff entities, cost-plus tariff logic, guaranteed capacity fee as set on thermal plants
+- Not for: network tariffs or the end-user price a consumer pays — use network_supply_tariffs
+
+## network_supply_tariffs
+
+- Use for: RETAIL-side tariffs — the regulated end-user price (GEL/kWh) and its distribution / supply / transmission components, supplier-to-distributor pairing, household consumption bands and commercial categories, voltage levels, universal vs public service, SOLR, and the guaranteed capacity fee pass-through into the supply component
+- Not for: what a generating plant is paid — use tariffs
 
 ## cfd_ppa
 

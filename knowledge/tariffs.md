@@ -1,5 +1,14 @@
 # Tariff Structure
 
+Scope: the **generation** side — GNERC cost-plus tariffs paid to regulated hydro and thermal
+power plants, in GEL/MWh. Use this document for questions about what a *power plant* is paid.
+
+For network (distribution and transmission) tariffs and the regulated **end-user** price a
+household or commercial customer pays per kWh, use **Network and End-User Supply Tariffs**
+(`network_supply_tariffs.md`). The guaranteed capacity fee defined below is set on the
+generation side but reaches consumers through the *supply* component of the end-user tariff;
+that link is described there.
+
 ## Definitions
 - **PSO (Public Service Obligation):** Activities or entities subject to tariff regulation by GNERC.
 - **Regulatory period:** Period for which GNERC sets tariffs.

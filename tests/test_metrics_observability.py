@@ -18,6 +18,19 @@ from core import llm
 from utils.metrics import Metrics
 
 
+def test_unresolvable_metric_observability_is_count_only(caplog):
+    m = Metrics()
+
+    with caplog.at_level("WARNING", logger="Enai"):
+        m.log_unresolvable_requested_metrics(2)
+
+    stats = m.get_stats()
+    assert stats["unresolvable_requested_metric_events"] == 1
+    assert stats["unresolvable_requested_metrics"] == 2
+    assert "unresolvable: count=2" in caplog.text
+    assert "metric_name" not in caplog.text
+
+
 def test_stage_metrics_are_aggregated():
     m = Metrics()
     m.log_stage("stage_1_generate_plan", 10.0)

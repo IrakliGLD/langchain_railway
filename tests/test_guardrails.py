@@ -6100,13 +6100,13 @@ def _make_viz_cross_check_qa(
 
 
 def test_cross_check_warns_chart_with_no_date_params(caplog):
-    """Phase 16 check 1: chart primary_presentation + no date params → warning."""
+    """Phase 16 check 1: chart + no temporal tool capability → warning."""
     import logging
 
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart")
-    steps = [{"tool_name": "get_tariffs", "params": {"entities": ["PPAs"]}}]  # no dates
+    steps = [{"tool_name": "get_single_value", "params": {"entity": "PPA"}}]
 
     with caplog.at_level(logging.WARNING, logger="Enai"):
         _cross_check_visualization(steps, qa, "show tariff chart")
@@ -6118,13 +6118,13 @@ def test_cross_check_warns_chart_with_no_date_params(caplog):
 
 
 def test_cross_check_warns_trend_goal_with_no_date_params(caplog):
-    """Phase 16 check 2: visual_goal=trend + no date params → warning."""
+    """Phase 16 check 2: trend + no temporal tool capability → warning."""
     import logging
 
     from agent.evidence_planner import _cross_check_visualization
 
     qa = _make_viz_cross_check_qa(primary_presentation="chart", visual_goal="trend")
-    steps = [{"tool_name": "get_tariffs", "params": {}}]  # no dates
+    steps = [{"tool_name": "get_single_value", "params": {}}]
 
     with caplog.at_level(logging.WARNING, logger="Enai"):
         _cross_check_visualization(steps, qa, "show trend")

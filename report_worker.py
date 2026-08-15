@@ -35,6 +35,7 @@ from core.report_job_processor import ReportJobProcessor
 from core.report_job_repository import PostgresReportJobRepository
 from core.report_job_worker import ReportJobWorker
 from knowledge.embedding_service import require_embedding_capability
+from utils.logging_config import configure_application_logging
 
 log = logging.getLogger("Enai.ReportWorker")
 _REPORT_WORKER_LEASE_SAFETY_MARGIN_SECONDS = 30
@@ -177,8 +178,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_application_logging()
     raise SystemExit(main())

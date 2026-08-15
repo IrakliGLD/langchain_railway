@@ -79,9 +79,13 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "contribution": ["balancing_price"],
 
     # Tariffs
-    "tariff": ["tariffs"],
-    "ტარიფი": ["tariffs"],
-    "тариф": ["tariffs"],
+    # NOTE: bare "tariff" fans out to BOTH tariff files. tariffs.md is the
+    # generation side (what a plant is paid, GEL/MWh); network_supply_tariffs.md
+    # is the retail side (what a consumer pays, GEL/kWh). Routing "tariff" to
+    # only one of them silently hides half the subject.
+    "tariff": ["tariffs", "network_supply_tariffs"],
+    "ტარიფი": ["tariffs", "network_supply_tariffs"],
+    "тариф": ["tariffs", "network_supply_tariffs"],
     "regulated": ["tariffs", "general_definitions"],
     "liberalization": ["market_structure", "tariffs"],
     "liberalisation": ["market_structure", "tariffs"],
@@ -91,16 +95,49 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "gardabani": ["tariffs"],
     "gnerc": ["tariffs", "market_structure"],
     "cost-plus": ["tariffs"],
-    "capacity fee": ["tariffs"],
+    "capacity fee": ["tariffs", "network_supply_tariffs"],
     "engurhesi": ["tariffs"],
+
+    # Network & end-user supply tariffs (retail side).
+    # WARNING: matching below is a bare substring test (`keyword in query_lower`),
+    # NOT a word-boundary match. Short keys therefore fire inside unrelated words.
+    # This is why the supply company code 'eps' is deliberately absent: it would
+    # match "steps", "keeps", "epsilon". Prefer multi-word or distinctive keys.
+    "end-user": ["network_supply_tariffs"],
+    "end user": ["network_supply_tariffs"],
+    "retail tariff": ["network_supply_tariffs"],
+    "retail price": ["network_supply_tariffs"],
+    "consumer tariff": ["network_supply_tariffs"],
+    "consumer price": ["network_supply_tariffs"],
+    "household tariff": ["network_supply_tariffs"],
+    "household": ["network_supply_tariffs"],
+    "per kwh": ["network_supply_tariffs"],
+    "gel/kwh": ["network_supply_tariffs"],
+    "electricity bill": ["network_supply_tariffs"],
+    "distribution tariff": ["network_supply_tariffs"],
+    "transmission tariff": ["network_supply_tariffs"],
+    "supply tariff": ["network_supply_tariffs"],
+    "network tariff": ["network_supply_tariffs"],
+    # NOTE: "universal service" is not repeated here -- it already exists in the
+    # PSO Trading block above and was extended there. A duplicate literal key
+    # would silently shadow the earlier entry (ruff F601).
+    "public service provider": ["network_supply_tariffs"],
+    "solr": ["network_supply_tariffs"],
+    "supplier of last resort": ["network_supply_tariffs"],
+    "telasi": ["network_supply_tariffs"],
+    "epg": ["network_supply_tariffs"],
+    "energo-pro georgia": ["network_supply_tariffs"],
+    "voltage": ["network_supply_tariffs"],
+    "საბოლოო მომხმარებელი": ["network_supply_tariffs"],
+    "конечный потребитель": ["network_supply_tariffs"],
 
     # PSO Trading
     "pso": ["pso_trading", "tariffs"],
     "public service obligation": ["pso_trading"],
-    "telmico": ["pso_trading"],
+    "telmico": ["pso_trading", "network_supply_tariffs"],
     "ep georgia": ["pso_trading"],
     "procurement": ["pso_trading"],
-    "universal service": ["pso_trading"],
+    "universal service": ["pso_trading", "network_supply_tariffs"],
     "cascade distribution": ["pso_trading"],
 
     # CfD / PPA

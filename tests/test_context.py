@@ -30,6 +30,33 @@ class TestTechTypeGroups:
         assert len(DEMAND_TECH_TYPES) == len(set(DEMAND_TECH_TYPES))
 
 
+def parse_static_allowed_tables() -> set:
+    """Parse STATIC_ALLOWED_TABLES from config.py source without importing.
+
+    ``config.py`` raises ``RuntimeError: Missing SUPABASE_DB_URL`` at import
+    time, so importing it here would make these tests pass only when a module
+    that sets the env (e.g. ``test_config.py``) happened to run first in the
+    same session.  Reading the source keeps them order-independent.
+    """
+    import ast
+    import pathlib
+
+    config_path = pathlib.Path(__file__).parent.parent / "config.py"
+    source = config_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "STATIC_ALLOWED_TABLES"
+        ):
+            return set(ast.literal_eval(node.value))
+
+    raise RuntimeError("STATIC_ALLOWED_TABLES not found in config.py")
+
+
 class TestSchemaConsistency:
     """Verify context.py stays aligned with config.py STATIC_ALLOWED_TABLES.
 
@@ -38,26 +65,7 @@ class TestSchemaConsistency:
     needing a live database URL in CI/test environments.
     """
 
-    @staticmethod
-    def _parse_static_allowed_tables() -> set:
-        """Parse STATIC_ALLOWED_TABLES from config.py source without importing."""
-        import ast
-        import pathlib
-
-        config_path = pathlib.Path(__file__).parent.parent / "config.py"
-        source = config_path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "STATIC_ALLOWED_TABLES"
-            ):
-                return set(ast.literal_eval(node.value))
-
-        raise RuntimeError("STATIC_ALLOWED_TABLES not found in config.py")
+    _parse_static_allowed_tables = staticmethod(parse_static_allowed_tables)
 
     def test_all_allowed_tables_in_schema_dict(self):
         """Every view in STATIC_ALLOWED_TABLES must have an entry in DB_SCHEMA_DICT."""
@@ -164,6 +172,167 @@ class TestScrubSchemaMentions:
         assert "balancing price" in after
         assert "balancing the grid" in after
         assert "balancing purposes" in after
+
+    def test_common_english_columns_survive_scrubbing(self):
+        """Ordinary English words that are also column names must not be replaced.
+
+        ``demand_tariff_mv`` and ``capacity_factor`` introduced the columns
+        ``value``, ``activity``, ``company`` and ``technology``.  They need
+        COLUMN_LABELS entries (readiness/display + the coverage test require
+        it) but replacing them in prose mangles ordinary sentences -- the same
+        failure VALUE_LABELS documents for bare words.
+        """
+        from context import scrub_schema_mentions
+
+        before = (
+            "The value of imports rose while wind technology matured. "
+            "Each company reported higher trading activity."
+        )
+        after = scrub_schema_mentions(before)
+        assert "The value of imports rose" in after
+        assert "wind technology matured" in after
+        assert "Each company reported higher trading activity." in after
+
+    def test_scrub_exemptions_are_real_columns(self):
+        """An exemption for a column that has no label is dead configuration."""
+        from context import COLUMN_LABELS, SCRUB_EXEMPT_COLUMNS
+
+        orphans = sorted(SCRUB_EXEMPT_COLUMNS - set(COLUMN_LABELS))
+        assert not orphans, f"SCRUB_EXEMPT_COLUMNS entries with no COLUMN_LABELS entry: {orphans}"
+
+
+class TestDashboardSharedViews:
+    """Pin the six materialized views shared with the dashboard's
+    Network & Supply and Plant Analytics tabs.
+
+    Column lists were verified against the live database on 2026-08-15.
+    They feed REQUIRED_SCHEMA_COLUMNS (main.py), so drift here shows up as a
+    permanent schema-readiness gap rather than a test failure in production.
+    """
+
+    EXPECTED_COLUMNS = {
+        "trade_by_ownership": ["date", "ownership", "quantity"],
+        "ownership_concentration": [
+            "date", "segment", "total_generation", "owner_count",
+            "hhi", "top1_share", "top3_share", "top5_share",
+        ],
+        "by_capacity": ["date", "entity", "segment", "quantity", "facility_count"],
+        "by_commissioning": ["date", "entity", "segment", "quantity"],
+        "capacity_factor": [
+            "date", "technology", "capacity_category", "capacity_category_order",
+            "segment", "facility_count", "generation_mwh", "installed_capacity_mw",
+            "hours_in_month", "capacity_factor", "capacity_factor_percent",
+        ],
+        "demand_tariff_mv": [
+            "date", "company", "activity", "volate",
+            "level_1_cat", "level_2_cat", "value",
+        ],
+    }
+
+    def test_columns_match_deployed_materialized_views(self):
+        from context import DB_SCHEMA_DICT
+
+        for view_name, columns in self.EXPECTED_COLUMNS.items():
+            assert DB_SCHEMA_DICT["views"][view_name]["columns"] == columns, (
+                f"{view_name} columns drifted from the deployed view"
+            )
+
+    def test_demand_tariff_id_is_deliberately_omitted(self):
+        """The view has a demand_tariff_id column; the contract must not claim it.
+
+        It is NULL on every calculated row, so exposing it invites a join on a
+        null key.  REQUIRED_SCHEMA_COLUMNS checks required-subset-of-reflected,
+        so omitting a real column is safe.
+        """
+        from context import DB_SCHEMA_DICT
+
+        assert "demand_tariff_id" not in DB_SCHEMA_DICT["views"]["demand_tariff_mv"]["columns"]
+
+    def test_views_are_allowlisted_and_joinable(self):
+        from context import DB_JOINS
+
+        allowed = parse_static_allowed_tables()
+        for view_name in self.EXPECTED_COLUMNS:
+            assert view_name in allowed, f"{view_name} missing from the SQL allowlist"
+            assert view_name in DB_JOINS, f"{view_name} missing from DB_JOINS"
+            assert DB_JOINS[view_name]["join_on"] == "date"
+
+    def test_schema_doc_declares_every_shared_view(self):
+        """A view the planner may query but cannot see in the schema text is unusable.
+
+        ``test_no_phantom_views_in_schema_doc`` guards the other direction
+        (documented but not allowlisted); this guards allowlisted but not
+        documented, for the six views this change introduced.
+        """
+        import re
+
+        from context import DB_SCHEMA_DOC
+
+        documented = set(re.findall(r"^- (\w+)\(", DB_SCHEMA_DOC, re.MULTILINE))
+        missing = sorted(set(self.EXPECTED_COLUMNS) - documented)
+        assert not missing, f"Shared views absent from DB_SCHEMA_DOC 'Available Views': {missing}"
+
+    def test_schema_doc_carries_the_load_bearing_rules(self):
+        """Each rule here maps to a way the model would otherwise be silently wrong."""
+        from context import DB_SCHEMA_DOC
+
+        # GEL/kWh vs GEL/MWh vs MWh -- three coexisting scales.
+        assert "GEL/kWh" in DB_SCHEMA_DOC
+        assert "THREE scales now coexist" in DB_SCHEMA_DOC
+        # demand_tariff_mv runs to 2030 but complete prices stop at the last final_price month.
+        assert "USABLE RANGE" in DB_SCHEMA_DOC
+        assert "activity = 'final_price'" in DB_SCHEMA_DOC
+        # Blank dimensions are '' and not NULL.
+        assert "EMPTY STRINGS" in DB_SCHEMA_DOC
+        # The plant-fleet segment is 'total' only -- the balancing filter matches nothing.
+        assert "'total'" in DB_SCHEMA_DOC
+        # capacity_factor vs capacity_factor_percent.
+        assert "Never multiply capacity_factor_percent by 100" in DB_SCHEMA_DOC
+
+    def test_schema_doc_columns_match_the_schema_dict(self):
+        """The prompt text and the runtime contract must not drift apart.
+
+        DB_SCHEMA_DICT drives readiness reflection; DB_SCHEMA_DOC is what the
+        planner LLM actually reads.  A column in one and not the other means
+        either the model invents a column that does not exist, or it never
+        learns about one that does.
+
+        Only views declared in the doc's "Available Views" list are compared --
+        ``dates_mv`` and ``monthly_cpi_mv`` are allowlisted but undocumented,
+        a pre-existing gap this test deliberately does not assert away.
+        """
+        import re
+
+        from context import DB_SCHEMA_DICT, DB_SCHEMA_DOC
+
+        documented = {
+            match.group(1): [col.strip() for col in match.group(2).split(",")]
+            for match in re.finditer(r"^- (\w+)\((.*?)\)$", DB_SCHEMA_DOC, re.MULTILINE)
+        }
+
+        mismatches = {
+            view: {"doc": columns, "dict": DB_SCHEMA_DICT["views"][view]["columns"]}
+            for view, columns in documented.items()
+            if view in DB_SCHEMA_DICT["views"]
+            and columns != DB_SCHEMA_DICT["views"][view]["columns"]
+        }
+        assert not mismatches, f"DB_SCHEMA_DOC / DB_SCHEMA_DICT column drift: {mismatches}"
+
+    def test_schema_doc_stays_within_a_sane_prompt_budget(self):
+        """DB_SCHEMA_DOC is injected verbatim into every SQL-planning prompt.
+
+        It is absent from every list in ``core/prompt_budget.py``, so it is
+        never truncated -- every character it grows is taken from
+        UNTRUSTED_DOMAIN_KNOWLEDGE, which *is* shed first.  This cap is a
+        tripwire, not a target: if a future change needs more room, move
+        detail into the selectively-loaded SQL examples instead.
+        """
+        from context import DB_SCHEMA_DOC
+
+        assert len(DB_SCHEMA_DOC) < 9000, (
+            f"DB_SCHEMA_DOC is {len(DB_SCHEMA_DOC)} chars; it crowds out domain knowledge "
+            "in the planner prompt. Move detail into knowledge/sql_example_selector.py."
+        )
 
     def test_value_labels_does_not_have_bare_balancing_key(self):
         """Guard the underlying VALUE_LABELS dict to prevent re-introduction."""

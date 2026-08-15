@@ -171,10 +171,26 @@ class TestValidatorTypedResult:
         result = _validate_plan_against_answer_kind(steps, qa, "price vs composition")
         assert result.rejects == []
 
-    def test_timeseries_missing_range_warns_not_rejects(self):
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "get_prices",
+            "get_tariffs",
+            "get_generation_mix",
+            "get_balancing_composition",
+        ],
+    )
+    def test_timeseries_default_history_passes_without_warning(self, tool_name):
         qa = _qa(answer_kind="timeseries")
-        steps = [_primary_step(params={"metric": "balancing"})]
+        steps = [_primary_step(tool_name=tool_name, params={"metric": "balancing"})]
         result = _validate_plan_against_answer_kind(steps, qa, "recent balancing prices")
+        assert result.warnings == []
+        assert result.rejects == []
+
+    def test_timeseries_missing_range_warns_for_tool_without_historical_default(self):
+        qa = _qa(answer_kind="timeseries")
+        steps = [_primary_step(tool_name="get_single_value", params={"metric": "value"})]
+        result = _validate_plan_against_answer_kind(steps, qa, "recent value")
         assert [i.rule for i in result.warnings] == ["timeseries_missing_range"]
         assert result.rejects == []
 
@@ -338,7 +354,7 @@ class TestValidatorTypedResult:
 
         with caplog.at_level(logging.WARNING, logger="Enai"):
             validate_plan_against_answer_kind(
-                [_primary_step(params={"metric": "balancing"})],
+                [_primary_step(tool_name="get_single_value", params={"metric": "value"})],
                 qa,
                 "show a chart",
             )
@@ -346,6 +362,28 @@ class TestValidatorTypedResult:
         messages = [record.getMessage() for record in caplog.records]
         assert any("no evidence step has date params" in message for message in messages)
         assert any("requires a time axis" in message for message in messages)
+
+    def test_visualization_cross_check_accepts_tool_default_history(self, caplog):
+        payload = _make_qa_payload(answer_kind="timeseries")
+        payload["visualization"].update(
+            {
+                "chart_recommended": True,
+                "primary_presentation": "chart",
+                "visual_goal": "trend",
+            }
+        )
+        qa = QuestionAnalysis(**payload)
+
+        with caplog.at_level(logging.WARNING, logger="Enai"):
+            validate_plan_against_answer_kind(
+                [_primary_step(tool_name="get_prices", params={"metric": "balancing"})],
+                qa,
+                "show recent balancing prices",
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert not any("no evidence step has date params" in message for message in messages)
+        assert not any("requires a time axis" in message for message in messages)
 
     def test_visualization_cross_check_warns_for_short_seasonal_span(self, caplog):
         payload = _make_qa_payload(answer_kind="timeseries")
@@ -382,7 +420,7 @@ class TestValidatorTypedResult:
 
 
 class TestBuildPlanPublishesValidation:
-    def test_result_stored_on_ctx_and_counted(self):
+    def test_default_history_does_not_publish_false_timeseries_warning(self):
         payload = _make_qa_payload(answer_kind="timeseries")
         ctx = QueryContext(query="recent balancing prices")
         ctx.question_analysis = QuestionAnalysis(**payload)
@@ -393,9 +431,9 @@ class TestBuildPlanPublishesValidation:
 
         assert isinstance(ctx.plan_validation, PlanValidationResult)
         rules = [i.rule for i in ctx.plan_validation.issues]
-        assert "timeseries_missing_range" in rules
+        assert "timeseries_missing_range" not in rules
         key = f"timeseries_missing_range:{SEVERITY_WARN}"
-        assert metrics.plan_validation_events.get(key, 0) == before.get(key, 0) + 1
+        assert metrics.plan_validation_events.get(key, 0) == before.get(key, 0)
 
     def test_non_authoritative_analysis_leaves_validation_none(self):
         ctx = QueryContext(query="test")
@@ -483,6 +521,66 @@ class TestEnforcementStage:
         import config
 
         assert config.PLAN_VALIDATION_MODE == "warn"
+
+
+class TestToolCapabilityRegistry:
+    """``_DEFAULT_MULTI_PERIOD_TOOLS`` asserts a claim about runtime behaviour --
+    that an unbounded call sorts newest-first and applies a row limit, so it
+    returns a series rather than a scalar.
+
+    Nothing in the module ties that claim to the tools themselves, so it can go
+    stale silently and in the dangerous direction: if a listed tool later
+    requires explicit dates, plan validation stops warning exactly when it
+    should start.  These tests make the two drift modes loud.
+    """
+
+    # Tools whose unbounded invocation yields a single value rather than a
+    # series.  Empty today: every registered tool defaults to recent history.
+    # A new single-value tool belongs here, NOT in _DEFAULT_MULTI_PERIOD_TOOLS.
+    KNOWN_SINGLE_PERIOD_TOOLS: set[str] = set()
+
+    def test_every_listed_tool_is_a_real_tool_name(self):
+        """A rename or typo would make the set silently match nothing."""
+        from agent.tools.capabilities import _DEFAULT_MULTI_PERIOD_TOOLS
+        from contracts.question_analysis import ToolName
+
+        known = {tool.value for tool in ToolName}
+        unknown = sorted(_DEFAULT_MULTI_PERIOD_TOOLS - known)
+        assert not unknown, (
+            f"_DEFAULT_MULTI_PERIOD_TOOLS lists non-existent tools: {unknown} -- "
+            "defaults_to_multi_period() will never return True for them"
+        )
+
+    def test_every_tool_is_explicitly_classified(self):
+        """Adding a ToolName member must force a deliberate classification.
+
+        Left unclassified, a new single-value tool would fall through to the
+        'no historical default' branch and emit spurious warnings, while a new
+        multi-period tool would be treated as needing explicit dates.
+        """
+        from agent.tools.capabilities import _DEFAULT_MULTI_PERIOD_TOOLS
+        from contracts.question_analysis import ToolName
+
+        classified = set(_DEFAULT_MULTI_PERIOD_TOOLS) | self.KNOWN_SINGLE_PERIOD_TOOLS
+        unclassified = sorted({tool.value for tool in ToolName} - classified)
+        assert not unclassified, (
+            f"Tools with no declared result-shape capability: {unclassified}. "
+            "Add each to agent/tools/capabilities.py._DEFAULT_MULTI_PERIOD_TOOLS "
+            "or to KNOWN_SINGLE_PERIOD_TOOLS in this test."
+        )
+
+    def test_a_tool_cannot_be_both_multi_and_single_period(self):
+        from agent.tools.capabilities import _DEFAULT_MULTI_PERIOD_TOOLS
+
+        overlap = sorted(_DEFAULT_MULTI_PERIOD_TOOLS & self.KNOWN_SINGLE_PERIOD_TOOLS)
+        assert not overlap, f"Tools classified as both multi- and single-period: {overlap}"
+
+    def test_unknown_tool_names_do_not_default_to_multi_period(self):
+        """Fail closed: an unrecognised tool must not claim historical rows."""
+        from agent.tools.capabilities import defaults_to_multi_period
+
+        for candidate in ("", "   ", "get_single_value", "not_a_tool", None):
+            assert defaults_to_multi_period(candidate) is False
 
 
 if __name__ == "__main__":

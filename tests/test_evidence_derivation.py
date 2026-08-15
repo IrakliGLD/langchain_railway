@@ -188,3 +188,28 @@ def test_a_metric_resolvable_on_any_of_its_columns_is_readable():
     )
 
     assert evidence_derivation.unresolvable_requested_metrics(ctx) == []
+
+
+def test_pipeline_observes_unresolvable_metrics_by_count_only(monkeypatch):
+    from agent import pipeline
+
+    observed_counts = []
+    metric_names = ["mom_absolute_change", "share_delta_mom"]
+    monkeypatch.setattr(
+        pipeline,
+        "_unresolvable_requested_metrics",
+        lambda _ctx: metric_names,
+    )
+    monkeypatch.setattr(
+        pipeline.metrics,
+        "log_unresolvable_requested_metrics",
+        observed_counts.append,
+        raising=False,
+    )
+
+    result = pipeline._observe_unresolvable_requested_metrics(
+        SimpleNamespace(query="sensitive user content")
+    )
+
+    assert result == metric_names
+    assert observed_counts == [2]

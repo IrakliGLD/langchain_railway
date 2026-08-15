@@ -71,7 +71,13 @@ GRANT SELECT ON
     public.trade_derived_entities,
     public.monthly_cpi_mv,
     public.energy_balance_long_mv,
-    public.mv_balancing_trade_with_tariff
+    public.mv_balancing_trade_with_tariff,
+    public.trade_by_ownership,
+    public.ownership_concentration,
+    public.by_capacity,
+    public.by_commissioning,
+    public.capacity_factor,
+    public.demand_tariff_mv
 TO enai_api_readonly;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA knowledge FROM enai_api_readonly;

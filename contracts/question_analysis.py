@@ -111,6 +111,7 @@ class KnowledgeTopicName(str, Enum):
     CROSS_BORDER_CAPACITY = "cross_border_capacity"
     EXCHANGE_TRANSITION = "exchange_transition"
     TARIFFS = "tariffs"
+    NETWORK_SUPPLY_TARIFFS = "network_supply_tariffs"
     CFD_PPA = "cfd_ppa"
     CURRENCY_INFLUENCE = "currency_influence"
     SEASONAL_PATTERNS = "seasonal_patterns"
