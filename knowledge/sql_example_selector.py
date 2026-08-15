@@ -834,6 +834,17 @@ Plan:
 -- paired with supplier telmico), supply (telmico, 'universal' for households),
 -- and transmission (gse, all category columns blank).
 -- Blank dimensions are EMPTY STRINGS, never NULL.
+--
+-- REPORT published_total_gel_kwh as the headline total, not total_gel_kwh.
+-- The computed sum appears in no row of the view, so the grounding gate strips
+-- it from the answer; the published final_price row is real data. Use
+-- total_gel_kwh only to cross-check: if the two differ by more than 0.0001 the
+-- component resolution is wrong, and that discrepancy is worth reporting.
+--
+-- All values are NET of VAT. VAT is 18% and is levied on top, so what a
+-- consumer actually pays is published_total_gel_kwh * 1.18. Report the net
+-- figure by default and say it is net; give the gross only when the question
+-- asks what a consumer pays.
 SELECT
     d.date,
     SUM(d.value) FILTER (WHERE d.activity = 'distribution')  AS distribution_gel_kwh,

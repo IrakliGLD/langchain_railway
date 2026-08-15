@@ -170,6 +170,18 @@ produce an incomplete price.
   - `level_1_cat` / `level_2_cat` — consumer class and sub-class, blank for transmission
 - Coverage: from 2021-07 onwards.
 
+### Reporting rules
+
+- **Report in GEL/kWh, as stored.** Do not convert tariffs up to GEL/MWh. The converted figure
+  appears in no row of the view, so the grounding gate strips it and the answer ships
+  truncated. When a comparison to wholesale prices is needed, convert the *price* down instead.
+- **Quote `final_price` for the total.** A summed three-component total exists in no row. Use
+  the components for the breakdown and `final_price` for the headline number; if a computed sum
+  and the published total disagree, report the discrepancy rather than either figure.
+- **`value` and `final_price` are net of VAT.** VAT is 18% and is levied on top, so a consumer
+  pays `final_price × 1.18`. Report the net figure by default and say it is net of VAT; give
+  the gross total only when the question asks what a consumer actually pays.
+
 **Critical usage notes:**
 
 - **Blank dimensions are empty strings (`''`), never NULL.** Filter with `= ''`; `IS NULL`
@@ -195,9 +207,9 @@ produce an incomplete price.
 This document was drafted from general knowledge plus public sources and **needs review by the
 maintainer**. The following points are the ones most worth confirming:
 
-1. **VAT treatment.** GNERC publishes end-user tariffs *including VAT*. Whether the `value`
-   column in `demand_tariff_mv` is VAT-inclusive or VAT-exclusive is not determinable from the
-   data alone, and it materially changes how the number should be described to a user.
+1. ~~**VAT treatment.**~~ **Settled 2026-08-15.** The view stores tariffs **net of VAT**; VAT
+   of 18% is levied on top of the published `final_price`. An earlier draft of this file
+   recorded the treatment as undeterminable — that was wrong. See "Reporting rules" above.
 2. **Voltage-to-customer-type association.** Public GNERC material associates voltage levels
    with customer types, but the data contains household categories at both `220/380` and
    `3.3-6-10`. This document therefore reports voltages verbatim and asserts no mapping.

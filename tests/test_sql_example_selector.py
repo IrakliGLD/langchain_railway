@@ -162,6 +162,34 @@ def test_new_examples_do_not_use_the_phantom_time_month_column():
         assert "time_month" not in examples, f"{name} examples use the phantom time_month column"
 
 
+def test_end_user_examples_name_the_published_total_as_the_headline_figure():
+    """A computed sum exists in no row, so strict_numeric grounding strips it.
+
+    The composition example returns both the component sum and the published
+    final_price. Without an explicit instruction the model quotes the sum as
+    the answer's headline number and that figure gets stripped -- the
+    2026-08-15 trace shipped 273 of 1,587 characters this way.
+    """
+    sql = _sql_blocks(END_USER_PRICE_EXAMPLES, keep_comments=True)
+
+    assert "published_total_gel_kwh" in sql
+    assert "report published_total_gel_kwh" in sql.lower(), (
+        "the composition example must say which of the two totals to quote"
+    )
+
+
+def test_end_user_examples_state_the_vat_basis():
+    """value and final_price are NET of VAT; 18% is levied on top.
+
+    Without this the model cannot say whether the figure it reports is what a
+    consumer pays, and may silently present a net figure as a consumer price.
+    """
+    sql = _sql_blocks(END_USER_PRICE_EXAMPLES, keep_comments=True)
+
+    assert "net of vat" in sql.lower()
+    assert "18" in sql
+
+
 def test_end_user_examples_teach_the_load_bearing_rules():
     """Each assertion maps to a way the generated SQL would otherwise be wrong."""
     # Blank dimensions are '' and not NULL.
