@@ -149,7 +149,9 @@ def test_wholesale_benchmark_adds_the_capacity_charge_and_converts_down(monkeypa
 
     assert "p_gcap_gel" in captured["sql"]
     assert "p_bal_gel" in captured["sql"]
-    assert captured["params"]["kwh_per_mwh"] == 1000.0
+    # The unit conversion is inlined, not bound: it is a physical constant and
+    # one fewer untyped parameter for the server to infer.
+    assert "/ 1000.0" in captured["sql"]
     assert "* 1000" not in captured["sql"], "tariffs must never be scaled up"
 
 
@@ -358,3 +360,55 @@ def test_wholesale_wording_requests_the_benchmark_column():
     )
 
     assert params["include_wholesale_benchmark"] is True
+
+
+def test_select_position_parameters_are_explicitly_cast(monkeypatch):
+    """psycopg 3 binds server-side, so a bare parameter in the SELECT list has
+    no inferable type and Postgres raises "could not determine data type of
+    parameter". No other tool in this codebase binds a parameter in SELECT
+    position, so there is no precedent protecting this one.
+    """
+    import re
+
+    import agent.tools.end_user_price_tools as tool_module
+
+    captured = {}
+
+    def fake_run(sql, params=None):
+        captured["sql"] = sql
+        return _stub_rows()(sql, params)
+
+    monkeypatch.setattr(tool_module, "run_text_query", fake_run)
+    tool_module.get_end_user_prices(include_wholesale_benchmark=True)
+
+    # Every ":param AS alias" in the SELECT list must carry a cast. The
+    # negative lookbehind skips the "::text" cast itself, whose second colon
+    # would otherwise read as a parameter named "text".
+    uncast = re.findall(r"(?<!:):(\w+)\s+AS\s", captured["sql"])
+    assert not uncast, f"SELECT-position parameters without an explicit cast: {uncast}"
+
+
+def test_resolved_params_dispatch_cleanly_through_the_registry(monkeypatch):
+    """End-to-end contract: whatever resolve_tool_params emits must be callable.
+
+    The planner and the tool are edited independently, so a param the planner
+    adds and the tool does not accept would only surface at runtime as a
+    TypeError deep in execute_tool.
+    """
+    import agent.tools.end_user_price_tools as tool_module
+    from agent.planner import resolve_tool_params
+    from agent.tools.registry import execute_tool
+    from agent.tools.types import ToolInvocation
+
+    monkeypatch.setattr(tool_module, "run_text_query", _stub_rows())
+
+    params = resolve_tool_params(
+        _qa_with_scope("Telmico", canonical_query="telmico household tariffs including vat"),
+        "get_end_user_prices",
+        "telmico household tariffs including vat",
+    )
+
+    df, cols, rows = execute_tool(ToolInvocation(name="get_end_user_prices", params=params))
+
+    assert "final_price_net" in cols
+    assert "total_gross" in cols, "include_vat was resolved but not honoured"

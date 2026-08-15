@@ -162,9 +162,12 @@ def _build_sql(
                 f"""
     SELECT
         d.date,
-        :supplier_{tag}   AS supplier,
-        :cat_id_{tag}     AS category,
-        :cat_label_{tag}  AS category_label,
+        -- Explicit casts: psycopg 3 binds server-side, so a bare parameter in
+        -- the SELECT list has no inferable type and Postgres raises
+        -- "could not determine data type of parameter".
+        :supplier_{tag}::text   AS supplier,
+        :cat_id_{tag}::text     AS category,
+        :cat_label_{tag}::text  AS category_label,
         MAX(d.value) FILTER (
             WHERE d.company = :distributor_{tag} AND d.activity = 'distribution'
               AND d.volate = :volate_{tag} AND d.level_1_cat = :l1_{tag}
@@ -199,12 +202,14 @@ def _build_sql(
         # The supply tariff already bundles the guaranteed capacity fee, so the
         # charge is added to the WHOLESALE side; the regulated figure then stays
         # equal to what is actually charged. Prices are GEL/MWh -> divide.
+        # KWH_PER_MWH is a physical constant, not user input, so it is inlined
+        # rather than bound -- one less untyped parameter for the server to
+        # infer, and it reads as the unit conversion it is.
         benchmark_select = (
-            ",\n    (p.p_bal_gel + p.p_gcap_gel) / :kwh_per_mwh AS wholesale_benchmark"
-            ",\n    s.final_price_net - (p.p_bal_gel + p.p_gcap_gel) / :kwh_per_mwh AS spread"
+            f",\n    (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH} AS wholesale_benchmark"
+            f",\n    s.final_price_net - (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH} AS spread"
         )
         benchmark_join = "\nLEFT JOIN price_with_usd p ON p.date = s.date"
-        params["kwh_per_mwh"] = KWH_PER_MWH
 
     params["row_limit"] = limit
     return f"""
