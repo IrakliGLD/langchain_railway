@@ -2722,7 +2722,12 @@ def enrich(ctx: QueryContext) -> QueryContext:
     _append_column_aggregates(ctx)
 
     # --- Seasonal stats ---
-    timeseries_info = detect_monthly_timeseries(ctx.df)
+    # Administered prices have no season. GNERC approves one transmission,
+    # distribution and supply tariff per regulatory period and it holds for
+    # every month in it, so a summer-versus-winter split describes the
+    # regulator's calendar, not the market. Handing the summarizer 20 seasonal
+    # metrics about a constant series invites an answer built on an artefact.
+    timeseries_info = None if _is_administered_price_frame(ctx.df) else detect_monthly_timeseries(ctx.df)
     if timeseries_info:
         time_col, value_col = timeseries_info
         try:
@@ -3100,6 +3105,25 @@ _MAX_ENUMERATED_SERIES = 20
 _TIME_COLUMN_NAMES = frozenset(
     {"date", "day", "week", "month", "quarter", "year", "period", "time", "timestamp"}
 )
+
+
+def _is_administered_price_frame(df) -> bool:
+    """Whether the frame holds regulator-set prices rather than market ones.
+
+    Transmission, distribution and supply tariffs are approved by GNERC for a
+    regulatory period and are identical in every month of it. Seasonal
+    decomposition of such a series measures the revision calendar, not
+    seasonality, so it is suppressed rather than reported.
+
+    Detected from the frame's own columns so it holds for any frame carrying
+    these tariffs, not only the one the retail tool builds.
+    """
+    if df is None or getattr(df, "empty", True):
+        return False
+    from agent.tools.end_user_price_tools import COMPONENT_COLUMNS, NET_TOTAL_COLUMN
+
+    present = set(df.columns)
+    return bool(present & ({NET_TOTAL_COLUMN} | set(COMPONENT_COLUMNS)))
 
 
 def _time_column(df):

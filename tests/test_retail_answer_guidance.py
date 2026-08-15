@@ -168,3 +168,60 @@ def test_the_retail_rules_are_registered_for_startup_validation():
     from skills.loader import _EXPECTED_FILES
 
     assert ("energy-analyst", "retail-tariff-rules.md") in _EXPECTED_FILES
+
+
+def test_regulated_tariffs_get_no_seasonal_statistics():
+    """GNERC sets one tariff per regulatory period and it holds for every
+    month in it. A summer-versus-winter split of that series measures the
+    revision calendar, not seasonality -- and 20 such metrics in stats_hint
+    is an invitation to build an answer on an artefact.
+    """
+    from agent.analyzer import _is_administered_price_frame, detect_monthly_timeseries
+
+    rows = []
+    for month in range(1, 13):
+        rows.append(
+            {
+                "date": pd.Timestamp(f"2026-{month:02d}-01"),
+                "supplier": "telmico",
+                "category": "220/380|hh|cat2",
+                "transmission_tariff_gel_kwh": 0.0067,
+                # Vary one component so the detector genuinely engages --
+                # otherwise this test would pass on a constant series for the
+                # wrong reason and prove nothing.
+                "distribution_tariff_gel_kwh": 0.0812 + 0.0001 * month,
+                "supply_tariff_gel_kwh": 0.1104,
+                "final_price_net_gel_kwh": 0.1983,
+            }
+        )
+    df = pd.DataFrame(rows)
+
+    # The detector WOULD fire on this frame; the guard is what stops it.
+    assert detect_monthly_timeseries(df) is not None
+    assert _is_administered_price_frame(df) is True
+
+
+def test_market_prices_keep_their_seasonality():
+    """The suppression must be specific: balancing prices ARE seasonal, and
+    that asymmetry is the point of a retail-versus-wholesale comparison."""
+    from agent.analyzer import _is_administered_price_frame
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-01-01", "2026-07-01"]),
+            "p_bal_gel": [210.0, 160.0],
+        }
+    )
+    assert _is_administered_price_frame(df) is False
+
+
+def test_the_guidance_explains_why_there_is_no_season():
+    from skills.loader import load_reference
+
+    rules = load_reference("energy-analyst", "retail-tariff-rules.md").lower()
+    assert "administered price" in rules
+    assert "gnerc" in rules
+    assert "step change" in rules
+    # And that the wholesale side differs, which is what makes a comparison
+    # worth writing.
+    assert "balancing price is the opposite" in rules
