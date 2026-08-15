@@ -78,6 +78,7 @@ from agent.stage_orchestrator import PipelineStageOrchestrator
 from agent.tools import execute_tool
 from agent.tools.end_user_price_tools import (
     asks_for_wholesale_comparison,
+    scope_haystack,
 )
 from agent.tools.end_user_price_tools import (
     resolve_scope as resolve_end_user_scope,
@@ -426,6 +427,17 @@ def _derive_response_mode(ctx: QueryContext) -> str:
             return ResponseMode.DATA_PRIMARY
         # Ambiguous types: comparison, forecast, ambiguous, unsupported
         if qa_path == "knowledge":
+            # ...unless the question already names a retail company AND
+            # category. The analyzer keeps calling such follow-ups ambiguous,
+            # which blocks the tool and returns an essay -- so the user who
+            # answered the clarification exactly as asked got no price. Once
+            # both axes are named there is a specific row to fetch.
+            if _retail_scope_is_fully_named(ctx):
+                log.info(
+                    "Retail scope fully named; routing to data despite "
+                    "analyzer preferred_path=knowledge"
+                )
+                return ResponseMode.DATA_PRIMARY
             return ResponseMode.KNOWLEDGE_PRIMARY
         return ResponseMode.DATA_PRIMARY
     if _is_target_model_knowledge_query(query_text):
@@ -487,9 +499,12 @@ def _needs_end_user_scope_clarification(ctx: QueryContext) -> bool:
     )
 
     # The analyzer's English canonicalization, so a Georgian or Russian
-    # question is read the same as an English one.
+    # question is read the same as an English one -- PLUS its entity_scope,
+    # which is where the analyzer puts the scope it has already extracted.
+    # Reading only the query missed "Telmico; small commercial at 220/380 V"
+    # and re-asked a question the user had just answered.
     question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
-    lowered = question.lower()
+    lowered = scope_haystack(analysis.entity_scope, question)
 
     # Trigger 1: the analyzer read the question in its original language and
     # concluded it is ambiguous. That verdict beats matching English keywords
@@ -512,8 +527,35 @@ def _needs_end_user_scope_clarification(ctx: QueryContext) -> bool:
     if not (analyzer_says_ambiguous or reads_as_comparison):
         return False
 
-    supplier, category = resolve_end_user_scope(question)
+    supplier, category = resolve_end_user_scope(lowered)
     return not (supplier and category)
+
+
+def _retail_scope_is_fully_named(ctx: QueryContext) -> bool:
+    """Whether a retail question already names both a company and a category.
+
+    Answering the clarification is useless if the reply is then routed to the
+    knowledge path: the analyzer keeps calling these follow-ups ambiguous
+    (``preferred_path=knowledge``, tools blocked), so the user who supplied
+    exactly what was asked for got an essay instead of their price. A fully
+    scoped retail question is a data question.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return False
+
+    analysis = ctx.question_analysis
+    topics = {
+        candidate.name.value
+        for candidate in (analysis.knowledge.candidate_topics or [])
+    }
+    if KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value not in topics:
+        return False
+
+    question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
+    supplier, category = resolve_end_user_scope(
+        scope_haystack(analysis.entity_scope, question)
+    )
+    return bool(supplier and category)
 
 
 def _derive_resolution_policy(ctx: QueryContext) -> str:

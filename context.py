@@ -83,7 +83,9 @@ COLUMN_LABELS = {
     # get_end_user_prices output frame. Each name carries its unit: these are
     # GEL/kWh while wholesale prices are GEL/MWh, and a bare "supply" reads as
     # a volume to is_intensive_metric, licensing a summed per-kWh tariff.
-    "supplier": "Supply Company",
+    "supplier": "Supply Company Code",
+    "supply_company": "Supply Company",
+    "series_label": "Company and Category",
     # Distinct labels: these are two different columns (the machine key and
     # its human string), and the label -> identifier inverse must round-trip.
     "category": "End-User Category Code",

@@ -9,6 +9,7 @@ GEL/MWh) and ``get_prices`` (wholesale, GEL/MWh). A retail question answered
 from the generation-side tool produces a fluent, fully-shipped, entirely wrong
 answer -- see the 2026-08-15 production trace.
 """
+import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -39,6 +40,18 @@ def category_id(volate: str, level_1_cat: str, level_2_cat: str) -> str:
 #: Retail supplier -> the distribution company on whose network it supplies.
 #: They are different legal entities; never substitute one for the other.
 SUPPLIER_TO_DISTRIBUTOR: Dict[str, str] = {"telmico": "telasi", "eps": "epg"}
+
+#: Full legal names. The view stores short codes, and an answer that says
+#: "eps" and "telmico" is quoting database keys at a reader who asked about
+#: companies. Emitted as a column so the answer and the chart legend can use
+#: the real name without the model having to remember the mapping.
+SUPPLIER_DISPLAY_NAMES: Dict[str, str] = {
+    "telmico": "Telmico (Tbilisi Electricity Supply Company)",
+    "eps": "EPS (EP Georgia Supply)",
+}
+
+#: Short forms for chart legends, where the full name would not fit.
+SUPPLIER_SHORT_NAMES: Dict[str, str] = {"telmico": "Telmico", "eps": "EPS"}
 
 #: Transmission applies to every category and carries no voltage or class.
 TRANSMISSION_ROW = {
@@ -105,7 +118,7 @@ CATEGORY_BY_ID: Dict[str, EndUserCategory] = {c.id: c for c in END_USER_CATEGORI
 #: map is what keeps that rejection from being reachable through the planner.
 SUPPLIER_ALIASES: Dict[str, Tuple[str, ...]] = {
     "telmico": ("telmico", "tbilisi electricity supply", "telasi"),
-    "eps": ("ep georgia supply", "epgeorgia supply", " eps ", "energo-pro georgia", "epg"),
+    "eps": ("ep georgia supply", "epgeorgia supply", "eps", "energo-pro georgia", "epg"),
 }
 
 #: Consumption-band and consumer-class wording specific enough to pin a single
@@ -117,6 +130,89 @@ CATEGORY_ALIASES: Dict[str, Tuple[str, ...]] = {
     "220/380|hh|cat3": ("cat3", "cat 3", "third band", "above 301", "over 301"),
     "220/380|com|small": ("small commercial", "small business"),
 }
+
+#: Voltage / class / band wording, resolved independently and composed into a
+#: category id. A flat alias list cannot express "Telmico, 3.3-6-10 kV,
+#: commercial (public supply)" -- which is the very example the clarification
+#: offers the user, so answering it exactly as instructed used to loop forever.
+#: Longer spellings first: "35-110" must win before a bare "35" would, and
+#: "small commercial" before "commercial".
+_VOLTAGE_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("3.3-6-10", ("3.3-6-10", "3.3–6–10", "3-6-10", "3,3-6-10", "6-10", "medium voltage")),
+    ("35-110", ("35-110", "35–110", "35-100", "35 110", "high voltage")),
+    ("220/380", ("220/380", "220-380", "220 380", "380 v", "low voltage")),
+)
+_CLASS_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("hh", ("household", "households", "residential", "domestic", "hh")),
+    ("com", ("commercial", "business", "non-household", "enterprise", "com")),
+)
+_BAND_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("cat1", ("cat1", "cat 1", "up to 101", "under 101", "first band")),
+    ("cat2", ("cat2", "cat 2", "101-301", "101–301", "second band")),
+    ("cat3", ("cat3", "cat 3", "above 301", "over 301", "third band")),
+    ("small", ("small commercial", "small business", "small")),
+    ("other", ("public supply", "public service", "public", "other")),
+)
+
+
+def _alias_matches(haystack: str, alias: str) -> bool:
+    """Substring match bounded by non-alphanumerics.
+
+    Plain ``in`` matches "eps" inside unrelated words, and the previous guard
+    against that -- padding the alias with spaces -- failed on "EPS, 220/380 V"
+    because a comma is not a space, so a fully scoped reply was treated as
+    unscoped and the clarification repeated. Boundaries handle punctuation
+    without banning the '/', '-' and '.' the voltage codes need.
+    """
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", haystack
+    ) is not None
+
+
+def _first_alias_hit(haystack: str, table) -> Optional[str]:
+    for code, aliases in table:
+        if any(_alias_matches(haystack, alias) for alias in aliases):
+            return code
+    return None
+
+
+def _compose_category(haystack: str) -> Optional[str]:
+    """Build a category id from voltage/class/band wording, if it names one.
+
+    Only returns ids that actually exist: a plausible-sounding combination the
+    view does not publish (household at 35-110 kV) resolves to nothing rather
+    than to a neighbouring category.
+    """
+    voltage = _first_alias_hit(haystack, _VOLTAGE_ALIASES)
+    consumer_class = _first_alias_hit(haystack, _CLASS_ALIASES)
+    if not (voltage and consumer_class):
+        return None
+
+    band = _first_alias_hit(haystack, _BAND_ALIASES)
+    candidates = [band] if band else []
+    # Households outside 220/380 carry a blank band, commercial defaults to
+    # "other"; try the stated band first, then the shape the view actually uses.
+    candidates += ["", "other"] if consumer_class == "hh" else ["other", ""]
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        composed = category_id(voltage, consumer_class, candidate)
+        if composed in CATEGORY_BY_ID:
+            return composed
+    return None
+
+
+def scope_haystack(entity_scope: Optional[str], query: Optional[str]) -> str:
+    """The text that scope is read from.
+
+    Single authority: the planner fills tool params from this and the pipeline
+    decides whether to ask for clarification from it. Reading different text in
+    the two places is how a question the analyzer HAD scoped
+    (``entity_scope='Telmico; small commercial at 220/380 V'``) was still asked
+    to name its scope, on 2026-08-15, twice.
+    """
+    return f"{entity_scope or ''} {query or ''}".strip().lower()
 
 #: Wording that asks for the retail price to be set against the wholesale side.
 WHOLESALE_COMPARISON_MARKERS: Tuple[str, ...] = (
@@ -137,6 +233,9 @@ GROSS_TOTAL_COLUMN = "total_gross_gel_kwh"
 
 #: Columns that identify which series a row belongs to.
 SERIES_COLUMNS: Tuple[str, ...] = ("supplier", "category")
+
+#: Human-readable "Company — Category" key, used as the chart legend entry.
+SERIES_LABEL_COLUMN = "series_label"
 
 
 def is_retail_price_frame(columns) -> bool:
@@ -172,17 +271,15 @@ def resolve_scope(text: str) -> Tuple[Optional[str], Optional[str]]:
     """
     haystack = f" {(text or '').strip().lower()} "
 
-    supplier = None
-    for code, aliases in SUPPLIER_ALIASES.items():
-        if any(alias in haystack for alias in aliases):
-            supplier = code
-            break
+    supplier = _first_alias_hit(haystack, tuple(SUPPLIER_ALIASES.items()))
 
     category = None
-    for category_id, aliases in CATEGORY_ALIASES.items():
-        if any(alias in haystack for alias in aliases):
-            category = category_id
+    for known_id, aliases in CATEGORY_ALIASES.items():
+        if any(_alias_matches(haystack, alias) for alias in aliases):
+            category = known_id
             break
+    if category is None:
+        category = _compose_category(haystack)
 
     return supplier, category
 
@@ -396,6 +493,22 @@ def get_end_user_prices(
     )
 
     df, cols, rows = run_text_query(sql, params)
+
+    if not df.empty:
+        df = df.copy()
+        # The view stores short codes. An answer that says "eps" is quoting a
+        # database key at someone who asked about a company, and a chart legend
+        # showing one unlabelled line is worse still, so the readable names
+        # travel with the data.
+        df["supply_company"] = df["supplier"].map(
+            lambda code: SUPPLIER_DISPLAY_NAMES.get(code, code)
+        )
+        df["series_label"] = [
+            f"{SUPPLIER_SHORT_NAMES.get(supplier, supplier)} — {label}"
+            for supplier, label in zip(df["supplier"], df["category_label"])
+        ]
+        cols = list(df.columns)
+        rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
 
     if include_vat and not df.empty and "final_price_net_gel_kwh" in df.columns:
         # Computed here rather than in SQL so the arithmetic is visible and

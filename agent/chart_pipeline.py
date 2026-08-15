@@ -397,6 +397,21 @@ def build_chart(ctx: QueryContext) -> QueryContext:
     if df.empty or not num_cols:
         return ctx
 
+    # Widen a multi-series retail frame BEFORE groups are resolved, so each
+    # supplier/category becomes a metric column the renderer can draw and name.
+    ctx.retail_series_columns = []
+    if _is_multi_series_retail(ctx):
+        from agent.tools.end_user_price_tools import headline_price_column
+
+        widened = _pivot_retail_series(df, time_key, headline_price_column(df.columns))
+        if widened is not None:
+            df, series_columns = widened
+            ctx.retail_series_columns = series_columns
+            num_cols = list(series_columns)
+            categorical_cols = []
+            label_map_all = {col: col for col in series_columns}
+            log.info("Retail frame widened to %d named series", len(series_columns))
+
     qa_for_chart = ctx.question_analysis if ctx.question_analysis_source == "llm_active" else None
     vis = getattr(qa_for_chart, "visualization", None)
     effective_presentation = effective_primary_presentation(qa_for_chart)
@@ -789,6 +804,50 @@ def _apply_legacy_chart_suppression(
     return True
 
 
+def _is_multi_series_retail(ctx: QueryContext) -> bool:
+    """A retail frame holding more than one supplier/category series."""
+    from agent.tools.end_user_price_tools import SERIES_COLUMNS, is_retail_price_frame
+
+    df = ctx.df
+    if df is None or df.empty or not is_retail_price_frame(df.columns):
+        return False
+    return df.groupby(list(SERIES_COLUMNS), dropna=False).ngroups > 1
+
+
+def _pivot_retail_series(df, time_key: Optional[str], headline: str):
+    """Widen a retail frame so each supplier/category becomes its own column.
+
+    Chart series are built from METRIC COLUMNS. A long frame carrying one price
+    column is therefore ONE line however many categories it holds -- which is
+    what shipped on 2026-08-15: "series=16" in the log, one unlabelled line on
+    screen. Pivoting makes each series a column named for the company and
+    category, so the renderer draws sixteen lines and the legend says which is
+    which.
+
+    Returns ``(wide_df, series_columns)`` or None when the frame cannot be
+    widened.
+    """
+    from agent.tools.end_user_price_tools import SERIES_LABEL_COLUMN
+
+    if time_key is None or SERIES_LABEL_COLUMN not in df.columns:
+        return None
+    if headline not in df.columns:
+        return None
+
+    wide = df.pivot_table(
+        index=time_key,
+        columns=SERIES_LABEL_COLUMN,
+        values=headline,
+        aggfunc="max",
+    ).reset_index()
+    wide.columns.name = None
+
+    series_columns = [c for c in wide.columns if c != time_key]
+    if not series_columns:
+        return None
+    return wide, series_columns
+
+
 def _retail_chart_groups(ctx: QueryContext) -> Optional[List[Dict[str, Any]]]:
     """Deterministic charts for a regulated end-user price frame.
 
@@ -813,19 +872,29 @@ def _retail_chart_groups(ctx: QueryContext) -> Optional[List[Dict[str, Any]]]:
         return None
 
     headline = headline_price_column(df.columns)
+    series_count = df.groupby(list(SERIES_COLUMNS), dropna=False).ngroups
+
+    metrics = [headline]
+    if series_count > 1 and ctx.retail_series_columns:
+        # The frame was widened; each series is now its own metric column.
+        metrics = list(ctx.retail_series_columns)
+
     groups: List[Dict[str, Any]] = [
         {
-            "metrics": [headline],
+            "metrics": metrics,
             "type": "line",
             "title": "Final end-user price by supply company and customer category",
             "source": "retail",
+            # This short-circuit bypasses the normalization loop that would
+            # otherwise set the cap, and the default of 3 would silently drop
+            # thirteen of sixteen series.
+            "_max_series_cap": max(len(metrics), _DEFAULT_MAX_SERIES),
         }
     ]
 
     # The stack is a part-to-whole only within ONE company and ONE category.
     # Stacking sixteen different stacks on a single axis is not a composition,
     # it is a pile.
-    series_count = df.groupby(list(SERIES_COLUMNS), dropna=False).ngroups
     if series_count == 1:
         groups.append(
             {

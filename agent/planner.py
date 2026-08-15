@@ -45,6 +45,9 @@ from agent.tools.end_user_price_tools import (
 from agent.tools.end_user_price_tools import (
     resolve_scope as resolve_end_user_scope,
 )
+from agent.tools.end_user_price_tools import (
+    scope_haystack as end_user_scope_haystack,
+)
 from agent.tools.types import ToolInvocation
 from config import ENABLE_CONTRACT_CONTINUITY, ENABLE_TRACE_DEBUG_ARTIFACTS
 from context import GENERATION_TECH_TYPES
@@ -1164,8 +1167,9 @@ def resolve_tool_params(
         # what is unambiguous and WIDEN otherwise: a specific category chosen
         # for a scope we did not understand is a confidently wrong answer,
         # while all-suppliers/all-categories is merely less pointed.
-        scope = (qa.entity_scope or "").strip().lower()
-        haystack = f"{scope} {effective_query}"
+        # Same haystack the clarify gate reads, so the two cannot disagree
+        # about whether a question named its company and category.
+        haystack = end_user_scope_haystack(qa.entity_scope, effective_query)
 
         supplier, category = resolve_end_user_scope(haystack)
         if supplier:

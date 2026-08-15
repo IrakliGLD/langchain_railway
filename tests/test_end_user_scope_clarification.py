@@ -185,6 +185,100 @@ def test_a_fully_scoped_ambiguous_retail_question_is_still_answered():
     assert _derive_resolution_policy(ctx) == ResolutionPolicy.ANSWER
 
 
+class TestAnsweringTheClarificationEndsIt:
+    """"does not work even after category clarification" -- 2026-08-15.
+
+    The user answered twice with a company and a category and was asked the
+    same question both times. Two causes, both fixed here: the gate read only
+    the query and ignored ``entity_scope``, which is where the analyzer puts
+    the scope it extracted; and the alias table could not express a commercial
+    category at a named voltage -- including the very example the clarification
+    offers, so following the instructions exactly looped forever.
+    """
+
+    @pytest.mark.parametrize(
+        "entity_scope",
+        [
+            # Verbatim from the production traces.
+            "Telmico; commercial 35-100 category",
+            "Telmico; small commercial at 220/380 V",
+            # The example the clarification itself gives the user.
+            "Telmico, 3.3-6-10 kV, commercial (public supply)",
+            "EPS, 220/380 V, household 101-301 kWh",
+        ],
+    )
+    def test_a_scoped_reply_is_not_asked_again(self, entity_scope):
+        from agent.pipeline import _derive_resolution_policy
+
+        ctx = _ctx("follow-up naming the scope")
+        ctx.question_analysis.entity_scope = entity_scope
+
+        assert _derive_resolution_policy(ctx) == ResolutionPolicy.ANSWER, (
+            f"re-asked a question already answered by scope {entity_scope!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "entity_scope",
+        [
+            "Telmico; commercial 35-100 category",
+            "Telmico, 3.3-6-10 kV, commercial (public supply)",
+        ],
+    )
+    def test_a_scoped_reply_reaches_the_data_path(self, entity_scope):
+        """Not being re-asked is not enough: the analyzer still calls these
+        follow-ups ambiguous with preferred_path=knowledge, which blocks the
+        tool. The user who answered exactly as asked would get an essay."""
+        from agent.pipeline import _derive_response_mode
+
+        ctx = _ctx("follow-up naming the scope")
+        ctx.question_analysis.entity_scope = entity_scope
+
+        assert _derive_response_mode(ctx) == "data_primary", (
+            "a fully scoped retail question must fetch data, not narrate"
+        )
+
+    def test_an_unscoped_retail_question_still_goes_to_knowledge(self):
+        from agent.pipeline import _derive_response_mode
+
+        ctx = _ctx("how do retail prices compare with the balancing price")
+        assert _derive_response_mode(ctx) == "knowledge_primary"
+
+
+class TestScopeResolution:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("Telmico, 3.3-6-10 kV, commercial (public supply)", "3.3-6-10|com|other"),
+            ("Telmico; small commercial at 220/380 V", "220/380|com|small"),
+            ("commercial at 35-110 kV", "35-110|com|other"),
+            # The user's own typo for the voltage band.
+            ("commercial 35-100 category", "35-110|com|other"),
+            ("household at 3.3-6-10 kV", "3.3-6-10|hh|"),
+            ("household 101-301 kWh at 220/380", "220/380|hh|cat2"),
+        ],
+    )
+    def test_voltage_and_class_compose_into_a_category(self, text, expected):
+        from agent.tools.end_user_price_tools import resolve_scope
+
+        _, category = resolve_scope(text)
+        assert category == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "household at 35-110 kV",  # not published
+            "tariffs in general",
+            "commercial customers",  # no voltage named
+        ],
+    )
+    def test_an_unpublished_or_vague_combination_resolves_to_nothing(self, text):
+        """Guessing a neighbouring category is worse than widening."""
+        from agent.tools.end_user_price_tools import resolve_scope
+
+        _, category = resolve_scope(text)
+        assert category is None
+
+
 def test_the_options_name_selectable_values_not_prose():
     """"the user does not know the categories you are suggesting to compared
     by, tell what are options. e.g. telmico, 3-6-10 kw, public supply"."""
