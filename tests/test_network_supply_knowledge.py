@@ -4,7 +4,17 @@ These assert load-bearing FACTS, not prose. Each maps to a way an answer would
 be wrong: reporting a net figure as a consumer price, naming the wrong company,
 claiming the wrong territory, or mixing two categories into one final price.
 """
+import os
 import pathlib
+
+# The tool-matrix drift test imports agent.tools.*, which imports config, which
+# validates its settings at import time. Same preamble as the other modules.
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 KNOWLEDGE_PATH = (
     pathlib.Path(__file__).resolve().parents[1] / "knowledge" / "network_supply_tariffs.md"
@@ -92,3 +102,13 @@ def test_knowledge_states_the_wholesale_comparison_basis():
     assert "guaranteed capacity" in flat
     assert "added to the wholesale" in flat
     assert "(p_bal_gel + p_gcap_gel) / 1000" in KNOWLEDGE_FLAT
+
+
+def test_knowledge_file_lists_every_tool_category_voltage():
+    """The tool's matrix is the source of truth. If the knowledge file drifts
+    from it, the model reads one set of categories and the tool serves another.
+    """
+    from agent.tools.end_user_price_tools import END_USER_CATEGORIES
+
+    for category in END_USER_CATEGORIES:
+        assert category.volate in KNOWLEDGE, f"{category.volate} missing from the topic file"

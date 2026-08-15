@@ -238,3 +238,123 @@ def test_unbounded_call_returns_the_most_recent_months(monkeypatch):
 
     tool_module.get_end_user_prices(start_date="2024-01-01")
     assert "ORDER BY s.date ASC" in captured["sql"]
+
+
+# ---------------------------------------------------------------------------
+# Analyzer entity_scope -> (supplier, category) resolution
+# ---------------------------------------------------------------------------
+
+def _qa_with_scope(entity_scope: str, canonical_query: str = "test query in English"):
+    """resolve_tool_params reads canonical_query_en in preference to raw_query,
+    so any wording a test relies on must live there."""
+    from contracts.question_analysis import QuestionAnalysis
+
+    return QuestionAnalysis(
+        **{
+            "version": "question_analysis_v1",
+            "raw_query": "test query",
+            "canonical_query_en": canonical_query,
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": "data_retrieval",
+                "analysis_mode": "light",
+                "intent": "test intent",
+                "needs_clarification": False,
+                "confidence": 0.9,
+            },
+            "routing": {
+                "preferred_path": "tool",
+                "needs_sql": False,
+                "needs_knowledge": False,
+                "prefer_tool": True,
+                "needs_multi_tool": False,
+                "evidence_roles": [],
+            },
+            "knowledge": {},
+            "tooling": {
+                "candidate_tools": [
+                    {"name": "get_end_user_prices", "score": 0.9, "reason": "retail"}
+                ]
+            },
+            "sql_hints": {},
+            "entity_scope": entity_scope,
+            "visualization": {
+                "chart_requested_by_user": False,
+                "chart_recommended": False,
+                "chart_confidence": 0.0,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_correlation_context": False,
+                "derived_metrics": [],
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "entity_scope,expected_supplier,expected_category",
+    [
+        ("Telmico", "telmico", None),
+        ("EP Georgia Supply", "eps", None),
+        ("household_consumers", None, None),
+        ("distribution_network_tariffs", None, None),
+        ("", None, None),
+        ("something_unrecognised", None, None),
+    ],
+)
+def test_end_user_scope_never_resolves_to_a_wrong_category(
+    entity_scope, expected_supplier, expected_category
+):
+    """An unrecognised scope must WIDEN, never guess.
+
+    Returning a specific category for a scope we did not understand produces a
+    confidently wrong answer -- the exact failure this whole change exists to
+    remove. Widening is merely less helpful.
+    """
+    from agent.planner import resolve_tool_params
+
+    params = resolve_tool_params(
+        _qa_with_scope(entity_scope), "get_end_user_prices", "test query"
+    )
+
+    assert params is not None
+    assert params.get("supplier") == expected_supplier
+    assert params.get("category") == expected_category
+
+
+def test_household_band_wording_resolves_to_its_category():
+    """A named consumption band is specific enough to resolve safely."""
+    from agent.planner import resolve_tool_params
+
+    params = resolve_tool_params(
+        _qa_with_scope("household cat2"), "get_end_user_prices", "test query"
+    )
+
+    assert params["category"] == "220/380|hh|cat2"
+
+
+def test_vat_wording_in_the_query_requests_the_gross_column():
+    from agent.planner import resolve_tool_params
+
+    params = resolve_tool_params(
+        _qa_with_scope("", canonical_query="what do households pay including VAT?"),
+        "get_end_user_prices",
+        "what do households pay including VAT?",
+    )
+
+    assert params["include_vat"] is True
+
+
+def test_wholesale_wording_requests_the_benchmark_column():
+    from agent.planner import resolve_tool_params
+
+    params = resolve_tool_params(
+        _qa_with_scope(
+            "", canonical_query="how does the end-user price compare with the wholesale price?"
+        ),
+        "get_end_user_prices",
+        "test query",
+    )
+
+    assert params["include_wholesale_benchmark"] is True

@@ -155,3 +155,14 @@ class TestKnowledgeTopicRouting:
             if keyword.isascii() and len(keyword) <= 4 and any(keyword in word for word in decoys)
         ]
         assert not offenders, f"TOPIC_MAP keys that fire inside unrelated words: {offenders}"
+
+
+def test_end_user_price_tool_is_catalogued_and_distinct_from_the_others():
+    """Three tools now touch prices. The catalog must separate them, or the
+    analyzer picks by name similarity -- which is how a distribution-tariff
+    question got answered with hydro plant tariffs."""
+    entry = _entry(QUESTION_ANALYSIS_TOOL_CATALOG, "get_end_user_prices")
+
+    assert "end-user" in entry["use_for"].lower()
+    assert "get_tariffs" in entry["avoid_for"]
+    assert "get_prices" in entry["avoid_for"]

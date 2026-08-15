@@ -1893,7 +1893,7 @@ class TestRetailTariffRouting:
             )
         )
 
-        assert [step["tool_name"] for step in ctx.evidence_plan] == [], (
+        assert "get_tariffs" not in [step["tool_name"] for step in ctx.evidence_plan], (
             "retail tariff question still routed to the generation-side tool"
         )
 
@@ -1929,3 +1929,24 @@ class TestRetailTariffRouting:
         ctx = build_evidence_plan(_ctx_with_qa(payload))
 
         assert "get_prices" in [step["tool_name"] for step in ctx.evidence_plan]
+
+
+def test_retail_tariff_question_routes_to_the_end_user_price_tool():
+    """Phase 2 suppressed the wrong tool; this supplies the right one.
+
+    The Phase 2 guards still hold: get_tariffs is not chosen for retail, and is
+    still chosen for generation-side questions.
+    """
+    payload = _make_qa_payload(
+        query_type="data_retrieval",
+        preferred_path="tool",
+        tools=[{"name": "get_tariffs", "score": 0.85, "reason": "tariff data"}],
+    )
+    payload["knowledge"] = {
+        "candidate_topics": [{"name": "network_supply_tariffs", "score": 0.9}]
+    }
+    payload["entity_scope"] = "distribution_network_tariffs"
+
+    ctx = build_evidence_plan(_ctx_with_qa(payload))
+
+    assert [step["tool_name"] for step in ctx.evidence_plan] == ["get_end_user_prices"]

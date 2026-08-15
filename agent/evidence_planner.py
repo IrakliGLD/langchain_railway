@@ -256,15 +256,16 @@ def _expand_evidence_steps(
     # A retail-tariff question routed to the generation-side tariff tool returns
     # plant tariffs and reads as a confident, correct answer (2026-08-15 trace:
     # a distribution-tariff question answered with Enguri/Vardnili/Dzevrula HPP
-    # figures, grounding gate satisfied). Emit no plan so the pipeline falls
-    # through to SQL against demand_tariff_mv.
+    # figures, grounding gate satisfied). Substitute the retail tool, which
+    # reads demand_tariff_mv and returns the components and published total.
     if top_name == ToolName.GET_TARIFFS.value and _is_retail_tariff_question(qa):
         log.info(
-            "Evidence plan: suppressing %s for a retail-tariff question; "
-            "falling through to SQL against demand_tariff_mv",
+            "Evidence plan: retail-tariff question — substituting %s for %s",
+            ToolName.GET_END_USER_PRICES.value,
             ToolName.GET_TARIFFS.value,
         )
-        return []
+        top_name = ToolName.GET_END_USER_PRICES.value
+        top_hint = None
 
     ar = qa.analysis_requirements
     needs_driver = ar.needs_driver_analysis

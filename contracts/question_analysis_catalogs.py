@@ -238,6 +238,14 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Tariff lookups and tariff comparisons.",
         "avoid_for": "Balancing price questions, conceptual definitions, generation mix questions, policy/status questions about liberalization or deregulation, and end-user/retail/distribution/transmission/supply tariffs (those are network_supply_tariffs, served from demand_tariff_mv).",
         "main_params": ["entities", "currency", "start_date", "end_date"],
+    },
+    {
+        "name": "get_end_user_prices",
+        "concepts": ["end-user price", "retail tariff", "household tariff",
+                      "distribution tariff", "supply tariff", "telasi", "telmico"],
+        "use_for": "Regulated end-user (retail) electricity prices in GEL/kWh and their distribution/supply/transmission components, by supplier and consumer category.",
+        "avoid_for": "What a generating plant is paid — use get_tariffs. Wholesale or balancing prices — use get_prices.",
+        "main_params": ["supplier", "category", "start_date", "end_date", "include_vat"],
         "combined_with": [
             {"tool": "get_prices", "when": "comparing tariffs against market prices"},
         ],
