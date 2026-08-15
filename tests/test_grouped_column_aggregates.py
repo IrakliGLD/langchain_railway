@@ -84,6 +84,37 @@ def test_ungrouped_frames_keep_the_existing_pooled_behaviour():
     assert "mean=100.5000" in ctx.stats_hint
 
 
+def test_the_whole_retail_fleet_is_enumerated_not_refused():
+    """Two supply companies x eight end-user categories = 16 series.
+
+    The domain owner asked for every category to be shown, so the enumeration
+    cap must clear the full fleet: a broad tariff question gets per-category
+    figures, not a note explaining why it cannot answer.
+    """
+    from agent.analyzer import _append_column_aggregates
+
+    categories = (
+        "220/380|com|other",
+        "220/380|com|small",
+        "220/380|hh|cat1",
+        "220/380|hh|cat2",
+        "220/380|hh|cat3",
+        "3.3-6-10|com|other",
+        "3.3-6-10|hh|",
+        "35-110|com|other",
+    )
+    ctx = _ctx(_end_user_frame(categories=categories))
+    _append_column_aggregates(ctx)
+
+    hint = ctx.stats_hint
+    assert "16 distinct series" in hint, hint[:400]
+    for category in categories:
+        assert category in hint, f"category {category} not enumerated:\n{hint[:600]}"
+    assert "no pooled average is reported" not in hint, (
+        "the full retail fleet must be enumerated, not refused:\n" + hint[:400]
+    )
+
+
 def test_high_cardinality_frames_refuse_to_pool_rather_than_enumerate():
     """Too many series to list is still not a licence to average them."""
     from agent.analyzer import _append_column_aggregates

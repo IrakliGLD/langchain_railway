@@ -3089,8 +3089,11 @@ def _prepare_timeseries_rows(
 
 
 #: Above this many series, per-series aggregates would crowd out the rest of
-#: stats_hint, so the frame is described instead of enumerated.
-_MAX_ENUMERATED_SERIES = 12
+#: stats_hint, so the frame is described instead of enumerated. Sized to clear
+#: the retail fleet -- two supply companies x eight end-user categories -- so a
+#: broad tariff question still gets every category enumerated rather than an
+#: apology, which is what the domain owner asked for on 2026-08-15.
+_MAX_ENUMERATED_SERIES = 20
 
 #: Time columns split a series along its own axis rather than into separate
 #: series, so they are never series keys.
@@ -3195,16 +3198,24 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
             "Figures below are per series; do not average across them."
         )
         if series_count <= _MAX_ENUMERATED_SERIES:
+            # One block per series: the scope is stated once as a header rather
+            # than repeated on every metric line, and column names are used raw
+            # because they already carry their unit. At 16 series that is the
+            # difference between roughly 8 KB and 4 KB of a summarizer prompt
+            # that runs near its budget on retail questions.
             for keys, group in ctx.df.groupby(series_cols, dropna=False, sort=True):
                 if not isinstance(keys, tuple):
                     keys = (keys,)
                 scope = ", ".join(f"{c}={k}" for c, k in zip(series_cols, keys))
+                block = []
                 for col in numeric_cols:
                     values = group[col].dropna()
                     if values.empty:
                         continue
-                    label = COLUMN_LABELS.get(col, col)
-                    lines.append(f"{label} [{scope}]: {_describe(values, col)}")
+                    block.append(f"  {col}: {_describe(values, col)}")
+                if block:
+                    lines.append(f"[{scope}]")
+                    lines.extend(block)
         else:
             # Too many series to enumerate is still not a licence to pool them.
             for col in numeric_cols:

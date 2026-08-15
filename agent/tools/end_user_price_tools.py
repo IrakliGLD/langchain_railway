@@ -96,6 +96,65 @@ END_USER_CATEGORIES: Tuple[EndUserCategory, ...] = (
 CATEGORY_BY_ID: Dict[str, EndUserCategory] = {c.id: c for c in END_USER_CATEGORIES}
 
 
+#: Wording specific enough to pin one supply company.
+#:
+#: Distribution-company names resolve to the SUPPLIER they pair with, because
+#: a question naming Telasi is asking about the Tbilisi stack and that stack's
+#: supply component is Telmico's. Only the supply code is ever emitted --
+#: ``_resolve_selection`` rejects "telasi" as a supplier by design, and this
+#: map is what keeps that rejection from being reachable through the planner.
+SUPPLIER_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "telmico": ("telmico", "tbilisi electricity supply", "telasi"),
+    "eps": ("ep georgia supply", "epgeorgia supply", " eps ", "energo-pro georgia", "epg"),
+}
+
+#: Consumption-band and consumer-class wording specific enough to pin a single
+#: category. Anything vaguer is left unresolved: the tool then widens to all
+#: eight rather than guessing one.
+CATEGORY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "220/380|hh|cat1": ("cat1", "cat 1", "first band", "up to 101"),
+    "220/380|hh|cat2": ("cat2", "cat 2", "second band", "101-301", "101–301"),
+    "220/380|hh|cat3": ("cat3", "cat 3", "third band", "above 301", "over 301"),
+    "220/380|com|small": ("small commercial", "small business"),
+}
+
+#: Wording that asks for the retail price to be set against the wholesale side.
+WHOLESALE_COMPARISON_MARKERS: Tuple[str, ...] = (
+    "wholesale", "balancing", "market price", "compare with the market",
+)
+
+
+def resolve_scope(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort ``(supplier, category)`` from free text.
+
+    Single authority for retail scope resolution: the planner uses it to fill
+    tool params, and the pipeline uses it to decide whether a comparison is
+    pinned down enough to answer. Two readers of the same vocabulary must not
+    disagree about whether a question named a category.
+    """
+    haystack = f" {(text or '').strip().lower()} "
+
+    supplier = None
+    for code, aliases in SUPPLIER_ALIASES.items():
+        if any(alias in haystack for alias in aliases):
+            supplier = code
+            break
+
+    category = None
+    for category_id, aliases in CATEGORY_ALIASES.items():
+        if any(alias in haystack for alias in aliases):
+            category = category_id
+            break
+
+    return supplier, category
+
+
+def asks_for_wholesale_comparison(text: str) -> bool:
+    """Whether the question sets the retail price against the wholesale side."""
+    haystack = (text or "").lower()
+    return any(marker in haystack for marker in WHOLESALE_COMPARISON_MARKERS)
+
+
 def _resolve_selection(
     supplier: Optional[str],
     category: Optional[str],
