@@ -139,6 +139,38 @@ def is_database_available() -> bool:
     return identity.ready
 
 
+def coerce_result_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Make PostgreSQL ``numeric`` columns visible to numeric consumers.
+
+    psycopg returns ``numeric`` as ``Decimal``, which pandas stores as object
+    dtype.  ``select_dtypes(include="number")`` then skips those columns, so
+    per-column aggregates (``agent/analyzer.py``), grounding-token extraction
+    (``agent/summary_grounding.py``), seasonal statistics
+    (``analysis/seasonal_stats.py``) and chart builders all silently see zero
+    numeric columns.  ``stats_hint`` collapses to just "Rows: N", the model is
+    left to compute its own figures, and the strict grounding gate correctly
+    rejects them -- shipping a truncated answer.
+
+    Coerce once here, at the single boundary where SQL rows become a frame,
+    rather than at each consumer.  Mirrors the existing treatment of
+    driver-enrichment frames in ``agent/pipeline.py``; see
+    ``coerce_decimal_columns_to_float`` for the full root-cause note.
+    """
+    if df is None or df.empty:
+        return df
+    # Local import: analysis.* is imported lazily at the other call site too,
+    # to keep core/ free of a hard dependency on analysis/.
+    from analysis.system_quantities import coerce_decimal_columns_to_float
+
+    coerced, changed_columns = coerce_decimal_columns_to_float(df)
+    if changed_columns:
+        log.info(
+            "Coerced %d Decimal column(s) to float on the SQL result frame",
+            len(changed_columns),
+        )
+    return coerced
+
+
 def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFrame, List[str], List[Any], float]:
     """
     Execute SQL with read-only transaction enforcement.
@@ -188,8 +220,9 @@ def execute_sql_safely(sql: str, timeout_seconds: int = 30) -> Tuple[pd.DataFram
                 rows = rows[:MAX_ROWS]
                 break
 
-        # Convert to DataFrame for compatibility
-        df = pd.DataFrame(rows, columns=cols)
+        # Convert to DataFrame for compatibility. Coerce Decimal columns here so
+        # every downstream numeric consumer sees real float dtypes.
+        df = coerce_result_frame(pd.DataFrame(rows, columns=cols))
 
     elapsed = time.time() - start
 

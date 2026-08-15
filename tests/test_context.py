@@ -318,6 +318,32 @@ class TestDashboardSharedViews:
         }
         assert not mismatches, f"DB_SCHEMA_DOC / DB_SCHEMA_DICT column drift: {mismatches}"
 
+    def test_schema_doc_forbids_converting_end_user_tariffs_to_per_mwh(self):
+        """Production trace: 0.15289 GEL/kWh was reported as 152.89.
+
+        The model converted to GEL/MWh to match the convention every other view
+        uses. The converted figure is in no row, so the grounding gate stripped
+        it -- 10 of 15 numeric tokens unmatched, answer cut to 273 of 1,587
+        characters.
+        """
+        from context import DB_SCHEMA_DOC
+
+        assert "Report demand_tariff_mv values in GEL/kWh as stored" in DB_SCHEMA_DOC
+
+    def test_schema_doc_states_the_vat_basis(self):
+        """value and final_price are net; 18% is levied on top."""
+        from context import DB_SCHEMA_DOC
+
+        assert "NET of VAT" in DB_SCHEMA_DOC
+        assert "18%" in DB_SCHEMA_DOC
+
+    def test_schema_doc_states_the_wholesale_comparison_basis(self):
+        """Without this the model compares a bare balancing price against a
+        tariff that already bundles the guaranteed capacity charge."""
+        from context import DB_SCHEMA_DOC
+
+        assert "(p_bal_gel + p_gcap_gel) / 1000" in DB_SCHEMA_DOC
+
     def test_schema_doc_stays_within_a_sane_prompt_budget(self):
         """DB_SCHEMA_DOC is injected verbatim into every SQL-planning prompt.
 

@@ -10,6 +10,8 @@ os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
 os.environ.setdefault("MODEL_TYPE", "openai")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+import pytest  # noqa: E402
+
 from agent.router import match_tool  # noqa: E402
 
 
@@ -210,3 +212,44 @@ def test_semantic_scores_populated_on_miss():
     assert len(_last_semantic_scores) == len(
         __import__("agent.router", fromlist=["_SEMANTIC_TOOL_TERMS"])._SEMANTIC_TOOL_TERMS
     )
+
+
+class TestSemanticFallbackRetailTariffs:
+    """The evidence-planner guard only covers the analyzer-authoritative path.
+
+    When the analyzer is unavailable the semantic fallback router runs instead,
+    and `get_tariffs` matches on the bare word "tariff" -- so a retail question
+    would again be answered with generation-side plant tariffs, silently and
+    with no guard in the way.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # Each of these scored high enough on get_tariffs' terms
+            # ("tariff", "regulated", "gnerc", "capacity fee") to be selected,
+            # which is the original wrong-view bug on the fallback path.
+            "gnerc regulated end-user tariff",
+            "distribution tariff regulated",
+            "regulated tariffs for households set by gnerc",
+            "supply tariff capacity fee regulated",
+            "how are distribution tariffs for households trending",
+            "telasi network tariff",
+        ],
+    )
+    def test_retail_wording_does_not_fall_back_to_the_generation_tariff_tool(self, query):
+        from agent.router import _semantic_match_tool
+
+        invocation = _semantic_match_tool(query, None, None)
+
+        assert invocation is None or invocation.name != "get_tariffs", (
+            f"semantic fallback routes {query!r} to the generation-side tool"
+        )
+
+    def test_generation_tariff_wording_still_falls_back_to_get_tariffs(self):
+        from agent.router import _semantic_match_tool
+
+        invocation = _semantic_match_tool("enguri tariff trend", None, None)
+
+        assert invocation is not None
+        assert invocation.name == "get_tariffs"

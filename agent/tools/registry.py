@@ -4,6 +4,7 @@ Registry for typed retrieval tools.
 from typing import Callable, Dict, List
 
 from .composition_tools import get_balancing_composition
+from .end_user_price_tools import get_end_user_prices
 from .generation_tools import get_generation_mix
 from .price_tools import get_prices
 from .tariff_tools import get_tariffs
@@ -14,6 +15,7 @@ TOOL_REGISTRY: Dict[str, Callable[..., ToolResult]] = {
     "get_prices": get_prices,
     "get_balancing_composition": get_balancing_composition,
     "get_tariffs": get_tariffs,
+    "get_end_user_prices": get_end_user_prices,
     "get_generation_mix": get_generation_mix,
 }
 

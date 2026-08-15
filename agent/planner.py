@@ -81,6 +81,24 @@ log = logging.getLogger("Enai")
 # analyzer's hallucinated windows end 18+ months back.
 _STALE_ANALYZER_WINDOW_MAX_AGE_DAYS = 120
 
+# Retail supplier aliases for get_end_user_prices. Only the supply companies
+# appear: telasi and epg are distribution companies and the tool rejects them
+# as suppliers, so they must never be resolved here.
+_END_USER_SUPPLIER_ALIASES = {
+    "telmico": ("telmico", "tbilisi electricity supply"),
+    "eps": ("ep georgia supply", "epgeorgia supply", " eps "),
+}
+
+# Consumption-band and consumer-class wording that is specific enough to pin a
+# single category. Anything vaguer is left unresolved so the tool widens to all
+# eight rather than guessing one.
+_END_USER_CATEGORY_ALIASES = {
+    "220/380|hh|cat1": ("cat1", "cat 1", "first band", "up to 101"),
+    "220/380|hh|cat2": ("cat2", "cat 2", "second band", "101-301", "101–301"),
+    "220/380|hh|cat3": ("cat3", "cat 3", "third band", "above 301", "over 301"),
+    "220/380|com|small": ("small commercial", "small business"),
+}
+
 
 def _extract_authoritative_date_range(
     raw_query: str,
@@ -1147,6 +1165,37 @@ def resolve_tool_params(
         if entities:
             params["entities"] = entities
         params["currency"] = currency
+
+    elif tool_name == ToolName.GET_END_USER_PRICES.value:
+        # The analyzer emits a freeform entity_scope ("Telmico",
+        # "household_consumers", "distribution_network_tariffs"). Resolve only
+        # what is unambiguous and WIDEN otherwise: a specific category chosen
+        # for a scope we did not understand is a confidently wrong answer,
+        # while all-suppliers/all-categories is merely less pointed.
+        scope = (qa.entity_scope or "").strip().lower()
+        haystack = f"{scope} {effective_query}"
+
+        supplier = None
+        for code, aliases in _END_USER_SUPPLIER_ALIASES.items():
+            if any(alias in haystack for alias in aliases):
+                supplier = code
+                break
+        if supplier:
+            params["supplier"] = supplier
+
+        category = None
+        for category_id, aliases in _END_USER_CATEGORY_ALIASES.items():
+            if any(alias in haystack for alias in aliases):
+                category = category_id
+                break
+        if category:
+            params["category"] = category
+
+        params["include_vat"] = "vat" in haystack
+        params["include_wholesale_benchmark"] = any(
+            token in haystack
+            for token in ("wholesale", "balancing", "market price", "compare with the market")
+        )
 
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)

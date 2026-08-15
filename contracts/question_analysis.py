@@ -123,6 +123,7 @@ class KnowledgeTopicName(str, Enum):
 class ToolName(str, Enum):
     GET_PRICES = "get_prices"
     GET_TARIFFS = "get_tariffs"
+    GET_END_USER_PRICES = "get_end_user_prices"
     GET_GENERATION_MIX = "get_generation_mix"
     GET_BALANCING_COMPOSITION = "get_balancing_composition"
 

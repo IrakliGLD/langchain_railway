@@ -834,6 +834,17 @@ Plan:
 -- paired with supplier telmico), supply (telmico, 'universal' for households),
 -- and transmission (gse, all category columns blank).
 -- Blank dimensions are EMPTY STRINGS, never NULL.
+--
+-- REPORT published_total_gel_kwh as the headline total, not total_gel_kwh.
+-- The computed sum appears in no row of the view, so the grounding gate strips
+-- it from the answer; the published final_price row is real data. Use
+-- total_gel_kwh only to cross-check: if the two differ by more than 0.0001 the
+-- component resolution is wrong, and that discrepancy is worth reporting.
+--
+-- All values are NET of VAT. VAT is 18% and is levied on top, so what a
+-- consumer actually pays is published_total_gel_kwh * 1.18. Report the net
+-- figure by default and say it is net; give the gross only when the question
+-- asks what a consumer pays.
 SELECT
     d.date,
     SUM(d.value) FILTER (WHERE d.activity = 'distribution')  AS distribution_gel_kwh,
@@ -894,6 +905,38 @@ WHERE activity = 'final_price'
   AND volate = '220/380'
   AND date = (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
 ORDER BY consumption_band, supplier;
+
+EXAMPLE 11.4 - End-User Price vs Wholesale:
+Query: "How does the household end-user price compare with the wholesale price?"
+Plan:
+{
+  "intent": "comparison",
+  "target": "end_user_vs_wholesale",
+  "period": "recent"
+}
+---SQL---
+-- The published supply tariff already bundles the guaranteed capacity charge, so
+-- the two sides only line up once it is added to the WHOLESALE side. Adding it
+-- there rather than subtracting it from the tariff keeps the regulated figure
+-- equal to what is actually charged.
+-- Prices are GEL/MWh and tariffs are GEL/kWh: divide the price by 1000. Never
+-- multiply the tariff instead.
+-- Compare against the NET final_price: the wholesale price is also net of VAT,
+-- so comparing a gross tariff to it overstates the spread by 18%.
+SELECT
+    d.date,
+    d.value                                          AS end_user_gel_kwh,
+    (p.p_bal_gel + p.p_gcap_gel) / 1000.0            AS wholesale_benchmark_gel_kwh,
+    d.value - (p.p_bal_gel + p.p_gcap_gel) / 1000.0  AS spread_gel_kwh
+FROM demand_tariff_mv d
+JOIN price_with_usd p ON p.date = d.date
+WHERE d.activity = 'final_price'
+  AND d.company = 'telmico'
+  AND d.volate = '220/380'
+  AND d.level_1_cat = 'hh'
+  AND d.level_2_cat = 'cat2'
+  AND d.date <= (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
+ORDER BY d.date;
 """
 
 # =============================================================================

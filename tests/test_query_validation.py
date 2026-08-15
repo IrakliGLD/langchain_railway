@@ -6,9 +6,21 @@ Regression coverage for:
     were mis-classified as conceptual because the temporal guard regex only matched
     "in YYYY" / "for YYYY" patterns, not bare four-digit years.
 """
-from types import SimpleNamespace
+import os
 
-import pytest
+# The tool-relevance tests import agent.tools.registry, which imports config,
+# which validates its settings at import time. Same preamble the other test
+# modules use, so this file is import-order independent.
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
+os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
+os.environ.setdefault("ENAI_SESSION_SIGNING_SECRET", "test-session-key")
+os.environ.setdefault("ENAI_EVALUATE_SECRET", "test-evaluate-key")
+os.environ.setdefault("MODEL_TYPE", "openai")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+
+from types import SimpleNamespace  # noqa: E402
+
+import pytest  # noqa: E402
 
 from utils.query_validation import (
     extract_query_topics,
@@ -239,3 +251,38 @@ def test_energy_security_accepts_named_import_and_domestic_generation_columns():
     assert relevant is True
     assert "energy_security" in reason
     assert skip_chart is False
+
+
+class TestToolRelevanceCoversEveryRegisteredTool:
+    """`validate_tool_relevance` holds a hardcoded tool->topics map and returns
+    False for anything absent from it.
+
+    A tool can therefore be fully registered -- enum, TOOL_REGISTRY, catalog,
+    evidence-plan routing -- and still never execute, because relevance
+    validation rejects it first. That is silent: the plan is built, the tool is
+    chosen, and the call is refused.
+    """
+
+    def test_every_registered_tool_has_a_relevance_mapping(self):
+        from agent.tools.registry import TOOL_REGISTRY
+        from utils.query_validation import validate_tool_relevance
+
+        unmapped = []
+        for tool_name in TOOL_REGISTRY:
+            ok, reason = validate_tool_relevance("electricity price and tariff", tool_name)
+            if reason.startswith("Unknown tool relevance mapping"):
+                unmapped.append(tool_name)
+
+        assert not unmapped, (
+            f"Registered tools with no relevance mapping: {unmapped}. "
+            "They will be rejected before executing."
+        )
+
+    def test_retail_tariff_query_passes_relevance_for_the_end_user_tool(self):
+        from utils.query_validation import validate_tool_relevance
+
+        ok, reason = validate_tool_relevance(
+            "what is the household end-user tariff", "get_end_user_prices"
+        )
+
+        assert ok, reason

@@ -7,6 +7,7 @@ from contracts.question_analysis import KnowledgeTopicName
 from contracts.question_analysis_catalogs import (
     QUESTION_ANALYSIS_ANSWER_KIND_GUIDE,
     QUESTION_ANALYSIS_QUERY_TYPE_GUIDE,
+    QUESTION_ANALYSIS_TOOL_CATALOG,
     QUESTION_ANALYSIS_TOPIC_CATALOG,
 )
 
@@ -40,6 +41,17 @@ def test_query_type_guide_distinguishes_historical_trend_from_forecast():
 
     assert "trend summaries" in data_retrieval
     assert "not forecast" in forecast
+
+
+def test_generation_tariff_tool_warns_against_retail_questions():
+    """The evidence-planner guard is a backstop, not the only defence.
+
+    Steering the analyzer away from get_tariffs for retail questions means the
+    wrong tool is usually never proposed, rather than proposed and suppressed.
+    """
+    entry = _entry(QUESTION_ANALYSIS_TOOL_CATALOG, "get_tariffs")
+
+    assert "end-user" in entry["avoid_for"].lower()
 
 
 class TestTopicRegistryAlignment:
@@ -143,3 +155,14 @@ class TestKnowledgeTopicRouting:
             if keyword.isascii() and len(keyword) <= 4 and any(keyword in word for word in decoys)
         ]
         assert not offenders, f"TOPIC_MAP keys that fire inside unrelated words: {offenders}"
+
+
+def test_end_user_price_tool_is_catalogued_and_distinct_from_the_others():
+    """Three tools now touch prices. The catalog must separate them, or the
+    analyzer picks by name similarity -- which is how a distribution-tariff
+    question got answered with hydro plant tariffs."""
+    entry = _entry(QUESTION_ANALYSIS_TOOL_CATALOG, "get_end_user_prices")
+
+    assert "end-user" in entry["use_for"].lower()
+    assert "get_tariffs" in entry["avoid_for"]
+    assert "get_prices" in entry["avoid_for"]

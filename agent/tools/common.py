@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from config import MAX_ROWS
 from core.db_gateway import database_connection
-from core.query_executor import ENGINE, check_dataframe_memory
+from core.query_executor import ENGINE, check_dataframe_memory, coerce_result_frame
 
 from .types import ToolResult
 
@@ -77,7 +77,9 @@ def run_text_query(sql: str, params: Optional[Dict[str, Any]] = None) -> ToolRes
         result = conn.execute(text(sql), params)
         rows = [tuple(r) for r in result.fetchall()]
         cols = list(result.keys())
-        df = pd.DataFrame(rows, columns=cols)
+        # A tool selecting a raw PostgreSQL ``numeric`` column would otherwise
+        # hand back object dtype, invisible to every select_dtypes consumer.
+        df = coerce_result_frame(pd.DataFrame(rows, columns=cols))
 
     check_dataframe_memory(df)
     return df, cols, rows
@@ -90,7 +92,8 @@ def run_statement(statement: Any, params: Optional[Dict[str, Any]] = None) -> To
         result = conn.execute(statement, params)
         rows = [tuple(r) for r in result.fetchall()]
         cols = list(result.keys())
-        df = pd.DataFrame(rows, columns=cols)
+        # Same reason as run_text_query: keep numeric columns numeric.
+        df = coerce_result_frame(pd.DataFrame(rows, columns=cols))
 
     check_dataframe_memory(df)
     return df, cols, rows
