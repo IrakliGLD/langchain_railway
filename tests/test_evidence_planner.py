@@ -1854,3 +1854,78 @@ class TestJoinProvenanceGrounding:
         tokens: set = set()
         _add_join_provenance_tokens(tokens, ctx)
         assert len(tokens) == 0
+
+
+# ---------------------------------------------------------------------------
+# Retail vs generation tariff routing (2026-08-15 production trace, request 3)
+# ---------------------------------------------------------------------------
+
+class TestRetailTariffRouting:
+    """`get_tariffs` reads `tariff_with_usd` -- what a regulated PLANT is paid.
+
+    Production trace 2026-08-15: "how are distribution tariffs trending?" planned
+    get_tariffs and answered with Enguri/Vardnili/Dzevrula HPP tariffs, at
+    confidence 0.98 with the grounding gate satisfied. A fluent, fully shipped,
+    entirely wrong answer -- worse than the truncated ones, because nothing
+    signalled it.
+    """
+
+    @staticmethod
+    def _tariff_payload(topics: list[str], entity_scope: str = "regulated_plants") -> dict:
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            preferred_path="tool",
+            tools=[{"name": "get_tariffs", "score": 0.85, "reason": "tariff data"}],
+        )
+        payload["knowledge"] = {
+            "candidate_topics": [{"name": name, "score": 0.9} for name in topics]
+        }
+        payload["entity_scope"] = entity_scope
+        return payload
+
+    def test_retail_tariff_question_does_not_plan_the_generation_tariff_tool(self):
+        ctx = build_evidence_plan(
+            _ctx_with_qa(
+                self._tariff_payload(
+                    ["network_supply_tariffs"],
+                    entity_scope="distribution_network_tariffs",
+                )
+            )
+        )
+
+        assert [step["tool_name"] for step in ctx.evidence_plan] == [], (
+            "retail tariff question still routed to the generation-side tool"
+        )
+
+    def test_generation_tariff_question_still_plans_the_tariff_tool(self):
+        """Regression guard: the fix must not starve plant-tariff questions."""
+        ctx = build_evidence_plan(_ctx_with_qa(self._tariff_payload(["tariffs"])))
+
+        assert "get_tariffs" in [step["tool_name"] for step in ctx.evidence_plan]
+
+    def test_question_naming_both_tariff_topics_keeps_the_generation_tool(self):
+        """Ambiguous questions keep current behaviour rather than losing evidence.
+
+        Suppression requires the retail topic AND the absence of the generation
+        topic, so a question the analyzer tagged with both is left alone.
+        """
+        ctx = build_evidence_plan(
+            _ctx_with_qa(self._tariff_payload(["tariffs", "network_supply_tariffs"]))
+        )
+
+        assert "get_tariffs" in [step["tool_name"] for step in ctx.evidence_plan]
+
+    def test_retail_guard_leaves_non_tariff_tools_alone(self):
+        """The guard keys on the tool, not just the topic."""
+        payload = _make_qa_payload(
+            query_type="data_retrieval",
+            preferred_path="tool",
+            tools=[{"name": "get_prices", "score": 0.9, "reason": "price data"}],
+        )
+        payload["knowledge"] = {
+            "candidate_topics": [{"name": "network_supply_tariffs", "score": 0.9}]
+        }
+
+        ctx = build_evidence_plan(_ctx_with_qa(payload))
+
+        assert "get_prices" in [step["tool_name"] for step in ctx.evidence_plan]

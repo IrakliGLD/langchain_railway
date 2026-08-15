@@ -34,6 +34,7 @@ from analysis.system_quantities import normalize_tool_dataframe
 from contracts.question_analysis import (
     AnswerKind,
     EvidenceRole,
+    KnowledgeTopicName,
     QueryType,
     QuestionAnalysis,
     RenderStyle,
@@ -217,6 +218,27 @@ def build_evidence_plan(ctx: QueryContext) -> QueryContext:
 _validate_plan_against_answer_kind = validate_plan_against_answer_kind
 
 
+def _is_retail_tariff_question(qa: QuestionAnalysis) -> bool:
+    """True for end-user/network tariff questions, false for plant tariffs.
+
+    ``get_tariffs`` reads ``tariff_with_usd`` -- what a regulated PLANT is paid,
+    in GEL/MWh.  Retail questions need ``demand_tariff_mv`` (GEL/kWh) and are
+    served from the SQL path instead.
+
+    Requiring the retail topic AND the absence of the generation topic keeps a
+    genuinely generation-side question on the tool even when it also mentions
+    end-user prices, so the guard cannot starve the case it is not aimed at.
+    """
+    topics = {
+        candidate.name.value
+        for candidate in (qa.knowledge.candidate_topics or [])
+    }
+    return (
+        KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value in topics
+        and KnowledgeTopicName.TARIFFS.value not in topics
+    )
+
+
 def _expand_evidence_steps(
     qa: QuestionAnalysis,
     raw_query: str,
@@ -230,6 +252,19 @@ def _expand_evidence_steps(
     top = candidates[0]
     top_name = top.name.value
     top_hint = top.params_hint
+
+    # A retail-tariff question routed to the generation-side tariff tool returns
+    # plant tariffs and reads as a confident, correct answer (2026-08-15 trace:
+    # a distribution-tariff question answered with Enguri/Vardnili/Dzevrula HPP
+    # figures, grounding gate satisfied). Emit no plan so the pipeline falls
+    # through to SQL against demand_tariff_mv.
+    if top_name == ToolName.GET_TARIFFS.value and _is_retail_tariff_question(qa):
+        log.info(
+            "Evidence plan: suppressing %s for a retail-tariff question; "
+            "falling through to SQL against demand_tariff_mv",
+            ToolName.GET_TARIFFS.value,
+        )
+        return []
 
     ar = qa.analysis_requirements
     needs_driver = ar.needs_driver_analysis
