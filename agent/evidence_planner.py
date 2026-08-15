@@ -180,6 +180,37 @@ def _repair_list_tariff_entities(
 # Stage 0.4: Build evidence plan
 # ---------------------------------------------------------------------------
 
+def _retail_fallback_steps(ctx: QueryContext, qa) -> list:
+    """Plan the retail tool when the analyzer nominated no tool at all.
+
+    Routing a retail question to the data path is not enough on its own: the
+    evidence plan is built from ``candidate_tools``, and on 2026-08-15 the
+    comparison question came back with ``candidate_tools=[]`` and confidence
+    0.45. Response mode was DATA_PRIMARY, no step was planned, the router
+    missed too, and the pipeline fell through to LLM-authored SQL -- which
+    reintroduced every problem the typed tool exists to prevent.
+
+    Only fires when nothing else planned anything, so it cannot displace a
+    plan the analyzer did make.
+    """
+    from agent.retail_routing import is_retail_data_question
+
+    if not is_retail_data_question(ctx):
+        return []
+
+    log.info(
+        "Evidence plan: retail question with no analyzer tool candidates -- "
+        "planning %s",
+        ToolName.GET_END_USER_PRICES.value,
+    )
+    return [{
+        "tool": ToolName.GET_END_USER_PRICES.value,
+        "role": "primary_data",
+        "params_hint": None,
+        "reason": "retail_fallback_no_candidate_tools",
+    }]
+
+
 def build_evidence_plan(ctx: QueryContext) -> QueryContext:
     """Deterministic expansion of QuestionAnalysis into evidence steps.
 
@@ -198,6 +229,9 @@ def build_evidence_plan(ctx: QueryContext) -> QueryContext:
         return ctx
 
     steps = _expand_evidence_steps(qa, ctx.query)
+
+    if not steps:
+        steps = _retail_fallback_steps(ctx, qa)
 
     ctx.evidence_plan = steps
     ctx.evidence_plan_source = "deterministic" if steps else ""

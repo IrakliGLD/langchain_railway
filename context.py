@@ -97,7 +97,7 @@ COLUMN_LABELS = {
     "vat_gel_kwh": "VAT at 18% (GEL/kWh)",
     "total_gross_gel_kwh": "Final end-user price, incl. VAT (GEL/kWh)",
     "wholesale_benchmark_gel_kwh": "Balancing + guaranteed capacity, rebased (GEL/kWh)",
-    "spread_gel_kwh": "Retail-to-wholesale spread (GEL/kWh)",
+    "supply_vs_wholesale_spread_gel_kwh": "Supply component vs wholesale, spread (GEL/kWh)",
 }
 
 # --- Columns excluded from scrub_schema_mentions ---

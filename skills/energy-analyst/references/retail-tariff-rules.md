@@ -98,10 +98,27 @@ figure by 1000 in your head produces a number that appears in no row, and it
 will be rejected as ungrounded and cut from the answer — that is exactly what
 happened to fourteen figures on 2026-08-15.
 
-When the question asks for a comparison against the wholesale or balancing
-price, actually make it: state the retail price, the wholesale benchmark
-including the capacity fee, and the spread between them, per series. A
-description of how the comparison would work is not a comparison.
+**Compare the SUPPLY component only — never the final price.** A customer
+choosing between the regulated tariff and buying wholesale still pays
+transmission and distribution either way: those are network charges for
+delivery, not for the energy. Only the supply component is the alternative to
+a wholesale purchase, so it is the only part that belongs in the comparison.
+
+```
+supply tariff  vs  (balancing price + guaranteed capacity fee)
+```
+
+Both already include the guaranteed capacity fee — the retail supply tariff
+bundles it, which is why it is added to the wholesale side. The tool returns
+this as `supply_vs_wholesale_spread_gel_kwh`; quote it rather than computing
+a difference yourself.
+
+Comparing the *final* price against wholesale overstates the gap by the entire
+network stack — roughly half the bill — and answers a question nobody asked.
+
+When the question asks for a comparison, actually make it: state the supply
+tariff, the wholesale benchmark, and the spread, per series. A description of
+how the comparison would work is not a comparison.
 
 ## The eight categories
 

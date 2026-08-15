@@ -225,3 +225,63 @@ def test_the_guidance_explains_why_there_is_no_season():
     # And that the wholesale side differs, which is what makes a comparison
     # worth writing.
     assert "balancing price is the opposite" in rules
+
+
+def test_seasonality_is_suppressed_on_llm_authored_column_names_too():
+    """The typed tool is not the only way these tariffs reach a frame.
+
+    When the tool does not run, the fallback SQL invents its own names --
+    "regulated_final_price_gel_per_kwh", "supply_tariff_gel_per_kwh". Matching
+    only the tool's exact column names let seasonality through on precisely
+    the path where the answer is least controlled (2026-08-15 19:10).
+    """
+    from agent.analyzer import _is_administered_price_frame
+
+    llm_frame = pd.DataFrame(
+        {
+            "month": pd.to_datetime(["2026-01-01", "2026-02-01"]),
+            "supplier": ["telmico", "telmico"],
+            "regulated_final_price_gel_per_kwh": [0.198, 0.198],
+            "wholesale_total_gel_per_kwh": [0.121, 0.130],
+        }
+    )
+    assert _is_administered_price_frame(llm_frame) is True
+
+
+def test_a_pure_wholesale_frame_is_still_seasonal():
+    """The looser matching must not swallow market prices."""
+    from agent.analyzer import _is_administered_price_frame
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-01-01", "2026-07-01"]),
+            "p_bal_gel": [210.0, 160.0],
+            "p_gcap_gel": [12.0, 12.0],
+        }
+    )
+    assert _is_administered_price_frame(df) is False
+
+
+def test_the_wholesale_comparison_uses_the_supply_component_only(monkeypatch):
+    """Transmission and distribution are paid on the network whichever way the
+    energy is procured, so they cancel out of a make-or-buy comparison.
+    Including them inflates the apparent gap by the whole network stack."""
+    import agent.tools.end_user_price_tools as tool_module
+
+    captured = {}
+
+    def fake_run(sql, params=None):
+        captured["sql"] = sql
+        df = pd.DataFrame([{"date": "2026-06-01", "supplier": "telmico",
+                            "category": "c", "category_label": "L",
+                            "final_price_net_gel_kwh": 0.1983}])
+        return df, list(df.columns), []
+
+    monkeypatch.setattr(tool_module, "run_text_query", fake_run)
+    tool_module.get_end_user_prices(include_wholesale_benchmark=True)
+
+    sql = captured["sql"]
+    assert "s.supply_tariff_gel_kwh - (p.p_bal_gel + p.p_gcap_gel)" in sql
+    assert "s.final_price_net_gel_kwh - (p.p_bal_gel" not in sql, (
+        "the spread must not be measured on the full stack"
+    )

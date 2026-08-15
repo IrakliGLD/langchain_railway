@@ -576,6 +576,7 @@ _RETAIL_METRIC_COLUMNS = (
     "distribution_tariff_gel_kwh",
     "supply_tariff_gel_kwh",
     "wholesale_benchmark_gel_kwh",
+    "supply_vs_wholesale_spread_gel_kwh",
 )
 
 

@@ -3123,7 +3123,21 @@ def _is_administered_price_frame(df) -> bool:
     from agent.tools.end_user_price_tools import COMPONENT_COLUMNS, NET_TOTAL_COLUMN
 
     present = set(df.columns)
-    return bool(present & ({NET_TOTAL_COLUMN} | set(COMPONENT_COLUMNS)))
+    if present & ({NET_TOTAL_COLUMN} | set(COMPONENT_COLUMNS)):
+        return True
+
+    # The same tariffs also arrive under LLM-authored column names when the
+    # typed tool did not run -- "regulated_final_price_gel_per_kwh",
+    # "distribution_tariff_gel_kwh" and so on. Matching only the tool's exact
+    # names let seasonality through on precisely the fallback path where the
+    # answer is already least controlled (2026-08-15). Recognise the shape:
+    # a per-kWh column naming one of the administered components.
+    lowered = [str(col).lower() for col in present]
+    per_kwh = [c for c in lowered if "kwh" in c]
+    return any(
+        any(token in col for token in ("transmission", "distribution", "supply", "final_price"))
+        for col in per_kwh
+    )
 
 
 def _time_column(df):

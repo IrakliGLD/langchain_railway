@@ -447,11 +447,16 @@ def _build_sql(
         # KWH_PER_MWH is a physical constant, not user input, so it is inlined
         # rather than bound -- one less untyped parameter for the server to
         # infer, and it reads as the unit conversion it is.
+        # The spread is measured on the SUPPLY component alone, not on the
+        # final price. Transmission and distribution are paid on the network
+        # whichever way the energy is procured, so they cancel out of the
+        # comparison; including them would inflate the apparent gap by the
+        # whole network stack and answer a question nobody asked.
         benchmark_select = (
             f",\n    (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH}"
             " AS wholesale_benchmark_gel_kwh"
-            f",\n    s.final_price_net_gel_kwh - (p.p_bal_gel + p.p_gcap_gel)"
-            f" / {KWH_PER_MWH} AS spread_gel_kwh"
+            f",\n    s.supply_tariff_gel_kwh - (p.p_bal_gel + p.p_gcap_gel)"
+            f" / {KWH_PER_MWH} AS supply_vs_wholesale_spread_gel_kwh"
         )
         benchmark_join = "\nLEFT JOIN price_with_usd p ON p.date = s.date"
 
