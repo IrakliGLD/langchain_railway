@@ -235,6 +235,11 @@ class QueryContext:
     # Introduced to let derived-chart builders (scenario, MoM/YoY, seasonal,
     # forecast observed-vs-projected) emit multi-panel overrides.
     chart_override_specs: Optional[List[Dict[str, Any]]] = None
+    # Column names of a widened retail frame, one per supplier/category series.
+    # Set during chart building so group resolution can use them as metrics:
+    # chart series come from metric COLUMNS, so a long frame renders as one
+    # line no matter how many categories it holds.
+    retail_series_columns: List[str] = dc_field(default_factory=list)
     charts: List[Dict[str, Any]] = dc_field(default_factory=list)
     chart_data: Optional[List[Dict[str, Any]]] = None
     chart_type: Optional[str] = None

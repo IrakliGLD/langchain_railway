@@ -45,6 +45,8 @@ def _retail_frame(suppliers=("telmico", "eps"), categories=_CATEGORIES, months=6
                         "supplier": supplier,
                         "category": category,
                         "category_label": f"Label {category}",
+                        "supply_company": f"{supplier} full name",
+                        "series_label": f"{supplier} — Label {category}",
                         "distribution_tariff_gel_kwh": 0.080 + 0.001 * ci,
                         "supply_tariff_gel_kwh": 0.110 + 0.002 * si,
                         "transmission_tariff_gel_kwh": 0.0067,
@@ -172,6 +174,55 @@ def test_per_kwh_columns_are_not_labelled_per_mwh():
     assert unit_for_price(["p_bal_usd"]) == "USD/MWh"
 
 
+def test_sixteen_categories_render_as_sixteen_named_lines():
+    """"the chart still show one line and not clear from the legend what this
+    line is" -- 2026-08-15, with series=16 logged.
+
+    Series are built from METRIC COLUMNS, so a long frame with one price
+    column is one line no matter how many categories it contains. The frame
+    has to be pivoted wide, one column per series, for the renderer to draw
+    and label them.
+    """
+    from agent.chart_pipeline import build_chart
+
+    ctx = _ctx_with(_retail_frame())
+    ctx = build_chart(ctx)
+
+    assert ctx.chart_data, "no chart produced"
+    value_keys = [k for k in ctx.chart_data[0] if k.lower() != "date"]
+    assert len(value_keys) == 16, (
+        f"expected 16 plottable series, got {len(value_keys)}: {value_keys}"
+    )
+
+
+def test_the_legend_names_the_company_and_the_category():
+    """A legend entry of "final_price_net_gel_kwh" identifies nothing."""
+    from agent.chart_pipeline import build_chart
+
+    ctx = _ctx_with(_retail_frame())
+    ctx = build_chart(ctx)
+
+    keys = " | ".join(k for k in ctx.chart_data[0] if k.lower() != "date")
+    lowered = keys.lower()
+    assert "telmico" in lowered and "eps" in lowered, f"companies missing: {keys}"
+    assert "hh" in lowered or "household" in lowered or "cat" in lowered, (
+        f"category missing from legend: {keys}"
+    )
+
+
+def test_a_single_series_frame_is_not_pivoted():
+    """One company and one category still wants its component composition,
+    which needs the components as columns."""
+    from agent.chart_pipeline import _resolve_chart_groups
+
+    df = _retail_frame(suppliers=("telmico",), categories=("220/380|hh|cat2",))
+    ctx = _ctx_with(df)
+    groups = _resolve_chart_groups(ctx, list(df.select_dtypes("number").columns), None)
+
+    assert len(groups) == 2
+    assert groups[1]["type"] == "stackedbar"
+
+
 def test_a_text_column_is_never_coerced_into_a_column_of_nothing():
     """General rule, not a retail one.
 
@@ -215,21 +266,21 @@ def test_a_genuinely_numeric_column_is_still_coerced():
     assert "some_unlisted_measure" not in categorical_cols
 
 
-def test_every_category_reaches_the_chart_data():
-    """The readability cap trims METRICS; it must never silently drop the
-    sixteen supplier/category series the question is about."""
-    from agent.chart_pipeline import build_chart
-    from context import COLUMN_LABELS
+def test_the_readability_cap_does_not_trim_the_widened_series():
+    """Once widened, each series IS a metric column -- so the metric cap points
+    straight at them.
+
+    ``_DEFAULT_MAX_SERIES`` is 3, and the retail short-circuit bypasses the
+    normalization loop that would otherwise set a cap, so the group must carry
+    one high enough for the whole fleet or thirteen of sixteen lines vanish.
+    """
+    from agent.chart_pipeline import _DEFAULT_MAX_SERIES, _resolve_chart_groups, build_chart
 
     ctx = _ctx_with(_retail_frame())
     ctx = build_chart(ctx)
+    # Rebuild groups against the widened frame the chart actually used.
+    groups = _resolve_chart_groups(ctx, list(ctx.retail_series_columns), None)
 
-    assert ctx.chart_data, "no chart produced"
-    # Chart rows carry display labels, not raw column names.
-    supplier_key = COLUMN_LABELS["supplier"]
-    category_key = COLUMN_LABELS["category"]
-    charted = {(row.get(supplier_key), row.get(category_key)) for row in ctx.chart_data}
-    assert len(charted) == 16, (
-        f"expected 16 series in chart data, got {len(charted)}; "
-        f"row keys={sorted(ctx.chart_data[0])}"
-    )
+    assert ctx.retail_series_columns and len(ctx.retail_series_columns) == 16
+    assert groups[0]["_max_series_cap"] >= 16 > _DEFAULT_MAX_SERIES
+    assert len(groups[0]["metrics"]) == 16

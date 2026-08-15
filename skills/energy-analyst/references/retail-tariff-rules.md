@@ -28,6 +28,20 @@ VAT of 18% is levied **on top** of this stack. `final_price_net_gel_kwh` is
 net; quote `total_gross_gel_kwh` when it is present rather than computing a
 gross figure yourself.
 
+## Name companies in full, not by their database code
+
+The data carries short codes. Write the company name the first time it appears
+and the short form afterwards:
+
+- `telmico` → **Telmico (Tbilisi Electricity Supply Company)**
+- `eps` → **EPS (EP Georgia Supply)**
+- `telasi` → **Telasi**, the Tbilisi distribution company
+- `epg` → **Energo-Pro Georgia (EPG)**, the distribution company elsewhere
+
+The `supply_company` column already holds the full name — quote it rather than
+the `supplier` code. Writing "eps" at a reader who asked about companies is
+quoting a database key back at them.
+
 ## Never mix companies or categories
 
 There are eight customer categories across two company pairs — sixteen
