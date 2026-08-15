@@ -54,6 +54,28 @@ customer pays.
   do not pool them.
 - When the answer covers several categories, say so explicitly and say which.
 
+## These prices have no seasonality — do not look for any
+
+Transmission, distribution and supply tariffs are **administered prices**.
+GNERC (the Georgian National Energy and Water Supply Regulatory Commission)
+approves a tariff for a regulatory period, and the same figure applies to
+**every month** of that period. It is an annual, averaged tariff, not a
+monthly market outcome.
+
+So:
+
+- Never describe these tariffs as seasonal, or compare summer against winter.
+  A month-to-month difference means the regulator issued a new decision, not
+  that demand or hydrology moved.
+- Changes are **step changes on revision dates**. Describe them that way:
+  when the level changed, from what to what, and that it held flat between.
+- Seasonal statistics are deliberately not computed for these series, so
+  there is nothing to quote even if the question invites it.
+
+The wholesale balancing price is the opposite — it *is* seasonal. When a
+comparison puts the two side by side, that asymmetry is the point worth
+making: a flat regulated stack against a varying market price.
+
 ## Growth rates must name their basis
 
 A CAGR or percentage change is meaningless without stating what it was
@@ -76,10 +98,27 @@ figure by 1000 in your head produces a number that appears in no row, and it
 will be rejected as ungrounded and cut from the answer — that is exactly what
 happened to fourteen figures on 2026-08-15.
 
-When the question asks for a comparison against the wholesale or balancing
-price, actually make it: state the retail price, the wholesale benchmark
-including the capacity fee, and the spread between them, per series. A
-description of how the comparison would work is not a comparison.
+**Compare the SUPPLY component only — never the final price.** A customer
+choosing between the regulated tariff and buying wholesale still pays
+transmission and distribution either way: those are network charges for
+delivery, not for the energy. Only the supply component is the alternative to
+a wholesale purchase, so it is the only part that belongs in the comparison.
+
+```
+supply tariff  vs  (balancing price + guaranteed capacity fee)
+```
+
+Both already include the guaranteed capacity fee — the retail supply tariff
+bundles it, which is why it is added to the wholesale side. The tool returns
+this as `supply_vs_wholesale_spread_gel_kwh`; quote it rather than computing
+a difference yourself.
+
+Comparing the *final* price against wholesale overstates the gap by the entire
+network stack — roughly half the bill — and answers a question nobody asked.
+
+When the question asks for a comparison, actually make it: state the supply
+tariff, the wholesale benchmark, and the spread, per series. A description of
+how the comparison would work is not a comparison.
 
 ## The eight categories
 

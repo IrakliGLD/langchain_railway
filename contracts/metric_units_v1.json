@@ -202,7 +202,8 @@
         "distribution_tariff_gel_kwh",
         "supply_tariff_gel_kwh",
         "transmission_tariff_gel_kwh",
-        "wholesale_benchmark_gel_kwh"
+        "wholesale_benchmark_gel_kwh",
+        "supply_vs_wholesale_spread_gel_kwh"
       ],
       "source_metric_patterns": [],
       "dimension": "currency_gel_per_energy",
