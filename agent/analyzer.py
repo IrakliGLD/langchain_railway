@@ -3165,6 +3165,42 @@ def _series_growth(group, col: str, time_col) -> str:
     return detail
 
 
+def _component_share_line(group) -> str:
+    """Each tariff component as a percentage of the final price.
+
+    "Distribution is 37% of the bill" is the natural thing to say about a
+    stack, and the model says it whether or not the figure exists in the
+    corpus -- so strict-numeric grounding strips the claim and the answer
+    ships gutted. On 2026-08-15 the same six tokens
+    (37, 48, 74, 86, 111, 124) were rejected on two consecutive runs.
+    Computing the shares here makes them quotable.
+
+    Returns "" for a frame that is not a component stack.
+    """
+    from agent.tools.end_user_price_tools import COMPONENT_COLUMNS, NET_TOTAL_COLUMN
+
+    if NET_TOTAL_COLUMN not in group.columns:
+        return ""
+    if not set(COMPONENT_COLUMNS) <= set(group.columns):
+        return ""
+
+    total = group[NET_TOTAL_COLUMN].dropna()
+    if total.empty or float(total.mean()) == 0:
+        return ""
+    total_mean = float(total.mean())
+
+    parts = []
+    for column in COMPONENT_COLUMNS:
+        values = group[column].dropna()
+        if values.empty:
+            continue
+        share = float(values.mean()) / total_mean * 100.0
+        parts.append(f"{column.replace('_tariff_gel_kwh', '')}={share:.1f}%")
+    if not parts:
+        return ""
+    return "  share of final price: " + " ".join(parts)
+
+
 def _series_key_columns(df, numeric_cols) -> tuple:
     """Columns that split ``df`` into series which must not be pooled.
 
@@ -3259,6 +3295,11 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
             if values.empty:
                 continue
             lines.append(f"{COLUMN_LABELS.get(col, col)}: {_describe(values, col)}")
+        # A single-series frame is exactly what a scoped retail question
+        # produces, so it needs the component shares just as much.
+        shares = _component_share_line(ctx.df)
+        if shares:
+            lines.append(shares.strip())
     else:
         # The frame holds several distinct series. Pooling them produces a
         # figure that matches no series -- an "average tariff" across two
@@ -3287,6 +3328,9 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
                         continue
                     growth = _series_growth(group, col, time_col)
                     block.append(f"  {col}: {_describe(values, col)}{growth}")
+                shares = _component_share_line(group)
+                if shares:
+                    block.append(shares)
                 if block:
                     lines.append(f"[{scope}]")
                     lines.extend(block)

@@ -427,15 +427,13 @@ def _derive_response_mode(ctx: QueryContext) -> str:
             return ResponseMode.DATA_PRIMARY
         # Ambiguous types: comparison, forecast, ambiguous, unsupported
         if qa_path == "knowledge":
-            # ...unless the question already names a retail company AND
-            # category. The analyzer keeps calling such follow-ups ambiguous,
-            # which blocks the tool and returns an essay -- so the user who
-            # answered the clarification exactly as asked got no price. Once
-            # both axes are named there is a specific row to fetch.
-            if _retail_scope_is_fully_named(ctx):
+            # ...unless it is a retail price question. Those are answered from
+            # data and close by offering to narrow, rather than being blocked
+            # on a question or answered as prose.
+            if _is_retail_data_question(ctx):
                 log.info(
-                    "Retail scope fully named; routing to data despite "
-                    "analyzer preferred_path=knowledge"
+                    "Retail question routed to data despite analyzer "
+                    "preferred_path=knowledge"
                 )
                 return ResponseMode.DATA_PRIMARY
             return ResponseMode.KNOWLEDGE_PRIMARY
@@ -449,96 +447,26 @@ def _derive_response_mode(ctx: QueryContext) -> str:
     )
 
 
-def _needs_end_user_scope_clarification(ctx: QueryContext) -> bool:
-    """Whether a retail-vs-wholesale comparison is too unscoped to answer.
+def _is_retail_data_question(ctx: QueryContext) -> bool:
+    """Whether a retail question should be answered from data.
 
-    There are eight end-user categories across two supply companies and their
-    final prices differ, so "how does the end-user price compare with the
-    balancing price" has sixteen different correct answers. Averaging them
-    produces a spread no customer experiences, which is precisely what the
-    domain owner rejected on 2026-08-15. Both axes must be pinned before the
-    comparison means anything.
+    2026-08-15, from the domain owner, after seeing both behaviours: "i prefer
+    general answer and then ask to clarify to provide targeted information and
+    assessment", and make all three questions behave the same way.
 
-    Deliberately narrow: only an unscoped COMPARISON asks. A plain trend or
-    level question shows every category side by side instead (see
-    ``_append_column_aggregates``), which is the same anti-mixing rule
-    expressed as breadth rather than as a question.
+    So retail questions are never blocked on a clarifying question. They are
+    answered from the data -- every category, never averaged -- and the answer
+    closes by offering to narrow. The narrowing offer lives in the summarizer
+    guidance, not here.
 
-    Two independent triggers, because the keyword one alone failed in
-    production on 2026-08-15:
+    This routes to data even when the analyzer says ``preferred_path=knowledge``
+    with ``query_type=ambiguous``, which is how the same three questions took
+    three different paths on 2026-08-15: one clarified, one fetched data, and
+    one wrote an essay -- the last because ``network_supply_tariffs`` ranked
+    third among candidate topics rather than first.
 
-    * the analyzer itself concluded the question is ambiguous, or
-    * the canonicalised question reads as a retail-vs-wholesale comparison.
-
-    Either way the scope must actually be missing before we ask.
-    """
-    if not ctx.has_authoritative_question_analysis:
-        return False
-
-    analysis = ctx.question_analysis
-    candidates = list(analysis.knowledge.candidate_topics or [])
-    topics = {candidate.name.value for candidate in candidates}
-    if KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value not in topics:
-        return False
-
-    # The analyzer ranks its candidates. On 2026-08-15 the retail comparison
-    # put network_supply_tariffs FIRST, ahead of market_structure and
-    # pso_trading; a genuinely wholesale question ranks balancing_price first
-    # and carries the retail topic only as a trailing possibility. That
-    # ranking is the discriminator for the ambiguity trigger below -- without
-    # it, any ambiguous question that merely brushes retail would be asked to
-    # pick a household consumption band.
-    top_topic = max(
-        candidates,
-        key=lambda candidate: getattr(candidate, "score", 0.0) or 0.0,
-        default=None,
-    )
-    retail_is_primary = (
-        top_topic is not None
-        and top_topic.name.value == KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value
-    )
-
-    # The analyzer's English canonicalization, so a Georgian or Russian
-    # question is read the same as an English one -- PLUS its entity_scope,
-    # which is where the analyzer puts the scope it has already extracted.
-    # Reading only the query missed "Telmico; small commercial at 220/380 V"
-    # and re-asked a question the user had just answered.
-    question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
-    lowered = scope_haystack(analysis.entity_scope, question)
-
-    # Trigger 1: the analyzer read the question in its original language and
-    # concluded it is ambiguous. That verdict beats matching English keywords
-    # against its own paraphrase -- on 2026-08-15 it returned
-    # query_type=ambiguous with confidence 0.95 while the keyword match below
-    # found nothing, and a theoretical essay shipped instead of a question.
-    analyzer_says_ambiguous = retail_is_primary and (
-        analysis.classification.query_type == QueryType.AMBIGUOUS
-        or analysis.answer_kind == AnswerKind.CLARIFY
-    )
-
-    # Trigger 2: the wording is a retail-vs-wholesale comparison. Topic alone
-    # is too loose -- "what drives the balancing price" can carry the retail
-    # topic as a candidate, and asking that user to pick a household
-    # consumption band would be nonsense.
-    reads_as_comparison = looks_like_retail_tariff_question(lowered) and (
-        asks_for_wholesale_comparison(lowered)
-    )
-
-    if not (analyzer_says_ambiguous or reads_as_comparison):
-        return False
-
-    supplier, category = resolve_end_user_scope(lowered)
-    return not (supplier and category)
-
-
-def _retail_scope_is_fully_named(ctx: QueryContext) -> bool:
-    """Whether a retail question already names both a company and a category.
-
-    Answering the clarification is useless if the reply is then routed to the
-    knowledge path: the analyzer keeps calling these follow-ups ambiguous
-    (``preferred_path=knowledge``, tools blocked), so the user who supplied
-    exactly what was asked for got an essay instead of their price. A fully
-    scoped retail question is a data question.
+    A genuine definition question ("what is a supply tariff") keeps the
+    knowledge path: it is classified conceptual_definition, not ambiguous.
     """
     if not ctx.has_authoritative_question_analysis:
         return False
@@ -551,11 +479,19 @@ def _retail_scope_is_fully_named(ctx: QueryContext) -> bool:
     if KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value not in topics:
         return False
 
+    # Ambiguity about WHICH company or category is not a reason to withhold
+    # the data; it is a reason to show all of it and offer to narrow.
+    if analysis.classification.query_type == QueryType.AMBIGUOUS:
+        return True
+    if analysis.answer_kind == AnswerKind.CLARIFY:
+        return True
+
+    # Already scoped: certainly a data question.
     question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
     supplier, category = resolve_end_user_scope(
         scope_haystack(analysis.entity_scope, question)
     )
-    return bool(supplier and category)
+    return bool(supplier or category)
 
 
 def _derive_resolution_policy(ctx: QueryContext) -> str:
@@ -575,9 +511,11 @@ def _derive_resolution_policy(ctx: QueryContext) -> str:
         # clarification must never re-ask it.
         return ResolutionPolicy.ANSWER
 
-    if _needs_end_user_scope_clarification(ctx):
-        ctx.clarify_reason = "end_user_scope_unspecified"
-        return ResolutionPolicy.CLARIFY
+    if _is_retail_data_question(ctx):
+        # Retail questions answer from data and offer to narrow at the end,
+        # rather than stopping to ask. Withholding the general answer was
+        # rejected by the domain owner on 2026-08-15 after seeing both.
+        return ResolutionPolicy.ANSWER
 
     if ctx.has_authoritative_question_analysis:
         if ctx.question_analysis.routing.preferred_path in (

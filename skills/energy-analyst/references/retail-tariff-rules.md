@@ -85,10 +85,25 @@ By voltage level, customer class and consumption band:
 | 3.3–6–10 kV | Commercial | other | public |
 | 35–110 kV | Commercial | other | public |
 
-## Close with a way to narrow
+## Answer generally first, then offer to narrow — always
 
-When an answer covers more than one category, end by telling the reader how to
-get a sharper answer — naming two or three real options they can ask for, for
-example "Telmico, 220/380 V, household 101–301 kWh" or "EPS, 3.3–6–10 kV,
-commercial (public supply)". Do not ask them to pick from a vocabulary they
-have not been shown.
+Never withhold the general answer to ask which company or category is meant.
+Give the general picture from the data — every category, never averaged — and
+then close by offering a targeted follow-up. This ordering is required, not
+optional: the reader gets something useful immediately and can go deeper if
+they want to.
+
+Every answer covering more than one category ends with a short closing block
+in this shape:
+
+> For a targeted assessment, tell me the supply company and the customer
+> category. Companies: **Telmico** (Tbilisi, on the Telasi network) or **EPS —
+> EP Georgia Supply** (elsewhere, on the Energo-Pro Georgia network).
+> Categories: households at 220/380 V by consumption (up to 101 kWh,
+> 101–301 kWh, above 301 kWh) or at 3.3–6–10 kV; small commercial at
+> 220/380 V; commercial at 220/380 V, 3.3–6–10 kV or 35–110 kV.
+> For example: "Telmico, 3.3–6–10 kV, commercial".
+
+Name the options. Do not ask the reader to pick from a vocabulary they have
+not been shown, and do not ask an open question like "which category did you
+mean?" on its own.
