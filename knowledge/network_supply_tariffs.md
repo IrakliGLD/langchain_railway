@@ -251,14 +251,20 @@ maintainer**. The following points are the ones most worth confirming:
 2. **Voltage-to-customer-type association.** Public GNERC material associates voltage levels
    with customer types, but the data contains household categories at both `220/380` and
    `3.3-6-10`. This document therefore reports voltages verbatim and asserts no mapping.
-3. **Composition of the supply tariff.** The guaranteed capacity fee pass-through and wholesale
-   procurement cost are stated here as the principal elements. The complete regulated cost
-   stack, and the relative weight of each element, should be confirmed against GNERC's supply
-   tariff methodology.
-4. **`public` vs `universal` scope.** The mapping of `public` to public-service commercial
-   customers and `universal` to households and small commercial customers follows the category
-   table above; confirm the precise regulatory definitions.
+3. **Composition of the supply tariff — partly settled.** That the supply tariff *contains* the
+   guaranteed capacity fee is established: it is precisely why the fee is added to the wholesale
+   side when the two are compared. Wholesale procurement cost is likewise certain. What is *not*
+   established is the **complete** list of regulated elements and their relative weights.
+   Answers should therefore say "principally procurement cost and the guaranteed capacity fee
+   pass-through" and must not present that as an exhaustive breakdown, or quote a share for any
+   element. Closing this needs GNERC's supply-tariff methodology.
+4. **`public` vs `universal` — operationally settled.** Which activity to query is fixed by the
+   category table and needs no further confirmation: `com|other` uses `public`; `com|small` and
+   every `hh` category use `universal`. GNERC's own tariff pages list exactly these two provider
+   types. What remains open is only the regulatory **eligibility rule** — which customers
+   qualify as public-service rather than universal-service. That affects how the categories are
+   *described*, never which rows are selected.
 
 Sources consulted: GNERC end-user tariff pages and tariff methodology documents, GNERC tariff
-resolutions, and the CEER Georgian tariff model presentation. Items 1–4 above are **not**
-settled by those sources.
+resolutions, and the CEER Georgian tariff model presentation. Item 1 is settled; items 3 and 4
+are partly settled as described; item 2 is open.
