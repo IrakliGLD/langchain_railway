@@ -11,6 +11,13 @@ KNOWLEDGE_PATH = (
 )
 KNOWLEDGE = KNOWLEDGE_PATH.read_text(encoding="utf-8")
 
+# Markdown wraps prose, so a phrase can straddle a newline. Collapse whitespace
+# before matching multi-word phrases -- otherwise these tests fail on reflow
+# rather than on missing content.
+import re  # noqa: E402
+
+KNOWLEDGE_FLAT = re.sub(r"\s+", " ", KNOWLEDGE)
+
 
 def test_vat_basis_is_settled_not_listed_as_unknown():
     """The dashboard settles this: the view stores tariffs NET of VAT.
@@ -35,3 +42,53 @@ def test_reporting_rules_are_stated():
 
     assert "gel/kwh" in lowered
     assert "final_price" in KNOWLEDGE
+
+
+def test_every_company_code_has_its_full_legal_name():
+    """An answer naming 'epg' rather than Energo-Pro Georgia is unhelpful; one
+    naming the wrong company is wrong."""
+    for code, name in [
+        ("gse", "Georgian State Electrosystem"),
+        ("telmico", "Tbilisi Electricity Supply Company"),
+        ("eps", "EP Georgia Supply"),
+        ("epg", "Energo-Pro Georgia"),
+    ]:
+        assert name in KNOWLEDGE, f"{code} is missing its full name ({name})"
+
+
+def test_service_territories_including_the_suburb_nuance():
+    """EPG/EPS also serve some Tbilisi suburbs.
+
+    Without this the model states that Telasi/Telmico serve Tbilisi
+    exclusively, so 'a household in Tbilisi' resolves to one supplier when it
+    may be either.
+    """
+    lowered = KNOWLEDGE.lower()
+
+    assert "tbilisi" in lowered
+    assert "suburb" in lowered
+
+
+def test_gse_is_identified_as_the_transmission_system_operator():
+    assert "TSO" in KNOWLEDGE
+
+
+def test_knowledge_forbids_mixing_categories():
+    """Components from different categories cannot be combined into one price."""
+    lowered = KNOWLEDGE.lower()
+
+    assert "never mix" in lowered or "do not mix" in lowered
+
+
+def test_knowledge_states_the_wholesale_comparison_basis():
+    """Benchmark = (p_bal_gel + p_gcap_gel) / 1000, in GEL/kWh.
+
+    The charge goes on the wholesale side rather than being taken off the
+    tariff, so the regulated figure stays equal to what is actually charged.
+    """
+    flat = KNOWLEDGE_FLAT.lower()
+
+    assert "p_gcap_gel" in KNOWLEDGE
+    assert "guaranteed capacity" in flat
+    assert "added to the wholesale" in flat
+    assert "(p_bal_gel + p_gcap_gel) / 1000" in KNOWLEDGE_FLAT

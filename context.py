@@ -396,6 +396,9 @@ mv_balancing_trade_with_tariff notes:
 - value and final_price are NET of VAT. VAT is 18% and is levied on top, so a consumer pays
   final_price × 1.18. Report the net figure by default and say it is net of VAT; give the gross
   only when the question asks what a consumer actually pays.
+- To compare with wholesale, join price_with_usd on date and use
+  (p_bal_gel + p_gcap_gel) / 1000 as the GEL/kWh benchmark. The supply tariff already bundles
+  the guaranteed capacity fee, so it is added to the WHOLESALE side; compare against net.
 
 The end-user price is the SUM of three components for one (date, supplier, category):
   1. distribution — the supplier's distributor: 'telmico'->'telasi', 'eps'->'epg'

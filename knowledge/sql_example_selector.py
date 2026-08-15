@@ -905,6 +905,38 @@ WHERE activity = 'final_price'
   AND volate = '220/380'
   AND date = (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
 ORDER BY consumption_band, supplier;
+
+EXAMPLE 11.4 - End-User Price vs Wholesale:
+Query: "How does the household end-user price compare with the wholesale price?"
+Plan:
+{
+  "intent": "comparison",
+  "target": "end_user_vs_wholesale",
+  "period": "recent"
+}
+---SQL---
+-- The published supply tariff already bundles the guaranteed capacity charge, so
+-- the two sides only line up once it is added to the WHOLESALE side. Adding it
+-- there rather than subtracting it from the tariff keeps the regulated figure
+-- equal to what is actually charged.
+-- Prices are GEL/MWh and tariffs are GEL/kWh: divide the price by 1000. Never
+-- multiply the tariff instead.
+-- Compare against the NET final_price: the wholesale price is also net of VAT,
+-- so comparing a gross tariff to it overstates the spread by 18%.
+SELECT
+    d.date,
+    d.value                                          AS end_user_gel_kwh,
+    (p.p_bal_gel + p.p_gcap_gel) / 1000.0            AS wholesale_benchmark_gel_kwh,
+    d.value - (p.p_bal_gel + p.p_gcap_gel) / 1000.0  AS spread_gel_kwh
+FROM demand_tariff_mv d
+JOIN price_with_usd p ON p.date = d.date
+WHERE d.activity = 'final_price'
+  AND d.company = 'telmico'
+  AND d.volate = '220/380'
+  AND d.level_1_cat = 'hh'
+  AND d.level_2_cat = 'cat2'
+  AND d.date <= (SELECT MAX(date) FROM demand_tariff_mv WHERE activity = 'final_price')
+ORDER BY d.date;
 """
 
 # =============================================================================

@@ -212,3 +212,13 @@ def test_plant_fleet_examples_teach_the_load_bearing_rules():
     assert "balancing" in _sql_blocks(PLANT_FLEET_EXAMPLES, keep_comments=True), (
         "the comment warning against the balancing filter was removed"
     )
+
+
+def test_end_user_examples_cover_the_wholesale_comparison():
+    """The supply tariff bundles the guaranteed capacity charge, so a bare
+    balancing price is not comparable to an end-user price."""
+    sql = _sql_blocks(END_USER_PRICE_EXAMPLES, keep_comments=True)
+
+    assert "p_gcap_gel" in sql, "comparison must add the guaranteed capacity charge"
+    assert "p_bal_gel" in sql
+    assert "1000" in sql, "wholesale prices must be converted down to GEL/kWh"

@@ -337,6 +337,13 @@ class TestDashboardSharedViews:
         assert "NET of VAT" in DB_SCHEMA_DOC
         assert "18%" in DB_SCHEMA_DOC
 
+    def test_schema_doc_states_the_wholesale_comparison_basis(self):
+        """Without this the model compares a bare balancing price against a
+        tariff that already bundles the guaranteed capacity charge."""
+        from context import DB_SCHEMA_DOC
+
+        assert "(p_bal_gel + p_gcap_gel) / 1000" in DB_SCHEMA_DOC
+
     def test_schema_doc_stays_within_a_sane_prompt_budget(self):
         """DB_SCHEMA_DOC is injected verbatim into every SQL-planning prompt.
 

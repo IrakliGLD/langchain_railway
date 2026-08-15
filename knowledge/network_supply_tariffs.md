@@ -37,11 +37,16 @@ about what a *consumer* pays.
 The regulated end-user price for one month and one consumer category is the **sum of three
 components**:
 
-| # | Component | Companies | Role |
-| - | ------------- | ---------------- | ---- |
-| 1 | Distribution | `telasi`, `epg` | Distribution network |
-| 2 | Supply | `telmico`, `eps` | Supply service (universal or public) |
-| 3 | Transmission | `gse` | Transmission network |
+| Component | Code | Full name | Role | Territory |
+| ------------- | --------- | --------- | ---- | --------- |
+| Transmission | `gse` | Georgian State Electrosystem | TSO, transmission network | national |
+| Distribution | `telasi` | Telasi | distribution network | Tbilisi |
+| Supply | `telmico` | Tbilisi Electricity Supply Company | supply service | Tbilisi |
+| Distribution | `epg` | Energo-Pro Georgia | distribution network | outside Tbilisi, plus some Tbilisi suburbs |
+| Supply | `eps` | EP Georgia Supply | supply service | outside Tbilisi, plus some Tbilisi suburbs |
+
+The distribution company and the supplier on the same network are **different legal
+entities**. Never use one in place of the other when assembling a price.
 
 ### Supplier to distributor pairing
 
@@ -53,8 +58,11 @@ always paired:
 | `telmico` | `telasi` |
 | `eps` | `epg` |
 
-`telasi` is the Tbilisi distribution network; `epg` (Energo-Pro Georgia) covers most of the
-rest of the country.
+Telasi and Telmico operate in Tbilisi, the capital. Energo-Pro Georgia and EP Georgia Supply
+operate across the rest of the country **and also cover some suburbs of Tbilisi** — so knowing
+a customer is "in Tbilisi" does not by itself determine which supplier serves them. If a
+question names only the city, say which pair is the usual one and note the suburb exception
+rather than asserting a single supplier.
 
 Transmission is the **same single row for every category** — `gse`, with blank voltage and
 blank consumer classes — because the transmission charge does not vary by consumer class.
@@ -121,6 +129,13 @@ Both major distribution territories use the same 101 / 301 kWh thresholds.
 
 Each category exists for both suppliers, giving 16 published end-user prices per month.
 
+**Never mix categories.** A final end-user price is assembled from three components that all
+belong to the *same* `(supplier, volate, level_1_cat, level_2_cat)` category, plus the single
+national transmission row. Taking the distribution component from one category and the supply
+component from another produces a number corresponding to no real tariff. Each of the 16
+published prices is self-contained: resolve one category completely, or report that it cannot
+be resolved — never assemble a price from parts of two.
+
 **Load-bearing irregularity.** In categories 6 and 8 the supply component is filed under
 `level_2_cat = 'other'` while the matching distribution component uses a **blank**
 `level_2_cat`. This mismatch is real, not a data error. Resolving these two categories by
@@ -140,6 +155,29 @@ produce an incomplete price.
   immediately into a movement in the end-user price.
 
 ---
+
+## Comparing to the wholesale price
+
+The regulated supply tariff already bundles the guaranteed capacity fee, so a bare balancing
+price is **not** comparable to an end-user price. The capacity charge is **added to the
+wholesale side** rather than subtracted from the tariff — that way the regulated figure stays
+equal to what is actually charged and the adjustment sits on one series.
+
+Benchmark, per month, from `public.price_with_usd`:
+
+```
+(p_bal_gel + p_gcap_gel) / 1000     -- GEL/kWh
+```
+
+Both prices are published in GEL/MWh, so divide by 1000 to reach the tariff's unit. Never
+multiply the tariff by 1000 instead: that figure appears in no row and the grounding gate will
+strip it from the answer.
+
+Compare against the **net** `final_price`, not the VAT-inclusive figure — the wholesale price
+is itself net of VAT, so comparing gross to net overstates the spread by 18%.
+
+The spread between the two is the combined distribution, transmission and retail-supply margin
+plus any regulated cost not present in the wholesale price. It is not a profit measure.
 
 ## Analytical implications
 
