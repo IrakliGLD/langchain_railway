@@ -43,6 +43,9 @@ from agent.tools.end_user_price_tools import (
     asks_for_wholesale_comparison,
 )
 from agent.tools.end_user_price_tools import (
+    resolve_consumer_class as resolve_end_user_consumer_class,
+)
+from agent.tools.end_user_price_tools import (
     resolve_scope as resolve_end_user_scope,
 )
 from agent.tools.end_user_price_tools import (
@@ -1176,6 +1179,12 @@ def resolve_tool_params(
             params["supplier"] = supplier
         if category:
             params["category"] = category
+        else:
+            # No single category, but the question may still name a CLASS
+            # ("for non-household consumers"), which covers four categories.
+            consumer_class = resolve_end_user_consumer_class(haystack)
+            if consumer_class:
+                params["consumer_class"] = consumer_class
 
         params["include_vat"] = "vat" in haystack
         params["include_wholesale_benchmark"] = asks_for_wholesale_comparison(haystack)

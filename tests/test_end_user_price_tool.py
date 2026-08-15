@@ -565,3 +565,59 @@ def test_resolved_params_dispatch_cleanly_through_the_registry(monkeypatch):
 
     assert "final_price_net_gel_kwh" in cols
     assert "total_gross_gel_kwh" in cols, "include_vat was resolved but not honoured"
+
+
+def test_the_price_is_also_given_per_mwh(monkeypatch):
+    """Wholesale prices are GEL/MWh, so any comparison restates these upward.
+
+    A model doing that multiplication itself produces numbers present in no
+    row, and strict-numeric grounding strips them: on 2026-08-15 fourteen
+    tokens (167 ... 303) were rejected, cutting a 3,433-character answer to
+    415. They were exactly the final prices expressed per MWh.
+    """
+    import agent.tools.end_user_price_tools as tool_module
+
+    monkeypatch.setattr(tool_module, "run_text_query", _stub_rows())
+    df, cols, _ = tool_module.get_end_user_prices()
+
+    assert "final_price_net_gel_mwh" in cols
+    assert round(float(df["final_price_net_gel_mwh"].iloc[0]), 1) == 198.3
+
+
+def test_a_consumer_class_narrows_without_picking_one_category():
+    """"for non-household consumers" names five commercial categories."""
+    from agent.tools.end_user_price_tools import _resolve_selection
+
+    _, categories = _resolve_selection(None, None, "com")
+    assert len(categories) == 4
+    assert all(c.level_1_cat == "com" for c in categories)
+
+    _, households = _resolve_selection(None, None, "hh")
+    assert len(households) == 4
+    assert all(c.level_1_cat == "hh" for c in households)
+
+
+def test_an_unknown_consumer_class_is_rejected():
+    import pytest as _pytest
+
+    from agent.tools.end_user_price_tools import _resolve_selection
+
+    with _pytest.raises(ValueError, match="Unknown consumer class"):
+        _resolve_selection(None, None, "industrial")
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("for non-household consumers", "com"),
+        ("non household customers", "com"),
+        ("for households", "hh"),
+        ("commercial customers", "com"),
+        ("end-user prices", None),
+    ],
+)
+def test_consumer_class_resolution(text, expected):
+    """"non-household" must not resolve to households by containing the word."""
+    from agent.tools.end_user_price_tools import resolve_consumer_class
+
+    assert resolve_consumer_class(text) == expected

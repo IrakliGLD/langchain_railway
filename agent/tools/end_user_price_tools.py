@@ -284,6 +284,20 @@ def resolve_scope(text: str) -> Tuple[Optional[str], Optional[str]]:
     return supplier, category
 
 
+def resolve_consumer_class(text: str) -> Optional[str]:
+    """'hh' / 'com' when the text names a consumer CLASS but not a category.
+
+    "for non-household consumers" names four commercial categories at once.
+    Returning a class lets the tool cover all four instead of the caller
+    having to pick one, or widening to households the question excluded.
+    """
+    haystack = f" {(text or '').strip().lower()} "
+    # Checked first: "non-household" contains "household".
+    if _alias_matches(haystack, "non-household") or _alias_matches(haystack, "non household"):
+        return "com"
+    return _first_alias_hit(haystack, _CLASS_ALIASES)
+
+
 def asks_for_wholesale_comparison(text: str) -> bool:
     """Whether the question sets the retail price against the wholesale side."""
     haystack = (text or "").lower()
@@ -293,8 +307,15 @@ def asks_for_wholesale_comparison(text: str) -> bool:
 def _resolve_selection(
     supplier: Optional[str],
     category: Optional[str],
+    consumer_class: Optional[str] = None,
 ) -> Tuple[Tuple[str, ...], Tuple[EndUserCategory, ...]]:
-    """Validate and widen the selection. Unknown input raises, never guesses."""
+    """Validate and widen the selection. Unknown input raises, never guesses.
+
+    ``consumer_class`` narrows to households or to non-households without
+    pinning a single category -- "compare this for non-household consumers"
+    names a class of four commercial categories, not one of them, and the
+    honest answer covers all four rather than picking one.
+    """
     if supplier is None:
         suppliers = tuple(SUPPLIER_TO_DISTRIBUTOR)
     else:
@@ -317,6 +338,21 @@ def _resolve_selection(
                 f"Expected one of {sorted(CATEGORY_BY_ID)}"
             )
         categories = (CATEGORY_BY_ID[key],)
+
+    if consumer_class is not None:
+        wanted = str(consumer_class).strip().lower()
+        if wanted not in {"hh", "com"}:
+            raise ValueError(
+                f"Unknown consumer class: {consumer_class!r}. Expected 'hh' "
+                "(households) or 'com' (non-household / commercial)."
+            )
+        narrowed = tuple(c for c in categories if c.level_1_cat == wanted)
+        if not narrowed:
+            raise ValueError(
+                f"No end-user category matches consumer class {wanted!r} "
+                f"within the selected category {category!r}."
+            )
+        categories = narrowed
 
     return suppliers, categories
 
@@ -442,6 +478,7 @@ def get_end_user_prices(
     end_date: Optional[str] = None,
     supplier: Optional[str] = None,
     category: Optional[str] = None,
+    consumer_class: Optional[str] = None,
     include_vat: bool = False,
     include_wholesale_benchmark: bool = False,
     currency: str = "gel",
@@ -469,7 +506,7 @@ def get_end_user_prices(
             "get_end_user_prices serves GEL/kWh only; the view stores no USD tariff."
         )
 
-    suppliers, categories = _resolve_selection(supplier, category)
+    suppliers, categories = _resolve_selection(supplier, category, consumer_class)
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)
@@ -496,6 +533,14 @@ def get_end_user_prices(
 
     if not df.empty:
         df = df.copy()
+        # The same price expressed per MWh. Wholesale prices are GEL/MWh, so
+        # any comparison restates these upward -- and a model that does the
+        # multiplication itself produces numbers in no row, which
+        # strict-numeric grounding then strips. On 2026-08-15 fourteen tokens
+        # (167 ... 303) were rejected this way, cutting a 3,433-character
+        # answer to 415: they were exactly these values, per MWh.
+        if NET_TOTAL_COLUMN in df.columns:
+            df["final_price_net_gel_mwh"] = df[NET_TOTAL_COLUMN] * KWH_PER_MWH
         # The view stores short codes. An answer that says "eps" is quoting a
         # database key at someone who asked about a company, and a chart legend
         # showing one unlabelled line is worse still, so the readable names

@@ -116,12 +116,20 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
         "name": "general_definitions",
         "concepts": ["definition", "terminology", "general electricity market concepts"],
         "use_for": "General definitions and conceptual electricity-market explanations.",
+        "example_questions": [
+            "What is balancing electricity?",
+            "Define guaranteed capacity.",
+        ],
     },
     {
         "name": "balancing_price",
         "concepts": ["balancing price", "p_bal", "price drivers", "shares", "xrate", "variation",
                       "surplus price behavior", "oversupply", "excess supply", "curtailment price impact"],
         "use_for": "Balancing price formation, variation, drivers, and seasonal patterns; also why prices stay high or rise during surplus/oversupply/curtailment — answerable conceptual questions (pair with cross_border_trade), not ambiguous.",
+        "example_questions": [
+            "Why did the balancing price change in May 2024?",
+            "What drives the balancing price?",
+        ],
     },
     {
         "name": "market_structure",
@@ -129,18 +137,30 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
                       "transitory period", "market design", "market model", "target model",
                       "power-plant liberalization", "deregulation plan", "regulation status"],
         "use_for": "Market participants, institutions, market structure, market model design, and policy/status questions about power-plant liberalization or deregulation.",
+        "example_questions": [
+            "What is the situation with power plant liberalization?",
+            "Who are the market participants?",
+        ],
     },
     {
         "name": "direct_contracts",
         "concepts": ["direct contract", "bilateral contract", "contract registration",
                       "contractual application", "project company", "guaranteed purchase"],
         "use_for": "Direct-contract eligibility, registration, termination, project-company contract treatment, and how bilateral contracts affect balancing settlement.",
+        "example_questions": [
+            "How do direct contracts work?",
+            "What share of supply is under direct contracts?",
+        ],
     },
     {
         "name": "cross_border_trade",
         "concepts": ["import", "export", "transit", "cross-border capacity allocation",
                       "ATC", "NTC", "surplus", "curtailment", "emergency import"],
         "use_for": "Import/export/transit RULES: cross-border capacity allocation, export priority, emergency cross-border trade, surplus, curtailment, and TSO restriction powers. For physical interconnection capacity (TTC values, operating modes, HVDC/transformer limits, the synchronous ring, planned interconnections), use cross_border_capacity.",
+        "example_questions": [
+            "How much electricity did Georgia import in 2024?",
+            "Which countries does Georgia trade electricity with?",
+        ],
     },
     {
         "name": "cross_border_capacity",
@@ -149,18 +169,30 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
                       "Kavkasioni", "Stepantsminda", "Gardabani interconnection", "Meskheti",
                       "Akhaltsikhe", "Marneuli-Ayrum", "synchronous ring", "Black Sea interconnection"],
         "use_for": "Physical cross-border interconnection infrastructure: TTC values, summer/winter transfer capacity, operating modes (synchronous/isolated/back-to-back), the Akhaltsikhe HVDC and Gardabani transformer limits, the Russia-Georgia-Azerbaijan synchronous-ring limitation, and planned interconnection projects (including the Black Sea/Romania link). Pair with cross_border_trade for the rules/rights side.",
+        "example_questions": [
+            "What is the interconnection capacity with Turkey?",
+            "How is cross-border capacity allocated?",
+        ],
     },
     {
         "name": "exchange_transition",
         "concepts": ["GENEX", "exchange transition", "Article 17^4", "day-ahead",
                       "intraday", "eligible buyers", "eligible sellers", "voluntary exchange"],
         "use_for": "July 2024-July 2027 exchange transition, voluntary day-ahead/intraday participation, exchange eligibility, and exchange interaction with monthly balancing.",
+        "example_questions": [
+            "Who can trade on the electricity exchange?",
+            "When does the exchange become mandatory?",
+        ],
     },
     {
         "name": "tariffs",
         "concepts": ["regulated tariff", "GNERC", "Enguri", "Gardabani", "cost-plus",
                       "guaranteed capacity fee"],
         "use_for": "GENERATION-side tariffs: what a regulated plant is paid (GEL/MWh), tariff entities, cost-plus logic. For network tariffs or the end-user price, use network_supply_tariffs.",
+        "example_questions": [
+            "What tariff is Enguri paid?",
+            "Compare regulated HPP and TPP tariffs in 2024.",
+        ],
     },
     {
         "name": "network_supply_tariffs",
@@ -169,37 +201,66 @@ QUESTION_ANALYSIS_TOPIC_CATALOG: List[Dict[str, Any]] = [
                       "public service", "telasi", "telmico", "voltage level",
                       "consumption band"],
         "use_for": "RETAIL-side tariffs: the regulated end-user price (GEL/kWh) and its distribution/supply/transmission components, consumption bands, voltage levels, and the guaranteed capacity fee pass-through. For what a plant is paid, use tariffs.",
+        "example_questions": [
+            "What is the trend in end-user electricity prices?",
+            "How does the final end-user price compare with the balancing price for non-household consumers?",
+            "How have distribution tariffs changed over time?",
+            "What does a household pay per kWh in Tbilisi?",
+        ],
     },
     {
         "name": "cfd_ppa",
         "concepts": ["CfD", "PPA", "support scheme", "strike price"],
         "use_for": "Support schemes, PPA/CfD concepts, and scheme-specific explanations.",
+        "example_questions": [
+            "What is a CfD and how does it work?",
+            "Which plants have PPAs?",
+        ],
     },
     {
         "name": "pso_trading",
         "concepts": ["PSO", "public service obligation", "Telmico", "EP Georgia Supply",
                       "procurement", "universal service", "public service", "cascade distribution"],
         "use_for": "PSO supplier procurement structures, Telmico and EP Georgia trading results, and Enguri/Vardnili cascade supply distribution.",
+        "example_questions": [
+            "How much did Telmico procure under PSO?",
+            "How is Enguri cascade output distributed?",
+        ],
     },
     {
         "name": "currency_influence",
         "concepts": ["exchange rate", "GEL/USD", "xrate", "USD-linked costs"],
         "use_for": "Exchange-rate impact and currency-linked price pressure.",
+        "example_questions": [
+            "How does the GEL/USD rate affect electricity prices?",
+            "What is the exchange rate trend?",
+        ],
     },
     {
         "name": "seasonal_patterns",
         "concepts": ["seasonality", "summer", "winter", "seasonal trend"],
         "use_for": "Seasonal market behavior and seasonal trend questions.",
+        "example_questions": [
+            "How do prices differ between summer and winter?",
+            "What is the seasonal pattern of hydro generation?",
+        ],
     },
     {
         "name": "generation_mix",
         "concepts": ["generation", "technology mix", "hydro", "thermal", "wind", "solar"],
         "use_for": "Generation composition and generation quantity questions.",
+        "example_questions": [
+            "Show the generation mix by technology since 2020.",
+            "What share of generation is hydro?",
+        ],
     },
     {
         "name": "sql_examples",
         "concepts": ["query patterns", "SQL examples", "analysis templates"],
         "use_for": "Planning support for SQL-oriented data queries.",
+        "example_questions": [
+            "Run a custom aggregation over the tariff table.",
+        ],
     },
 ]
 
@@ -231,6 +292,10 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
             {"tool": "get_balancing_composition", "when": "explaining price drivers or composition effects on price"},
             {"tool": "get_tariffs", "when": "analyzing regulated cost impact on balancing price"},
         ],
+        "example_questions": [
+            "Balancing price trend in USD from 2021 to 2022.",
+            "What was the deregulated price last year?",
+        ],
     },
     {
         "name": "get_tariffs",
@@ -238,6 +303,10 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "use_for": "Tariff lookups and tariff comparisons.",
         "avoid_for": "Balancing price questions, conceptual definitions, generation mix questions, policy/status questions about liberalization or deregulation, and end-user/retail/distribution/transmission/supply tariffs (those are network_supply_tariffs, served from demand_tariff_mv).",
         "main_params": ["entities", "currency", "start_date", "end_date"],
+        "example_questions": [
+            "What tariff is Enguri paid in 2024?",
+            "Compare regulated HPP and new TPP tariffs.",
+        ],
     },
     {
         "name": "get_end_user_prices",
@@ -245,9 +314,18 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
                       "distribution tariff", "supply tariff", "telasi", "telmico"],
         "use_for": "Regulated end-user (retail) electricity prices in GEL/kWh and their distribution/supply/transmission components, by supplier and consumer category.",
         "avoid_for": "What a generating plant is paid — use get_tariffs. Wholesale or balancing prices — use get_prices.",
-        "main_params": ["supplier", "category", "start_date", "end_date", "include_vat"],
+        "main_params": [
+            "supplier", "category", "consumer_class",
+            "start_date", "end_date", "include_vat",
+        ],
         "combined_with": [
             {"tool": "get_prices", "when": "comparing tariffs against market prices"},
+        ],
+        "example_questions": [
+            "What is the trend in end-user electricity prices?",
+            "How have distribution tariffs changed over time?",
+            "How does the final end-user price compare with the balancing price for non-household consumers?",
+            "What does a household in Tbilisi pay per kWh, including VAT?",
         ],
     },
     {
@@ -266,6 +344,10 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "combined_with": [
             {"tool": "get_prices", "when": "correlating generation patterns with price movements"},
         ],
+        "example_questions": [
+            "Show generation mix by technology from 2020 to 2023.",
+            "How much electricity was generated in 2024?",
+        ],
     },
     {
         "name": "get_balancing_composition",
@@ -275,6 +357,10 @@ QUESTION_ANALYSIS_TOOL_CATALOG: List[Dict[str, Any]] = [
         "main_params": ["entities", "start_date", "end_date"],
         "combined_with": [
             {"tool": "get_prices", "when": "understanding how composition shifts affect prices"},
+        ],
+        "example_questions": [
+            "What was the share of import in balancing electricity?",
+            "How did PPA share of balancing purchases change?",
         ],
     },
 ]

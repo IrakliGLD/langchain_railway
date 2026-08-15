@@ -4,14 +4,26 @@
   "registry_version": "1.0.0",
   "metrics": {
     "price.gel": {
-      "source_metrics": ["p_bal_gel", "p_dereg_gel", "p_gcap_gel", "balancing_price_gel", "deregulated_price_gel", "guaranteed_capacity_price_gel"],
+      "source_metrics": [
+        "p_bal_gel",
+        "p_dereg_gel",
+        "p_gcap_gel",
+        "balancing_price_gel",
+        "deregulated_price_gel",
+        "guaranteed_capacity_price_gel"
+      ],
       "source_metric_patterns": [],
       "dimension": "currency_gel_per_energy",
       "storage_unit": "GEL/MWh",
       "canonical_unit": "tetri/kWh",
       "display_unit": "tetri/kWh",
       "to_canonical_factor": 0.1,
-      "compatible_aggregations": ["mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 3,
       "filter_unit_aliases": {
         "gel/mwh": 0.1,
@@ -20,14 +32,26 @@
       }
     },
     "price.usd": {
-      "source_metrics": ["p_bal_usd", "p_dereg_usd", "p_gcap_usd", "balancing_price_usd", "deregulated_price_usd", "guaranteed_capacity_price_usd"],
+      "source_metrics": [
+        "p_bal_usd",
+        "p_dereg_usd",
+        "p_gcap_usd",
+        "balancing_price_usd",
+        "deregulated_price_usd",
+        "guaranteed_capacity_price_usd"
+      ],
       "source_metric_patterns": [],
       "dimension": "currency_usd_per_energy",
       "storage_unit": "USD/MWh",
       "canonical_unit": "USD cents/kWh",
       "display_unit": "USD cents/kWh",
       "to_canonical_factor": 0.1,
-      "compatible_aggregations": ["mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 3,
       "filter_unit_aliases": {
         "usd/mwh": 0.1,
@@ -38,14 +62,23 @@
       }
     },
     "tariff.gel": {
-      "source_metrics": ["tariff_gel"],
-      "source_metric_patterns": ["*_tariff_gel"],
+      "source_metrics": [
+        "tariff_gel"
+      ],
+      "source_metric_patterns": [
+        "*_tariff_gel"
+      ],
       "dimension": "currency_gel_per_energy",
       "storage_unit": "GEL/MWh",
       "canonical_unit": "GEL/MWh",
       "display_unit": "GEL/MWh",
       "to_canonical_factor": 1.0,
-      "compatible_aggregations": ["mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 3,
       "filter_unit_aliases": {
         "gel/mwh": 1.0,
@@ -54,14 +87,23 @@
       }
     },
     "tariff.usd": {
-      "source_metrics": ["tariff_usd"],
-      "source_metric_patterns": ["*_tariff_usd"],
+      "source_metrics": [
+        "tariff_usd"
+      ],
+      "source_metric_patterns": [
+        "*_tariff_usd"
+      ],
       "dimension": "currency_usd_per_energy",
       "storage_unit": "USD/MWh",
       "canonical_unit": "USD/MWh",
       "display_unit": "USD/MWh",
       "to_canonical_factor": 1.0,
-      "compatible_aggregations": ["mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 3,
       "filter_unit_aliases": {
         "usd/mwh": 1.0,
@@ -72,14 +114,30 @@
       }
     },
     "energy.quantity": {
-      "source_metrics": ["quantity_tech", "generation_quantity", "total_demand", "total_domestic_generation", "local_generation", "import_dependent_supply", "total_supply"],
-      "source_metric_patterns": ["quantity_*"],
+      "source_metrics": [
+        "quantity_tech",
+        "generation_quantity",
+        "total_demand",
+        "total_domestic_generation",
+        "local_generation",
+        "import_dependent_supply",
+        "total_supply"
+      ],
+      "source_metric_patterns": [
+        "quantity_*"
+      ],
       "dimension": "energy",
       "storage_unit": "thousand MWh",
       "canonical_unit": "MWh",
       "display_unit": "MWh",
       "to_canonical_factor": 1000.0,
-      "compatible_aggregations": ["sum", "mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "sum",
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 3,
       "filter_unit_aliases": {
         "thousand mwh": 1000.0,
@@ -88,14 +146,25 @@
       }
     },
     "ratio.share": {
-      "source_metrics": ["generation_share", "balancing_share", "import_dependency_ratio"],
-      "source_metric_patterns": ["share_*"],
+      "source_metrics": [
+        "generation_share",
+        "balancing_share",
+        "import_dependency_ratio"
+      ],
+      "source_metric_patterns": [
+        "share_*"
+      ],
       "dimension": "dimensionless_ratio",
       "storage_unit": "ratio",
       "canonical_unit": "%",
       "display_unit": "%",
       "to_canonical_factor": 100.0,
-      "compatible_aggregations": ["mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 2,
       "filter_unit_aliases": {
         "ratio": 100.0,
@@ -105,17 +174,53 @@
       }
     },
     "exchange_rate.gel_usd": {
-      "source_metrics": ["xrate", "exchange_rate"],
+      "source_metrics": [
+        "xrate",
+        "exchange_rate"
+      ],
       "source_metric_patterns": [],
       "dimension": "exchange_rate_gel_per_usd",
       "storage_unit": "GEL/USD",
       "canonical_unit": "GEL/USD",
       "display_unit": "GEL/USD",
       "to_canonical_factor": 1.0,
-      "compatible_aggregations": ["mean", "min", "max", "median"],
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
       "precision": 4,
       "filter_unit_aliases": {
         "gel/usd": 1.0
+      }
+    },
+    "retail_price.gel": {
+      "source_metrics": [
+        "final_price_net_gel_kwh",
+        "total_gross_gel_kwh",
+        "distribution_tariff_gel_kwh",
+        "supply_tariff_gel_kwh",
+        "transmission_tariff_gel_kwh",
+        "wholesale_benchmark_gel_kwh"
+      ],
+      "source_metric_patterns": [],
+      "dimension": "currency_gel_per_energy",
+      "storage_unit": "GEL/kWh",
+      "canonical_unit": "tetri/kWh",
+      "display_unit": "tetri/kWh",
+      "to_canonical_factor": 100.0,
+      "compatible_aggregations": [
+        "mean",
+        "min",
+        "max",
+        "median"
+      ],
+      "precision": 3,
+      "filter_unit_aliases": {
+        "gel/kwh": 100.0,
+        "tetri/kwh": 1.0,
+        "tetri": 1.0
       }
     }
   }

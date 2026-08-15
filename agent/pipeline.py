@@ -476,7 +476,19 @@ def _is_retail_data_question(ctx: QueryContext) -> bool:
         candidate.name.value
         for candidate in (analysis.knowledge.candidate_topics or [])
     }
-    if KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value not in topics:
+    question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
+    haystack = scope_haystack(analysis.entity_scope, question)
+
+    # Topic nomination is not reliable enough to be the only key. On
+    # 2026-08-15 the retail comparison came back with candidate_topics
+    # [tariffs, market_structure, balancing_price] -- network_supply_tariffs
+    # absent entirely -- so the question was answered as prose while the data
+    # sat one call away. The WORDING is the second key.
+    is_retail = (
+        KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value in topics
+        or looks_like_retail_tariff_question(haystack)
+    )
+    if not is_retail:
         return False
 
     # Ambiguity about WHICH company or category is not a reason to withhold
@@ -486,11 +498,12 @@ def _is_retail_data_question(ctx: QueryContext) -> bool:
     if analysis.answer_kind == AnswerKind.CLARIFY:
         return True
 
+    # A comparison against the wholesale side is a data question by nature.
+    if asks_for_wholesale_comparison(haystack):
+        return True
+
     # Already scoped: certainly a data question.
-    question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
-    supplier, category = resolve_end_user_scope(
-        scope_haystack(analysis.entity_scope, question)
-    )
+    supplier, category = resolve_end_user_scope(haystack)
     return bool(supplier or category)
 
 
