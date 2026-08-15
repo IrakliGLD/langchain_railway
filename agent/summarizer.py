@@ -412,6 +412,8 @@ _VISIBLE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
 def _enforce_atomic_conceptual_list(ctx: QueryContext) -> None:
     """Render one visible bullet for every structured LIST claim."""
 
+    if ctx.terminal_outcome:
+        return
     if not ctx.has_authoritative_question_analysis:
         return
     if ctx.question_analysis.answer_kind != AnswerKind.LIST:
@@ -1051,7 +1053,13 @@ def answer_conceptual(ctx: QueryContext) -> QueryContext:
         shipped_answer_chars=len(ctx.summary or ""),
         summary_source=ctx.summary_source,
     )
-    log.info("✅ Conceptual answer generated")
+    if ctx.terminal_outcome:
+        log.info(
+            "Conceptual answer completed with terminal outcome: %s",
+            ctx.terminal_outcome,
+        )
+    else:
+        log.info("✅ Conceptual answer generated")
     return ctx
 
 # Deterministic direct answers avoid LLM summarization when the analytical evidence is already complete.

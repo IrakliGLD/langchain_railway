@@ -2900,7 +2900,13 @@ def enrich(ctx: QueryContext) -> QueryContext:
                     structured_horizon,
                 )
             ctx.stats_hint += f"\n\n--- FORECAST NOTE ---\n{_forecast_note}"
-            log.info(_forecast_note)
+            projected_rows = 0
+            if "is_forecast" in ctx.df.columns:
+                projected_rows = int(ctx.df["is_forecast"].fillna(False).astype(bool).sum())
+            log.info(
+                "Forecast generation completed: projected_rows=%d",
+                projected_rows,
+            )
         except Exception as _e:
             log.warning(f"Forecast generation failed: {_e}")
 

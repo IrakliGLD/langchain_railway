@@ -9,7 +9,9 @@ and turning an ambiguous NVIDIA delivery into a pipeline 500 on /ask.
 
 from __future__ import annotations
 
+import logging
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
 os.environ.setdefault("ENAI_GATEWAY_SECRET", "test-gateway-key")
@@ -21,6 +23,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import pytest
 
 from agent import summarizer
+from contracts.question_analysis import AnswerKind
 from models import QueryContext, TerminalOutcome
 from utils.provider_attempts import (
     ProviderDeliveryDisposition,
@@ -151,7 +154,7 @@ class TestTimeoutClassification:
 
 class TestConceptualPathDegrades:
     def test_ambiguous_provider_failure_returns_transient_outcome_without_second_call(
-        self, monkeypatch
+        self, monkeypatch, caplog
     ):
         monkeypatch.setattr(
             summarizer, "llm_summarize_structured_conceptual", _ambiguous_failure,
@@ -165,11 +168,34 @@ class TestConceptualPathDegrades:
         ctx = QueryContext(query="What is the balancing market?")
         ctx.is_conceptual = True
 
-        out = summarizer.answer_conceptual(ctx)
+        with caplog.at_level(logging.INFO, logger="Enai"):
+            out = summarizer.answer_conceptual(ctx)
 
         assert out.summary_source == "transient_failure"
         assert out.terminal_outcome == TerminalOutcome.TRANSIENT_FAILURE.value
         assert legacy_calls == []
+        messages = [record.getMessage() for record in caplog.records]
+        assert not any("Conceptual answer generated" in message for message in messages)
+        assert any(
+            "Conceptual answer completed with terminal outcome" in message
+            for message in messages
+        )
+
+    def test_atomic_list_renderer_skips_terminal_outcome_without_warning(self, caplog):
+        ctx = QueryContext(query="List the eligible participants")
+        ctx.question_analysis = SimpleNamespace(answer_kind=AnswerKind.LIST)
+        ctx.question_analysis_source = "llm_active"
+        ctx.summary_source = "transient_failure"
+        ctx.terminal_outcome = TerminalOutcome.TRANSIENT_FAILURE.value
+        ctx.summary_claims = []
+
+        with caplog.at_level(logging.WARNING, logger="Enai"):
+            summarizer._enforce_atomic_conceptual_list(ctx)
+
+        assert not any(
+            "Atomic list contract could not render" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 if __name__ == "__main__":

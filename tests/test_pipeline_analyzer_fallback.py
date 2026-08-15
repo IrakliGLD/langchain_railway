@@ -5,6 +5,7 @@ forecast, why/explanation) must still fire via the keyword-derived fallback
 published at ``ctx.effective_answer_kind``.  See plan
 ``dreamy-imagining-ritchie.md`` Finding 1.
 """
+import logging
 import os
 
 os.environ.setdefault("SUPABASE_DB_URL", "postgresql://user:pass@localhost/db")
@@ -81,7 +82,7 @@ def test_resolve_effective_answer_kind_empty_query_returns_none():
     assert pipeline._resolve_effective_answer_kind(ctx) is None
 
 
-def test_analyzer_enrich_forecast_fires_without_authoritative_qa(monkeypatch):
+def test_analyzer_enrich_forecast_fires_without_authoritative_qa(monkeypatch, caplog):
     """Stage 3 forecast branch must run when effective_answer_kind=FORECAST,
     even with no authoritative QA (the F1 regression surface).
     """
@@ -98,9 +99,14 @@ def test_analyzer_enrich_forecast_fires_without_authoritative_qa(monkeypatch):
 
     called = {"forecast": False}
 
+    sensitive_forecast_note = "FAKE FORECAST NOTE\n2026 projected value = 123.45"
+
     def _fake_forecast(df, query):
         called["forecast"] = True
-        return df, "FAKE FORECAST NOTE"
+        result = df.copy()
+        result["is_forecast"] = False
+        result.loc[result.index[-1], "is_forecast"] = True
+        return result, sensitive_forecast_note
 
     monkeypatch.setattr(analyzer, "_generate_cagr_forecast", _fake_forecast)
     # Short-circuit heavy branches so the test stays focused.
@@ -109,10 +115,13 @@ def test_analyzer_enrich_forecast_fires_without_authoritative_qa(monkeypatch):
     monkeypatch.setattr(analyzer, "_materialize_chart_override", lambda ctx: None)
     monkeypatch.setattr(analyzer, "_append_column_aggregates", lambda ctx: None)
 
-    analyzer.enrich(ctx)
+    with caplog.at_level(logging.INFO, logger="Enai"):
+        analyzer.enrich(ctx)
 
     assert called["forecast"] is True
-    assert "FAKE FORECAST NOTE" in ctx.stats_hint
+    assert sensitive_forecast_note in ctx.stats_hint
+    assert sensitive_forecast_note not in caplog.text
+    assert "Forecast generation completed: projected_rows=1" in caplog.text
 
 
 def test_analyzer_enrich_why_fires_without_authoritative_qa(monkeypatch):

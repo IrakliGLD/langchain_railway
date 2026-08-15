@@ -111,6 +111,11 @@ class Metrics:
         # distinguishes an evidence-unavailable degrade from a conceptual answer
         # so a data failure is never counted as a conceptual success.
         self.terminal_outcome_events = {}
+        # Analyzer requests that cannot be resolved against the collected frame.
+        # Counts only events and request cardinality; metric names and user text
+        # are deliberately excluded from aggregate observability.
+        self.unresolvable_requested_metric_event_count = 0
+        self.unresolvable_requested_metric_count = 0
         # F3: one assignment event per P4 gate and request. Keys are
         # "<gate>:<active|holdback|disabled|ineligible>". No actor, session,
         # request identifier, or hash is retained.
@@ -532,6 +537,19 @@ class Metrics:
         self.terminal_outcome_events[key] = self.terminal_outcome_events.get(key, 0) + 1
 
     @_synchronized
+    def log_unresolvable_requested_metrics(self, count: int) -> None:
+        """Track unresolvable analyzer requests without retaining their content."""
+        normalized_count = max(0, int(count or 0))
+        if not normalized_count:
+            return
+        self.unresolvable_requested_metric_event_count += 1
+        self.unresolvable_requested_metric_count += normalized_count
+        log.warning(
+            "Post-enrichment requested metrics unresolvable: count=%d",
+            normalized_count,
+        )
+
+    @_synchronized
     def log_p4_rollout(self, gate: str, status: str) -> None:
         """Track effective P4 rollout assignments without identity material."""
         key = (
@@ -644,6 +662,10 @@ class Metrics:
             "plan_validation_events": dict(self.plan_validation_events),
             "chart_source_events": dict(self.chart_source_events),
             "terminal_outcome_events": dict(self.terminal_outcome_events),
+            "unresolvable_requested_metric_events": (
+                self.unresolvable_requested_metric_event_count
+            ),
+            "unresolvable_requested_metrics": self.unresolvable_requested_metric_count,
             "p4_rollout_events": dict(self.p4_rollout_events),
             "tool_calls_by_source": dict(self.tool_calls_by_source),
             "tool_time_by_source": dict(self.tool_time_by_source),

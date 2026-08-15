@@ -140,6 +140,14 @@ from utils.trace_logging import trace_detail
 log = logging.getLogger("Enai")
 
 
+def _observe_unresolvable_requested_metrics(ctx: QueryContext) -> list[str]:
+    """Emit count-only telemetry and return names for privacy-safe trace redaction."""
+    unresolvable = _unresolvable_requested_metrics(ctx)
+    if unresolvable:
+        metrics.log_unresolvable_requested_metrics(len(unresolvable))
+    return unresolvable
+
+
 def _remaining_request_seconds(ctx: QueryContext, stage: str) -> float | None:
     deadline = getattr(ctx, "request_deadline", None)
     if deadline is None:
@@ -598,6 +606,7 @@ def _resolve_effective_answer_kind(ctx) -> AnswerKind | None:
 _MARKET_STRUCTURE_TOPICS = frozenset({
     KnowledgeTopicName.BALANCING_PRICE,
     KnowledgeTopicName.TARIFFS,
+    KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS,
     KnowledgeTopicName.MARKET_STRUCTURE,
     KnowledgeTopicName.DIRECT_CONTRACTS,
     KnowledgeTopicName.CROSS_BORDER_TRADE,
@@ -3399,6 +3408,7 @@ def _process_query_impl(
 
     ctx.missing_evidence_for_metrics = _missing_requested_evidence(ctx)
     analysis_readiness_gaps = validate_analysis_requirements(ctx)
+    unresolvable_requested_metrics = _observe_unresolvable_requested_metrics(ctx)
     trace_detail(
         log,
         ctx,
@@ -3409,7 +3419,7 @@ def _process_query_impl(
         # Excused from the shortfall above, so it has to stay visible here:
         # a metric naming no column the frame holds is an analyzer error, not
         # evidence the collectors failed to fetch.
-        unresolvable_requested_metrics=_unresolvable_requested_metrics(ctx),
+        unresolvable_requested_metrics=unresolvable_requested_metrics,
         analysis_readiness_gaps=analysis_readiness_gaps,
     )
     if analysis_readiness_gaps:
