@@ -201,3 +201,43 @@ def test_the_guidance_requires_answering_before_offering_to_narrow():
     assert "3.3–6–10" in rules or "3.3-6-10" in rules
     assert "35–110" in rules or "35-110" in rules
     assert "101" in rules and "301" in rules
+
+
+class TestTheComparisonQuestionReachesData:
+    """"for the third, comparison type question, where i still need
+    comparison, for non-household consumers" -- 2026-08-15.
+
+    That question came back with candidate_topics
+    [tariffs, market_structure, balancing_price]: network_supply_tariffs was
+    not nominated at all, so a topic-only gate left it on the knowledge path
+    writing prose about a comparison it never made.
+    """
+
+    def test_retail_wording_routes_to_data_without_the_topic(self):
+        from agent.pipeline import _derive_response_mode
+
+        ctx = _ctx(
+            "How does the final end-user electricity price compare with the "
+            "balancing price for non-household consumers?",
+            topics=("tariffs", "market_structure", "balancing_price"),
+            scores=(0.9, 0.8, 0.7),
+        )
+        assert _derive_response_mode(ctx) == "data_primary"
+
+    def test_a_pure_wholesale_question_is_still_left_alone(self):
+        from agent.pipeline import _derive_response_mode
+
+        ctx = _ctx(
+            "What drives the balancing price?",
+            topics=("balancing_price", "market_structure"),
+            scores=(0.95, 0.5),
+        )
+        assert _derive_response_mode(ctx) == "knowledge_primary"
+
+    def test_the_guidance_demands_an_actual_comparison(self):
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "retail-tariff-rules.md").lower()
+        assert "is not a comparison" in rules
+        assert "do not convert units yourself" in rules
+        assert "final_price_net_gel_mwh" in rules

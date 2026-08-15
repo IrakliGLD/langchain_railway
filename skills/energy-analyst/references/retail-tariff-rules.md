@@ -64,11 +64,22 @@ and will be rejected as ungrounded.
 
 ## Comparing against the wholesale price
 
-Wholesale prices are **GEL/MWh**; these tariffs are **GEL/kWh**. Divide the
-wholesale figure by 1000 before any comparison, and add the guaranteed
-capacity fee (`p_gcap_gel`) to the balancing price, because the retail supply
-component already contains it. Comparing without both adjustments overstates
-the retail margin.
+Wholesale prices are **GEL/MWh**; these tariffs are **GEL/kWh**. Add the
+guaranteed capacity fee (`p_gcap_gel`) to the balancing price before
+comparing, because the retail supply component already contains it. Comparing
+without it overstates the retail margin.
+
+**Do not convert units yourself.** Both renderings are already in the data:
+`final_price_net_gel_kwh` and `final_price_net_gel_mwh` are the same price per
+kWh and per MWh. Quote whichever the comparison needs. Multiplying a per-kWh
+figure by 1000 in your head produces a number that appears in no row, and it
+will be rejected as ungrounded and cut from the answer — that is exactly what
+happened to fourteen figures on 2026-08-15.
+
+When the question asks for a comparison against the wholesale or balancing
+price, actually make it: state the retail price, the wholesale benchmark
+including the capacity fee, and the spread between them, per series. A
+description of how the comparison would work is not a comparison.
 
 ## The eight categories
 
