@@ -62,7 +62,12 @@ from agent.provenance import (
 from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.report_evidence import build_report_narrative_items
 from agent.report_intent import report_context_requires_table
-from agent.router import ROUTER_ENABLE_SEMANTIC_FALLBACK, _last_semantic_scores, match_tool
+from agent.router import (
+    ROUTER_ENABLE_SEMANTIC_FALLBACK,
+    _last_semantic_scores,
+    looks_like_retail_tariff_question,
+    match_tool,
+)
 from agent.scenario_contract import (
     extract_scenario_requests,
     ground_scenario_request,
@@ -71,6 +76,12 @@ from agent.scenario_contract import (
 )
 from agent.stage_orchestrator import PipelineStageOrchestrator
 from agent.tools import execute_tool
+from agent.tools.end_user_price_tools import (
+    asks_for_wholesale_comparison,
+)
+from agent.tools.end_user_price_tools import (
+    resolve_scope as resolve_end_user_scope,
+)
 from agent.tools.types import ToolInvocation
 from analysis.shares import compute_entity_price_contributions
 from analysis.system_quantities import normalize_tool_dataframe
@@ -425,6 +436,49 @@ def _derive_response_mode(ctx: QueryContext) -> str:
     )
 
 
+def _needs_end_user_scope_clarification(ctx: QueryContext) -> bool:
+    """Whether a retail-vs-wholesale comparison is too unscoped to answer.
+
+    There are eight end-user categories across two supply companies and their
+    final prices differ, so "how does the end-user price compare with the
+    balancing price" has sixteen different correct answers. Averaging them
+    produces a spread no customer experiences, which is precisely what the
+    domain owner rejected on 2026-08-15. Both axes must be pinned before the
+    comparison means anything.
+
+    Deliberately narrow: only the benchmark COMPARISON asks. A plain trend or
+    level question shows every category side by side instead (see
+    ``_append_column_aggregates``), which is the same anti-mixing rule
+    expressed as breadth rather than as a question.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return False
+
+    topics = {
+        candidate.name.value
+        for candidate in (ctx.question_analysis.knowledge.candidate_topics or [])
+    }
+    if KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value not in topics:
+        return False
+
+    # The analyzer's English canonicalization, so a Georgian or Russian
+    # question is read the same as an English one.
+    question = ctx.resolved_query or ctx.question_analysis.canonical_query_en or ctx.query
+    lowered = question.lower()
+
+    # Topic alone is too loose: "what drives the balancing price" can carry the
+    # retail topic as a candidate, and asking that user to pick a household
+    # consumption band would be nonsense. Require retail wording as well, so
+    # the gate fires only on a genuine retail-vs-wholesale comparison.
+    if not looks_like_retail_tariff_question(lowered):
+        return False
+    if not asks_for_wholesale_comparison(lowered):
+        return False
+
+    supplier, category = resolve_end_user_scope(question)
+    return not (supplier and category)
+
+
 def _derive_resolution_policy(ctx: QueryContext) -> str:
     """Derive whether the pipeline should answer or request clarification."""
 
@@ -436,6 +490,15 @@ def _derive_resolution_policy(ctx: QueryContext) -> str:
         # The user already chose one of the offered clarify branches, so this turn
         # should continue with that interpretation instead of re-asking.
         return ResolutionPolicy.ANSWER
+
+    if ctx.clarify_selection_override:
+        # Same rule for the deterministic gates below: a turn that answers a
+        # clarification must never re-ask it.
+        return ResolutionPolicy.ANSWER
+
+    if _needs_end_user_scope_clarification(ctx):
+        ctx.clarify_reason = "end_user_scope_unspecified"
+        return ResolutionPolicy.CLARIFY
 
     if ctx.has_authoritative_question_analysis:
         if ctx.question_analysis.routing.preferred_path in (
