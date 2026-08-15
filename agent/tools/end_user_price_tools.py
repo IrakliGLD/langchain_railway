@@ -124,6 +124,44 @@ WHOLESALE_COMPARISON_MARKERS: Tuple[str, ...] = (
 )
 
 
+#: Components in tariff order: the stack a customer's bill is built from.
+COMPONENT_COLUMNS: Tuple[str, ...] = (
+    "transmission_tariff_gel_kwh",
+    "distribution_tariff_gel_kwh",
+    "supply_tariff_gel_kwh",
+)
+
+#: The published total, net of VAT, and its gross twin when VAT was requested.
+NET_TOTAL_COLUMN = "final_price_net_gel_kwh"
+GROSS_TOTAL_COLUMN = "total_gross_gel_kwh"
+
+#: Columns that identify which series a row belongs to.
+SERIES_COLUMNS: Tuple[str, ...] = ("supplier", "category")
+
+
+def is_retail_price_frame(columns) -> bool:
+    """Whether a result frame came from ``get_end_user_prices``.
+
+    Identified by shape rather than by provenance so it also holds for a frame
+    rebuilt downstream. Requires the series keys AND the published total: a
+    frame carrying components alone cannot be charted as a price stack.
+    """
+    # set(columns) directly: a pandas Index has no usable truth value, so the
+    # customary ``columns or ()`` guard raises instead of defaulting.
+    present = set(columns) if columns is not None else set()
+    return (
+        set(SERIES_COLUMNS) <= present
+        and NET_TOTAL_COLUMN in present
+        and set(COMPONENT_COLUMNS) <= present
+    )
+
+
+def headline_price_column(columns) -> str:
+    """The column an answer should lead with: gross when VAT was requested."""
+    present = set(columns) if columns is not None else set()
+    return GROSS_TOTAL_COLUMN if GROSS_TOTAL_COLUMN in present else NET_TOTAL_COLUMN
+
+
 def resolve_scope(text: str) -> Tuple[Optional[str], Optional[str]]:
     """Best-effort ``(supplier, category)`` from free text.
 
