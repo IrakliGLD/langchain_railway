@@ -60,6 +60,60 @@ def looks_like_plant_fleet_question(text: str) -> bool:
     return any(marker in lowered for marker in _PLANT_FLEET_MARKERS)
 
 
+#: Topics backed by data we actually hold. An "ambiguous" question about one
+#: of these can be answered from the data and narrowed afterwards; the rest are
+#: genuinely knowledge subjects where prose is the right answer.
+#:
+#: Deliberately a denylist-by-omission rather than wording: keyword markers
+#: have failed three times in this work (retail routing twice, plant fleet
+#: once) because the phrasings that matter are unbounded, while the set of
+#: datasets is small, known and stable.
+_DATA_BACKED_TOPICS = frozenset({
+    KnowledgeTopicName.BALANCING_PRICE.value,
+    KnowledgeTopicName.GENERATION_MIX.value,
+    KnowledgeTopicName.TARIFFS.value,
+    KnowledgeTopicName.NETWORK_SUPPLY_TARIFFS.value,
+    KnowledgeTopicName.CROSS_BORDER_TRADE.value,
+    KnowledgeTopicName.PSO_TRADING.value,
+    KnowledgeTopicName.CURRENCY_INFLUENCE.value,
+    KnowledgeTopicName.SEASONAL_PATTERNS.value,
+})
+
+
+def is_data_backed_ambiguous_question(ctx: QueryContext) -> bool:
+    """Ambiguous question about a subject we hold data for -> answer from data.
+
+    The domain owner's rule, set for retail and asked to be applied generally:
+    "i prefer general answer and then ask to clarify to provide targeted
+    information and assessment". Ambiguity about WHICH slice is meant is a
+    reason to show the data and offer to narrow, not to write an essay.
+
+    Keyed on the analyzer's own topic nomination rather than on question
+    wording. Wording markers have now failed three times here -- twice for
+    retail routing, once for plant fleet, where a fleet question was still
+    answered as prose after markers were added because the phrasing did not
+    contain any of them. The phrasings are unbounded; the datasets are not.
+
+    A genuine definition question is unaffected: those are classified
+    ``conceptual_definition``, not ``ambiguous``.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return False
+
+    analysis = ctx.question_analysis
+    if not (
+        analysis.classification.query_type == QueryType.AMBIGUOUS
+        or analysis.answer_kind == AnswerKind.CLARIFY
+    ):
+        return False
+
+    topics = {
+        candidate.name.value
+        for candidate in (analysis.knowledge.candidate_topics or [])
+    }
+    return bool(topics & _DATA_BACKED_TOPICS)
+
+
 def is_plant_fleet_data_question(ctx: QueryContext) -> bool:
     """Whether a plant-fleet question should be answered from data.
 
