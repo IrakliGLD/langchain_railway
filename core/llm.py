@@ -6459,6 +6459,17 @@ def llm_summarize_structured(
             if _retail_rules:
                 guidance_parts.append(f"RETAIL TARIFF RULES:\n{_retail_rules}")
 
+        # Plant-fleet rules (conditional on a fleet frame being present).
+        # Same placement argument as the retail block above: guidance is in no
+        # truncation profile, and these are unit traps that silently corrupt an
+        # answer -- generation_mwh is plain MWh while every neighbouring
+        # quantity column is thousand MWh.
+        _fleet_markers = ("capacity_factor", "installed_capacity_mw", "capacity_category")
+        if any(marker in (stats_hint or "") for marker in _fleet_markers):
+            _fleet_rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+            if _fleet_rules:
+                guidance_parts.append(f"PLANT FLEET RULES:\n{_fleet_rules}")
+
         # Energy-analyst domain knowledge (conditional on energy-domain focus).
         # Phase D: deterministic render_style skips this — the generic renderer
         # owns formatting on that path and never reads skill prose.

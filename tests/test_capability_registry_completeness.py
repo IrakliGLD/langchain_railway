@@ -169,3 +169,63 @@ def test_the_retail_adapter_canonicalises_to_the_wholesale_unit():
     # and category is not a price anyone pays.
     assert row["entity_id"] == "220/380|hh|cat2"
     assert "Telmico" in row["entity_label"]
+
+
+def test_plant_fleet_questions_reach_the_data():
+    """2026-08-16: two fleet questions came back ambiguous/knowledge with
+    candidate_tools=[] (confidence 0.88 and 0.32) and were answered as prose
+    from generation_mix knowledge, while by_capacity, by_commissioning,
+    capacity_factor and ownership_concentration sat one query away."""
+    from agent.retail_routing import looks_like_plant_fleet_question
+
+    for question in (
+        "What is the installed capacity by band?",
+        "How has the capacity factor changed for hydro?",
+        "When was most of the fleet commissioned?",
+        "What is the ownership concentration of generation?",
+        "How many power plants are there?",
+    ):
+        assert looks_like_plant_fleet_question(question), question
+
+
+def test_capacity_wording_that_means_something_else_is_not_claimed():
+    """"capacity" collides with the guaranteed capacity FEE and with
+    cross-border interconnection capacity -- different subjects, different
+    data. Claiming them would route a tariff question to the fleet views."""
+    from agent.retail_routing import looks_like_plant_fleet_question
+
+    for question in (
+        "What is the guaranteed capacity fee?",
+        "What is the interconnection capacity with Turkey?",
+        "How is cross-border capacity allocated?",
+    ):
+        assert not looks_like_plant_fleet_question(question), question
+
+
+def test_plant_fleet_wording_routes_to_the_right_knowledge_topics():
+    """Before these entries, "installed capacity" matched only the guaranteed
+    capacity fee and cross-border interconnection entries, so a fleet question
+    was answered from the wrong knowledge entirely."""
+    from knowledge import infer_topic_matches
+
+    assert "generation_mix" in infer_topic_matches("installed capacity by band")
+    assert "generation_mix" in infer_topic_matches("capacity factor for hydro")
+    assert "generation_mix" in infer_topic_matches("when were plants commissioned")
+    concentration = infer_topic_matches("ownership concentration of generation")
+    assert {"generation_mix", "market_structure"} & concentration
+
+    # And the collisions still resolve to their own topics.
+    assert "cross_border_capacity" in infer_topic_matches("interconnection capacity")
+
+
+def test_the_plant_fleet_rules_are_registered_and_state_the_unit_trap():
+    from skills.loader import _EXPECTED_FILES, load_reference
+
+    assert ("energy-analyst", "plant-fleet-rules.md") in _EXPECTED_FILES
+    rules = load_reference("energy-analyst", "plant-fleet-rules.md").lower()
+    assert rules, "plant-fleet-rules.md is missing"
+    # generation_mwh is plain MWh while neighbouring quantity columns are
+    # thousand MWh -- a factor of 1000 waiting to happen.
+    assert "thousand mwh" in rules
+    assert "generation_mwh" in rules
+    assert "never pool" in rules or "do not pool" in rules

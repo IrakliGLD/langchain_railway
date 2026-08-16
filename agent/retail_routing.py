@@ -22,6 +22,76 @@ from models import QueryContext
 log = logging.getLogger("Enai")
 
 
+#: Wording that names a plant-fleet dataset: installed capacity bands,
+#: commissioning vintage, capacity factors, ownership concentration. These are
+#: served from materialized views (by_capacity, by_commissioning,
+#: capacity_factor, ownership_concentration) via SQL -- there is no typed tool.
+#:
+#: "capacity" alone is deliberately absent: it collides with the guaranteed
+#: capacity FEE and with cross-border interconnection capacity, which are
+#: different subjects served by different data.
+_PLANT_FLEET_MARKERS = frozenset({
+    "installed capacity",
+    "capacity band",
+    "capacity category",
+    "capacity factor",
+    "load factor",
+    "commissioning",
+    "commissioned",
+    "vintage",
+    "plant age",
+    "fleet",
+    "ownership concentration",
+    "market concentration",
+    "herfindahl",
+    "hhi",
+    "owner share",
+    "number of plants",
+    "plant count",
+    "facility count",
+    "how many plants",
+    "how many power plants",
+})
+
+
+def looks_like_plant_fleet_question(text: str) -> bool:
+    """Whether the question is about fleet structure rather than output."""
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _PLANT_FLEET_MARKERS)
+
+
+def is_plant_fleet_data_question(ctx: QueryContext) -> bool:
+    """Whether a plant-fleet question should be answered from data.
+
+    Same failure the retail tool had, from the other direction: on 2026-08-16
+    two fleet questions came back ``query_type=ambiguous``,
+    ``preferred_path=knowledge``, ``candidate_tools=[]`` (confidence 0.88 and
+    0.32) and were answered as prose from generation_mix knowledge -- with no
+    data at all, while by_capacity, by_commissioning, capacity_factor and
+    ownership_concentration sat one query away.
+
+    There is no typed tool for these views, so routing to data means the SQL
+    path. That is adequate here: the views are narrow and flat, and
+    PLANT_FLEET_EXAMPLES already shows the shapes.
+
+    Ambiguity about which technology or band is meant is not a reason to
+    withhold the data -- it is a reason to show it and offer to narrow, the
+    same rule the domain owner set for retail.
+    """
+    if not ctx.has_authoritative_question_analysis:
+        return False
+
+    analysis = ctx.question_analysis
+    question = ctx.resolved_query or analysis.canonical_query_en or ctx.query
+    if not looks_like_plant_fleet_question(question):
+        return False
+
+    return (
+        analysis.classification.query_type == QueryType.AMBIGUOUS
+        or analysis.answer_kind == AnswerKind.CLARIFY
+    )
+
+
 def is_retail_data_question(ctx: QueryContext) -> bool:
     """Whether a retail question should be answered from data.
 
