@@ -158,26 +158,73 @@ produce an incomplete price.
 
 ## Comparing to the wholesale price
 
-The regulated supply tariff already bundles the guaranteed capacity fee, so a bare balancing
-price is **not** comparable to an end-user price. The capacity charge is **added to the
-wholesale side** rather than subtracted from the tariff — that way the regulated figure stays
-equal to what is actually charged and the adjustment sits on one series.
+This comparison answers one specific question: **should an eligible consumer keep buying at
+the regulated tariff, or move to the wholesale market?** Everything below follows from that
+framing.
 
-Benchmark, per month, from `public.price_with_usd`:
+### Compare the supply component only
+
+Transmission and distribution are network charges paid **either way** — they are for delivery,
+not for the energy. A consumer who moves to wholesale still pays them. Only the **supply**
+component is the alternative to a wholesale purchase, so it is the only part that belongs in
+the comparison.
+
+Comparing the *final* end-user price against wholesale overstates the gap by the entire
+network stack — roughly half the bill — and answers a question nobody asked.
+
+### The benchmark must carry every cost the supply tariff bundles
 
 ```
-(p_bal_gel + p_gcap_gel) / 1000     -- GEL/kWh
+supply tariff  vs  (p_bal_gel + p_gcap_gel) / 1000 + 0.00019
 ```
 
-Both prices are published in GEL/MWh, so divide by 1000 to reach the tariff's unit. Never
-multiply the tariff by 1000 instead: that figure appears in no row and the grounding gate will
-strip it from the answer.
+- **Guaranteed capacity fee** (`p_gcap_gel`) — bundled into the regulated supply tariff, so it
+  is added to the wholesale side rather than subtracted from the tariff. That keeps the
+  regulated figure equal to what is actually charged and puts the adjustment on one series.
+- **ESCO service fee** — 0.00019 GEL/kWh, charged on wholesale purchases and likewise bundled
+  into the supply tariff.
 
-Compare against the **net** `final_price`, not the VAT-inclusive figure — the wholesale price
-is itself net of VAT, so comparing gross to net overstates the spread by 18%.
+Leaving either off puts a cost on the retail side that the benchmark does not carry, so part
+of the apparent margin is simply the missing fee.
 
-The spread between the two is the combined distribution, transmission and retail-supply margin
-plus any regulated cost not present in the wholesale price. It is not a profit measure.
+Both wholesale prices are published in GEL/MWh, so divide by 1000 to reach the tariff's unit.
+Never multiply the tariff by 1000 instead: that figure appears in no row and the grounding gate
+will strip it from the answer. Compare **net** of VAT on both sides — the wholesale price is
+itself net, so comparing gross to net overstates the spread by 18%.
+
+### The choice is one-way, so a month-by-month strategy is not available
+
+Under the transitional market model a consumer that leaves the regulated tariff for the
+wholesale market **cannot return to regulated supply**. The decision is irreversible for the
+duration of the transition.
+
+This changes what the comparison can conclude. A month-by-month reading — "wholesale was
+cheaper in these months, regulated in those, so switch back and forth" — describes a strategy
+that does not exist. The honest form of the answer is:
+
+- how the two compare **over a sustained period**, not month by month;
+- how often and by how much wholesale was below the regulated supply tariff across that period;
+- that switching is a **one-time, irreversible** commitment, so the relevant question is the
+  expected spread over the horizon a consumer would be exposed to, and its variability — not
+  the count of favourable months.
+
+Month-level detail is still worth showing as *volatility evidence*: it says how much risk the
+consumer takes on, which is exactly what an irreversible choice turns into the central issue.
+
+### The comparison has a shelf life
+
+It is meaningful **only under the current transitional model**. Georgia entered the Article 17⁴
+transition on **1 July 2024** with the launch of the GENEX exchange; the EU-style **target
+model is planned for July 2027**, with acknowledged delay risk (see `market_structure.md`
+§9 and `exchange_transition.md` §7).
+
+Under the target model the balancing price becomes hourly and time-dependent under
+self-dispatch, so a monthly weighted-average balancing price stops being the right benchmark
+and the regulated-versus-wholesale framing itself may not survive. Do not project this
+comparison past the transition, and say so when the question reaches toward it.
+
+The spread between the two is not a profit measure. It is the difference between an
+administered supply price and a market one, net of the fees named above.
 
 ## Analytical implications
 

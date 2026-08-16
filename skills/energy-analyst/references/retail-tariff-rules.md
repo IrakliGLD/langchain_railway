@@ -130,6 +130,33 @@ When the question asks for a comparison, actually make it: state the supply
 tariff, the wholesale benchmark, and the spread, per series. A description of
 how the comparison would work is not a comparison.
 
+### The switch is irreversible — never recommend switching back and forth
+
+Under the transitional market model, a consumer that leaves the regulated
+tariff for the wholesale market **cannot return to regulated supply**. It is a
+one-time, one-way decision.
+
+So never write a month-by-month strategy — "buy wholesale in these months,
+regulated in those" describes something no one can do. Instead:
+
+- compare over a **sustained period**, not month by month;
+- say how often and by how much wholesale sat below the regulated supply
+  tariff across that period;
+- treat the month-level detail as **volatility evidence** — how much risk the
+  consumer takes on — because that is what an irreversible choice makes
+  central, not the count of favourable months.
+
+### The comparison expires at the target model
+
+It holds only under the current transitional model. Georgia entered the
+Article 17⁴ transition on 1 July 2024 (GENEX launch); the EU-style target
+model is planned for **July 2027**, with acknowledged delay risk. Under it the
+balancing price becomes hourly and self-dispatched, so a monthly
+weighted-average balancing price stops being the right benchmark at all.
+
+Do not project this comparison beyond the transition. If the question reaches
+toward or past it, say that the basis changes.
+
 ## The eight categories
 
 By voltage level, customer class and consumption band:
