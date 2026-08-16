@@ -331,8 +331,8 @@ class TestPlantViewsMatchTheDatabase:
 
         # Terse in the schema doc: enough not to write a wrong WHERE clause.
         assert "0-10000" in DB_SCHEMA_DOC
-        assert "ratios in 0..1" in DB_SCHEMA_DOC
-        assert "partitions of the same monthly" in DB_SCHEMA_DOC
+        assert "ratios 0..1" in DB_SCHEMA_DOC
+        assert "partition the same monthly total" in DB_SCHEMA_DOC
 
         # Full interpretation in guidance.
         rules = load_reference("energy-analyst", "plant-fleet-rules.md")
@@ -345,3 +345,44 @@ class TestPlantViewsMatchTheDatabase:
         rules = load_reference("energy-analyst", "plant-fleet-rules.md")
         assert "does not contain installed capacity" in rules
         assert "0–10000" in rules or "0-10000" in rules
+
+
+def test_the_capacity_factor_formula_is_documented_and_correct():
+    """Verified against the live view: 38266 / (223.070 x 744) = 0.2305679639
+    against a published 0.2305679638."""
+    from skills.loader import load_reference
+
+    published = 0.2305679638386302
+    computed = 38266.0 / (223.070 * 744)
+    assert abs(computed - published) < 1e-9
+
+    rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+    assert "installed_capacity_mw × hours_in_month" in rules
+    assert "744" in rules, "hours_in_month is calendar hours; say so"
+
+
+def test_the_thousandfold_unit_gap_is_documented_with_evidence():
+    """capacity_factor.generation_mwh (MWh) vs by_capacity.quantity (thousand
+    MWh). Asserted from the earlier session, now confirmed on every 2020-01
+    band -- 46,179 vs 46.179 and so on."""
+    from context import DB_SCHEMA_DOC
+    from skills.loader import load_reference
+
+    assert "THOUSAND" in DB_SCHEMA_DOC and "1000x" in DB_SCHEMA_DOC
+    rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+    assert "46,179" in rules and "46.179" in rules
+
+
+def test_trade_by_ownership_has_no_segment_column():
+    """It was wrongly grouped with the four views that carry segment='total'."""
+    from context import DB_SCHEMA_DOC
+
+    assert "trade_by_ownership(date, ownership, quantity)" in DB_SCHEMA_DOC
+    assert "these four views" in DB_SCHEMA_DOC
+    assert "trade_by_ownership has no\n  segment column" in DB_SCHEMA_DOC
+
+
+def test_trade_is_not_presented_as_a_share_of_generation():
+    from context import DB_SCHEMA_DOC
+
+    assert "TRADE, not generation" in DB_SCHEMA_DOC

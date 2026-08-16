@@ -396,20 +396,26 @@ mv_balancing_trade_with_tariff notes:
   vocabulary (MW): '<=5', '6-10', '11-20', '21-50', '51-100', '101-200', '201-500', 'more than 500'
 - by_commissioning.entity (commissioning cohort): '<=1990', '1991-2000', '2001-2010', '2011-2020', 'after 2020'
 - capacity_factor.technology: 'hpp' (hydro), 'tpp' (thermal), 'wpp' (wind), 'solar'
-  * technology × capacity band is SPARSE — not every pair exists in every month. Do not assume a full grid.
+  * technology × capacity band is SPARSE — not every pair exists every month.
 - trade_by_ownership.ownership (exact case — 'GIG' is uppercase, all others lowercase):
   'energo-pro group', 'georgian water and power jcs', 'GIG', 'inter-rao', 'other', 'state', 'vartsikhe 2005 jsc'
-- `segment` in these five views currently holds exactly ONE value, 'total'. Do NOT reuse the
-  trade_derived_entities 'balancing' filter here — it matches nothing and returns an empty result.
-- capacity_factor carries the SAME quantity at two scales: `capacity_factor` is a ratio in 0..1,
-  `capacity_factor_percent` is that value ×100. Pick one. Never multiply capacity_factor_percent by 100.
-- ownership_concentration is one row per month; scales differ WITHIN the row: `hhi` is
-  0-10000 (not 0-1), `top1_share`/`top3_share`/`top5_share` are ratios in 0..1.
-- by_capacity.quantity and by_commissioning.quantity are two partitions of the same monthly
-  total, equal to ownership_concentration.total_generation (thousand MWh). Bands that do not
-  sum to it mean a filter dropped rows.
-- by_capacity measures GENERATION per capacity band, not installed capacity: the band label is
-  the MW range, `quantity` is energy. `installed_capacity_mw` exists only in capacity_factor.
+- SCALES — getting these wrong is the main failure mode on these views:
+  * capacity_factor.generation_mwh is plain MWh; `quantity` and total_generation are THOUSAND
+    MWh. Exactly 1000x apart; never add or compare them unconverted.
+  * `capacity_factor` is a ratio 0..1, `capacity_factor_percent` is that ×100. Pick one.
+    Never multiply capacity_factor_percent by 100.
+  * `hhi` is 0-10000; `top1_share`/`top3_share`/`top5_share` are ratios 0..1.
+- capacity_factor is precomputed (generation_mwh / (installed_capacity_mw * hours_in_month)):
+  read the column, never recompute.
+- by_capacity measures GENERATION per capacity band, not installed capacity — the band label is
+  the MW range. `installed_capacity_mw` exists only in capacity_factor.
+- by_capacity and by_commissioning both partition the same monthly total, equal to
+  ownership_concentration.total_generation. Bands not summing to it mean rows were dropped.
+- trade_by_ownership is TRADE, not generation: its monthly total does NOT equal
+  total_generation. Never present one as a share of the other.
+- `segment` in these four views holds exactly ONE value, 'total' (trade_by_ownership has no
+  segment column at all). Do NOT reuse the trade_derived_entities 'balancing' filter here — it
+  matches nothing and returns an empty result.
 
 **demand_tariff_mv — regulated END-USER tariff components (GEL/kWh, NOT GEL/MWh):**
 

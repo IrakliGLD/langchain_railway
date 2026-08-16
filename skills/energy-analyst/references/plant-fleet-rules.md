@@ -44,27 +44,51 @@ partial sum as the fleet.
 
 ## Units differ from everything else in this system — check before comparing
 
-Three scales coexist and mixing them is a factor-of-1000 error:
+`capacity_factor.generation_mwh` is **plain MWh**. Every other quantity here —
+`by_capacity.quantity`, `by_commissioning.quantity`,
+`ownership_concentration.total_generation` — is **thousand MWh**. Exactly
+1000× apart, confirmed against the database on 2020-01, where every capacity
+band matched to the last decimal:
 
-- `capacity_factor.generation_mwh` is **plain MWh**.
-- `quantity` columns elsewhere (`tech_quantity_view`, trade views) are
-  **thousand MWh**.
-- Prices are GEL/MWh; retail tariffs are GEL/kWh.
+| band | `capacity_factor` (MWh) | `by_capacity` (thousand MWh) |
+|---|---|---|
+| 21-50 | 46,179 | 46.179 |
+| 201-500 | 540,804 | 540.804 |
+| 101-200 | 137,424 | 137.424 |
+| more than 500 | 171,375 | 171.375 |
 
-Never add or compare a `generation_mwh` figure to a `quantity_*` figure
-without converting. State the unit in the answer.
+Never add or compare across that boundary without converting, and state the
+unit in the answer.
 
-`installed_capacity_mw` is **MW** (power), `generation_mwh` is **MWh**
-(energy). They are not the same dimension and do not sum.
+`installed_capacity_mw` is **MW** (power); `generation_mwh` is **MWh**
+(energy). Different dimensions — they do not sum.
 
 ## Capacity factor is a ratio, and it is already computed
 
-`capacity_factor` is a ratio in 0–1; `capacity_factor_percent` is the same
-number ×100. Quote the column, do not recompute from generation and capacity —
-a derived figure appears in no row and the grounding gate strips it.
+`capacity_factor` = `generation_mwh / (installed_capacity_mw × hours_in_month)`,
+verified to nine decimals against the published column. `hours_in_month` is
+calendar hours — 744 in January.
+
+So quote the column. Recomputing produces a figure that appears in no row, and
+the grounding gate strips it — the failure that repeatedly gutted retail
+answers in this same work.
+
+`capacity_factor` is a ratio in 0–1; `capacity_factor_percent` is that ×100.
+Pick one; never multiply the percent column again.
 
 A capacity factor above 1 is a data problem, not a record-breaking plant. Say
 so rather than reporting it as a finding.
+
+## trade_by_ownership is trade, not generation
+
+Its monthly total does **not** equal `ownership_concentration.total_generation`
+— 993.063 against 1000.976 in 2020-01. They measure different things, so never
+present one as a share of the other, and do not "reconcile" the gap.
+
+It also has **no `segment` column**, unlike the other four views.
+
+(Observed but unconfirmed: that 2020-01 gap of 7.913 equals wind output for the
+same month exactly. One month is not a rule — do not state it as one.)
 
 ## Never pool across bands, technologies or owners
 
