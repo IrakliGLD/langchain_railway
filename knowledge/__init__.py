@@ -207,6 +207,27 @@ TOPIC_MAP: Dict[str, List[str]] = {
     "ntc": ["cross_border_trade"],
     "capacity allocation": ["cross_border_trade"],
 
+    # Plant-fleet structure — by_capacity, by_commissioning, capacity_factor,
+    # ownership_concentration. Before these entries the word "capacity" in a
+    # fleet question routed to the guaranteed capacity FEE or to cross-border
+    # interconnection capacity, both different subjects served by different
+    # data, so a fleet question was answered from the wrong knowledge entirely.
+    # Bare "capacity" stays out for exactly that reason; every key here is
+    # specific enough not to collide.
+    "installed capacity": ["generation_mix"],
+    "capacity band": ["generation_mix"],
+    "capacity category": ["generation_mix"],
+    "capacity factor": ["generation_mix"],
+    "load factor": ["generation_mix"],
+    "commissioning": ["generation_mix"],
+    "commissioned": ["generation_mix"],
+    "vintage": ["generation_mix"],
+    "plant fleet": ["generation_mix"],
+    "ownership concentration": ["generation_mix", "market_structure"],
+    "market concentration": ["market_structure", "generation_mix"],
+    "herfindahl": ["market_structure", "generation_mix"],
+    "hhi": ["market_structure", "generation_mix"],
+
     # Interconnection capacity (physical / TTC) — see cross_border_capacity.md.
     # These describe the physical transmission layer (transfer ceilings,
     # operating modes, converter/transformer limits, named interconnections),

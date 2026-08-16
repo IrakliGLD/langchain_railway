@@ -62,7 +62,7 @@ from agent.provenance import (
 from agent.render_fitness import df_date_span, period_bounds_from_hint
 from agent.report_evidence import build_report_narrative_items
 from agent.report_intent import report_context_requires_table
-from agent.retail_routing import is_retail_data_question
+from agent.retail_routing import is_plant_fleet_data_question, is_retail_data_question
 from agent.router import (
     ROUTER_ENABLE_SEMANTIC_FALLBACK,
     _last_semantic_scores,
@@ -434,6 +434,14 @@ def _derive_response_mode(ctx: QueryContext) -> str:
             if is_retail_data_question(ctx):
                 log.info(
                     "Retail question routed to data despite analyzer "
+                    "preferred_path=knowledge"
+                )
+                return ResponseMode.DATA_PRIMARY
+            # Same rule for the plant-fleet views. They have no typed tool, so
+            # "knowledge" here means an essay about a dataset we hold.
+            if is_plant_fleet_data_question(ctx):
+                log.info(
+                    "Plant-fleet question routed to data despite analyzer "
                     "preferred_path=knowledge"
                 )
                 return ResponseMode.DATA_PRIMARY
