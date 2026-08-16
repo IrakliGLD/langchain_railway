@@ -299,3 +299,142 @@ class TestAmbiguousDataBackedQuestionsReachTheData:
 
         ctx = self._ctx(["generation_mix"], query_type="conceptual_definition")
         assert _derive_response_mode(ctx) == "knowledge_primary"
+
+
+class TestPlantViewsMatchTheDatabase:
+    """Verified against screenshots of the live views (2026-08-16).
+
+    Three scales sit in one ownership_concentration row and two of them were
+    undocumented, which is the same class of error that produced the GEL/kWh
+    vs GEL/MWh failures on the retail side.
+    """
+
+    def test_the_documented_columns_match_the_views(self):
+        from context import DB_SCHEMA_DOC
+
+        assert (
+            "by_capacity(date, entity, segment, quantity, facility_count)" in DB_SCHEMA_DOC
+        )
+        # by_commissioning genuinely has no facility_count.
+        assert "by_commissioning(date, entity, segment, quantity)" in DB_SCHEMA_DOC
+        assert (
+            "ownership_concentration(date, segment, total_generation, owner_count, "
+            "hhi, top1_share, top3_share, top5_share)" in DB_SCHEMA_DOC
+        )
+
+    def test_the_scales_are_documented_where_each_is_needed(self):
+        """DB_SCHEMA_DOC feeds SQL GENERATION and has a 9,000-char tripwire, so
+        it carries only what a query writer needs. How to READ the numbers
+        belongs in guidance, which no truncation profile sheds."""
+        from context import DB_SCHEMA_DOC
+        from skills.loader import load_reference
+
+        # Terse in the schema doc: enough not to write a wrong WHERE clause.
+        assert "0-10000" in DB_SCHEMA_DOC
+        assert "ratios 0..1" in DB_SCHEMA_DOC
+        assert "partition the same monthly total" in DB_SCHEMA_DOC
+
+        # Full interpretation in guidance.
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        assert "highly concentrated" in rules
+        assert "1000.976" in rules, "the verified reconciliation must be quotable"
+
+    def test_by_capacity_is_not_described_as_installed_capacity(self):
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        assert "does not contain installed capacity" in rules
+        assert "0–10000" in rules or "0-10000" in rules
+
+
+def test_the_capacity_factor_formula_is_documented_and_correct():
+    """Verified against the live view: 38266 / (223.070 x 744) = 0.2305679639
+    against a published 0.2305679638."""
+    from skills.loader import load_reference
+
+    published = 0.2305679638386302
+    computed = 38266.0 / (223.070 * 744)
+    assert abs(computed - published) < 1e-9
+
+    rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+    assert "installed_capacity_mw × hours_in_month" in rules
+    assert "744" in rules, "hours_in_month is calendar hours; say so"
+
+
+def test_the_thousandfold_unit_gap_is_documented_with_evidence():
+    """capacity_factor.generation_mwh (MWh) vs by_capacity.quantity (thousand
+    MWh). Asserted from the earlier session, now confirmed on every 2020-01
+    band -- 46,179 vs 46.179 and so on."""
+    from context import DB_SCHEMA_DOC
+    from skills.loader import load_reference
+
+    assert "THOUSAND" in DB_SCHEMA_DOC and "1000x" in DB_SCHEMA_DOC
+    rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+    assert "46,179" in rules and "46.179" in rules
+
+
+def test_trade_by_ownership_has_no_segment_column():
+    """It was wrongly grouped with the four views that carry segment='total'."""
+    from context import DB_SCHEMA_DOC
+
+    assert "trade_by_ownership(date, ownership, quantity)" in DB_SCHEMA_DOC
+    assert "these four views" in DB_SCHEMA_DOC
+    assert "trade_by_ownership has no\n  segment column" in DB_SCHEMA_DOC
+
+
+def test_trade_is_not_presented_as_a_share_of_generation():
+    from context import DB_SCHEMA_DOC
+
+    assert "TRADE, not generation" in DB_SCHEMA_DOC
+
+
+class TestCapacityBandsAreCompleteAndOrdered:
+    """There are EIGHT bands and they do not sort alphabetically.
+
+    ORDER BY capacity_category yields 101-200, 11-20, 201-500, 21-50, 51-100,
+    6-10, <=5, more than 500 -- which makes any "largest band" or "smallest
+    band" claim wrong. capacity_category_order exists for this; by_capacity
+    has no order column at all.
+    """
+
+    BANDS = ["<=5", "6-10", "11-20", "21-50", "51-100", "101-200", "201-500", "more than 500"]
+
+    def test_all_eight_bands_are_in_the_schema_doc(self):
+        from context import DB_SCHEMA_DOC
+
+        for band in self.BANDS:
+            assert f"'{band}'" in DB_SCHEMA_DOC, f"band {band!r} missing"
+        assert "8-band" in DB_SCHEMA_DOC
+
+    def test_all_eight_bands_are_enumerated_in_guidance(self):
+        """The summarizer reads guidance, not DB_SCHEMA_DOC. An answer that
+        covers "all bands" has to know there are eight."""
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        for band in self.BANDS:
+            assert f"`{band}`" in rules, f"band {band!r} not enumerated in guidance"
+
+    def test_the_lexical_sort_trap_is_documented_in_both_places(self):
+        from context import DB_SCHEMA_DOC
+        from skills.loader import load_reference
+
+        assert "capacity_category_order" in DB_SCHEMA_DOC
+        assert "101-200 before 11-20" in DB_SCHEMA_DOC
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        assert "Never sort these alphabetically" in rules
+        assert "no** order column" in rules or "no order column" in rules
+
+    def test_the_lexical_sort_really_is_wrong(self):
+        """Guard the premise, so this documentation cannot become folklore."""
+        assert sorted(self.BANDS) != self.BANDS
+        assert sorted(self.BANDS)[0] == "101-200"
+
+    def test_the_five_commissioning_cohorts_are_not_confused_with_the_bands(self):
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        for cohort in ("<=1990", "1991-2000", "2001-2010", "2011-2020", "after 2020"):
+            assert cohort in rules, f"cohort {cohort!r} missing"
+        assert "vintages, not sizes" in rules

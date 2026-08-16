@@ -392,19 +392,31 @@ mv_balancing_trade_with_tariff notes:
 
 **Plant-fleet views (by_capacity, by_commissioning, capacity_factor, ownership_concentration, trade_by_ownership):**
 
-- by_capacity.entity AND capacity_factor.capacity_category share ONE installed-capacity band
-  vocabulary (MW): '<=5', '6-10', '11-20', '21-50', '51-100', '101-200', '201-500', 'more than 500'
+- by_capacity.entity AND capacity_factor.capacity_category share ONE 8-band vocabulary (MW), in
+  this order: '<=5', '6-10', '11-20', '21-50', '51-100', '101-200', '201-500', 'more than 500'.
+  These are TEXT: ORDER BY the band column sorts 101-200 before 11-20. Use
+  capacity_factor.capacity_category_order; by_capacity has no order column, so sort by the list.
 - by_commissioning.entity (commissioning cohort): '<=1990', '1991-2000', '2001-2010', '2011-2020', 'after 2020'
-- capacity_factor.technology: 'hpp' (hydro), 'tpp' (thermal), 'wpp' (wind), 'solar'
-  * technology × capacity band is SPARSE — not every pair exists in every month. Do not assume a full grid.
-- trade_by_ownership.ownership (exact case — 'GIG' is uppercase, all others lowercase):
-  'energo-pro group', 'georgian water and power jcs', 'GIG', 'inter-rao', 'other', 'state', 'vartsikhe 2005 jsc'
-- `segment` in these five views currently holds exactly ONE value, 'total'. Do NOT reuse the
-  trade_derived_entities 'balancing' filter here — it matches nothing and returns an empty result.
-- capacity_factor carries the SAME quantity at two scales: `capacity_factor` is a ratio in 0..1,
-  `capacity_factor_percent` is that value ×100. Pick one. Never multiply capacity_factor_percent by 100.
-- ownership_concentration is one row per month: `hhi` is the Herfindahl-Hirschman index,
-  `top1_share`/`top3_share`/`top5_share` are ownership shares of generation.
+- capacity_factor.technology: 'hpp', 'tpp', 'wpp', 'solar'. technology × band is SPARSE.
+- trade_by_ownership.ownership, exact case ('GIG' uppercase, rest lowercase): 'energo-pro group',
+  'georgian water and power jcs', 'GIG', 'inter-rao', 'other', 'state', 'vartsikhe 2005 jsc'
+- SCALES (the main failure mode here):
+  * capacity_factor.generation_mwh is plain MWh; `quantity` and total_generation are THOUSAND
+    MWh — exactly 1000x. Never add or compare them unconverted.
+  * `capacity_factor` is a ratio 0..1, `capacity_factor_percent` is that ×100. Pick one.
+    Never multiply capacity_factor_percent by 100.
+  * `hhi` is 0-10000; `top1_share`/`top3_share`/`top5_share` are ratios 0..1.
+- capacity_factor is precomputed (generation_mwh / (installed_capacity_mw * hours_in_month)):
+  read the column, never recompute.
+- by_capacity measures GENERATION per capacity band, not installed capacity — the band label is
+  the MW range. `installed_capacity_mw` exists only in capacity_factor.
+- by_capacity and by_commissioning both partition the same monthly total, which equals
+  ownership_concentration.total_generation.
+- trade_by_ownership is TRADE, not generation: its monthly total does NOT equal
+  total_generation. Never present one as a share of the other.
+- `segment` in these four views holds exactly ONE value, 'total' (trade_by_ownership has no
+  segment column at all). Do NOT reuse the trade_derived_entities 'balancing' filter here — it
+  matches nothing and returns an empty result.
 
 **demand_tariff_mv — regulated END-USER tariff components (GEL/kWh, NOT GEL/MWh):**
 
