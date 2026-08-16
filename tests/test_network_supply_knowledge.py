@@ -112,3 +112,43 @@ def test_knowledge_file_lists_every_tool_category_voltage():
 
     for category in END_USER_CATEGORIES:
         assert category.volate in KNOWLEDGE, f"{category.volate} missing from the topic file"
+
+
+def test_the_wholesale_switch_is_documented_as_irreversible():
+    """A month-by-month "switch back and forth" reading describes a strategy
+    that does not exist under the transitional model: leaving the regulated
+    tariff for wholesale is one-way."""
+    import pathlib
+
+    doc = pathlib.Path("knowledge/network_supply_tariffs.md").read_text(encoding="utf-8").lower()
+
+    assert "cannot return to regulated supply" in doc
+    assert "irreversible" in doc
+    # And the consequence for the analysis, not just the fact.
+    assert "month by month" in doc or "month-by-month" in doc
+    assert "sustained period" in doc
+
+
+def test_the_comparison_shelf_life_is_documented():
+    """The regulated-versus-wholesale framing is transition-specific."""
+    import pathlib
+
+    doc = pathlib.Path("knowledge/network_supply_tariffs.md").read_text(encoding="utf-8").lower()
+
+    assert "transitional model" in doc
+    assert "2027" in doc, "the target-model horizon must be stated"
+    assert "1 july 2024" in doc, "the transition start must be stated"
+
+
+def test_the_binding_rules_also_live_in_guidance():
+    """The knowledge file goes through a 24,000-char compaction and can be
+    dropped; guidance is in no truncation profile. Rules the answer must
+    ALWAYS follow belong there too."""
+    from skills.loader import load_reference
+
+    rules = load_reference("energy-analyst", "retail-tariff-rules.md").lower()
+
+    assert "cannot return to regulated supply" in rules
+    assert "irreversible" in rules
+    assert "2027" in rules
+    assert "volatility evidence" in rules
