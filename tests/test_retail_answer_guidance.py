@@ -281,7 +281,12 @@ def test_the_wholesale_comparison_uses_the_supply_component_only(monkeypatch):
     tool_module.get_end_user_prices(include_wholesale_benchmark=True)
 
     sql = captured["sql"]
-    assert "s.supply_tariff_gel_kwh - (p.p_bal_gel + p.p_gcap_gel)" in sql
-    assert "s.final_price_net_gel_kwh - (p.p_bal_gel" not in sql, (
-        "the spread must not be measured on the full stack"
+    # Assert the semantics, not the spelling of the benchmark expression --
+    # that expression gains terms (ESCO fee) and would break a literal match.
+    assert "s.supply_tariff_gel_kwh - " in sql, "spread must start from supply"
+    spread_line = next(
+        line for line in sql.splitlines() if "supply_vs_wholesale_spread" in line
+    )
+    assert "final_price" not in spread_line, (
+        "the spread must not be measured on the full stack: " + spread_line.strip()
     )

@@ -105,13 +105,23 @@ delivery, not for the energy. Only the supply component is the alternative to
 a wholesale purchase, so it is the only part that belongs in the comparison.
 
 ```
-supply tariff  vs  (balancing price + guaranteed capacity fee)
+supply tariff  vs  balancing price + guaranteed capacity fee + ESCO service fee
 ```
 
-Both already include the guaranteed capacity fee — the retail supply tariff
-bundles it, which is why it is added to the wholesale side. The tool returns
-this as `supply_vs_wholesale_spread_gel_kwh`; quote it rather than computing
-a difference yourself.
+The wholesale side carries **every cost the retail supply tariff already
+bundles**, so the two are like-for-like:
+
+- **Guaranteed capacity fee** (`p_gcap_gel`) — bundled into the supply tariff.
+- **ESCO service fee** — 0.00019 GEL/kWh, charged on wholesale purchases and
+  likewise bundled into the supply tariff.
+
+Omitting either leaves a cost on the retail side that the benchmark does not
+carry, so part of the apparent margin is just the missing fee.
+
+The tool returns the benchmark as `wholesale_benchmark_gel_kwh` and the
+difference as `supply_vs_wholesale_spread_gel_kwh`. Quote those rather than
+computing a difference yourself. When the answer states what the benchmark
+is, name all three components.
 
 Comparing the *final* price against wholesale overstates the gap by the entire
 network stack — roughly half the bill — and answers a question nobody asked.
