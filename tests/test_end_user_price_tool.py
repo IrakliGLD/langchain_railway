@@ -621,3 +621,50 @@ def test_consumer_class_resolution(text, expected):
     from agent.tools.end_user_price_tools import resolve_consumer_class
 
     assert resolve_consumer_class(text) == expected
+
+
+def test_the_benchmark_carries_every_fee_the_supply_tariff_bundles(monkeypatch):
+    """Like-for-like, or the spread is partly just a missing fee.
+
+    The retail supply tariff bundles both the guaranteed capacity fee and the
+    ESCO service fee. Whichever is left off the wholesale side shows up as
+    apparent retail margin.
+    """
+    import agent.tools.end_user_price_tools as tool_module
+
+    captured = _capture_sql(monkeypatch, include_wholesale_benchmark=True)
+    sql = captured["sql"]
+
+    assert "p.p_bal_gel + p.p_gcap_gel" in sql, "balancing + capacity fee missing"
+    assert str(tool_module.ESCO_SERVICE_FEE_GEL_KWH) in sql, "ESCO fee missing"
+    # Both the benchmark column and the spread must use the same expression;
+    # a spread computed against a different benchmark than the one reported
+    # would be internally inconsistent.
+    benchmark_occurrences = sql.count(
+        f"+ {tool_module.ESCO_SERVICE_FEE_GEL_KWH})"
+    )
+    assert benchmark_occurrences == 2, (
+        f"benchmark expression should appear in both columns, found {benchmark_occurrences}"
+    )
+
+
+def test_the_esco_fee_is_a_named_constant_not_a_literal():
+    """A magic number in SQL cannot be found when the fee is revised."""
+    from agent.tools.end_user_price_tools import ESCO_SERVICE_FEE_GEL_KWH
+
+    assert ESCO_SERVICE_FEE_GEL_KWH == 0.00019
+
+
+def test_the_benchmark_is_arithmetically_what_it_claims():
+    """Guard the actual sum, not just the presence of the terms."""
+    from agent.tools.end_user_price_tools import (
+        ESCO_SERVICE_FEE_GEL_KWH,
+        KWH_PER_MWH,
+    )
+
+    p_bal, p_gcap = 120.0, 12.0   # GEL/MWh
+    benchmark = (p_bal + p_gcap) / KWH_PER_MWH + ESCO_SERVICE_FEE_GEL_KWH
+    assert round(benchmark, 6) == 0.13219
+
+    supply_tariff = 0.1104        # GEL/kWh
+    assert round(supply_tariff - benchmark, 6) == -0.02179

@@ -96,7 +96,9 @@ COLUMN_LABELS = {
     "final_price_net_gel_kwh": "Final end-user price, net of VAT (GEL/kWh)",
     "vat_gel_kwh": "VAT at 18% (GEL/kWh)",
     "total_gross_gel_kwh": "Final end-user price, incl. VAT (GEL/kWh)",
-    "wholesale_benchmark_gel_kwh": "Balancing + guaranteed capacity, rebased (GEL/kWh)",
+    "wholesale_benchmark_gel_kwh": (
+        "Wholesale benchmark: balancing + guaranteed capacity + ESCO fee (GEL/kWh)"
+    ),
     "supply_vs_wholesale_spread_gel_kwh": "Supply component vs wholesale, spread (GEL/kWh)",
 }
 

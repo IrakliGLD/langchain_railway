@@ -68,6 +68,18 @@ VAT_RATE = 0.18
 #: Wholesale prices are GEL/MWh, tariffs GEL/kWh. Normalise downward.
 KWH_PER_MWH = 1000.0
 
+#: ESCO service fee, GEL/kWh. Charged on wholesale purchases and already
+#: bundled into the retail supply tariff, so it is added to the WHOLESALE side
+#: of a make-or-buy comparison for the same reason the guaranteed capacity fee
+#: is: otherwise the retail figure carries a cost the benchmark does not and
+#: the comparison is not like-for-like.
+#:
+#: Hardcoded on the domain owner's instruction (2026-08-15). It is applied as
+#: one constant across every period; if the fee is ever revised, or a
+#: published series for it becomes available, this becomes a lookup rather
+#: than a literal.
+ESCO_SERVICE_FEE_GEL_KWH = 0.00019
+
 END_USER_CATEGORIES: Tuple[EndUserCategory, ...] = (
     EndUserCategory(
         "220/380|com|other", "Commercial - other (220/380)",
@@ -452,11 +464,20 @@ def _build_sql(
         # whichever way the energy is procured, so they cancel out of the
         # comparison; including them would inflate the apparent gap by the
         # whole network stack and answer a question nobody asked.
+        # The benchmark carries every cost the retail supply tariff already
+        # bundles, so the two sides are like-for-like: the balancing price,
+        # the guaranteed capacity fee, and the ESCO service fee. Omitting
+        # either fee leaves a cost on the retail side that the benchmark does
+        # not carry, and the spread reads as a margin that is partly just the
+        # missing fee.
+        benchmark = (
+            f"((p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH}"
+            f" + {ESCO_SERVICE_FEE_GEL_KWH})"
+        )
         benchmark_select = (
-            f",\n    (p.p_bal_gel + p.p_gcap_gel) / {KWH_PER_MWH}"
-            " AS wholesale_benchmark_gel_kwh"
-            f",\n    s.supply_tariff_gel_kwh - (p.p_bal_gel + p.p_gcap_gel)"
-            f" / {KWH_PER_MWH} AS supply_vs_wholesale_spread_gel_kwh"
+            f",\n    {benchmark} AS wholesale_benchmark_gel_kwh"
+            f",\n    s.supply_tariff_gel_kwh - {benchmark}"
+            " AS supply_vs_wholesale_spread_gel_kwh"
         )
         benchmark_join = "\nLEFT JOIN price_with_usd p ON p.date = s.date"
 
