@@ -100,10 +100,40 @@ between them. Report per technology, or per capacity band, and say which.
 Weighted and unweighted means differ sharply here because the bands are very
 unequal in size. If a single figure is unavoidable, state the weighting.
 
-## Vocabulary
+## The eight capacity bands — all of them, in order
 
-- `by_capacity.entity` and `capacity_factor.capacity_category` share one
-  eight-band vocabulary. They are the same bands under two column names.
+`by_capacity.entity` and `capacity_factor.capacity_category` share one
+**eight**-band vocabulary. They are the same bands under two column names.
+
+| order | band (MW) |
+|---|---|
+| 1 | `<=5` |
+| 2 | `6-10` |
+| 3 | `11-20` |
+| 4 | `21-50` |
+| 5 | `51-100` |
+| 6 | `101-200` |
+| 7 | `201-500` |
+| 8 | `more than 500` |
+
+**Never sort these alphabetically.** They are text, so `ORDER BY
+capacity_category` produces `101-200, 11-20, 201-500, 21-50, 51-100, 6-10,
+<=5, more than 500` — a sequence that reads as meaningless and makes any
+"largest band" or "smallest band" claim wrong. Sort by
+`capacity_category_order`, which exists for exactly this reason.
+
+`by_capacity` has **no** order column, so apply the order above when
+presenting its bands.
+
+An answer covering "all bands" must account for all eight. Reporting a subset
+without saying so understates the fleet — and if the bands do not sum to the
+month's total, rows were dropped (see the reconciliation above).
+
+Do not confuse these with the **five** commissioning cohorts in
+`by_commissioning`: `<=1990`, `1991-2000`, `2001-2010`, `2011-2020`,
+`after 2020`. Those are vintages, not sizes.
+
+## Vocabulary
 - `segment` is **`total` only** in all four views. It is not a filter that
   selects anything; do not present results as though a segment had been chosen.
 - `ownership_concentration.ownership` values are mixed case — `GIG` is

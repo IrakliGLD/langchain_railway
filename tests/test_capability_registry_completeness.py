@@ -386,3 +386,55 @@ def test_trade_is_not_presented_as_a_share_of_generation():
     from context import DB_SCHEMA_DOC
 
     assert "TRADE, not generation" in DB_SCHEMA_DOC
+
+
+class TestCapacityBandsAreCompleteAndOrdered:
+    """There are EIGHT bands and they do not sort alphabetically.
+
+    ORDER BY capacity_category yields 101-200, 11-20, 201-500, 21-50, 51-100,
+    6-10, <=5, more than 500 -- which makes any "largest band" or "smallest
+    band" claim wrong. capacity_category_order exists for this; by_capacity
+    has no order column at all.
+    """
+
+    BANDS = ["<=5", "6-10", "11-20", "21-50", "51-100", "101-200", "201-500", "more than 500"]
+
+    def test_all_eight_bands_are_in_the_schema_doc(self):
+        from context import DB_SCHEMA_DOC
+
+        for band in self.BANDS:
+            assert f"'{band}'" in DB_SCHEMA_DOC, f"band {band!r} missing"
+        assert "8-band" in DB_SCHEMA_DOC
+
+    def test_all_eight_bands_are_enumerated_in_guidance(self):
+        """The summarizer reads guidance, not DB_SCHEMA_DOC. An answer that
+        covers "all bands" has to know there are eight."""
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        for band in self.BANDS:
+            assert f"`{band}`" in rules, f"band {band!r} not enumerated in guidance"
+
+    def test_the_lexical_sort_trap_is_documented_in_both_places(self):
+        from context import DB_SCHEMA_DOC
+        from skills.loader import load_reference
+
+        assert "capacity_category_order" in DB_SCHEMA_DOC
+        assert "101-200 before 11-20" in DB_SCHEMA_DOC
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        assert "Never sort these alphabetically" in rules
+        assert "no** order column" in rules or "no order column" in rules
+
+    def test_the_lexical_sort_really_is_wrong(self):
+        """Guard the premise, so this documentation cannot become folklore."""
+        assert sorted(self.BANDS) != self.BANDS
+        assert sorted(self.BANDS)[0] == "101-200"
+
+    def test_the_five_commissioning_cohorts_are_not_confused_with_the_bands(self):
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        for cohort in ("<=1990", "1991-2000", "2001-2010", "2011-2020", "after 2020"):
+            assert cohort in rules, f"cohort {cohort!r} missing"
+        assert "vintages, not sizes" in rules
