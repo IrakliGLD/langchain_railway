@@ -4,12 +4,43 @@ Applies to questions about the generating fleet itself — how much capacity
 exists, when it was built, how hard it runs, who owns it — as opposed to how
 much it generated. Served from four materialized views:
 
-| View | Answers |
-|---|---|
-| `by_capacity` | how many plants and how much capacity, by size band |
-| `by_commissioning` | fleet vintage — capacity by commissioning period |
-| `capacity_factor` | utilisation — generation against installed capacity |
-| `ownership_concentration` | HHI and top-owner shares |
+| View | Measures | Columns |
+|---|---|---|
+| `by_capacity` | **generation** and plant count, split by capacity band | `quantity`, `facility_count` |
+| `by_commissioning` | **generation**, split by commissioning cohort | `quantity` only |
+| `capacity_factor` | utilisation — generation against installed capacity | `capacity_factor`, `installed_capacity_mw`, `generation_mwh` |
+| `ownership_concentration` | HHI and top-owner shares | `hhi`, `top1/3/5_share`, `owner_count`, `total_generation` |
+
+**`by_capacity` does not contain installed capacity.** The band label is a MW
+range; the measured value is energy. `installed_capacity_mw` exists only in
+`capacity_factor`. Saying "installed capacity by band" of a `by_capacity`
+result reports generation as though it were capacity.
+
+`by_commissioning` has no plant count — only `quantity`. A zero is real
+(`after 2020` is 0 throughout 2020), not a gap.
+
+## The two partitions reconcile — use it as a check
+
+`by_capacity` and `by_commissioning` split the **same monthly total**, and that
+total is `ownership_concentration.total_generation` for the same month.
+Verified on 2020-01: the eight capacity bands sum to 1000.976, the five
+commissioning cohorts sum to 1000.976, and `total_generation` is 1000.976.
+
+So the three columns carry the same unit. If a query's bands do not reconcile
+to the month's total, a filter dropped rows — say so rather than reporting the
+partial sum as the fleet.
+
+## ownership_concentration mixes scales in one row
+
+- `hhi` is on the standard **0–10000** scale, not 0–1 and not a percent
+  (observed 1400–4900). Conventional reading: below 1500 unconcentrated,
+  1500–2500 moderate, above 2500 highly concentrated. Georgian generation sits
+  mostly at or above 2500 — do not call a value near 2800 low.
+- `top1_share` / `top3_share` / `top5_share` are **ratios in 0–1** (0.42, 0.82,
+  0.88). Multiply by 100 to state a percentage; never print the raw ratio with
+  a `%` sign.
+- `owner_count` changes over time (63 in 2020, 68 in 2021) — do not treat it as
+  a constant.
 
 ## Units differ from everything else in this system — check before comparing
 

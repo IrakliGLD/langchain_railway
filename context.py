@@ -403,8 +403,13 @@ mv_balancing_trade_with_tariff notes:
   trade_derived_entities 'balancing' filter here — it matches nothing and returns an empty result.
 - capacity_factor carries the SAME quantity at two scales: `capacity_factor` is a ratio in 0..1,
   `capacity_factor_percent` is that value ×100. Pick one. Never multiply capacity_factor_percent by 100.
-- ownership_concentration is one row per month: `hhi` is the Herfindahl-Hirschman index,
-  `top1_share`/`top3_share`/`top5_share` are ownership shares of generation.
+- ownership_concentration is one row per month; scales differ WITHIN the row: `hhi` is
+  0-10000 (not 0-1), `top1_share`/`top3_share`/`top5_share` are ratios in 0..1.
+- by_capacity.quantity and by_commissioning.quantity are two partitions of the same monthly
+  total, equal to ownership_concentration.total_generation (thousand MWh). Bands that do not
+  sum to it mean a filter dropped rows.
+- by_capacity measures GENERATION per capacity band, not installed capacity: the band label is
+  the MW range, `quantity` is energy. `installed_capacity_mw` exists only in capacity_factor.
 
 **demand_tariff_mv — regulated END-USER tariff components (GEL/kWh, NOT GEL/MWh):**
 

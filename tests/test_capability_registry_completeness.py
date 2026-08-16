@@ -299,3 +299,49 @@ class TestAmbiguousDataBackedQuestionsReachTheData:
 
         ctx = self._ctx(["generation_mix"], query_type="conceptual_definition")
         assert _derive_response_mode(ctx) == "knowledge_primary"
+
+
+class TestPlantViewsMatchTheDatabase:
+    """Verified against screenshots of the live views (2026-08-16).
+
+    Three scales sit in one ownership_concentration row and two of them were
+    undocumented, which is the same class of error that produced the GEL/kWh
+    vs GEL/MWh failures on the retail side.
+    """
+
+    def test_the_documented_columns_match_the_views(self):
+        from context import DB_SCHEMA_DOC
+
+        assert (
+            "by_capacity(date, entity, segment, quantity, facility_count)" in DB_SCHEMA_DOC
+        )
+        # by_commissioning genuinely has no facility_count.
+        assert "by_commissioning(date, entity, segment, quantity)" in DB_SCHEMA_DOC
+        assert (
+            "ownership_concentration(date, segment, total_generation, owner_count, "
+            "hhi, top1_share, top3_share, top5_share)" in DB_SCHEMA_DOC
+        )
+
+    def test_the_scales_are_documented_where_each_is_needed(self):
+        """DB_SCHEMA_DOC feeds SQL GENERATION and has a 9,000-char tripwire, so
+        it carries only what a query writer needs. How to READ the numbers
+        belongs in guidance, which no truncation profile sheds."""
+        from context import DB_SCHEMA_DOC
+        from skills.loader import load_reference
+
+        # Terse in the schema doc: enough not to write a wrong WHERE clause.
+        assert "0-10000" in DB_SCHEMA_DOC
+        assert "ratios in 0..1" in DB_SCHEMA_DOC
+        assert "partitions of the same monthly" in DB_SCHEMA_DOC
+
+        # Full interpretation in guidance.
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        assert "highly concentrated" in rules
+        assert "1000.976" in rules, "the verified reconciliation must be quotable"
+
+    def test_by_capacity_is_not_described_as_installed_capacity(self):
+        from skills.loader import load_reference
+
+        rules = load_reference("energy-analyst", "plant-fleet-rules.md")
+        assert "does not contain installed capacity" in rules
+        assert "0–10000" in rules or "0-10000" in rules
