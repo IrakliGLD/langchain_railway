@@ -229,3 +229,73 @@ def test_the_plant_fleet_rules_are_registered_and_state_the_unit_trap():
     assert "thousand mwh" in rules
     assert "generation_mwh" in rules
     assert "never pool" in rules or "do not pool" in rules
+
+
+class TestAmbiguousDataBackedQuestionsReachTheData:
+    """The general form of the retail and plant-fleet routing rules.
+
+    2026-08-16 15:34: a fleet question came back ambiguous / knowledge /
+    candidate_tools=[] with candidate_topics=[market_structure,
+    generation_mix] and was answered as prose -- AFTER wording markers had
+    been added for exactly that domain. The phrasings are unbounded; the
+    datasets are not, so the rule keys on the analyzer's topic nomination.
+    """
+
+    @staticmethod
+    def _ctx(topics, query_type="ambiguous"):
+        from contracts.question_analysis import QuestionAnalysis
+        from models import QueryContext
+
+        payload = {
+            "version": "question_analysis_v1",
+            "raw_query": "q",
+            "canonical_query_en": "q",
+            "language": {"input_language": "en", "answer_language": "en"},
+            "classification": {
+                "query_type": query_type, "analysis_mode": "light",
+                "intent": "i", "needs_clarification": False, "confidence": 0.7,
+            },
+            "routing": {
+                "preferred_path": "knowledge", "needs_sql": False,
+                "needs_knowledge": True, "prefer_tool": False,
+                "needs_multi_tool": False, "evidence_roles": [],
+            },
+            "knowledge": {
+                "candidate_topics": [{"name": t, "score": 0.8} for t in topics]
+            },
+            "tooling": {"candidate_tools": []},
+            "sql_hints": {},
+            "visualization": {
+                "chart_requested_by_user": False, "chart_recommended": False,
+                "chart_confidence": 0.0,
+            },
+            "analysis_requirements": {
+                "needs_driver_analysis": False,
+                "needs_correlation_context": False, "derived_metrics": [],
+            },
+        }
+        ctx = QueryContext(query="q")
+        ctx.question_analysis = QuestionAnalysis(**payload)
+        ctx.question_analysis_source = "llm_active"
+        ctx.resolved_query = "q"
+        return ctx
+
+    def test_the_exact_production_topic_set_now_routes_to_data(self):
+        from agent.pipeline import _derive_response_mode
+
+        ctx = self._ctx(["market_structure", "generation_mix"])
+        assert _derive_response_mode(ctx) == "data_primary"
+
+    def test_a_knowledge_only_topic_set_stays_on_knowledge(self):
+        from agent.pipeline import _derive_response_mode
+
+        ctx = self._ctx(["market_structure", "exchange_transition"])
+        assert _derive_response_mode(ctx) == "knowledge_primary"
+
+    def test_a_definition_question_stays_on_knowledge(self):
+        """Conceptual questions are classified conceptual_definition, not
+        ambiguous -- that is what keeps 'what is a capacity factor' as prose."""
+        from agent.pipeline import _derive_response_mode
+
+        ctx = self._ctx(["generation_mix"], query_type="conceptual_definition")
+        assert _derive_response_mode(ctx) == "knowledge_primary"

@@ -224,13 +224,37 @@ class TestTheComparisonQuestionReachesData:
         )
         assert _derive_response_mode(ctx) == "data_primary"
 
-    def test_a_pure_wholesale_question_is_still_left_alone(self):
+    def test_a_pure_wholesale_question_also_reaches_data(self):
+        """Deliberate widening (2026-08-16).
+
+        This case used to assert knowledge_primary, guarding the retail
+        CLARIFY gate against asking a wholesale question to pick a household
+        band. That gate is gone -- retail no longer blocks -- and the rule
+        that replaced it routes any AMBIGUOUS question on a data-backed topic
+        to the data. balancing_price is data-backed, so this now fetches data
+        too, which matches the owner's standing preference: answer generally
+        from data, then offer to narrow.
+
+        Genuinely conceptual questions are unaffected: they classify as
+        conceptual_definition, not ambiguous.
+        """
         from agent.pipeline import _derive_response_mode
 
         ctx = _ctx(
             "What drives the balancing price?",
             topics=("balancing_price", "market_structure"),
             scores=(0.95, 0.5),
+        )
+        assert _derive_response_mode(ctx) == "data_primary"
+
+    def test_a_knowledge_only_subject_still_stays_on_knowledge(self):
+        """The widening is bounded by the data-backed topic set."""
+        from agent.pipeline import _derive_response_mode
+
+        ctx = _ctx(
+            "How will the target market model work?",
+            topics=("market_structure", "exchange_transition"),
+            scores=(0.9, 0.8),
         )
         assert _derive_response_mode(ctx) == "knowledge_primary"
 
