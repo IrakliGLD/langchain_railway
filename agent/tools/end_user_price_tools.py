@@ -227,9 +227,25 @@ def scope_haystack(entity_scope: Optional[str], query: Optional[str]) -> str:
     return normalize_scope_dashes(f"{entity_scope or ''} {query or ''}".strip().lower())
 
 #: Wording that asks for the retail price to be set against the wholesale side.
+#:
+#: Georgian forms are present because the questions arrive in Georgian and the
+#: English list is matched against ``qa.canonical_query_en`` -- the analyzer's
+#: TRANSLATION. On 2026-08-16 that paraphrase happened to say "wholesale" and
+#: the benchmark was fetched; on 2026-08-17 it said "the exchange" instead and
+#: the entire comparison silently did not happen. A marker list read off a
+#: paraphrase is a coin toss; read off the user's own words it is not.
 WHOLESALE_COMPARISON_MARKERS: Tuple[str, ...] = (
     "wholesale", "balancing", "market price", "compare with the market",
+    "საბითუმო",   # wholesale
+    "საბალანსო",  # balancing
 )
+
+#: Topics whose nomination by the analyzer means the question reaches the
+#: wholesale side, whatever words the translation chose. This is the structured
+#: signal that was sitting unused on the 2026-08-17 trace, where
+#: candidate_topics were ["network_supply_tariffs", "market_structure",
+#: "balancing_price"] and the benchmark was still not fetched.
+WHOLESALE_COMPARISON_TOPICS: Tuple[str, ...] = ("balancing_price",)
 
 
 #: Components in tariff order: the stack a customer's bill is built from.
@@ -310,10 +326,22 @@ def resolve_consumer_class(text: str) -> Optional[str]:
     return _first_alias_hit(haystack, _CLASS_ALIASES)
 
 
-def asks_for_wholesale_comparison(text: str) -> bool:
-    """Whether the question sets the retail price against the wholesale side."""
+def asks_for_wholesale_comparison(text: str, *, topics=()) -> bool:
+    """Whether the question sets the retail price against the wholesale side.
+
+    Two keys, the same shape ``is_retail_data_question`` already uses and for
+    the same reason: wording markers have now failed four times on this path.
+    Here the wording is not even the user's -- it is the analyzer's English
+    paraphrase -- so a topic the analyzer nominated is the more reliable of the
+    two, and the caller passes the RAW question text alongside the paraphrase.
+    """
     haystack = (text or "").lower()
-    return any(marker in haystack for marker in WHOLESALE_COMPARISON_MARKERS)
+    if any(marker in haystack for marker in WHOLESALE_COMPARISON_MARKERS):
+        return True
+    return any(
+        str(topic).strip().lower() in WHOLESALE_COMPARISON_TOPICS
+        for topic in (topics or ())
+    )
 
 
 #: Units that mean POWER, not voltage. A number beside one of these is a
