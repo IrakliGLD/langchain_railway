@@ -38,6 +38,25 @@ def test_a_retail_primary_plans_no_tariff_context_tool():
     assert EvidenceRole.TARIFF_CONTEXT.value not in mapping
 
 
+def test_a_retail_primary_plans_no_companion_tool_at_all():
+    """Removing one role only moved the problem to the next one.
+
+    Dropping tariff_context made the analyzer ask for correlation_driver instead,
+    which maps to get_prices and also returned 0 rows, with the same
+    narrative-augmentation validator warning (2026-08-17). Whack-a-mole.
+
+    The general reason there is nothing to fetch: the wholesale side is already
+    IN the retail frame. ``include_wholesale_benchmark`` puts the balancing price,
+    the guaranteed capacity fee and the ESCO fee into the primary result as
+    ``wholesale_benchmark_gel_kwh``. A companion tool cannot add a series the
+    frame does not already have, and every companion observed on a retail primary
+    came back empty.
+    """
+    mapping = _role_to_default_tool(ToolName.GET_END_USER_PRICES.value)
+
+    assert mapping == {}, f"retail primary should plan no companions, got {mapping}"
+
+
 def test_a_wholesale_primary_still_maps_tariff_context_to_get_tariffs():
     """The role is meaningful there and must keep working."""
     mapping = _role_to_default_tool(ToolName.GET_PRICES.value)
@@ -45,14 +64,25 @@ def test_a_wholesale_primary_still_maps_tariff_context_to_get_tariffs():
     assert mapping[EvidenceRole.TARIFF_CONTEXT.value] == ToolName.GET_TARIFFS.value
 
 
-def test_the_other_roles_are_unchanged_on_a_retail_primary():
-    """Narrow change: only tariff_context is affected."""
-    mapping = _role_to_default_tool(ToolName.GET_END_USER_PRICES.value)
+def test_every_other_primary_keeps_its_full_mapping():
+    """The change is confined to the retail primary.
 
-    assert mapping[EvidenceRole.COMPOSITION_CONTEXT.value] == (
-        ToolName.GET_BALANCING_COMPOSITION.value
-    )
-    assert mapping[EvidenceRole.CORRELATION_DRIVER.value] == ToolName.GET_PRICES.value
+    Supersedes an earlier assertion that only tariff_context was dropped on a
+    retail primary; that narrow scope is what let correlation_driver take its
+    place. This is the guard that matters now -- no other primary loses a role.
+    """
+    for primary in (
+        ToolName.GET_PRICES.value,
+        ToolName.GET_TARIFFS.value,
+        ToolName.GET_GENERATION_MIX.value,
+        ToolName.GET_BALANCING_COMPOSITION.value,
+    ):
+        mapping = _role_to_default_tool(primary)
+        assert set(mapping) == {
+            EvidenceRole.COMPOSITION_CONTEXT.value,
+            EvidenceRole.TARIFF_CONTEXT.value,
+            EvidenceRole.CORRELATION_DRIVER.value,
+        }, f"{primary} lost a role: {sorted(mapping)}"
 
 
 def test_the_prices_primary_correlation_override_still_applies():

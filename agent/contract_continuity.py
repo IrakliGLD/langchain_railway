@@ -38,7 +38,17 @@ def _build_snapshot(ctx) -> str:
     hint = getattr(top, "params_hint", None) if top else None
     hint_dict: dict = {}
     if hint is not None:
-        for field in ("metric", "currency", "granularity", "start_date", "end_date"):
+        # Deliberately no start_date / end_date. Those describe WHEN the last
+        # question was about, and the next one may be about a different period --
+        # while metric, currency and granularity describe WHAT is being asked and
+        # are safe to carry.
+        #
+        # 2026-08-17: turn 1's analyzer invented "August 2026" for a dateless
+        # question, and inheriting that window is how an answer's coverage came to
+        # depend on which question was asked first. Scope is worth inheriting; a
+        # period nobody asked for should not survive one turn, let alone
+        # propagate through a session.
+        for field in ("metric", "currency", "granularity"):
             value = getattr(hint, field, None)
             if value:
                 hint_dict[field] = str(value)

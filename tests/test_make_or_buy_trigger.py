@@ -118,41 +118,17 @@ def test_the_failing_trace_now_reaches_the_tool_with_a_benchmark_and_a_window():
     assert params is not None
     assert params["include_wholesale_benchmark"] is True, "no benchmark -> nothing to compare"
     assert params["supplier"] == "telmico"
-    # A single analyzer month is widened so the annual block has years to report.
-    assert params["end_date"] == "2026-06-30"
-    assert params["start_date"] < "2022-01-01"
+    # The analyzer's invented month is CLEARED, not widened. Widening fixed the
+    # fetch and left the contract declaring June, and the summarizer answers the
+    # analyzer's canonical query -- so the answer came back scoped to that single
+    # month. See tests/test_make_or_buy_window_clearing.py for the full rule.
+    assert "start_date" not in params
+    assert "end_date" not in params
 
 
-class TestAMakeOrBuyWindowCoversYearsNotOneMonth:
-    """rows=1 on the failing trace: a single month cannot answer an irreversible
-    choice, and the annual block needs more than one year to show anything."""
-
-    def test_a_single_month_window_is_widened(self):
-        from agent.planner import expand_make_or_buy_window
-
-        start, end = expand_make_or_buy_window(
-            "2026-06-01", "2026-06-30", is_make_or_buy=True
-        )
-
-        assert end == "2026-06-30"
-        assert start is not None and start < "2022-01-01"
-
-    def test_an_explicit_multi_year_window_is_left_alone(self):
-        from agent.planner import expand_make_or_buy_window
-
-        assert expand_make_or_buy_window(
-            "2021-07-01", "2026-06-30", is_make_or_buy=True
-        ) == ("2021-07-01", "2026-06-30")
-
-    def test_a_non_comparison_window_is_left_alone(self):
-        from agent.planner import expand_make_or_buy_window
-
-        assert expand_make_or_buy_window(
-            "2026-06-01", "2026-06-30", is_make_or_buy=False
-        ) == ("2026-06-01", "2026-06-30")
-
-    def test_an_open_window_is_left_open(self):
-        """No dates means the tool already fetches the full range."""
-        from agent.planner import expand_make_or_buy_window
-
-        assert expand_make_or_buy_window(None, None, is_make_or_buy=True) == (None, None)
+# The window rule moved to tests/test_make_or_buy_window_clearing.py, and the
+# behaviour changed with it: an analyzer-invented period is now CLEARED rather
+# than widened to five years. Widening fixed the fetch but left the contract
+# declaring a single month, and the summarizer answers the analyzer's canonical
+# query -- so the answer came back about that month while six years of evidence
+# sat unused (2026-08-17). A period the USER stated is still honoured.

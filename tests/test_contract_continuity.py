@@ -78,8 +78,15 @@ def test_snapshot_contains_routed_fields_and_hint():
     snapshot = json.loads(continuity_snapshot_json(_authoritative_ctx()))
     assert snapshot["query_type"] == "data_retrieval"
     assert snapshot["top_tool"] == "get_prices"
-    assert snapshot["params_hint"]["start_date"] == "2023-01-01"
+    assert snapshot["params_hint"]["metric"] == "balancing"
     assert snapshot["canonical_query_en"] == "monthly balancing prices for 2023"
+    # The date window is deliberately NOT carried (2026-08-17): an analyzer that
+    # invented a month for a dateless question had it inherited by the next turn,
+    # which made an answer's coverage depend on which question came first.
+    # Nothing is lost -- the period still travels in canonical_query_en above, in
+    # the user's own terms, instead of as a window applied silently.
+    assert "start_date" not in snapshot["params_hint"]
+    assert "end_date" not in snapshot["params_hint"]
 
 
 def test_snapshot_empty_without_authoritative_analysis():

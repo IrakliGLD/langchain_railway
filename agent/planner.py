@@ -998,57 +998,45 @@ def build_tool_invocation_from_analysis(
     )
 
 
-#: A make-or-buy comparison needs years, not a month. The choice is
-#: irreversible, so the answer is about the expected spread over the horizon and
-#: its variability -- neither of which exists in a single month. Same five-year
-#: reach as the single-month explanation widener above, and the annual block
-#: needs several years before it can show anything at all.
-_MAKE_OR_BUY_HISTORY_YEARS = 5
-
-#: Below this many months, a comparison window is treated as too narrow to
-#: answer the question that was asked.
-_MAKE_OR_BUY_MIN_MONTHS = 24
 
 
-def expand_make_or_buy_window(
+def resolve_make_or_buy_window(
     start_date: Optional[str],
     end_date: Optional[str],
     *,
     is_make_or_buy: bool,
+    user_stated_dates: bool,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Widen a too-narrow window for a regulated-versus-wholesale comparison.
+    """The window a regulated-versus-wholesale comparison should actually fetch.
 
-    2026-08-17 production trace: ``get_end_user_prices`` returned ONE row for a
-    make-or-buy question, because the analyzer's period pinned a single month.
-    One month cannot say whether a consumer should make an irreversible switch,
-    and the annual comparison block has nothing to report from it.
+    Replaces an earlier widener that fixed the fetch and left the CONTRACT
+    declaring a single month. That was not enough: the summarizer's question is
+    the analyzer's ``canonical_query_en`` -- the prompt census shows
+    ``user_question_chars`` equal to its length in every trace -- so the model
+    answered "is retail cheaper in August 2026" while holding six years of
+    evidence, and titled its result for that month.
 
-    An open window is left open -- the tool already fetches the full range --
-    and an explicitly wide window is left alone, so a question that named its
-    own period keeps it.
+    A period the USER stated is honoured; overriding it would answer a question
+    nobody asked. A period the ANALYZER invented on a dateless question is
+    CLEARED rather than widened, because the choice is irreversible and one month
+    cannot inform it. Clearing is what the control request in the same session
+    did -- no period, 66 rows, full coverage -- and it also recovers the months a
+    fixed 5-year window drops (61 rows against 66).
     """
-    if not is_make_or_buy or not end_date:
+    if not is_make_or_buy:
         return start_date, end_date
-
-    end_dt = _parse_iso_date(end_date)
-    if end_dt is None:
+    if user_stated_dates:
         return start_date, end_date
+    if start_date is None and end_date is None:
+        return None, None
 
-    start_dt = _parse_iso_date(start_date) if start_date else None
-    if start_dt is not None:
-        months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
-        if months >= _MAKE_OR_BUY_MIN_MONTHS:
-            return start_date, end_date
-
-    widened = date(end_dt.year - _MAKE_OR_BUY_HISTORY_YEARS, end_dt.month, 1).isoformat()
     log.info(
-        "Widening make-or-buy comparison window: %s-%s -> %s-%s",
+        "Make-or-buy comparison: clearing analyzer-invented window %s-%s "
+        "(no date in the question) so the full published range is compared",
         start_date,
         end_date,
-        widened,
-        end_date,
     )
-    return widened, end_date
+    return None, None
 
 
 def build_end_user_price_params(
@@ -1284,16 +1272,29 @@ def resolve_tool_params(
             ],
         )
         params.update(end_user_params)
-        # A single-month window cannot answer an irreversible make-or-buy choice.
-        start_date, end_date = expand_make_or_buy_window(
+        # A single month cannot answer an irreversible make-or-buy choice, and a
+        # window the analyzer invented is not evidence that one was asked for.
+        # ``_extract_authoritative_date_range`` reads the RAW query, so it is the
+        # only signal here that reflects what the user actually wrote.
+        _user_start, _user_end = _extract_authoritative_date_range(raw_query, effective_query)
+        _is_make_or_buy = bool(end_user_params.get("include_wholesale_benchmark"))
+        start_date, end_date = resolve_make_or_buy_window(
             start_date,
             end_date,
-            is_make_or_buy=bool(end_user_params.get("include_wholesale_benchmark")),
+            is_make_or_buy=_is_make_or_buy,
+            user_stated_dates=bool(_user_start or _user_end),
         )
+        params.pop("start_date", None)
+        params.pop("end_date", None)
         if start_date:
             params["start_date"] = start_date
         if end_date:
             params["end_date"] = end_date
+        # Clear the CONTRACT too. sql_hints.period feeds the continuity snapshot,
+        # so an invented month left in place is inherited by the next turn as
+        # well, and downstream readers keep believing the answer is about it.
+        if _is_make_or_buy and start_date is None and end_date is None:
+            qa.sql_hints.period = None
 
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)
