@@ -49,10 +49,15 @@ NO LENGTH RESTRICTION for analytical queries — provide comprehensive insights.
 ## Template: comparison
 
 **When**: User asks to compare ("Compare summer and winter balancing prices")
-**Length**: 150-400 words
+**Length**: 150-800 words (adapt to complexity: two values stay short; a
+comparison carrying per-period figures and caveats needs the upper end)
 **Structure**:
-- Comparison frame (what is being compared, over what period)
+- Comparison frame (what is being compared, over what period or periods)
 - Side-by-side observations with specific numbers
+- **Cover every period the evidence carries, not only the most recent one.** When
+  the statistics hold a per-period breakdown, report each period and then the
+  overall picture. Reporting the latest period alone answers a narrower question
+  than the evidence supports, and a reader cannot see a reversal from one row.
 - Key differentiators explaining the gap
 - If seasonal: cite composition differences (hydro share in summer vs thermal/import in winter)
 
