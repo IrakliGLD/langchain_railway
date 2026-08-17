@@ -534,7 +534,11 @@ def seed_history(
                 "question": _history_text(turn.get("question", "")),
                 "answer": _history_text(turn.get("answer", "")),
             }
-            for turn in turns[:SESSION_HISTORY_MAX_TURNS]
+            # Tail, not head: ``append_exchange`` below keeps the NEWEST turns
+            # (``del history[:-N]``), and seeding kept the oldest. With the cap
+            # at 2 and three caller turns supplied, that discarded the most
+            # recent turn -- the one a follow-up refers to (2026-08-17).
+            for turn in turns[-SESSION_HISTORY_MAX_TURNS:]
         ]
         payload["updated_at"] = now_ts
 
