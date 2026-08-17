@@ -202,6 +202,54 @@ class TestAClarifyShapedAnswerFromDataStillCharts:
             question_analysis=self._analysis("clarify"),
         ) is True
 
+    def test_clarify_charts_even_when_the_plan_recommends_no_chart(self):
+        """The configuration production actually produced, which the test above missed.
+
+        That test passes ``chart_recommended=True``, so it clears the gate below
+        on the recommendation rather than on the clarify rescue -- it would have
+        passed without the rescue at all. On 2026-08-17 the analyzer emitted
+        ``chart_recommended=false`` with a null presentation, and a 66-row monthly
+        frame produced "Skipping chart: visualization plan did not recommend a
+        chart".
+
+        The plan is stale for exactly the reason the answer_kind was: it was drawn
+        for a CLARIFYING answer, where no chart is correct. Rescuing the
+        answer_kind without rescuing the plan derived from it leaves the chart
+        suppressed one gate later.
+        """
+        from tests.test_guardrails import _make_chart_stage_question_analysis
+        from visualization.chart_selector import should_generate_chart
+
+        analysis = _make_chart_stage_question_analysis(
+            answer_kind="clarify",
+            primary_presentation=None,
+            chart_recommended=False,
+        )
+
+        assert should_generate_chart(
+            "is the regulated supply tariff cheaper than wholesale",
+            66,
+            response_mode="data_primary",
+            question_analysis=analysis,
+        ) is True
+
+    def test_a_rescued_clarify_still_needs_enough_rows_to_chart(self):
+        from tests.test_guardrails import _make_chart_stage_question_analysis
+        from visualization.chart_selector import should_generate_chart
+
+        analysis = _make_chart_stage_question_analysis(
+            answer_kind="clarify",
+            primary_presentation=None,
+            chart_recommended=False,
+        )
+
+        assert should_generate_chart(
+            "is the regulated supply tariff cheaper than wholesale",
+            1,
+            response_mode="data_primary",
+            question_analysis=analysis,
+        ) is False
+
     def test_clarify_still_suppresses_a_chart_outside_the_data_path(self):
         from visualization.chart_selector import should_generate_chart
 

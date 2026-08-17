@@ -109,6 +109,25 @@ def should_generate_chart(
             )
             return should_draw
 
+        # The analyzer drew its visualization plan for a CLARIFYING answer, where
+        # recommending no chart is correct -- there is nothing to plot. Once
+        # retail routing flips the route to the data path there IS a frame, so
+        # that plan is stale for exactly the reason the answer_kind was.
+        #
+        # Rescuing the answer_kind above without rescuing the plan derived from it
+        # leaves the chart suppressed one gate later, which is what the
+        # 2026-08-17 trace showed: past the clarify gate, then "visualization plan
+        # did not recommend a chart" on a 66-row monthly frame.
+        if answer_kind == "clarify" and answers_from_data:
+            should_draw = row_count >= 2
+            log.info(
+                "%s chart: clarify answered from data (recommended=%s, rows=%d)",
+                "Generating" if should_draw else "Skipping",
+                chart_recommended,
+                row_count,
+            )
+            return should_draw
+
         if primary_presentation in {"chart", "chart_plus_table"} or chart_recommended:
             if answer_kind in {"timeseries", "forecast", "scenario", "comparison"}:
                 should_draw = row_count >= 2
