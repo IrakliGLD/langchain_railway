@@ -3530,8 +3530,19 @@ def _append_annual_comparison(ctx: QueryContext) -> None:
     if ctx.has_authoritative_question_analysis:
         profile = ctx.question_analysis.analysis_requirements.monthly_consumption or None
 
+    # State the span explicitly. The summarizer answers the analyzer's canonical
+    # query, which on 2026-08-17 named a single month on a dateless question, and
+    # the answer was titled for that month while six years sat in this block.
+    # A grounded statement of what the comparison covers gives it a basis for
+    # saying so.
+    _span = (
+        f"{periods.min():%Y-%m}"
+        f" to {periods.max():%Y-%m}"
+    )
     lines = [
         f"\n{_ANNUAL_COMPARISON_HEADER}",
+        f"This comparison covers {_span} — every period below, not any single "
+        "month named in the question.",
         "Regulated supply tariff vs like-for-like wholesale benchmark (balancing "
         "price + guaranteed capacity fee + ESCO service fee), averaged per calendar "
         "year. Figures are per series; never average across them. A PARTIAL year is "
