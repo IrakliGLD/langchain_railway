@@ -44,6 +44,7 @@ from agent.report_grounding import (
 from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_CONSTANTS_FIRST_MODE,
+    ANALYZER_DEADLINE_SHARE,
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
     ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE,
     ENABLE_ANALYZER_PROMPT_CACHE_KEY,
@@ -96,6 +97,7 @@ from config import (
     ROUTER_REASONING_EFFORT,
     ROUTER_THINKING_BUDGET,
     SESSION_HISTORY_MAX_TURNS,
+    SUMMARIZER_GUIDANCE_MAX_CHARS,
     SUMMARIZER_MODEL,
     SUMMARIZER_PROMPT_BUDGET_MAX_CHARS,
     SUMMARIZER_REASONING_EFFORT,
@@ -500,8 +502,63 @@ _REPORT_STAGE_PREFIX = "report_"
 _REPORT_STAGE_MINIMUM_TIMEOUT_SECONDS = 240.0
 
 
+#: Stages whose call must not be allowed to spend the whole request budget.
+#: The per-call timeout is clamped to what REMAINS, so an early stage that runs
+#: long is charged to the later ones without anything reporting it. Stage 0.2 is
+#: the only early stage with an unbounded reasoning cost, and Stage 4 is the one
+#: that pays: see the 2026-08-17 incident note on ANALYZER_DEADLINE_SHARE.
+_ANALYZER_TIMEOUT_STAGE = "question_analyzer"
+
+#: Prompt characters the summarizer gets through per second of budget, used to
+#: decide whether a prompt is affordable before the call starts. Measured on
+#: 2026-08-17 (chars / seconds taken): 62,830/39.0 = 1,611 · 73,495/49.1 = 1,497
+#: · 75,639/43.3 = 1,747, while 88,364 did NOT finish in 69.2s (<1,277) and
+#: 89,664 did not finish in 74.6s (<1,202). Throughput degrades as the prompt
+#: grows because reasoning cost is superlinear in it, so the figure is set below
+#: the slowest success rather than at the average: 1,000 leaves all three
+#: answered requests untouched and sheds both that timed out.
+#: tests/test_stage_deadline_governance.py pins it against those five requests.
+_SUMMARIZER_CHARS_PER_SECOND = 1_000
+
+
+def _analyzer_timeout_seconds(configured_seconds: float) -> float:
+    """Cap Stage 0.2 at its share of the request budget.
+
+    Returns ``configured_seconds`` unchanged when there is no request scope, so
+    offline entry points and tests are unaffected. Never returns more than the
+    request actually has left: late in a request the share is irrelevant.
+    """
+    scope = current_request_execution_scope()
+    if scope is None or scope.deadline is None:
+        return configured_seconds
+    share_seconds = (scope.deadline.budget_ms / 1000.0) * ANALYZER_DEADLINE_SHARE
+    remaining_seconds = scope.deadline.remaining_seconds()
+    return max(0.001, min(configured_seconds, share_seconds, remaining_seconds))
+
+
+def _deadline_aware_summarizer_budget(
+    *, configured_budget: int, remaining_ms: int
+) -> int:
+    """Shrink the Stage 4 prompt when there is not time to think about a big one.
+
+    Starting a call that cannot finish inside the remaining budget spends the
+    whole remainder and ships a failure string -- the 2026-08-17 outcome, twice,
+    after 112 seconds each. Scaling the prompt to the time available trades
+    depth for an answer, which is the right trade at that point.
+
+    ``remaining_ms`` below zero is the caller's "no request scope" sentinel and
+    leaves the configured budget alone.
+    """
+    if remaining_ms < 0:
+        return configured_budget
+    affordable = int(max(0, remaining_ms) / 1000.0 * _SUMMARIZER_CHARS_PER_SECOND)
+    return max(1_500, min(configured_budget, affordable))
+
+
 def _effective_provider_timeout_seconds(provider: str, stage: str) -> float:
     configured = _configured_provider_timeout_seconds(provider)
+    if str(stage or "") == _ANALYZER_TIMEOUT_STAGE:
+        configured = _analyzer_timeout_seconds(configured)
     if (
         REPORT_MODEL_TYPE
         and str(stage or "").startswith(_REPORT_STAGE_PREFIX)
@@ -3342,7 +3399,7 @@ def _build_analyzer_prompt_blocks(
     current_query_lower = str(user_query or "").lower()
 
     blocks: list[tuple[str, str]] = [
-        ("UNTRUSTED_USER_QUESTION", user_query or ""),
+        ("UNTRUSTED_USER_QUESTION", _neutralize_block_delimiter(user_query)),
         ("UNTRUSTED_CONVERSATION_HISTORY", prompt_context.history_str),
         ("CONTRACT_QUERY_TYPE_GUIDE", _QUERY_TYPE_GUIDE_JSON),
         ("CONTRACT_ANSWER_KIND_GUIDE", _ANSWER_KIND_GUIDE_JSON),
@@ -3547,7 +3604,7 @@ def _render_legacy_analyzer_prompt(user_query: str, history_str: str, schema_hin
         ]
     ).strip()
     legacy_blocks = [
-        ("UNTRUSTED_USER_QUESTION", user_query or ""),
+        ("UNTRUSTED_USER_QUESTION", _neutralize_block_delimiter(user_query)),
         ("UNTRUSTED_CONVERSATION_HISTORY", history_str),
         ("UNTRUSTED_QUERY_TYPE_GUIDE", _QUERY_TYPE_GUIDE_JSON),
         ("UNTRUSTED_ANSWER_KIND_GUIDE", _ANSWER_KIND_GUIDE_JSON),
@@ -5902,6 +5959,7 @@ def llm_repair_report_section(
 
 _SUMMARIZER_CENSUS_SECTION_NAMES = (
     "UNTRUSTED_USER_QUESTION",
+    "UNTRUSTED_QUESTION_INTERPRETATION",
     "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES",
     "UNTRUSTED_DOMAIN_KNOWLEDGE",
     "UNTRUSTED_STATISTICS",
@@ -5911,6 +5969,65 @@ _SUMMARIZER_CENSUS_SECTION_NAMES = (
 _SUMMARIZER_CENSUS_SECTION_RE = re.compile(
     r"((?:UNTRUSTED)_\w+):\n<<<(.*?)>>>", re.DOTALL,
 )
+#: Guidance blocks that are reference appendices rather than instructions about
+#: how to answer *this* question. They are the largest blocks by far
+#: (retail-tariff-rules.md alone is 15.5 KB) and the only ones an answer can
+#: survive without, so they are what a guidance budget sheds first. Anything not
+#: listed here is treated as an answer rule and kept.
+#: Background loaded on every energy-domain question regardless of the frame in
+#: hand. Droppable outright: nothing in the answer depends on it being complete.
+_GUIDANCE_BACKGROUND_PREFIXES = (
+    "SEASONAL DOMAIN RULES:",
+    "ENTITY TAXONOMY:",
+)
+
+
+def _pack_guidance(parts: list[str], *, budget: int) -> str:
+    """Assemble guidance under a character budget.
+
+    Two steps, in this order for a reason:
+
+    1. Drop generic background outright. It is loaded on every energy-domain
+       question and no answer depends on having all of it.
+    2. Trim the largest remaining block to fit, rather than dropping it.
+       Frame-specific rules -- retail tariff rules on a retail frame, fleet
+       rules on a fleet frame -- are loaded precisely because the frame in hand
+       needs them, so dropping them whole trades a slow answer for a wrong one.
+       Reference files lead with their headline rules, so a truncated block is
+       still worth more than an absent one.
+
+    Order is preserved for whatever survives.
+    """
+    kept = [part for part in parts if part]
+    if not kept:
+        return ""
+
+    def _rendered(blocks: list[str]) -> str:
+        return "\n\n".join(blocks)
+
+    if len(_rendered(kept)) <= budget:
+        return _rendered(kept)
+
+    for index in range(len(kept) - 1, -1, -1):
+        if len(_rendered(kept)) <= budget:
+            break
+        if kept[index].startswith(_GUIDANCE_BACKGROUND_PREFIXES):
+            kept.pop(index)
+
+    while len(_rendered(kept)) > budget and kept:
+        largest = max(range(len(kept)), key=lambda i: len(kept[i]))
+        overflow = len(_rendered(kept)) - budget
+        target = len(kept[largest]) - overflow
+        if target < 200:
+            # Trimming this block to a stub would leave a header and nothing
+            # else; at that point the budget is genuinely too small for the
+            # rule set and dropping the block is the honest outcome.
+            kept.pop(largest)
+            continue
+        kept[largest] = _truncate_text(kept[largest], target)
+    return _truncate_text(_rendered(kept), budget)
+
+
 _SUMMARIZER_GUIDANCE_PREFIX = "SYSTEM_GUIDANCE (authoritative rules):\n"
 _SUMMARIZER_GUIDANCE_SUFFIX = "Respond with JSON exactly matching this schema:\n"
 
@@ -5935,6 +6052,9 @@ def _summarizer_prompt_census(prompt: str) -> dict[str, int]:
     named_content_chars = sum(section_lengths.values()) + guidance_chars
     return {
         "user_question_chars": section_lengths["UNTRUSTED_USER_QUESTION"],
+        "question_interpretation_chars": section_lengths[
+            "UNTRUSTED_QUESTION_INTERPRETATION"
+        ],
         "external_source_passages_chars": section_lengths[
             "UNTRUSTED_EXTERNAL_SOURCE_PASSAGES"
         ],
@@ -5954,12 +6074,14 @@ def _log_summarizer_prompt_census(prompt: str, *, phase: str) -> None:
     census = _summarizer_prompt_census(prompt)
     log.info(
         "summarizer_prompt_census phase=%s "
-        "user_question_chars=%d external_source_passages_chars=%d "
+        "user_question_chars=%d question_interpretation_chars=%d "
+        "external_source_passages_chars=%d "
         "domain_knowledge_chars=%d statistics_chars=%d data_preview_chars=%d "
         "conversation_history_chars=%d guidance_chars=%d fixed_overhead_chars=%d "
         "total_chars=%d",
         phase,
         census["user_question_chars"],
+        census["question_interpretation_chars"],
         census["external_source_passages_chars"],
         census["domain_knowledge_chars"],
         census["statistics_chars"],
@@ -6053,6 +6175,12 @@ def _retail_rules_apply(stats_hint: Optional[str]) -> bool:
 
 _SUMMARIZER_STATS_SECTION_RE = re.compile(r"(?m)^--- ([^-\n].*?) ---[ \t]*$")
 _SUMMARIZER_STATS_SECTION_PRIORITY = {
+    # Figures the user typed. Nothing else in the corpus can substitute for
+    # them -- every other block is re-derivable from the frame, this one is not
+    # -- so it outranks everything. Without an entry it would default to 10,
+    # below COLUMN AGGREGATES at 25, and be shed first: the same trap the
+    # ANNUAL_COMPARISON_SECTION note below records.
+    "USER-SUPPLIED SERIES": 105,
     "CAUSAL CONTEXT": 100,
     "COMPONENT PRESSURE SUMMARY": 95,
     "REGULATED PLANT SALES": 90,
@@ -6122,7 +6250,47 @@ def _compact_summarizer_statistics(stats_hint: str, *, max_chars: int = 36000) -
     return compacted
 
 
+def _neutralize_block_delimiter(text: str) -> str:
+    """Stop untrusted text from opening or closing a ``<<<...>>>`` prompt block.
+
+    Every untrusted payload is fenced by these delimiters, and the section
+    names inside the fence are what the census, the truncation profiles and the
+    provenance gate key off. Text that carries the delimiter can therefore
+    forge a section -- a user-supplied ``>>>`` followed by
+    ``UNTRUSTED_STATISTICS:`` presents fabricated figures to a gate that treats
+    that section as evidence. Spacing the run out keeps the characters readable
+    to the model while removing their structural meaning.
+    """
+    return str(text or "").replace(">>>", "> > >").replace("<<<", "< < <")
+
+
+def _resolve_question_surfaces(
+    routing_query: str, raw_user_query: str
+) -> tuple[str, str]:
+    """Split the question the user asked from the rewrite used for routing.
+
+    Returns ``(asked_question, interpretation)``. The asked question is always
+    the user's own text when we have it; the interpretation is the canonical
+    rewrite, and is empty when it adds nothing (identical text, or no rewrite).
+    Callers that predate ``raw_user_query`` keep their existing behaviour: the
+    routing surface becomes the question and there is no interpretation block.
+    """
+    routing_text = _neutralize_block_delimiter(routing_query).strip()
+    raw_text = _neutralize_block_delimiter(raw_user_query).strip()
+    if not raw_text:
+        return routing_text, ""
+    if not routing_text or routing_text == raw_text:
+        return raw_text, ""
+    return raw_text, routing_text
+
+
 _PREVIEW_PERIOD_RE = re.compile(r"^\d{4}(-\d{2}){0,2}")
+
+#: Recent periods held out of the even-spacing thinning. Twelve because a year
+#: is the shortest window the recurring comparisons here are asked over -- a
+#: month-by-month question answered from a subsample of its own months is the
+#: 2026-08-17 complaint.
+_PREVIEW_RESERVED_RECENT_PERIODS = 12
 
 
 def _compact_preview_by_period(preamble: list[str], data: list[str], max_chars: int):
@@ -6152,9 +6320,25 @@ def _compact_preview_by_period(preamble: list[str], data: list[str], max_chars: 
     ordered = sorted(set(periods))
     fixed = sum(len(line) + 1 for line in preamble)
     for keep_count in range(len(ordered), 1, -1):
-        step = (len(ordered) - 1) / (keep_count - 1)
-        indices = sorted({int(round(position * step)) for position in range(keep_count)})
-        keep = {ordered[index] for index in indices}
+        # Reserve the recent tail before spreading the rest. Even spacing keeps
+        # the RANGE represented -- the 2026-08-16 fix, which must survive -- but
+        # it has no notion of which end the question is about, so on 2026-08-17
+        # a sixty-six-period retail frame lost months from inside the last year
+        # while a twelve-month comparison was being asked. Half the kept budget
+        # is the cap so reserving the tail can never crowd out the far end.
+        reserved_count = min(_PREVIEW_RESERVED_RECENT_PERIODS, keep_count // 2)
+        reserved = set(ordered[len(ordered) - reserved_count:]) if reserved_count else set()
+        spread_count = keep_count - len(reserved)
+        if spread_count >= 2:
+            spread_span = len(ordered) - len(reserved)
+            step = (spread_span - 1) / (spread_count - 1) if spread_count > 1 else 0
+            indices = sorted(
+                {int(round(position * step)) for position in range(spread_count)}
+            )
+            keep = {ordered[index] for index in indices if index < spread_span}
+        else:
+            keep = {ordered[0]}
+        keep |= reserved
         kept = [line for line in data if line.split(",", 1)[0] in keep]
         note = (
             f"...[rows omitted from preview]... {len(keep)} of {len(ordered)} periods "
@@ -6242,8 +6426,22 @@ def llm_summarize_structured(
     grounding_policy: str = "",
     comparison_focus: bool = False,
     answer_mode: str = "standard",
+    raw_user_query: str = "",
 ) -> SummaryEnvelope:
-    """Generate strict JSON summary for guardrail validation."""
+    """Generate strict JSON summary for guardrail validation.
+
+    ``user_query`` is the routing surface -- normally the analyzer's
+    ``canonical_query_en`` -- and ``raw_user_query`` is what the user actually
+    typed. The question block is rendered from the RAW text: the 2026-08-17
+    incident had a user paste a twelve-month consumption profile that the
+    canonical rewrite compressed away, so the model was asked to reason about
+    figures it had never been shown. The rewrite still travels, labelled as an
+    interpretation, because it carries the English normalisation that helps on
+    non-English turns.
+    """
+    asked_question, question_interpretation = _resolve_question_surfaces(
+        user_query, raw_user_query
+    )
     effective_data_preview = "" if resolution_policy == "clarify" else data_preview
     effective_data_preview = _compact_summarizer_preview(effective_data_preview)
     stats_hint = _compact_summarizer_statistics(stats_hint)
@@ -6287,7 +6485,8 @@ def llm_summarize_structured(
     )
     skill_hash = get_skills_content_hash() if ENABLE_SKILL_PROMPTS_SUMMARIZER else "off"
     cache_input = (
-        f"summary_structured_v10|pm={PIPELINE_MODE}|{user_query}|{effective_data_preview}|{stats_hint}|"
+        f"summary_structured_v11|pm={PIPELINE_MODE}|{asked_question}|{question_interpretation}|"
+        f"{effective_data_preview}|{stats_hint}|"
         f"{lang_instruction}|{history_str}|strict={strict_grounding}|{domain_knowledge}|{vector_knowledge}|"
         f"skills={ENABLE_SKILL_PROMPTS_SUMMARIZER}|qa={qa_type}|eak={effective_answer_kind_key}|"
         f"vk={vk_doc_types}|sh={skill_hash}|"
@@ -6628,7 +6827,9 @@ def llm_summarize_structured(
         formatting_rules = load_reference("answer-composer", "formatting-rules.md")
         if formatting_rules:
             guidance_parts.append(formatting_rules)
-        skill_guidance = "\n\n".join(guidance_parts)
+        skill_guidance = _pack_guidance(
+            guidance_parts, budget=SUMMARIZER_GUIDANCE_MAX_CHARS
+        )
         log.info(
             "📝 Structured summarizer enriched: query_type=%s, focus=%s, guidance=%d chars",
             query_type,
@@ -6682,11 +6883,16 @@ def llm_summarize_structured(
         "citations": ["string"],
         "confidence": 0.0,
     }
+    interpretation_block = (
+        f"UNTRUSTED_QUESTION_INTERPRETATION:\n<<<{question_interpretation}>>>\n\n"
+        if question_interpretation
+        else ""
+    )
     prompt = f"""
 UNTRUSTED_USER_QUESTION:
-<<<{user_query}>>>
+<<<{asked_question}>>>
 
-UNTRUSTED_EXTERNAL_SOURCE_PASSAGES:
+{interpretation_block}UNTRUSTED_EXTERNAL_SOURCE_PASSAGES:
 <<<{vector_knowledge}>>>
 
 UNTRUSTED_DOMAIN_KNOWLEDGE:
@@ -6724,6 +6930,9 @@ Citation format rules:
         resolution_policy=resolution_policy,
     )
     _summary_budget = FAST_MODE_SUMMARIZER_BUDGET if _fast_pipeline else SUMMARIZER_PROMPT_BUDGET_MAX_CHARS
+    _summary_budget = _deadline_aware_summarizer_budget(
+        configured_budget=_summary_budget, remaining_ms=deadline_remaining_ms
+    )
     prompt = _enforce_prompt_budget(
         prompt,
         label="summarize_structured",

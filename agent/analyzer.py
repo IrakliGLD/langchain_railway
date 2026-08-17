@@ -17,6 +17,7 @@ from agent.provenance import sql_query_hash, stamp_provenance
 from agent.router import extract_balancing_entities
 from agent.scenario_contract import extract_scenario_requests, ground_scenario_requests
 from agent.sql_executor import BALANCING_SHARE_PIVOT_SQL, ensure_share_dataframe, fetch_balancing_share_panel
+from agent.user_supplied_series import attach_user_supplied_series
 from analysis.seasonal_stats import (
     calculate_seasonal_stats,
     detect_monthly_timeseries,
@@ -3017,6 +3018,15 @@ def enrich(ctx: QueryContext) -> QueryContext:
 
         # Pre-calculate trendlines for forecast answer generation
         _precalculate_trendlines(ctx, cols_labeled)
+
+    # Figures the user typed into the question. Attached last so the block sits
+    # beside the measured evidence rather than being overwritten by any of the
+    # stats builders above, and so a question that pastes a profile has that
+    # profile available for weighting instead of silently dropping it.
+    try:
+        attach_user_supplied_series(ctx)
+    except Exception as _series_err:  # never let a paste break enrichment
+        log.warning("User-supplied series attach failed: %s", _series_err)
 
     trace_detail(
         log,

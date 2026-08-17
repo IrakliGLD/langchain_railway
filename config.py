@@ -632,6 +632,27 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS = max(
     1500,
     int(os.getenv("SUMMARIZER_PROMPT_BUDGET_MAX_CHARS", str(PROMPT_BUDGET_MAX_CHARS))),
 )
+# Guidance budget (2026-08-17 incident). SYSTEM_GUIDANCE lives in the prompt
+# suffix, and _section_aware_truncate only drops UNTRUSTED_* sections, so the
+# whole-prompt budget could never touch it -- it could only cut evidence. On the
+# make-or-buy retail path guidance reached 33,385 chars (retail-tariff-rules.md
+# alone is 15.5 KB) and the 88k prompt could not finish inside the request
+# deadline. 20k holds the focus rules, the answer template and the balancing
+# template together while forcing the reference appendices to compete.
+SUMMARIZER_GUIDANCE_MAX_CHARS = _read_bounded_int_env(
+    "SUMMARIZER_GUIDANCE_MAX_CHARS", 20_000, minimum=2_000, maximum=30_000,
+)
+# Share of the request budget Stage 0.2 may spend (2026-08-17 incident). The
+# per-call timeout is clamped to the REMAINING budget, so an analyzer that runs
+# long is charged silently to Stage 4: at 41.5s of a 115s budget the summarizer
+# was left 69.2s for a 22.4k-token prompt and timed out, shipping a 77-char
+# failure after 112 seconds. A third of the budget covers the 24-26s calls seen
+# on healthy turns with headroom, and makes overrun bounded and visible instead
+# of invisible.
+ANALYZER_DEADLINE_SHARE = max(
+    0.05,
+    min(0.9, float(os.getenv("ANALYZER_DEADLINE_SHARE", "0.35"))),
+)
 # Analyzer prompt ordering (2026-08-09). The shipped prompt opens with the
 # user question and appends the output schema after every block, so two
 # unrelated questions share a 28-character prefix and ~8,700 tokens of schema,
