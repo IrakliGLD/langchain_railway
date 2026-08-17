@@ -153,6 +153,18 @@ produce an incomplete price.
   separately approved components, only one of which (supply) tracks procurement cost.
 - Consequently a movement in the balancing price does **not** translate directly or
   immediately into a movement in the end-user price.
+- **Why not immediately: the supply tariff is fixed for a regulatory period against an
+  *expected* wholesale price.** GNERC's tariff methodology sets the supply tariff for the whole
+  regulatory period on a forecast of what procurement will cost. A shock inside the period does
+  not move the tariff. The resulting shortfall or surplus is settled in the **next regulatory
+  period** instead: if wholesale costs rose and the supplier under-recovered, the regulator
+  compensates that loss in the following period, so the regulated price then carries both the
+  new period's expected cost *and* the previous period's shortfall. The same works in reverse
+  after a shock that cut wholesale costs. This is the retail counterpart of the generation-side
+  lag described in `tariffs.md`, where an exchange-rate effect on hydro tariffs is "reflected
+  only in the next regulatory period, not immediately". It matters most for non-household
+  consumers supplied under the **`public`** activity — commercial "other" at each of the three
+  voltage levels.
 
 ---
 
@@ -191,6 +203,42 @@ Both wholesale prices are published in GEL/MWh, so divide by 1000 to reach the t
 Never multiply the tariff by 1000 instead: that figure appears in no row and the grounding gate
 will strip it from the answer. Compare **net** of VAT on both sides — the wholesale price is
 itself net, so comparing gross to net overstates the spread by 18%.
+
+### Households are not a live make-or-buy question
+
+Household regulated prices sit well below the wholesale benchmark, and **under current
+arrangements** they stay there: the universal supplier serving households has access to low-cost
+sources of electricity that other suppliers do not. (Recorded on the domain owner's instruction,
+2026-08-17, the same standing as the ESCO fee constant.)
+
+So for the four household categories the comparison has a known answer and does not need
+re-deriving each time. State it in one line and spend the analysis on the commercial categories,
+where the outcome genuinely varies. This is a statement about the *price relationship*, not about
+which customers are eligible to leave regulated supply — that eligibility rule is still open (see
+"Verification status" item 4).
+
+### A single year's sign is not a verdict on that year
+
+Because the tariff is trued up across regulatory periods (see "Relationship to the wholesale
+market" above), a year in which the regulated price sits *above* the benchmark may simply be
+recovering an earlier period's shortfall, and a year below it may be giving back an earlier
+surplus. The sign in any one year is therefore partly an artefact of where that year falls in the
+regulatory cycle.
+
+Do not present a single year's reversal as evidence that one side is structurally cheaper. Read
+the run of years together, and say which part of the gap is cycle and which is level when the
+data supports the distinction.
+
+### Moving to wholesale also takes on exchange-rate risk
+
+The balancing price is highly sensitive to the GEL/USD rate, because most of what it is built from
+is USD-denominated. A consumer on the regulated tariff carries none of that inside the regulatory
+period; a consumer buying wholesale carries it every month. So the risk taken on by switching is
+not only electricity-market risk — it is currency risk as well, from events with nothing to do
+with the power sector.
+
+See `currency_influence.md` §2.1 and §6 for the channels and the mechanism; they are not repeated
+here.
 
 ### The choice is one-way, so a month-by-month strategy is not available
 

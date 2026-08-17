@@ -8,6 +8,7 @@ Handles:
 - Data preview formatting
 """
 import logging
+import re
 from typing import List, Tuple
 
 import numpy as np
@@ -33,22 +34,188 @@ _EXTENSIVE_TOKENS = (
     "quantity", "volume", "generation", "demand",
     "consumption", "export", "import", "supply",
 )
+# A currency-per-energy unit in the name is DEFINITIVE: the column holds a price
+# per unit of energy, so it is intensive whatever else the name says. This wins
+# over the word heuristic below, because an extensive word can appear as a
+# QUALIFIER on a per-unit price without making it a volume —
+# "supply_vs_wholesale_spread_gel_kwh" is a per-kWh spread, and the word "supply"
+# had it summed across 66 months into the grounding corpus (2026-08-16 trace).
+# NOTE: bare energy units ("_mwh", "_gwh") are deliberately absent — those really
+# do name quantities, so "demand_mwh" must stay extensive.
+_CURRENCY_PER_ENERGY_TOKENS = (
+    "gel_kwh", "gel_mwh", "usd_kwh", "usd_mwh",
+)
 
 
 def is_intensive_metric(col: str) -> bool:
     """Whether *col* holds an intensive (per-unit) value that must be averaged
     rather than summed across periods.
 
-    Intensive tokens take precedence (a price-of-X is still a price); unknown
+    A currency-per-energy unit in the name settles it outright; otherwise
+    intensive tokens take precedence (a price-of-X is still a price); unknown
     columns default to intensive — averaging never inflates a level, and a
     period-over-period % trend is identical either way, so this is the safe bias.
+
+    Separators are normalised first so a raw name and its display label classify
+    the SAME way: agent/analyzer.py labels before calling quick_stats, where the
+    unit reads "(GEL/kWh)" rather than "_gel_kwh". Matching only the underscore
+    form fixed the column-aggregates block and left the yearly-trend line still
+    summing a per-kWh spread.
     """
-    c = (col or "").lower()
+    c = re.sub(r"[^a-z0-9]+", "_", (col or "").lower())
+    if any(tok in c for tok in _CURRENCY_PER_ENERGY_TOKENS):
+        return True
     if any(tok in c for tok in _INTENSIVE_TOKENS):
         return True
     if any(tok in c for tok in _EXTENSIVE_TOKENS):
         return False
     return True
+
+
+#: Says rows were dropped. Without it the model reads the last kept row and the
+#: first kept tail row as consecutive periods -- on the 2026-08-16 trace that was
+#: 2026-06 directly followed by 2021-09, with nothing in between and no sign
+#: anything was missing.
+PREVIEW_OMISSION_MARKER = "...[rows omitted from preview]..."
+
+#: Column names that look like a time axis. Same tuple the trend analysis uses.
+_TIME_KEYWORDS = ("date", "year", "month", "period")
+
+#: A text column is worth moving into a legend only if it is this wide on
+#: average. Short codes cost less inline than they would as legend entries.
+_LEGEND_MIN_AVG_WIDTH = 12
+
+#: ...and only if it takes few enough distinct values that the legend is far
+#: smaller than the repetition it replaces.
+_LEGEND_MAX_DISTINCT = 32
+
+
+def _preview_time_column(df):
+    """The frame's time axis by name, or None."""
+    for col in df.columns:
+        if any(kw in str(col).lower() for kw in _TIME_KEYWORDS):
+            return col
+    return None
+
+
+def _extract_repeated_labels(df):
+    """Move long, key-determined text columns out of the rows into a legend.
+
+    On the 2026-08-16 retail frame three columns -- ``supply_company`` (43
+    chars), ``series_label`` (38) and ``category_label`` (up to 37) -- carried
+    roughly 110 of each 197-char row and were repeated across all 528 rows,
+    while each is already implied by a short key on the same row. Stating the
+    mapping once and keeping the key roughly doubles how much of the frame fits
+    in the same budget.
+
+    Deliberately expressed as a property of the data -- a wide text column that
+    is constant within some narrower column's groups -- rather than as a list of
+    retail column names, so it does not need editing when a tool adds a column.
+
+    Returns ``(df, legend_text)``; ``legend_text`` is "" when nothing qualified.
+    """
+    candidates = [
+        col for col in df.columns
+        if not pd.api.types.is_numeric_dtype(df[col])
+        and not pd.api.types.is_datetime64_any_dtype(df[col])
+    ]
+    widths = {col: df[col].astype(str).map(len).mean() for col in candidates}
+
+    dropped: list[str] = []
+    legend_lines: list[str] = []
+    for col in candidates:
+        if widths[col] < _LEGEND_MIN_AVG_WIDTH:
+            continue
+        values = df[col].astype(str)
+        distinct = values.nunique()
+        # One value per row is an identifier, not a label: there is nothing to
+        # factor out and the legend would be as long as the column.
+        if distinct > _LEGEND_MAX_DISTINCT or distinct >= len(df):
+            continue
+
+        # The narrowest column that determines this one. Narrower matters: the
+        # key stays on every row, so a key wider than the label saves nothing.
+        key = None
+        for candidate_key in candidates:
+            if candidate_key == col or candidate_key in dropped:
+                continue
+            if widths[candidate_key] >= widths[col]:
+                continue
+            if df.groupby(df[candidate_key].astype(str), dropna=False)[col].nunique(
+                dropna=False
+            ).max() != 1:
+                continue
+            if key is None or df[candidate_key].nunique() < df[key].nunique():
+                key = candidate_key
+        if key is None:
+            continue
+
+        dropped.append(col)
+        mapping = dict(zip(df[key].astype(str), values))
+        for key_value, label in sorted(mapping.items()):
+            legend_lines.append(f"  {key}={key_value} -> {col}={label}")
+
+    if not dropped:
+        return df, ""
+
+    legend = (
+        "LEGEND (constant per key, stated once instead of on every row):\n"
+        + "\n".join(legend_lines)
+        + "\n"
+    )
+    return df.drop(columns=dropped), legend
+
+
+def _sample_whole_periods(df, max_chars: int):
+    """Keep every series at evenly spaced dates across the full span.
+
+    Head-and-tail truncation on a date-ordered frame keeps only the ends: on the
+    2026-08-16 trace it left the five most recent months and the three oldest,
+    so 2022, 2023, 2024 and 2025 -- including both years the question named --
+    reached the model not at all.
+
+    Sampling by DATE rather than by row position is what keeps a cross-series
+    comparison possible: every retained date carries all of its series, so the
+    categories can still be set against each other at any period shown. Sampling
+    rows would leave different categories present on different dates.
+
+    Returns the CSV, or None when the frame has no usable time axis or spans too
+    little for sampling to beat the existing head/tail behaviour.
+    """
+    time_col = _preview_time_column(df)
+    if time_col is None:
+        return None
+    periods = pd.to_datetime(df[time_col], errors="coerce")
+    if periods.isna().any():
+        return None
+    distinct = sorted(periods.unique())
+    if len(distinct) < 4:
+        return None
+    span_days = (distinct[-1] - distinct[0]) / pd.Timedelta(days=1)
+    if span_days < 365:
+        return None
+
+    csv_len = len(df.to_csv(index=False))
+    chars_per_row = max(1.0, csv_len / max(1, len(df)))
+    affordable_rows = max(1, int(max_chars / chars_per_row))
+    rows_per_date = max(1, round(len(df) / len(distinct)))
+    keep_count = max(2, min(len(distinct), affordable_rows // rows_per_date))
+
+    if keep_count >= len(distinct):
+        return None
+
+    # Evenly spaced, endpoints always included: the newest and oldest periods
+    # anchor the range the answer is allowed to describe.
+    step = (len(distinct) - 1) / (keep_count - 1)
+    indices = sorted({int(round(position * step)) for position in range(keep_count)})
+    keep = {distinct[index] for index in indices}
+
+    sampled = df[periods.isin(keep)]
+    note = (
+        f"{PREVIEW_OMISSION_MARKER} sampled to {len(keep)} of {len(distinct)} periods, "
+        "evenly spaced across the full range; every period shown carries all series"
+    )
+    return note + "\n" + sampled.to_csv(index=False)
 
 
 def rows_to_preview(
@@ -92,14 +259,37 @@ def rows_to_preview(
     if len(preview) <= max_preview_chars:
         return preview
 
-    # Progressive truncation: keep first half + last quarter of rows
+    # Everything below applies only because the frame did NOT fit. A preview
+    # within budget is returned above, untouched.
+
+    # 1. Width first: repeated labels cost more than the rows they describe.
+    df, legend = _extract_repeated_labels(df)
+    preview = df.to_csv(index=False)
+    if len(legend) + len(preview) <= max_preview_chars:
+        return legend + preview
+
+    # 2. Then depth, by whole periods, so every year stays represented.
+    sampled = _sample_whole_periods(df, max_preview_chars - len(legend))
+    if sampled is not None:
+        return legend + sampled
+
+    # 3. Last resort: keep both ends and say what went missing. The marker is
+    #    the difference between a gap and an apparently continuous series.
     while len(preview) > max_preview_chars and len(df) > 20:
         keep_head = max(10, len(df) // 2)
         keep_tail = max(5, len(df) // 4)
-        df = pd.concat([df.head(keep_head), df.tail(keep_tail)])
+        head, tail = df.head(keep_head), df.tail(keep_tail)
+        df = pd.concat([head, tail])
         preview = df.to_csv(index=False)
 
-    return preview
+    if len(df) < len(rows[:max_rows]):
+        lines = preview.splitlines(keepends=True)
+        boundary = 1 + len(df.head(len(df) // 2 if len(df) > 20 else len(df)))
+        preview = "".join(lines[:boundary]) + (
+            f"{PREVIEW_OMISSION_MARKER} middle rows dropped; both ends retained\n"
+        ) + "".join(lines[boundary:])
+
+    return legend + preview
 
 
 def quick_stats(rows: List[Tuple], cols: List[str]) -> str:

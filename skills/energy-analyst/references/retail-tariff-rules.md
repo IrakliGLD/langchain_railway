@@ -146,6 +146,50 @@ regulated in those" describes something no one can do. Instead:
   consumer takes on — because that is what an irreversible choice makes
   central, not the count of favourable months.
 
+What is forbidden is a switching **strategy** across periods. A **record of
+outcomes per year** is not that — it is the volatility evidence above at a
+grain a reader can actually hold, and it is required, not optional. Report the
+year-by-year outcome and then give the bottom line over the whole horizon.
+
+### Use the ANNUAL MAKE-OR-BUY COMPARISON block
+
+When the statistics contain a section headed
+`--- ANNUAL MAKE-OR-BUY COMPARISON ---`, that block is the comparison. It gives,
+per series and per calendar year, the mean supply tariff, the mean wholesale
+benchmark, the signed spread in both GEL/kWh and GEL/MWh, and which side sat
+lower.
+
+- **Quote those figures. Do not recompute them** — a figure you derive appears
+  in no row and the grounding gate will cut it.
+- State the outcome for **each year**, then the tally over full years.
+- A year marked `PARTIAL` is reported as partial, **with the months it covers**,
+  and is not compared like-for-like against a full year: the wholesale side is
+  seasonal and the tariff is not, so a Jul–Dec stub and a Jan–Jun stub are
+  biased in opposite directions.
+
+### One year's sign is not a verdict on that year
+
+The supply tariff is fixed for a **regulatory period** against an *expected*
+wholesale price, and any shortfall is settled in the **next** period. So a year
+in which the regulated price sits above the benchmark may simply be
+**recovering** an earlier period's loss, and a year below it may be giving back
+an earlier surplus.
+
+Never present a single year's reversal as proof that one side is structurally
+cheaper. Read the run of years together, and say plainly that part of the gap
+reflects the regulatory cycle rather than the market.
+
+### Households are a settled case — spend the analysis elsewhere
+
+Household regulated prices sit well below the wholesale benchmark and under
+current arrangements stay there, because the universal supplier serving
+households has access to low-cost sources other suppliers do not.
+
+So when the frame covers both: give the household categories **one line**
+saying the regulated tariff is and remains the cheaper side, and spend the
+per-year analysis on the **commercial** categories, where the outcome actually
+varies. Do not present the household comparison as an open question.
+
 ### The comparison expires at the target model
 
 It holds only under the current transitional model. Georgia entered the
@@ -179,6 +223,14 @@ Give the general picture from the data — every category, never averaged — an
 then close by offering a targeted follow-up. This ordering is required, not
 optional: the reader gets something useful immediately and can go deeper if
 they want to.
+
+**Coverage and depth are different things.** Every category is still covered —
+that is not negotiable and is what "never averaged" protects. What varies is the
+**depth** each one gets. On a make-or-buy comparison the household categories
+are a settled case (above), so they are covered in one line with the verdict,
+while the commercial categories get the full per-year treatment. Covering a
+category briefly is not the same as omitting it; omitting one, or folding it
+into an average, is still forbidden.
 
 Every answer covering more than one category ends with a short closing block
 in this shape:

@@ -403,6 +403,91 @@ def test_no_value_column_is_classified_as_a_summable_quantity(monkeypatch):
     )
 
 
+def test_wholesale_benchmark_columns_are_not_classified_as_summable(monkeypatch):
+    """The same rule as above, on the columns the benchmark adds.
+
+    The test above calls the tool WITHOUT ``include_wholesale_benchmark``, so it
+    never sees ``supply_vs_wholesale_spread_gel_kwh`` -- the one per-kWh column
+    that ``is_intensive_metric`` actually gets wrong. "supply" is an extensive
+    token and the column carries no intensive token, so the guard above passes
+    while the real defect ships: a per-kWh spread SUMMED across 66 months,
+    quotable from the grounding corpus (2026-08-16 trace).
+
+    The stub returns the SQL's own columns, so the benchmark pair is supplied
+    directly rather than inferred from the flag.
+    """
+    import agent.tools.end_user_price_tools as tool_module
+    from analysis.stats import is_intensive_metric
+
+    monkeypatch.setattr(
+        tool_module,
+        "run_text_query",
+        _stub_rows(
+            wholesale_benchmark_gel_kwh=0.1470,
+            supply_vs_wholesale_spread_gel_kwh=-0.0366,
+        ),
+    )
+    _, cols, _ = tool_module.get_end_user_prices(include_wholesale_benchmark=True)
+    value_columns = [c for c in cols if c.endswith(("_gel_kwh", "_gel_mwh"))]
+
+    assert "supply_vs_wholesale_spread_gel_kwh" in value_columns
+    assert "wholesale_benchmark_gel_kwh" in value_columns
+    not_intensive = [c for c in value_columns if not is_intensive_metric(c)]
+    assert not not_intensive, (
+        "these per-unit columns would be SUMMED across months in stats_hint: "
+        f"{not_intensive}"
+    )
+
+
+def test_currency_per_energy_unit_beats_an_extensive_word_in_the_name(monkeypatch):
+    """The rule generalises: the unit suffix decides, not the qualifier word.
+
+    ``supply``, ``demand``, ``generation`` and ``consumption`` are extensive
+    tokens because elsewhere they name volumes. As a QUALIFIER on a per-unit
+    price they do not make the column a volume, and a bare energy unit still
+    does. Pinning both directions keeps a future column name from re-opening
+    this by accident.
+    """
+    from analysis.stats import is_intensive_metric
+
+    # Currency-per-energy: intensive regardless of the qualifier word.
+    for col in (
+        "supply_vs_wholesale_spread_gel_kwh",
+        "demand_charge_gel_kwh",
+        "generation_cost_usd_mwh",
+        "consumption_price_gel_mwh",
+    ):
+        assert is_intensive_metric(col) is True, col
+
+    # Bare energy units are quantities and must stay summable.
+    for col in ("generation_gwh", "demand_mwh", "supply_quantity", "export"):
+        assert is_intensive_metric(col) is False, col
+
+
+def test_display_labels_keep_their_per_unit_classification():
+    """The rule must survive labeling, because one caller labels first.
+
+    ``agent/analyzer.py`` calls ``quick_stats(ctx.rows, cols_labeled)`` -- so
+    the classifier sees "Supply component vs wholesale, spread (GEL/kWh)", not
+    the raw column name. The unit reads ``GEL/kWh`` with a SLASH there, so a
+    fix that only matches the underscore form repairs the column-aggregates
+    block and leaves the yearly-trend line in ``quick_stats`` still summing a
+    per-kWh spread.
+    """
+    from analysis.stats import is_intensive_metric
+    from context import COLUMN_LABELS
+
+    for raw in (
+        "supply_vs_wholesale_spread_gel_kwh",
+        "wholesale_benchmark_gel_kwh",
+        "supply_tariff_gel_kwh",
+        "final_price_net_gel_kwh",
+    ):
+        label = COLUMN_LABELS.get(raw, raw)
+        assert label != raw, f"{raw} has no display label; test no longer covers it"
+        assert is_intensive_metric(label) is True, f"{raw} -> {label!r}"
+
+
 def test_every_parameter_actually_binds_through_sqlalchemy(monkeypatch):
     """The SQL must survive ``text()``, not merely look well-formed.
 
