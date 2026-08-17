@@ -75,7 +75,22 @@ def should_generate_chart(
             log.info("Skipping chart: visualization plan prefers %s", primary_presentation)
             return False
 
-        if answer_kind in {"knowledge", "clarify"} and not chart_requested:
+        # CLARIFY suppresses charts because a clarifying question has nothing to
+        # plot. That premise is stale for the questions retail routing overrides:
+        # they carry a clarify-shaped answer_kind and are answered FROM DATA, on
+        # the domain owner's "answer generally, then offer to narrow" rule. The
+        # analyzer emitted clarify on both retail traces on record, so the
+        # comparison chart would vanish on a rerun for a reason unrelated to
+        # charting -- the same disagreement the vector tier had.
+        #
+        # KNOWLEDGE is deliberately not rescued: a knowledge answer really has no
+        # data behind it, and nothing overrides that answer_kind to the data path.
+        answers_from_data = response_mode == "data_primary"
+        if answer_kind == "clarify" and not chart_requested and not answers_from_data:
+            log.info("Skipping chart: answer_kind=%s", answer_kind)
+            return False
+
+        if answer_kind == "knowledge" and not chart_requested:
             log.info("Skipping chart: answer_kind=%s", answer_kind)
             return False
 
