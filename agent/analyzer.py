@@ -3496,6 +3496,13 @@ def _append_annual_comparison(ctx: QueryContext) -> None:
         "tariff is not, so a partial year is not comparable like-for-like with a full "
         "one. Spread is tariff minus benchmark, so a negative spread means the "
         "regulated side sat below it.",
+        "The annual benchmark is an UNWEIGHTED mean of its months. The wholesale "
+        "side is seasonal -- summer months are hydro-dominant and cost less -- so it "
+        "equals what a consumer actually pays only if their consumption is flat "
+        "across the year: a summer-heavy consumer pays less than it shows, a "
+        "winter-heavy one more. The seasonal split on each line is the size of that "
+        "effect. The regulated stack is administered and flat, so its mean IS its "
+        "per-kWh price and is never split by season.",
     ]
 
     def _measure(group):
@@ -3504,6 +3511,31 @@ def _append_annual_comparison(ctx: QueryContext) -> None:
         tariff = float(group[_MAKE_OR_BUY_TARIFF_COLUMN].mean())
         benchmark = float(group[_MAKE_OR_BUY_BENCHMARK_COLUMN].mean())
         return tariff, benchmark, tariff - benchmark, months
+
+    def _seasonal_benchmark(group) -> str:
+        """Summer and winter means of the WHOLESALE side only.
+
+        The tariff is administered and flat, so splitting it would invite exactly
+        the summer-versus-winter comparison the retail rules forbid for
+        administered prices. The benchmark split is what tells a reader how much
+        their own consumption profile can move the answer: it is the difference
+        between paying the summer price and paying the winter one.
+        """
+        from config import SUMMER_MONTHS
+
+        is_summer = group["__month"].isin(SUMMER_MONTHS)
+        parts = []
+        for label, values in (
+            ("summer", group.loc[is_summer, _MAKE_OR_BUY_BENCHMARK_COLUMN].dropna()),
+            ("winter", group.loc[~is_summer, _MAKE_OR_BUY_BENCHMARK_COLUMN].dropna()),
+        ):
+            # A window with no months of a season has no mean for it. Emitting one
+            # anyway would be inventing a figure.
+            if values.empty:
+                continue
+            mean = float(values.mean())
+            parts.append(f"{label}={mean:.4f} ({mean * 1000:.1f})")
+        return f" | benchmark by season: {' '.join(parts)}" if parts else ""
 
     def _year_line(year: int, group) -> str:
         tariff, benchmark, spread, months = _measure(group)
@@ -3515,6 +3547,7 @@ def _append_annual_comparison(ctx: QueryContext) -> None:
             f"benchmark={benchmark:.4f} ({benchmark * 1000:.1f}) "
             f"spread={spread:+.4f} ({spread * 1000:+.1f}) "
             f"{_annual_comparison_verdict(spread)}"
+            f"{_seasonal_benchmark(group)}"
         )
 
     # Too many series to name is not a licence to pool them: report how the

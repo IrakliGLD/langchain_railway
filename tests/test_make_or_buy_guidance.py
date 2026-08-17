@@ -158,6 +158,37 @@ def test_coverage_and_depth_are_reconciled_not_left_contradicting():
     assert "still covered" in rules or "every category is still" in rules
 
 
+def test_knowledge_says_the_consumers_own_load_shape_moves_the_wholesale_cost():
+    """Domain owner, 2026-08-17. Absent from every file before this.
+
+    The regulated stack is flat, so its mean is its per-kWh price. The wholesale
+    side is seasonal, so an unweighted mean is what a consumer pays only if
+    consumption is flat across the year. The asymmetry is the point: the caveat
+    applies to ONE side of the comparison.
+    """
+    knowledge = _retail_knowledge()
+
+    assert "unweighted" in knowledge or "consumption-weighted" in knowledge
+    assert "summer" in knowledge and "winter" in knowledge
+    # The direction has to be stated, not left for the reader to infer.
+    assert "summer-heavy" in knowledge or "more consumption in summer" in knowledge
+
+
+def test_rules_forbid_quoting_the_unweighted_mean_as_what_a_consumer_pays():
+    """And require the seasonal split, which seasonal_patterns.md already demands.
+
+    "ALWAYS mention summer and winter averages separately when comparing prices
+    -- never use annual averages only." The annual block reported annual means
+    only, so the rule and the evidence disagreed.
+    """
+    rules = _retail_rules()
+
+    assert "unweighted" in rules
+    assert "benchmark by season" in rules
+    # The flat side must stay unsplit.
+    assert "never split" in rules or "not split by season" in rules
+
+
 def test_retail_rules_load_whenever_the_annual_block_is_present():
     """Wiring: the reading rule must reach the prompt whenever the data does.
 

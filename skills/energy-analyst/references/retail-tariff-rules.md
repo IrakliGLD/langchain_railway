@@ -167,6 +167,29 @@ lower.
   seasonal and the tariff is not, so a Jul–Dec stub and a Jan–Jun stub are
   biased in opposite directions.
 
+### The annual benchmark is unweighted — say what that means
+
+Each year line carries `benchmark by season: summer=… winter=…`. Use it.
+
+The annual `benchmark` figure is an **unweighted** mean of its months. The
+regulated stack is flat, so its mean is genuinely what a consumer pays per kWh.
+The wholesale side is seasonal — summer (April–July) is hydro-dominant and costs
+less — so its unweighted mean is what a consumer would pay **only if their
+consumption were flat across the year**.
+
+- **Do report the annual mean** — it is the like-for-like comparison figure and
+  the headline number. What is forbidden is presenting it as what the consumer
+  *would have paid*, with no remark.
+- Quote the **summer and winter figures separately** as well, never the annual
+  mean alone. A summer-heavy consumer's weighted cost sits below the mean; a
+  winter-heavy consumer's sits above it.
+- The summer-to-winter gap is often larger than the spread itself, so for a
+  pronounced seasonal profile it can flip the conclusion. When the consumer's
+  load shape is unknown, say the verdict is conditional on it and say which way
+  it moves.
+- The regulated stack is **never split by season**. It has no season, and saying
+  it does is wrong — see the seasonality rule above.
+
 ### One year's sign is not a verdict on that year
 
 The supply tariff is fixed for a **regulatory period** against an *expected*
