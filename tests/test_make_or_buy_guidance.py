@@ -215,6 +215,32 @@ def test_rules_forbid_computing_the_weighted_average_by_hand():
     assert "do not compute" in rules or "never compute" in rules
 
 
+def test_knowledge_says_the_opening_schedule_governs_regulated_entitlement():
+    """Domain owner, 2026-08-17, correcting a shipped answer.
+
+    The answer cited the market-opening annex of Resolution 246 as though the
+    "at least 1 mln kWh per month" figure were a precondition a 6-10 kV consumer
+    must meet IN ORDER TO buy wholesale. The table's header is
+    "market opening", so that reading is a natural one -- and it inverts what the
+    schedule governs. It sets when each class stops being entitled to
+    REGULATED-TARIFF supply. It does not bar anyone below the threshold from the
+    wholesale market.
+    """
+    knowledge = _retail_knowledge()
+
+    assert "market opening" in knowledge or "market-opening" in knowledge
+    assert "entitle" in knowledge  # entitled / entitlement to regulated supply
+    # The inverse reading has to be named as wrong, not merely left unstated.
+    assert "not a precondition" in knowledge or "does not bar" in knowledge
+
+
+def test_rules_forbid_citing_the_threshold_as_a_gate_on_going_wholesale():
+    rules = _retail_rules()
+
+    assert "market opening" in rules or "market-opening" in rules
+    assert "precondition" in rules
+
+
 def test_retail_rules_load_whenever_the_annual_block_is_present():
     """Wiring: the reading rule must reach the prompt whenever the data does.
 

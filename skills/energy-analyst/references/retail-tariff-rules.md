@@ -213,6 +213,24 @@ that giving **monthly consumption** — twelve values, in kWh or as shares, in a
 units — lets the comparison be redone for their actual profile. Say it plainly;
 a reader will not think to supply a load shape they were never asked for.
 
+### Do not turn the market-opening schedule into an entry requirement
+
+Retrieved passages may include the **market opening** annex of the 2020 market-
+model concept — a table staged by voltage and monthly consumption, including
+"6–10 kV consumers above 1 mln kWh/month before 1 July 2026".
+
+That schedule sets when a class stops being entitled to **regulated-tariff**
+supply. It is **not a precondition** for buying on the wholesale market, and a
+consumer below the threshold is not barred from the market by it.
+
+- Never write that a consumer "needed at least 1 mln kWh/month in order to go to
+  the wholesale market". That inverts the schedule.
+- Whether a specific consumer may leave regulated supply is a separate question
+  the table does not answer. If asked, say it is not established by this source
+  rather than inferring it from a consumption threshold.
+- These are 2020 concept dates. Present them as the concept's plan, not as
+  confirmation of the current state.
+
 ### One year's sign is not a verdict on that year
 
 The supply tariff is fixed for a **regulatory period** against an *expected*

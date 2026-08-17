@@ -233,6 +233,33 @@ Two consequences for any answer:
 - The verdict is conditional on the consumer's load shape whenever that shape is
   unknown. Say so, and say which way it would move the answer.
 
+### The market-opening schedule is about regulated entitlement, not permission to buy wholesale
+
+Annex 1 of the market-model concept (Government Resolution №246, 16 April 2020)
+carries a table headed **"market opening"** (`ბაზრის გახსნა`), staged by voltage
+level and monthly consumption — 35–110 kV consumers above 0.4 mln kWh/month
+before 1 July 2021; all 35–110 kV plus 6–10 kV consumers above **1 mln kWh/month**
+before 1 July 2026; all other consumers except households and small enterprises
+before 1 July 2027.
+
+**What that schedule sets is when each class stops being entitled to supply at
+the regulated tariff.** It is **not a precondition** a consumer must satisfy in
+order to buy on the wholesale market, and it **does not bar** a consumer below
+the threshold from doing so. (Recorded on the domain owner's instruction,
+2026-08-17, after an answer read it the other way round.)
+
+The header invites the inverse reading, so state the direction explicitly
+whenever this table is used:
+
+- Never present "at least 1 mln kWh per month" as a hurdle to leaving the
+  regulated tariff. It describes losing the regulated option, not gaining the
+  market one.
+- A consumer's own eligibility to leave regulated supply is a **separate**
+  question this table does not answer, and it remains open — see "Verification
+  status" item 4.
+- The dates are a schedule from a 2020 concept document. Treat them as the
+  concept's plan, not as confirmation of what has since taken effect.
+
 ### Households are not a live make-or-buy question
 
 Household regulated prices sit well below the wholesale benchmark, and **under current
