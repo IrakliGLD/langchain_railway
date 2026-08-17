@@ -232,6 +232,10 @@ def test_knowledge_says_the_opening_schedule_governs_regulated_entitlement():
     assert "entitle" in knowledge  # entitled / entitlement to regulated supply
     # The inverse reading has to be named as wrong, not merely left unstated.
     assert "not a precondition" in knowledge or "does not bar" in knowledge
+    # WHO can no longer supply them, and FROM WHEN -- both were left implicit in
+    # the first draft, and both are the substance of the correction.
+    assert "public supplier" in knowledge
+    assert "from that date" in knowledge or "onwards" in knowledge
 
 
 def test_rules_forbid_citing_the_threshold_as_a_gate_on_going_wholesale():

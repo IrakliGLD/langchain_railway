@@ -219,9 +219,11 @@ Retrieved passages may include the **market opening** annex of the 2020 market-
 model concept — a table staged by voltage and monthly consumption, including
 "6–10 kV consumers above 1 mln kWh/month before 1 July 2026".
 
-That schedule sets when a class stops being entitled to **regulated-tariff**
-supply. It is **not a precondition** for buying on the wholesale market, and a
-consumer below the threshold is not barred from the market by it.
+"Opening" there means the group **loses the regulated option**: from that date
+onwards those consumers can no longer buy electricity at the **regulated price
+from the public supplier** and must source it elsewhere. It is **not a
+precondition** for buying on the wholesale market, and a consumer below the
+threshold is not barred from the market by it.
 
 - Never write that a consumer "needed at least 1 mln kWh/month in order to go to
   the wholesale market". That inverts the schedule.
