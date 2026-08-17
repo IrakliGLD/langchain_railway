@@ -255,6 +255,16 @@ COMPONENT_COLUMNS: Tuple[str, ...] = (
     "supply_tariff_gel_kwh",
 )
 
+#: The three columns a make-or-buy comparison is built from, named here because
+#: this module emits them. Three consumers depend on the spelling -- the annual
+#: comparison block in agent/analyzer.py, the comparison charts in
+#: agent/chart_pipeline.py, and the frame adapter -- and a rename spelled in one
+#: place is silent in the others: the block simply stops emitting and the chart
+#: simply stops being drawn, with no error from either.
+MAKE_OR_BUY_TARIFF_COLUMN = "supply_tariff_gel_kwh"
+MAKE_OR_BUY_BENCHMARK_COLUMN = "wholesale_benchmark_gel_kwh"
+MAKE_OR_BUY_SPREAD_COLUMN = "supply_vs_wholesale_spread_gel_kwh"
+
 #: The published total, net of VAT, and its gross twin when VAT was requested.
 NET_TOTAL_COLUMN = "final_price_net_gel_kwh"
 GROSS_TOTAL_COLUMN = "total_gross_gel_kwh"

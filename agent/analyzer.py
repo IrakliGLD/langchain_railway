@@ -3400,8 +3400,12 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
 
 #: The two columns that make a frame a make-or-buy comparison. Both must be
 #: present: the block compares them, and either alone is a different question.
-_MAKE_OR_BUY_TARIFF_COLUMN = "supply_tariff_gel_kwh"
-_MAKE_OR_BUY_BENCHMARK_COLUMN = "wholesale_benchmark_gel_kwh"
+from agent.tools.end_user_price_tools import (  # noqa: E402 -- single authority for the column names
+    MAKE_OR_BUY_BENCHMARK_COLUMN as _MAKE_OR_BUY_BENCHMARK_COLUMN,
+)
+from agent.tools.end_user_price_tools import (  # noqa: E402
+    MAKE_OR_BUY_TARIFF_COLUMN as _MAKE_OR_BUY_TARIFF_COLUMN,
+)
 
 #: Rows this block may enumerate before it stops naming individual series.
 #: 8 series x 6 years is ~48 lines and ~6 KB on an 11.7 KB stats_hint, which

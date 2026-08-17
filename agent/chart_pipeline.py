@@ -754,6 +754,25 @@ def _prepare_chart_source(
         and not re.search(r"\b(month|year)\b", col.lower())
     ]
     num_cols = _filter_energy_side_num_cols(chart_query, num_cols)
+
+    # Chart series are plotted in FRAME order, and the retail tool sorts DESC
+    # when no date filter is given so that a LIMIT captures the most recent
+    # months. Both charts in the 2026-08-17 report therefore read 2026-12 on the
+    # left and 2021 on the right. Nothing else in the chart path sorts by time:
+    # the only sort_values(date_col) lives inside calculate_trendline, which
+    # orders a local copy for line fitting and never reaches the axis.
+    #
+    # Rows are reordered by the parsed timestamps without touching the column's
+    # dtype, so every downstream reader sees the values it already expected.
+    if time_key and time_key in df.columns and not df.empty:
+        try:
+            parsed = pd.to_datetime(df[time_key], errors="coerce")
+            if parsed.notna().all() and not parsed.is_monotonic_increasing:
+                df = df.loc[parsed.sort_values().index].reset_index(drop=True)
+                log.info("Sorted chart source chronologically on '%s'", time_key)
+        except Exception as exc:
+            log.warning("Chronological chart sort skipped for '%s': %s", time_key, exc)
+
     return df, time_key, label_map_all, categorical_cols, num_cols
 
 
@@ -860,8 +879,13 @@ def _retail_chart_groups(ctx: QueryContext) -> Optional[List[Dict[str, Any]]]:
     wanted one comparison across categories. The frame already states exactly
     how many series exist, so the decision does not need to be inferred.
     """
+    # Imported rather than respelled: the chart and the annual comparison block
+    # must not disagree about what a make-or-buy frame is.
     from agent.tools.end_user_price_tools import (
         COMPONENT_COLUMNS,
+        MAKE_OR_BUY_BENCHMARK_COLUMN,
+        MAKE_OR_BUY_SPREAD_COLUMN,
+        MAKE_OR_BUY_TARIFF_COLUMN,
         SERIES_COLUMNS,
         headline_price_column,
         is_retail_price_frame,
@@ -874,23 +898,77 @@ def _retail_chart_groups(ctx: QueryContext) -> Optional[List[Dict[str, Any]]]:
     headline = headline_price_column(df.columns)
     series_count = df.groupby(list(SERIES_COLUMNS), dropna=False).ngroups
 
+    groups: List[Dict[str, Any]] = []
+
+    # A make-or-buy frame leads with the comparison, because that is the question
+    # that was asked. The 2026-08-17 report drew the final-price line and the
+    # component stack and never drew this at all, though both columns were in the
+    # frame, in the same unit, on the same time axis.
+    #
+    # SUPPLY, never the final price: transmission and distribution are paid
+    # whichever way the energy is procured, so comparing the total overstates the
+    # gap by the whole network stack -- about half the bar in that same report.
+    # Both knowledge/network_supply_tariffs.md and the retail rules say so.
+    #
+    # Single-series only. The multi-series path widens the frame by pivoting on
+    # the headline column alone, which leaves no benchmark column to overlay; a
+    # per-series comparison would need that pivot to carry two metrics.
+    comparison_ready = (
+        series_count == 1
+        and MAKE_OR_BUY_TARIFF_COLUMN in df.columns
+        and MAKE_OR_BUY_BENCHMARK_COLUMN in df.columns
+    )
+    if comparison_ready:
+        groups.append(
+            {
+                "metrics": [MAKE_OR_BUY_TARIFF_COLUMN, MAKE_OR_BUY_BENCHMARK_COLUMN],
+                "type": "line",
+                "title": (
+                    "Regulated supply component vs wholesale benchmark "
+                    "(balancing + guaranteed capacity + ESCO fee)"
+                ),
+                "source": "retail",
+                "_max_series_cap": 2,
+            }
+        )
+        # The gap is a percent or two of the level, so on the shared axis above
+        # the two lines nearly coincide -- the report's own axis runs 0 to 0.30
+        # with the values at 0.22-0.26. This panel is where the sign change is
+        # legible, and the sign change is the answer.
+        if MAKE_OR_BUY_SPREAD_COLUMN in df.columns:
+            groups.append(
+                {
+                    "metrics": [MAKE_OR_BUY_SPREAD_COLUMN],
+                    "type": "line",
+                    "title": (
+                        "Spread: regulated supply minus wholesale benchmark "
+                        "(below zero = regulated cheaper)"
+                    ),
+                    "source": "retail",
+                    "_max_series_cap": 1,
+                }
+            )
+
     metrics = [headline]
     if series_count > 1 and ctx.retail_series_columns:
         # The frame was widened; each series is now its own metric column.
         metrics = list(ctx.retail_series_columns)
 
-    groups: List[Dict[str, Any]] = [
-        {
-            "metrics": metrics,
-            "type": "line",
-            "title": "Final end-user price by supply company and customer category",
-            "source": "retail",
-            # This short-circuit bypasses the normalization loop that would
-            # otherwise set the cap, and the default of 3 would silently drop
-            # thirteen of sixteen series.
-            "_max_series_cap": max(len(metrics), _DEFAULT_MAX_SERIES),
-        }
-    ]
+    # The headline line is dropped on a comparison frame: the component stack
+    # below already carries the total, and the question is not about the total.
+    if not comparison_ready:
+        groups.append(
+            {
+                "metrics": metrics,
+                "type": "line",
+                "title": "Final end-user price by supply company and customer category",
+                "source": "retail",
+                # This short-circuit bypasses the normalization loop that would
+                # otherwise set the cap, and the default of 3 would silently drop
+                # thirteen of sixteen series.
+                "_max_series_cap": max(len(metrics), _DEFAULT_MAX_SERIES),
+            }
+        )
 
     # The stack is a part-to-whole only within ONE company and ONE category.
     # Stacking sixteen different stacks on a single axis is not a composition,
