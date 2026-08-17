@@ -130,13 +130,35 @@ class TestTheComparisonIsActuallyDrawn:
         assert len(spread_groups) == 1
         assert spread_groups[0]["metrics"] == [SPREAD]
 
-    # NOT tested here: a non-zero y-baseline for the comparison chart. The chart
-    # path has no baseline mechanism at all -- no beginAtZero, y_min or
-    # suggestedMin in the group dict, the chart spec, or chart_meta -- so a flag
-    # set here would be read by nothing, and a test asserting the flag would pass
-    # while the rendered axis stayed at zero. Making the axis zoom needs a change
-    # in the frontend repo. The spread panel below is what carries the signal
-    # under the renderer as it exists.
+    def test_the_comparison_asks_the_renderer_not_to_start_at_zero(self):
+        """A zero baseline hides the quantity the chart exists to show.
+
+        The gap is a percent or two of the level, so on a 0-0.30 axis the two
+        lines nearly coincide. ``MyChartComponent`` hard-codes
+        ``beginAtZero: true`` on its y-scales, so the backend has to ask for the
+        zoom explicitly -- and the flag has to reach ``chart_meta``, which is the
+        only thing that component reads. A flag that stops at the group dict
+        would be read by nothing.
+        """
+        groups = _retail_chart_groups(_ctx(_retail_frame()))
+
+        assert groups[0]["_y_begin_at_zero"] is False
+        # The spread panel crosses zero, so zero must stay on that axis.
+        spread = next(g for g in groups if SPREAD in g["metrics"])
+        assert spread.get("_y_begin_at_zero") is not False
+
+    def test_the_flag_reaches_chart_meta(self):
+        """Not just the group dict: chart_meta is what the renderer consumes."""
+        from agent.chart_pipeline import build_chart
+
+        ctx = build_chart(_ctx(_retail_frame()))
+
+        assert ctx.chart_meta is not None
+        charts = (ctx.chart_meta or {}).get("charts") or []
+        metas = [c.get("chartMeta", c) for c in charts] if charts else [ctx.chart_meta]
+        assert any(m.get("yBeginAtZero") is False for m in metas), (
+            f"no chart asked for a non-zero baseline: {[sorted(m) for m in metas]}"
+        )
 
     def test_the_redundant_final_price_line_is_dropped_on_a_comparison(self):
         """The component stack already carries the total, and the question is

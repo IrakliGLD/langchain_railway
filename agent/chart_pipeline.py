@@ -929,6 +929,10 @@ def _retail_chart_groups(ctx: QueryContext) -> Optional[List[Dict[str, Any]]]:
                 ),
                 "source": "retail",
                 "_max_series_cap": 2,
+                # The gap is a percent or two of the level, so a zero baseline
+                # renders the two lines as one. MyChartComponent hard-codes
+                # beginAtZero on its y-scales, so the zoom has to be asked for.
+                "_y_begin_at_zero": False,
             }
         )
         # The gap is a percent or two of the level, so on the shared axis above
@@ -1629,6 +1633,10 @@ def _build_chart_spec(
     chart_meta["groupIndex"] = group_index
     chart_meta["sourceMetrics"] = list(metrics)
     chart_meta["groupSource"] = group.get("source", "auto")
+    # Emitted only when a group explicitly asks for the zoom, so every existing
+    # chart keeps the renderer's own default of starting at zero.
+    if group.get("_y_begin_at_zero") is False:
+        chart_meta["yBeginAtZero"] = False
 
     visual_goal = getattr(getattr(visualization, "visual_goal", None), "value", None)
     if visual_goal:
