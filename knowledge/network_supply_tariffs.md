@@ -233,6 +233,42 @@ Two consequences for any answer:
 - The verdict is conditional on the consumer's load shape whenever that shape is
   unknown. Say so, and say which way it would move the answer.
 
+### The market-opening schedule is about regulated entitlement, not permission to buy wholesale
+
+Annex 1 of the market-model concept (Government Resolution №246, 16 April 2020)
+carries a table headed **"market opening"** (`ბაზრის გახსნა`), staged by voltage
+level and monthly consumption — 35–110 kV consumers above 0.4 mln kWh/month
+before 1 July 2021; all 35–110 kV plus 6–10 kV consumers above **1 mln kWh/month**
+before 1 July 2026; all other consumers except households and small enterprises
+before 1 July 2027.
+
+**"Opening" here means the group loses the regulated option.** From the stated
+date onwards, consumers in that group can no longer obtain electricity at the
+**regulated price from the public supplier**; they have to source it elsewhere.
+That is what the schedule sets — not who is *allowed* to buy on the wholesale
+market. It is **not a precondition** a consumer must satisfy in order to buy
+wholesale, and it **does not bar** a consumer below the threshold from doing so.
+(Recorded on the domain owner's instruction, 2026-08-17, after an answer read it
+the other way round.)
+
+The header invites the inverse reading, so state the direction explicitly
+whenever this table is used:
+
+- Never present "at least 1 mln kWh per month" as a hurdle to leaving the
+  regulated tariff. It describes losing the regulated option, not gaining the
+  market one.
+- A consumer's own eligibility to leave regulated supply is a **separate**
+  question this table does not answer, and it remains open — see "Verification
+  status" item 4.
+- The dates are a schedule from a 2020 concept document. Treat them as the
+  concept's plan, not as confirmation of what has since taken effect.
+- Note the consequence for the make-or-buy comparison itself: for a group that
+  has already been opened, there is no regulated price left to compare against,
+  so the question becomes which market option is best rather than whether to
+  leave. Do not assume that applies to a particular consumer — the eligibility
+  point above is unresolved — but do not present a regulated-versus-wholesale
+  choice as open if the source says the group's regulated option has lapsed.
+
 ### Households are not a live make-or-buy question
 
 Household regulated prices sit well below the wholesale benchmark, and **under current
