@@ -657,6 +657,32 @@ def _role_to_default_tool(primary_tool: str) -> Dict[str, str]:
     return base
 
 
+_WINDOW_KEYS = ("start_date", "end_date")
+
+
+def align_secondary_window(params: dict, *, primary_params: dict) -> dict:
+    """Put a companion dataset on the primary's window, whatever that window is.
+
+    The primary governs in BOTH directions. Filling an unset companion window
+    was already the behaviour; clearing one the primary does not have is the
+    2026-08-17 fix. On the make-or-buy path
+    ``planner.resolve_make_or_buy_window`` deliberately clears an
+    analyzer-invented month so the full published range is compared -- the
+    retail primary then fetched 66 rows while the wholesale companion, which
+    had resolved the same invented month for itself, fetched 11. Two datasets
+    on different supports do not make a comparison.
+
+    Returns a new dict; the caller's is left alone.
+    """
+    aligned = dict(params or {})
+    for key in _WINDOW_KEYS:
+        if key in (primary_params or {}):
+            aligned[key] = primary_params[key]
+        else:
+            aligned.pop(key, None)
+    return aligned
+
+
 def _resolve_secondary_params(
     qa: QuestionAnalysis,
     tool_name: str,
@@ -684,11 +710,9 @@ def _resolve_secondary_params(
     if params is None:
         return None
 
-    # Inherit the primary time window so cross-tool evidence lines up on the same periods.
-    if "start_date" not in params and "start_date" in primary_params:
-        params["start_date"] = primary_params["start_date"]
-    if "end_date" not in params and "end_date" in primary_params:
-        params["end_date"] = primary_params["end_date"]
+    # Adopt the primary time window so cross-tool evidence lines up on the same
+    # periods -- including when the primary deliberately has no window.
+    params = align_secondary_window(params, primary_params=primary_params)
     if (
         tool_name in {ToolName.GET_PRICES.value, ToolName.GET_TARIFFS.value}
         and primary_params.get("currency")
