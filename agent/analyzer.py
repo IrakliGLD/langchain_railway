@@ -28,7 +28,7 @@ from analysis.system_quantities import (
     normalize_period_series,
     normalize_period_series_with_granularity,
 )
-from contracts.question_analysis import AnswerKind, ChartIntent, SemanticRole
+from contracts.question_analysis import AnswerKind, ChartIntent, RenderStyle, SemanticRole
 from core.db_gateway import database_connection
 from core.query_executor import ENGINE
 from models import QueryContext
@@ -2721,6 +2721,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
     ctx.stats_hint = quick_stats(ctx.rows, cols_labeled)
     _append_column_aggregates(ctx)
     _append_annual_comparison(ctx)
+    _pin_make_or_buy_render_style(ctx)
 
     # --- Seasonal stats ---
     # Administered prices have no season. GNERC approves one transmission,
@@ -3432,6 +3433,42 @@ def _annual_comparison_verdict(spread: float) -> str:
     if rounded == 0:
         return "level"
     return "regulated cheaper" if rounded < 0 else "wholesale cheaper"
+
+
+def _pin_make_or_buy_render_style(ctx: QueryContext) -> None:
+    """A make-or-buy answer is written, not rendered.
+
+    On 2026-08-17 the same question came back once as ``deterministic`` and once
+    as ``narrative``; the deterministic run produced the worse answer. The
+    deterministic renderer emits values, and this answer's substance is the
+    caveats around them -- irreversibility, the seasonal/unweighted benchmark,
+    the consumer's load shape, the regulatory-cycle true-up. None of those
+    survive a value renderer.
+
+    The system already detected the mismatch and only logged it: that run
+    carried ``Plan validation: render_style=DETERMINISTIC but plan has 1
+    narrative-augmentation step(s)``. This promotes that observation into the
+    decision.
+
+    Same override idiom, and the same authoritative-analysis guard, as the
+    uncorrectable-evidence-gap degrade in ``agent/evidence_finalizer.py``.
+    Deliberately narrow: keyed on the benchmark columns, so a plain retail
+    tariff series still renders deterministically.
+    """
+    if ctx.df is None or ctx.df.empty:
+        return
+    if not {_MAKE_OR_BUY_TARIFF_COLUMN, _MAKE_OR_BUY_BENCHMARK_COLUMN} <= set(ctx.df.columns):
+        return
+    if not ctx.has_authoritative_question_analysis:
+        return
+    if ctx.question_analysis.render_style == RenderStyle.NARRATIVE:
+        return
+
+    log.info(
+        "Make-or-buy frame: pinning render_style %s -> narrative",
+        getattr(ctx.question_analysis.render_style, "value", None),
+    )
+    ctx.question_analysis.render_style = RenderStyle.NARRATIVE
 
 
 def _append_annual_comparison(ctx: QueryContext) -> None:

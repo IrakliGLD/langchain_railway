@@ -639,6 +639,15 @@ def _role_to_default_tool(primary_tool: str) -> Dict[str, str]:
     # If the primary tool is prices, the correlation driver should be composition
     if primary_tool == ToolName.GET_PRICES.value:
         base[EvidenceRole.CORRELATION_DRIVER.value] = ToolName.GET_BALANCING_COMPOSITION.value
+
+    # On a retail primary there is no tariff context left to fetch: the frame
+    # already IS the tariff series, in GEL/kWh. get_tariffs is the generation
+    # side -- what a regulated PLANT is paid, in GEL/MWh -- so planning it costs
+    # a round trip and returns nothing. Every retail run on record that planned
+    # it logged "fetched tariff_context via get_tariffs (0 rows)" and tripped the
+    # narrative-augmentation plan-validation warning (2026-08-17).
+    if primary_tool == ToolName.GET_END_USER_PRICES.value:
+        base.pop(EvidenceRole.TARIFF_CONTEXT.value, None)
     return base
 
 
