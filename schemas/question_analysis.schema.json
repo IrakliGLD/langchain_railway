@@ -47,6 +47,22 @@
           "maxItems": 12,
           "title": "Derived Metrics",
           "type": "array"
+        },
+        "monthly_consumption": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Consumption per calendar month (1=January .. 12=December) when the question states one. Units are irrelevant -- kWh, MWh or shares all give the same weighted average -- because only the relative weights matter. Populate ONLY from figures the question actually supplies; never estimate a load shape. Used to weight the wholesale benchmark in a make-or-buy comparison, since an unweighted mean is what a consumer pays only if consumption is flat across the year.",
+          "title": "Monthly Consumption"
         }
       },
       "title": "AnalysisRequirementsInfo",

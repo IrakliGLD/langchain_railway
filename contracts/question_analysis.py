@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import (
     AfterValidator,
@@ -664,6 +664,47 @@ class AnalysisRequirementsInfo(BaseModel):
     needs_correlation_context: bool = False
     forecast_horizon_years: Optional[int] = Field(default=None, ge=1, le=20)
     derived_metrics: List[DerivedMetricRequest] = Field(default_factory=list, max_length=12)
+    monthly_consumption: Optional[Dict[int, float]] = Field(
+        default=None,
+        description=(
+            "Consumption per calendar month (1=January .. 12=December) when the "
+            "question states one. Units are irrelevant -- kWh, MWh or shares all "
+            "give the same weighted average -- because only the relative weights "
+            "matter. Populate ONLY from figures the question actually supplies; "
+            "never estimate a load shape. Used to weight the wholesale benchmark "
+            "in a make-or-buy comparison, since an unweighted mean is what a "
+            "consumer pays only if consumption is flat across the year."
+        ),
+    )
+
+    @field_validator("monthly_consumption")
+    @classmethod
+    def _validate_monthly_consumption(
+        cls, value: Optional[Dict[int, float]]
+    ) -> Optional[Dict[int, float]]:
+        """Reject a profile that cannot weight anything.
+
+        Months outside the calendar mean the extraction misread the question, and
+        an all-zero profile makes the weighted mean a division by zero -- both are
+        better refused here than carried into the arithmetic.
+        """
+        if value is None:
+            return None
+        for month, consumption in value.items():
+            if not 1 <= int(month) <= 12:
+                raise ValueError(
+                    f"monthly_consumption month must be 1-12, got {month!r}"
+                )
+            if consumption < 0:
+                raise ValueError(
+                    f"monthly_consumption cannot be negative, got {consumption!r} "
+                    f"for month {month!r}"
+                )
+        if value and sum(value.values()) <= 0:
+            raise ValueError(
+                "monthly_consumption totals zero, so it cannot weight anything"
+            )
+        return value or None
 
 
 # Top-level payload validated once, then reused by the rest of the pipeline.

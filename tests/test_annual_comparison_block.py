@@ -153,6 +153,65 @@ def test_months_without_a_benchmark_leave_both_the_mean_and_the_coverage():
     assert "0.1450" in line and "0.1470" in line
 
 
+class TestTheWholesaleSideIsSplitBySeason:
+    """A simple annual mean of the wholesale side is not what a consumer pays.
+
+    The regulated stack is flat, so its mean IS its per-kWh price. The wholesale
+    side is seasonal -- summer is hydro-dominant and cheap, winter is
+    thermal/import-dominant and dear -- so an UNWEIGHTED annual mean is only what
+    a consumer would pay if consumption were flat across the year. A summer-heavy
+    consumer pays less than the mean suggests, a winter-heavy one more.
+
+    ``seasonal_patterns.md`` already forbids the shortcut outright: "ALWAYS
+    mention summer and winter averages separately when comparing prices -- never
+    use annual averages only." The block reported annual means only.
+    """
+
+    @staticmethod
+    def _seasonal_year():
+        # Summer (Apr-Jul) cheap, winter dear. Months 1..12.
+        benchmark = [0.170, 0.170, 0.170, 0.120, 0.120, 0.120, 0.120,
+                     0.170, 0.170, 0.170, 0.170, 0.170]
+        return _rows(2022, range(1, 13), 0.145, benchmark)
+
+    def test_each_year_reports_the_benchmark_by_season(self):
+        stats = _run(self._seasonal_year())
+
+        line = next(line for line in stats.splitlines() if line.strip().startswith("2022"))
+        assert "summer" in line and "winter" in line, line
+        # Uses the repo's season definition: summer is months 4-7.
+        assert "0.1200" in line, "summer mean of the four cheap months"
+        assert "0.1700" in line, "winter mean of the eight dear months"
+
+    def test_the_annual_benchmark_mean_is_labelled_unweighted(self):
+        """Otherwise the model quotes it as what the consumer would have paid."""
+        stats = _run(self._seasonal_year())
+
+        assert "unweighted" in stats.lower()
+
+    def test_the_regulated_side_is_never_split_by_season(self):
+        """Administered prices have no season, and the rules forbid saying they do.
+
+        Splitting the tariff invites exactly the summer-versus-winter comparison
+        ``retail-tariff-rules.md`` bans for administered prices.
+        """
+        stats = _run(self._seasonal_year())
+
+        line = next(line for line in stats.splitlines() if line.strip().startswith("2022"))
+        # One seasonal pair only, on the benchmark.
+        assert line.count("summer=") == 1
+        assert line.count("winter=") == 1
+
+    def test_a_year_with_no_summer_months_reports_no_summer_mean(self):
+        """A Jan-Mar stub has no summer to average; inventing one would be a lie."""
+        stats = _run(_rows(2023, range(1, 4), 0.145, 0.170))
+
+        line = next(line for line in stats.splitlines() if line.strip().startswith("2023"))
+        assert "PARTIAL" in line
+        assert "summer=" not in line
+        assert "winter=" in line
+
+
 def test_no_block_at_all_without_the_benchmark_column():
     """This is the make-or-buy shape, not a general per-year facility."""
     records = _rows(2022, range(1, 13), 0.145, 0.147)

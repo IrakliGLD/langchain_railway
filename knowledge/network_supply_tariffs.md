@@ -204,6 +204,35 @@ Never multiply the tariff by 1000 instead: that figure appears in no row and the
 will strip it from the answer. Compare **net** of VAT on both sides — the wholesale price is
 itself net, so comparing gross to net overstates the spread by 18%.
 
+### An average of the wholesale side is not what a consumer would have paid
+
+This caveat applies to **one side only**, and that asymmetry is the whole point.
+
+The regulated stack is administered and flat within a regulatory period, so its
+mean *is* its per-kWh price: a consumer pays that figure whenever they consume.
+The wholesale side is seasonal — summer (April–July) is hydro-dominant and costs
+less, winter is thermal- and import-dominant and costs more. An **unweighted**
+mean of monthly wholesale prices is therefore what a consumer would pay only if
+their consumption were flat across the year.
+
+It almost never is. A **summer-heavy** consumer buying wholesale pays a
+consumption-weighted average **below** the unweighted mean, so the comparison
+understates how good wholesale would have been for them. A **winter-heavy**
+consumer pays **above** it, and the comparison flatters wholesale. The size of
+the effect is the summer-to-winter gap in the benchmark, which can be far larger
+than the spread being measured — so for a consumer with a pronounced seasonal
+profile it can decide the answer outright.
+
+Two consequences for any answer:
+
+- Report the wholesale side's **summer and winter averages separately**, not the
+  annual mean alone (`seasonal_patterns.md` requires this of every price
+  comparison). Never split the regulated stack the same way: it has no season,
+  and describing it as seasonal is wrong (see `tariffs.md` and the retail
+  answering rules).
+- The verdict is conditional on the consumer's load shape whenever that shape is
+  unknown. Say so, and say which way it would move the answer.
+
 ### Households are not a live make-or-buy question
 
 Household regulated prices sit well below the wholesale benchmark, and **under current

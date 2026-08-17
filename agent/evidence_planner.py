@@ -198,16 +198,37 @@ def _retail_fallback_steps(ctx: QueryContext, qa) -> list:
     if not is_retail_data_question(ctx):
         return []
 
+    # Same shape as every other planned step (see the primary_step literal in
+    # _expand_evidence_steps). This dict previously carried "tool" and
+    # "params_hint", so the first consumer to read it raised KeyError and the
+    # request died with a 500 -- _expand_evidence_steps reads
+    # steps[0]["tool_name"] directly, and the pipeline reads step["params"].
+    # 2026-08-17 production, error_class=KeyError.
+    #
+    # Params are RESOLVED here rather than left as a hint: the executor has
+    # nothing to call the tool with otherwise, and resolving them is also what
+    # gives this path the make-or-buy benchmark and the widened window that the
+    # non-fallback path already gets.
+    try:
+        params = resolve_tool_params(
+            qa, ToolName.GET_END_USER_PRICES.value, ctx.query, hint=None
+        ) or {}
+    except ValueError as exc:
+        # An unresolvable scope is a reason to plan nothing, never to 500.
+        log.warning("Retail fallback could not resolve tool params: %s", exc)
+        return []
+
     log.info(
         "Evidence plan: retail question with no analyzer tool candidates -- "
         "planning %s",
         ToolName.GET_END_USER_PRICES.value,
     )
     return [{
-        "tool": ToolName.GET_END_USER_PRICES.value,
-        "role": "primary_data",
-        "params_hint": None,
-        "reason": "retail_fallback_no_candidate_tools",
+        "role": EvidenceRole.PRIMARY_DATA.value,
+        "tool_name": ToolName.GET_END_USER_PRICES.value,
+        "params": params,
+        "satisfied": False,
+        "source": "planner",
     }]
 
 
