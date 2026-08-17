@@ -998,7 +998,65 @@ def build_tool_invocation_from_analysis(
     )
 
 
-def build_end_user_price_params(haystack: str) -> dict:
+#: A make-or-buy comparison needs years, not a month. The choice is
+#: irreversible, so the answer is about the expected spread over the horizon and
+#: its variability -- neither of which exists in a single month. Same five-year
+#: reach as the single-month explanation widener above, and the annual block
+#: needs several years before it can show anything at all.
+_MAKE_OR_BUY_HISTORY_YEARS = 5
+
+#: Below this many months, a comparison window is treated as too narrow to
+#: answer the question that was asked.
+_MAKE_OR_BUY_MIN_MONTHS = 24
+
+
+def expand_make_or_buy_window(
+    start_date: Optional[str],
+    end_date: Optional[str],
+    *,
+    is_make_or_buy: bool,
+) -> tuple[Optional[str], Optional[str]]:
+    """Widen a too-narrow window for a regulated-versus-wholesale comparison.
+
+    2026-08-17 production trace: ``get_end_user_prices`` returned ONE row for a
+    make-or-buy question, because the analyzer's period pinned a single month.
+    One month cannot say whether a consumer should make an irreversible switch,
+    and the annual comparison block has nothing to report from it.
+
+    An open window is left open -- the tool already fetches the full range --
+    and an explicitly wide window is left alone, so a question that named its
+    own period keeps it.
+    """
+    if not is_make_or_buy or not end_date:
+        return start_date, end_date
+
+    end_dt = _parse_iso_date(end_date)
+    if end_dt is None:
+        return start_date, end_date
+
+    start_dt = _parse_iso_date(start_date) if start_date else None
+    if start_dt is not None:
+        months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+        if months >= _MAKE_OR_BUY_MIN_MONTHS:
+            return start_date, end_date
+
+    widened = date(end_dt.year - _MAKE_OR_BUY_HISTORY_YEARS, end_dt.month, 1).isoformat()
+    log.info(
+        "Widening make-or-buy comparison window: %s-%s -> %s-%s",
+        start_date,
+        end_date,
+        widened,
+        end_date,
+    )
+    return widened, end_date
+
+
+def build_end_user_price_params(
+    haystack: str,
+    *,
+    raw_query: str = "",
+    topics=(),
+) -> dict:
     """Tool params for ``get_end_user_prices`` from the resolved scope text.
 
     The analyzer emits a freeform entity_scope ("Telmico", "household_consumers",
@@ -1037,7 +1095,11 @@ def build_end_user_price_params(haystack: str) -> dict:
             params["voltage"] = voltage
 
     params["include_vat"] = "vat" in haystack
-    params["include_wholesale_benchmark"] = asks_for_wholesale_comparison(haystack)
+    # The RAW question as well as the analyzer's paraphrase: the paraphrase is
+    # what silently dropped the comparison on 2026-08-17.
+    params["include_wholesale_benchmark"] = asks_for_wholesale_comparison(
+        f"{haystack} {(raw_query or '').lower()}", topics=topics
+    )
     return params
 
 
@@ -1213,11 +1275,25 @@ def resolve_tool_params(
     elif tool_name == ToolName.GET_END_USER_PRICES.value:
         # Same haystack the clarify gate reads, so the two cannot disagree
         # about whether a question named its company and category.
-        params.update(
-            build_end_user_price_params(
-                end_user_scope_haystack(qa.entity_scope, effective_query)
-            )
+        end_user_params = build_end_user_price_params(
+            end_user_scope_haystack(qa.entity_scope, effective_query),
+            raw_query=raw_query,
+            topics=[
+                candidate.name.value
+                for candidate in (qa.knowledge.candidate_topics or [])
+            ],
         )
+        params.update(end_user_params)
+        # A single-month window cannot answer an irreversible make-or-buy choice.
+        start_date, end_date = expand_make_or_buy_window(
+            start_date,
+            end_date,
+            is_make_or_buy=bool(end_user_params.get("include_wholesale_benchmark")),
+        )
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
 
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)
