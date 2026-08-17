@@ -5971,12 +5971,38 @@ def _log_summarizer_prompt_census(prompt: str, *, phase: str) -> None:
     )
 
 
+#: Name of the per-year make-or-buy section. Two modules depend on it: this one
+#: prioritises the section and triggers the retail rules off it, while
+#: agent/analyzer.py emits the header. A rename in one is silent in the other,
+#: so tests/test_make_or_buy_guidance.py pins them together.
+ANNUAL_COMPARISON_SECTION = "ANNUAL MAKE-OR-BUY COMPARISON"
+
+
+def _retail_rules_apply(stats_hint: Optional[str]) -> bool:
+    """Whether the retail tariff rules belong in this answer's guidance.
+
+    Keyed on the retail frame's own total column, and ALSO on the annual
+    make-or-buy block. The block is triggered by different columns (the supply
+    tariff and the wholesale benchmark), so a frame could in principle carry
+    per-year verdicts while the rules that govern reading them stayed out of the
+    prompt -- and those rules are what stop a single year's reversal being
+    presented as a structural finding.
+    """
+    text = stats_hint or ""
+    return "final_price_net_gel_kwh" in text or ANNUAL_COMPARISON_SECTION in text
+
+
 _SUMMARIZER_STATS_SECTION_RE = re.compile(r"(?m)^--- ([^-\n].*?) ---[ \t]*$")
 _SUMMARIZER_STATS_SECTION_PRIORITY = {
     "CAUSAL CONTEXT": 100,
     "COMPONENT PRESSURE SUMMARY": 95,
     "REGULATED PLANT SALES": 90,
     "DERIVED ANALYSIS EVIDENCE": 85,
+    # When a make-or-buy question is asked, this block IS the answer: it holds
+    # the only per-year comparison figures in the corpus. Without an entry here
+    # it would default to 10 -- below COLUMN AGGREGATES at 25 -- and be shed
+    # first, reproducing the defect it was added to fix.
+    ANNUAL_COMPARISON_SECTION: 88,
     "CORRELATION MATRIX": 80,
     "SERIES LEVELS": 75,
     "SCENARIO": 70,
@@ -6037,6 +6063,50 @@ def _compact_summarizer_statistics(stats_hint: str, *, max_chars: int = 36000) -
     return compacted
 
 
+_PREVIEW_PERIOD_RE = re.compile(r"^\d{4}(-\d{2}){0,2}")
+
+
+def _compact_preview_by_period(preamble: list[str], data: list[str], max_chars: int):
+    """Drop whole periods evenly instead of the middle of the range.
+
+    Second half of the 2026-08-16 defect. ``rows_to_preview`` was fixed to
+    sample whole periods, and this stage then cut its output down again by
+    head-and-tail -- measured afterwards, 2023 and 2024 still reached the model
+    not at all, which are the years the question named. Dropping whole periods
+    keeps the range represented, and keeps every series present at each period
+    that survives so a cross-series comparison is still possible there.
+
+    Returns None when the preview has no period-shaped leading field, leaving
+    the head/tail path to handle it.
+    """
+    periods: list[str] = []
+    for line in data:
+        key = line.split(",", 1)[0]
+        if not _PREVIEW_PERIOD_RE.match(key):
+            return None
+        if not periods or periods[-1] != key:
+            if key not in periods:
+                periods.append(key)
+    if len(periods) < 4:
+        return None
+
+    ordered = sorted(set(periods))
+    fixed = sum(len(line) + 1 for line in preamble)
+    for keep_count in range(len(ordered), 1, -1):
+        step = (len(ordered) - 1) / (keep_count - 1)
+        indices = sorted({int(round(position * step)) for position in range(keep_count)})
+        keep = {ordered[index] for index in indices}
+        kept = [line for line in data if line.split(",", 1)[0] in keep]
+        note = (
+            f"...[rows omitted from preview]... {len(keep)} of {len(ordered)} periods "
+            "kept, evenly spaced; every period shown carries all series"
+        )
+        size = fixed + len(note) + 1 + sum(len(line) + 1 for line in kept)
+        if size <= max_chars:
+            return "\n".join([*preamble, note, *kept])
+    return None
+
+
 def _compact_summarizer_preview(data_preview: str, *, max_chars: int = 12000) -> str:
     """Bound a line-oriented preview while retaining its schema and range endpoints."""
 
@@ -6046,6 +6116,28 @@ def _compact_summarizer_preview(data_preview: str, *, max_chars: int = 12000) ->
     lines = text.splitlines()
     if len(lines) < 4:
         return _truncate_text(text, max_chars)
+
+    # Everything before the first period-shaped row is structure the answer
+    # needs whatever else goes: the legend, any omission note, and the CSV
+    # header. Slicing it as though it were data can drop the column names.
+    first_data = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if _PREVIEW_PERIOD_RE.match(line.split(",", 1)[0])
+        ),
+        1,
+    )
+    by_period = _compact_preview_by_period(
+        lines[:first_data], lines[first_data:], max_chars
+    )
+    if by_period is not None:
+        log.info(
+            "Summarizer preview compacted by period: input_chars=%d output_chars=%d",
+            len(text),
+            len(by_period),
+        )
+        return by_period
 
     marker = "...[middle preview rows omitted]..."
     header = lines[0]
@@ -6454,7 +6546,7 @@ def llm_summarize_structured(
         # retrieved explanation of the tariff stack is the first thing cut.
         # Guidance is not in any truncation profile, so ~2 KB here is worth
         # more than 18 KB of passages that may not survive.
-        if "final_price_net_gel_kwh" in (stats_hint or ""):
+        if _retail_rules_apply(stats_hint):
             _retail_rules = load_reference("energy-analyst", "retail-tariff-rules.md")
             if _retail_rules:
                 guidance_parts.append(f"RETAIL TARIFF RULES:\n{_retail_rules}")

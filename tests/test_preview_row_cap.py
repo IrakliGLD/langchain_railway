@@ -48,7 +48,10 @@ def test_the_last_row_survives_a_full_size_retail_frame():
     preview = rows_to_preview(rows, _COLS)
     lines = preview.strip().splitlines()
 
-    assert lines[1].startswith(rows[0][0]), "first row missing"
+    # Located by content, not by index: a truncated preview may now open with a
+    # legend and/or an omission note before the CSV header, so the first data
+    # row is no longer always line 1. What matters is that it is still there.
+    assert any(line.startswith(rows[0][0]) for line in lines), "first row missing"
     assert lines[-1].startswith(rows[-1][0]), (
         "last row missing: the preview still ends where the row cap cut it, so "
         "a trend question cannot see where the series ended"

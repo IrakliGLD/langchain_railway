@@ -49,6 +49,9 @@ from agent.tools.end_user_price_tools import (
     resolve_scope as resolve_end_user_scope,
 )
 from agent.tools.end_user_price_tools import (
+    resolve_voltage as resolve_end_user_voltage,
+)
+from agent.tools.end_user_price_tools import (
     scope_haystack as end_user_scope_haystack,
 )
 from agent.tools.types import ToolInvocation
@@ -995,6 +998,49 @@ def build_tool_invocation_from_analysis(
     )
 
 
+def build_end_user_price_params(haystack: str) -> dict:
+    """Tool params for ``get_end_user_prices`` from the resolved scope text.
+
+    The analyzer emits a freeform entity_scope ("Telmico", "household_consumers",
+    "distribution_network_tariffs"). Resolve only what is unambiguous and WIDEN
+    otherwise: a specific category chosen for a scope we did not understand is a
+    confidently wrong answer, while all-suppliers/all-categories is merely less
+    pointed.
+
+    Widening is not all-or-nothing, though. ``_compose_category`` needs a voltage
+    AND a class and returns nothing given one, so on 2026-08-16 a question naming
+    "6-10" and no class widened from two categories to all eight -- four of them
+    households, for a customer who was not one. What resolved is used.
+
+    Extracted from ``resolve_tool_params`` so the mapping can be tested without
+    building a whole QuestionAnalysis; the caller supplies the same haystack the
+    clarify gate reads.
+    """
+    params: dict = {}
+
+    supplier, category = resolve_end_user_scope(haystack)
+    if supplier:
+        params["supplier"] = supplier
+    if category:
+        params["category"] = category
+    else:
+        # No single category, but the question may still name a CLASS
+        # ("for non-household consumers"), which covers four categories.
+        consumer_class = resolve_end_user_consumer_class(haystack)
+        if consumer_class:
+            params["consumer_class"] = consumer_class
+        # ...and it may name a voltage level, which covers two or three. Both
+        # can apply: "commercial at 6-10 kV" is one category, but either alone
+        # still narrows.
+        voltage = resolve_end_user_voltage(haystack)
+        if voltage:
+            params["voltage"] = voltage
+
+    params["include_vat"] = "vat" in haystack
+    params["include_wholesale_benchmark"] = asks_for_wholesale_comparison(haystack)
+    return params
+
+
 def resolve_tool_params(
     qa: QuestionAnalysis,
     tool_name: str,
@@ -1165,29 +1211,13 @@ def resolve_tool_params(
         params["currency"] = currency
 
     elif tool_name == ToolName.GET_END_USER_PRICES.value:
-        # The analyzer emits a freeform entity_scope ("Telmico",
-        # "household_consumers", "distribution_network_tariffs"). Resolve only
-        # what is unambiguous and WIDEN otherwise: a specific category chosen
-        # for a scope we did not understand is a confidently wrong answer,
-        # while all-suppliers/all-categories is merely less pointed.
         # Same haystack the clarify gate reads, so the two cannot disagree
         # about whether a question named its company and category.
-        haystack = end_user_scope_haystack(qa.entity_scope, effective_query)
-
-        supplier, category = resolve_end_user_scope(haystack)
-        if supplier:
-            params["supplier"] = supplier
-        if category:
-            params["category"] = category
-        else:
-            # No single category, but the question may still name a CLASS
-            # ("for non-household consumers"), which covers four categories.
-            consumer_class = resolve_end_user_consumer_class(haystack)
-            if consumer_class:
-                params["consumer_class"] = consumer_class
-
-        params["include_vat"] = "vat" in haystack
-        params["include_wholesale_benchmark"] = asks_for_wholesale_comparison(haystack)
+        params.update(
+            build_end_user_price_params(
+                end_user_scope_haystack(qa.entity_scope, effective_query)
+            )
+        )
 
     elif tool_name == ToolName.GET_GENERATION_MIX.value:
         types = (hint.types if hint and getattr(hint, "types", None) else []) or extract_generation_types(effective_query)

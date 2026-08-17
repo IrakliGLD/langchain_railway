@@ -679,6 +679,7 @@ def _resolve_vector_retrieval_tier(
     *,
     is_conceptual: bool = False,
     topics=None,
+    answers_from_data: bool = False,
 ) -> VectorRetrievalTier:
     """Decide how much vector-retrieval effort a query warrants.
 
@@ -717,7 +718,17 @@ def _resolve_vector_retrieval_tier(
     if PIPELINE_MODE == "fast":
         return VectorRetrievalTier.SKIP
 
-    if answer_kind == AnswerKind.CLARIFY:
+    # CLARIFY -> SKIP rests on "no data to ground, no knowledge to cite". That
+    # premise is stale for the questions retail_routing overrides: they carry a
+    # clarify-shaped answer_kind but are answered FROM DATA, on the domain
+    # owner's rule "answer generally, then offer to narrow". Deciding the tier
+    # from the analyzer's PROPOSED clarify, while the route is decided by
+    # is_retail_data_question one line later in process_query, is how the
+    # 2026-08-16 trace reached Stage 4 with domain_knowledge_chars=0 on a
+    # question about network_supply_tariffs. Keying both off the same predicate
+    # is what stops them disagreeing again -- the class of bug retail_routing.py
+    # was created to fix.
+    if answer_kind == AnswerKind.CLARIFY and not answers_from_data:
         return VectorRetrievalTier.SKIP
 
     if answer_kind in (AnswerKind.KNOWLEDGE, AnswerKind.EXPLANATION):
@@ -2589,11 +2600,16 @@ def _resolve_vector_tier(ctx: QueryContext) -> "VectorRetrievalTier":
         if _qa_for_tier is not None
         else None
     )
+    # Same predicates the response-mode derivation uses to route a
+    # clarify-shaped question to the data path, read here so the tier cannot
+    # disagree with the route taken one step later.
+    _answers_from_data = is_retail_data_question(ctx) or is_data_backed_ambiguous_question(ctx)
     _retrieval_tier = _resolve_vector_retrieval_tier(
         answer_kind=ctx.effective_answer_kind,
         render_style=(_qa_for_tier.render_style if _qa_for_tier is not None else None),
         is_conceptual=bool(ctx.is_conceptual),
         topics=_candidate_topic_names,
+        answers_from_data=_answers_from_data,
     )
     ctx.vector_retrieval_tier = _retrieval_tier
     if _retrieval_tier == VectorRetrievalTier.SKIP:

@@ -2720,6 +2720,7 @@ def enrich(ctx: QueryContext) -> QueryContext:
     ctx.preview = rows_to_preview(ctx.rows, cols_labeled)
     ctx.stats_hint = quick_stats(ctx.rows, cols_labeled)
     _append_column_aggregates(ctx)
+    _append_annual_comparison(ctx)
 
     # --- Seasonal stats ---
     # Administered prices have no season. GNERC approves one transmission,
@@ -3395,6 +3396,185 @@ def _append_column_aggregates(ctx: QueryContext) -> None:
             series_count,
             "/".join(str(c) for c in series_cols) or "none",
         )
+
+
+#: The two columns that make a frame a make-or-buy comparison. Both must be
+#: present: the block compares them, and either alone is a different question.
+_MAKE_OR_BUY_TARIFF_COLUMN = "supply_tariff_gel_kwh"
+_MAKE_OR_BUY_BENCHMARK_COLUMN = "wholesale_benchmark_gel_kwh"
+
+#: Rows this block may enumerate before it stops naming individual series.
+#: 8 series x 6 years is ~48 lines and ~6 KB on an 11.7 KB stats_hint, which
+#: fits. _MAX_ENUMERATED_SERIES (20) would allow 120 lines (~15 KB) in a prompt
+#: that already runs near its budget on exactly these questions, so this block
+#: is capped on emitted ROWS rather than on series.
+_MAX_ANNUAL_COMPARISON_ROWS = 60
+
+_MONTH_ABBR = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+_ANNUAL_COMPARISON_HEADER = "--- ANNUAL MAKE-OR-BUY COMPARISON ---"
+
+
+def _annual_comparison_verdict(spread: float) -> str:
+    """Which side sat lower, at the precision the block actually reports.
+
+    Rounded before comparing so a float artefact in the eighth decimal cannot
+    be reported as a verdict against a printed spread of 0.0000.
+    """
+    rounded = round(spread, 4)
+    if rounded == 0:
+        return "level"
+    return "regulated cheaper" if rounded < 0 else "wholesale cheaper"
+
+
+def _append_annual_comparison(ctx: QueryContext) -> None:
+    """Per-year regulated-vs-wholesale comparison, one line per series per year.
+
+    ``_append_column_aggregates`` reports one mean per series over the WHOLE
+    span. For a make-or-buy question that is the wrong grain: a 2021-2026 mean
+    spread averages away the year-to-year sign flips the question is about --
+    on the domain owner's own reading, 2022 sat regulated-cheaper and 2024
+    wholesale-cheaper, and a single mean shows neither.
+
+    Emitted into ``stats_hint`` rather than the preview because the preview is
+    row-compacted twice (528 -> 124 -> 60 rows on the 2026-08-16 trace, which
+    dropped 2022-2025 entirely), while ``stats_hint`` is compacted by whole
+    block at a priority this section is registered for.
+
+    Both unit renderings are printed for every value: the grounding gate
+    tokenises the corpus and ``_add_rounded_source_variants`` rounds a token but
+    never derives a x1000 form, so a corpus holding only 0.1450 cannot ground
+    the "145 GEL/MWh" the comparison is actually discussed in.
+    """
+    import pandas as _pd
+
+    if ctx.df is None or ctx.df.empty:
+        return
+    df = ctx.df
+    if not {_MAKE_OR_BUY_TARIFF_COLUMN, _MAKE_OR_BUY_BENCHMARK_COLUMN} <= set(df.columns):
+        return
+    time_col = _time_column(df)
+    if time_col is None:
+        return
+
+    # Coverage is counted on PAIRED months only. The benchmark reaches the frame
+    # through a LEFT JOIN on price_with_usd, so a month can carry a tariff and no
+    # benchmark; averaging the tariff over twelve months against a benchmark over
+    # six would compare two different periods and call it a spread.
+    paired = df.dropna(
+        subset=[_MAKE_OR_BUY_TARIFF_COLUMN, _MAKE_OR_BUY_BENCHMARK_COLUMN]
+    ).copy()
+    if paired.empty:
+        return
+    periods = _pd.to_datetime(paired[time_col], errors="coerce")
+    paired = paired.loc[periods.notna()].copy()
+    if paired.empty:
+        return
+    periods = periods.loc[paired.index]
+    paired["__year"] = periods.dt.year.astype(int)
+    paired["__month"] = periods.dt.month.astype(int)
+
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    series_cols, series_count = _series_key_columns(df, numeric_cols)
+    years = sorted(paired["__year"].unique())
+    if not years:
+        return
+
+    lines = [
+        f"\n{_ANNUAL_COMPARISON_HEADER}",
+        "Regulated supply tariff vs like-for-like wholesale benchmark (balancing "
+        "price + guaranteed capacity fee + ESCO service fee), averaged per calendar "
+        "year. Figures are per series; never average across them. A PARTIAL year is "
+        "computed only from the months named: the wholesale side is seasonal and the "
+        "tariff is not, so a partial year is not comparable like-for-like with a full "
+        "one. Spread is tariff minus benchmark, so a negative spread means the "
+        "regulated side sat below it.",
+    ]
+
+    def _measure(group):
+        """(tariff mean, benchmark mean, spread, sorted months) for one year."""
+        months = sorted(int(m) for m in group["__month"].unique())
+        tariff = float(group[_MAKE_OR_BUY_TARIFF_COLUMN].mean())
+        benchmark = float(group[_MAKE_OR_BUY_BENCHMARK_COLUMN].mean())
+        return tariff, benchmark, tariff - benchmark, months
+
+    def _year_line(year: int, group) -> str:
+        tariff, benchmark, spread, months = _measure(group)
+        full = len(months) == 12
+        span = "" if full else f" ({_MONTH_ABBR[months[0] - 1]}-{_MONTH_ABBR[months[-1] - 1]})"
+        return (
+            f"  {year} {'FULL   ' if full else 'PARTIAL'} {len(months)}/12{span}: "
+            f"supply={tariff:.4f} GEL/kWh ({tariff * 1000:.1f} GEL/MWh) "
+            f"benchmark={benchmark:.4f} ({benchmark * 1000:.1f}) "
+            f"spread={spread:+.4f} ({spread * 1000:+.1f}) "
+            f"{_annual_comparison_verdict(spread)}"
+        )
+
+    # Too many series to name is not a licence to pool them: report how the
+    # verdict split across series in each year and ask for a narrower scope.
+    if series_cols and series_count * len(years) > _MAX_ANNUAL_COMPARISON_ROWS:
+        lines.append(
+            f"Frame holds {series_count} series over {len(years)} years, above the "
+            "enumeration budget, so per-series detail is omitted. Name one company "
+            "and one customer category to get it."
+        )
+        for year in years:
+            verdicts = [
+                _annual_comparison_verdict(_measure(group)[2])
+                for _keys, group in paired[paired["__year"] == year].groupby(
+                    series_cols, dropna=False, sort=True
+                )
+            ]
+            total = len(verdicts)
+            lines.append(
+                f"  {year}: regulated cheaper in {verdicts.count('regulated cheaper')} "
+                f"of {total}, wholesale cheaper in {verdicts.count('wholesale cheaper')} "
+                f"of {total}."
+            )
+        ctx.stats_hint += "\n".join(lines)
+        log.info(
+            "Added annual make-or-buy comparison to stats_hint "
+            "(series=%d years=%d, tally only)",
+            series_count,
+            len(years),
+        )
+        return
+
+    groups = (
+        paired.groupby(series_cols, dropna=False, sort=True)
+        if series_cols
+        else [((), paired)]
+    )
+    for keys, series_frame in groups:
+        if series_cols:
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            lines.append(
+                "[" + ", ".join(f"{c}={k}" for c, k in zip(series_cols, keys)) + "]"
+            )
+        full_year_verdicts = []
+        for year, year_frame in series_frame.groupby("__year", sort=True):
+            lines.append(_year_line(int(year), year_frame))
+            if year_frame["__month"].nunique() == 12:
+                full_year_verdicts.append(
+                    _annual_comparison_verdict(_measure(year_frame)[2])
+                )
+        # Full years only: a six-month stub must not swing the headline.
+        lines.append(
+            f"  Full years: {len(full_year_verdicts)}; "
+            f"regulated cheaper in {full_year_verdicts.count('regulated cheaper')}, "
+            f"wholesale cheaper in {full_year_verdicts.count('wholesale cheaper')}."
+        )
+
+    ctx.stats_hint += "\n".join(lines)
+    log.info(
+        "Added annual make-or-buy comparison to stats_hint (series=%d years=%d)",
+        series_count,
+        len(years),
+    )
 
 
 def _add_correlation_target_levels(ctx: QueryContext) -> None:

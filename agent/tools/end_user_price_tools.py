@@ -195,7 +195,7 @@ def _compose_category(haystack: str) -> Optional[str]:
     view does not publish (household at 35-110 kV) resolves to nothing rather
     than to a neighbouring category.
     """
-    voltage = _first_alias_hit(haystack, _VOLTAGE_ALIASES)
+    voltage = _voltage_alias_hit(haystack)
     consumer_class = _first_alias_hit(haystack, _CLASS_ALIASES)
     if not (voltage and consumer_class):
         return None
@@ -224,7 +224,7 @@ def scope_haystack(entity_scope: Optional[str], query: Optional[str]) -> str:
     (``entity_scope='Telmico; small commercial at 220/380 V'``) was still asked
     to name its scope, on 2026-08-15, twice.
     """
-    return f"{entity_scope or ''} {query or ''}".strip().lower()
+    return normalize_scope_dashes(f"{entity_scope or ''} {query or ''}".strip().lower())
 
 #: Wording that asks for the retail price to be set against the wholesale side.
 WHOLESALE_COMPARISON_MARKERS: Tuple[str, ...] = (
@@ -281,7 +281,7 @@ def resolve_scope(text: str) -> Tuple[Optional[str], Optional[str]]:
     pinned down enough to answer. Two readers of the same vocabulary must not
     disagree about whether a question named a category.
     """
-    haystack = f" {(text or '').strip().lower()} "
+    haystack = normalize_scope_dashes(f" {(text or '').strip().lower()} ")
 
     supplier = _first_alias_hit(haystack, tuple(SUPPLIER_ALIASES.items()))
 
@@ -316,10 +316,57 @@ def asks_for_wholesale_comparison(text: str) -> bool:
     return any(marker in haystack for marker in WHOLESALE_COMPARISON_MARKERS)
 
 
+#: Units that mean POWER, not voltage. A number beside one of these is a
+#: connection rating -- "6-10 kW" -- not a voltage level, and a 6-10 kW customer
+#: is served at 220/380 V. Reading it as the 3.3-6-10 kV level names a different
+#: stack entirely. The Georgian spellings matter because the questions arrive in
+#: Georgian: kW is კვტ, kV is კვ, and the two differ by one character.
+#: 2026-08-16: the query said `6-10 კვტ` and only the absence of a class word
+#: stopped "6-10" resolving to 3.3-6-10 kV.
+_POWER_UNIT_MARKERS: Tuple[str, ...] = ("kw", "kva", "kilowatt", "კვტ", "კვა")
+
+
+def normalize_scope_dashes(text: str) -> str:
+    """En/em dashes to plain hyphens before any alias matching.
+
+    The aliases spell "6-10" while the analyzer emitted "6–10"; on 2026-08-16
+    the match survived only because the Georgian original happened to use a
+    plain hyphen. Normalising once here covers every numeric alias instead of
+    doubling each table.
+    """
+    return re.sub(r"[‐-―]", "-", text or "")
+
+
+def _voltage_alias_hit(haystack: str) -> Optional[str]:
+    """First voltage alias in *haystack* that is not a power rating."""
+    for code, aliases in _VOLTAGE_ALIASES:
+        for alias in aliases:
+            for match in re.finditer(
+                rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", haystack
+            ):
+                trailing = haystack[match.end():match.end() + 12].lstrip()
+                if any(trailing.startswith(unit) for unit in _POWER_UNIT_MARKERS):
+                    continue
+                return code
+    return None
+
+
+def resolve_voltage(text: str) -> Optional[str]:
+    """The voltage level named by *text*, or None.
+
+    None is the honest answer for an unstated voltage AND for a stated power
+    rating: widening to every voltage is merely less pointed, while picking the
+    wrong one is confidently wrong.
+    """
+    haystack = normalize_scope_dashes(f" {(text or '').strip().lower()} ")
+    return _voltage_alias_hit(haystack)
+
+
 def _resolve_selection(
     supplier: Optional[str],
     category: Optional[str],
     consumer_class: Optional[str] = None,
+    voltage: Optional[str] = None,
 ) -> Tuple[Tuple[str, ...], Tuple[EndUserCategory, ...]]:
     """Validate and widen the selection. Unknown input raises, never guesses.
 
@@ -327,6 +374,12 @@ def _resolve_selection(
     pinning a single category -- "compare this for non-household consumers"
     names a class of four commercial categories, not one of them, and the
     honest answer covers all four rather than picking one.
+
+    ``voltage`` narrows the same way from the other axis, and for the same
+    reason: a question naming "6-10 kV" and no customer class states two of the
+    eight categories. Discarding it because the class was missing is what turned
+    a two-category question into an eight-category answer on 2026-08-16, half of
+    it about households the asker was not.
     """
     if supplier is None:
         suppliers = tuple(SUPPLIER_TO_DISTRIBUTOR)
@@ -363,6 +416,23 @@ def _resolve_selection(
             raise ValueError(
                 f"No end-user category matches consumer class {wanted!r} "
                 f"within the selected category {category!r}."
+            )
+        categories = narrowed
+
+    if voltage is not None:
+        wanted_voltage = str(voltage).strip()
+        known = {c.volate for c in END_USER_CATEGORIES}
+        if wanted_voltage not in known:
+            raise ValueError(
+                f"Unknown voltage level: {voltage!r}. Expected one of "
+                f"{sorted(known)} -- reported verbatim as stored, never renamed "
+                "to LV/MV/HV."
+            )
+        narrowed = tuple(c for c in categories if c.volate == wanted_voltage)
+        if not narrowed:
+            raise ValueError(
+                f"No end-user category matches voltage {wanted_voltage!r} within "
+                f"the selected category {category!r} / class {consumer_class!r}."
             )
         categories = narrowed
 
@@ -505,6 +575,7 @@ def get_end_user_prices(
     supplier: Optional[str] = None,
     category: Optional[str] = None,
     consumer_class: Optional[str] = None,
+    voltage: Optional[str] = None,
     include_vat: bool = False,
     include_wholesale_benchmark: bool = False,
     currency: str = "gel",
@@ -532,7 +603,9 @@ def get_end_user_prices(
             "get_end_user_prices serves GEL/kWh only; the view stores no USD tariff."
         )
 
-    suppliers, categories = _resolve_selection(supplier, category, consumer_class)
+    suppliers, categories = _resolve_selection(
+        supplier, category, consumer_class, voltage
+    )
     start_date = normalize_date(start_date)
     end_date = normalize_date(end_date)
     limit = normalize_limit(limit)

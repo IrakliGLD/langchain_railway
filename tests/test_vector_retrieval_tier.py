@@ -31,7 +31,8 @@ from knowledge.vector_retrieval import retrieve_vector_knowledge
 # ---------------------------------------------------------------------------
 
 
-def _resolve(answer_kind, render_style, *, is_conceptual=False, topics=None):
+def _resolve(answer_kind, render_style, *, is_conceptual=False, topics=None,
+             answers_from_data=False):
     from agent.pipeline import _resolve_vector_retrieval_tier
 
     return _resolve_vector_retrieval_tier(
@@ -39,6 +40,7 @@ def _resolve(answer_kind, render_style, *, is_conceptual=False, topics=None):
         render_style=render_style,
         is_conceptual=is_conceptual,
         topics=topics,
+        answers_from_data=answers_from_data,
     )
 
 
@@ -56,6 +58,53 @@ def test_tier_clarify_is_skip():
     # CLARIFY wins over render_style — no data to ground regardless.
     assert _resolve(AnswerKind.CLARIFY, RenderStyle.NARRATIVE) == VectorRetrievalTier.SKIP
     assert _resolve(AnswerKind.CLARIFY, RenderStyle.DETERMINISTIC) == VectorRetrievalTier.SKIP
+
+
+def test_tier_clarify_keeps_knowledge_warm_when_the_answer_comes_from_data():
+    """The CLARIFY premise is stale for questions retail routing overrides.
+
+    "CLARIFY -> SKIP: no data to ground, no knowledge to cite" was true when
+    written. ``retail_routing`` now answers clarify-shaped retail questions FROM
+    DATA -- the domain owner's rule, "answer generally, then offer to narrow" --
+    so both halves of that premise are false for them.
+
+    On the 2026-08-16 trace the tier was resolved one line before response-mode
+    derivation flipped the route to DATA_PRIMARY, and was never recomputed:
+    ``domain_knowledge_chars=0`` for an answer that was about to be written from
+    ``network_supply_tariffs.md``'s subject matter.
+    """
+    assert _resolve(
+        AnswerKind.CLARIFY, RenderStyle.NARRATIVE, answers_from_data=True
+    ) == VectorRetrievalTier.LIGHT
+
+
+def test_tier_clarify_still_skips_when_nothing_will_be_answered_from_data():
+    """The rescue must not disable clarify handling generally."""
+    assert _resolve(
+        AnswerKind.CLARIFY, RenderStyle.NARRATIVE, answers_from_data=False
+    ) == VectorRetrievalTier.SKIP
+
+
+def test_the_trace_shaped_retail_question_resolves_to_light_end_to_end():
+    """Integration over the predicate the router actually uses.
+
+    Pins the whole path, not just the policy function: a clarify-shaped,
+    ambiguous retail question nominating ``network_supply_tariffs`` must come
+    out of ``_resolve_vector_tier`` warm, because that is the exact shape that
+    produced the starved answer.
+    """
+    from agent.pipeline import _resolve_vector_tier
+    from tests.test_end_user_scope_clarification import _ctx
+
+    ctx = _ctx(
+        "Telmico 6-10 kV customer: compare regulated supply against wholesale",
+        topics=("network_supply_tariffs", "market_structure", "pso_trading"),
+        query_type="ambiguous",
+        preferred_path="knowledge",
+    )
+    ctx.effective_answer_kind = AnswerKind.CLARIFY
+
+    assert _resolve_vector_tier(ctx) == VectorRetrievalTier.LIGHT
 
 
 def test_tier_deterministic_data_shapes_skip():
