@@ -189,6 +189,32 @@ def test_rules_forbid_quoting_the_unweighted_mean_as_what_a_consumer_pays():
     assert "never split" in rules or "not split by season" in rules
 
 
+def test_rules_use_the_weighted_figure_and_invite_a_load_shape_when_absent():
+    """Domain owner, 2026-08-17: if the user provides monthly consumption, use it.
+
+    Two halves. When the block carries ``consumption-weighted``, that is the
+    figure for THAT consumer and must lead the verdict. When it does not, the
+    answer has to tell the reader the option exists -- nobody supplies a load
+    shape they were never asked for.
+    """
+    rules = _retail_rules()
+
+    assert "consumption-weighted" in rules
+    # The invitation, so an unweighted answer is not a dead end.
+    assert "monthly consumption" in rules
+
+
+def test_rules_forbid_computing_the_weighted_average_by_hand():
+    """It is arithmetic on user input, so a model-derived figure is ungrounded.
+
+    The block computes it precisely so the number exists in the corpus. A model
+    working it out itself produces a figure in no row, and the gate strips it.
+    """
+    rules = _retail_rules()
+
+    assert "do not compute" in rules or "never compute" in rules
+
+
 def test_retail_rules_load_whenever_the_annual_block_is_present():
     """Wiring: the reading rule must reach the prompt whenever the data does.
 

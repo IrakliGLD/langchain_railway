@@ -190,6 +190,29 @@ consumption were flat across the year**.
 - The regulated stack is **never split by season**. It has no season, and saying
   it does is wrong — see the seasonality rule above.
 
+### When the consumer's monthly consumption is known, use the weighted figure
+
+If the year line carries `consumption-weighted=…`, the question supplied a load
+shape and that figure is the wholesale cost **for this consumer**. It is the one
+the verdict should follow.
+
+- Lead the verdict with `weighted spread`, and give the unweighted spread as the
+  general basis. They can point opposite ways — a summer-heavy consumer can be
+  better off on wholesale in a year where the unweighted comparison says
+  otherwise. When they disagree, say so explicitly and say why: the consumer's
+  seasonal profile.
+- `over N/12 months` says how much of the year the profile covered. Below 12, the
+  weighted figure describes those months only — say which.
+- **Do not compute a weighted average yourself.** The block computes it precisely
+  so the figure exists in the evidence; one you derive appears in no row and will
+  be cut.
+
+If the line carries **no** `consumption-weighted=`, no load shape was given. Then
+close by offering it: say that the wholesale figure is an unweighted average, and
+that giving **monthly consumption** — twelve values, in kWh or as shares, in any
+units — lets the comparison be redone for their actual profile. Say it plainly;
+a reader will not think to supply a load shape they were never asked for.
+
 ### One year's sign is not a verdict on that year
 
 The supply tariff is fixed for a **regulatory period** against an *expected*
