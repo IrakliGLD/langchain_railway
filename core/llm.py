@@ -5978,6 +5978,65 @@ def _log_summarizer_prompt_census(prompt: str, *, phase: str) -> None:
 ANNUAL_COMPARISON_SECTION = "ANNUAL MAKE-OR-BUY COMPARISON"
 
 
+#: Document types that indicate a legal/regulatory source, in the order they are
+#: preferred. A LIST, not a set: the previous code did ``for dt in doc_types:
+#: ... break`` over a set of the RETRIEVED types, so which one won depended on
+#: set iteration order rather than on any stated priority.
+_DOC_TYPE_FOCUS_PRIORITY: tuple[tuple[str, str], ...] = (
+    ("regulation", "regulation"),
+    ("law", "regulation"),
+    ("order", "regulation"),
+    ("methodology", "regulation"),
+)
+
+
+def _resolve_summarizer_focus(
+    user_query: str,
+    vector_knowledge_bundle,
+    stats_hint: Optional[str],
+) -> str:
+    """Which focus-specific guidance this answer gets.
+
+    Extracted from ``llm_summarize_structured`` so the decision can be tested;
+    it was inline, and it silently drove a 3,000-character swing in the model's
+    instructions between two runs of the same question (2026-08-17).
+
+    Order of authority:
+
+    1. The QUERY TEXT, via ``get_query_focus`` — deterministic, so it stays
+       first and is never overridden.
+    2. The FRAME, for a retail question. A retail comparison is a tariff
+       question whatever the retriever returned. Keyed on the same predicate the
+       retail rules already load off, so the two cannot disagree.
+    3. The retrieved documents, only when the first two say nothing. This is the
+       step that used to decide it alone: on 2026-08-17 one run retrieved a
+       legal chunk and got the ``regulation`` guidance (4,444 chars, and it
+       skips the generic answer template), the other did not and got ``general``
+       (997 chars) — same question, different brief.
+
+    ``regulation`` guidance is enumeration discipline for "who may / what is
+    required" questions. Reaching it by accident on a price comparison is what
+    invited the market-opening eligibility table into an answer that had not
+    asked about eligibility.
+    """
+    focus = get_query_focus(user_query)
+    if focus != "general":
+        return focus
+
+    if _retail_rules_apply(stats_hint):
+        return "tariff"
+
+    chunks = getattr(vector_knowledge_bundle, "chunks", None) if vector_knowledge_bundle else None
+    if not chunks:
+        return focus
+
+    present = {c.document_type for c in chunks if getattr(c, "document_type", None)}
+    for document_type, mapped_focus in _DOC_TYPE_FOCUS_PRIORITY:
+        if document_type in present:
+            return mapped_focus
+    return focus
+
+
 def _retail_rules_apply(stats_hint: Optional[str]) -> bool:
     """Whether the retail tariff rules belong in this answer's guidance.
 
@@ -6393,21 +6452,12 @@ def llm_summarize_structured(
 
     # --- Skill-enriched prompt (Phase 3) ---
     if ENABLE_SKILL_PROMPTS_SUMMARIZER:
-        # Focus selection: prefer vector-chunk document_type, fall back to heuristic
-        _DOC_TYPE_TO_FOCUS = {
-            "regulation": "regulation",
-            "law": "regulation",
-            "order": "regulation",
-            "methodology": "regulation",
-        }
-        query_focus = get_query_focus(user_query)
-        if query_focus == "general" and vector_knowledge_bundle and vector_knowledge_bundle.chunks:
-            doc_types = {c.document_type for c in vector_knowledge_bundle.chunks if c.document_type}
-            for dt in doc_types:
-                mapped_focus = _DOC_TYPE_TO_FOCUS.get(dt)
-                if mapped_focus:
-                    query_focus = mapped_focus
-                    break
+        # Query text first, then the frame, then the retrieved documents. See
+        # _resolve_summarizer_focus for why the retrieval step can no longer
+        # decide this alone.
+        query_focus = _resolve_summarizer_focus(
+            user_query, vector_knowledge_bundle, stats_hint
+        )
 
         query_lower = user_query.lower()
 
