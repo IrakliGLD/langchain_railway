@@ -10,8 +10,10 @@ a 112-second wait. Nothing overspent -- the split was simply never governed.
 
 Two properties are pinned here:
 
-1. Stage 0.2 gets a stated share of the budget, so overrun is bounded and
-   visible rather than silently charged to Stage 4.
+1. Stage 4 keeps a reserve, so an analyzer overrun is bounded and visible
+   rather than silently charged to it. (Expressed as the summarizer's reserve
+   rather than the analyzer's share -- the share form regressed production;
+   tests/test_analyzer_deadline_floor.py records why.)
 2. When Stage 4 starts with less time than its prompt plausibly needs, it sheds
    prompt rather than starting a call that cannot finish. A shorter answer
    beats a 112-second failure.
@@ -40,18 +42,24 @@ def _deadline(budget_ms: int) -> RequestDeadline:
     return RequestDeadline.from_budget_ms(budget_ms=budget_ms, source="test")
 
 
-def test_analyzer_share_of_the_budget_is_configured():
+def test_the_split_between_the_stages_is_configured():
     """An unstated split is what let Stage 0.2 take 41s of a 115s budget."""
-    assert 0.0 < config.ANALYZER_DEADLINE_SHARE < 1.0
+    assert config.SUMMARIZER_DEADLINE_RESERVE_MS > 0
+    assert 0.0 < config.ANALYZER_MINIMUM_DEADLINE_SHARE < 1.0
 
 
-def test_analyzer_call_is_capped_at_its_share():
-    """A 115s budget must not hand Stage 0.2 the whole thing."""
+def test_analyzer_call_is_bounded_by_stage_4s_reserve():
+    """A 115s budget must not hand Stage 0.2 the whole thing.
+
+    Bounded by what Stage 4 needs, not by a fraction of the budget -- see
+    tests/test_analyzer_deadline_floor.py for why the fraction was wrong.
+    """
     with bind_request_execution_scope(deadline=_deadline(115_000)):
         seconds = llm_core._analyzer_timeout_seconds(configured_seconds=120.0)
 
-    assert seconds <= 115.0 * config.ANALYZER_DEADLINE_SHARE + 0.5
     assert seconds > 0
+    assert seconds < 115.0
+    assert 115_000 - seconds * 1000 >= config.SUMMARIZER_DEADLINE_RESERVE_MS * 0.95
 
 
 def test_analyzer_cap_never_exceeds_what_the_request_has_left():

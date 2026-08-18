@@ -201,6 +201,46 @@ def extract_user_supplied_series(query: str) -> Optional[UserSuppliedSeries]:
     return UserSuppliedSeries(points=points)
 
 
+def strip_user_supplied_series_lines(query: str) -> str:
+    """Return the question with any pasted data rows removed.
+
+    What a question ASKS FOR is decided by the question, not by figures quoted
+    underneath it. On 2026-08-17 the SQL relevance guard read the Georgian word
+    for consumption out of the user's own line "my consumption by months is as
+    follows", concluded the question was about demand, and hard-blocked a
+    correct retail-versus-wholesale query to zero rows.
+
+    Only strips when a series is actually present, so a lone month mentioned in
+    prose is never removed from the question.
+    """
+    text = str(query or "")
+    if extract_user_supplied_series(text) is None:
+        return text
+
+    kept: list[str] = []
+    for line in text.splitlines():
+        period = _period_for_line(line)
+        is_data_row = (
+            period is not None
+            and _line_is_shaped_like_a_data_row(line)
+            and _value_for_line(line, period) is not None
+        )
+        if is_data_row:
+            # The line that introduces the block belongs to it. "my consumption
+            # by months is as follows:" names consumption because it is
+            # labelling the figures below, not asking for consumption data --
+            # and that word alone is what blocked the 2026-08-17 turn. Only a
+            # colon lead-in immediately above the rows qualifies, so an actual
+            # question keeps its topics.
+            while kept and not kept[-1].strip():
+                kept.pop()
+            if kept and kept[-1].rstrip().endswith((":", "：")):
+                kept.pop()
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def attach_user_supplied_series(ctx) -> bool:
     """Put the user's own figures into statistics and the grounding corpus.
 
