@@ -642,16 +642,27 @@ SUMMARIZER_PROMPT_BUDGET_MAX_CHARS = max(
 SUMMARIZER_GUIDANCE_MAX_CHARS = _read_bounded_int_env(
     "SUMMARIZER_GUIDANCE_MAX_CHARS", 20_000, minimum=2_000, maximum=30_000,
 )
-# Share of the request budget Stage 0.2 may spend (2026-08-17 incident). The
-# per-call timeout is clamped to the REMAINING budget, so an analyzer that runs
-# long is charged silently to Stage 4: at 41.5s of a 115s budget the summarizer
-# was left 69.2s for a 22.4k-token prompt and timed out, shipping a 77-char
-# failure after 112 seconds. A third of the budget covers the 24-26s calls seen
-# on healthy turns with headroom, and makes overrun bounded and visible instead
-# of invisible.
-ANALYZER_DEADLINE_SHARE = max(
-    0.05,
-    min(0.9, float(os.getenv("ANALYZER_DEADLINE_SHARE", "0.35"))),
+# Stage 4's reserved share of the request budget (2026-08-17). Per-call timeouts
+# are clamped to what REMAINS, so a long analyzer is charged silently to the
+# summarizer: at 41.5s of a 115s budget Stage 4 was left 69.2s for a 22.4k-token
+# prompt and shipped a 77-char failure after 112 seconds.
+#
+# Expressed as Stage 4's RESERVE, not as the analyzer's share. The first attempt
+# at this capped the analyzer at a fraction (0.35 -> 40,250 ms) and immediately
+# regressed production: analyzer calls that completed took 41,017 and 41,473 ms,
+# so the cap sat inside the distribution it was bounding and both post-deploy
+# calls timed out at it. Losing the analyzer costs the whole contract -- the
+# turn falls back to legacy plan+SQL and the relevance guard blocked it to zero
+# rows -- which is far worse than a slow Stage 4. Reserving for the consumer
+# leaves the analyzer 70s of a 115s budget, well clear of its observed range.
+SUMMARIZER_DEADLINE_RESERVE_MS = _read_bounded_int_env(
+    "SUMMARIZER_DEADLINE_RESERVE_MS", 45_000, minimum=5_000, maximum=120_000,
+)
+# Floor for the degenerate case where the reserve exceeds what is left. No split
+# is good then, and halving beats guaranteeing that Stage 0.2 fails.
+ANALYZER_MINIMUM_DEADLINE_SHARE = max(
+    0.1,
+    min(0.9, float(os.getenv("ANALYZER_MINIMUM_DEADLINE_SHARE", "0.5"))),
 )
 # Analyzer prompt ordering (2026-08-09). The shipped prompt opens with the
 # user question and appends the output schema after every block, so two

@@ -44,7 +44,7 @@ from agent.report_grounding import (
 from agent.report_projection import projected_row_indices
 from config import (
     ANALYZER_CONSTANTS_FIRST_MODE,
-    ANALYZER_DEADLINE_SHARE,
+    ANALYZER_MINIMUM_DEADLINE_SHARE,
     ANALYZER_PROMPT_BUDGET_MAX_CHARS,
     ENABLE_ANALYZER_EXPLICIT_PROMPT_CACHE,
     ENABLE_ANALYZER_PROMPT_CACHE_KEY,
@@ -97,6 +97,7 @@ from config import (
     ROUTER_REASONING_EFFORT,
     ROUTER_THINKING_BUDGET,
     SESSION_HISTORY_MAX_TURNS,
+    SUMMARIZER_DEADLINE_RESERVE_MS,
     SUMMARIZER_GUIDANCE_MAX_CHARS,
     SUMMARIZER_MODEL,
     SUMMARIZER_PROMPT_BUDGET_MAX_CHARS,
@@ -522,18 +523,32 @@ _SUMMARIZER_CHARS_PER_SECOND = 1_000
 
 
 def _analyzer_timeout_seconds(configured_seconds: float) -> float:
-    """Cap Stage 0.2 at its share of the request budget.
+    """Leave Stage 4 a reserve; the analyzer may use everything else.
+
+    Bounding Stage 0.2 as a FRACTION of the budget regressed production on
+    2026-08-17: 0.35 of 115,000 ms is 40,250 ms, and analyzer calls that
+    completed took 41,017 and 41,473 ms, so the bound landed inside the
+    distribution it was meant to bound and the calls started failing at it. A
+    failed analyzer is not a slower answer -- it costs the contract, the
+    evidence plan and the typed tool route, and the legacy fallback was then
+    blocked to zero rows by the SQL relevance guard.
+
+    Reserving for the CONSUMER cannot make that mistake: the analyzer is only
+    ever squeezed by however much Stage 4 actually needs, and at the production
+    budget it keeps 70s against an observed maximum of 41.5s.
 
     Returns ``configured_seconds`` unchanged when there is no request scope, so
-    offline entry points and tests are unaffected. Never returns more than the
-    request actually has left: late in a request the share is irrelevant.
+    offline entry points and tests are unaffected.
     """
     scope = current_request_execution_scope()
     if scope is None or scope.deadline is None:
         return configured_seconds
-    share_seconds = (scope.deadline.budget_ms / 1000.0) * ANALYZER_DEADLINE_SHARE
-    remaining_seconds = scope.deadline.remaining_seconds()
-    return max(0.001, min(configured_seconds, share_seconds, remaining_seconds))
+    remaining_ms = scope.deadline.remaining_ms()
+    allowed_ms = max(
+        remaining_ms - SUMMARIZER_DEADLINE_RESERVE_MS,
+        remaining_ms * ANALYZER_MINIMUM_DEADLINE_SHARE,
+    )
+    return max(0.001, min(configured_seconds, allowed_ms / 1000.0))
 
 
 def _deadline_aware_summarizer_budget(

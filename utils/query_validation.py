@@ -11,6 +11,7 @@ import logging
 import re
 from typing import Optional, Set, Tuple
 
+from agent.user_supplied_series import strip_user_supplied_series_lines
 from config import TOOL_RELEVANCE_OVERLAP_THRESHOLD
 from contracts.question_analysis import QuestionAnalysis
 
@@ -275,7 +276,12 @@ def extract_query_topics(query: str) -> Set[str]:
         >>> extract_query_topics("Show me balancing price trends")
         {'balancing', 'price', 'trend'}
     """
-    query_lower = query.lower()
+    # Figures the user pasted state their INPUT; they do not request a topic.
+    # Reading "my consumption by months is as follows" as a demand request
+    # blocked a correct retail-versus-wholesale query to zero rows on
+    # 2026-08-17. Same rule the report-track guardrails follow: what a question
+    # asks for is decided by the question, not by data quoted underneath it.
+    query_lower = strip_user_supplied_series_lines(query).lower()
     topics = set()
 
     # Topic keywords mapping (concept → normalized terms)
