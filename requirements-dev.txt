@@ -2,7 +2,7 @@
 pytest==8.0.0
 ruff==0.15.16
 # pytest-cov 5.x is the newest line compatible with the pytest==8.0.0 development pin above
-pytest-cov==5.0.0
+pytest-cov==7.1.0
 # Production dependency advisory evidence (P7.5).
 pip-audit==2.10.1
 # CycloneDX SBOM generator used by the protected release-evidence workflow.
