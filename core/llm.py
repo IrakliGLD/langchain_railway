@@ -511,15 +511,15 @@ _REPORT_STAGE_MINIMUM_TIMEOUT_SECONDS = 240.0
 _ANALYZER_TIMEOUT_STAGE = "question_analyzer"
 
 #: Prompt characters the summarizer gets through per second of budget, used to
-#: decide whether a prompt is affordable before the call starts. Measured on
-#: 2026-08-17 (chars / seconds taken): 62,830/39.0 = 1,611 · 73,495/49.1 = 1,497
-#: · 75,639/43.3 = 1,747, while 88,364 did NOT finish in 69.2s (<1,277) and
-#: 89,664 did not finish in 74.6s (<1,202). Throughput degrades as the prompt
-#: grows because reasoning cost is superlinear in it, so the figure is set below
-#: the slowest success rather than at the average: 1,000 leaves all three
-#: answered requests untouched and sheds both that timed out.
-#: tests/test_stage_deadline_governance.py pins it against those five requests.
-_SUMMARIZER_CHARS_PER_SECOND = 1_000
+#: decide whether a prompt is affordable before the call starts. Initial
+#: measurements on 2026-08-17 ranged from 1,497 to 1,747 chars/s for successful
+#: calls, while prompts above 88k failed below 1,277 chars/s. On 2026-09-09 the
+#: same model/effort timed out on 79,053 chars with 84.8s of provider time, then
+#: completed on 71,422 chars with 76.4s. The lower 900-char rate makes the
+#: deadline budget robust to that provider-runtime variance while the
+#: answer-kind truncation profile preserves the required evidence sections.
+#: tests/test_stage_deadline_governance.py pins both incident sets.
+_SUMMARIZER_CHARS_PER_SECOND = 900
 
 
 def _analyzer_timeout_seconds(configured_seconds: float) -> float:
@@ -666,10 +666,12 @@ def _cache_mark_in_flight(cache_input: str):
     return None
 
 
-def _cache_get_or_reserve(cache_input: str):
+def _cache_get_or_reserve(cache_input: str, *, minimum_remaining_ms: int = 0):
     """Use atomic singleflight when available, retaining compatibility with test caches."""
     fn = getattr(llm_cache, "get_or_reserve", None)
     if fn is not None:
+        if minimum_remaining_ms > 0:
+            return fn(cache_input, minimum_remaining_ms=minimum_remaining_ms)
         return fn(cache_input)
     cached = llm_cache.get(cache_input)
     if cached:
@@ -6508,7 +6510,10 @@ def llm_summarize_structured(
         f"rm={response_mode}|rp={resolution_policy}|gp={grounding_policy}|cf={int(comparison_focus)}|"
         f"re={SUMMARIZER_REASONING_EFFORT or 'provider_default'}"
     )
-    cached_response, cache_token = _cache_get_or_reserve(cache_input)
+    cached_response, cache_token = _cache_get_or_reserve(
+        cache_input,
+        minimum_remaining_ms=SUMMARIZER_DEADLINE_RESERVE_MS,
+    )
     request_scope = current_request_execution_scope()
     deadline_remaining_ms = (
         request_scope.deadline.remaining_ms()
@@ -6956,48 +6961,47 @@ Citation format rules:
     )
     _log_summarizer_prompt_census(prompt, phase="post_budget")
 
-    llm_start = time.time()
-    primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
     try:
-        llm = get_llm_for_stage(
-            SUMMARIZER_MODEL,
-            reasoning_effort=SUMMARIZER_REASONING_EFFORT,
-            max_retries=1,
-        )
-        if ENABLE_TRACE_DEBUG_ARTIFACTS:
-            log.info(
-                "LLM prompt composition: system=%d chars, user=%d chars, "
-                "domain_knowledge_in_prompt=%d chars, vector_knowledge_in_prompt=%d chars",
-                len(system),
-                len(prompt),
-                len(domain_knowledge),
-                len(vector_knowledge),
+        llm_start = time.time()
+        primary_model_name = SUMMARIZER_MODEL or get_primary_model_name()
+        try:
+            llm = get_llm_for_stage(
+                SUMMARIZER_MODEL,
+                reasoning_effort=SUMMARIZER_REASONING_EFFORT,
+                max_retries=1,
             )
-        message = _invoke_at_stage(
-            llm,
-            [("system", system), ("user", prompt)],
-            primary_model_name,
-            "structured_summarize",
-        )
-        _log_usage_for_message(
-            message,
-            model_name=primary_model_name,
-            attempt_stage="structured_summarize",
-            configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
-        )
-        metrics.log_llm_call(time.time() - llm_start)
-    except Exception as primary_exc:
-        log.warning("Structured summarize failed with primary model: %s", primary_exc)
-        message = _fallback_to_openai(
-            [("system", system), ("user", prompt)],
-            primary_exc,
-            llm_start=llm_start,
-            label="structured_summarize",
-            configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
-        )
-    raw_output = message.content.strip()
-
-    try:
+            if ENABLE_TRACE_DEBUG_ARTIFACTS:
+                log.info(
+                    "LLM prompt composition: system=%d chars, user=%d chars, "
+                    "domain_knowledge_in_prompt=%d chars, vector_knowledge_in_prompt=%d chars",
+                    len(system),
+                    len(prompt),
+                    len(domain_knowledge),
+                    len(vector_knowledge),
+                )
+            message = _invoke_at_stage(
+                llm,
+                [("system", system), ("user", prompt)],
+                primary_model_name,
+                "structured_summarize",
+            )
+            _log_usage_for_message(
+                message,
+                model_name=primary_model_name,
+                attempt_stage="structured_summarize",
+                configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
+            )
+            metrics.log_llm_call(time.time() - llm_start)
+        except Exception as primary_exc:
+            log.warning("Structured summarize failed with primary model: %s", primary_exc)
+            message = _fallback_to_openai(
+                [("system", system), ("user", prompt)],
+                primary_exc,
+                llm_start=llm_start,
+                label="structured_summarize",
+                configured_reasoning_effort=SUMMARIZER_REASONING_EFFORT,
+            )
+        raw_output = message.content.strip()
         payload = _extract_json_payload(raw_output)
         try:
             envelope = SummaryEnvelope.model_validate(payload)
