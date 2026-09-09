@@ -53,12 +53,23 @@ from config import (
 log = logging.getLogger("Enai")
 
 
-def _bounded_coalesce_wait_seconds(configured_seconds: float) -> float:
+def _bounded_coalesce_wait_seconds(
+    configured_seconds: float,
+    *,
+    minimum_remaining_ms: int = 0,
+) -> float:
     from utils.request_deadline import current_request_execution_scope
 
     scope = current_request_execution_scope()
     if scope is None or scope.deadline is None:
         return configured_seconds
+    if minimum_remaining_ms > 0:
+        required_remaining_ms = max(
+            int(minimum_remaining_ms),
+            REQUEST_CLEANUP_ALLOWANCE_MS + PROVIDER_MINIMUM_START_BUDGET_MS,
+        )
+        available_ms = scope.deadline.remaining_ms() - required_remaining_ms
+        return min(configured_seconds, max(0.0, available_ms / 1000.0))
     return scope.deadline.bounded_timeout_seconds(
         "llm_coalesce_wait",
         configured_timeout_seconds=configured_seconds,
@@ -254,8 +265,12 @@ class LLMResponseCache:
 
         # Another thread is computing this key — wait for it.
         log.info("⏳ LLM cache: waiting for in-flight result (key=%.8s…)", key)
-        event, _token, _started_at = flight
-        signaled = event.wait(timeout=_bounded_coalesce_wait_seconds(self._coalesce_timeout))
+        event, _token, started_at = flight
+        wait_seconds = min(
+            _bounded_coalesce_wait_seconds(self._coalesce_timeout),
+            max(0.0, started_at + self._coalesce_timeout - _time.monotonic()),
+        )
+        signaled = event.wait(timeout=wait_seconds)
 
         with self._lock:
             result = self._cache.get(key)
@@ -273,16 +288,27 @@ class LLMResponseCache:
         self._misses += 1
         return None
 
-    def get_or_reserve(self, prompt: str) -> tuple[Optional[str], object | None]:
+    def get_or_reserve(
+        self,
+        prompt: str,
+        *,
+        minimum_remaining_ms: int = 0,
+    ) -> tuple[Optional[str], object | None]:
         """Atomically return a cached value or reserve singleflight ownership.
 
         The opaque token must be passed to :meth:`set` or
         :meth:`cancel_in_flight`. A waiter can replace a timed-out owner, and a
-        late result from that stale owner is then discarded.
+        late result from that stale owner is then discarded. When
+        ``minimum_remaining_ms`` is positive, waiting ends early enough to
+        preserve that much of the current request deadline for the caller's
+        own execution.
         """
 
         key = self._make_key(prompt)
-        deadline = _time.monotonic() + _bounded_coalesce_wait_seconds(self._coalesce_timeout * 2)
+        deadline = _time.monotonic() + _bounded_coalesce_wait_seconds(
+            self._coalesce_timeout * 2,
+            minimum_remaining_ms=minimum_remaining_ms,
+        )
         observed_flight = None
         while True:
             with self._lock:
@@ -296,12 +322,17 @@ class LLMResponseCache:
                     self._misses += 1
                     return None, token
 
-            event, _token, _started_at = flight
+            event, _token, started_at = flight
             if flight is not observed_flight:
                 log.info("LLM cache: waiting for in-flight result (key=%.8s...)", key)
                 observed_flight = flight
-            remaining = max(0.0, deadline - _time.monotonic())
-            signaled = event.wait(timeout=min(self._coalesce_timeout, remaining))
+            now = _time.monotonic()
+            remaining = max(0.0, deadline - now)
+            owner_lease_remaining = max(
+                0.0,
+                started_at + self._coalesce_timeout - now,
+            )
+            signaled = event.wait(timeout=min(owner_lease_remaining, remaining))
 
             with self._lock:
                 result = self._cache.get(key)
@@ -319,7 +350,14 @@ class LLMResponseCache:
                     )
                     event.set()
                     self._misses += 1
-                    log.warning("LLM cache replaced stale in-flight owner (key=%.8s...)", key)
+                    if _time.monotonic() >= started_at + self._coalesce_timeout:
+                        log.warning("LLM cache replaced stale in-flight owner (key=%.8s...)", key)
+                    else:
+                        log.warning(
+                            "LLM cache wait budget exhausted; replaced in-flight owner "
+                            "(key=%.8s...)",
+                            key,
+                        )
                     return None, replacement_token
 
             if _time.monotonic() >= deadline:

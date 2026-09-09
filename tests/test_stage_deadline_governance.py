@@ -114,6 +114,22 @@ def test_calibration_against_the_incident_requests():
         assert budget < prompt_chars, f"{prompt_chars} would still have timed out"
 
 
+def test_calibration_against_slow_september_summarizer():
+    """Leave useful headroom when provider throughput drops below 1k chars/s.
+
+    On 2026-09-09 a 79,053-character prompt timed out with 87,847 ms left,
+    while the same July analysis completed at 71,422 characters. Prompt budget
+    enforcement applies its own 10% processing margin after this calculation.
+    """
+    budget = llm_core._deadline_aware_summarizer_budget(
+        configured_budget=98_500,
+        remaining_ms=87_847,
+    )
+
+    effective_prompt_ceiling = int(budget * 0.90)
+    assert 65_000 <= effective_prompt_ceiling <= 72_000
+
+
 def test_summarizer_budget_is_never_raised_above_what_was_configured():
     generous = llm_core._deadline_aware_summarizer_budget(
         configured_budget=45_000, remaining_ms=300_000
@@ -130,6 +146,64 @@ def test_summarizer_budget_is_unchanged_without_a_deadline():
         )
         == 45_000
     )
+
+
+def test_structured_summarizer_reserves_execution_time_while_coalescing(monkeypatch):
+    observed: dict = {}
+
+    def _cached(_key, **kwargs):
+        observed.update(kwargs)
+        return (
+            '{"answer":"cached","claims":[],"citations":[],"confidence":0.9}',
+            None,
+        )
+
+    monkeypatch.setattr(llm_core, "_cache_get_or_reserve", _cached)
+
+    result = llm_core.llm_summarize_structured(
+        user_query="Why did the price change?",
+        data_preview="date,value\n2026-07-01,112.1",
+        stats_hint="Previous value: 140.99",
+    )
+
+    assert result.answer == "cached"
+    assert observed["minimum_remaining_ms"] == config.SUMMARIZER_DEADLINE_RESERVE_MS
+
+
+def test_structured_summarizer_releases_reservation_on_provider_failure(monkeypatch):
+    reservation = object()
+    cancelled: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        llm_core,
+        "_cache_get_or_reserve",
+        lambda *_args, **_kwargs: (None, reservation),
+    )
+    monkeypatch.setattr(
+        llm_core,
+        "_cache_cancel_in_flight",
+        lambda key, token=None: cancelled.append((key, token)),
+    )
+    monkeypatch.setattr(llm_core, "get_llm_for_stage", lambda *_args, **_kwargs: object())
+
+    def _fail(*_args, **_kwargs):
+        raise TimeoutError("provider timed out")
+
+    monkeypatch.setattr(llm_core, "_invoke_at_stage", _fail)
+
+    try:
+        llm_core.llm_summarize_structured(
+            user_query="Why did the price change?",
+            data_preview="date,value\n2026-07-01,112.1",
+            stats_hint="Previous value: 140.99",
+        )
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("provider failure should escape the LLM boundary")
+
+    assert len(cancelled) == 1
+    assert cancelled[0][1] is reservation
 
 
 class _DummyCache:
